@@ -16,10 +16,13 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "python-multipart",
+    "click",
+    "rich",
 ]
 
 [project.optional-dependencies]
 mlx = ["mlx-whisper"]
+menubar = ["rumps"]
 
 [project.scripts]
 localflow = "localflow.app:main"
