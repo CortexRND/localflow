@@ -49,6 +49,44 @@ Grant on first run:
 1. **Microphone**: System Settings → Privacy & Security → Microphone → Terminal (or your app launcher)
 2. **Accessibility**: System Settings → Privacy & Security → Accessibility → Terminal (for paste injection)
 
+### Meetings → work prompts → Orca
+
+Meetings flow from detection to dispatched work without manual steps in between:
+
+1. **Detect** — the watcher sees sustained mic use and (with `meeting_auto_start`) starts a session
+2. **Transcribe** — audio is transcribed in chunks while the meeting runs
+3. **Notes** — on stop, notes and a transcript log are written to the vault
+4. **Prompts** — work prompts derived from the notes are written to `prompts_dir` and queued
+
+Then review and dispatch them:
+
+```bash
+lf prompts list                  # queued prompts and their status
+lf prompts list --status pending
+lf prompts show <id>             # full prompt text
+lf prompts approve <id>...       # pending -> approved
+lf prompts reject <id>...        # pending -> rejected
+lf prompts dispatch <id>...      # approved -> an Orca worktree per prompt
+lf prompts dispatch --all --dry-run
+```
+
+Only `approved` prompts are ever dispatched — approval is the gate. Dispatch needs
+`orca_repo` set and the Orca app running (`orca open`); if it isn't, nothing is
+dispatched and prompts stay approved for a retry. Once dispatched,
+`lf prompts show <id>` prints the worktree and the `orca terminal read` command for
+following the agent.
+
+A prompt whose dispatch failed can be retried: `lf prompts approve <id>` puts a
+`failed` prompt back to `approved` and clears the previous attempt's error and
+worktree. `dispatched` and `rejected` prompts cannot be re-approved.
+
+`orca open` launches a GUI desktop app, so dispatch only works from a logged-in
+desktop session — not over SSH and not from a headless cron.
+
+The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
+`path:` is the easiest to write by hand. List registered repos with
+`orca repo list --json`.
+
 ### Configuration
 
 Create `~/.localflow.toml`:
@@ -64,6 +102,11 @@ hotkey = "alt_l"                  # bare key name = hold-to-talk; "<cmd>+<shift>
 sample_rate = 16000
 server_host = "0.0.0.0"
 server_port = 8756
+
+meeting_auto_start = true              # start transcribing when a meeting is detected
+prompts_dir = "~/projs/prompts/meetings"  # where derived work prompts are written
+orca_repo = "path:/Users/you/projs/myrepo"  # Orca repo selector; required for `lf prompts dispatch`
+orca_agent = "claude"                  # agent to run in each dispatched worktree
 ```
 
 All keys are optional; defaults shown above apply.

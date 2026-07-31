@@ -19,6 +19,14 @@ from rich.table import Table
 from rich.text import Text
 
 from localflow.config import load_config
+from localflow.dispatch import (
+    QUEUE_PATH,
+    STATUSES,
+    PromptQueue,
+    StatusConflict,
+    dispatch,
+    orca_available,
+)
 
 console = Console()
 _config = load_config()
@@ -174,9 +182,9 @@ def notes(limit: int) -> None:
     console.print(table)
 
 
-@cli.command()
+@cli.command("open")
 @click.argument("query", nargs=-1, required=True)
-def open(query: tuple[str, ...]) -> None:
+def open_note(query: tuple[str, ...]) -> None:
     """Open the newest note matching QUERY words in Obsidian/default app."""
     root = Path(_config.vault_path).expanduser() / _config.notes_folder
     words = [w.lower() for w in query]
@@ -190,6 +198,220 @@ def open(query: tuple[str, ...]) -> None:
     newest = max(matches, key=lambda p: p.stat().st_mtime)
     subprocess.run(["open", str(newest)], check=False)
     console.print(f"opened {newest.name}")
+
+
+_STATUS_STYLE = {
+    "pending": "yellow",
+    "approved": "cyan",
+    "dispatched": "green",
+    "rejected": "dim",
+    "failed": "red",
+}
+
+
+def _status(status: str) -> str:
+    style = _STATUS_STYLE.get(status, "white")
+    return f"[{style}]{status}[/{style}]"
+
+
+def _resolve(queue: PromptQueue, prompt_id: str) -> dict:
+    """Queue entry for PROMPT_ID, or exit 1 with a message."""
+    entry = queue.get(prompt_id)
+    if entry is None:
+        console.print(f"[red]unknown prompt[/red] {prompt_id} — list them with: [bold]lf prompts list[/bold]")
+        sys.exit(1)
+    return entry
+
+
+@cli.group()
+def prompts() -> None:
+    """Review work prompts from meetings and dispatch them to Orca."""
+
+
+@prompts.command("list")
+@click.option("--status", "-s", default=None, type=click.Choice(STATUSES),
+              help="Only show prompts with this status.")
+def prompts_list(status: str | None) -> None:
+    """List queued work prompts."""
+    entries = PromptQueue().list(status=status)
+    if not entries:
+        what = f"no {status} prompts" if status else "no prompts queued"
+        console.print(f"[dim]{what} ({QUEUE_PATH})[/dim]")
+        return
+    table = Table(box=None, header_style="dim")
+    table.add_column("id")
+    table.add_column("status")
+    table.add_column("title")
+    table.add_column("meeting")
+    table.add_column("created")
+    for e in entries:
+        table.add_row(
+            e["id"],
+            _status(e["status"]),
+            e["title"],
+            e.get("meeting") or "",
+            e.get("created") or "",
+        )
+    console.print(table)
+
+
+@prompts.command("show")
+@click.argument("prompt_id")
+def prompts_show(prompt_id: str) -> None:
+    """Print the full text of prompt PROMPT_ID."""
+    entry = _resolve(PromptQueue(), prompt_id)
+    path = Path(entry["path"]).expanduser()
+    if not path.exists():
+        console.print(f"[red]prompt file missing[/red] {path}")
+        sys.exit(1)
+    console.print(f"[dim]{path}[/dim]")
+    if entry["status"] == "dispatched":
+        console.print(f"[green]dispatched[/green] to worktree [bold]{entry.get('worktree') or '?'}[/bold]")
+        handle = entry.get("handle") or ""
+        if handle:
+            console.print(f"  follow it with: [bold]orca terminal read --terminal {handle} --json[/bold]")
+        else:
+            console.print("  [dim]no terminal handle recorded[/dim]")
+    console.print()
+    console.print(path.read_text())
+
+
+@prompts.command("approve")
+@click.argument("ids", nargs=-1, required=True)
+def prompts_approve(ids: tuple[str, ...]) -> None:
+    """Approve prompts IDS for dispatch (retries a failed one, clearing its error)."""
+    _set_reviewed(ids, "approved", ("pending", "failed"))
+
+
+@prompts.command("reject")
+@click.argument("ids", nargs=-1, required=True)
+def prompts_reject(ids: tuple[str, ...]) -> None:
+    """Reject prompts IDS so they are never dispatched."""
+    _set_reviewed(ids, "rejected", ("pending",))
+
+
+def _set_reviewed(ids: tuple[str, ...], status: str, from_statuses: tuple[str, ...]) -> None:
+    """Move prompts in FROM_STATUSES to STATUS; anything else is refused.
+
+    Re-approving a failed prompt clears the residue of the failed attempt so it
+    dispatches clean.
+    """
+    queue = PromptQueue()
+    approvable = " or ".join(from_statuses)
+    refused = False
+    for prompt_id in ids:
+        entry = _resolve(queue, prompt_id)
+        if entry["status"] not in from_statuses:
+            console.print(f"[red]{prompt_id}[/red] is {_status(entry['status'])} — "
+                          f"only {approvable} prompts can be {status}; skipped")
+            refused = True
+            continue
+        # Compare-and-set on the status we just read: the server can approve or
+        # dispatch the same entry between the read above and this write.
+        clear = {"error": "", "worktree": "", "handle": ""} if entry["status"] == "failed" else {}
+        try:
+            queue.set_status(prompt_id, status, expect=from_statuses, **clear)
+        except StatusConflict as conflict:
+            console.print(f"[red]{prompt_id}[/red] changed to {_status(conflict.current)} "
+                          f"while it was being {status} — not touched")
+            refused = True
+            continue
+        console.print(f"{_status(status)} {prompt_id}  {entry['title']}")
+    if refused:
+        sys.exit(1)
+
+
+@prompts.command("dispatch")
+@click.argument("ids", nargs=-1)
+@click.option("--all", "all_", is_flag=True, help="Dispatch every approved prompt.")
+@click.option("--repo", default="", help="Orca repo selector (default: config.orca_repo).")
+@click.option("--agent", default="", help="Agent to run (default: config.orca_agent).")
+@click.option("--dry-run", is_flag=True, help="Show what would be dispatched; change nothing.")
+def prompts_dispatch(ids: tuple[str, ...], all_: bool, repo: str, agent: str, dry_run: bool) -> None:
+    """Dispatch approved prompts IDS (or --all) to Orca worktrees."""
+    target_repo = repo or _config.orca_repo
+    if not target_repo:
+        console.print("[red]no repo configured[/red] — set [bold]orca_repo[/bold] in ~/.localflow.toml "
+                      "or pass [bold]--repo[/bold]")
+        console.print("  find the selector with: [bold]orca repo list --json[/bold]")
+        sys.exit(1)
+    target_agent = agent or _config.orca_agent
+
+    queue = PromptQueue()
+    if all_ and ids:
+        console.print("[red]pass ids or --all, not both[/red]")
+        sys.exit(1)
+    if all_:
+        entries = queue.list(status="approved")
+    elif ids:
+        entries = [_resolve(queue, i) for i in ids]
+        unapproved = [e for e in entries if e["status"] != "approved"]
+        if unapproved:
+            for e in unapproved:
+                console.print(f"[red]{e['id']}[/red] is {_status(e['status'])}, not approved — "
+                              f"approve it with: [bold]lf prompts approve {e['id']}[/bold]")
+            sys.exit(1)
+    else:
+        console.print("[red]nothing selected[/red] — pass ids or [bold]--all[/bold]")
+        sys.exit(1)
+
+    if not entries:
+        console.print("[dim]no approved prompts to dispatch[/dim]")
+        return
+
+    if dry_run:
+        table = Table(box=None, header_style="dim")
+        table.add_column("id")
+        table.add_column("title")
+        table.add_column("repo")
+        table.add_column("agent")
+        for e in entries:
+            table.add_row(e["id"], e["title"], target_repo, target_agent)
+        console.print(table)
+        console.print(f"[dim]dry run — {len(entries)} prompt(s) would be dispatched[/dim]")
+        return
+
+    ready, reason = orca_available()
+    if not ready:
+        console.print(f"[red]orca unavailable:[/red] {reason}")
+        console.print("  start the app with: [bold]orca open[/bold], then retry — prompts stay approved")
+        sys.exit(1)
+
+    dispatched = 0
+    conflicts = 0
+    for e in entries:
+        result = dispatch(e, target_repo, target_agent)
+        # Each write compare-and-sets on "approved": if the server dispatched this
+        # entry while orca was working, we must not overwrite its record.
+        if result.get("ok"):
+            worktree = result.get("worktree")
+            try:
+                queue.set_status(e["id"], "dispatched", expect=("approved",), worktree=worktree,
+                                 handle=result.get("handle", ""), repo=target_repo)
+            except StatusConflict as conflict:
+                console.print(f"[yellow]dispatched but not recorded[/yellow] {e['id']}  {e['title']} → "
+                              f"{worktree} (queue moved to {_status(conflict.current)} meanwhile)")
+                conflicts += 1
+                continue
+            console.print(f"[green]dispatched[/green] {e['id']}  {e['title']} → {worktree}")
+            dispatched += 1
+        else:
+            error = result.get("error", "unknown error")
+            try:
+                queue.set_status(e["id"], "failed", expect=("approved",), error=error)
+            except StatusConflict as conflict:
+                console.print(f"[red]failed[/red] {e['id']}  {e['title']}: {error} "
+                              f"(not recorded — queue moved to {_status(conflict.current)})")
+                conflicts += 1
+                continue
+            console.print(f"[red]failed[/red] {e['id']}  {e['title']}: {error}")
+    failures = len(entries) - dispatched - conflicts
+    summary = f"\n{dispatched} dispatched, {failures} failed"
+    if conflicts:
+        summary += f", {conflicts} raced (see above)"
+    console.print(summary)
+    if failures or conflicts:
+        sys.exit(1)
 
 
 @cli.command()
