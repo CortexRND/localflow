@@ -1,9 +1,10 @@
 """launchd LaunchAgent management — run localflow on login, always on.
 
 Installs a per-user LaunchAgent that starts the `localflow` console script at
-login and keeps it running (KeepAlive restarts it if it dies). Scoped to the
-Aqua session type because dictation needs a GUI session for the microphone,
-Accessibility (paste injection), and clipboard.
+login and relaunches it on a crash (nonzero exit) but not after a clean exit
+0 — see `plist_content` for why. Scoped to the Aqua session type because
+dictation needs a GUI session for the microphone, Accessibility (paste
+injection), and clipboard.
 """
 
 import os
@@ -46,6 +47,11 @@ def plist_content(program: str | None = None) -> str:
     `program` defaults to the `localflow` console script next to
     `sys.executable` (see `_default_program`). Log paths are expanded to
     absolute paths under `~/.localflow/`.
+
+    KeepAlive only restarts on a nonzero exit (crash), not a clean exit 0: a
+    single-instance lock elsewhere means a manually-started localflow holding
+    the lock makes the launchd copy exit 0, and KeepAlive=true would
+    relaunch-loop it forever.
     """
     if program is None:
         program = _default_program()
@@ -54,7 +60,7 @@ def plist_content(program: str | None = None) -> str:
         "Label": LABEL,
         "ProgramArguments": [program],
         "RunAtLoad": True,
-        "KeepAlive": True,
+        "KeepAlive": {"SuccessfulExit": False},
         "LimitLoadToSessionType": "Aqua",
         "StandardOutPath": str(log_dir / "agent.out.log"),
         "StandardErrorPath": str(log_dir / "agent.err.log"),
@@ -66,8 +72,12 @@ def install(program: str | None = None) -> Path:
     """Write the plist and load it into launchd. Returns the plist path.
 
     If the agent is already loaded, it is booted out first so `bootstrap`
-    doesn't fail with "already loaded". On older macOS where `bootstrap`
-    itself isn't supported, falls back to `launchctl load -w`.
+    doesn't fail with "already loaded". `bootstrap` failures are not
+    diagnosed by matching stderr text — on real macOS, permission-denied,
+    TCC/session issues, and "already bootstrapped" all produce a "Bootstrap
+    failed" prefix too, so that string tells us nothing. Instead, ANY
+    bootstrap failure falls back to `launchctl load -w`; if that also fails,
+    both error outputs are raised together so the real cause isn't masked.
     """
     path = _plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,19 +93,17 @@ def install(program: str | None = None) -> Path:
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        stderr = result.stderr or ""
-        if "Bootstrap failed" in stderr:
-            # Older macOS: bootstrap/bootout subcommands aren't available.
-            fallback = subprocess.run(
-                ["launchctl", "load", "-w", str(path)],
-                capture_output=True, text=True,
+        bootstrap_err = (result.stderr or "").strip()
+        fallback = subprocess.run(
+            ["launchctl", "load", "-w", str(path)],
+            capture_output=True, text=True,
+        )
+        if fallback.returncode != 0:
+            load_err = (fallback.stderr or "").strip()
+            raise RuntimeError(
+                f"launchctl bootstrap failed: {bootstrap_err}; "
+                f"launchctl load fallback also failed: {load_err}"
             )
-            if fallback.returncode != 0:
-                raise RuntimeError(
-                    f"launchctl load failed: {(fallback.stderr or '').strip()}"
-                )
-        else:
-            raise RuntimeError(f"launchctl bootstrap failed: {stderr.strip()}")
     return path
 
 

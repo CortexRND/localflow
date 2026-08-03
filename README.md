@@ -59,8 +59,10 @@ lf agent status      # running / loaded, not running / not loaded
 lf agent uninstall
 ```
 
-Once installed, localflow runs on every login and relaunches itself if it
-dies (`KeepAlive`) — it's meant to just stay running in the background.
+Once installed, localflow runs on every login and relaunches if it crashes;
+a clean exit stays down until next login (`KeepAlive` = `SuccessfulExit:
+false`) — so a manually-started instance holding the single-instance lock
+can exit 0 without triggering a relaunch loop.
 
 Grant **Microphone** and **Accessibility** permissions to the `.venv` Python
 binary (the interpreter the LaunchAgent actually runs), not just Terminal —

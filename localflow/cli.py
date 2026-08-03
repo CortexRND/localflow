@@ -450,16 +450,25 @@ def agent() -> None:
 def agent_install() -> None:
     """Install and load the LaunchAgent so localflow starts on login."""
     from localflow.launchagent import install
-    path = install()
+    try:
+        path = install()
+    except RuntimeError as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        sys.exit(1)
     console.print(f"[green]installed[/green] {path}")
-    console.print("localflow starts on login and relaunches if it exits (KeepAlive).")
+    console.print("localflow starts on login and relaunches if it crashes; "
+                  "a clean exit stays down until next login (KeepAlive).")
 
 
 @agent.command("uninstall")
 def agent_uninstall() -> None:
     """Unload and remove the LaunchAgent."""
     from localflow.launchagent import uninstall
-    uninstall()
+    try:
+        uninstall()
+    except RuntimeError as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        sys.exit(1)
     console.print("[green]uninstalled[/green]")
 
 
@@ -467,7 +476,12 @@ def agent_uninstall() -> None:
 def agent_status() -> None:
     """Show whether the LaunchAgent is loaded and running."""
     from localflow.launchagent import status
-    console.print(status())
+    try:
+        result = status()
+    except RuntimeError as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        sys.exit(1)
+    console.print(result)
 
 
 def main() -> None:

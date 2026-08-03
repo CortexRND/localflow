@@ -23,7 +23,7 @@ def test_plist_is_valid_xml_with_expected_keys():
     assert data["Label"] == "com.cortexrnd.localflow"
     assert data["ProgramArguments"] == ["/opt/venv/bin/localflow"]
     assert data["RunAtLoad"] is True
-    assert data["KeepAlive"] is True
+    assert data["KeepAlive"] == {"SuccessfulExit": False}
     assert data["LimitLoadToSessionType"] == "Aqua"
 
 
@@ -99,7 +99,13 @@ def test_install_ignores_bootout_failure_when_not_previously_loaded(home, monkey
     assert path.exists()
 
 
-def test_install_falls_back_to_load_on_old_macos_bootstrap_failure(home, monkeypatch):
+def test_install_falls_back_to_load_on_any_bootstrap_failure(home, monkeypatch):
+    """No stderr-text heuristic: any bootstrap failure tries `load -w` next.
+
+    Uses a permission-denied-style message (still prefixed "Bootstrap
+    failed:" on real macOS) to prove the fallback isn't gated on matching a
+    specific substring — it fires unconditionally on nonzero exit.
+    """
     calls = []
 
     def run(argv, **kwargs):
@@ -109,7 +115,7 @@ def test_install_falls_back_to_load_on_old_macos_bootstrap_failure(home, monkeyp
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
-    L.install("/opt/venv/bin/localflow")
+    L.install("/opt/venv/bin/localflow")  # load fallback succeeds, so no raise
 
     kinds = [c[1] for c in calls]
     assert kinds == ["bootout", "bootstrap", "load"]
@@ -118,28 +124,36 @@ def test_install_falls_back_to_load_on_old_macos_bootstrap_failure(home, monkeyp
     assert "-w" in load_call
 
 
-def test_install_raises_on_bootstrap_failure_without_fallback_marker(home, monkeypatch):
+def test_install_falls_back_even_on_generic_bootstrap_error(home, monkeypatch):
+    """A permission/TCC-style failure with no special marker still falls back
+    to `load -w` rather than raising immediately."""
+    calls = []
+
     def run(argv, **kwargs):
+        calls.append(argv)
         if argv[1] == "bootstrap":
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Some other launchd error")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(RuntimeError, match="Some other launchd error"):
-        L.install("/opt/venv/bin/localflow")
+    L.install("/opt/venv/bin/localflow")  # must not raise: load fallback succeeded
+    assert [c[1] for c in calls] == ["bootout", "bootstrap", "load"]
 
 
-def test_install_raises_when_load_fallback_also_fails(home, monkeypatch):
+def test_install_raises_with_both_errors_when_load_fallback_also_fails(home, monkeypatch):
     def run(argv, **kwargs):
         if argv[1] == "bootstrap":
-            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Bootstrap failed: old macOS")
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Bootstrap failed: permission denied")
         if argv[1] == "load":
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="load also broken")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(RuntimeError, match="load also broken"):
+    with pytest.raises(RuntimeError) as excinfo:
         L.install("/opt/venv/bin/localflow")
+    # Both error outputs must survive so the real cause isn't masked.
+    assert "permission denied" in str(excinfo.value)
+    assert "load also broken" in str(excinfo.value)
 
 
 # ------------------------------------------------------------------ uninstall ---
