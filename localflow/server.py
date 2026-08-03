@@ -1,6 +1,8 @@
+import logging
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +14,12 @@ from starlette.concurrency import run_in_threadpool
 from localflow import sounds
 from localflow.cleanup import Cleaner
 from localflow.config import load_config
+from localflow.dispatch import (
+    PromptQueue,
+    StatusConflict,
+    parse_work_prompts,
+    write_prompts,
+)
 from localflow.log import setup_logging
 from localflow.meetings import (
     MeetingSession,
@@ -26,15 +34,24 @@ from localflow.workprompts import WorkPromptGenerator
 app = FastAPI()
 
 setup_logging()
+log = logging.getLogger("localflow.server")
 _config = load_config()
 _transcriber: Transcriber | None = None
 _cleaner: Cleaner | None = None
 _lock = threading.Lock()
 _transcribe_lock = threading.Lock()
 
+# `_on_meeting_detected` is defined further down; forward it lazily.
 _watcher = MeetingWatcher(
     min_busy_seconds=_config.meeting_min_busy_seconds,
+    on_detect=lambda platform: _on_meeting_detected(platform),
 )
+# Meeting state is touched by HTTP handlers AND the watcher thread. Every
+# read-modify-write of _session / _session_meta / _session_state goes through
+# _session_lock; _session_state is the gate that makes check-then-act atomic
+# across the slow, unlocked mic-open and summarize phases.
+_session_lock = threading.Lock()
+_session_state = "idle"  # idle | starting | running | stopping
 _session: MeetingSession | None = None
 _session_meta: dict = {}
 _last_saved: dict | None = None
@@ -45,6 +62,12 @@ _writer = ObsidianWriter(
 _prompt_gen = WorkPromptGenerator(
     model=_config.fireworks_model, api_key=_config.fireworks_api_key
 )
+# One shared instance: PromptQueue's lock is per-instance, so two instances
+# racing would be last-writer-wins over the whole queue file.
+_queue = PromptQueue()
+# No queue lock here on purpose: PromptQueue serialises across processes itself,
+# and status changes go through its compare-and-set. A lock here would only
+# guard the server against the server.
 
 
 @app.on_event("startup")
@@ -150,12 +173,13 @@ class MeetingStart(BaseModel):
 
 @app.get("/meeting/status")
 def meeting_status() -> dict:
-    session = _session
+    with _session_lock:  # snapshot so session and its meta can't disagree
+        session, meta, last_saved = _session, dict(_session_meta), _last_saved
     live = None
     if session is not None and session.active:
         live = {
-            "title": _session_meta.get("title", "Meeting"),
-            "category": _session_meta.get("category", "Other"),
+            "title": meta.get("title", "Meeting"),
+            "category": meta.get("category", "Other"),
             "seconds": int(session.elapsed_seconds()),
             "segments": [
                 {"stamp": s.stamp, "text": s.text} for s in session.segments[-8:]
@@ -168,43 +192,93 @@ def meeting_status() -> dict:
         "mic_busy": _watcher.mic_busy,
         "detected": _watcher.detected,
         "platform": _watcher.platform,
+        "auto_start": _config.meeting_auto_start,
         "session": live,
-        "last_saved": _last_saved,
+        "last_saved": last_saved,
     }
 
 
-@app.post("/meeting/start")
-def meeting_start(body: MeetingStart) -> dict:
-    global _session, _session_meta, _last_saved
-    if _session is not None and _session.active:
-        raise HTTPException(status_code=409, detail="a meeting session is already running")
-    category = body.category or _watcher.platform or "Other"
-    session = MeetingSession(
-        _get_transcriber(),
-        _transcribe_lock,
-        sample_rate=_config.sample_rate,
-        chunk_seconds=_config.meeting_chunk_seconds,
-    )
+def _start_session(title: str, category: str) -> dict:
+    """Claim the session slot, then open the mic. Shared by HTTP and the watcher."""
+    global _session, _session_meta, _last_saved, _session_state
+    with _session_lock:
+        if _session_state != "idle":
+            raise HTTPException(
+                status_code=409, detail="a meeting session is already running"
+            )
+        _session_state = "starting"  # slot claimed; nobody else can start or stop
+
+    # Outside the lock: the first _get_transcriber() loads a whisper model and
+    # the mic open can block. "starting" already excludes everyone else.
+    category = category or _watcher.platform or "Other"
     _watcher.pause()  # we hold the mic now; don't self-detect
     try:
+        session = MeetingSession(
+            _get_transcriber(),
+            _transcribe_lock,
+            sample_rate=_config.sample_rate,
+            chunk_seconds=_config.meeting_chunk_seconds,
+        )
         session.start()
     except Exception as exc:
         _watcher.resume()
+        with _session_lock:
+            _session_state = "idle"
         raise HTTPException(status_code=500, detail=f"mic open failed: {exc}")
-    _session = session
-    _session_meta = {"title": body.title or "Meeting", "category": category}
-    _last_saved = None
+
+    with _session_lock:
+        _session = session
+        _session_meta = {"title": title or "Meeting", "category": category}
+        _last_saved = None
+        _session_state = "running"
     if _config.sounds_enabled:
         sounds.play("start")
     return {"ok": True, "category": category}
 
 
+def _on_meeting_detected(platform: str) -> None:
+    """Watcher-thread callback: auto-start a session on detection."""
+    if not _config.meeting_auto_start:
+        return
+    with _session_lock:
+        if _session_state != "idle":
+            return  # cheap pre-check; _start_session re-checks atomically
+    title = f"{platform} meeting" if platform and platform != "Other" else "Meeting"
+    try:
+        _start_session(title, "")
+        log.info("auto-started meeting session (platform=%s)", platform)
+    except HTTPException as exc:
+        log.warning("auto-start skipped: %s", exc.detail)
+
+
+@app.post("/meeting/start")
+def meeting_start(body: MeetingStart) -> dict:
+    return _start_session(body.title, body.category)
+
+
+def _write_prompt_files(prompts_md: str, title: str, started_at: datetime) -> dict:
+    """Extract work prompts to files + queue. Never fails the meeting save."""
+    prompts_dir = Path(_config.prompts_dir).expanduser()
+    prompts = parse_work_prompts(prompts_md)
+    if not prompts:
+        return {}
+    paths = write_prompts(prompts, title, started_at, prompts_dir)
+    _queue.add(prompts, paths, title)
+    return {"prompts": len(paths), "prompts_dir": str(prompts_dir)}
+
+
 @app.post("/meeting/stop")
 async def meeting_stop() -> dict:
-    global _session, _last_saved
-    session = _session
-    if session is None or not session.active:
-        raise HTTPException(status_code=409, detail="no meeting session running")
+    global _session, _last_saved, _session_state
+    with _session_lock:
+        if _session_state != "running" or _session is None:
+            raise HTTPException(status_code=409, detail="no meeting session running")
+        session = _session
+        meta = dict(_session_meta)
+        # Release the slot and mark it draining before the slow work below, so a
+        # second /meeting/stop or an auto-start sees "stopping" and bounces.
+        _session = None
+        _session_state = "stopping"
 
     def _finish() -> dict:
         global _last_saved
@@ -214,34 +288,86 @@ async def meeting_stop() -> dict:
         _watcher.resume()
         transcript = " ".join(s.text for s in segments)
         notes_md = _summarizer.summarize(transcript)
+        title = meta.get("title", "Meeting")
+        extra: dict = {}
         if _config.work_prompts:
             prompts_md = _prompt_gen.generate(notes_md)
             if prompts_md:
                 notes_md += f"\n\n## Suggested Work Prompts\n\n{prompts_md}"
+                try:
+                    extra = _write_prompt_files(prompts_md, title, session.started_at)
+                except Exception:
+                    log.exception("writing work prompts failed; notes still saved")
         saved = _writer.write(
-            title=_session_meta.get("title", "Meeting"),
-            category=_session_meta.get("category", "Other"),
+            title=title,
+            category=meta.get("category", "Other"),
             started_at=session.started_at,
             duration_seconds=session.elapsed_seconds(),
             notes_md=notes_md,
             segments=segments,
         )
-        _last_saved = {
+        payload = {
             "notes_path": str(saved.notes_path),
             "log_path": str(saved.log_path),
             "segments": len(segments),
+            **extra,
         }
-        return _last_saved
+        with _session_lock:
+            _last_saved = payload
+        return payload
 
-    result = await run_in_threadpool(_finish)
-    _session = None
-    return result
+    try:
+        return await run_in_threadpool(_finish)
+    finally:
+        with _session_lock:
+            _session_state = "idle"
 
 
 @app.post("/meeting/dismiss")
 def meeting_dismiss() -> dict:
     _watcher.dismiss()
     return {"ok": True}
+
+
+# Prompts are reviewed here but dispatched from the CLI only — no run endpoint.
+# Approve doubles as retry: a `failed` entry is a dispatch that errored, and
+# stranding it would let one transient Orca hiccup kill the prompt for good.
+_APPROVE_FROM = ("pending", "failed")
+_REJECT_FROM = ("pending",)
+
+
+@app.get("/prompts")
+def prompts_list(status: str | None = None) -> dict:
+    return {"entries": _queue.list(status=status)}
+
+
+def _transition(entry_id: str, verb: str, status: str, allowed: tuple[str, ...]) -> dict:
+    """Guarded status change. 404 if the entry is gone, 409 if the move is invalid.
+
+    Compare-and-set inside the queue rather than get-then-set here: the CLI
+    dispatches in a separate process, so it can flip an entry to `dispatched`
+    between our check and our write, and we would silently undo it.
+    """
+    try:
+        updated = _queue.set_status(entry_id, status, expect=allowed)
+    except StatusConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot {verb} a {exc.current} prompt (allowed from: {', '.join(allowed)})",
+        )
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"unknown prompt: {entry_id}")
+    return updated
+
+
+@app.post("/prompts/{entry_id}/approve")
+def prompts_approve(entry_id: str) -> dict:
+    return _transition(entry_id, "approve", "approved", _APPROVE_FROM)
+
+
+@app.post("/prompts/{entry_id}/reject")
+def prompts_reject(entry_id: str) -> dict:
+    return _transition(entry_id, "reject", "rejected", _REJECT_FROM)
 
 
 def main() -> None:

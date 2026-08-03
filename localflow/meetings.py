@@ -11,6 +11,7 @@ import logging
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -113,9 +114,11 @@ class MeetingWatcher:
     MeetingSession is active we hold the mic ourselves, so polling pauses.
     """
 
-    def __init__(self, min_busy_seconds: int = 12, poll_seconds: float = 3.0):
+    def __init__(self, min_busy_seconds: int = 12, poll_seconds: float = 3.0,
+                 on_detect: Callable[[str], None] | None = None):
         self.min_busy_seconds = min_busy_seconds
         self.poll_seconds = poll_seconds
+        self.on_detect = on_detect
         self.detected = False
         self.platform = ""
         self.mic_busy = False
@@ -179,6 +182,12 @@ class MeetingWatcher:
                         "localflow: meeting detected",
                         f"Mic in use ({self.platform}). Open the localflow UI to transcribe.",
                     )
+                if self.on_detect is not None:
+                    # A bad callback must never kill the watcher thread.
+                    try:
+                        self.on_detect(self.platform)
+                    except Exception:
+                        log.exception("on_detect callback failed")
 
 
 # ------------------------------------------------------------------ session ---
