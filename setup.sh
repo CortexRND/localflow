@@ -26,7 +26,7 @@ source .venv/bin/activate
 
 # Install package
 echo "Installing localflow..."
-pip install -e .
+pip install -e ".[mlx,menubar]"
 
 echo ""
 echo "✓ Setup complete!"
