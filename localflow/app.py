@@ -50,7 +50,10 @@ def main() -> None:
         since_desc = since if since is not None else "unknown time"
         print(
             f"another localflow instance is already running (pid {pid_desc}, "
-            f"since {since_desc}); use `lf agent status` or kill it first",
+            f"since {since_desc}); if it is the login agent, stop it with "
+            f"`launchctl bootout gui/$UID/com.cortexrnd.localflow` (or `lf agent "
+            f"uninstall` to also stop starting on login) — plain `kill` makes "
+            f"launchd relaunch it; otherwise kill {pid_desc}",
             file=sys.stderr,
         )
         # Exit 0: launchd KeepAlive={SuccessfulExit: false} treats nonzero
