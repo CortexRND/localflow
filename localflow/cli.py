@@ -441,6 +441,35 @@ def menubar() -> None:
     menubar_main()
 
 
+@cli.group()
+def agent() -> None:
+    """Run localflow on login via a launchd LaunchAgent (always on)."""
+
+
+@agent.command("install")
+def agent_install() -> None:
+    """Install and load the LaunchAgent so localflow starts on login."""
+    from localflow.launchagent import install
+    path = install()
+    console.print(f"[green]installed[/green] {path}")
+    console.print("localflow starts on login and relaunches if it exits (KeepAlive).")
+
+
+@agent.command("uninstall")
+def agent_uninstall() -> None:
+    """Unload and remove the LaunchAgent."""
+    from localflow.launchagent import uninstall
+    uninstall()
+    console.print("[green]uninstalled[/green]")
+
+
+@agent.command("status")
+def agent_status() -> None:
+    """Show whether the LaunchAgent is loaded and running."""
+    from localflow.launchagent import status
+    console.print(status())
+
+
 def main() -> None:
     cli()
 

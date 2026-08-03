@@ -49,6 +49,24 @@ Grant on first run:
 1. **Microphone**: System Settings → Privacy & Security → Microphone → Terminal (or your app launcher)
 2. **Accessibility**: System Settings → Privacy & Security → Accessibility → Terminal (for paste injection)
 
+### Run on login (always on)
+
+Install a launchd LaunchAgent so localflow starts automatically:
+
+```bash
+lf agent install
+lf agent status      # running / loaded, not running / not loaded
+lf agent uninstall
+```
+
+Once installed, localflow runs on every login and relaunches itself if it
+dies (`KeepAlive`) — it's meant to just stay running in the background.
+
+Grant **Microphone** and **Accessibility** permissions to the `.venv` Python
+binary (the interpreter the LaunchAgent actually runs), not just Terminal —
+System Settings → Privacy & Security → Microphone / Accessibility → add
+`.venv/bin/python3` (or use the `+` button and navigate to it).
+
 ### Meetings → work prompts → Orca
 
 Meetings flow from detection to dispatched work without manual steps in between:
@@ -184,6 +202,7 @@ Create a Shortcut that POSTs audio to `/transcribe`:
 - **localflow/cleanup.py**: Optional Ollama LLM polish (timeout 15s, graceful fallback)
 - **localflow/inject.py**: Paste text via osascript and System Events
 - **localflow/hotkey.py**: Global hotkey listener (pynput)
+- **localflow/launchagent.py**: launchd LaunchAgent — run on login, stay always on
 - **localflow/app.py**: Desktop CLI entrypoint
 - **localflow/server.py**: FastAPI web server for phone access
 - **localflow/static/index.html**: Single-page mobile app (no external assets)
