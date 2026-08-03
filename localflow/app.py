@@ -1,5 +1,6 @@
 import logging
 import queue
+import sys
 import threading
 import time
 
@@ -12,6 +13,7 @@ from localflow.config import load_config
 from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
 from localflow.inject import paste_text
 from localflow.log import setup_logging
+from localflow.singleinstance import acquire, read_holder
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
 
@@ -37,6 +39,25 @@ def _print_banner(config) -> None:
 
 def main() -> None:
     """Desktop entrypoint (console script `localflow`)."""
+    # Acquire the single-instance lock before anything else — in particular
+    # before the (slow) model load — so a second launch fails fast instead
+    # of silently sharing the hotkey and mic with an already-running
+    # instance (see incident: transcriptions degraded to 0 chars).
+    lock = acquire("localflow")
+    if lock is None:
+        pid, since = read_holder("localflow")
+        pid_desc = pid if pid is not None else "unknown"
+        since_desc = since if since is not None else "unknown time"
+        print(
+            f"another localflow instance is already running (pid {pid_desc}, "
+            f"since {since_desc}); use `lf agent status` or kill it first",
+            file=sys.stderr,
+        )
+        # Exit 0: launchd KeepAlive={SuccessfulExit: false} treats nonzero
+        # as a crash and would relaunch-loop while a manual instance holds
+        # the lock.
+        raise SystemExit(0)
+
     log_path = setup_logging()
     log.info("localflow starting")
     config = load_config()
