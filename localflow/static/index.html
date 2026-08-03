@@ -2,24 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>localflow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #f7f7f5;
-    --surface: #ffffff;
-    --text: #1a1a1a;
-    --muted: #5a5a5a;
-    --accent: #0f3d3e;
-    --accent-soft: #f0f4f4;
-    --alert: #a32222;
-    --alert-soft: #fbf3f3;
-    --rule: #e0e0dc;
-    /* Interactive boundaries need 3:1 against their fill (WCAG 1.4.11).
-       --rule is a decorative hairline at 1.23:1 and must not be used on them. */
-    --control-border: #767676;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
-    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --bg: #6438d8;
+    --fg: #f2e8d0;
+    --accent: #edff45;
+    --paper: #faf5e8;
+    --frame: 10px;
+    --edge: clamp(1.25rem, 5vw, 3rem);
+    --measure: 42rem;
+    --font-display: "Anton", "Arial Narrow", Impact, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+    --font-sans: ui-sans-serif, system-ui, sans-serif;
+    --noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    /* opaque rule colours - never opacity, so contrast stays measurable */
+    --rule-on-purple: color-mix(in srgb, var(--fg) 70%, var(--bg));  /* computes opaque, 3.49:1 on purple */
   }
 
   * { box-sizing: border-box; }
@@ -28,7 +30,7 @@
     margin: 0;
     padding: 0;
     background: var(--bg);
-    color: var(--text);
+    color: var(--fg);
     font-family: var(--font-sans);
     font-size: 16px;
     line-height: 1.5;
@@ -43,374 +45,671 @@
     touch-action: manipulation;
   }
 
-  :focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .band--paper :focus-visible { outline-color: var(--bg); }
+
+  /* fixed frame around the viewport, like the reference */
+  .frame {
+    position: fixed; inset: 0; z-index: 100;
+    border: var(--frame) solid var(--bg);
+    pointer-events: none;
   }
 
-  .container {
-    max-width: 520px;
-    margin: 0 auto;
-    padding: 40px 20px 56px;
+  .noise { position: relative; }
+  .noise::after {
+    content: ""; position: absolute; inset: 0;
+    background-image: var(--noise);
+    background-repeat: repeat; background-size: 256px 256px;
+    mix-blend-mode: color-burn; opacity: 0.2; pointer-events: none;
   }
 
-  /* ---- Masthead ---- */
+  /* ---------- Bands: full-bleed horizontal fields, capped inner column ---------- */
+  /* the whole page is a centred poster; the only left-aligned things are the
+     data cards (archive, meeting panel, colophon) — the reference's .terminal */
+  .band {
+    padding: 6rem var(--edge);
+    text-align: center;
+  }
+  .band--paper {
+    background: var(--paper);
+    color: var(--bg);
+    /* inset on top of the fixed frame, so purple runs down both sides and the
+       paper reads as a card laid on the field, not a stripe across it */
+    margin-inline: var(--frame);
+  }
+  .band--rule { border-top: 1px solid var(--accent); }
+  /* the voice band is the poster: extra air above and below the record slab,
+     and it hosts the radiating sunburst, so it clips its own decoration */
+  .band--voice {
+    position: relative;
+    overflow: hidden;
+    padding-top: 7rem;
+    padding-bottom: 8rem;
+  }
+  .inner { max-width: var(--measure); margin: 0 auto; position: relative; }
+
   .masthead {
-    padding-bottom: 1.5rem;
-    border-bottom: 1px solid var(--rule);
-    margin-bottom: 2.5rem;
+    position: relative;
+    padding-top: calc(clamp(6rem, 26vh, 13rem) + env(safe-area-inset-top));
+    padding-bottom: 4.5rem;
+  }
+
+  /* thin mono utility strip pinned inside the frame — installs the small
+     register so the page never opens on a giant word */
+  .topbar {
+    position: absolute;
+    inset-inline: 0;
+    top: var(--frame);
+    z-index: 20;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.25rem var(--edge);
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.7rem;
+    color: var(--fg);
+    white-space: nowrap;
+  }
+  /* two nowrap mono strings need ~300px; below that, shrink rather than wrap */
+  @media (max-width: 400px) {
+    .topbar { font-size: 0.6rem; letter-spacing: 0.06em; padding-inline: var(--edge); }
   }
   .masthead h1 {
-    font-size: 1.6rem;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    line-height: 1.15;
+    font-family: var(--font-display);
+    font-weight: 400;
+    text-transform: uppercase;
+    font-size: clamp(3.4rem, 21vw, 8rem);
+    line-height: 0.82;
+    letter-spacing: 0.005em;
     margin: 0;
   }
-  .masthead p {
-    font-size: 0.9rem;
-    color: var(--muted);
-    margin: 0.4rem 0 0;
-  }
-
-  /* ---- Sections ---- */
-  .section + .section {
-    margin-top: 3rem;
-    padding-top: 2rem;
-    border-top: 1px solid var(--rule);
-  }
-  .section-label {
-    font-size: 0.72rem;
-    font-weight: 600;
+  /* the strap is the reference's outlined pill: cream sentence, acid on one phrase */
+  .strap {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0 0.45em;
+    max-width: 100%;
+    margin: 1.6rem auto 0;
+    padding: 0.6rem 1.4rem;
+    border: 1px solid var(--rule-on-purple);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-weight: 800;
     text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--accent);
-    margin-bottom: 1.25rem;
+    letter-spacing: 0.12em;
+    font-size: 0.68rem;
+    line-height: 1.6;
+    color: var(--fg);
+  }
+  .strap b { color: var(--accent); font-weight: 800; }
+
+  /* boxed eyebrow — the reference's only outlined-rectangle vocabulary */
+  .eyebrow {
+    display: inline-block;
+    border: 1px solid currentColor;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.65rem;
+    padding: 0.35rem 0.9rem;
+    color: var(--fg);
+    margin: 0 auto 2rem;
+  }
+  .band--paper .eyebrow { color: var(--bg); }
+
+  .title {
+    font-family: var(--font-display);
+    font-weight: 400;
+    text-transform: uppercase;
+    font-size: clamp(2.6rem, 15vw, 5rem);
+    line-height: 0.86;
+    letter-spacing: 0.005em;
+    margin: 0 0 1.75rem;
   }
 
-  /* ---- Primary control ---- */
+  /* ---------- Primary control: the record slab, on a sunburst ---------- */
+  .record-wrap { position: relative; }
+  .rays {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    /* wide enough that the lit annulus clears the RECORD slab instead of
+       hiding behind it — closest-side keeps the % stops honest (100% = radius) */
+    width: min(880px, 156vw);
+    aspect-ratio: 1;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: repeating-conic-gradient(from 0deg,
+      color-mix(in srgb, var(--fg) 50%, transparent) 0deg 0.4deg,
+      transparent 0.4deg 3.6deg);
+    -webkit-mask: radial-gradient(circle closest-side, transparent 24%, #000 34%, #000 58%, transparent 76%);
+    mask: radial-gradient(circle closest-side, transparent 24%, #000 34%, #000 58%, transparent 76%);
+    animation: pulse 6s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.55; transform: translate(-50%, -50%) scale(1); }
+    50% { opacity: 1; transform: translate(-50%, -50%) scale(1.04); }
+  }
+
   #recordBtn {
     position: relative;
     display: block;
     width: 100%;
-    min-height: 120px;
-    padding: 16px 52px;
-    background: var(--accent);
-    color: #ffffff;
-    border: 1px solid var(--accent);
-    font-size: 1.05rem;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    text-align: center;
+    padding: 1rem 1.1rem 1.15rem;
+    min-height: 132px;
+    background: var(--fg);
+    color: var(--bg);
+    border: 5px solid var(--fg);
     cursor: pointer;
-    margin-bottom: 1rem;
+    font-family: var(--font-display);
+    font-weight: 400;
+    text-transform: uppercase;
+    font-size: clamp(3.2rem, 28vw, 9rem);
+    line-height: 0.88;
+    letter-spacing: 0.005em;
+    overflow-wrap: break-word;
   }
-  #recordBtn:active { opacity: 0.9; }
-
+  #recordBtn::after {
+    content: "Tap to start";
+    display: block;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: 0.7rem;
+    line-height: 1.4;
+    letter-spacing: 0.14em;
+    color: var(--bg);
+    margin-top: 0.65rem;
+  }
+  #recordBtn:hover, #recordBtn:active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+  }
+  /* recording: full inversion + acid outline + blinking square + JS text "Stop" */
   #recordBtn.recording {
-    background: var(--alert);
-    border-color: var(--alert);
-    color: #ffffff;
+    background: var(--bg);
+    border-color: var(--accent);
+    color: var(--accent);
   }
   #recordBtn.recording::before {
     content: "";
-    position: absolute;
-    left: 20px;
-    top: 50%;
-    width: 12px;
-    height: 12px;
-    margin-top: -6px;
-    background: #ffffff;
+    display: inline-block;
+    width: 0.28em;
+    height: 0.28em;
+    margin-right: 0.22em;
+    vertical-align: 0.2em;
+    background: var(--accent);
     animation: blink 1.2s ease-in-out infinite;
   }
-
-  #recordBtn.busy,
-  #recordBtn:disabled {
-    background: #d8d8d4;
-    border-color: #c9c9c4;
-    color: #3f3f3f;
+  #recordBtn.recording::after {
+    content: "Tap to stop — recording";
+    color: var(--accent);
+  }
+  /* busy: purple field, cream outline, no blink, JS text "Transcribing…".
+     Drops to the mono face on purpose - Anton ships no U+2026 glyph and the
+     Google Fonts latin subset claims that range, so Anton renders it as tofu. */
+  #recordBtn.busy, #recordBtn:disabled {
+    background: var(--bg);
+    border-color: var(--fg);
+    color: var(--fg);
     cursor: not-allowed;
-  }
-  #recordBtn.busy::before { content: none; }
-
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.15; }
-  }
-
-  /* ---- Clean toggle ---- */
-  #cleanToggle {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-    min-height: 48px;
-    font-size: 0.9rem;
-    color: var(--muted);
-    cursor: pointer;
-  }
-  #cleanToggle input {
-    width: 22px;
-    height: 22px;
-    flex: 0 0 auto;
-    accent-color: var(--accent);
-    cursor: pointer;
-  }
-
-  /* ---- Status & error ---- */
-  #status {
-    min-height: 1.5em;
     font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: clamp(1.35rem, 6vw, 2.1rem);
+    line-height: 1.2;
+    letter-spacing: 0.08em;
+  }
+  #recordBtn.busy::before, #recordBtn:disabled::before { content: none; }
+  #recordBtn.busy::after, #recordBtn:disabled::after {
+    content: "Working — do not close";
+    color: var(--fg);
+  }
+
+  /* ---------- Clean toggle ---------- */
+  #cleanToggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    min-height: 48px;
+    max-width: 100%;
+    margin-top: 1.75rem;
+    padding: 0 1.35rem 0 1.05rem;
+    border: 1px solid var(--rule-on-purple);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.78rem;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  /* the UA checkbox draws a near-black glyph — there is no black in this
+     palette, so the box is drawn by hand: cream square, acid fill when on */
+  #cleanToggle input {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 20px;
+    height: 20px;
+    flex: 0 0 auto;
+    margin: 0;
+    border: 2px solid var(--fg);
+    border-radius: 0;
+    background: transparent;
+    display: grid;
+    place-content: center;
+    cursor: pointer;
+  }
+  #cleanToggle input:checked::before {
+    content: "";
+    width: 10px;
+    height: 10px;
+    background: var(--accent);
+  }
+
+  /* ---------- Status & error ---------- */
+  #status {
+    margin-top: 1.25rem;
+    font-family: var(--font-mono);
+    font-weight: 800;
     font-size: 0.85rem;
-    color: var(--muted);
-    margin-top: 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent);
   }
-  #error {
-    display: none;
-    border: 1px solid var(--alert);
-    border-left-width: 3px;
-    background: var(--alert-soft);
-    color: #7d1a1a;
-    padding: 0.85rem 1rem;
-    font-size: 0.9rem;
-    line-height: 1.45;
-    margin-top: 1rem;
-  }
+  #status:empty { display: none; margin: 0; }
 
   .spinner {
     display: inline-block;
-    vertical-align: -3px;
+    vertical-align: -2px;
     width: 14px;
     height: 14px;
-    margin-right: 0.5rem;
-    border: 2px solid var(--rule);
+    margin-right: 0.6rem;
+    border: 2px solid var(--rule-on-purple);
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* ---- Meeting ---- */
-  .meeting-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 1rem;
-    margin-bottom: 1rem;
+  #error {
+    display: none;   /* JS sets style.display='block' - must stay a block */
+    margin-top: 1.75rem;
+    padding: 1.15rem 1.25rem 1.35rem;
+    border: 1px solid var(--accent);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    letter-spacing: 0.04em;
   }
-  .meeting-header h2 {
-    font-size: 1rem;
-    font-weight: 600;
-    margin: 0;
+  #error::before {
+    content: "Error";
+    display: block;
+    font-family: var(--font-display);
+    font-weight: 400;
+    text-transform: uppercase;
+    font-size: 2rem;
+    line-height: 1;
+    letter-spacing: 0.01em;
+    color: var(--accent);
+    margin-bottom: 0.4rem;
+  }
+
+  /* ---------- Meeting (paper band) ---------- */
+  /* the controls live in a bordered card — the .terminal exception again */
+  #meetingPanel {
+    border: 1px solid var(--bg);
+    padding: 1.4rem var(--edge) 1.6rem;
+    text-align: left;
   }
   #meetingWatchState {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--muted);
-    text-align: right;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.7rem;
+    color: var(--bg);
+    margin: 0 0 1.25rem;
   }
+  #meetingWatchState:empty { display: none; margin: 0; }
 
   #meetingBanner {
-    display: none;
-    border: 1px solid var(--accent);
-    border-left-width: 3px;
-    background: var(--accent-soft);
-    padding: 0.75rem 0.85rem;
-    font-size: 0.9rem;
-    line-height: 1.4;
-    margin-bottom: 1rem;
+    display: none;   /* JS sets style.display='block' - must stay a block */
+    border: 1px solid var(--bg);
+    padding: 1rem 1.15rem;
+    margin-bottom: 1.25rem;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--bg);
   }
   .banner-inner {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
+    gap: 0.9rem;
     flex-wrap: wrap;
   }
 
-  .dismissBtn,
-  .copyBtn {
+  .dismissBtn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     min-height: 44px;
-    padding: 0 12px;
-    background: var(--surface);
-    border: 1px solid var(--control-border);
-    color: var(--accent);
-    font-size: 0.8rem;
-    font-weight: 600;
+    min-width: 96px;
+    padding: 0 1.25rem;
+    background: transparent;
+    border: 1px solid var(--bg);
+    border-radius: 999px;
+    color: var(--bg);
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.7rem;
     cursor: pointer;
+    flex: 0 0 auto;
   }
-  .dismissBtn { min-width: 88px; flex: 0 0 auto; }
-  .dismissBtn:active, .copyBtn:active { background: #f1f1ee; }
+  .dismissBtn:hover, .dismissBtn:active {
+    background: var(--bg);
+    color: var(--paper);
+  }
 
   .meetingRow {
     display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
   }
   .meetingRow input,
   .meetingRow select {
-    min-height: 48px;
-    padding: 0 0.75rem;
-    font-size: 16px;
-    background: var(--surface);
-    border: 1px solid var(--control-border);
-    -webkit-tap-highlight-color: transparent;
-    touch-action: manipulation;
-  }
-  .meetingRow input { flex: 1 1 auto; min-width: 0; }
-  .meetingRow select { flex: 0 0 auto; min-width: 116px; }
-  /* Safari's UA placeholder colour is ~2.35:1 on white — below AA, and this
-     placeholder doubles as the field's only visible label. Set it explicitly. */
-  .meetingRow input::placeholder {
-    color: var(--muted);
-    opacity: 1; /* Firefox dims placeholders by default */
-  }
-
-  #meetingBtn {
-    position: relative;
-    display: block;
-    width: 100%;
-    min-height: 56px;
-    padding: 12px 44px;
-    background: var(--surface);
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    font-size: 0.9rem;
-    font-weight: 600;
-    line-height: 1.3;
+    min-height: 54px;
+    padding: 0 1rem;
+    font-size: 16px;   /* keeps iOS from zooming on focus */
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: transparent;
+    border: 1px solid var(--bg);
+    color: var(--bg);
     cursor: pointer;
-    margin-bottom: 1rem;
   }
-  #meetingBtn:active { background: var(--accent-soft); }
+  .meetingRow input { flex: 1 1 12rem; min-width: 0; cursor: text; }
+  .meetingRow select { flex: 0 1 auto; min-width: 8.5rem; }
+  .meetingRow input::placeholder { color: var(--bg); opacity: 1; }
 
+  /* hugs its text, like the reference CTA — not a full-bleed app slab */
+  #meetingBtn {
+    display: inline-block;
+    width: auto;
+    max-width: 100%;
+    min-height: 56px;
+    margin-top: 0.5rem;
+    padding: 1.05rem 2.25rem;
+    background: var(--bg);
+    color: var(--paper);
+    border: 1px solid var(--bg);
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+  #meetingBtn:hover, #meetingBtn:active {
+    background: transparent;
+    color: var(--bg);
+  }
+  /* live: acid field + blinking square, plus JS text "Stop meeting transcription" */
   #meetingBtn.live {
     background: var(--accent);
-    border-color: var(--accent);
-    color: #ffffff;
+    border-color: var(--bg);
+    color: var(--bg);
   }
   #meetingBtn.live::before {
     content: "";
-    position: absolute;
-    left: 18px;
-    top: 50%;
-    width: 10px;
-    height: 10px;
-    margin-top: -5px;
-    background: #ffffff;
+    display: inline-block;
+    width: 0.7em;
+    height: 0.7em;
+    margin-right: 0.55em;
+    background: var(--bg);
     animation: blink 1.2s ease-in-out infinite;
   }
   #meetingBtn:disabled {
-    background: #d8d8d4;
-    border-color: #c9c9c4;
-    color: #3f3f3f;
+    background: transparent;
+    border-style: dashed;
+    color: var(--bg);
     cursor: not-allowed;
   }
   #meetingBtn:disabled::before { content: none; }
 
+  /* live log: a purple window sunk into the paper band */
   #meetingLive {
-    display: none;
-    border: 1px solid var(--rule);
-    background: var(--surface);
-    padding: 1rem;
+    display: none;   /* JS sets style.display='block' - must stay a block */
+    background: var(--bg);
+    border: 1px solid var(--bg);
+    padding: 1rem 1.15rem 1.15rem;
     font-family: var(--font-mono);
     font-size: 0.85rem;
-    line-height: 1.6;
-    max-height: 260px;
+    line-height: 1.7;
+    color: var(--accent);
+    max-height: 280px;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     white-space: pre-wrap;
     word-wrap: break-word;
-    margin-bottom: 1rem;
+    margin-top: 1.25rem;
   }
-  #meetingSaved {
-    display: none;
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    color: var(--accent);
-    line-height: 1.5;
-    word-break: break-all;
+  #meetingLive::before {
+    content: "Live log";
+    display: block;
+    font-weight: 800;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--fg);
+    margin-bottom: 0.75rem;
   }
 
-  /* ---- Transcripts ---- */
+  #meetingSaved {
+    display: none;   /* JS sets style.display='block' - must stay a block */
+    margin-top: 1.5rem;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: 0.85rem;
+    letter-spacing: 0.04em;
+    color: var(--bg);
+    line-height: 1.6;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+  #meetingSaved::before {
+    content: "Saved";
+    display: block;
+    font-family: var(--font-display);
+    font-weight: 400;
+    text-transform: uppercase;
+    font-size: 1.6rem;
+    line-height: 1;
+    letter-spacing: 0.01em;
+    color: var(--bg);
+    margin-bottom: 0.4rem;
+  }
+
+  /* ---------- Transcripts ---------- */
+  /* a built, bordered card so the purple field never reads as empty */
+  /* the reference's one left-aligned object is the .terminal data card;
+     the archive, the meeting panel and the colophon are that exception */
+  .archive-frame {
+    border: 1px solid var(--rule-on-purple);
+    padding: 1.15rem var(--edge) 1.4rem;
+    text-align: left;
+  }
+  .frame-tab {
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.68rem;
+    color: var(--fg);
+    padding-bottom: 0.85rem;
+    margin-bottom: 1.25rem;
+    border-bottom: 1px solid var(--rule-on-purple);
+  }
   #list:empty::before {
     content: "No transcripts yet.";
     display: block;
-    font-size: 0.9rem;
-    color: var(--muted);
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.85rem;
+    color: var(--fg);
   }
   .item {
-    padding: 1.25rem 0;
-    border-top: 1px solid var(--rule);
+    border-top: 1px solid var(--rule-on-purple);
+    padding: 1.5rem 0;
   }
   .item:first-child { border-top: none; padding-top: 0; }
   .item .meta {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
+    gap: 0.9rem;
     font-family: var(--font-mono);
-    font-size: 0.78rem;
-    color: var(--muted);
-    margin-bottom: 0.75rem;
-  }
-  .copyBtn {
-    min-width: 84px;
-    margin: -10px -4px -10px 0;
-    font-family: var(--font-sans);
-  }
-  .copyBtn.copied {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #ffffff;
-    cursor: default;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.7rem;
+    color: var(--accent);
+    margin-bottom: 0.85rem;
   }
   .item .text {
     font-size: 1rem;
-    line-height: 1.6;
-    color: var(--text);
+    line-height: 1.65;
+    color: var(--fg);
     white-space: pre-wrap;
     word-wrap: break-word;
   }
-
-  /* ---- Colophon ---- */
-  .colophon {
-    margin-top: 3rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid var(--rule);
-    font-size: 0.8rem;
-    color: var(--muted);
-    line-height: 1.6;
+  .copyBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 92px;
+    margin: -8px 0;
+    padding: 0 1.1rem;
+    background: var(--fg);
+    color: var(--bg);
+    border: 1px solid var(--fg);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.7rem;
+    cursor: pointer;
+    flex: 0 0 auto;
   }
-  .colophon p { margin: 0; }
+  .copyBtn:hover, .copyBtn:active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+  }
+  /* copied: acid fill + a check mark, and JS also swaps the label to "copied" */
+  .copyBtn.copied {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+    cursor: default;
+  }
+  .copyBtn.copied::before {
+    content: "\2713";
+    margin-right: 0.4em;
+  }
+
+  /* ---------- Colophon ---------- */
+  /* a terminal card, not naked prose: the reference has zero sentence-case
+     running text outside a bordered box */
+  .colophon {
+    margin-top: 2.5rem;
+    border: 1px solid var(--rule-on-purple);
+    padding: 1.15rem var(--edge) 1.25rem;
+    color: var(--fg);
+    text-align: left;
+  }
+  .colophon p {
+    margin: 0;
+    max-width: 46ch;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.7rem;
+    line-height: 2.1;
+  }
   .colophon code {
     font-family: var(--font-mono);
-    font-size: 0.78rem;
-    color: var(--text);
-    background: #ecece8;
-    padding: 0.1rem 0.3rem;
+    font-weight: 800;
+    text-transform: none;
+    letter-spacing: 0.04em;
+    color: var(--bg);
+    background: var(--accent);
+    padding: 0.15rem 0.4rem;
   }
 
+  .band--last { padding-bottom: calc(3.5rem + env(safe-area-inset-bottom)); }
+
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.15; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   @media (prefers-reduced-motion: reduce) {
-    .spinner, #recordBtn.recording::before, #meetingBtn.live::before {
+    .spinner, #recordBtn.recording::before, #meetingBtn.live::before, .rays {
       animation: none;
     }
   }
 </style>
 </head>
-<body>
+<body class="noise">
 
-  <div class="container">
-    <header class="masthead">
+  <div class="frame" aria-hidden="true"></div>
+
+  <header class="band masthead">
+    <div class="topbar">
+      <span aria-hidden="true">localflow</span>
+      <span>Local only · No cloud</span>
+    </div>
+    <div class="inner">
       <h1>localflow</h1>
-      <p>Local voice and meeting transcription.</p>
-    </header>
+      <p class="strap">Voice &amp; meeting transcription · <b>runs on this machine</b></p>
+    </div>
+  </header>
 
-    <section class="section" aria-labelledby="sec-voice">
-      <div class="section-label" id="sec-voice">Voice</div>
+  <section class="band band--rule band--voice" aria-labelledby="sec-voice">
+    <div class="inner">
+      <p class="eyebrow">No.01 — Push to talk</p>
+      <h2 class="title" id="sec-voice">Voice</h2>
 
-      <button id="recordBtn" type="button">Record</button>
+      <div class="record-wrap">
+        <div class="rays" aria-hidden="true"></div>
+        <button id="recordBtn" type="button">Record</button>
+      </div>
 
       <label id="cleanToggle">
         <input type="checkbox" id="cleanCheckbox" checked>
@@ -419,16 +718,16 @@
 
       <div id="status"></div>
       <div id="error"></div>
-    </section>
+    </div>
+  </section>
 
-    <section class="section" aria-labelledby="sec-meeting">
-      <div class="section-label" id="sec-meeting">Meeting</div>
+  <section class="band band--paper" aria-labelledby="sec-meeting">
+    <div class="inner">
+      <p class="eyebrow">No.02 — Room watcher</p>
+      <h2 class="title" id="sec-meeting">Meeting</h2>
 
       <div id="meetingPanel">
-        <div class="meeting-header">
-          <h2>Meeting transcription</h2>
-          <span id="meetingWatchState"></span>
-        </div>
+        <div id="meetingWatchState"></div>
 
         <div id="meetingBanner">
           <div class="banner-inner">
@@ -440,7 +739,7 @@
         <div class="meetingRow">
           <input id="meetingTitle" type="text" placeholder="Meeting title"
                  aria-label="Meeting title">
-          <select id="meetingCategory">
+          <select id="meetingCategory" aria-label="Meeting platform">
             <option value="">auto</option>
             <option>Zoom</option>
             <option>Google Meet</option>
@@ -458,17 +757,24 @@
         <div id="meetingLive"></div>
         <div id="meetingSaved"></div>
       </div>
-    </section>
+    </div>
+  </section>
 
-    <section class="section" aria-labelledby="sec-transcripts">
-      <div class="section-label" id="sec-transcripts">Transcripts</div>
-      <div id="list"></div>
-    </section>
+  <section class="band band--last" aria-labelledby="sec-transcripts">
+    <div class="inner">
+      <p class="eyebrow">No.03 — The archive</p>
+      <h2 class="title" id="sec-transcripts">Transcripts</h2>
 
-    <footer class="colophon">
-      <p>Mic access requires HTTPS or localhost. To use this from your phone over Tailscale, run <code>tailscale serve 8756</code> and open the printed https:// URL.</p>
-    </footer>
-  </div>
+      <div class="archive-frame">
+        <div class="frame-tab">This session · saved locally</div>
+        <div id="list"></div>
+      </div>
+
+      <footer class="colophon">
+        <p>Mic access requires HTTPS or localhost. To use this from your phone over Tailscale, run <code>tailscale serve 8756</code> and open the printed https:// URL.</p>
+      </footer>
+    </div>
+  </section>
 
 <script>
   const recordBtn = document.getElementById('recordBtn');
