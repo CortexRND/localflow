@@ -6,20 +6,18 @@ import time
 
 import numpy as np
 
-from localflow import sounds
 from localflow.audio import Recorder
 from localflow.cleanup import Cleaner
 from localflow.config import load_config
 from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
 from localflow.inject import paste_text
 from localflow.log import setup_logging
+from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
 
 log = logging.getLogger("localflow.app")
-
-MIN_CLIP_SECONDS = 0.3
 
 
 def _print_banner(config) -> None:
@@ -96,47 +94,31 @@ def main() -> None:
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
 
-    def on_start() -> None:
-        if not recorder.recording:
-            try:
-                recorder.start()
-            except Exception as exc:
-                print(f"mic error: {exc}")
-                return
-            if config.sounds_enabled:
-                sounds.play("start")
-            print("● recording")
-
-    def on_stop() -> None:
-        if not recorder.recording:
-            return
-        audio = recorder.stop()
-        if config.sounds_enabled:
-            sounds.play("stop")
-        print("■ transcribing…")
-        duration = len(audio) / config.sample_rate if config.sample_rate else 0
-        if duration < MIN_CLIP_SECONDS:
-            log.info("clip too short (%.2fs), dropped", duration)
-            return
-        work_queue.put(audio)
-
-    def on_toggle() -> None:
-        if not recorder.recording:
-            on_start()
-        else:
-            on_stop()
+    # Owns the real recorder.start()/stop() pipeline on its own daemon
+    # thread; note_start/note_stop/note_toggle below are enqueue-only and
+    # safe to call directly from the pynput event-tap callback thread.
+    controller = PushToTalkController(recorder, config, work_queue)
 
     _print_banner(config)
     print(f"  log file:     {log_path}")
 
     if is_hold_key(config.hotkey):
-        listener = HoldKeyListener(config.hotkey, on_start, on_stop)
+        listener = HoldKeyListener(config.hotkey, controller.note_start, controller.note_stop)
     else:
-        listener = HotkeyListener(config.hotkey, on_toggle)
+        listener = HotkeyListener(config.hotkey, controller.note_toggle)
     try:
         listener.run_forever()
     except KeyboardInterrupt:
         print("\nexiting…")
+        return
+
+    # run_forever() returned on its own — the listener died (macOS disabled
+    # the event tap after a timeout, or pynput crashed). Exiting 0 here
+    # would look like a clean shutdown to launchd's KeepAlive={SuccessfulExit:
+    # false} and the always-on agent would never be relaunched, so exit
+    # non-zero instead.
+    log.error("hotkey listener exited unexpectedly — exiting non-zero for launchd to restart")
+    raise SystemExit(1)
 
 
 def _process_clip(audio: np.ndarray, config, transcriber: Transcriber, cleaner: Cleaner) -> None:
