@@ -67,6 +67,11 @@ class PushToTalkController:
         self._play_sound = play_sound
         self._min_clip_seconds = min_clip_seconds
         self._events: "queue.Queue" = queue.Queue()
+        # Tracks the logical state note_toggle() last drove toward. Guarded
+        # by _toggle_lock because it's read-modify-written from the caller
+        # thread; recorder.recording is NOT a substitute (see note_toggle).
+        self._toggle_intent = False
+        self._toggle_lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run, name="pushtotalk-consumer", daemon=True
         )
@@ -83,13 +88,26 @@ class PushToTalkController:
         self._events.put(("stop", time.monotonic()))
 
     def note_toggle(self) -> None:
-        """Toggle-mode equivalent of note_start()/note_stop(). Reads
-        recorder.recording (a plain bool, not I/O) to decide which — same
-        check the pre-fix on_toggle() made directly."""
-        if self._recorder.recording:
-            self.note_stop()
-        else:
-            self.note_start()
+        """Toggle-mode equivalent of note_start()/note_stop().
+
+        Resolves start-vs-stop from _toggle_intent, tracked synchronously
+        here under a lock — NOT from recorder.recording. recorder.recording
+        only flips True inside the consumer thread's recorder.start() call,
+        which runs async and takes ~60-100ms; reading it on the caller
+        thread would race a rapid double-press landing inside that window
+        (both presses would read False and both enqueue "start", and the
+        consumer's already-recording guard would silently drop the second
+        one — the user's intended stop is lost and the mic keeps
+        recording). _toggle_intent flips synchronously on every call, so
+        the second press always resolves to the opposite of the first
+        regardless of how far the consumer has gotten.
+        """
+        with self._toggle_lock:
+            self._toggle_intent = not self._toggle_intent
+            if self._toggle_intent:
+                self.note_start()
+            else:
+                self.note_stop()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -106,6 +124,15 @@ class PushToTalkController:
             event = pending if pending is not None else self._events.get()
             pending = None
             if event is _SHUTDOWN:
+                # _SHUTDOWN can arrive either straight off self._events.get()
+                # or deferred via `pending` (e.g. the spam-coalescing
+                # lookahead pulled it right after a "start" was already
+                # processed and the mic opened). Either way, if a recording
+                # is live at this point, close it before exiting — otherwise
+                # the stream is left open with nothing left to stop it.
+                if self._recorder.recording:
+                    log.warning("shutdown received mid-recording — stopping mic first")
+                    self._do_stop()
                 return
             kind, ts = event
 
