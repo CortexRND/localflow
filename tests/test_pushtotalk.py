@@ -29,8 +29,13 @@ class FakeRecorder:
         self._clip_seconds = clip_seconds
         self._sample_rate = sample_rate
         self.start_gate: threading.Event | None = None  # optional block point
+        # Set the instant start() is entered, before it blocks on
+        # start_gate — lets tests wait for "consumer is inside recorder.start()"
+        # deterministically instead of guessing with a sleep.
+        self.start_entered = threading.Event()
 
     def start(self) -> None:
+        self.start_entered.set()
         if self.start_gate is not None:
             self.start_gate.wait(timeout=2.0)
         self.start_calls += 1
@@ -168,3 +173,83 @@ def test_note_start_returns_immediately_even_while_consumer_is_busy():
     finally:
         recorder.start_gate.set()
         controller.shutdown()
+
+
+# ------------------------------------------------------- reviewer fix-ups ---
+# Two defects a reviewer found in the merged pushtotalk.py: a caller-thread
+# race in note_toggle(), and a mic left open if _SHUTDOWN is deferred while
+# a "start" is in flight. Both fixed in pushtotalk.py; regression-tested here.
+
+
+def test_note_toggle_resolves_correctly_under_rapid_double_press():
+    """note_toggle() must NOT decide start-vs-stop from recorder.recording
+    read on the caller thread: recording only flips True inside the
+    consumer's recorder.start() call, which here is gated open for ~60-100ms
+    of real work. A second toggle landing inside that window must still
+    resolve to "stop" (not get silently dropped as a stray duplicate
+    start), so the recording actually ends."""
+    recorder = FakeRecorder()
+    recorder.start_gate = threading.Event()  # block inside recorder.start()
+    controller, recorder, config, work_queue, _ = make_controller(recorder=recorder)
+    try:
+        controller.note_toggle()  # intent: start
+        assert _wait_until(lambda: recorder.start_entered.is_set()), (
+            "consumer never reached recorder.start()"
+        )
+        # Still inside the blocking call — recorder.recording is the stale
+        # False that a caller-thread read of it would race on.
+        assert recorder.start_calls == 0
+        assert recorder.recording is False
+
+        controller.note_toggle()  # lands mid-block; must resolve to "stop"
+
+        recorder.start_gate.set()  # release the block
+
+        assert _wait_until(lambda: recorder.stop_calls == 1), (
+            "recorder.stop() was never called — the second toggle was dropped"
+        )
+        assert recorder.start_calls == 1
+        assert recorder.stop_calls == 1
+        assert recorder.recording is False
+    finally:
+        recorder.start_gate.set()
+        controller.shutdown()
+
+
+def test_shutdown_mid_recording_stops_the_mic():
+    """General case: shutdown() arrives while a recording is genuinely
+    active. The mic stream must be closed before the consumer thread exits,
+    not left open."""
+    recorder = FakeRecorder()
+    controller, recorder, config, work_queue, _ = make_controller(recorder=recorder)
+    controller.note_start()
+    assert _wait_until(lambda: recorder.start_calls == 1)
+    assert recorder.recording is True
+
+    controller.shutdown()
+
+    assert recorder.stop_calls == 1
+    assert recorder.recording is False
+
+
+def test_shutdown_pulled_by_start_lookahead_still_stops_mic():
+    """Precise regression for the reported race: shutdown()'s _SHUTDOWN
+    sentinel lands in the queue immediately behind a "start" event, so the
+    consumer's spam-coalescing lookahead (a get_nowait() run right after
+    dequeuing "start") is the one that pulls it — not the top-level
+    blocking get(). That deferred sentinel must not skip stopping the mic
+    that _do_start() just opened.
+
+    note_start() then shutdown() are called back-to-back with no sleep so
+    both land in the queue before the daemon thread is scheduled (same
+    reasoning as the spam-coalescing tests above), which reliably drives
+    the lookahead-deferred path rather than the direct one.
+    """
+    recorder = FakeRecorder()
+    controller, recorder, config, work_queue, _ = make_controller(recorder=recorder)
+    controller.note_start()
+    controller.shutdown()
+
+    assert recorder.start_calls == 1
+    assert recorder.stop_calls == 1
+    assert recorder.recording is False
