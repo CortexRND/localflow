@@ -19,7 +19,10 @@ class Config:
     sounds_enabled: bool = True        # audio cue on record start/stop
     spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
     sample_rate: int = 16000
-    server_host: str = "0.0.0.0"
+    # Bind loopback by default: the API (mic recording, transcription, prompt
+    # approve/reject) has no auth, so 0.0.0.0 exposed it to the whole LAN.
+    # Set to "0.0.0.0" explicitly in config to opt into network access.
+    server_host: str = "127.0.0.1"
     server_port: int = 8756
     # Meeting transcription -> Obsidian. ~/projs is itself a vault (it has a
     # .obsidian/ at its root), which is where the work these notes describe
