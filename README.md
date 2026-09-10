@@ -112,9 +112,9 @@ The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
 Create `~/.localflow.toml`:
 
 ```toml
-model_size = "base"               # whisper model: tiny, base, small, medium, large-v3
-stt_backend = "auto"              # auto | mlx | faster-whisper
-# language = "en"                 # omit for autodetect
+model_size = "base"               # whisper model: tiny, base, small, medium, large-v3 (ignored by parakeet)
+stt_backend = "auto"              # auto | mlx | faster-whisper | parakeet
+# language = "en"                 # omit for autodetect (parakeet is English-only)
 cleanup_enabled = true
 ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2:3b"
@@ -130,6 +130,12 @@ orca_agent = "claude"                  # agent to run in each dispatched worktre
 ```
 
 All keys are optional; defaults shown above apply.
+
+`stt_backend = "parakeet"` uses NVIDIA Parakeet TDT 0.6B v2 via
+[parakeet-mlx](https://github.com/senstella/parakeet-mlx) (Apple Silicon).
+Install with `pip install -e '.[parakeet]'`. It is a fixed checkpoint
+(`mlx-community/parakeet-tdt-0.6b-v2`), so `model_size` is ignored, and it is
+English-only, so `language` autodetect does not apply.
 
 ### Phone access (Tailscale)
 
@@ -200,7 +206,7 @@ Create a Shortcut that POSTs audio to `/transcribe`:
 
 - **localflow/config.py**: Load ~/.localflow.toml (TOML parsing)
 - **localflow/audio.py**: Record mono float32 via sounddevice
-- **localflow/stt.py**: Transcribe via faster-whisper (CPU, int8 quantization)
+- **localflow/stt.py**: Transcribe via mlx-whisper (Apple GPU), faster-whisper (CPU, int8), or NVIDIA Parakeet TDT via parakeet-mlx (English-only; arrays fed straight to the log-mel front-end, no temp files/ffmpeg)
 - **localflow/cleanup.py**: Optional Ollama LLM polish (timeout 15s, graceful fallback)
 - **localflow/inject.py**: Paste text via osascript and System Events
 - **localflow/hotkey.py**: Global hotkey listener (pynput)

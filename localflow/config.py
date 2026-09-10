@@ -5,9 +5,9 @@ from pathlib import Path
 
 @dataclass
 class Config:
-    model_size: str = "base"           # whisper model size
-    stt_backend: str = "auto"          # auto | mlx | faster-whisper
-    language: str | None = None        # None = autodetect
+    model_size: str = "base"           # whisper model size (ignored by parakeet: fixed model id)
+    stt_backend: str = "auto"          # auto | mlx | faster-whisper | parakeet
+    language: str | None = None        # None = autodetect (parakeet is English-only)
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"
     cleanup_enabled: bool = True
