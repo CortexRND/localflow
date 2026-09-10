@@ -31,17 +31,20 @@ _JOIN_PATTERN = re.compile(
 _SLASH_PATTERN = re.compile(r"(^|\s+)slash\b[.,]?\s*", re.IGNORECASE)
 
 _NAME_SPLIT = re.compile(r"[-_]")
+# Between two parts of a registered name: STT whitespace, an already-typed
+# separator, or a spoken one ("skill underscore part").
+_PART_SEPARATOR = r"(?:\s*[_-]\s*|\s+(?:" + "|".join(_JOINING) + r")\b[.,]?\s+|\s+)"
+_PLACEHOLDER = re.compile("\x00(\\d+)\x00")
 
 
 def _command_pattern(names: Iterable[str]) -> re.Pattern | None:
-    """Match "/" + a registered name whose parts may be separated by spaces,
-    "-" or "_" (STT output or an already-correct command). Longest names are
-    tried first so "skill_part_two" wins over "skill_part"."""
+    """Match "/" + a registered name (STT output or an already-correct command).
+    Longest names are tried first so "skill_part_two" wins over "skill_part"."""
     ordered = sorted({n for n in names if n}, key=len, reverse=True)
     if not ordered:
         return None
     alternatives = [
-        r"[\s_-]+".join(re.escape(part) for part in _NAME_SPLIT.split(name))
+        _PART_SEPARATOR.join(re.escape(part) for part in _NAME_SPLIT.split(name))
         for name in ordered
     ]
     # Only a command-position slash (start of text or after whitespace) is
@@ -54,26 +57,63 @@ def _command_pattern(names: Iterable[str]) -> re.Pattern | None:
     )
 
 
-def _canonical_lookup(names: Iterable[str]) -> dict[str, str]:
-    return {" ".join(_NAME_SPLIT.split(n)).lower(): n for n in names if n}
+def _spoken_key(token: str) -> str:
+    """Collapse separators (typed or spoken) and case: "Skill underscore Part"
+    and "skill-part" both become "skill part"."""
+    words = [w for w in re.split(r"[\s_-]+", token.lower()) if w]
+    stripped = [w for w in words if w not in _JOINING]
+    return " ".join(stripped or words)
+
+
+def _canonical_lookup(names: Iterable[str]) -> dict[str, str | None]:
+    """spoken key -> registered name, or None when several registered names
+    share a key (e.g. skill-part and skill_part): ambiguous speech is left as is."""
+    lookup: dict[str, str | None] = {}
+    for name in names:
+        if not name:
+            continue
+        key = _spoken_key(name)
+        lookup[key] = None if key in lookup and lookup[key] != name else name
+    return lookup
 
 
 def normalize_commands(text: str, names: Sequence[str]) -> str:
+    return _normalize(text, names, lambda name: "/" + name)
+
+
+def _normalize(text: str, names: Sequence[str], render) -> str:
     pattern = _command_pattern(names)
     if pattern is None:
         return text
+    exact = set(names)
     lookup = _canonical_lookup(names)
 
     def repl(m: re.Match) -> str:
-        key = re.sub(r"[\s_-]+", " ", m.group(1)).lower()
-        return "/" + lookup.get(key, m.group(1))
+        token = m.group(1)
+        if token in exact:
+            return render(token)
+        canonical = lookup.get(_spoken_key(token))
+        if canonical is None:
+            return m.group(0)
+        return render(canonical)
 
     return pattern.sub(repl, text)
 
 
 def apply_spoken_symbols(text: str, commands: Sequence[str] = ()) -> str:
-    text = _JOIN_PATTERN.sub(lambda m: _JOINING[m.group(1).lower()], text)
     text = _SLASH_PATTERN.sub(lambda m: ("/" if m.group(1) == "" else " /"), text)
+    # Snap registered commands before the generic symbol-word pass so a name
+    # whose parts are literally "dash"/"underscore" survives it; the canonical
+    # form is parked behind a placeholder until that pass is done.
+    resolved: list[str] = []
+
+    def park(name: str) -> str:
+        resolved.append("/" + name)
+        return f"\x00{len(resolved) - 1}\x00"
+
     if commands:
-        text = normalize_commands(text, commands)
+        text = _normalize(text, commands, park)
+    text = _JOIN_PATTERN.sub(lambda m: _JOINING[m.group(1).lower()], text)
+    if resolved:
+        text = _PLACEHOLDER.sub(lambda m: resolved[int(m.group(1))], text)
     return text

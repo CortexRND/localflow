@@ -58,3 +58,18 @@ def test_discover_commands(tmp_path):
     (tmp_path / "README.md").write_text("x")
     names = discover_commands(["explicit_one", "not valid"], [str(tmp_path), str(tmp_path / "missing")])
     assert names == ["candidate-solutioning", "explicit_one", "skill_part"]
+
+
+def test_colliding_names_keep_exact_and_skip_ambiguous_speech():
+    names = ["skill-part", "skill_part"]
+    assert apply_spoken_symbols("/skill-part", names) == "/skill-part"
+    assert apply_spoken_symbols("/skill_part", names) == "/skill_part"
+    assert apply_spoken_symbols("slash skill part", names) == "/skill part"
+    assert apply_spoken_symbols("slash skill underscore part", names) == "/skill_part"
+
+
+def test_symbol_words_inside_registered_names():
+    names = ["dash", "foo_dash_bar"]
+    assert apply_spoken_symbols("slash dash", names) == "/dash"
+    assert apply_spoken_symbols("slash foo dash bar.", names) == "/foo_dash_bar"
+    assert apply_spoken_symbols("warm dash cache", names) == "warm-cache"
