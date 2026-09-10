@@ -13,6 +13,7 @@ from starlette.concurrency import run_in_threadpool
 
 from localflow import sounds
 from localflow.cleanup import Cleaner
+from localflow.commands import discover_commands
 from localflow.config import load_config
 from localflow.dispatch import (
     PromptQueue,
@@ -36,6 +37,7 @@ app = FastAPI()
 setup_logging()
 log = logging.getLogger("localflow.server")
 _config = load_config()
+_commands = discover_commands(_config.command_names, _config.skills_dirs)
 _transcriber: Transcriber | None = None
 _cleaner: Cleaner | None = None
 _lock = threading.Lock()
@@ -140,7 +142,7 @@ def _transcribe_sync(audio: np.ndarray, clean: bool) -> str:
     if clean:
         text = _get_cleaner().clean(text)
     if _config.spoken_symbols and text:
-        text = apply_spoken_symbols(text)
+        text = apply_spoken_symbols(text, _commands)
     return text
 
 
