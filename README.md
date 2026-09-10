@@ -119,6 +119,9 @@ cleanup_enabled = true
 ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2:3b"
 hotkey = "alt_l"                  # bare key name = hold-to-talk; "<cmd>+<shift>+<space>" = toggle
+spoken_symbols = true             # "slash"/"dash"/"underscore" -> / - _
+command_names = []                # extra slash-command names, e.g. ["skill_part"]
+skills_dirs = ["~/.claude/skills", "~/.agents/skills"]  # subdirectory names are registered too
 sample_rate = 16000
 server_host = "0.0.0.0"
 server_port = 8756
@@ -136,6 +139,26 @@ All keys are optional; defaults shown above apply.
 Install with `pip install -e '.[parakeet]'`. It is a fixed checkpoint
 (`mlx-community/parakeet-tdt-0.6b-v2`), so `model_size` is ignored, and it is
 English-only, so `language` autodetect does not apply.
+
+#### Spoken slash-commands
+
+Dictation turns "slash" into `/` and, when the words after it exactly match a
+registered command name, snaps them to that name's registered spelling:
+
+| Dictated | Pasted (with `skill_part`, `candidate-solutioning` registered) |
+| --- | --- |
+| `slash skill part.` | `/skill_part` |
+| `run slash candidate solutioning with these args` | `run /candidate-solutioning with these args` |
+| `slash unknown words` | `/unknown words` |
+| `we discussed candidate solutioning today` | unchanged |
+
+Registered names are `command_names` plus the subdirectory names of each
+`skills_dirs` entry (the `<skills>/<name>/SKILL.md` layout). Only exact word
+sequences match — no fuzzy matching, so `candidate solution` is never rewritten
+to `/candidate-solutioning` — the separator comes verbatim from the registered
+name (`-` vs `_`), the longest registered name wins on overlap, and only
+sentence punctuation trailing a command at the end of the dictation is dropped.
+Meeting transcripts are never touched.
 
 ### Phone access (Tailscale)
 

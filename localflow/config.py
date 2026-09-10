@@ -1,5 +1,5 @@
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 
@@ -18,6 +18,13 @@ class Config:
     hotkey: str = "alt_l"
     sounds_enabled: bool = True        # audio cue on record start/stop
     spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
+    # Registered slash-command names: after a dictated "slash", an exact spoken
+    # match is snapped to the registered spelling ("slash skill part" ->
+    # "/skill_part"). Names listed here plus subdirectory names of skills_dirs.
+    command_names: list[str] = field(default_factory=list)
+    skills_dirs: list[str] = field(
+        default_factory=lambda: ["~/.claude/skills", "~/.agents/skills"]
+    )
     sample_rate: int = 16000
     # Bind loopback by default: the API (mic recording, transcription, prompt
     # approve/reject) has no auth, so 0.0.0.0 exposed it to the whole LAN.

@@ -3,11 +3,13 @@ import queue
 import sys
 import threading
 import time
+from typing import Sequence
 
 import numpy as np
 
 from localflow.audio import Recorder
 from localflow.cleanup import Cleaner
+from localflow.commands import discover_commands
 from localflow.config import load_config
 from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
 from localflow.inject import paste_text
@@ -70,6 +72,8 @@ def main() -> None:
         backend=config.stt_backend,
     )
     print(f"  stt backend:  {transcriber.backend}")
+    commands = discover_commands(config.command_names, config.skills_dirs)
+    print(f"  commands:     {len(commands)} registered")
     recorder = Recorder(sample_rate=config.sample_rate)
     cleaner = Cleaner(
         config.ollama_url,
@@ -86,7 +90,7 @@ def main() -> None:
             if audio is None:
                 break
             try:
-                _process_clip(audio, config, transcriber, cleaner)
+                _process_clip(audio, config, transcriber, cleaner, commands)
             except Exception:
                 log.exception("transcription pipeline failed")
             work_queue.task_done()
@@ -121,14 +125,20 @@ def main() -> None:
     raise SystemExit(1)
 
 
-def _process_clip(audio: np.ndarray, config, transcriber: Transcriber, cleaner: Cleaner) -> None:
+def _process_clip(
+    audio: np.ndarray,
+    config,
+    transcriber: Transcriber,
+    cleaner: Cleaner,
+    commands: Sequence[str] = (),
+) -> None:
     start = time.monotonic()
     text = transcriber.transcribe(audio)
     # Cleanup only pays off on real sentences; short fragments have nothing to fix.
     if config.cleanup_enabled and text and len(text.split()) >= 5:
         text = cleaner.clean(text)
     if config.spoken_symbols and text:
-        text = apply_spoken_symbols(text)
+        text = apply_spoken_symbols(text, commands)
     elapsed_ms = int((time.monotonic() - start) * 1000)
     log.info("transcribed %d chars in %dms", len(text or ""), elapsed_ms)
     if text:
