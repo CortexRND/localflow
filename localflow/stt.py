@@ -74,7 +74,8 @@ class Transcriber:
         # feed the in-memory array straight into the log-mel front-end instead.
         cfg = self._parakeet.preprocessor_config
         x = self._mx.array(np.ascontiguousarray(audio, dtype=np.float32))
-        if x.shape[-1] < cfg.hop_length:
+        # The reflect-padded STFT needs at least one full FFT frame of input.
+        if x.shape[-1] < cfg.n_fft:
             return ""
         mel = self._parakeet_logmel(x, cfg)
         result = self._parakeet.generate(mel)[0]
