@@ -57,24 +57,60 @@ def _command_pattern(names: Iterable[str]) -> re.Pattern | None:
     )
 
 
-def _spoken_key(token: str) -> str:
-    """Collapse separators (typed or spoken) and case: "Skill underscore Part"
-    and "skill-part" both become "skill part"."""
-    words = [w for w in re.split(r"[\s_-]+", token.lower()) if w]
-    stripped = [w for w in words if w not in _JOINING]
-    return " ".join(stripped or words)
+_TOKEN_SPLIT = re.compile(r"(\s*[_-]\s*|\s+)")
 
 
-def _canonical_lookup(names: Iterable[str]) -> dict[str, str | None]:
-    """spoken key -> registered name, or None when several registered names
-    share a key (e.g. skill-part and skill_part): ambiguous speech is left as is."""
-    lookup: dict[str, str | None] = {}
+def _shape(token: str, spoken: bool) -> tuple[str, tuple[str | None, ...]]:
+    """(key, separators) of a token. The key collapses separators and case
+    ("Skill_Part", "skill-part" -> "skill part"); separators record the
+    evidence between parts: "-", "_", or None for plain whitespace. With
+    spoken=True a separator word between parts is read as that separator
+    ("skill underscore part" -> "skill part", ("_",))."""
+    pieces = _TOKEN_SPLIT.split(token.lower())
+    words = [w.rstrip(".,") for w in pieces[0::2]]
+    seps = [s.strip() or None for s in pieces[1::2]]
+    if spoken:
+        i = 1
+        while i < len(words) - 1:
+            if words[i] in _JOINING:
+                sep = _JOINING[words[i]]
+                del words[i]
+                seps[i - 1 : i + 1] = [sep]
+            else:
+                i += 1
+    return " ".join(words), tuple(seps)
+
+
+def _candidates(names: Iterable[str]) -> dict[str, list[str]]:
+    """spoken key -> registered names sharing it (several when names differ
+    only by separator, e.g. skill-part and skill_part)."""
+    lookup: dict[str, list[str]] = {}
     for name in names:
-        if not name:
-            continue
-        key = _spoken_key(name)
-        lookup[key] = None if key in lookup and lookup[key] != name else name
+        if name:
+            lookup.setdefault(_shape(name, spoken=False)[0], []).append(name)
     return lookup
+
+
+def _resolve(token: str, lookup: dict[str, list[str]]) -> str | None:
+    """The one registered name matching the token, reading separator words
+    literally first ("foo dash bar" -> foo_dash_bar) and as separators second
+    ("skill underscore part" -> skill_part). Among names that differ only by
+    separator, the token's typed/spoken separators decide; None if ambiguous."""
+    for spoken in (False, True):
+        key, seps = _shape(token, spoken)
+        candidates = lookup.get(key, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        matches = [
+            name
+            for name in candidates
+            if all(s is None or s == n for s, n in zip(seps, _shape(name, False)[1]))
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if candidates:
+            return None
+    return None
 
 
 def normalize_commands(text: str, names: Sequence[str]) -> str:
@@ -86,13 +122,11 @@ def _normalize(text: str, names: Sequence[str], render) -> str:
     if pattern is None:
         return text
     exact = set(names)
-    lookup = _canonical_lookup(names)
+    lookup = _candidates(names)
 
     def repl(m: re.Match) -> str:
         token = m.group(1)
-        if token in exact:
-            return render(token)
-        canonical = lookup.get(_spoken_key(token))
+        canonical = token if token in exact else _resolve(token, lookup)
         if canonical is None:
             return m.group(0)
         return render(canonical)

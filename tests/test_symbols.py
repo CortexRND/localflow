@@ -66,6 +66,9 @@ def test_colliding_names_keep_exact_and_skip_ambiguous_speech():
     assert apply_spoken_symbols("/skill_part", names) == "/skill_part"
     assert apply_spoken_symbols("slash skill part", names) == "/skill part"
     assert apply_spoken_symbols("slash skill underscore part", names) == "/skill_part"
+    assert apply_spoken_symbols("Slash Skill underscore Part.", names) == "/skill_part"
+    assert apply_spoken_symbols("slash skill dash part", names) == "/skill-part"
+    assert apply_spoken_symbols("/Skill-Part", names) == "/skill-part"
 
 
 def test_symbol_words_inside_registered_names():
