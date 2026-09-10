@@ -44,6 +44,7 @@ class Transcriber:
             # Downloads weights on first use; run a silent clip so the graph is
             # compiled before the first dictation.
             self._parakeet = from_pretrained(PARAKEET_REPO)
+            mx.eval(self._parakeet.parameters())
             self._parakeet_generate(np.zeros(16000, dtype=np.float32))
             self.backend = "parakeet"
             return
