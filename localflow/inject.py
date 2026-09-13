@@ -6,6 +6,13 @@ from localflow.platform import current
 
 
 def paste_text(text: str, method: str = "auto") -> None:
+    if method == "clipboard":
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            pass
+        return
+
     old_clipboard = None
     try:
         try:

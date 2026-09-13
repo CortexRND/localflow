@@ -15,7 +15,8 @@ class DarwinPlatform:
     name = "darwin"
 
     def paste(self, method: str = "auto") -> None:
-        del method
+        if method not in ("auto", "osascript"):
+            raise ValueError(f"unknown paste method: {method!r}")
         subprocess.run(
             [
                 "osascript",

@@ -11,6 +11,16 @@ log = logging.getLogger("localflow.platform.linux")
 _wayland_warned = False
 
 
+def _desktop_exec(program: str) -> str:
+    escaped = (
+        program.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("`", "\\`")
+        .replace("$", "\\$")
+    )
+    return f'"{escaped}"'
+
+
 class LinuxPlatform:
     name = "linux"
 
@@ -71,7 +81,7 @@ class LinuxPlatform:
         if not sound.exists():
             return
         player = next(
-            (candidate for candidate in ("paplay", "pw-play", "aplay") if shutil.which(candidate)),
+            (candidate for candidate in ("paplay", "pw-play") if shutil.which(candidate)),
             None,
         )
         if player is None:
@@ -97,7 +107,7 @@ class LinuxPlatform:
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=localflow\n"
-            f"Exec={program}\n"
+            f"Exec={_desktop_exec(program)}\n"
             "X-GNOME-Autostart-enabled=true\n"
         )
         return path

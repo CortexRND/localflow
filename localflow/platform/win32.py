@@ -1,3 +1,4 @@
+import base64
 import os
 import subprocess
 import sys
@@ -18,7 +19,8 @@ class Win32Platform:
     name = "win32"
 
     def paste(self, method: str = "auto") -> None:
-        del method
+        if method not in ("auto", "pynput"):
+            raise ValueError(f"unknown paste method: {method!r}")
         from pynput import keyboard
 
         controller = keyboard.Controller()
@@ -33,13 +35,15 @@ class Win32Platform:
             f"<text id=\"2\">{_xml_escape(message)}</text>"
             "</binding></visual></toast>"
         )
+        encoded_xml = base64.b64encode(xml.encode("utf-8")).decode("ascii")
         script = (
             "[Windows.UI.Notifications.ToastNotificationManager, "
             "Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; "
             "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, "
             "ContentType = WindowsRuntime] | Out-Null; "
             "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
-            f"$xml.LoadXml('{xml}'); "
+            "$xml.LoadXml([Text.Encoding]::UTF8.GetString("
+            f"[Convert]::FromBase64String('{encoded_xml}'))); "
             "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
             '[Windows.UI.Notifications.ToastNotificationManager]::'
             'CreateToastNotifier("localflow").Show($toast)'

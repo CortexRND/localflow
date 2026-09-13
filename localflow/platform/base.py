@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import ClassVar, Protocol, runtime_checkable
 
+PASTE_METHODS = ("auto", "clipboard", "wtype", "xdotool", "pynput", "osascript")
+
 
 @runtime_checkable
 class Platform(Protocol):

@@ -1,4 +1,6 @@
+import base64
 import os
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -131,10 +133,10 @@ def test_linux_autostart_round_trip(monkeypatch, tmp_path):
     )
     platform = LinuxPlatform()
 
-    path = platform.autostart_install("/opt/localflow")
+    path = platform.autostart_install("/opt/local flow/$app")
 
     assert path == tmp_path / "config" / "autostart" / "localflow.desktop"
-    assert "Exec=/opt/localflow" in path.read_text()
+    assert 'Exec="/opt/local flow/\\$app"' in path.read_text()
     assert platform.autostart_status() == f"installed ({path})"
     platform.autostart_uninstall()
     assert platform.autostart_status() == "not installed"
@@ -152,6 +154,27 @@ def test_linux_try_lock_second_fd_fails(tmp_path):
     finally:
         os.close(first)
         os.close(second)
+
+
+def test_linux_sound_does_not_use_aplay(monkeypatch):
+    players = []
+    calls = []
+    monkeypatch.setattr("localflow.platform.linux.Path.exists", lambda path: True)
+
+    def which(name):
+        players.append(name)
+        return "/usr/bin/aplay" if name == "aplay" else None
+
+    monkeypatch.setattr("localflow.platform.linux.shutil.which", which)
+    monkeypatch.setattr(
+        "localflow.platform.linux.subprocess.Popen",
+        lambda argv, **kwargs: calls.append(argv),
+    )
+
+    LinuxPlatform().play_sound("start")
+
+    assert players == ["paplay", "pw-play"]
+    assert calls == []
 
 
 def test_windows_autostart_and_lock(monkeypatch):
@@ -212,11 +235,22 @@ def test_windows_notify_escapes_xml(monkeypatch):
         lambda argv, **kwargs: calls.append(argv),
     )
 
-    Win32Platform().notify("A&B", "<message>")
+    Win32Platform().notify("O'Reilly $(", "<message>")
 
     assert calls
-    assert "&amp;" in calls[0][-1]
-    assert "&lt;message&gt;" in calls[0][-1]
+    script = calls[0][-1]
+    assert "O'Reilly $(" not in script
+    encoded = re.search(r"FromBase64String\('([^']+)'\)", script).group(1)
+    xml = base64.b64decode(encoded).decode("utf-8")
+    assert "<text id=\"1\">O&apos;Reilly $(</text>" in xml
+    assert "<text id=\"2\">&lt;message&gt;</text>" in xml
+
+
+def test_platform_paste_methods_are_validated():
+    with pytest.raises(ValueError, match="unknown paste method"):
+        DarwinPlatform().paste("pynput")
+    with pytest.raises(ValueError, match="unknown paste method"):
+        Win32Platform().paste("osascript")
 
 
 def test_darwin_autostart_delegates(monkeypatch, tmp_path):
@@ -266,3 +300,34 @@ def test_inject_facade_passes_paste_method(monkeypatch):
 
     assert calls == ["xdotool"]
     assert clipboard == ["text", "old"]
+
+
+def test_inject_clipboard_method_keeps_text_without_keystroke(monkeypatch):
+    from localflow import inject
+
+    clipboard = []
+
+    class FakePlatform:
+        def paste(self, method):
+            raise AssertionError("clipboard mode must not send a keystroke")
+
+    monkeypatch.setattr(inject, "current", lambda: FakePlatform())
+    monkeypatch.setattr(inject.pyperclip, "copy", clipboard.append)
+
+    inject.paste_text("transcript", "clipboard")
+
+    assert clipboard == ["transcript"]
+
+
+def test_cli_rejects_unknown_paste_method():
+    from click.testing import CliRunner
+
+    import localflow.cli as cli_module
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["config", "set", "paste.method", "bad"],
+    )
+
+    assert result.exit_code != 0
+    assert "invalid paste method" in result.output
