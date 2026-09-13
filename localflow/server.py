@@ -77,15 +77,15 @@ _summarizer = MeetingSummarizer(
 _writer = ObsidianWriter(
     _config.vault_path, _config.notes_folder, _config.logs_folder
 )
-key = _config.fireworks_api_key or os.environ.get("FIREWORKS_API_KEY", "")
+_fireworks_key = _config.fireworks_api_key or os.environ.get("FIREWORKS_API_KEY", "")
 _prompt_gen = WorkPromptGenerator(
     OpenAICompatLLM(
         base_url="https://api.fireworks.ai/inference/v1",
         model=_config.fireworks_model,
-        api_key=key,
+        api_key=_fireworks_key,
         temperature=0.3,
     )
-    if key
+    if _fireworks_key
     else None
 )
 # One shared instance: PromptQueue's lock is per-instance, so two instances
