@@ -5,13 +5,13 @@ must be running (`lf serve`) for meeting features, but the menu bar app
 stays up regardless and shows server state.
 """
 
-import subprocess
 import webbrowser
 
 import requests
 import rumps
 
 from localflow.config import load_config
+from localflow.platform import current
 
 _config = load_config()
 BASE = f"http://127.0.0.1:{_config.server_port}"
@@ -127,7 +127,7 @@ class LocalflowMenuBar(rumps.App):
 
         folder = Path(_config.vault_path).expanduser() / _config.notes_folder
         folder.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["open", str(folder)], check=False)
+        current().open_path(str(folder))
 
 
 def main() -> None:

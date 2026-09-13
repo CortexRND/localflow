@@ -5,7 +5,6 @@ run the components themselves.
 """
 
 import json
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -37,6 +36,7 @@ from localflow.dispatch import (
     dispatch,
     orca_available,
 )
+from localflow.platform import current
 from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set_secret
 
 console = Console()
@@ -332,7 +332,7 @@ def open_note(query: tuple[str, ...]) -> None:
         console.print("[red]no match[/red]")
         sys.exit(1)
     newest = max(matches, key=lambda p: p.stat().st_mtime)
-    subprocess.run(["open", str(newest)], check=False)
+    current().open_path(str(newest))
     console.print(f"opened {newest.name}")
 
 
@@ -567,7 +567,7 @@ def dictate() -> None:
 @cli.command()
 def ui() -> None:
     """Open the web UI in the default browser."""
-    subprocess.run(["open", BASE], check=False)
+    current().open_path(BASE)
 
 
 @cli.command()
@@ -582,12 +582,9 @@ def agent() -> None:
     """Run localflow on login via a launchd LaunchAgent (always on)."""
 
 
-@agent.command("install")
-def agent_install() -> None:
-    """Install and load the LaunchAgent so localflow starts on login."""
-    from localflow.launchagent import install
+def _autostart_install() -> None:
     try:
-        path = install()
+        path = current().autostart_install()
     except RuntimeError as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
@@ -596,28 +593,63 @@ def agent_install() -> None:
                   "a clean exit stays down until next login (KeepAlive).")
 
 
-@agent.command("uninstall")
-def agent_uninstall() -> None:
-    """Unload and remove the LaunchAgent."""
-    from localflow.launchagent import uninstall
+def _autostart_uninstall() -> None:
     try:
-        uninstall()
+        current().autostart_uninstall()
     except RuntimeError as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
     console.print("[green]uninstalled[/green]")
 
 
-@agent.command("status")
-def agent_status() -> None:
-    """Show whether the LaunchAgent is loaded and running."""
-    from localflow.launchagent import status
+def _autostart_status() -> None:
     try:
-        result = status()
+        result = current().autostart_status()
     except RuntimeError as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
     console.print(result)
+
+
+@agent.command("install")
+def agent_install() -> None:
+    """Install and load the LaunchAgent so localflow starts on login."""
+    _autostart_install()
+
+
+@agent.command("uninstall")
+def agent_uninstall() -> None:
+    """Unload and remove the LaunchAgent."""
+    _autostart_uninstall()
+
+
+@agent.command("status")
+def agent_status() -> None:
+    """Show whether the LaunchAgent is loaded and running."""
+    _autostart_status()
+
+
+@cli.group()
+def autostart() -> None:
+    """Run localflow on login."""
+
+
+@autostart.command("install")
+def autostart_install() -> None:
+    """Install autostart for the current platform."""
+    _autostart_install()
+
+
+@autostart.command("uninstall")
+def autostart_uninstall() -> None:
+    """Remove autostart for the current platform."""
+    _autostart_uninstall()
+
+
+@autostart.command("status")
+def autostart_status() -> None:
+    """Show current autostart status."""
+    _autostart_status()
 
 
 def main() -> None:

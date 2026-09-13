@@ -134,7 +134,7 @@ def _process_clip(
     elapsed_ms = int((time.monotonic() - start) * 1000)
     log.info("transcribed %d chars in %dms", len(text or ""), elapsed_ms)
     if text:
-        paste_text(text)
+        paste_text(text, config.paste_method)
         print(f"{text}  ({elapsed_ms}ms)")
 
 

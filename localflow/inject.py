@@ -1,10 +1,11 @@
-import subprocess
 import time
 
 import pyperclip
 
+from localflow.platform import current
 
-def paste_text(text: str) -> None:
+
+def paste_text(text: str, method: str = "auto") -> None:
     old_clipboard = None
     try:
         try:
@@ -14,14 +15,7 @@ def paste_text(text: str) -> None:
 
         pyperclip.copy(text)
 
-        subprocess.run(
-            [
-                "osascript",
-                "-e",
-                'tell application "System Events" to keystroke "v" using command down',
-            ],
-            check=False,
-        )
+        current().paste(method)
 
         time.sleep(0.3)
     except Exception:
