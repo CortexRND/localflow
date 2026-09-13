@@ -23,11 +23,12 @@ class OllamaLLM:
         self, system: str, user: str, *, max_tokens: int | None = None
     ) -> str:
         try:
+            prompt = f"{system}\n\n{user}" if system else user
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json={
                     "model": self.model,
-                    "prompt": f"{system}\n\n{user}",
+                    "prompt": prompt,
                     "options": {
                         "num_ctx": self.num_ctx,
                         "num_predict": max_tokens if max_tokens is not None else -1,
@@ -56,7 +57,7 @@ class OllamaLLM:
             response.raise_for_status()
             models = response.json().get("models", [])
             return [
-                ModelInfo(id=model["name"], label=model.get("name", ""), installed=True)
+                ModelInfo(id=model["name"], label=model["name"], installed=True)
                 for model in models
             ]
         except Exception as exc:
@@ -67,5 +68,5 @@ class OllamaLLM:
             response = requests.get(f"{self.base_url}/api/tags", timeout=3)
             response.raise_for_status()
             return Health(ok=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return Health(ok=False, detail=str(exc))

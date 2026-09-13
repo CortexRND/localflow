@@ -322,8 +322,7 @@ class MeetingSummarizer:
         self.llm = llm
         self.words_per_chunk = words_per_chunk
 
-    def _generate(self, prompt: str, timeout: int = 300) -> str:
-        del timeout
+    def _generate(self, prompt: str) -> str:
         return self.llm.complete("", prompt)
 
     def summarize(self, transcript: str) -> str:

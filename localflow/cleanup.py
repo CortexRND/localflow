@@ -18,5 +18,5 @@ class Cleaner:
             if not cleaned:
                 return text
             return cleaned
-        except Exception:  # noqa: BLE001
+        except Exception:
             return text

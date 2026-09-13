@@ -13,11 +13,13 @@ class OpenAICompatLLM:
         model: str,
         api_key: str = "",
         timeout: int = 120,
+        temperature: float | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.temperature = temperature
 
     def complete(
         self, system: str, user: str, *, max_tokens: int | None = None
@@ -34,6 +36,8 @@ class OpenAICompatLLM:
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
@@ -73,5 +77,5 @@ class OpenAICompatLLM:
         try:
             self.list_models()
             return Health(ok=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return Health(ok=False, detail=str(exc))

@@ -55,12 +55,12 @@ Derive the work prompts from these meeting notes, following your instructions ex
 
 
 class WorkPromptGenerator:
-    def __init__(self, llm: LLMProvider):
+    def __init__(self, llm: LLMProvider | None):
         self.llm = llm
 
     @property
     def available(self) -> bool:
-        return bool(getattr(self.llm, "api_key", True))
+        return self.llm is not None
 
     def generate(self, notes_md: str) -> str:
         """Returns a Markdown section body, or '' when unavailable/failed."""
@@ -68,6 +68,7 @@ class WorkPromptGenerator:
             log.info("FIREWORKS_API_KEY not set; skipping work prompts")
             return ""
         try:
+            assert self.llm is not None
             return self.llm.complete(
                 _SYSTEM,
                 _TEMPLATE.format(notes=notes_md),

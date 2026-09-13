@@ -66,17 +66,27 @@ _ollama = OllamaLLM(
     timeout=_config.cleanup_timeout,
     num_ctx=_config.cleanup_num_ctx,
 )
-_summarizer = MeetingSummarizer(_ollama)
+_summarizer = MeetingSummarizer(
+    OllamaLLM(
+        _config.ollama_url,
+        _config.ollama_model,
+        timeout=300,
+        num_ctx=8192,
+    )
+)
 _writer = ObsidianWriter(
     _config.vault_path, _config.notes_folder, _config.logs_folder
 )
+key = _config.fireworks_api_key or os.environ.get("FIREWORKS_API_KEY", "")
 _prompt_gen = WorkPromptGenerator(
     OpenAICompatLLM(
         base_url="https://api.fireworks.ai/inference/v1",
         model=_config.fireworks_model,
-        api_key=_config.fireworks_api_key
-        or os.environ.get("FIREWORKS_API_KEY", ""),
+        api_key=key,
+        temperature=0.3,
     )
+    if key
+    else None
 )
 # One shared instance: PromptQueue's lock is per-instance, so two instances
 # racing would be last-writer-wins over the whole queue file.

@@ -22,9 +22,6 @@ class Transcriber:
     ):
         self.language = language
         self.model_size = model_size
-        self.model = None
-        self._mlx = None
-        self._parakeet = None
         self.provider: STTProvider
 
         if backend not in ("auto", "mlx", "faster-whisper", "parakeet"):
@@ -35,7 +32,6 @@ class Transcriber:
             provider.load(model_size, language)
             self.provider = provider
             self.backend = "parakeet"
-            self._sync_legacy_attributes()
             return
 
         if backend in ("auto", "mlx") and model_size in _MLX_REPOS:
@@ -44,7 +40,6 @@ class Transcriber:
                 provider.load(model_size, language)
                 self.provider = provider
                 self.backend = "mlx"
-                self._sync_legacy_attributes()
                 return
             except ImportError:
                 if backend == "mlx":
@@ -54,16 +49,6 @@ class Transcriber:
         provider.load(model_size, language)
         self.provider = provider
         self.backend = "faster-whisper"
-        self._sync_legacy_attributes()
-
-    def _sync_legacy_attributes(self) -> None:
-        self.model = getattr(self.provider, "model", None)
-        self._mlx = getattr(self.provider, "_mlx", None)
-        self._parakeet = getattr(self.provider, "_parakeet", None)
-        if hasattr(self.provider, "_parakeet_logmel"):
-            self._parakeet_logmel = self.provider._parakeet_logmel
-        if hasattr(self.provider, "_mx"):
-            self._mx = self.provider._mx
 
     def transcribe(self, audio: np.ndarray) -> str:
         """audio: 1-D float32 16kHz. Return joined stripped text."""

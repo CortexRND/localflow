@@ -24,6 +24,7 @@ from localflow.providers.stt_faster_whisper import FasterWhisperSTT
 from localflow.providers.stt_mlx_whisper import MlxWhisperSTT
 from localflow.providers.stt_parakeet import ParakeetSTT
 from localflow.stt import Transcriber
+from localflow.workprompts import WorkPromptGenerator
 
 
 class FakeResponse:
@@ -101,6 +102,20 @@ def test_ollama_complete_payload_and_quote_stripping(monkeypatch):
     ]
 
 
+def test_ollama_empty_system_uses_raw_user_prompt(monkeypatch):
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(kwargs)
+        return FakeResponse({"response": "result"})
+
+    monkeypatch.setattr("requests.post", post)
+
+    OllamaLLM("http://ollama", "llama").complete("", "raw prompt")
+
+    assert calls[0]["json"]["prompt"] == "raw prompt"
+
+
 @pytest.mark.parametrize(
     "response",
     [FakeResponse({"response": "  "}), FakeResponse({}, status=500)],
@@ -134,7 +149,9 @@ def test_openai_compat_complete_and_bearer(monkeypatch):
         return FakeResponse({"choices": [{"message": {"content": " result "}}]})
 
     monkeypatch.setattr("requests.post", post)
-    llm = OpenAICompatLLM("https://example/v1/", "model", api_key="secret")
+    llm = OpenAICompatLLM(
+        "https://example/v1/", "model", api_key="secret", temperature=0.3
+    )
 
     assert llm.complete("system", "user", max_tokens=123) == "result"
     url, kwargs = calls[0]
@@ -147,6 +164,7 @@ def test_openai_compat_complete_and_bearer(monkeypatch):
             {"role": "user", "content": "user"},
         ],
         "max_tokens": 123,
+        "temperature": 0.3,
     }
 
     calls.clear()
@@ -197,6 +215,13 @@ def test_cleaner_uses_provider_and_preserves_fallback():
 
     assert Cleaner(FakeLLM(error=RuntimeError("failed"))).clean("input") == "input"
     assert Cleaner(FakeLLM(result="")).clean("input") == "input"
+
+
+def test_work_prompt_generator_without_provider_is_unavailable():
+    generator = WorkPromptGenerator(None)
+
+    assert generator.available is False
+    assert generator.generate("notes") == ""
 
 
 def test_transcriber_faster_whisper_provider(monkeypatch):
