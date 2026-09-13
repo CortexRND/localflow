@@ -14,7 +14,7 @@ from localflow.config import load_config
 from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
 from localflow.inject import paste_text
 from localflow.log import setup_logging
-from localflow.providers.llm_ollama import OllamaLLM
+from localflow.providers.factory import build_llm, build_stt
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
 from localflow.stt import Transcriber
@@ -30,7 +30,7 @@ def _print_banner(config) -> None:
     mode = "hold to talk" if is_hold_key(config.hotkey) else "toggle"
     print(f"  hotkey:       {config.hotkey} ({mode})")
     print(f"  model:        {config.model_size}")
-    print(f"  ollama model: {config.ollama_model}")
+    print(f"  llm model:     {config.llm_model}")
     print("-" * 60)
     print("macOS permissions required for this terminal app:")
     print("  System Settings -> Privacy & Security -> Microphone")
@@ -67,22 +67,12 @@ def main() -> None:
     config = load_config()
 
     print("loading model…")
-    transcriber = Transcriber(
-        model_size=config.model_size,
-        language=config.language,
-        backend=config.stt_backend,
-    )
+    transcriber = build_stt(config)
     print(f"  stt backend:  {transcriber.backend}")
     commands = discover_commands(config.command_names, config.skills_dirs)
     print(f"  commands:     {len(commands)} registered")
     recorder = Recorder(sample_rate=config.sample_rate)
-    ollama = OllamaLLM(
-        config.ollama_url,
-        config.ollama_model,
-        timeout=config.cleanup_timeout,
-        num_ctx=config.cleanup_num_ctx,
-    )
-    cleaner = Cleaner(ollama)
+    cleaner = Cleaner(build_llm(config))
 
     work_queue: queue.Queue[np.ndarray] = queue.Queue()
 

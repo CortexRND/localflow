@@ -24,7 +24,7 @@ class Transcriber:
         self.model_size = model_size
         self.provider: STTProvider
 
-        if backend not in ("auto", "mlx", "faster-whisper", "parakeet"):
+        if backend not in ("auto", "mlx", "mlx-whisper", "faster-whisper", "parakeet"):
             raise ValueError(f"unknown stt backend: {backend!r}")
 
         if backend == "parakeet":
@@ -34,7 +34,7 @@ class Transcriber:
             self.backend = "parakeet"
             return
 
-        if backend in ("auto", "mlx") and model_size in _MLX_REPOS:
+        if backend in ("auto", "mlx", "mlx-whisper") and model_size in _MLX_REPOS:
             provider = MlxWhisperSTT()
             try:
                 provider.load(model_size, language)
@@ -42,7 +42,7 @@ class Transcriber:
                 self.backend = "mlx"
                 return
             except ImportError:
-                if backend == "mlx":
+                if backend in ("mlx", "mlx-whisper"):
                     raise
 
         provider = FasterWhisperSTT()

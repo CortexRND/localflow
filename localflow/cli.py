@@ -4,6 +4,7 @@ Talks to the running localflow server over HTTP; `lf serve` / `lf dictate`
 run the components themselves.
 """
 
+import json
 import subprocess
 import sys
 import time
@@ -18,7 +19,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from localflow.config import load_config
+from localflow.config import (
+    config_field,
+    config_toml,
+    legacy_config_path,
+    load_config,
+    migrate_legacy,
+    save_config,
+    valid_config_keys,
+)
+from localflow.config import config_path as resolved_config_path
 from localflow.dispatch import (
     QUEUE_PATH,
     STATUSES,
@@ -27,6 +37,7 @@ from localflow.dispatch import (
     dispatch,
     orca_available,
 )
+from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set_secret
 
 console = Console()
 _config = load_config()
@@ -39,7 +50,7 @@ def _get(path: str) -> dict:
         resp.raise_for_status()
         return resp.json()
     except requests.ConnectionError:
-        console.print(f"[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
+        console.print("[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
         sys.exit(1)
 
 
@@ -47,7 +58,7 @@ def _post(path: str, json: dict | None = None) -> dict:
     try:
         resp = requests.post(BASE + path, json=json, timeout=600)
     except requests.ConnectionError:
-        console.print(f"[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
+        console.print("[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
         sys.exit(1)
     if not resp.ok:
         try:
@@ -62,6 +73,131 @@ def _post(path: str, json: dict | None = None) -> dict:
 @click.group()
 def cli() -> None:
     """localflow: local dictation + meeting transcription to Obsidian."""
+
+
+@cli.group()
+def config() -> None:
+    """Inspect and edit localflow configuration."""
+
+
+@config.command("path")
+def config_path_command() -> None:
+    """Print the resolved v2 path and legacy-file status."""
+    path = resolved_config_path()
+    legacy = legacy_config_path()
+    click.echo(f"path: {path}")
+    click.echo(f"legacy: {'exists' if legacy.exists() else 'missing'} ({legacy})")
+
+
+@config.command("show")
+def config_show() -> None:
+    """Print the v2 TOML that would be written for the current config."""
+    click.echo(config_toml(load_config()), nl=False)
+
+
+@config.command("get")
+@click.argument("section_key")
+def config_get(section_key: str) -> None:
+    """Print SECTION.KEY."""
+    try:
+        _section, field_name = config_field(section_key)
+    except KeyError:
+        raise click.ClickException(
+            f"unknown config key {section_key!r}; valid keys: "
+            + ", ".join(valid_config_keys())
+        )
+    value = getattr(load_config(), field_name)
+    if isinstance(value, (list, bool)):
+        output = json.dumps(value)
+    else:
+        output = "" if value is None else str(value)
+    click.echo(output)
+
+
+def _coerce_config_value(current: object, raw: str) -> object:
+    if isinstance(current, bool):
+        if raw.lower() not in ("true", "false"):
+            raise click.ClickException("boolean values must be true or false")
+        return raw.lower() == "true"
+    if isinstance(current, int) and not isinstance(current, bool):
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise click.ClickException(f"invalid integer: {raw!r}") from exc
+    if isinstance(current, float):
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise click.ClickException(f"invalid float: {raw!r}") from exc
+    if isinstance(current, list):
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    if current is None:
+        return raw or None
+    return raw
+
+
+@config.command("set")
+@click.argument("section_key")
+@click.argument("raw_value")
+def config_set(section_key: str, raw_value: str) -> None:
+    """Set SECTION.KEY to VALUE and write the v2 config."""
+    try:
+        _section, field_name = config_field(section_key)
+    except KeyError:
+        raise click.ClickException(
+            f"unknown config key {section_key!r}; valid keys: "
+            + ", ".join(valid_config_keys())
+        )
+    current = load_config()
+    setattr(current, field_name, _coerce_config_value(getattr(current, field_name), raw_value))
+    path = save_config(current)
+    click.echo(f"saved {path}")
+
+
+@config.command("migrate")
+def config_migrate_command() -> None:
+    """Force migration of the legacy flat config file."""
+    migrated = migrate_legacy()
+    if migrated is None:
+        click.echo("no legacy config found")
+    else:
+        click.echo(f"migrated legacy config to {resolved_config_path()}")
+
+
+@cli.group()
+def secret() -> None:
+    """Manage provider API-key secrets."""
+
+
+@secret.command("set")
+@click.argument("name")
+def secret_set(name: str) -> None:
+    """Prompt for and store NAME in the keyring."""
+    value = click.prompt("secret", hide_input=True)
+    try:
+        set_secret(name, value)
+    except SecretsUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"stored {name}")
+
+
+@secret.command("unset")
+@click.argument("name")
+def secret_unset(name: str) -> None:
+    """Delete NAME from the keyring."""
+    try:
+        delete_secret(name)
+    except SecretsUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"removed {name}")
+
+
+@secret.command("status")
+def secret_status() -> None:
+    """Show whether each supported secret is configured."""
+    for name in ("llm_api_key", "fireworks_api_key"):
+        state = "configured" if get_secret(name) else "not configured"
+        click.echo(f"{name}: {state}")
 
 
 @cli.command()
