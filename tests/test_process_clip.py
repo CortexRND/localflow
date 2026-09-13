@@ -6,19 +6,23 @@ import pytest
 
 pytest.importorskip("sounddevice")
 
-from localflow import app  # noqa: E402
+from localflow import app
 
 REGISTRY = ["skill_part", "candidate-solutioning"]
 
 
 def _config(cleanup_enabled: bool) -> SimpleNamespace:
-    return SimpleNamespace(cleanup_enabled=cleanup_enabled, spoken_symbols=True)
+    return SimpleNamespace(
+        cleanup_enabled=cleanup_enabled,
+        spoken_symbols=True,
+        paste_method="auto",
+    )
 
 
 @pytest.mark.parametrize("cleanup_enabled", [True, False])
 def test_process_clip_normalizes_known_command(monkeypatch, cleanup_enabled):
     pasted = []
-    monkeypatch.setattr(app, "paste_text", pasted.append)
+    monkeypatch.setattr(app, "paste_text", lambda text, method: pasted.append(text))
     transcriber = Mock(transcribe=Mock(return_value="Run slash skill part with these arguments."))
     cleaner = Mock(clean=Mock(side_effect=lambda text: text.replace("Run", "Please run")))
 
@@ -33,7 +37,7 @@ def test_process_clip_normalizes_known_command(monkeypatch, cleanup_enabled):
 
 def test_process_clip_short_command_skips_cleanup(monkeypatch):
     pasted = []
-    monkeypatch.setattr(app, "paste_text", pasted.append)
+    monkeypatch.setattr(app, "paste_text", lambda text, method: pasted.append(text))
     transcriber = Mock(transcribe=Mock(return_value="Slash candidate solutioning."))
     cleaner = Mock(clean=Mock(side_effect=AssertionError("cleanup must not run")))
 

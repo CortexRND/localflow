@@ -12,13 +12,14 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 
+from localflow.platform import current
 from localflow.providers.base import LLMProvider
 
 log = logging.getLogger("localflow.meetings")
@@ -104,8 +105,7 @@ def detect_platform() -> str:
 
 
 def notify(title: str, message: str) -> None:
-    script = f'display notification "{message}" with title "{title}"'
-    subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+    current().notify(title, message)
 
 
 class MeetingWatcher:

@@ -5,7 +5,6 @@ run the components themselves.
 """
 
 import json
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -37,6 +36,8 @@ from localflow.dispatch import (
     dispatch,
     orca_available,
 )
+from localflow.platform import current
+from localflow.platform.base import PASTE_METHODS
 from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set_secret
 
 console = Console()
@@ -147,6 +148,11 @@ def config_set(section_key: str, raw_value: str) -> None:
         raise click.ClickException(
             f"unknown config key {section_key!r}; valid keys: "
             + ", ".join(valid_config_keys())
+        )
+    if section_key == "paste.method" and raw_value not in PASTE_METHODS:
+        raise click.ClickException(
+            f"invalid paste method {raw_value!r}; valid methods: "
+            + ", ".join(PASTE_METHODS)
         )
     current = load_config()
     setattr(current, field_name, _coerce_config_value(getattr(current, field_name), raw_value))
@@ -332,7 +338,7 @@ def open_note(query: tuple[str, ...]) -> None:
         console.print("[red]no match[/red]")
         sys.exit(1)
     newest = max(matches, key=lambda p: p.stat().st_mtime)
-    subprocess.run(["open", str(newest)], check=False)
+    current().open_path(str(newest))
     console.print(f"opened {newest.name}")
 
 
@@ -567,7 +573,7 @@ def dictate() -> None:
 @cli.command()
 def ui() -> None:
     """Open the web UI in the default browser."""
-    subprocess.run(["open", BASE], check=False)
+    current().open_path(BASE)
 
 
 @cli.command()
@@ -579,45 +585,82 @@ def menubar() -> None:
 
 @cli.group()
 def agent() -> None:
-    """Run localflow on login via a launchd LaunchAgent (always on)."""
+    """Alias of `lf autostart` (launchd LaunchAgent on macOS)."""
 
 
-@agent.command("install")
-def agent_install() -> None:
-    """Install and load the LaunchAgent so localflow starts on login."""
-    from localflow.launchagent import install
+def _autostart_install() -> None:
+    platform = current()
     try:
-        path = install()
-    except RuntimeError as exc:
+        path = platform.autostart_install()
+    except (RuntimeError, OSError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
-    console.print(f"[green]installed[/green] {path}")
-    console.print("localflow starts on login and relaunches if it crashes; "
-                  "a clean exit stays down until next login (KeepAlive).")
+    if platform.name == "darwin":
+        console.print(f"[green]installed[/green] {path}")
+        console.print("localflow starts on login and relaunches if it crashes; "
+                      "a clean exit stays down until next login (KeepAlive).")
+    else:
+        console.print(f"installed: {path}")
+        console.print("localflow will start at login")
 
 
-@agent.command("uninstall")
-def agent_uninstall() -> None:
-    """Unload and remove the LaunchAgent."""
-    from localflow.launchagent import uninstall
+def _autostart_uninstall() -> None:
     try:
-        uninstall()
-    except RuntimeError as exc:
+        current().autostart_uninstall()
+    except (RuntimeError, OSError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
     console.print("[green]uninstalled[/green]")
 
 
-@agent.command("status")
-def agent_status() -> None:
-    """Show whether the LaunchAgent is loaded and running."""
-    from localflow.launchagent import status
+def _autostart_status() -> None:
     try:
-        result = status()
-    except RuntimeError as exc:
+        result = current().autostart_status()
+    except (RuntimeError, OSError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
     console.print(result)
+
+
+@agent.command("install")
+def agent_install() -> None:
+    """Alias of `lf autostart install` (launchd LaunchAgent on macOS)."""
+    _autostart_install()
+
+
+@agent.command("uninstall")
+def agent_uninstall() -> None:
+    """Alias of `lf autostart uninstall` (launchd LaunchAgent on macOS)."""
+    _autostart_uninstall()
+
+
+@agent.command("status")
+def agent_status() -> None:
+    """Alias of `lf autostart status` (launchd LaunchAgent on macOS)."""
+    _autostart_status()
+
+
+@cli.group()
+def autostart() -> None:
+    """Run localflow on login."""
+
+
+@autostart.command("install")
+def autostart_install() -> None:
+    """Install autostart for the current platform."""
+    _autostart_install()
+
+
+@autostart.command("uninstall")
+def autostart_uninstall() -> None:
+    """Remove autostart for the current platform."""
+    _autostart_uninstall()
+
+
+@autostart.command("status")
+def autostart_status() -> None:
+    """Show current autostart status."""
+    _autostart_status()
 
 
 def main() -> None:

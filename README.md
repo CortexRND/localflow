@@ -18,6 +18,14 @@ An open-source WisprFlow-style dictation app:
 - **ffmpeg** (via Homebrew: `brew install ffmpeg`)
 - **Ollama** (optional, for cleanup): `ollama pull llama3.2:3b`
 
+### Platform support
+
+| Platform | Dictation, paste, autostart, notifications | Meetings |
+| --- | --- | --- |
+| macOS | Full support | Supported |
+| Linux | Best-effort support | Disabled |
+| Windows | Best-effort support | Disabled |
+
 ## Install
 
 ```bash
