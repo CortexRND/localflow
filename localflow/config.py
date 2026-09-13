@@ -61,28 +61,32 @@ class ConfigError(RuntimeError):
 
 @dataclass
 class Config:
-    model_size: str = "base"
-    stt_backend: str = "auto"
-    language: str | None = None
+    model_size: str = "base"           # whisper model size (ignored by parakeet: fixed model id)
+    stt_backend: str = "auto"          # auto | mlx-whisper | faster-whisper | parakeet | entry-point id
+    language: str | None = None        # None = autodetect (parakeet is English-only)
     stt_device: str = "auto"
-    llm_provider: str = "ollama"
+    llm_provider: str = "ollama"       # ollama | openai-compatible | entry-point id
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3.2:3b"
     cleanup_enabled: bool = True
     cleanup_timeout: int = 120
     cleanup_num_ctx: int = 8192
+    # Bare pynput Key name ('alt_l' = left Option) = hold-to-talk;
+    # GlobalHotKeys combo ('<cmd>+<shift>+<space>') = toggle.
     hotkey: str = "alt_l"
-    sounds_enabled: bool = True
+    sounds_enabled: bool = True        # audio cue on record start/stop
     paste_method: str = "auto"
-    spoken_symbols: bool = True
+    spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
     command_names: list[str] = field(default_factory=list)
     skills_dirs: list[str] = field(
         default_factory=lambda: ["~/.claude/skills", "~/.agents/skills"]
     )
     sample_rate: int = 16000
+    # Bind loopback by default: the API has no auth, so 0.0.0.0 exposes it to
+    # the whole LAN. Set "0.0.0.0" explicitly to opt into network access.
     server_host: str = "127.0.0.1"
     server_port: int = 8756
-    meetings_enabled: bool = sys.platform == "darwin"
+    meetings_enabled: bool = sys.platform == "darwin"  # meeting watcher needs CoreAudio; forced off elsewhere
     vault_path: str = "~/projs"
     notes_folder: str = "notes/meetings"
     logs_folder: str = "notes/transcripts"
@@ -93,7 +97,7 @@ class Config:
     work_prompts: bool = True
     fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
     prompts_dir: str = "~/projs/prompts/meetings"
-    orca_repo: str = ""
+    orca_repo: str = ""                # Orca dispatch target, e.g. "id:<repoId>"; empty = not configured
     orca_agent: str = "claude"
 
 

@@ -30,7 +30,7 @@ def _print_banner(config) -> None:
     mode = "hold to talk" if is_hold_key(config.hotkey) else "toggle"
     print(f"  hotkey:       {config.hotkey} ({mode})")
     print(f"  model:        {config.model_size}")
-    print(f"  llm model:     {config.llm_model}")
+    print(f"  llm model:    {config.llm_model}")
     print("-" * 60)
     print("macOS permissions required for this terminal app:")
     print("  System Settings -> Privacy & Security -> Microphone")
