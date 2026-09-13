@@ -34,6 +34,10 @@ class Win32Platform:
             "</binding></visual></toast>"
         )
         script = (
+            "[Windows.UI.Notifications.ToastNotificationManager, "
+            "Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; "
+            "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, "
+            "ContentType = WindowsRuntime] | Out-Null; "
             "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
             f"$xml.LoadXml('{xml}'); "
             "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
@@ -64,7 +68,7 @@ class Win32Platform:
 
     def autostart_install(self, program: str | None = None) -> Path:
         if program is None:
-            program = str(Path(sys.executable).parent / "localflow")
+            program = str(Path(sys.executable).parent / "localflow.exe")
         import winreg
 
         with winreg.OpenKey(
