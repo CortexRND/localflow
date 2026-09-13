@@ -1,4 +1,5 @@
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -28,6 +29,8 @@ from localflow.meetings import (
     MeetingWatcher,
     ObsidianWriter,
 )
+from localflow.providers.llm_ollama import OllamaLLM
+from localflow.providers.llm_openai_compat import OpenAICompatLLM
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
 from localflow.workprompts import WorkPromptGenerator
@@ -57,12 +60,23 @@ _session_state = "idle"  # idle | starting | running | stopping
 _session: MeetingSession | None = None
 _session_meta: dict = {}
 _last_saved: dict | None = None
-_summarizer = MeetingSummarizer(_config.ollama_url, _config.ollama_model)
+_ollama = OllamaLLM(
+    _config.ollama_url,
+    _config.ollama_model,
+    timeout=_config.cleanup_timeout,
+    num_ctx=_config.cleanup_num_ctx,
+)
+_summarizer = MeetingSummarizer(_ollama)
 _writer = ObsidianWriter(
     _config.vault_path, _config.notes_folder, _config.logs_folder
 )
 _prompt_gen = WorkPromptGenerator(
-    model=_config.fireworks_model, api_key=_config.fireworks_api_key
+    OpenAICompatLLM(
+        base_url="https://api.fireworks.ai/inference/v1",
+        model=_config.fireworks_model,
+        api_key=_config.fireworks_api_key
+        or os.environ.get("FIREWORKS_API_KEY", ""),
+    )
 )
 # One shared instance: PromptQueue's lock is per-instance, so two instances
 # racing would be last-writer-wins over the whole queue file.
@@ -98,12 +112,7 @@ def _get_cleaner() -> Cleaner:
     if _cleaner is None:
         with _lock:
             if _cleaner is None:
-                _cleaner = Cleaner(
-                    url=_config.ollama_url,
-                    model=_config.ollama_model,
-                    timeout=_config.cleanup_timeout,
-                    num_ctx=_config.cleanup_num_ctx,
-                )
+                _cleaner = Cleaner(_ollama)
     return _cleaner
 
 

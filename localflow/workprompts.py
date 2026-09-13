@@ -2,13 +2,10 @@
 model on the Fireworks API (OpenAI-compatible chat completions)."""
 
 import logging
-import os
 
-import requests
+from localflow.providers.base import LLMProvider
 
 log = logging.getLogger("localflow.workprompts")
-
-_FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 
 _SYSTEM = """You derive work prompts from meeting notes inside an automated dictation pipeline. Your output is inserted verbatim into a Markdown document and parsed by a machine, so the format contract below is strict: emit only the specified blocks, with no preamble, commentary, or code fences.
 
@@ -58,13 +55,12 @@ Derive the work prompts from these meeting notes, following your instructions ex
 
 
 class WorkPromptGenerator:
-    def __init__(self, model: str, api_key: str = ""):
-        self.model = model
-        self.api_key = api_key or os.environ.get("FIREWORKS_API_KEY", "")
+    def __init__(self, llm: LLMProvider):
+        self.llm = llm
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key)
+        return bool(getattr(self.llm, "api_key", True))
 
     def generate(self, notes_md: str) -> str:
         """Returns a Markdown section body, or '' when unavailable/failed."""
@@ -72,25 +68,13 @@ class WorkPromptGenerator:
             log.info("FIREWORKS_API_KEY not set; skipping work prompts")
             return ""
         try:
-            resp = requests.post(
-                _FIREWORKS_URL,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM},
-                        {"role": "user", "content": _TEMPLATE.format(notes=notes_md)},
-                    ],
-                    # Reasoning models (kimi-k2p6, deepseek-v4-pro) spend tokens
-                    # thinking before the visible answer; budget must cover both.
-                    "max_tokens": 8192,
-                    "temperature": 0.3,
-                },
-                timeout=120,
+            return self.llm.complete(
+                _SYSTEM,
+                _TEMPLATE.format(notes=notes_md),
+                # Reasoning models (kimi-k2p6, deepseek-v4-pro) spend tokens
+                # thinking before the visible answer; budget must cover both.
+                max_tokens=8192,
             )
-            resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"].strip()
-            return text
         except Exception:
             log.exception("work prompt generation failed")
             return ""

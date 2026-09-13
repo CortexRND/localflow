@@ -17,8 +17,9 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import requests
 import sounddevice as sd
+
+from localflow.providers.base import LLMProvider
 
 log = logging.getLogger("localflow.meetings")
 
@@ -317,24 +318,13 @@ _MERGE_PROMPT = """The following are meeting notes from consecutive parts of one
 
 
 class MeetingSummarizer:
-    def __init__(self, url: str, model: str, words_per_chunk: int = 2500):
-        self.url = url
-        self.model = model
+    def __init__(self, llm: LLMProvider, words_per_chunk: int = 2500):
+        self.llm = llm
         self.words_per_chunk = words_per_chunk
 
     def _generate(self, prompt: str, timeout: int = 300) -> str:
-        resp = requests.post(
-            f"{self.url}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_ctx": 8192},
-            },
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", "").strip()
+        del timeout
+        return self.llm.complete("", prompt)
 
     def summarize(self, transcript: str) -> str:
         words = transcript.split()
