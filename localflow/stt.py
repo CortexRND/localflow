@@ -1,5 +1,6 @@
 import numpy as np
 
+from localflow.providers import registry
 from localflow.providers.base import STTProvider
 from localflow.providers.stt_faster_whisper import FasterWhisperSTT
 from localflow.providers.stt_mlx_whisper import _MLX_REPOS, MlxWhisperSTT
@@ -25,7 +26,15 @@ class Transcriber:
         self.provider: STTProvider
 
         if backend not in ("auto", "mlx", "mlx-whisper", "faster-whisper", "parakeet"):
-            raise ValueError(f"unknown stt backend: {backend!r}")
+            try:
+                provider_class = registry.stt_provider_class(backend)
+            except KeyError as exc:
+                raise ValueError(f"unknown stt backend: {backend!r}") from exc
+            provider = provider_class()
+            provider.load(model_size, language)
+            self.provider = provider
+            self.backend = backend
+            return
 
         if backend == "parakeet":
             provider: STTProvider = ParakeetSTT()

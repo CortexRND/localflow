@@ -125,6 +125,14 @@ def _parse(path: Path) -> dict:
 
 
 def _config_from_v2(data: dict) -> Config:
+    version = data.get("config_version")
+    if version is None:
+        log.warning("missing config_version; assuming %d", CONFIG_VERSION)
+    elif version > CONFIG_VERSION:
+        raise ConfigError(
+            f"config_version {version} is newer than this localflow supports "
+            f"({CONFIG_VERSION})"
+        )
     config = Config()
     for section, values in data.items():
         if section == "config_version":
@@ -210,9 +218,20 @@ def migrate_legacy(path: Path | None = None) -> Config | None:
         try:
             set_secret("fireworks_api_key", fireworks_key)
         except SecretsUnavailable:
+            if not (
+                os.environ.get("LOCALFLOW_FIREWORKS_API_KEY")
+                or os.environ.get("FIREWORKS_API_KEY")
+            ):
+                os.environ.setdefault("FIREWORKS_API_KEY", fireworks_key)
+                log.warning(
+                    "not migrating ~/.localflow.toml: fireworks_api_key could not "
+                    "be stored in the keyring; set FIREWORKS_API_KEY in the "
+                    "environment (or fix the keyring) and rerun `lf config migrate`"
+                )
+                return config
             log.warning(
-                "could not store fireworks_api_key in the keyring; "
-                "set FIREWORKS_API_KEY in the environment instead"
+                "keyring unavailable; using the existing fireworks API key "
+                "environment variable"
             )
     target = config_path()
     save_config(config, target)

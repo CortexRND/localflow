@@ -103,6 +103,23 @@ def test_malformed_toml_raises_config_error(isolated_config):
     assert "Expected" in str(exc_info.value)
 
 
+def test_newer_config_version_raises_config_error(isolated_config):
+    isolated_config.write_text("config_version = 3\n")
+
+    with pytest.raises(ConfigError, match="config_version 3 is newer"):
+        config.load_config()
+
+
+def test_missing_config_version_warns_and_loads(isolated_config, caplog):
+    isolated_config.write_text("[server]\nport = 9001\n")
+
+    with caplog.at_level(logging.WARNING):
+        loaded = config.load_config()
+
+    assert loaded.server_port == 9001
+    assert "missing config_version" in caplog.text
+
+
 def test_empty_language_maps_to_none(isolated_config):
     isolated_config.write_text('[stt]\nlanguage = ""\n')
 
@@ -175,6 +192,50 @@ def test_second_load_does_not_remigrate(isolated_config, monkeypatch, tmp_path):
 
     assert config.load_config().model_size == "tiny"
     assert legacy.stat().st_mtime_ns == mtime
+
+
+def test_migration_keeps_secret_in_process_when_keyring_unavailable(
+    isolated_config, monkeypatch, tmp_path
+):
+    from localflow import secrets
+
+    class RaisingKeyring:
+        def set_password(self, service, name, value):
+            raise RuntimeError("no backend")
+
+    monkeypatch.setattr(secrets, "keyring", RaisingKeyring())
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALFLOW_FIREWORKS_API_KEY", raising=False)
+    legacy = tmp_path / ".localflow.toml"
+    monkeypatch.setattr(config, "legacy_config_path", lambda: legacy)
+    legacy.write_text('fireworks_api_key = "secret"\nmodel_size = "tiny"\n')
+
+    loaded = config.load_config()
+
+    assert loaded.model_size == "tiny"
+    assert not isolated_config.exists()
+    assert legacy.exists()
+    assert secrets.get_secret("fireworks_api_key") == "secret"
+
+
+def test_migration_with_existing_secret_environment_writes_v2(
+    isolated_config, monkeypatch, tmp_path
+):
+    from localflow import secrets
+
+    class RaisingKeyring:
+        def set_password(self, service, name, value):
+            raise RuntimeError("no backend")
+
+    monkeypatch.setattr(secrets, "keyring", RaisingKeyring())
+    monkeypatch.setenv("FIREWORKS_API_KEY", "existing")
+    legacy = tmp_path / ".localflow.toml"
+    monkeypatch.setattr(config, "legacy_config_path", lambda: legacy)
+    legacy.write_text('fireworks_api_key = "legacy"\n')
+
+    config.load_config()
+
+    assert isolated_config.exists()
 
 
 def test_meetings_enabled_platform_override(isolated_config, monkeypatch):
