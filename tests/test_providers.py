@@ -75,6 +75,26 @@ def test_registry_discovers_entry_point(monkeypatch):
     assert "fake" in list_stt_ids()
 
 
+def test_transcriber_discovers_entry_point_backend(monkeypatch):
+    class FakeProvider:
+        def load(self, model, language):
+            assert (model, language) == ("x", None)
+
+        def transcribe(self, audio):
+            return ""
+
+    entry_point = SimpleNamespace(name="fake", load=lambda: FakeProvider)
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [entry_point] if group == "localflow.stt_providers" else [],
+    )
+
+    transcriber = Transcriber("x", None, backend="fake")
+
+    assert isinstance(transcriber.provider, FakeProvider)
+    assert transcriber.backend == "fake"
+
+
 def test_ollama_complete_payload_and_quote_stripping(monkeypatch):
     calls = []
 

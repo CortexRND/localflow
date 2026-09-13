@@ -109,36 +109,83 @@ The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
 
 ### Configuration
 
-Create `~/.localflow.toml`:
+Configuration is stored at `platformdirs`' user config location
+(`~/.config/localflow/config.toml` on Linux and
+`~/Library/Application Support/localflow/config.toml` on macOS). An existing
+`~/.localflow.toml` is migrated automatically on first load and left in place.
+Use `lf config` to inspect or edit it, and `lf secret` to manage API keys
+without putting them in the TOML file:
+
+```console
+lf config path
+lf config show
+lf config get llm.model
+lf config set hotkey.key alt_l
+lf secret set llm_api_key
+lf secret status
+```
+
+The v2 file uses nested sections:
 
 ```toml
-model_size = "base"               # whisper model: tiny, base, small, medium, large-v3 (ignored by parakeet)
-stt_backend = "auto"              # auto | mlx | faster-whisper | parakeet
-# language = "en"                 # omit for autodetect (parakeet is English-only)
-cleanup_enabled = true
-ollama_url = "http://localhost:11434"
-ollama_model = "llama3.2:3b"
-hotkey = "alt_l"                  # bare key name = hold-to-talk; "<cmd>+<shift>+<space>" = toggle
-spoken_symbols = true             # "slash"/"dash"/"underscore" -> / - _
-command_names = []                # extra slash-command names, e.g. ["skill_part"]
-skills_dirs = ["~/.claude/skills", "~/.agents/skills"]  # subdirectory names are registered too
-sample_rate = 16000
-server_host = "0.0.0.0"
-server_port = 8756
+config_version = 2
 
-meeting_auto_start = true              # start transcribing when a meeting is detected
-prompts_dir = "~/projs/prompts/meetings"  # where derived work prompts are written
-orca_repo = "path:/Users/you/projs/myrepo"  # Orca repo selector; required for `lf prompts dispatch`
-orca_agent = "claude"                  # agent to run in each dispatched worktree
+[stt]
+provider = "auto"                  # auto | mlx-whisper | mlx | faster-whisper | parakeet
+model = "base"                     # tiny, base, small, medium, large-v3
+# language = "en"                  # omit for autodetect (parakeet is English-only)
+device = "auto"
+
+[llm]
+provider = "ollama"                # ollama | openai-compatible
+base_url = "http://localhost:11434"
+model = "llama3.2:3b"
+cleanup_enabled = true
+cleanup_timeout = 120
+num_ctx = 8192
+
+[hotkey]
+key = "alt_l"                      # bare key = hold-to-talk; combo = toggle
+sounds = true
+
+[paste]
+method = "auto"
+
+[dictation]
+spoken_symbols = true              # "slash"/"dash"/"underscore" -> / - _
+command_names = []
+skills_dirs = ["~/.claude/skills", "~/.agents/skills"]
+sample_rate = 16000
+
+[server]
+host = "127.0.0.1"
+port = 8756
+
+[features]
+meetings = true                    # macOS only; forced false elsewhere
+
+[meetings]
+watch = true
+chunk_seconds = 30
+min_busy_seconds = 12
+auto_start = true
+work_prompts = true
+fireworks_model = "accounts/fireworks/models/kimi-k2p6"
+prompts_dir = "~/projs/prompts/meetings"
+vault_path = "~/projs"
+notes_folder = "notes/meetings"
+logs_folder = "notes/transcripts"
+orca_repo = "path:/Users/you/projs/myrepo"
+orca_agent = "claude"
 ```
 
 All keys are optional; defaults shown above apply.
 
-`stt_backend = "parakeet"` uses NVIDIA Parakeet TDT 0.6B v2 via
+`stt.provider = "parakeet"` uses NVIDIA Parakeet TDT 0.6B v2 via
 [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (Apple Silicon).
 Install with `pip install -e '.[parakeet]'`. It is a fixed checkpoint
-(`mlx-community/parakeet-tdt-0.6b-v2`), so `model_size` is ignored, and it is
-English-only, so `language` autodetect does not apply.
+(`mlx-community/parakeet-tdt-0.6b-v2`), so `stt.model` is ignored, and it is
+English-only, so `stt.language` autodetect does not apply.
 
 #### Spoken slash-commands
 
@@ -227,7 +274,8 @@ Create a Shortcut that POSTs audio to `/transcribe`:
 
 ## Architecture
 
-- **localflow/config.py**: Load ~/.localflow.toml (TOML parsing)
+- **localflow/config.py**: Load nested v2 TOML (and migrate legacy
+  `~/.localflow.toml` files)
 - **localflow/audio.py**: Record mono float32 via sounddevice
 - **localflow/stt.py**: Transcribe via mlx-whisper (Apple GPU), faster-whisper (CPU, int8), or NVIDIA Parakeet TDT via parakeet-mlx (English-only; arrays fed straight to the log-mel front-end, no temp files/ffmpeg)
 - **localflow/cleanup.py**: Optional Ollama LLM polish (timeout 15s, graceful fallback)
