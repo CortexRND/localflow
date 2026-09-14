@@ -4,10 +4,12 @@ import os
 import sys
 import tempfile
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import platformdirs
+
+from localflow.platform.base import PASTE_METHODS
 
 log = logging.getLogger("localflow.config")
 
@@ -276,3 +278,49 @@ def valid_config_keys() -> list[str]:
         for section, mapping in _SECTIONS.items()
         for key in mapping
     ]
+
+
+def config_to_dict(config: Config) -> dict:
+    result: dict = {"config_version": CONFIG_VERSION}
+    for section, mapping in _SECTIONS.items():
+        result[section] = {
+            file_key: getattr(config, field_name)
+            for file_key, field_name in mapping.items()
+        }
+    return result
+
+
+def apply_config_update(config: Config, update: dict) -> Config:
+    changes: dict[str, object] = {}
+    for section, values in update.items():
+        mapping = _SECTIONS.get(section)
+        if mapping is None or not isinstance(values, dict):
+            raise ConfigError(f"unknown config key '{section}'")
+        for file_key, value in values.items():
+            field_name = mapping.get(file_key)
+            if field_name is None:
+                raise ConfigError(f"unknown config key '{section}.{file_key}'")
+            current = getattr(config, field_name)
+            if field_name == "language":
+                valid_type = value is None or isinstance(value, str)
+            elif isinstance(current, bool):
+                valid_type = type(value) is bool
+            elif isinstance(current, int):
+                valid_type = type(value) is int
+            elif isinstance(current, float):
+                valid_type = type(value) is float
+            elif isinstance(current, list):
+                valid_type = (
+                    isinstance(value, list)
+                    and all(isinstance(item, str) for item in value)
+                )
+            else:
+                valid_type = isinstance(value, str)
+            if not valid_type:
+                raise ConfigError(
+                    f"invalid type for config key '{section}.{file_key}'"
+                )
+            if section == "paste" and file_key == "method" and value not in PASTE_METHODS:
+                raise ConfigError(f"invalid paste method: {value!r}")
+            changes[field_name] = value
+    return replace(config, **changes)

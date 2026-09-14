@@ -20,7 +20,10 @@ class MlxWhisperSTT:
         self._mlx_repo = ""
         self.language: str | None = None
 
-    def load(self, model: str, language: str | None) -> None:
+    def load(
+        self, model: str, language: str | None, device: str = "auto"
+    ) -> None:
+        del device
         import mlx_whisper
 
         self._mlx = mlx_whisper

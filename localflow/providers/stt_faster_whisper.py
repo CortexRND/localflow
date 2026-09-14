@@ -11,10 +11,18 @@ class FasterWhisperSTT:
         self.model = None
         self.language: str | None = None
 
-    def load(self, model: str, language: str | None) -> None:
+    def load(self, model: str, language: str | None, device: str = "auto") -> None:
+        if device in ("auto", "cpu"):
+            runtime_device, compute_type = "cpu", "int8"
+        elif device == "cuda":
+            runtime_device, compute_type = "cuda", "float16"
+        else:
+            raise ValueError(f"unsupported stt device: {device!r}")
         from faster_whisper import WhisperModel
 
-        self.model = WhisperModel(model, device="cpu", compute_type="int8")
+        self.model = WhisperModel(
+            model, device=runtime_device, compute_type=compute_type
+        )
         self.language = language
 
     def transcribe(self, audio: np.ndarray) -> str:

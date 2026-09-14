@@ -77,8 +77,8 @@ def test_registry_discovers_entry_point(monkeypatch):
 
 def test_transcriber_discovers_entry_point_backend(monkeypatch):
     class FakeProvider:
-        def load(self, model, language):
-            assert (model, language) == ("x", None)
+        def load(self, model, language, device="auto"):
+            assert (model, language, device) == ("x", None, "auto")
 
         def transcribe(self, audio):
             return ""
@@ -93,6 +93,45 @@ def test_transcriber_discovers_entry_point_backend(monkeypatch):
 
     assert isinstance(transcriber.provider, FakeProvider)
     assert transcriber.backend == "fake"
+
+
+def test_transcriber_forwards_stt_device_to_entry_point(monkeypatch):
+    seen = []
+
+    class FakeProvider:
+        def load(self, model, language, device="auto"):
+            seen.append((model, language, device))
+
+        def transcribe(self, audio):
+            return ""
+
+    entry_point = SimpleNamespace(name="fake", load=lambda: FakeProvider)
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [entry_point] if group == "localflow.stt_providers" else [],
+    )
+
+    Transcriber("x", None, backend="fake", device="cuda")
+
+    assert seen == [("x", None, "cuda")]
+
+
+def test_faster_whisper_uses_cuda_device(monkeypatch):
+    calls = []
+
+    class WhisperModel:
+        def __init__(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    module = ModuleType("faster_whisper")
+    module.WhisperModel = WhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    FasterWhisperSTT().load("small", "en", device="cuda")
+
+    assert calls == [
+        (("small",), {"device": "cuda", "compute_type": "float16"})
+    ]
 
 
 def test_ollama_complete_payload_and_quote_stripping(monkeypatch):

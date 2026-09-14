@@ -15,7 +15,10 @@ class ParakeetSTT:
         self._parakeet = None
         self.language: str | None = None
 
-    def load(self, model: str, language: str | None) -> None:
+    def load(
+        self, model: str, language: str | None, device: str = "auto"
+    ) -> None:
+        del device
         import mlx.core as mx
         from parakeet_mlx import from_pretrained
         from parakeet_mlx.audio import get_logmel

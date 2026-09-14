@@ -46,6 +46,7 @@ def build_stt(config: Config) -> Transcriber:
         config.model_size,
         config.language,
         backend=config.stt_backend,
+        device=config.stt_device,
     )
 
 

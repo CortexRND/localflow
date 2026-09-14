@@ -258,6 +258,37 @@ def test_config_table_covers_every_dataclass_field():
     assert len(mapped) == sum(len(section) for section in config._SECTIONS.values())
 
 
+def test_config_to_dict_and_partial_update():
+    original = Config()
+    serialized = config.config_to_dict(original)
+
+    assert serialized["stt"]["model"] == original.model_size
+    assert serialized["llm"]["provider"] == original.llm_provider
+
+    updated = config.apply_config_update(
+        original,
+        {"stt": {"model": "small", "language": None}, "server": {"port": 9000}},
+    )
+    assert updated.model_size == "small"
+    assert updated.language is None
+    assert updated.server_port == 9000
+    assert original.server_port == 8756
+
+
+@pytest.mark.parametrize(
+    "update, message",
+    [
+        ({"stt": {"missing": "x"}}, "unknown config key 'stt.missing'"),
+        ({"missing": {"key": "x"}}, "unknown config key 'missing'"),
+        ({"server": {"port": "9000"}}, "invalid type for config key 'server.port'"),
+        ({"paste": {"method": "invalid"}}, "invalid paste method"),
+    ],
+)
+def test_apply_config_update_validates(update, message):
+    with pytest.raises(ConfigError, match=message):
+        config.apply_config_update(Config(), update)
+
+
 def test_factory_builds_ollama(isolated_config):
     loaded = Config()
     provider = build_llm(loaded, timeout=7, num_ctx=123)

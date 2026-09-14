@@ -189,6 +189,11 @@ orca_agent = "claude"
 
 All keys are optional; defaults shown above apply.
 
+Open the local settings UI at
+`http://127.0.0.1:8756/settings`, or run `lf ui` to open it in your browser.
+The `lf status`, `lf stt`, and `lf llm` commands show status and manage the
+configured speech-to-text and language-model providers.
+
 `stt.provider = "parakeet"` uses NVIDIA Parakeet TDT 0.6B v2 via
 [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (Apple Silicon).
 Install with `pip install -e '.[parakeet]'`. It is a fixed checkpoint
