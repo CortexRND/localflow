@@ -1,10 +1,17 @@
+import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from localflow import launchagent as L
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32" or os.environ.get("LOCALFLOW_PLATFORM") == "win32",
+    reason="launchd tests are not supported on Windows",
+)
 
 
 @pytest.fixture(autouse=True)
