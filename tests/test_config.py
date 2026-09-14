@@ -35,7 +35,7 @@ def isolated_config(monkeypatch, tmp_path):
 def test_defaults_when_no_file(isolated_config):
     loaded = config.load_config()
 
-    assert loaded == Config(meetings_enabled=False)
+    assert loaded == Config()
 
 
 def test_v2_round_trip_for_non_default_config(isolated_config, monkeypatch):

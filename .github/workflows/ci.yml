@@ -6,6 +6,8 @@ on:
 
 jobs:
   test:
+    env:
+      PYNPUT_BACKEND: dummy
     strategy:
       fail-fast: false
       matrix:
