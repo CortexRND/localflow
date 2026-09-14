@@ -449,11 +449,15 @@
 
   async function saveSection(update, msgId) {
     try {
-      config = await api("/api/config", { method: "PUT", body: update });
-      setMsg(msgId, "saved", true);
+      const result = await api("/api/config", { method: "PUT", body: update });
+      const restart = result.restart_required || [];
+      delete result.restart_required;
+      config = result;
+      setMsg(msgId, restart.length ? `saved — restart localflow to apply ${restart.join(", ")}` : "saved", true);
       toast("saved");
       $("adv-json").value = JSON.stringify(config, null, 2);
-    } catch (e) { setMsg(msgId, e.message, false); }
+      return true;
+    } catch (e) { setMsg(msgId, e.message, false); return false; }
   }
 
   $("stt-save").addEventListener("click", () => {
@@ -461,7 +465,7 @@
     saveSection({ stt: {
       provider: $("stt-provider").value, model, device: $("stt-device").value,
       language: $("stt-language").value.trim() || null,
-    } }, "stt-msg").then(() => { $("stt-model-custom").value = ""; return loadSttModels(); });
+    } }, "stt-msg").then((ok) => { if (!ok) return; $("stt-model-custom").value = ""; return loadSttModels(); });
   });
 
   // ---- LLM ----
@@ -495,7 +499,7 @@
     saveSection({ llm: {
       provider: $("llm-provider").value, base_url: $("llm-base-url").value.trim(), model,
       cleanup_enabled: $("llm-cleanup").checked, cleanup_timeout: Number($("llm-timeout").value),
-    } }, "llm-msg").then(() => { $("llm-model-custom").value = ""; fillSelect($("llm-model"), [{ id: model }], model); });
+    } }, "llm-msg").then((ok) => { if (!ok) return; $("llm-model-custom").value = ""; fillSelect($("llm-model"), [{ id: model }], model); });
   });
 
   $("llm-test").addEventListener("click", async () => {
@@ -566,8 +570,7 @@
     let update;
     try { update = JSON.parse($("adv-json").value); } catch (e) { setMsg("adv-msg", `invalid JSON: ${e.message}`, false); return; }
     delete update.config_version;
-    await saveSection(update, "adv-msg");
-    await loadConfig();
+    if (await saveSection(update, "adv-msg")) await loadConfig();
   });
   $("adv-reload").addEventListener("click", () => loadConfig().then(() => setMsg("adv-msg", "reloaded", true)));
 
@@ -578,6 +581,8 @@
       sttProviders = stt;
       fillSelect($("llm-provider"), llm.map((p) => ({ id: p.id, label: p.offline ? `${p.id} (local)` : p.id })));
       $("adv-path").textContent = status.config_path;
+      $("nav-platform").textContent = status.platform;
+      $("nav-config-path").textContent = status.config_path;
       await loadConfig();
       await loadSecrets();
       showPage(location.hash.replace("#", "") || "status");
