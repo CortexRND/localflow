@@ -179,6 +179,7 @@ def test_linux_sound_does_not_use_aplay(monkeypatch):
 
 def test_windows_autostart_and_lock(monkeypatch):
     values = {}
+    monkeypatch.setattr("localflow.platform.win32.os.lseek", lambda fd, offset, whence: None)
 
     class Key:
         def __enter__(self):
