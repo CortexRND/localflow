@@ -20,6 +20,7 @@ class Transcriber:
         model_size: str = "small",
         language: str | None = None,
         backend: str = "auto",
+        device: str = "auto",
     ):
         self.language = language
         self.model_size = model_size
@@ -31,22 +32,31 @@ class Transcriber:
             except KeyError as exc:
                 raise ValueError(f"unknown stt backend: {backend!r}") from exc
             provider = provider_class()
-            provider.load(model_size, language)
+            provider.load(model_size, language, device)
             self.provider = provider
             self.backend = backend
             return
 
+        if backend in ("mlx", "mlx-whisper") and device != "auto":
+            raise ValueError(f"{backend} does not support device {device!r}")
+        if backend == "parakeet" and device != "auto":
+            raise ValueError(f"{backend} does not support device {device!r}")
+
         if backend == "parakeet":
             provider: STTProvider = ParakeetSTT()
-            provider.load(model_size, language)
+            provider.load(model_size, language, device)
             self.provider = provider
             self.backend = "parakeet"
             return
 
-        if backend in ("auto", "mlx", "mlx-whisper") and model_size in _MLX_REPOS:
+        if (
+            backend in ("auto", "mlx", "mlx-whisper")
+            and device == "auto"
+            and model_size in _MLX_REPOS
+        ):
             provider = MlxWhisperSTT()
             try:
-                provider.load(model_size, language)
+                provider.load(model_size, language, device)
                 self.provider = provider
                 self.backend = "mlx"
                 return
@@ -55,7 +65,7 @@ class Transcriber:
                     raise
 
         provider = FasterWhisperSTT()
-        provider.load(model_size, language)
+        provider.load(model_size, language, device)
         self.provider = provider
         self.backend = "faster-whisper"
 

@@ -1,4 +1,6 @@
 import importlib.metadata
+import importlib.util
+import sys
 
 from localflow.providers.llm_ollama import OllamaLLM
 from localflow.providers.llm_openai_compat import OpenAICompatLLM
@@ -47,6 +49,25 @@ def llm_provider_class(id: str):
 
 def list_stt_ids() -> list[str]:
     return _valid_ids(STT_BUILTINS, "localflow.stt_providers")
+
+
+def stt_available(id: str) -> bool:
+    if id not in STT_BUILTINS:
+        return True
+    if id == "faster-whisper":
+        module = "faster_whisper"
+    elif id == "mlx-whisper":
+        if sys.platform != "darwin":
+            return False
+        module = "mlx_whisper"
+    else:
+        if sys.platform != "darwin":
+            return False
+        module = "parakeet_mlx"
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def list_llm_ids() -> list[str]:

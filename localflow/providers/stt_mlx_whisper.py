@@ -20,7 +20,11 @@ class MlxWhisperSTT:
         self._mlx_repo = ""
         self.language: str | None = None
 
-    def load(self, model: str, language: str | None) -> None:
+    def load(
+        self, model: str, language: str | None, device: str = "auto"
+    ) -> None:
+        if device != "auto":
+            raise ValueError(f"mlx-whisper does not support device {device!r}")
         import mlx_whisper
 
         self._mlx = mlx_whisper

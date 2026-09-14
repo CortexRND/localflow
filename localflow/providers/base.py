@@ -26,7 +26,9 @@ class STTProvider(Protocol):
     id: ClassVar[str]
     offline: ClassVar[bool]
 
-    def load(self, model: str, language: str | None) -> None: ...
+    def load(
+        self, model: str, language: str | None, device: str = "auto"
+    ) -> None: ...
 
     def transcribe(self, audio: np.ndarray) -> str: ...
 

@@ -4,17 +4,26 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from localflow import api as api_logic
 from localflow import sounds
+from localflow.apitoken import load_or_create
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
-from localflow.config import load_config
+from localflow.config import (
+    ConfigError,
+    apply_config_update,
+    config_to_dict,
+    load_config,
+    save_config,
+)
 from localflow.dispatch import (
     PromptQueue,
     StatusConflict,
@@ -28,7 +37,9 @@ from localflow.meetings import (
     MeetingWatcher,
     ObsidianWriter,
 )
+from localflow.platform import current
 from localflow.providers.factory import build_llm, build_stt, build_workprompts_llm
+from localflow.secrets import SecretsUnavailable
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
 from localflow.workprompts import WorkPromptGenerator
@@ -38,10 +49,12 @@ app = FastAPI()
 setup_logging()
 log = logging.getLogger("localflow.server")
 _config = load_config()
+_api_token = load_or_create()
 _commands = discover_commands(_config.command_names, _config.skills_dirs)
 _transcriber: Transcriber | None = None
 _cleaner: Cleaner | None = None
 _lock = threading.Lock()
+_config_lock = threading.Lock()
 _transcribe_lock = threading.Lock()
 
 # `_on_meeting_detected` is defined further down; forward it lazily.
@@ -76,10 +89,32 @@ _queue = PromptQueue()
 
 @app.on_event("startup")
 def _start_watcher() -> None:
+    global _api_token
+    _api_token = load_or_create()
     if _config.meetings_enabled and _config.meeting_watch:
         _watcher.start()
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.middleware("http")
+async def _api_auth(request: Request, call_next):
+    if request.url.path.startswith("/api/") or request.url.path == "/settings":
+        client_host = request.client.host if request.client else ""
+        loopback = client_host in ("127.0.0.1", "::1", "localhost")
+        supplied_token = request.headers.get("X-Localflow-Token") or request.query_params.get(
+            "token"
+        )
+        if loopback and request.method in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("Origin")
+            if origin:
+                origin_host = urlparse(origin).netloc
+                request_host = request.headers.get("Host", "")
+                if origin_host and origin_host.lower() != request_host.lower():
+                    return JSONResponse({"detail": "invalid request origin"}, status_code=403)
+        elif supplied_token != _api_token:
+            return JSONResponse({"detail": "invalid API token"}, status_code=401)
+    return await call_next(request)
 
 
 def _get_transcriber() -> Transcriber:
@@ -147,6 +182,130 @@ def healthz() -> dict:
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(_STATIC_DIR / "index.html")
+
+
+@app.get("/settings")
+def settings() -> HTMLResponse:
+    html = (_STATIC_DIR / "settings.html").read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("__LOCALFLOW_TOKEN__", _api_token))
+
+
+@app.get("/api/status")
+def api_status() -> dict:
+    return api_logic.status(_config, current(), _transcriber is not None)
+
+
+@app.get("/api/config")
+def api_config() -> dict:
+    return config_to_dict(_config)
+
+
+@app.put("/api/config")
+def api_config_update(body: dict) -> dict:
+    global _config, _transcriber, _cleaner, _ollama, _commands
+    with _config_lock:
+        try:
+            updated = apply_config_update(_config, body)
+            new_llm = api_logic.validate_runtime(updated)
+        except ConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        commands_changed = (
+            updated.command_names != _config.command_names
+            or updated.skills_dirs != _config.skills_dirs
+        )
+        save_config(updated)
+        _config = updated
+        if commands_changed:
+            _commands = discover_commands(_config.command_names, _config.skills_dirs)
+        _transcriber = None
+        _cleaner = None
+        _ollama = new_llm
+        result = config_to_dict(_config)
+    return {**result, "restart_required": api_logic.restart_required(body)}
+
+
+@app.get("/api/providers/stt")
+def api_stt_providers() -> list[dict]:
+    return api_logic.stt_providers()
+
+
+@app.get("/api/providers/llm")
+def api_llm_providers() -> list[dict]:
+    return api_logic.llm_providers()
+
+
+@app.get("/api/models")
+def api_models(
+    kind: str,
+    provider: str,
+    base_url: str | None = None,
+) -> dict:
+    return api_logic.models(_config, kind, provider, base_url)
+
+
+@app.post("/api/test/llm")
+def api_test_llm(body: dict | None = None) -> dict:
+    body = body or {}
+    return api_logic.test_llm(
+        _config,
+        body.get("provider"),
+        body.get("base_url"),
+        body.get("model"),
+    )
+
+
+@app.get("/api/secrets")
+def api_secrets() -> dict[str, bool]:
+    return api_logic.secrets_status()
+
+
+@app.put("/api/secrets/{name}")
+def api_secret_update(name: str, body: dict) -> dict[str, bool]:
+    global _ollama, _cleaner, _prompt_gen
+    if name not in api_logic.SECRET_NAMES:
+        raise HTTPException(status_code=404, detail="unknown secret")
+    value = body.get("value", "")
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="value must be a string")
+    with _config_lock:
+        try:
+            api_logic.update_secret(name, value)
+            if name == "llm_api_key":
+                _ollama = build_llm(_config)
+                _cleaner = None
+            elif name == "fireworks_api_key":
+                _prompt_gen = WorkPromptGenerator(build_workprompts_llm(_config))
+        except SecretsUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return api_logic.secrets_status()
+
+
+@app.get("/api/autostart")
+def api_autostart() -> dict[str, str]:
+    try:
+        status = current().autostart_status()
+    except (RuntimeError, OSError):
+        status = "unavailable"
+    return {"status": status}
+
+
+@app.post("/api/autostart")
+def api_autostart_update(body: dict) -> dict[str, str]:
+    enabled = body.get("enabled")
+    if type(enabled) is not bool:
+        raise HTTPException(status_code=400, detail="enabled must be a boolean")
+    try:
+        if enabled:
+            current().autostart_install()
+        else:
+            current().autostart_uninstall()
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        status = current().autostart_status()
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": status}
 
 
 @app.post("/transcribe")

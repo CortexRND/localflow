@@ -7,8 +7,10 @@ run the components themselves.
 import json
 import sys
 import time
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import click
 import requests
@@ -18,6 +20,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from localflow import api as api_logic
+from localflow.apitoken import read as read_api_token
 from localflow.config import (
     config_field,
     config_toml,
@@ -38,6 +42,8 @@ from localflow.dispatch import (
 )
 from localflow.platform import current
 from localflow.platform.base import PASTE_METHODS
+from localflow.providers import registry
+from localflow.providers.factory import build_llm
 from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set_secret
 
 console = Console()
@@ -45,9 +51,9 @@ _config = load_config()
 BASE = f"http://127.0.0.1:{_config.server_port}"
 
 
-def _get(path: str) -> dict:
+def _get(path: str, timeout: float = 5) -> dict:
     try:
-        resp = requests.get(BASE + path, timeout=5)
+        resp = requests.get(BASE + path, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
     except requests.ConnectionError:
@@ -206,30 +212,152 @@ def secret_status() -> None:
         click.echo(f"{name}: {state}")
 
 
+def _flatten_status(value: dict, prefix: str = ""):
+    for key, item in value.items():
+        name = f"{prefix}.{key}" if prefix else key
+        if isinstance(item, dict):
+            yield from _flatten_status(item, name)
+        else:
+            yield name, item
+
+
 @cli.command()
-def status() -> None:
-    """Server, watcher, and session state."""
-    st = _get("/meeting/status")
-    table = Table(show_header=False, box=None)
-    table.add_row("server", "[green]up[/green]")
-    watcher = "[green]watching[/green]" if st["watching"] else f"[red]off[/red] {st['watch_error']}"
-    table.add_row("watcher", watcher)
-    table.add_row("mic busy", "[yellow]yes[/yellow]" if st["mic_busy"] else "no")
-    if st["detected"]:
-        table.add_row("detected", f"[bold yellow]meeting ({st['platform'] or '?'})[/bold yellow]")
-    session = st.get("session")
-    if session:
-        table.add_row(
-            "session",
-            f"[bold red]● {session['title']}[/bold red] ({session['category']}) "
-            f"{session['seconds'] // 60}m{session['seconds'] % 60:02d}s, "
-            f"{session['segment_count']} segments",
-        )
+@click.option("--json", "json_output", is_flag=True, help="Print JSON.")
+def status(json_output: bool) -> None:
+    """Show localflow status."""
+    result = api_logic.status(load_config(), current(), False)
+    try:
+        result["meeting"] = _get("/meeting/status", timeout=2)
+    except (SystemExit, requests.RequestException, ValueError):
+        result["meeting"] = {"server": "down"}
+    if json_output:
+        click.echo(json.dumps(result))
+        return
+    for key, value in _flatten_status(result):
+        click.echo(f"{key}: {value}")
+
+
+@cli.group()
+def stt() -> None:
+    """Inspect and select speech-to-text providers."""
+
+
+@stt.command("list")
+@click.option("--json", "json_output", is_flag=True, help="Print JSON.")
+def stt_list(json_output: bool) -> None:
+    """List STT providers and models."""
+    config = load_config()
+    providers = api_logic.stt_providers()
+    error = None
+    selected = api_logic.resolve_stt_provider(config.stt_backend)
+    try:
+        models = [
+            asdict(model)
+            for model in registry.stt_provider_class(selected)().list_models()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        models = []
+        error = str(exc)
+    result = {"providers": providers, "models": models, "error": error}
+    if json_output:
+        click.echo(json.dumps(result))
+        return
+    for provider in providers:
+        state = "available" if provider["available"] else "unavailable"
+        click.echo(f"{provider['id']}: {state}")
+    for model in models:
+        click.echo(f"{model['id']}: {model.get('label', '')}")
+    if error:
+        console.print(f"[red]error:[/red] {error}")
+
+
+@stt.command("use")
+@click.argument("provider")
+@click.argument("model", required=False)
+@click.option("--device", type=click.Choice(("auto", "cpu", "cuda")), default="auto")
+def stt_use(provider: str, model: str | None, device: str) -> None:
+    """Select an STT provider, optional MODEL, and DEVICE."""
+    selected = api_logic.resolve_stt_provider(provider)
+    try:
+        registry.stt_provider_class(selected)
+    except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    config = load_config()
+    config.stt_backend = provider
+    config.model_size = model or config.model_size
+    config.stt_device = device
+    click.echo(f"saved {save_config(config)}")
+
+
+@cli.group()
+def llm() -> None:
+    """Inspect and select language-model providers."""
+
+
+@llm.command("list")
+@click.option("--provider", default=None)
+@click.option("--base-url", default=None)
+@click.option("--json", "json_output", is_flag=True, help="Print JSON.")
+def llm_list(
+    provider: str | None, base_url: str | None, json_output: bool
+) -> None:
+    """List models from an LLM provider."""
+    config = load_config()
+    selected = provider or config.llm_provider
+    selected_config = replace(
+        config,
+        llm_provider=selected,
+        llm_base_url=base_url or config.llm_base_url,
+    )
+    try:
+        models = [
+            asdict(model) for model in build_llm(selected_config, timeout=10).list_models()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        if json_output:
+            click.echo(json.dumps({"models": [], "error": str(exc)}))
+        else:
+            console.print(f"[red]error:[/red] {exc}")
+        raise click.exceptions.Exit(1)
+    result = {"models": models, "error": None}
+    if json_output:
+        click.echo(json.dumps(result))
     else:
-        table.add_row("session", "none")
-    if st.get("last_saved"):
-        table.add_row("last saved", st["last_saved"]["notes_path"])
-    console.print(table)
+        for model in models:
+            click.echo(f"{model['id']}: {model.get('label', '')}")
+
+
+@llm.command("use")
+@click.argument("provider")
+@click.option("--base-url", default=None)
+@click.option("--model", "model_name", default=None)
+def llm_use(provider: str, base_url: str | None, model_name: str | None) -> None:
+    """Select an LLM provider and optional endpoint or model."""
+    if provider not in registry.list_llm_ids():
+        raise click.ClickException(f"unknown LLM provider: {provider}")
+    config = load_config()
+    config.llm_provider = provider
+    if base_url is not None:
+        config.llm_base_url = base_url
+    if model_name is not None:
+        config.llm_model = model_name
+    click.echo(f"saved {save_config(config)}")
+
+
+@llm.command("test")
+@click.option("--provider", default=None)
+@click.option("--base-url", default=None)
+@click.option("--model", "model_name", default=None)
+def llm_test(
+    provider: str | None, base_url: str | None, model_name: str | None
+) -> None:
+    """Test connectivity to an LLM provider."""
+    result = api_logic.test_llm(load_config(), provider, base_url, model_name)
+    if result["ok"]:
+        console.print(f"[green]ok[/green] {result['detail'] or 'reachable'}")
+        return
+    console.print(f"[red]{result['detail']}[/red]")
+    raise click.exceptions.Exit(1)
 
 
 @cli.group()
@@ -573,7 +701,8 @@ def dictate() -> None:
 @cli.command()
 def ui() -> None:
     """Open the web UI in the default browser."""
-    current().open_path(BASE)
+    token = read_api_token() or ""
+    current().open_path(f"{BASE}/settings?token={quote(token)}")
 
 
 @cli.command()
