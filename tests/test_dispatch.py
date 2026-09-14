@@ -24,11 +24,6 @@ POSIX_QUEUE_LOCK_TEST = pytest.mark.skipif(
     reason="POSIX cross-process locking tests are not supported on Windows",
 )
 
-POSIX_QUEUE_LOCK_TEST = pytest.mark.skipif(
-    sys.platform == "win32" or os.environ.get("LOCALFLOW_PLATFORM") == "win32",
-    reason="POSIX cross-process locking tests are not supported on Windows",
-)
-
 
 # ------------------------------------------------------------------ parsing ---
 
