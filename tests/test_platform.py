@@ -142,6 +142,10 @@ def test_linux_autostart_round_trip(monkeypatch, tmp_path):
     assert platform.autostart_status() == "not installed"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.environ.get("LOCALFLOW_PLATFORM") == "win32",
+    reason="POSIX file locking is not supported on Windows",
+)
 def test_linux_try_lock_second_fd_fails(tmp_path):
     path = tmp_path / "lock"
     first = os.open(path, os.O_CREAT | os.O_RDWR)

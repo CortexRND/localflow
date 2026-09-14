@@ -1,5 +1,7 @@
 import json
+import os
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +11,6 @@ import pytest
 from localflow import dispatch as D
 from localflow.dispatch import PromptQueue, WorkPrompt
 
-
 SAMPLE = """### Migrate session storage to Redis
 > Replace the local-file session storage in the app with Redis, keeping the
 > current session API unchanged. Done means existing session tests pass.
@@ -17,6 +18,16 @@ SAMPLE = """### Migrate session storage to Redis
 ### Update deploy docs for Redis sessions
 > After the migration lands, update the deployment documentation.
 """
+
+POSIX_QUEUE_LOCK_TEST = pytest.mark.skipif(
+    sys.platform == "win32" or os.environ.get("LOCALFLOW_PLATFORM") == "win32",
+    reason="POSIX cross-process locking tests are not supported on Windows",
+)
+
+POSIX_QUEUE_LOCK_TEST = pytest.mark.skipif(
+    sys.platform == "win32" or os.environ.get("LOCALFLOW_PLATFORM") == "win32",
+    reason="POSIX cross-process locking tests are not supported on Windows",
+)
 
 
 # ------------------------------------------------------------------ parsing ---
@@ -221,6 +232,7 @@ for eid in sys.argv[1:]:
 """
 
 
+@POSIX_QUEUE_LOCK_TEST
 def test_queue_survives_concurrent_processes(tmp_path):
     """The server and the CLI are separate processes over one queue file.
 
@@ -253,6 +265,7 @@ def test_queue_survives_concurrent_processes(tmp_path):
     assert all(e["worktree"] == "wt-" + e["id"] for e in final)
 
 
+@POSIX_QUEUE_LOCK_TEST
 def test_queue_write_survives_unavailable_lock(seeded, monkeypatch):
     """An unusable lock must degrade to unlocked, never swallow the write."""
     queue, entries, _ = seeded
@@ -327,6 +340,7 @@ open(sys.argv[1], "w").write(str(won))
 """
 
 
+@POSIX_QUEUE_LOCK_TEST
 def test_cas_exactly_one_winner_across_processes(tmp_path):
     """Four processes race to approve the same 30 entries.
 
