@@ -10,6 +10,7 @@ import time
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import click
 import requests
@@ -20,6 +21,7 @@ from rich.table import Table
 from rich.text import Text
 
 from localflow import api as api_logic
+from localflow.apitoken import read as read_api_token
 from localflow.config import (
     config_field,
     config_toml,
@@ -49,9 +51,9 @@ _config = load_config()
 BASE = f"http://127.0.0.1:{_config.server_port}"
 
 
-def _get(path: str) -> dict:
+def _get(path: str, timeout: float = 5) -> dict:
     try:
-        resp = requests.get(BASE + path, timeout=5)
+        resp = requests.get(BASE + path, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
     except requests.ConnectionError:
@@ -224,6 +226,10 @@ def _flatten_status(value: dict, prefix: str = ""):
 def status(json_output: bool) -> None:
     """Show localflow status."""
     result = api_logic.status(load_config(), current(), False)
+    try:
+        result["meeting"] = _get("/meeting/status", timeout=2)
+    except (SystemExit, requests.RequestException, ValueError):
+        result["meeting"] = {"server": "down"}
     if json_output:
         click.echo(json.dumps(result))
         return
@@ -271,8 +277,9 @@ def stt_list(json_output: bool) -> None:
 @click.option("--device", type=click.Choice(("auto", "cpu", "cuda")), default="auto")
 def stt_use(provider: str, model: str | None, device: str) -> None:
     """Select an STT provider, optional MODEL, and DEVICE."""
+    selected = api_logic.resolve_stt_provider(provider)
     try:
-        registry.stt_provider_class(provider)
+        registry.stt_provider_class(selected)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
     config = load_config()
@@ -694,7 +701,8 @@ def dictate() -> None:
 @cli.command()
 def ui() -> None:
     """Open the web UI in the default browser."""
-    current().open_path(f"{BASE}/settings")
+    token = read_api_token() or ""
+    current().open_path(f"{BASE}/settings?token={quote(token)}")
 
 
 @cli.command()

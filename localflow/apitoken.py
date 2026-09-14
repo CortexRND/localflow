@@ -8,6 +8,13 @@ def token_path() -> Path:
     return config_dir() / "api-token"
 
 
+def read() -> str | None:
+    try:
+        return token_path().read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def load_or_create() -> str:
     token = secrets.token_urlsafe(32)
     path = token_path()

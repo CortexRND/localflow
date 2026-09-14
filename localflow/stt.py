@@ -37,6 +37,11 @@ class Transcriber:
             self.backend = backend
             return
 
+        if backend in ("mlx", "mlx-whisper") and device != "auto":
+            raise ValueError(f"{backend} does not support device {device!r}")
+        if backend == "parakeet" and device != "auto":
+            raise ValueError(f"{backend} does not support device {device!r}")
+
         if backend == "parakeet":
             provider: STTProvider = ParakeetSTT()
             provider.load(model_size, language, device)
@@ -44,7 +49,11 @@ class Transcriber:
             self.backend = "parakeet"
             return
 
-        if backend in ("auto", "mlx", "mlx-whisper") and model_size in _MLX_REPOS:
+        if (
+            backend in ("auto", "mlx", "mlx-whisper")
+            and device == "auto"
+            and model_size in _MLX_REPOS
+        ):
             provider = MlxWhisperSTT()
             try:
                 provider.load(model_size, language, device)

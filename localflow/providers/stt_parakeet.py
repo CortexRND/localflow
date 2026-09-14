@@ -18,7 +18,8 @@ class ParakeetSTT:
     def load(
         self, model: str, language: str | None, device: str = "auto"
     ) -> None:
-        del device
+        if device != "auto":
+            raise ValueError(f"parakeet does not support device {device!r}")
         import mlx.core as mx
         from parakeet_mlx import from_pretrained
         from parakeet_mlx.audio import get_logmel

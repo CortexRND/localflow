@@ -15,11 +15,14 @@ def test_status_json_reports_unloaded_stt(monkeypatch, tmp_path):
         (),
         {"name": "linux", "autostart_status": lambda self: "not installed"},
     )())
+    monkeypatch.setattr(cli_module, "_get", lambda path, timeout=5: {"watching": False})
 
     result = CliRunner().invoke(cli_module.cli, ["status", "--json"])
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["stt"]["loaded"] is False
+    output = json.loads(result.output)
+    assert output["stt"]["loaded"] is False
+    assert output["meeting"]["watching"] is False
 
 
 def test_stt_and_llm_use_save_nested_config(monkeypatch, tmp_path):

@@ -1,6 +1,6 @@
 from dataclasses import asdict, replace
 
-from localflow.config import Config, config_path
+from localflow.config import Config, ConfigError, config_path
 from localflow.providers import registry
 from localflow.providers.factory import build_llm
 from localflow.secrets import (
@@ -16,6 +16,32 @@ _STT_ALIASES = {"auto": "faster-whisper", "mlx": "mlx-whisper"}
 
 def resolve_stt_provider(provider: str) -> str:
     return _STT_ALIASES.get(provider, provider)
+
+
+def validate_runtime(config: Config):
+    stt_provider = resolve_stt_provider(config.stt_backend)
+    if stt_provider not in registry.list_stt_ids():
+        raise ConfigError(f"unknown stt provider {config.stt_backend!r}")
+    if config.llm_provider not in registry.list_llm_ids():
+        raise ConfigError(f"unknown llm provider {config.llm_provider!r}")
+    try:
+        return build_llm(config)
+    except Exception as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def restart_required(update: dict) -> list[str]:
+    restart_sections = {"meetings", "server", "hotkey", "features"}
+    required: list[str] = []
+    for section, values in update.items():
+        if not isinstance(values, dict):
+            continue
+        for key in values:
+            if section in restart_sections or (
+                section == "dictation" and key == "sample_rate"
+            ):
+                required.append(f"{section}.{key}")
+    return required
 
 
 def status(config: Config, platform: object, loaded: bool) -> dict:
@@ -123,4 +149,5 @@ def update_secret(name: str, value: str) -> None:
         try:
             delete_secret(name)
         except SecretsUnavailable:
-            pass
+            if get_secret(name):
+                raise

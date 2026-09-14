@@ -116,6 +116,43 @@ def test_transcriber_forwards_stt_device_to_entry_point(monkeypatch):
     assert seen == [("x", None, "cuda")]
 
 
+def test_transcriber_auto_cpu_skips_mlx(monkeypatch):
+    calls = []
+
+    def fail_mlx(*args, **kwargs):
+        raise AssertionError("MLX should not load for an explicit CPU device")
+
+    monkeypatch.setattr(MlxWhisperSTT, "load", fail_mlx)
+    monkeypatch.setattr(
+        FasterWhisperSTT,
+        "load",
+        lambda self, model, language, device="auto": calls.append(
+            (model, language, device)
+        ),
+    )
+
+    transcriber = Transcriber("small", None, backend="auto", device="cpu")
+
+    assert transcriber.backend == "faster-whisper"
+    assert calls == [("small", None, "cpu")]
+
+
+@pytest.mark.parametrize(
+    ("backend", "message"),
+    (("mlx", "mlx"), ("mlx-whisper", "mlx-whisper"), ("parakeet", "parakeet")),
+)
+def test_transcriber_rejects_unsupported_accelerator(backend, message):
+    with pytest.raises(ValueError, match=f"{message} does not support device"):
+        Transcriber("small", None, backend=backend, device="cpu")
+
+
+def test_mlx_and_parakeet_providers_reject_explicit_device():
+    with pytest.raises(ValueError, match="mlx-whisper does not support device"):
+        MlxWhisperSTT().load("small", None, device="cpu")
+    with pytest.raises(ValueError, match="parakeet does not support device"):
+        ParakeetSTT().load("small", None, device="cpu")
+
+
 def test_faster_whisper_uses_cuda_device(monkeypatch):
     calls = []
 

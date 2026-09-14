@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, UploadFile
@@ -53,6 +54,7 @@ _commands = discover_commands(_config.command_names, _config.skills_dirs)
 _transcriber: Transcriber | None = None
 _cleaner: Cleaner | None = None
 _lock = threading.Lock()
+_config_lock = threading.Lock()
 _transcribe_lock = threading.Lock()
 
 # `_on_meeting_detected` is defined further down; forward it lazily.
@@ -97,12 +99,20 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/") or request.url.path == "/settings":
         client_host = request.client.host if request.client else ""
-        if (
-            client_host not in ("127.0.0.1", "::1", "localhost")
-            and request.headers.get("X-Localflow-Token") != _api_token
-        ):
+        loopback = client_host in ("127.0.0.1", "::1", "localhost")
+        supplied_token = request.headers.get("X-Localflow-Token") or request.query_params.get(
+            "token"
+        )
+        if loopback and request.method in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("Origin")
+            if origin:
+                origin_host = urlparse(origin).netloc
+                request_host = request.headers.get("Host", "")
+                if origin_host and origin_host.lower() != request_host.lower():
+                    return JSONResponse({"detail": "invalid request origin"}, status_code=403)
+        elif supplied_token != _api_token:
             return JSONResponse({"detail": "invalid API token"}, status_code=401)
     return await call_next(request)
 
@@ -192,17 +202,26 @@ def api_config() -> dict:
 
 @app.put("/api/config")
 def api_config_update(body: dict) -> dict:
-    global _config, _transcriber, _cleaner, _ollama
-    try:
-        updated = apply_config_update(_config, body)
-    except ConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    save_config(updated)
-    _config = updated
-    _transcriber = None
-    _cleaner = None
-    _ollama = build_llm(_config)
-    return config_to_dict(_config)
+    global _config, _transcriber, _cleaner, _ollama, _commands
+    with _config_lock:
+        try:
+            updated = apply_config_update(_config, body)
+            new_llm = api_logic.validate_runtime(updated)
+        except ConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        commands_changed = (
+            updated.command_names != _config.command_names
+            or updated.skills_dirs != _config.skills_dirs
+        )
+        save_config(updated)
+        _config = updated
+        if commands_changed:
+            _commands = discover_commands(_config.command_names, _config.skills_dirs)
+        _transcriber = None
+        _cleaner = None
+        _ollama = new_llm
+        result = config_to_dict(_config)
+    return {**result, "restart_required": api_logic.restart_required(body)}
 
 
 @app.get("/api/providers/stt")
@@ -242,15 +261,22 @@ def api_secrets() -> dict[str, bool]:
 
 @app.put("/api/secrets/{name}")
 def api_secret_update(name: str, body: dict) -> dict[str, bool]:
+    global _ollama, _cleaner, _prompt_gen
     if name not in api_logic.SECRET_NAMES:
         raise HTTPException(status_code=404, detail="unknown secret")
     value = body.get("value", "")
     if not isinstance(value, str):
         raise HTTPException(status_code=400, detail="value must be a string")
-    try:
-        api_logic.update_secret(name, value)
-    except SecretsUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    with _config_lock:
+        try:
+            api_logic.update_secret(name, value)
+            if name == "llm_api_key":
+                _ollama = build_llm(_config)
+                _cleaner = None
+            elif name == "fireworks_api_key":
+                _prompt_gen = WorkPromptGenerator(build_workprompts_llm(_config))
+        except SecretsUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     return api_logic.secrets_status()
 
 
