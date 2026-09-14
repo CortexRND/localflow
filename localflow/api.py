@@ -11,6 +11,11 @@ from localflow.secrets import (
 )
 
 SECRET_NAMES = ("llm_api_key", "fireworks_api_key")
+_STT_ALIASES = {"auto": "faster-whisper", "mlx": "mlx-whisper"}
+
+
+def resolve_stt_provider(provider: str) -> str:
+    return _STT_ALIASES.get(provider, provider)
 
 
 def status(config: Config, platform: object, loaded: bool) -> dict:
@@ -69,7 +74,9 @@ def models(
 ) -> dict:
     try:
         if kind == "stt":
-            values = registry.stt_provider_class(provider)().list_models()
+            values = registry.stt_provider_class(
+                resolve_stt_provider(provider)
+            )().list_models()
         elif kind == "llm":
             provider_config = replace(
                 config,

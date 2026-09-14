@@ -243,10 +243,11 @@ def stt_list(json_output: bool) -> None:
     config = load_config()
     providers = api_logic.stt_providers()
     error = None
+    selected = api_logic.resolve_stt_provider(config.stt_backend)
     try:
         models = [
             asdict(model)
-            for model in registry.stt_provider_class(config.stt_backend)().list_models()
+            for model in registry.stt_provider_class(selected)().list_models()
         ]
     except Exception as exc:  # noqa: BLE001
         models = []

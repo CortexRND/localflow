@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="localflow-token" content="__LOCALFLOW_TOKEN__">
+<title>localflow settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Anton&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #6438d8;
+    --fg: #f2e8d0;
+    --accent: #edff45;
+    --paper: #faf5e8;
+    --ink: #2a1a5e;
+    --rule: color-mix(in srgb, var(--bg) 25%, var(--paper));
+    --ok: #1f7a3f;
+    --bad: #b3261e;
+    --font-display: "Anton", "Arial Narrow", Impact, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --font-sans: ui-sans-serif, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--font-sans); }
+  a { color: inherit; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  .shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+  nav { padding: 2rem 1.25rem; border-right: 1px solid color-mix(in srgb, var(--fg) 30%, var(--bg)); }
+  nav h1 { font: 400 2.6rem/0.9 var(--font-display); text-transform: uppercase; margin: 0 0 0.25rem; }
+  nav .sub { font-family: var(--font-mono); font-size: 0.65rem; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 2rem; }
+  nav .sub b { color: var(--accent); }
+  nav button {
+    display: block; width: 100%; text-align: left; background: none; border: 0; border-left: 3px solid transparent;
+    color: var(--fg); padding: 0.55rem 0.75rem; cursor: pointer; font: inherit;
+  }
+  nav button:hover { border-left-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+  nav button[aria-current="page"] { border-left-color: var(--accent); color: var(--accent); }
+  nav .foot { margin-top: 2rem; font-family: var(--font-mono); font-size: 0.7rem; word-break: break-all; opacity: 0.85; }
+
+  main { padding: 2rem clamp(1.25rem, 4vw, 3rem); background: var(--paper); color: var(--ink); }
+  section[hidden] { display: none; }
+  h2 { font: 400 2.2rem/0.9 var(--font-display); text-transform: uppercase; margin: 0 0 1.5rem; color: var(--bg); }
+  .eyebrow { display: inline-block; border: 1px solid var(--bg); color: var(--bg); font: 800 0.62rem var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase; padding: 0.3rem 0.7rem; margin-bottom: 1rem; }
+  .card { border: 1px solid var(--rule); padding: 1.25rem; margin-bottom: 1.25rem; max-width: 46rem; background: #fff8; }
+  .row { display: grid; grid-template-columns: 180px 1fr; gap: 0.5rem 1rem; align-items: center; margin-bottom: 0.9rem; }
+  .row label { font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .row .hint { grid-column: 2; font-size: 0.8rem; opacity: 0.75; margin-top: -0.4rem; }
+  input[type=text], input[type=password], input[type=number], select, textarea {
+    width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--bg); background: #fff; color: var(--ink); font: inherit; border-radius: 0;
+  }
+  textarea { font-family: var(--font-mono); font-size: 0.8rem; min-height: 16rem; }
+  input[type=checkbox] { width: 1.1rem; height: 1.1rem; accent-color: var(--bg); }
+  .inline { display: flex; gap: 0.5rem; align-items: center; }
+  .inline > * { flex: 1; }
+  .inline > button { flex: 0 0 auto; }
+  button.btn {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--bg); padding: 0.5rem 1rem; cursor: pointer;
+    font: 800 0.72rem var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase;
+  }
+  button.btn.secondary { background: transparent; color: var(--bg); }
+  button.btn:disabled { opacity: 0.5; cursor: default; }
+  .actions { display: flex; gap: 0.75rem; align-items: center; margin-top: 1rem; }
+  .badge { display: inline-block; font: 800 0.62rem var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; padding: 0.15rem 0.5rem; border: 1px solid currentColor; }
+  .badge.local { color: var(--ok); }
+  .badge.remote { color: var(--bad); }
+  .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; max-width: 46rem; }
+  .status-grid .card { margin: 0; }
+  .status-grid dt { font: 800 0.62rem var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.7; margin-top: 0.6rem; }
+  .status-grid dd { margin: 0; font-family: var(--font-mono); font-size: 0.9rem; word-break: break-all; }
+  .msg { font-family: var(--font-mono); font-size: 0.8rem; min-height: 1.2rem; }
+  .msg.ok { color: var(--ok); }
+  .msg.bad { color: var(--bad); }
+  .warn { border-left: 4px solid var(--bad); padding: 0.5rem 0.75rem; background: #fff; color: var(--bad); font-size: 0.85rem; }
+  #toast { position: fixed; right: 1rem; bottom: 1rem; background: var(--ink); color: var(--fg); padding: 0.6rem 1rem; font-family: var(--font-mono); font-size: 0.8rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  @media (max-width: 720px) {
+    .shell { grid-template-columns: 1fr; }
+    nav { border-right: 0; border-bottom: 1px solid color-mix(in srgb, var(--fg) 30%, var(--bg)); }
+    .row { grid-template-columns: 1fr; }
+    .row .hint { grid-column: 1; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav aria-label="Settings pages">
+    <h1>localflow</h1>
+    <div class="sub">settings · <b id="nav-platform">…</b></div>
+    <button data-page="status" aria-current="page">Status</button>
+    <button data-page="stt">Speech-to-text</button>
+    <button data-page="llm">Language model</button>
+    <button data-page="hotkey">Hotkey &amp; paste</button>
+    <button data-page="server">Server</button>
+    <button data-page="startup">Startup</button>
+    <button data-page="advanced">Advanced</button>
+    <div class="foot" id="nav-config-path"></div>
+  </nav>
+
+  <main>
+    <section id="page-status">
+      <span class="eyebrow">Live</span>
+      <h2>Status</h2>
+      <div class="status-grid">
+        <div class="card"><dl>
+          <dt>Speech-to-text</dt><dd id="st-stt"></dd>
+          <dt>Device / language</dt><dd id="st-stt-dev"></dd>
+          <dt>Model loaded</dt><dd id="st-loaded"></dd>
+        </dl></div>
+        <div class="card"><dl>
+          <dt>Language model</dt><dd id="st-llm"></dd>
+          <dt>Endpoint</dt><dd id="st-llm-url"></dd>
+          <dt>Cleanup</dt><dd id="st-cleanup"></dd>
+        </dl></div>
+        <div class="card"><dl>
+          <dt>Hotkey</dt><dd id="st-hotkey"></dd>
+          <dt>Paste method</dt><dd id="st-paste"></dd>
+          <dt>Server bind</dt><dd id="st-server"></dd>
+        </dl></div>
+        <div class="card"><dl>
+          <dt>Platform</dt><dd id="st-platform"></dd>
+          <dt>Run on login</dt><dd id="st-autostart"></dd>
+          <dt>Meetings (macOS only)</dt><dd id="st-meetings"></dd>
+        </dl></div>
+      </div>
+    </section>
+
+    <section id="page-stt" hidden>
+      <span class="eyebrow">Inference · speech</span>
+      <h2>Speech-to-text</h2>
+      <div class="card">
+        <div class="row">
+          <label for="stt-provider">Provider</label>
+          <select id="stt-provider"></select>
+          <div class="hint">Greyed-out providers need an extra package (e.g. <code>pip install localflow[mlx]</code>) or another OS.</div>
+        </div>
+        <div class="row">
+          <label for="stt-model">Model</label>
+          <div class="inline">
+            <select id="stt-model"></select>
+            <input type="text" id="stt-model-custom" placeholder="or type a model id" aria-label="Custom model id">
+          </div>
+          <div class="hint" id="stt-model-hint"></div>
+        </div>
+        <div class="row">
+          <label for="stt-device">Device</label>
+          <select id="stt-device">
+            <option value="auto">auto</option>
+            <option value="cpu">cpu</option>
+            <option value="cuda">cuda (NVIDIA)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="stt-language">Language</label>
+          <input type="text" id="stt-language" placeholder="auto-detect (leave blank) or e.g. en">
+        </div>
+        <div class="actions">
+          <button class="btn" id="stt-save">Save</button>
+          <span class="msg" id="stt-msg"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-llm" hidden>
+      <span class="eyebrow">Inference · cleanup</span>
+      <h2>Language model</h2>
+      <div class="card">
+        <div class="row">
+          <label for="llm-provider">Provider</label>
+          <div class="inline">
+            <select id="llm-provider"></select>
+            <span class="badge" id="llm-badge"></span>
+          </div>
+          <div class="hint">Ollama, LM Studio, llama.cpp and OpenAI-style servers all work through <em>openai-compatible</em>. Remote endpoints send your transcript off this machine.</div>
+        </div>
+        <div class="row">
+          <label for="llm-base-url">Base URL</label>
+          <input type="text" id="llm-base-url">
+        </div>
+        <div class="row">
+          <label for="llm-model">Model</label>
+          <div class="inline">
+            <select id="llm-model"></select>
+            <input type="text" id="llm-model-custom" placeholder="or type a model id" aria-label="Custom LLM model id">
+            <button class="btn secondary" id="llm-refresh">Refresh</button>
+          </div>
+          <div class="hint" id="llm-model-hint"></div>
+        </div>
+        <div class="row">
+          <label for="llm-key">API key</label>
+          <div class="inline">
+            <input type="password" id="llm-key" placeholder="stored in the OS keyring, never in config" autocomplete="off">
+            <button class="btn secondary" id="llm-key-save">Save key</button>
+          </div>
+          <div class="hint" id="llm-key-hint"></div>
+        </div>
+        <div class="row">
+          <label for="llm-cleanup">Cleanup on</label>
+          <input type="checkbox" id="llm-cleanup">
+        </div>
+        <div class="row">
+          <label for="llm-timeout">Timeout (s)</label>
+          <input type="number" id="llm-timeout" min="1">
+        </div>
+        <div class="actions">
+          <button class="btn" id="llm-save">Save</button>
+          <button class="btn secondary" id="llm-test">Test connection</button>
+          <span class="msg" id="llm-msg"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-hotkey" hidden>
+      <span class="eyebrow">Input</span>
+      <h2>Hotkey &amp; paste</h2>
+      <div class="card">
+        <div class="row">
+          <label for="hk-key">Hold-to-talk key</label>
+          <input type="text" id="hk-key">
+          <div class="hint">pynput key name, e.g. <code>alt_l</code>, <code>ctrl_r</code>, <code>f8</code>. Takes effect on restart.</div>
+        </div>
+        <div class="row">
+          <label for="hk-paste">Paste method</label>
+          <select id="hk-paste">
+            <option value="auto">auto</option>
+            <option value="clipboard">clipboard only (no keystroke)</option>
+            <option value="osascript">osascript (macOS)</option>
+            <option value="wtype">wtype (Wayland)</option>
+            <option value="xdotool">xdotool (X11)</option>
+            <option value="pynput">pynput</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="hk-sounds">Sounds</label>
+          <input type="checkbox" id="hk-sounds">
+        </div>
+        <div class="row">
+          <label for="hk-symbols">Spoken symbols</label>
+          <input type="checkbox" id="hk-symbols">
+          <div class="hint">"slash", "dash", "underscore" → <code>/ - _</code></div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="hk-save">Save</button>
+          <span class="msg" id="hk-msg"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-server" hidden>
+      <span class="eyebrow">Network</span>
+      <h2>Server</h2>
+      <div class="card">
+        <div class="row">
+          <label for="sv-host">Bind address</label>
+          <input type="text" id="sv-host">
+        </div>
+        <div class="warn" id="sv-warn" hidden>Non-loopback bind: anything on your network can reach this server. Requests to <code>/api/*</code> then require the per-boot token from the config folder.</div>
+        <div class="row" style="margin-top:0.9rem">
+          <label for="sv-port">Port</label>
+          <input type="number" id="sv-port" min="1" max="65535">
+        </div>
+        <div class="actions">
+          <button class="btn" id="sv-save">Save</button>
+          <span class="msg" id="sv-msg"></span>
+        </div>
+        <div class="hint" style="margin-top:0.75rem">Changes apply on next <code>lf serve</code>.</div>
+      </div>
+    </section>
+
+    <section id="page-startup" hidden>
+      <span class="eyebrow">Lifecycle</span>
+      <h2>Startup</h2>
+      <div class="card">
+        <div class="row">
+          <label>Run on login</label>
+          <div class="inline">
+            <span id="as-status" class="msg"></span>
+            <button class="btn" id="as-toggle">…</button>
+          </div>
+          <div class="hint">macOS: launchd LaunchAgent · Linux: XDG autostart entry · Windows: HKCU Run key.</div>
+        </div>
+        <span class="msg" id="as-msg"></span>
+      </div>
+    </section>
+
+    <section id="page-advanced" hidden>
+      <span class="eyebrow">Raw</span>
+      <h2>Advanced</h2>
+      <div class="card">
+        <div class="row">
+          <label>Config file</label>
+          <code id="adv-path"></code>
+        </div>
+        <div class="row">
+          <label for="adv-json">Config (JSON)</label>
+          <textarea id="adv-json" spellcheck="false"></textarea>
+          <div class="hint">Edit and save to apply any key. Unknown keys and wrong types are rejected.</div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="adv-save">Save</button>
+          <button class="btn secondary" id="adv-reload">Reload</button>
+          <span class="msg" id="adv-msg"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast" role="status"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const token = document.querySelector('meta[name="localflow-token"]').content;
+  let config = null;
+  let sttProviders = [];
+
+  async function api(path, opts = {}) {
+    const headers = { "X-Localflow-Token": token };
+    if (opts.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(opts.body);
+    }
+    const res = await fetch(path, { ...opts, headers });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `${res.status} ${res.statusText}`);
+    return data;
+  }
+
+  function toast(text) {
+    const el = $("toast");
+    el.textContent = text;
+    el.classList.add("show");
+    setTimeout(() => el.classList.remove("show"), 2200);
+  }
+
+  function setMsg(id, text, ok) {
+    const el = $(id);
+    el.textContent = text;
+    el.className = "msg " + (ok === undefined ? "" : ok ? "ok" : "bad");
+  }
+
+  function fillSelect(select, items, value) {
+    select.innerHTML = "";
+    for (const item of items) {
+      const opt = document.createElement("option");
+      opt.value = item.id;
+      opt.textContent = item.label || item.id;
+      if (item.disabled) opt.disabled = true;
+      select.appendChild(opt);
+    }
+    if (value !== undefined && ![...select.options].some((o) => o.value === value)) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = `${value} (custom)`;
+      select.appendChild(opt);
+    }
+    if (value !== undefined) select.value = value;
+  }
+
+  function isLocalUrl(url) {
+    try {
+      const host = new URL(url).hostname;
+      return ["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host) || host.endsWith(".local");
+    } catch { return false; }
+  }
+
+  // ---- navigation ----
+  document.querySelectorAll("nav button[data-page]").forEach((btn) => {
+    btn.addEventListener("click", () => showPage(btn.dataset.page));
+  });
+  function showPage(name) {
+    document.querySelectorAll("main section").forEach((s) => { s.hidden = s.id !== `page-${name}`; });
+    document.querySelectorAll("nav button[data-page]").forEach((b) => {
+      if (b.dataset.page === name) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+    });
+    location.hash = name;
+    if (name === "status") loadStatus();
+    if (name === "startup") loadAutostart();
+  }
+
+  // ---- status ----
+  async function loadStatus() {
+    try {
+      const s = await api("/api/status");
+      $("nav-platform").textContent = s.platform;
+      $("nav-config-path").textContent = s.config_path;
+      $("st-stt").textContent = `${s.stt.provider} · ${s.stt.model}`;
+      $("st-stt-dev").textContent = `${s.stt.device} · ${s.stt.language || "auto"}`;
+      $("st-loaded").textContent = s.stt.loaded ? "yes" : "not yet (loads on first use)";
+      $("st-llm").textContent = `${s.llm.provider} · ${s.llm.model}`;
+      $("st-llm-url").innerHTML = "";
+      $("st-llm-url").append(s.llm.base_url, " ");
+      const badge = document.createElement("span");
+      badge.className = "badge " + (isLocalUrl(s.llm.base_url) ? "local" : "remote");
+      badge.textContent = isLocalUrl(s.llm.base_url) ? "local" : "remote";
+      $("st-llm-url").append(badge);
+      $("st-cleanup").textContent = s.llm.cleanup_enabled ? "on" : "off";
+      $("st-hotkey").textContent = s.hotkey;
+      $("st-paste").textContent = s.paste_method;
+      $("st-server").textContent = `${s.server.host}:${s.server.port}`;
+      $("st-platform").textContent = s.platform;
+      $("st-autostart").textContent = s.autostart;
+      $("st-meetings").textContent = s.meetings_enabled ? "enabled" : "disabled";
+    } catch (e) { toast(`status: ${e.message}`); }
+  }
+
+  // ---- config load / forms ----
+  async function loadConfig() {
+    config = await api("/api/config");
+    // STT
+    fillSelect($("stt-provider"), [{ id: "auto", label: "auto (best available)" }].concat(sttProviders.map((p) => ({
+      id: p.id, label: p.available ? p.id : `${p.id} (not installed)`, disabled: !p.available && p.id !== config.stt.provider,
+    }))), config.stt.provider);
+    await loadSttModels();
+    $("stt-device").value = config.stt.device;
+    $("stt-language").value = config.stt.language || "";
+    // LLM
+    $("llm-base-url").value = config.llm.base_url;
+    $("llm-provider").value = config.llm.provider;
+    updateLlmBadge();
+    fillSelect($("llm-model"), [{ id: config.llm.model }], config.llm.model);
+    $("llm-model-hint").textContent = "Click Refresh to list models from the endpoint.";
+    $("llm-cleanup").checked = config.llm.cleanup_enabled;
+    $("llm-timeout").value = config.llm.cleanup_timeout;
+    // hotkey
+    $("hk-key").value = config.hotkey.key;
+    $("hk-paste").value = config.paste.method;
+    $("hk-sounds").checked = config.hotkey.sounds;
+    $("hk-symbols").checked = config.dictation.spoken_symbols;
+    // server
+    $("sv-host").value = config.server.host;
+    $("sv-port").value = config.server.port;
+    updateBindWarning();
+    // advanced
+    $("adv-json").value = JSON.stringify(config, null, 2);
+  }
+
+  async function loadSttModels() {
+    const provider = $("stt-provider").value;
+    const current = config.stt.provider === provider ? config.stt.model : undefined;
+    const data = await api(`/api/models?kind=stt&provider=${encodeURIComponent(provider)}`);
+    fillSelect($("stt-model"), data.models.map((m) => ({
+      id: m.id, label: m.installed === true ? `${m.id} ✓` : m.label || m.id,
+    })), current);
+    $("stt-model-hint").textContent = data.error ? `Could not list models: ${data.error}` : "✓ = downloaded. Others download on first use.";
+  }
+  $("stt-provider").addEventListener("change", () => loadSttModels().catch((e) => setMsg("stt-msg", e.message, false)));
+
+  async function saveSection(update, msgId) {
+    try {
+      config = await api("/api/config", { method: "PUT", body: update });
+      setMsg(msgId, "saved", true);
+      toast("saved");
+      $("adv-json").value = JSON.stringify(config, null, 2);
+    } catch (e) { setMsg(msgId, e.message, false); }
+  }
+
+  $("stt-save").addEventListener("click", () => {
+    const model = $("stt-model-custom").value.trim() || $("stt-model").value;
+    saveSection({ stt: {
+      provider: $("stt-provider").value, model, device: $("stt-device").value,
+      language: $("stt-language").value.trim() || null,
+    } }, "stt-msg").then(() => { $("stt-model-custom").value = ""; return loadSttModels(); });
+  });
+
+  // ---- LLM ----
+  function updateLlmBadge() {
+    const local = isLocalUrl($("llm-base-url").value);
+    const b = $("llm-badge");
+    b.className = "badge " + (local ? "local" : "remote");
+    b.textContent = local ? "local" : "remote";
+  }
+  $("llm-base-url").addEventListener("input", updateLlmBadge);
+  $("llm-provider").addEventListener("change", () => {
+    const p = $("llm-provider").value;
+    if (p === "ollama" && !$("llm-base-url").value.includes("11434")) $("llm-base-url").value = "http://localhost:11434";
+    if (p === "openai-compatible" && $("llm-base-url").value.includes("11434")) $("llm-base-url").value = "http://localhost:11434/v1";
+    updateLlmBadge();
+  });
+
+  async function refreshLlmModels() {
+    const provider = $("llm-provider").value, base = $("llm-base-url").value;
+    setMsg("llm-msg", "listing models…");
+    const data = await api(`/api/models?kind=llm&provider=${encodeURIComponent(provider)}&base_url=${encodeURIComponent(base)}`);
+    const current = $("llm-model-custom").value.trim() || $("llm-model").value;
+    fillSelect($("llm-model"), data.models, current);
+    $("llm-model-hint").textContent = data.error ? `Could not list models: ${data.error}` : `${data.models.length} model(s) at ${base}`;
+    setMsg("llm-msg", "");
+  }
+  $("llm-refresh").addEventListener("click", () => refreshLlmModels().catch((e) => setMsg("llm-msg", e.message, false)));
+
+  $("llm-save").addEventListener("click", () => {
+    const model = $("llm-model-custom").value.trim() || $("llm-model").value;
+    saveSection({ llm: {
+      provider: $("llm-provider").value, base_url: $("llm-base-url").value.trim(), model,
+      cleanup_enabled: $("llm-cleanup").checked, cleanup_timeout: Number($("llm-timeout").value),
+    } }, "llm-msg").then(() => { $("llm-model-custom").value = ""; fillSelect($("llm-model"), [{ id: model }], model); });
+  });
+
+  $("llm-test").addEventListener("click", async () => {
+    setMsg("llm-msg", "testing…");
+    try {
+      const r = await api("/api/test/llm", { method: "POST", body: {
+        provider: $("llm-provider").value, base_url: $("llm-base-url").value.trim(),
+        model: $("llm-model-custom").value.trim() || $("llm-model").value,
+      } });
+      setMsg("llm-msg", r.ok ? `ok — ${r.detail || "reachable"}` : `failed — ${r.detail}`, r.ok);
+    } catch (e) { setMsg("llm-msg", e.message, false); }
+  });
+
+  async function loadSecrets() {
+    try {
+      const s = await api("/api/secrets");
+      $("llm-key-hint").textContent = s.llm_api_key ? "A key is stored. Enter a new one to replace it, or save empty to remove." : "No key stored (fine for local servers).";
+    } catch (e) { $("llm-key-hint").textContent = e.message; }
+  }
+  $("llm-key-save").addEventListener("click", async () => {
+    try {
+      await api("/api/secrets/llm_api_key", { method: "PUT", body: { value: $("llm-key").value } });
+      $("llm-key").value = "";
+      setMsg("llm-msg", "key saved to keyring", true);
+      loadSecrets();
+    } catch (e) { setMsg("llm-msg", e.message, false); }
+  });
+
+  // ---- hotkey ----
+  $("hk-save").addEventListener("click", () => saveSection({
+    hotkey: { key: $("hk-key").value.trim(), sounds: $("hk-sounds").checked },
+    paste: { method: $("hk-paste").value },
+    dictation: { spoken_symbols: $("hk-symbols").checked },
+  }, "hk-msg"));
+
+  // ---- server ----
+  function updateBindWarning() {
+    const h = $("sv-host").value.trim();
+    $("sv-warn").hidden = ["127.0.0.1", "localhost", "::1"].includes(h);
+  }
+  $("sv-host").addEventListener("input", updateBindWarning);
+  $("sv-save").addEventListener("click", () => saveSection({
+    server: { host: $("sv-host").value.trim(), port: Number($("sv-port").value) },
+  }, "sv-msg"));
+
+  // ---- startup ----
+  async function loadAutostart() {
+    try {
+      const r = await api("/api/autostart");
+      $("as-status").textContent = r.status;
+      const installed = r.status.startsWith("installed") || r.status.startsWith("loaded");
+      $("as-toggle").textContent = installed ? "Disable" : "Enable";
+      $("as-toggle").dataset.enabled = installed ? "1" : "0";
+    } catch (e) { setMsg("as-msg", e.message, false); }
+  }
+  $("as-toggle").addEventListener("click", async () => {
+    const enable = $("as-toggle").dataset.enabled !== "1";
+    try {
+      const r = await api("/api/autostart", { method: "POST", body: { enabled: enable } });
+      $("as-status").textContent = r.status;
+      setMsg("as-msg", enable ? "localflow will start on login" : "removed", true);
+      loadAutostart();
+    } catch (e) { setMsg("as-msg", e.message, false); }
+  });
+
+  // ---- advanced ----
+  $("adv-save").addEventListener("click", async () => {
+    let update;
+    try { update = JSON.parse($("adv-json").value); } catch (e) { setMsg("adv-msg", `invalid JSON: ${e.message}`, false); return; }
+    delete update.config_version;
+    await saveSection(update, "adv-msg");
+    await loadConfig();
+  });
+  $("adv-reload").addEventListener("click", () => loadConfig().then(() => setMsg("adv-msg", "reloaded", true)));
+
+  // ---- boot ----
+  (async () => {
+    try {
+      const [stt, llm, status] = await Promise.all([api("/api/providers/stt"), api("/api/providers/llm"), api("/api/status")]);
+      sttProviders = stt;
+      fillSelect($("llm-provider"), llm.map((p) => ({ id: p.id, label: p.offline ? `${p.id} (local)` : p.id })));
+      $("adv-path").textContent = status.config_path;
+      await loadConfig();
+      await loadSecrets();
+      showPage(location.hash.replace("#", "") || "status");
+    } catch (e) { toast(`could not load settings: ${e.message}`); }
+  })();
+})();
+</script>
+</body>
+</html>
