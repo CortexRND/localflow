@@ -28,13 +28,26 @@ def controller(tmp_path):
     c.window.close()
 
 
-def test_empty_state_and_example(controller):
-    c, store = controller
+def test_empty_state_hides_editor(controller):
+    c, _ = controller
     assert c.empty_state_visible()
-    c.add_example()
+    assert c.detail_editor_hidden()
+
+
+def test_create_from_empty_shows_editor(controller):
+    c, _ = controller
+    c.new_phrase()
     assert not c.empty_state_visible()
+    assert not c.detail_editor_hidden()
+
+
+def test_example_adds_entry_and_shows_editor(controller):
+    c, store = controller
+    c.add_example()
     (e,) = store.list()
     assert e["trigger"] == "review checklist"
+    assert not c.empty_state_visible()
+    assert not c.detail_editor_hidden()
 
 
 def test_draft_autosave_and_invalid(controller):
@@ -48,13 +61,11 @@ def test_draft_autosave_and_invalid(controller):
     assert [e["trigger"] for e in store.list()] == ["my trigger"]
 
     entry = store.list()[0]
-    c.set_fields("Review checklist", "x")
-    assert "Already used" not in c.trigger_hint_text()
     store.add("other", "y")
+    c.reload_sidebar()
     c.set_fields("other", "x")
     c.flush_autosave()
     assert "Already used" in c.trigger_hint_text()
-    # the invalid commit wrote nothing for the edit target
     assert store.get(entry["id"])["text"] == "my text"
 
 
@@ -78,13 +89,40 @@ def test_toggle_persists(controller):
     assert store.list()[0]["enabled"] is False
 
 
-def test_delete_and_undo(controller):
+def test_delete_selects_neighbour(controller):
+    c, store = controller
+    store.add("alpha", "A")
+    b = store.add("beta", "B")
+    g = store.add("gamma", "G")
+    c.reload_sidebar()
+    c.select_entry(b["id"])
+    c.delete_current()
+    assert c.undo_bar_visible()
+    remaining = [e["trigger"] for e in store.list()]
+    assert remaining == ["alpha", "gamma"]
+    # same row index clamped: beta was row 1 -> gamma (row 1) selected
+    assert c.current_id == g["id"]
+    assert not c.detail_editor_hidden()
+
+
+def test_delete_last_entry_shows_empty_state(controller):
     c, store = controller
     e = store.add("trig", "t")
     c.reload_sidebar()
     c.select_entry(e["id"])
     c.delete_current()
-    assert c.undo_bar_visible() and store.list() == []
+    assert store.list() == []
+    assert c.empty_state_visible()
+    assert c.detail_editor_hidden()
+
+
+def test_delete_and_undo_restores(controller):
+    c, store = controller
+    e = store.add("trig", "t")
+    c.reload_sidebar()
+    c.select_entry(e["id"])
+    c.delete_current()
+    assert c.undo_bar_visible()
     c.undo_delete()
     assert [x["trigger"] for x in store.list()] == ["trig"]
     assert not c.undo_bar_visible()
@@ -98,8 +136,27 @@ def test_test_input_shows_expansion(controller):
     assert c.preview_output() == "please CHECK now"
 
 
-def test_external_change_poll(controller, tmp_path):
+def test_test_field_delegate_updates_preview(controller):
     c, store = controller
+    store.add("review checklist", "CHECK")
+    c.reload_sidebar()
+    c.test_field.setStringValue_("please review checklist now")
+    # The delegate path, not the action: a fake note whose object() is the
+    # test field.
+    c.controlTextDidChange_(SimpleNamespace(object=lambda: c.test_field))
+    assert c.preview_output() == "please CHECK now"
+
+
+def test_trigger_field_delegate_updates_hints(controller):
+    c, _ = controller
+    c.new_phrase()
+    c.trigger_field.setStringValue_("")
+    c.controlTextDidChange_(SimpleNamespace(object=lambda: c.trigger_field))
+    assert c.trigger_hint_text() == "Type the words you'll say"
+
+
+def test_external_change_poll(controller, tmp_path):
+    c, _ = controller
     c.model.changed_on_disk()  # prime
     HotPhraseStore(tmp_path / "hot_phrases.json").add("sign off", "Thanks")
     c.poll_store()
@@ -108,8 +165,8 @@ def test_external_change_poll(controller, tmp_path):
 
 def test_snapshot_png(controller, tmp_path):
     from localflow.phrases_mac import snapshot_png
+    c, _ = controller
     for dark in (False, True):
-        c, _ = controller
         out = tmp_path / f"snap-{'dark' if dark else 'light'}.png"
         snapshot_png(c, out, dark=dark)
         assert out.exists() and out.stat().st_size > 0

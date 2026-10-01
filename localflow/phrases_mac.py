@@ -3,6 +3,11 @@
 Opened by the dispatcher in phrases_window.py (which falls back to the Tk
 window when PyObjC is absent). All logic lives in PhrasesModel; this file
 is the AppKit layer only.
+
+Selector hygiene: methods that PyObjC exposes to Objective-C follow Cocoa
+naming (`tableView_viewForTableColumn_row_` = tableView:viewForTableColumn:row:).
+Everything else is @objc.python_method so a stray underscore can't silently
+export a malformed selector — tests/test_phrases_mac_static.py enforces it.
 """
 
 import objc
@@ -35,7 +40,7 @@ from AppKit import (
     NSFont,
     NSApp,
 )
-from Foundation import NSObject, NSMakeRect, NSIndexSet
+from Foundation import NSObject, NSMakeRect, NSIndexSet, NSRunLoop, NSDate
 
 from localflow.hotphrases import HOT_PHRASES_PATH, HotPhraseStore
 from localflow.phrases_model import PhrasesModel
@@ -52,6 +57,8 @@ _EXAMPLE_TEXT = (
     "- no unrelated churn\n"
     "Report findings by severity."
 )
+
+_TOOLBAR_NEW = "newPhrase"
 
 
 def _label(text, font=None, color=None, wrap=False):
@@ -73,12 +80,13 @@ def _first_line(text):
 class PhrasesWindowController(NSObject):
     """Owns the split-view window and drives PhrasesModel.
 
-    Test-reachable surface: new_phrase, set_fields, flush_autosave,
-    select_entry, toggle_enabled, delete_current, undo_delete, set_search,
-    set_test_input; visible_triggers, trigger_hint_text, status_text,
-    preview_output, empty_state_visible, undo_bar_visible. `confirm_discard`
-    is a callable returning True to discard pending edits (default shows an
-    NSAlert) so tests can bypass the modal.
+    Test-reachable surface: new_phrase, add_example, set_fields,
+    flush_autosave, select_entry, toggle_enabled, delete_current,
+    undo_delete, set_search, set_test_input, poll_store; visible_triggers,
+    trigger_hint_text, status_text, preview_output, empty_state_visible,
+    detail_editor_hidden, undo_bar_visible. `confirm_discard` is a callable
+    returning True to discard pending edits (default shows an NSAlert) so
+    tests can bypass the modal.
     """
 
     def initWithStore_config_(self, store, config=None):
@@ -93,6 +101,8 @@ class PhrasesWindowController(NSObject):
         self._fields_dirty = False
         self._entries = []
         self._undo_token = None
+        self._autosave_timer = None
+        self._undo_timer = None
 
         self._build_window()
         self._build_sidebar()
@@ -103,8 +113,7 @@ class PhrasesWindowController(NSObject):
         self._update_detail_visibility()
         if self._entries:
             self.select_entry(self._entries[0]["id"])
-        else:
-            self.new_phrase()
+        # else: empty state shows, no draft in progress
         self._poll_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             _POLL_INTERVAL, self, objc.selector(self.pollStore_, signature=b"v@:@"), None, True
         )
@@ -112,6 +121,7 @@ class PhrasesWindowController(NSObject):
 
     # ------------------------------------------------------------ window ---
 
+    @objc.python_method
     def _build_window(self):
         style = (
             AppKit.NSWindowStyleMaskTitled
@@ -140,6 +150,7 @@ class PhrasesWindowController(NSObject):
 
     # ----------------------------------------------------------- sidebar ---
 
+    @objc.python_method
     def _build_sidebar(self):
         self.sidebar_vc = NSViewController.alloc().init()
         stack = NSStackView.alloc().init()
@@ -149,6 +160,7 @@ class PhrasesWindowController(NSObject):
 
         self.search_field = NSSearchField.alloc().init()
         self.search_field.setPlaceholderString_("Search phrases")
+        self.search_field.setDelegate_(self)
         self.search_field.setTarget_(self)
         self.search_field.setAction_(objc.selector(self.searchChanged_, signature=b"v@:@"))
         stack.addView_inGravity_(self.search_field, AppKit.NSStackViewGravityTop)
@@ -175,6 +187,7 @@ class PhrasesWindowController(NSObject):
         item.setMinimumThickness_(220)
         self.split.addSplitViewItem_(item)
 
+    @objc.python_method
     def reload_sidebar(self, keep_selection=True):
         keep = self.current_id if keep_selection else None
         self._entries = self.model.entries(self.query)
@@ -187,6 +200,8 @@ class PhrasesWindowController(NSObject):
                     )
                     self.table.scrollRowToVisible_(row)
                     break
+
+    # -- table data source / delegate --
 
     def numberOfRowsInTableView_(self, _table):
         if self.query and not self._entries:
@@ -201,11 +216,17 @@ class PhrasesWindowController(NSObject):
         color = NSColor.labelColor() if enabled else NSColor.tertiaryLabelColor()
 
         cell = NSView.alloc().init()
-        trigger = _label(e["trigger"], font=NSFont.systemFontOfSize_weight_(13, AppKit.NSFontWeightSemibold), color=color)
+        trigger = _label(
+            e["trigger"],
+            font=NSFont.systemFontOfSize_weight_(13, AppKit.NSFontWeightSemibold),
+            color=color,
+        )
         trigger.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
-        sub = _label(_first_line(e["text"]),
-                     font=NSFont.systemFontOfSize_(11),
-                     color=color if not enabled else NSColor.secondaryLabelColor())
+        sub = _label(
+            _first_line(e["text"]),
+            font=NSFont.systemFontOfSize_(11),
+            color=color if not enabled else NSColor.secondaryLabelColor(),
+        )
         sub.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
 
         stack = NSStackView.alloc().init()
@@ -231,15 +252,13 @@ class PhrasesWindowController(NSObject):
             off.centerYAnchor().constraintEqualToAnchor_(cell.centerYAnchor()).setActive_(True)
         return cell
 
-    def tableViewShouldSelectRow_(self, _table, row):
+    def tableView_shouldSelectRow_(self, _table, row):
         if self.query and not self._entries:
             return False
         target = self._entries[row]["id"]
         if target == self.current_id:
             return True
-        if not self._leave_editor():
-            return False
-        return True
+        return self._leave_editor()
 
     def tableViewSelectionDidChange_(self, _note):
         row = self.table.selectedRow()
@@ -251,6 +270,7 @@ class PhrasesWindowController(NSObject):
 
     # ------------------------------------------------------------ detail ---
 
+    @objc.python_method
     def _build_detail(self):
         self.detail_vc = NSViewController.alloc().init()
         root = NSStackView.alloc().init()
@@ -259,15 +279,19 @@ class PhrasesWindowController(NSObject):
         root.setEdgeInsets_(AppKit.NSEdgeInsets(20, 20, 20, 20))
         root.setSpacing_(8)
         root.setDetachesHiddenViews_(True)
+        self.editor_root = root
 
-        # disabled banner
+        # disabled banner: a custom box needs a real content view, its title
+        # doesn't render for NSBoxCustom.
         self.banner = NSBox.alloc().init()
-        self.banner.setTitle_("Hot phrases are turned off in ~/.localflow.toml (hot_phrases = false)")
         self.banner.setBoxType_(AppKit.NSBoxCustom)
         self.banner.setFillColor_(NSColor.systemYellowColor().colorWithAlphaComponent_(0.18))
         self.banner.setBorderColor_(NSColor.clearColor())
         self.banner.setCornerRadius_(6)
         self.banner.setContentViewMargins_(AppKit.NSEdgeInsets(8, 10, 8, 10))
+        self.banner.setContentView_(_label(
+            "Hot phrases are turned off in ~/.localflow.toml (hot_phrases = false)",
+            wrap=True))
         self.banner.setHidden_(self.model.hot_phrases_enabled)
         root.addArrangedSubview_(self.banner)
 
@@ -276,8 +300,6 @@ class PhrasesWindowController(NSObject):
         self.trigger_field = NSTextField.alloc().init()
         self.trigger_field.setPlaceholderString_("e.g. review checklist")
         self.trigger_field.setDelegate_(self)
-        self.trigger_field.setTarget_(self)
-        self.trigger_field.setAction_(objc.selector(self.fieldChanged_, signature=b"v@:@"))
         root.addArrangedSubview_(self.trigger_field)
         self.trigger_field.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutOrientationHorizontal)
         self.trigger_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
@@ -293,6 +315,11 @@ class PhrasesWindowController(NSObject):
         self.text_view.setAutomaticDashSubstitutionEnabled_(False)
         self.text_view.setAutomaticTextReplacementEnabled_(False)
         self.text_view.setDelegate_(self)
+        self.text_view.setMinSize_(AppKit.NSMakeSize(0, 0))
+        self.text_view.setMaxSize_(AppKit.NSMakeSize(1e7, 1e7))
+        self.text_view.setVerticallyResizable_(True)
+        self.text_view.setHorizontallyResizable_(False)
+        self.text_view.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         text_scroll = NSScrollView.alloc().init()
         text_scroll.setDocumentView_(self.text_view)
         text_scroll.setHasVerticalScroller_(True)
@@ -301,16 +328,11 @@ class PhrasesWindowController(NSObject):
         root.addArrangedSubview_(text_scroll)
         text_scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutOrientationVertical)
         text_scroll.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
-        self.text_view.setMinSize_(AppKit.NSMakeSize(0, 0))
-        self.text_view.setMaxSize_(AppKit.NSMakeSize(1e7, 1e7))
-        self.text_view.setVerticallyResizable_(True)
-        self.text_view.setHorizontallyResizable_(False)
-        self.text_view.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         self.text_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                       color=NSColor.secondaryLabelColor())
         root.addArrangedSubview_(self.text_hint_label)
 
-        # enabled row: switch + "On" + spacer + Delete…
+        # enabled row: switch + "On" + spacer + Delete
         row = NSStackView.alloc().init()
         row.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationHorizontal)
         row.setSpacing_(8)
@@ -323,7 +345,7 @@ class PhrasesWindowController(NSObject):
         spacer.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutOrientationHorizontal)
         row.addArrangedSubview_(spacer)
         self.delete_button = NSButton.alloc().init()
-        self.delete_button.setTitle_("Delete\u2026")
+        self.delete_button.setTitle_("Delete")
         self.delete_button.setBezelStyle_(AppKit.NSBezelStyleAccessoryBarAction)
         self.delete_button.setContentTintColor_(NSColor.systemRedColor())
         self.delete_button.setTarget_(self)
@@ -358,13 +380,19 @@ class PhrasesWindowController(NSObject):
         self.test_area.setSpacing_(6)
         self.test_field = NSTextField.alloc().init()
         self.test_field.setPlaceholderString_("Say something\u2026")
-        self.test_field.setTarget_(self)
-        self.test_field.setAction_(objc.selector(self.testChanged_, signature=b"v@:@"))
+        # Delegate, not just target/action: the action only fires on Return;
+        # the preview must update live as you type.
+        self.test_field.setDelegate_(self)
         self.test_area.addArrangedSubview_(self.test_field)
         self.test_output = NSTextView.alloc().init()
         self.test_output.setEditable_(False)
         self.test_output.setRichText_(False)
         self.test_output.setDrawsBackground_(False)
+        self.test_output.setMinSize_(AppKit.NSMakeSize(0, 0))
+        self.test_output.setMaxSize_(AppKit.NSMakeSize(1e7, 1e7))
+        self.test_output.setVerticallyResizable_(True)
+        self.test_output.setHorizontallyResizable_(False)
+        self.test_output.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         test_scroll = NSScrollView.alloc().init()
         test_scroll.setDocumentView_(self.test_output)
         test_scroll.setHasVerticalScroller_(True)
@@ -382,6 +410,7 @@ class PhrasesWindowController(NSObject):
         self.detail_vc.setView_(root)
         self.split.addSplitViewItem_(NSSplitViewItem.splitViewItemWithViewController_(self.detail_vc))
 
+    @objc.python_method
     def _build_empty_state(self):
         self.empty_view = NSStackView.alloc().init()
         self.empty_view.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationVertical)
@@ -407,7 +436,6 @@ class PhrasesWindowController(NSObject):
         self.empty_view.addArrangedSubview_(subtitle)
         self.empty_view.addArrangedSubview_(create)
         self.empty_view.addArrangedSubview_(example)
-        # Centered overlay in the detail view.
         self.empty_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
         self.detail_vc.view().addSubview_(self.empty_view)
         self.empty_view.centerXAnchor().constraintEqualToAnchor_(
@@ -418,6 +446,7 @@ class PhrasesWindowController(NSObject):
             self.detail_vc.view().widthAnchor(), -80).setActive_(True)
         self.empty_view.setHidden_(True)
 
+    @objc.python_method
     def _build_undo_bar(self):
         self.undo_bar = NSBox.alloc().init()
         self.undo_bar.setBoxType_(AppKit.NSBoxCustom)
@@ -440,14 +469,18 @@ class PhrasesWindowController(NSObject):
         self.undo_bar.bottomAnchor().constraintEqualToAnchor_constant_(
             self.detail_vc.view().bottomAnchor(), -12).setActive_(True)
         self.undo_bar.setHidden_(True)
-        self._undo_timer = None
 
+    @objc.python_method
     def _update_detail_visibility(self):
-        has = bool(self.model.entries())
-        self.empty_view.setHidden_(has)
+        """Empty state iff the store is empty AND no draft is being edited;
+        the editor stack is fully hidden while it shows."""
+        show_empty = not self.model.entries() and self.current_id is None and not self._draft
+        self.empty_view.setHidden_(not show_empty)
+        self.editor_root.setHidden_(show_empty)
 
     # ------------------------------------------------------------- editor ---
 
+    @objc.python_method
     def _editor_values(self):
         return (
             str(self.trigger_field.stringValue()),
@@ -455,6 +488,7 @@ class PhrasesWindowController(NSObject):
             bool(self.enabled_switch.state() == AppKit.NSControlStateValueOn),
         )
 
+    @objc.python_method
     def _fields_match_entry(self, entry):
         trigger, text, enabled = self._editor_values()
         return (
@@ -463,6 +497,7 @@ class PhrasesWindowController(NSObject):
             and enabled == bool(entry.get("enabled"))
         )
 
+    @objc.python_method
     def _pending_edit(self):
         """An unsaved change worth confirming: a dirty stored entry, or a
         draft with anything typed that can't be committed."""
@@ -472,6 +507,7 @@ class PhrasesWindowController(NSObject):
         return bool(self.trigger_field.stringValue().strip()
                     or self.text_view.string().strip())
 
+    @objc.python_method
     def _update_hints(self):
         trigger, text, _ = self._editor_values()
         ok, msg = self.model.trigger_hint(trigger, exclude_id=self.current_id)
@@ -483,6 +519,7 @@ class PhrasesWindowController(NSObject):
         self.text_hint_label.setTextColor_(
             NSColor.secondaryLabelColor() if ok else NSColor.systemRedColor())
 
+    @objc.python_method
     def _schedule_autosave(self):
         if self._autosave_timer is not None:
             self._autosave_timer.invalidate()
@@ -491,11 +528,16 @@ class PhrasesWindowController(NSObject):
             None, False
         )
 
-    _autosave_timer = None
+    # -- delegate callbacks (real selectors) --
 
-    # Delegate callbacks -----------------------------------------------------
-
-    def controlTextDidChange_(self, _note):
+    def controlTextDidChange_(self, note):
+        obj = note.object()
+        if obj is self.test_field:
+            self._render_preview()
+            return
+        if obj is self.search_field:
+            self.searchChanged_(self.search_field)
+            return
         self._fields_dirty = True
         self._update_hints()
         self._schedule_autosave()
@@ -505,15 +547,8 @@ class PhrasesWindowController(NSObject):
         self._update_hints()
         self._schedule_autosave()
 
-    def fieldChanged_(self, _sender):
-        self._schedule_autosave()
-
     def searchChanged_(self, _sender):
-        self.query = str(self.search_field.stringValue())
-        self.reload_sidebar()
-
-    def testChanged_(self, _sender):
-        self._render_preview()
+        self.set_search(str(self.search_field.stringValue()))
 
     def toggleTestArea_(self, sender):
         open_ = self.test_area.isHidden()
@@ -541,8 +576,17 @@ class PhrasesWindowController(NSObject):
     def pollStore_(self, _timer):
         self.poll_store()
 
+    def hideUndoBar_(self, _timer):
+        self._undo_timer = None
+        self.undo_bar.setHidden_(True)
+        self._undo_token = None
+
+    def fadeStatus_(self, _timer):
+        self.status_label.setStringValue_("")
+
     # ------------------------------------------------------------- actions ---
 
+    @objc.python_method
     def new_phrase(self):
         if not self._leave_editor():
             return
@@ -550,17 +594,20 @@ class PhrasesWindowController(NSObject):
         self._draft = True
         self.table.deselectAll_(None)
         self._set_fields("", "", True)
+        self._update_detail_visibility()
         self.window.makeFirstResponder_(self.trigger_field)
 
+    @objc.python_method
     def add_example(self):
         entry, err = self.model.commit(None, _EXAMPLE_TRIGGER, _EXAMPLE_TEXT, True)
         if err is not None:
-            self._flash_status(err)
+            self._flash_status(err, error=True)
             return
         self.reload_sidebar()
-        self._update_detail_visibility()
         self.select_entry(entry["id"])
+        self._update_detail_visibility()
 
+    @objc.python_method
     def _set_fields(self, trigger, text, enabled):
         self.trigger_field.setStringValue_(trigger)
         self.text_view.setString_(text)
@@ -569,6 +616,7 @@ class PhrasesWindowController(NSObject):
         self._fields_dirty = False
         self._update_hints()
 
+    @objc.python_method
     def set_fields(self, trigger, text):
         """Test hook: simulate typing and run the same change handlers."""
         self.trigger_field.setStringValue_(trigger)
@@ -576,6 +624,7 @@ class PhrasesWindowController(NSObject):
         self._fields_dirty = True
         self._update_hints()
 
+    @objc.python_method
     def flush_autosave(self):
         """Commit the current editor contents immediately."""
         trigger, text, enabled = self._editor_values()
@@ -592,26 +641,29 @@ class PhrasesWindowController(NSObject):
         self.reload_sidebar()
         self._update_detail_visibility()
         self._flash_status("Saved \u2713")
-        self._reschedule_undo_timer_hide()
 
+    @objc.python_method
     def select_entry(self, entry_id):
         if entry_id == self.current_id:
             return
         for row, e in enumerate(self._entries):
             if e["id"] == entry_id:
-                if self.tableViewShouldSelectRow_(self.table, row):
+                if self.tableView_shouldSelectRow_(self.table, row):
                     self.table.selectRowIndexes_byExtendingSelection_(
                         NSIndexSet.indexSetWithIndex_(row), False)
                     self.table.scrollRowToVisible_(row)
                     self._load_entry(self._entries[row])
                 return
 
+    @objc.python_method
     def _load_entry(self, entry):
         self.current_id = entry["id"]
         self._draft = False
         self._set_fields(entry["trigger"], entry["text"], bool(entry.get("enabled")))
         self._flash_status("")
+        self._update_detail_visibility()
 
+    @objc.python_method
     def toggle_enabled(self):
         if self.current_id is None:
             return
@@ -621,10 +673,15 @@ class PhrasesWindowController(NSObject):
             AppKit.NSControlStateValueOn if not enabled else AppKit.NSControlStateValueOff)
         self.reload_sidebar()
 
+    @objc.python_method
     def delete_current(self):
         if self.current_id is None:
             return
-        token = self.model.delete(self.current_id)
+        deleted_id = self.current_id
+        old_index = next(
+            (i for i, e in enumerate(self._entries) if e["id"] == deleted_id), 0
+        )
+        token = self.model.delete(deleted_id)
         if token is None:
             return
         self._undo_token = token
@@ -636,19 +693,18 @@ class PhrasesWindowController(NSObject):
             _UNDO_BAR_SECONDS, self,
             objc.selector(self.hideUndoBar_, signature=b"v@:@"), None, False)
         self.current_id = None
-        self._draft = True
-        self._set_fields("", "", True)
+        self._draft = False
         self.reload_sidebar(keep_selection=False)
+        # Select the neighbour at the same index (clamped); only when the
+        # store is empty does the empty state come back.
+        if self._entries:
+            neighbour = self._entries[min(old_index, len(self._entries) - 1)]
+            self.select_entry(neighbour["id"])
+        else:
+            self._set_fields("", "", True)
         self._update_detail_visibility()
 
-    def hideUndoBar_(self, _timer):
-        self._undo_timer = None
-        self.undo_bar.setHidden_(True)
-        self._undo_token = None
-
-    def _reschedule_undo_timer_hide(self):
-        pass
-
+    @objc.python_method
     def undo_delete(self):
         if self._undo_token is None:
             return
@@ -660,17 +716,22 @@ class PhrasesWindowController(NSObject):
             self._flash_status(err, error=True)
             return
         self.reload_sidebar()
-        self._update_detail_visibility()
         self.select_entry(entry["id"])
+        self._update_detail_visibility()
 
+    @objc.python_method
     def set_search(self, q):
-        self.search_field.setStringValue_(q)
-        self.searchChanged_(self.search_field)
+        self.query = q
+        if str(self.search_field.stringValue()) != q:
+            self.search_field.setStringValue_(q)
+        self.reload_sidebar()
 
+    @objc.python_method
     def set_test_input(self, s):
         self.test_field.setStringValue_(s)
         self._render_preview()
 
+    @objc.python_method
     def _render_preview(self):
         said = str(self.test_field.stringValue())
         if not said.strip():
@@ -685,23 +746,25 @@ class PhrasesWindowController(NSObject):
         else:
             self.test_matched_label.setStringValue_("No hot phrase matched")
 
+    @objc.python_method
     def poll_store(self):
         if not self.model.changed_on_disk():
             return
         if not self._pending_edit():
             current = self.model.get(self.current_id) if self.current_id else None
             self.reload_sidebar()
-            self._update_detail_visibility()
             if current is not None:
                 self._load_entry(current)
             elif self.current_id is None and not self._entries:
+                self._draft = False
                 self._set_fields("", "", True)
         else:
             self.reload_sidebar()
-            self._update_detail_visibility()
+        self._update_detail_visibility()
 
     # ------------------------------------------------- pending-change guard ---
 
+    @objc.python_method
     def _leave_editor(self):
         """Commit pending edits, or ask what to do about a bad change.
         Returns False when the user chose 'Keep Editing'."""
@@ -725,6 +788,7 @@ class PhrasesWindowController(NSObject):
             return True
         return False
 
+    @objc.python_method
     def _confirm_discard_alert(self, error):
         alert = NSAlert.alloc().init()
         alert.setMessageText_("This change can't be saved")
@@ -736,9 +800,12 @@ class PhrasesWindowController(NSObject):
     # ------------------------------------------------------------- menus ---
 
     def validateMenuItem_(self, item):
-        if item.action() == b"deletePhrase:" or item.action() == "deletePhrase:":
+        action = item.action()
+        if action in (b"deletePhrase:", "deletePhrase:"):
             fr = self.window.firstResponder()
-            if fr is self.trigger_field or fr is self.text_view or fr is self.search_field or fr is self.test_field:
+            # Cmd+Delete is also delete-to-line-start in text fields; never
+            # steal it while a field or text view is editing.
+            if isinstance(fr, (NSTextField, NSTextView, NSSearchField)):
                 return False
             return self.current_id is not None
         return True
@@ -760,6 +827,7 @@ class PhrasesWindowController(NSObject):
 
     # ------------------------------------------------------------ helpers ---
 
+    @objc.python_method
     def _flash_status(self, msg, error=False):
         self.status_label.setStringValue_(msg)
         self.status_label.setTextColor_(
@@ -769,28 +837,35 @@ class PhrasesWindowController(NSObject):
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 1.2, self, objc.selector(self.fadeStatus_, signature=b"v@:@"), None, False)
 
-    def fadeStatus_(self, _timer):
-        self.status_label.setStringValue_("")
-
     # ----------------------------------------------------------- test hooks ---
 
+    @objc.python_method
     def visible_triggers(self):
         if self.query and not self._entries:
             return []
         return [e["trigger"] for e in self._entries]
 
+    @objc.python_method
     def trigger_hint_text(self):
         return str(self.trigger_hint_label.stringValue())
 
+    @objc.python_method
     def status_text(self):
         return str(self.status_label.stringValue())
 
+    @objc.python_method
     def preview_output(self):
         return str(self.test_output.string())
 
+    @objc.python_method
     def empty_state_visible(self):
         return not self.empty_view.isHidden()
 
+    @objc.python_method
+    def detail_editor_hidden(self):
+        return bool(self.editor_root.isHidden())
+
+    @objc.python_method
     def undo_bar_visible(self):
         return not self.undo_bar.isHidden()
 
@@ -798,19 +873,21 @@ class PhrasesWindowController(NSObject):
 
     def toolbarAllowedItemIdentifiers_(self, _toolbar):
         return [
-            AppKit.NSToolbarSidebarTrackingSeparatorItemIdentifier
-            if hasattr(AppKit, "NSToolbarSidebarTrackingSeparatorItemIdentifier")
-            else "NSToolbarSidebarTrackingSeparatorItemIdentifier",
-            "newPhrase",
+            AppKit.NSToolbarToggleSidebarItemIdentifier,
+            _TOOLBAR_NEW,
             AppKit.NSToolbarFlexibleSpaceItemIdentifier,
         ]
 
     def toolbarDefaultItemIdentifiers_(self, _toolbar):
-        return self.toolbarAllowedItemIdentifiers_(_toolbar)
+        return [
+            AppKit.NSToolbarToggleSidebarItemIdentifier,
+            _TOOLBAR_NEW,
+            AppKit.NSToolbarFlexibleSpaceItemIdentifier,
+        ]
 
     def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(
             self, _toolbar, identifier, _flag):
-        if identifier == "newPhrase":
+        if identifier == _TOOLBAR_NEW:
             item = NSToolbarItem.alloc().initWithItemIdentifier_(identifier)
             item.setImage_(
                 NSImage.imageWithSystemSymbolName_accessibilityDescription_("plus", None))
@@ -821,7 +898,9 @@ class PhrasesWindowController(NSObject):
         return None
 
 
-def build_window(store, config=None) -> "PhrasesWindowController":
+def build_window(store, config=None) -> PhrasesWindowController:
+    # Tests and the snapshot script need a shared app before creating windows.
+    NSApplication.sharedApplication()
     return PhrasesWindowController.alloc().initWithStore_config_(store, config)
 
 
@@ -887,11 +966,17 @@ def main(path=None):
 
 
 def snapshot_png(controller, path, dark=False):
-    """Render the window's content to PNG without screen-recording permission."""
+    """Render the window to PNG without screen-recording permission."""
     name = AppKit.NSAppearanceNameDarkAqua if dark else AppKit.NSAppearanceNameAqua
-    controller.window.setAppearance_(
-        AppKit.NSAppearance.appearanceNamed_(name))
-    view = controller.window.contentView()
+    controller.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_(name))
+    controller.window.orderFrontRegardless()
+    controller.window.displayIfNeeded()
+    # Let layout and the appearance change settle before reading pixels.
+    NSRunLoop.currentRunLoop().runUntilDate_(
+        NSDate.dateWithTimeIntervalSinceNow_(0.2))
+    view = controller.window.contentView().superview()
+    if view is None:
+        view = controller.window.contentView()
     view.layoutSubtreeIfNeeded()
     view.displayIfNeeded()
     bounds = view.bounds()
