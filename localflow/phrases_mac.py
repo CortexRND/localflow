@@ -395,13 +395,19 @@ class PhrasesWindowController(NSObject):
         root.addArrangedSubview_(status_row)
         status_row.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
 
-        # "Test a phrase" disclosure
+        # "Test a phrase" disclosure: the triangle bezel is only ~13pt tall
+        # and clips its own title, so the label sits next to it.
         self.disclosure = NSButton.alloc().init()
         self.disclosure.setBezelStyle_(AppKit.NSBezelStyleDisclosure)
-        self.disclosure.setTitle_("Test a phrase")
+        self.disclosure.setTitle_("")
         self.disclosure.setTarget_(self)
         self.disclosure.setAction_(objc.selector(self.toggleTestArea_, signature=b"v@:@"))
-        root.addArrangedSubview_(self.disclosure)
+        disc_row = NSStackView.alloc().init()
+        disc_row.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationHorizontal)
+        disc_row.setAlignment_(AppKit.NSLayoutAttributeCenterY)
+        disc_row.addArrangedSubview_(self.disclosure)
+        disc_row.addArrangedSubview_(_label("Test a phrase"))
+        root.addArrangedSubview_(disc_row)
 
         self.test_area = NSStackView.alloc().init()
         self.test_area.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationVertical)
@@ -445,7 +451,9 @@ class PhrasesWindowController(NSObject):
         for anchor, const in (
             (root.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()), None),
             (root.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()), None),
-            (root.topAnchor().constraintEqualToAnchor_(container.topAnchor()), None),
+            # safe-area top keeps the editor below the unified toolbar.
+            (root.topAnchor().constraintEqualToAnchor_(
+                container.safeAreaLayoutGuide().topAnchor()), None),
             (root.bottomAnchor().constraintEqualToAnchor_(container.bottomAnchor()), None),
         ):
             anchor.setActive_(True)
