@@ -674,6 +674,184 @@
     padding: 0.15rem 0.4rem;
   }
 
+
+  /* ---------- Hot phrases (purple band, archive-style card) ---------- */
+  .hp-frame {
+    border: 1px solid var(--rule-on-purple);
+    padding: 1.15rem var(--edge) 1.4rem;
+    text-align: left;
+  }
+  .hp-lede {
+    margin: 0 0 1.5rem;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--fg);
+  }
+  .hp-lede b { color: var(--accent); font-weight: 800; }
+  .hp-label {
+    display: block;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.68rem;
+    color: var(--fg);
+    margin: 0 0 0.45rem;
+  }
+  .hp-field { margin-bottom: 1rem; }
+  .hp-field input,
+  .hp-field textarea {
+    display: block;
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: 16px;   /* keeps iOS from zooming on focus */
+    line-height: 1.5;
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--rule-on-purple);
+    border-radius: 0;
+    padding: 0.8rem 1rem;
+  }
+  .hp-field input { min-height: 54px; }
+  .hp-field textarea { min-height: 9rem; resize: vertical; }
+  .hp-field input::placeholder,
+  .hp-field textarea::placeholder { color: var(--rule-on-purple); opacity: 1; }
+  .hp-field input:focus,
+  .hp-field textarea:focus { border-color: var(--accent); }
+  .hp-actions {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .hp-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 0 1.25rem;
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--fg);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+  .hp-btn:hover, .hp-btn:active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+  }
+  .hp-btn--primary { background: var(--fg); color: var(--bg); }
+  .hp-btn[hidden] { display: none; }
+  .hp-btn:disabled { border-style: dashed; background: transparent; color: var(--fg); cursor: not-allowed; }
+  #hpFormMsg {
+    font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+  }
+  .hp-divider {
+    border: 0;
+    border-top: 1px solid var(--rule-on-purple);
+    margin: 1.6rem 0 1.4rem;
+  }
+  #hpPreviewOut {
+    margin-top: 0.75rem;
+    padding: 0.9rem 1rem;
+    border: 1px dashed var(--rule-on-purple);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: var(--accent);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  #hpPreviewOut:empty { display: none; }
+  #hpList:empty::before {
+    content: "No hot phrases yet.";
+    display: block;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.85rem;
+    color: var(--fg);
+  }
+  .hp-item {
+    border-top: 1px solid var(--rule-on-purple);
+    padding: 1.25rem 0;
+  }
+  .hp-item:first-child { border-top: none; padding-top: 0; }
+  .hp-item.off .hp-trigger, .hp-item.off .hp-text { opacity: 0.55; }
+  .hp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.7rem;
+  }
+  .hp-trigger {
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.9rem;
+    color: var(--accent);
+    overflow-wrap: anywhere;
+  }
+  .hp-trigger::before { content: "\201C"; }
+  .hp-trigger::after { content: "\201D"; }
+  .hp-text {
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--fg);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 7.8em;
+    overflow: hidden;
+  }
+  .hp-item.expanded .hp-text { max-height: none; }
+  .hp-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.68rem;
+    color: var(--fg);
+    cursor: pointer;
+    min-height: 44px;
+  }
+  .hp-toggle input {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    border: 2px solid var(--fg);
+    background: transparent;
+    display: grid;
+    place-content: center;
+    cursor: pointer;
+  }
+  .hp-toggle input:checked::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+  }
+
   .band--last { padding-bottom: calc(3.5rem + env(safe-area-inset-bottom)); }
 
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.15; } }
@@ -760,9 +938,51 @@
     </div>
   </section>
 
-  <section class="band band--last" aria-labelledby="sec-transcripts">
+  <section class="band band--rule" aria-labelledby="sec-hotphrases">
     <div class="inner">
-      <p class="eyebrow">No.03 — The archive</p>
+      <p class="eyebrow">No.03 — Shortcuts</p>
+      <h2 class="title" id="sec-hotphrases">Hot phrases</h2>
+
+      <div class="hp-frame">
+        <p class="hp-lede">Say a short trigger while dictating and localflow pastes the saved text instead. Say the trigger <b>on its own</b> to paste the text exactly as written, or mid-sentence to expand it in place. Case and punctuation don't matter.</p>
+
+        <form id="hpForm" autocomplete="off">
+          <div class="hp-field">
+            <label class="hp-label" for="hpTrigger">Trigger — what you say</label>
+            <input id="hpTrigger" type="text" maxlength="80" required
+                   placeholder="e.g. review checklist">
+          </div>
+          <div class="hp-field">
+            <label class="hp-label" for="hpText">Pasted text</label>
+            <textarea id="hpText" maxlength="20000" required
+                      placeholder="The full prompt to paste at the cursor"></textarea>
+          </div>
+          <div class="hp-actions">
+            <button class="hp-btn hp-btn--primary" id="hpSave" type="submit">Add hot phrase</button>
+            <button class="hp-btn" id="hpCancel" type="button" hidden>Cancel edit</button>
+            <span id="hpFormMsg" role="status"></span>
+          </div>
+        </form>
+
+        <hr class="hp-divider">
+
+        <div class="hp-field">
+          <label class="hp-label" for="hpPreviewIn">Try it — type what you'd say</label>
+          <input id="hpPreviewIn" type="text" placeholder="e.g. Review checklist.">
+          <div id="hpPreviewOut" aria-live="polite"></div>
+        </div>
+
+        <hr class="hp-divider">
+
+        <div class="frame-tab">Saved · ~/.localflow/hot_phrases.json</div>
+        <div id="hpList"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band band--rule band--last" aria-labelledby="sec-transcripts">
+    <div class="inner">
+      <p class="eyebrow">No.04 — The archive</p>
       <h2 class="title" id="sec-transcripts">Transcripts</h2>
 
       <div class="archive-frame">
@@ -1045,6 +1265,181 @@
 
   setInterval(pollMeeting, 3000);
   pollMeeting();
+
+  // ---------------- hot phrases ----------------
+  const hpForm = document.getElementById('hpForm');
+  const hpTrigger = document.getElementById('hpTrigger');
+  const hpText = document.getElementById('hpText');
+  const hpSave = document.getElementById('hpSave');
+  const hpCancel = document.getElementById('hpCancel');
+  const hpFormMsg = document.getElementById('hpFormMsg');
+  const hpList = document.getElementById('hpList');
+  const hpPreviewIn = document.getElementById('hpPreviewIn');
+  const hpPreviewOut = document.getElementById('hpPreviewOut');
+
+  let hpEditing = null;  // id of the entry being edited, or null when adding
+
+  async function hpRequest(method, url, body) {
+    const resp = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!resp.ok) {
+      let detail = resp.statusText;
+      try {
+        const j = await resp.json();
+        if (j.detail) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail);
+      } catch (_) {}
+      throw new Error(detail);
+    }
+    return resp.json();
+  }
+
+  function hpFlash(msg) {
+    hpFormMsg.textContent = msg;
+    setTimeout(() => { if (hpFormMsg.textContent === msg) hpFormMsg.textContent = ''; }, 2500);
+  }
+
+  function hpResetForm() {
+    hpEditing = null;
+    hpForm.reset();
+    hpSave.textContent = 'Add hot phrase';
+    hpCancel.hidden = true;
+  }
+
+  function hpRender(entries) {
+    hpList.replaceChildren();
+    for (const e of entries) {
+      const item = document.createElement('div');
+      item.className = 'hp-item' + (e.enabled ? '' : ' off');
+
+      const head = document.createElement('div');
+      head.className = 'hp-head';
+      const trig = document.createElement('span');
+      trig.className = 'hp-trigger';
+      trig.textContent = e.trigger;
+
+      const actions = document.createElement('div');
+      actions.className = 'hp-actions';
+
+      const toggle = document.createElement('label');
+      toggle.className = 'hp-toggle';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!e.enabled;
+      cb.setAttribute('aria-label', 'Enable ' + e.trigger);
+      cb.onchange = async () => {
+        try {
+          await hpRequest('PATCH', '/hot-phrases/' + e.id, { enabled: cb.checked });
+          clearError();
+        } catch (err) {
+          showError('Hot phrase: ' + err.message);
+        }
+        hpLoad();
+      };
+      const tl = document.createElement('span');
+      tl.textContent = 'On';
+      toggle.append(cb, tl);
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'hp-btn';
+      editBtn.textContent = 'Edit';
+      editBtn.onclick = () => {
+        hpEditing = e.id;
+        hpTrigger.value = e.trigger;
+        hpText.value = e.text;
+        hpSave.textContent = 'Save changes';
+        hpCancel.hidden = false;
+        hpFormMsg.textContent = '';
+        hpForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        hpTrigger.focus({ preventScroll: true });
+      };
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'hp-btn';
+      delBtn.textContent = 'Delete';
+      delBtn.onclick = async () => {
+        if (!confirm('Delete hot phrase "' + e.trigger + '"?')) return;
+        try {
+          await hpRequest('DELETE', '/hot-phrases/' + e.id);
+          if (hpEditing === e.id) hpResetForm();
+          clearError();
+        } catch (err) {
+          showError('Hot phrase: ' + err.message);
+        }
+        hpLoad();
+      };
+
+      actions.append(toggle, editBtn, delBtn);
+      head.append(trig, actions);
+
+      const text = document.createElement('div');
+      text.className = 'hp-text';
+      text.textContent = e.text;
+      text.title = 'Click to expand';
+      text.onclick = () => item.classList.toggle('expanded');
+
+      item.append(head, text);
+      hpList.appendChild(item);
+    }
+  }
+
+  async function hpLoad() {
+    try {
+      const data = await hpRequest('GET', '/hot-phrases');
+      hpRender(data.entries || []);
+      hpPreview();
+    } catch (err) {
+      showError('Hot phrases: ' + err.message);
+    }
+  }
+
+  hpForm.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const body = { trigger: hpTrigger.value, text: hpText.value };
+    hpSave.disabled = true;
+    try {
+      if (hpEditing) {
+        await hpRequest('PATCH', '/hot-phrases/' + hpEditing, body);
+        hpFlash('Saved');
+      } else {
+        await hpRequest('POST', '/hot-phrases', body);
+        hpFlash('Added');
+      }
+      hpResetForm();
+      clearError();
+      hpLoad();
+    } catch (err) {
+      showError('Hot phrase: ' + err.message);
+    } finally {
+      hpSave.disabled = false;
+    }
+  });
+
+  hpCancel.addEventListener('click', hpResetForm);
+
+  let hpPreviewTimer = null;
+  let hpPreviewSeq = 0;
+  async function hpPreview() {
+    const said = hpPreviewIn.value;
+    const seq = ++hpPreviewSeq;
+    if (!said.trim()) { hpPreviewOut.textContent = ''; return; }
+    try {
+      const data = await hpRequest('POST', '/hot-phrases/preview', { text: said });
+      if (seq === hpPreviewSeq) hpPreviewOut.textContent = data.text;
+    } catch (err) {
+      if (seq === hpPreviewSeq) hpPreviewOut.textContent = 'Preview failed: ' + err.message;
+    }
+  }
+  hpPreviewIn.addEventListener('input', () => {
+    clearTimeout(hpPreviewTimer);
+    hpPreviewTimer = setTimeout(hpPreview, 200);
+  });
+
+  hpLoad();
 </script>
 </body>
 </html>
