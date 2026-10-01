@@ -255,13 +255,15 @@ def match_whole(text: str, phrases: list[tuple[str, str]]) -> str | None:
 _PARK = re.compile("\x01(\\d+)\x01")  # distinct from symbols.py's \x00 placeholders
 
 
-def _trigger_regex(phrases: list[tuple[str, str]]) -> tuple[re.Pattern, list[str]] | None:
+def _trigger_regex(
+    phrases: list[tuple[str, str]],
+) -> tuple[re.Pattern, list[tuple[str, str]]] | None:
     """One case-insensitive regex over all triggers, longest first (word
     count, then length) so 'pr review full' wins over 'pr review'. Each
     trigger is a named group — the expansion is looked up by group name, so
     a spelling that normalizes differently from the match (e.g. IGNORECASE
     matching dotless 'ı' against trigger 'i') can never key the wrong entry.
-    Returns (regex, expansions by group index) or None."""
+    Returns (regex, (trigger, expansion) pairs by group index) or None."""
     ordered = sorted(
         phrases,
         key=lambda p: (
@@ -270,7 +272,7 @@ def _trigger_regex(phrases: list[tuple[str, str]]) -> tuple[re.Pattern, list[str
         ),
     )
     alternatives = []
-    expansions: list[str] = []
+    pairs: list[tuple[str, str]] = []
     seen: set[str] = set()
     for trigger, expansion in ordered:
         normalized = normalize_trigger(trigger)
@@ -278,8 +280,8 @@ def _trigger_regex(phrases: list[tuple[str, str]]) -> tuple[re.Pattern, list[str
             continue
         seen.add(normalized)
         pattern = r"[\W_]+".join(re.escape(w) for w in normalized.split())
-        alternatives.append(f"(?P<h{len(expansions)}>{pattern})")
-        expansions.append(expansion)
+        alternatives.append(f"(?P<h{len(pairs)}>{pattern})")
+        pairs.append((trigger, expansion))
     if not alternatives:
         return None
     regex = re.compile(
@@ -288,7 +290,7 @@ def _trigger_regex(phrases: list[tuple[str, str]]) -> tuple[re.Pattern, list[str
         + r")(?![^\W_])(?:[.,!?;:]+(?=\s*$))?",
         re.IGNORECASE,
     )
-    return regex, expansions
+    return regex, pairs
 
 
 def park_hot_phrases(text: str, phrases: list[tuple[str, str]]) -> tuple[str, list[str]]:
@@ -304,12 +306,12 @@ def park_hot_phrases(text: str, phrases: list[tuple[str, str]]) -> tuple[str, li
     built = _trigger_regex(phrases)
     if built is None or not text:
         return text, []
-    regex, expansions = built
+    regex, pairs = built
 
     parked: list[str] = []
 
     def replace(match: re.Match) -> str:
-        expansion = expansions[int(match.lastgroup[1:])]
+        expansion = pairs[int(match.lastgroup[1:])][1]
         parked.append(expansion)
         return f"\x01{len(parked) - 1}\x01"
 
@@ -320,6 +322,26 @@ def restore_hot_phrases(text: str, parked: list[str]) -> str:
     if not parked:
         return text
     return _PARK.sub(lambda m: parked[int(m.group(1))], text)
+
+
+def matched_triggers(text: str, phrases: list[tuple[str, str]]) -> list[str]:
+    """The triggers that matched in `text`: a whole-utterance match, or the
+    distinct triggers hit by whole-word inline matches, in match order."""
+    if not phrases or not text:
+        return []
+    for trigger, _ in phrases:
+        if normalize_trigger(trigger) == normalize_trigger(text):
+            return [trigger]
+    built = _trigger_regex(phrases)
+    if built is None:
+        return []
+    regex, pairs = built
+    matched: list[str] = []
+    for m in regex.finditer(text):
+        trigger = pairs[int(m.lastgroup[1:])][0]
+        if trigger not in matched:
+            matched.append(trigger)
+    return matched
 
 
 def expand_hot_phrases(text: str, phrases: list[tuple[str, str]]) -> str:
