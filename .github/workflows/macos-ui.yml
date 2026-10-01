@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e . pytest
-      - run: pytest -q tests/test_hotphrases.py tests/test_phrases_model.py tests/test_phrases_mac.py
+      - run: pytest -q tests/test_hotphrases.py tests/test_phrases_model.py tests/test_phrases_mac.py tests/test_phrases_mac_static.py
       - run: python scripts/mac_ui_snapshots.py
         if: always()
       - uses: actions/upload-artifact@v4

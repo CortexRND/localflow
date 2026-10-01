@@ -131,8 +131,11 @@ paste — including which triggers matched. `install-app` writes
 from Spotlight/Launchpad too.
 
 Elsewhere (or if PyObjC is missing on macOS) a simpler Tk window opens
-with the same features; it needs tkinter (`sudo apt install python3-tk`
-on Linux, or `brew install python-tk@3.X` for a Homebrew Python).
+as a fallback. It keeps the classic layout — an entry list plus explicit
+Save/Revert buttons and a confirm dialog on delete; the sidebar,
+autosave and undo design above is macOS-only. The fallback needs
+tkinter (`sudo apt install python3-tk` on Linux, or
+`brew install python-tk@3.X` for a Homebrew Python).
 
 Matching is on normalized words (case and punctuation are ignored), whole
 words only — "reviews checklist" does not trigger "review checklist". A

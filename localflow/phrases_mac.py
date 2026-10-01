@@ -107,6 +107,8 @@ class PhrasesWindowController(NSObject):
         self._undo_token = None
         self._autosave_timer = None
         self._undo_timer = None
+        self._loaded = None          # last committed/loaded (trigger, text, enabled)
+        self._leave_committed = False  # _leave_editor sets this when it wrote to disk
 
         self._build_window()
         self._build_sidebar()
@@ -218,6 +220,10 @@ class PhrasesWindowController(NSObject):
                     )
                     self.table.scrollRowToVisible_(row)
                     break
+        # Keep the test preview in step with the store (e.g. a phrase was
+        # toggled off or edited elsewhere).
+        if not self.test_area.isHidden():
+            self._render_preview()
 
     # -- table data source / delegate --
 
@@ -273,10 +279,23 @@ class PhrasesWindowController(NSObject):
     def tableView_shouldSelectRow_(self, _table, row):
         if self.query and not self._entries:
             return False
-        target = self._entries[row]["id"]
-        if target == self.current_id:
+        target_id = self._entries[row]["id"]
+        if target_id == self.current_id:
             return True
-        return self._leave_editor()
+        self._leave_committed = False
+        if not self._leave_editor():
+            return False
+        if self._leave_committed:
+            # The commit reloaded the sidebar and reordered rows; the
+            # clicked row index no longer points at the target. Select it
+            # by id once this selection pass finishes.
+            self.performSelector_withObject_afterDelay_(
+                "selectEntryById:", target_id, 0.0)
+            return False
+        return True
+
+    def selectEntryById_(self, entry_id):
+        self.select_entry(str(entry_id))
 
     def tableViewSelectionDidChange_(self, _note):
         row = self.table.selectedRow()
@@ -580,13 +599,19 @@ class PhrasesWindowController(NSObject):
 
     @objc.python_method
     def _pending_edit(self):
-        """An unsaved change worth confirming: a dirty stored entry, or a
-        draft with anything typed that can't be committed."""
-        if self.current_id is not None:
-            entry = self.model.get(self.current_id)
-            return entry is not None and not self._fields_match_entry(entry)
-        return bool(self.trigger_field.stringValue().strip()
-                    or self.text_view.string().strip())
+        """The editor differs from what was last loaded or committed.
+
+        Compared against _loaded (the editor's view), not the disk entry —
+        external changes must not make local fields count as dirty, and
+        they get their own handling in poll_store.
+        """
+        trigger, text, enabled = self._editor_values()
+        loaded = self._loaded or ("", "", True)
+        return (
+            trigger.strip() != loaded[0]
+            or text != loaded[1]
+            or enabled != loaded[2]
+        )
 
     @objc.python_method
     def _update_hints(self):
@@ -699,6 +724,7 @@ class PhrasesWindowController(NSObject):
         self.enabled_switch.setState_(
             AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff)
         self._fields_dirty = False
+        self._loaded = (trigger.strip(), text, enabled)
         self._update_hints()
 
     @objc.python_method
@@ -729,6 +755,7 @@ class PhrasesWindowController(NSObject):
         self.current_id = entry["id"]
         self._draft = False
         self._fields_dirty = False
+        self._loaded = (entry["trigger"], entry["text"], bool(entry.get("enabled")))
         self.reload_sidebar()
         self._update_detail_visibility()
         self._flash_status("Saved \u2713")
@@ -737,13 +764,17 @@ class PhrasesWindowController(NSObject):
     def select_entry(self, entry_id):
         if entry_id == self.current_id:
             return
+        # Commit or confirm any pending edit first; a successful commit
+        # reloads the sidebar and reorders rows, so selection must happen
+        # by id on the fresh list.
+        if not self._leave_editor():
+            return
         for row, e in enumerate(self._entries):
             if e["id"] == entry_id:
-                if self.tableView_shouldSelectRow_(self.table, row):
-                    self.table.selectRowIndexes_byExtendingSelection_(
-                        NSIndexSet.indexSetWithIndex_(row), False)
-                    self.table.scrollRowToVisible_(row)
-                    self._load_entry(self._entries[row])
+                self.table.selectRowIndexes_byExtendingSelection_(
+                    NSIndexSet.indexSetWithIndex_(row), False)
+                self.table.scrollRowToVisible_(row)
+                self._load_entry(e)
                 return
 
     @objc.python_method
@@ -758,10 +789,11 @@ class PhrasesWindowController(NSObject):
     def toggle_enabled(self):
         if self.current_id is None:
             return
-        _, _, enabled = self._editor_values()
+        trigger, text, enabled = self._editor_values()
         self.model.set_enabled(self.current_id, not enabled)
         self.enabled_switch.setState_(
             AppKit.NSControlStateValueOn if not enabled else AppKit.NSControlStateValueOff)
+        self._loaded = (trigger.strip(), text, not enabled)
         self.reload_sidebar()
 
     @objc.python_method
@@ -841,16 +873,42 @@ class PhrasesWindowController(NSObject):
     def poll_store(self):
         if not self.model.changed_on_disk():
             return
-        if not self._pending_edit():
-            current = self.model.get(self.current_id) if self.current_id else None
-            self.reload_sidebar()
-            if current is not None:
-                self._load_entry(current)
-            elif self.current_id is None and not self._entries:
+        pending = self._pending_edit()
+        current = (self.model.get(self.current_id)
+                   if self.current_id is not None else None)
+        if self.current_id is not None and current is None:
+            # Deleted elsewhere.
+            if pending:
+                # Keep the local edits; the next commit re-adds the phrase.
+                self.current_id = None
+                self._draft = True
+                self.reload_sidebar()
+                self._flash_status(
+                    "This phrase was deleted elsewhere — your edits will "
+                    "be saved as a new phrase",
+                    error=True)
+            else:
+                old_index = next(
+                    (i for i, e in enumerate(self._entries)
+                     if e["id"] == self.current_id), 0)
+                self.current_id = None
                 self._draft = False
-                self._set_fields("", "", True)
-        else:
-            self.reload_sidebar()
+                self.reload_sidebar(keep_selection=False)
+                if self._entries:
+                    neighbour = self._entries[min(old_index, len(self._entries) - 1)]
+                    self.select_entry(neighbour["id"])
+                else:
+                    self._set_fields("", "", True)
+            self._update_detail_visibility()
+            return
+        self.reload_sidebar()
+        if pending:
+            pass  # local edits win; the next commit writes them
+        elif current is not None:
+            self._load_entry(current)
+        elif self.current_id is None and not self._entries:
+            self._draft = False
+            self._set_fields("", "", True)
         self._update_detail_visibility()
 
     # ------------------------------------------------- pending-change guard ---
@@ -869,6 +927,9 @@ class PhrasesWindowController(NSObject):
         if err is None:
             self.current_id = entry["id"]
             self._fields_dirty = False
+            self._leave_committed = True
+            self._loaded = (entry["trigger"], entry["text"],
+                            bool(entry.get("enabled")))
             self.reload_sidebar()
             self._update_detail_visibility()
             self._flash_status("Saved \u2713")
@@ -876,6 +937,11 @@ class PhrasesWindowController(NSObject):
         # Non-empty invalid draft or bad edit: ask.
         if self.confirm_discard(err):
             self._fields_dirty = False
+            # The fields keep the discarded values; mark them as loaded so
+            # a second _leave_editor (e.g. terminate after window close)
+            # does not ask again.
+            trigger, text, enabled = self._editor_values()
+            self._loaded = (trigger.strip(), text, enabled)
             return True
         return False
 
@@ -913,8 +979,15 @@ class PhrasesWindowController(NSObject):
     def windowShouldClose_(self, _sender):
         return self._leave_editor()
 
-    def windowWillClose_(self, _note):
-        NSApp.terminate_(self)
+    # -- app delegate --
+
+    def applicationShouldTerminate_(self, _app):
+        # Cmd+Q: flush or confirm pending edits before quitting.
+        return (AppKit.NSTerminateNow if self._leave_editor()
+                else AppKit.NSTerminateCancel)
+
+    def applicationShouldTerminateAfterLastWindowClosed_(self, _app):
+        return True
 
     # ------------------------------------------------------------ helpers ---
 
@@ -1010,7 +1083,8 @@ def _build_main_menu(controller):
     file_item.setTitle_("File")
     main_menu.addItem_(file_item)
     file_menu = NSMenu.alloc().initWithTitle_("File")
-    file_menu.addItemWithTitle_action_keyEquivalent_("New Phrase", "newPhraseMenu:", "n")
+    new_item = file_menu.addItemWithTitle_action_keyEquivalent_("New Phrase", "newPhraseMenu:", "n")
+    new_item.setTarget_(controller)
     file_menu.addItemWithTitle_action_keyEquivalent_("Close Window", "performClose:", "w")
     file_item.setSubmenu_(file_menu)
 
@@ -1031,8 +1105,10 @@ def _build_main_menu(controller):
     delete_item = edit_menu.addItemWithTitle_action_keyEquivalent_(
         "Delete Phrase", "deletePhrase:", "\x7f")
     delete_item.setKeyEquivalentModifierMask_(AppKit.NSEventModifierFlagCommand)
-    edit_menu.addItemWithTitle_action_keyEquivalent_(
+    delete_item.setTarget_(controller)
+    find_item = edit_menu.addItemWithTitle_action_keyEquivalent_(
         "Find", "findPhrases:", "f")
+    find_item.setTarget_(controller)
     edit_item.setSubmenu_(edit_menu)
 
     window_item = NSMenuItem.alloc().init()
@@ -1050,6 +1126,7 @@ def main(path=None):
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
     controller = build_window(store)
+    app.setDelegate_(controller)
     _build_main_menu(controller)
     app.activateIgnoringOtherApps_(True)
     controller.window.makeKeyAndOrderFront_(None)

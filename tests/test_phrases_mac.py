@@ -171,6 +171,94 @@ def test_external_change_poll(controller, tmp_path):
     assert "sign off" in c.visible_triggers()
 
 
+def test_quit_commits_pending_draft(controller):
+    c, store = controller
+    c.new_phrase()
+    c.set_fields("my trigger", "my text")
+    assert c.applicationShouldTerminate_(None) == AppKit.NSTerminateNow
+    assert [e["trigger"] for e in store.list()] == ["my trigger"]
+
+
+def test_quit_cancelled_on_kept_invalid_draft(controller):
+    c, store = controller
+    c.confirm_discard = lambda _err: False
+    c.new_phrase()
+    c.set_fields("", "some text")  # invalid trigger, pending
+    assert c.applicationShouldTerminate_(None) == AppKit.NSTerminateCancel
+    assert store.list() == []
+
+
+def test_external_update_reloads_editor(controller, tmp_path):
+    c, store = controller
+    e = store.add("trig", "old text")
+    c.reload_sidebar()
+    c.select_entry(e["id"])
+    c.model.changed_on_disk()  # prime
+    store2 = HotPhraseStore(tmp_path / "hot_phrases.json")
+    store2.update(e["id"], trigger="trig", text="external text")
+    c.poll_store()
+    assert str(c.text_view.string()) == "external text"
+    # A subsequent selection change must not write the stale text back.
+    store2.add("other", "o")
+    c.reload_sidebar()
+    other = [x for x in c._entries if x["trigger"] == "other"][0]
+    c.select_entry(other["id"])
+    assert [x["text"] for x in store2.list() if x["id"] == e["id"]] == ["external text"]
+
+
+def test_external_delete_selected_shows_empty(controller, tmp_path):
+    c, store = controller
+    e = store.add("trig", "t")
+    c.reload_sidebar()
+    c.select_entry(e["id"])
+    c.model.changed_on_disk()  # prime
+    HotPhraseStore(tmp_path / "hot_phrases.json").delete(e["id"])
+    c.poll_store()
+    assert c.current_id is None
+    assert c.empty_state_visible()
+
+
+def test_external_delete_with_pending_readds_on_flush(controller, tmp_path):
+    c, store = controller
+    e = store.add("trig", "t")
+    c.reload_sidebar()
+    c.select_entry(e["id"])
+    c.set_fields("trig", "local text")
+    c.model.changed_on_disk()  # prime after local edit
+    HotPhraseStore(tmp_path / "hot_phrases.json").delete(e["id"])
+    c.poll_store()
+    assert c.current_id is None
+    c.flush_autosave()
+    (entry,) = store.list()
+    assert entry["text"] == "local text"
+
+
+def test_preview_refreshes_on_toggle(controller):
+    c, store = controller
+    e = store.add("review checklist", "CHECK")
+    c.reload_sidebar()
+    c.select_entry(e["id"])
+    c.open_test_area(True)
+    c.set_test_input("review checklist")
+    assert c.preview_output() == "CHECK"
+    c.toggle_enabled()
+    assert c.preview_output() == "review checklist"
+    assert "No hot phrase matched" in str(c.test_matched_label.stringValue())
+
+
+def test_renamed_phrase_selects_target(controller):
+    c, store = controller
+    a = store.add("alpha", "A")
+    b = store.add("beta", "B")
+    c.reload_sidebar()
+    c.select_entry(a["id"])
+    c.set_fields("zeta", "A")  # rename, unflushed
+    c.select_entry(b["id"])
+    assert c.current_id == b["id"]
+    assert str(c.trigger_field.stringValue()) == "beta"
+    assert [e["trigger"] for e in store.list()] == ["beta", "zeta"]
+
+
 def test_snapshot_png(controller, tmp_path):
     from localflow.phrases_mac import snapshot_png
     c, _ = controller
