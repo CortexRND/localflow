@@ -277,8 +277,8 @@ class PhrasesWindowController(NSObject):
         root = NSStackView.alloc().init()
         root.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationVertical)
         root.setAlignment_(AppKit.NSLayoutAttributeLeading)
-        root.setEdgeInsets_(AppKit.NSEdgeInsets(20, 20, 20, 20))
-        root.setSpacing_(8)
+        root.setEdgeInsets_(AppKit.NSEdgeInsets(12, 16, 12, 16))
+        root.setSpacing_(6)
         root.setDetachesHiddenViews_(True)
         self.editor_root = root
 
@@ -304,6 +304,10 @@ class PhrasesWindowController(NSObject):
             banner_label.bottomAnchor().constraintEqualToAnchor_constant_(
                 self.banner.bottomAnchor(), -6),
         ])
+        self.banner.setContentCompressionResistancePriority_forOrientation_(
+            751, AppKit.NSLayoutConstraintOrientationVertical)
+        self.banner.setContentHuggingPriority_forOrientation_(
+            751, AppKit.NSLayoutConstraintOrientationVertical)
         self.banner.setHidden_(self.model.hot_phrases_enabled)
         root.addArrangedSubview_(self.banner)
 
@@ -343,8 +347,15 @@ class PhrasesWindowController(NSObject):
         # never clip when the window is short.
         text_scroll.setContentCompressionResistancePriority_forOrientation_(
             50, AppKit.NSLayoutConstraintOrientationVertical)
+        # Cap the paste field at a share of the stack height so a large
+        # fitting size can't push the rows below it out of view; when space
+        # is tight (test area open) it shrinks to its minimum instead.
+        text_height = text_scroll.heightAnchor().constraintEqualToAnchor_multiplier_(
+            root.heightAnchor(), 0.45)
+        text_height.setPriority_(750)
+        text_height.setActive_(True)
         text_scroll.heightAnchor().constraintGreaterThanOrEqualToConstant_(
-            80).setActive_(True)
+            60).setActive_(True)
         text_scroll.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
         self.text_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                       color=NSColor.secondaryLabelColor())
@@ -415,7 +426,7 @@ class PhrasesWindowController(NSObject):
         test_scroll.setDocumentView_(self.test_output)
         test_scroll.setHasVerticalScroller_(True)
         test_scroll.setBorderType_(AppKit.NSLineBorder)
-        test_scroll.heightAnchor().constraintEqualToConstant_(80).setActive_(True)
+        test_scroll.heightAnchor().constraintEqualToConstant_(60).setActive_(True)
         self.test_area.addArrangedSubview_(test_scroll)
         self.test_matched_label = _label("", font=NSFont.systemFontOfSize_(11),
                                          color=NSColor.secondaryLabelColor())
