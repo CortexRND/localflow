@@ -107,6 +107,22 @@ The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
 `path:` is the easiest to write by hand. List registered repos with
 `orca repo list --json`.
 
+### Hot phrases
+
+Hot phrases let you paste a saved long prompt by speaking a short trigger
+mid-dictation: say "review checklist" and the saved review prompt is pasted
+instead. Entries live in `~/.localflow/hot_phrases.json` (shared between the
+server, which writes it, and the desktop app, which re-reads it when it
+changes — no restart needed). Manage them in the web UI on the server's page
+(`http://localhost:8756`), including a "try it" preview box.
+
+Matching is on normalized words (case and punctuation are ignored), whole
+words only — "reviews checklist" does not trigger "review checklist". A
+trigger spoken mid-sentence expands inline; an utterance that is only the
+trigger ("Review checklist.") expands verbatim — Ollama cleanup and spoken
+symbols are skipped so the prompt is pasted exactly as saved. Set
+`hot_phrases = false` to disable.
+
 ### Configuration
 
 Create `~/.localflow.toml`:
@@ -120,6 +136,7 @@ ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2:3b"
 hotkey = "alt_l"                  # bare key name = hold-to-talk; "<cmd>+<shift>+<space>" = toggle
 spoken_symbols = true             # "slash"/"dash"/"underscore" -> / - _
+hot_phrases = true                # spoken trigger phrases expand into saved prompts
 command_names = []                # extra slash-command names, e.g. ["skill_part"]
 skills_dirs = ["~/.claude/skills", "~/.agents/skills"]  # subdirectory names are registered too
 sample_rate = 16000
