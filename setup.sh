@@ -28,6 +28,14 @@ source .venv/bin/activate
 echo "Installing localflow..."
 pip install -e ".[mlx,menubar]"
 
+# The hot-phrases window needs tkinter (Homebrew Python doesn't ship it).
+if ! .venv/bin/python -c "import tkinter" 2>/dev/null; then
+    ver=$(.venv/bin/python -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')")
+    echo ""
+    echo "⚠ tkinter is not available — the hot phrases window (lf phrases) won't run."
+    echo "  Install it with: brew install python-tk@${ver}"
+fi
+
 echo ""
 echo "✓ Setup complete!"
 echo ""
