@@ -288,7 +288,7 @@ class PhrasesWindowController(NSObject):
         self.banner.setFillColor_(NSColor.systemYellowColor().colorWithAlphaComponent_(0.18))
         self.banner.setBorderColor_(NSColor.clearColor())
         self.banner.setCornerRadius_(6)
-        self.banner.setContentViewMargins_(AppKit.NSEdgeInsets(8, 10, 8, 10))
+        self.banner.setContentViewMargins_(AppKit.NSMakeSize(10, 8))
         self.banner.setContentView_(_label(
             "Hot phrases are turned off in ~/.localflow.toml (hot_phrases = false)",
             wrap=True))
