@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("AppKit")
+AppKit = pytest.importorskip("AppKit")
 
 from localflow.hotphrases import HotPhraseStore  # noqa: E402
 from localflow.phrases_mac import build_window  # noqa: E402
@@ -145,6 +145,14 @@ def test_test_field_delegate_updates_preview(controller):
     # test field.
     c.controlTextDidChange_(SimpleNamespace(object=lambda: c.test_field))
     assert c.preview_output() == "please CHECK now"
+
+
+def test_open_test_area_sets_disclosure_state(controller):
+    c, _ = controller
+    c.open_test_area(True)
+    assert c.disclosure.state() == AppKit.NSControlStateValueOn
+    c.open_test_area(False)
+    assert c.disclosure.state() == AppKit.NSControlStateValueOff
 
 
 def test_trigger_field_delegate_updates_hints(controller):

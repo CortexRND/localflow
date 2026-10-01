@@ -96,6 +96,7 @@ def test_text_hint(model):
         False,
         f"Keep it under {MAX_TEXT_CHARS:,} characters",
     )
+    assert m.text_hint("x") == (True, "1 line \u00b7 1 character")
     assert m.text_hint("one") == (True, "1 line \u00b7 3 characters")
     assert m.text_hint("one\ntwo") == (True, "2 lines \u00b7 7 characters")
 

@@ -41,7 +41,10 @@ from AppKit import (
     NSFont,
     NSApp,
 )
-from Foundation import NSObject, NSMakeRect, NSIndexSet, NSRunLoop, NSDate
+from Foundation import (
+    NSObject, NSMakeRect, NSIndexSet, NSRunLoop, NSDate,
+    NSAttributedString,
+)
 
 from localflow.hotphrases import HOT_PHRASES_PATH, HotPhraseStore
 from localflow.phrases_model import PhrasesModel
@@ -156,7 +159,7 @@ class PhrasesWindowController(NSObject):
         self.sidebar_vc = NSViewController.alloc().init()
         stack = NSStackView.alloc().init()
         stack.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationVertical)
-        stack.setEdgeInsets_(AppKit.NSEdgeInsets(0, 0, 8, 0))
+        stack.setEdgeInsets_(AppKit.NSEdgeInsets(0, 8, 8, 8))
         stack.setSpacing_(6)
 
         self.search_field = NSSearchField.alloc().init()
@@ -179,11 +182,25 @@ class PhrasesWindowController(NSObject):
         scroll = NSScrollView.alloc().init()
         scroll.setDocumentView_(self.table)
         scroll.setHasVerticalScroller_(True)
+        scroll.setAutohidesScrollers_(True)
         scroll.setDrawsBackground_(False)
         stack.addView_inGravity_(scroll, AppKit.NSStackViewGravityTop)
         scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationVertical)
 
-        self.sidebar_vc.setView_(stack)
+        # Pin the stack's top to the safe area so the unified titlebar's
+        # traffic-light buttons don't overlap the search field.
+        container = NSView.alloc().init()
+        stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        container.addSubview_(stack)
+        for c in (
+            stack.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
+            stack.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()),
+            stack.topAnchor().constraintEqualToAnchor_(
+                container.safeAreaLayoutGuide().topAnchor()),
+            stack.bottomAnchor().constraintEqualToAnchor_(container.bottomAnchor()),
+        ):
+            c.setActive_(True)
+        self.sidebar_vc.setView_(container)
         item = NSSplitViewItem.sidebarWithViewController_(self.sidebar_vc)
         item.setMinimumThickness_(220)
         self.split.addSplitViewItem_(item)
@@ -339,6 +356,7 @@ class PhrasesWindowController(NSObject):
         text_scroll = NSScrollView.alloc().init()
         text_scroll.setDocumentView_(self.text_view)
         text_scroll.setHasVerticalScroller_(True)
+        text_scroll.setAutohidesScrollers_(True)
         text_scroll.setBorderType_(AppKit.NSLineBorder)
         text_scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
         root.addArrangedSubview_(text_scroll)
@@ -355,7 +373,8 @@ class PhrasesWindowController(NSObject):
         text_height.setActive_(True)
         text_scroll.heightAnchor().constraintGreaterThanOrEqualToConstant_(
             60).setActive_(True)
-        text_scroll.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
+        text_scroll.widthAnchor().constraintEqualToAnchor_constant_(
+            root.widthAnchor(), -32).setActive_(True)
         self.text_scroll = text_scroll
         self.text_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                       color=NSColor.secondaryLabelColor())
@@ -376,13 +395,16 @@ class PhrasesWindowController(NSObject):
         self.delete_button = NSButton.alloc().init()
         self.delete_button.setTitle_("Delete")
         self.delete_button.setBezelStyle_(AppKit.NSBezelStyleAccessoryBarAction)
-        self.delete_button.setContentTintColor_(NSColor.systemRedColor())
+        self.delete_button.setAttributedTitle_(
+            NSAttributedString.alloc().initWithString_attributes_(
+                "Delete", {AppKit.NSForegroundColorAttributeName: NSColor.systemRedColor()}))
         self.delete_button.setTarget_(self)
         self.delete_button.setAction_(objc.selector(self.deleteClicked_, signature=b"v@:@"))
         row.addArrangedSubview_(self.delete_button)
         row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         root.addArrangedSubview_(row)
-        row.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
+        row.widthAnchor().constraintEqualToAnchor_constant_(
+            root.widthAnchor(), -32).setActive_(True)
 
         # status
         status_row = NSStackView.alloc().init()
@@ -393,12 +415,14 @@ class PhrasesWindowController(NSObject):
         status_row.addArrangedSubview_(self.status_label)
         status_row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         root.addArrangedSubview_(status_row)
-        status_row.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
+        status_row.widthAnchor().constraintEqualToAnchor_constant_(
+            root.widthAnchor(), -32).setActive_(True)
 
         # "Test a phrase" disclosure: the triangle bezel is only ~13pt tall
         # and clips its own title, so the label sits next to it.
         self.disclosure = NSButton.alloc().init()
         self.disclosure.setBezelStyle_(AppKit.NSBezelStyleDisclosure)
+        self.disclosure.setButtonType_(AppKit.NSButtonTypePushOnPushOff)
         self.disclosure.setTitle_("")
         self.disclosure.setTarget_(self)
         self.disclosure.setAction_(objc.selector(self.toggleTestArea_, signature=b"v@:@"))
@@ -431,16 +455,22 @@ class PhrasesWindowController(NSObject):
         test_scroll = NSScrollView.alloc().init()
         test_scroll.setDocumentView_(self.test_output)
         test_scroll.setHasVerticalScroller_(True)
+        test_scroll.setAutohidesScrollers_(True)
         test_scroll.setBorderType_(AppKit.NSLineBorder)
         test_scroll.heightAnchor().constraintEqualToConstant_(60).setActive_(True)
         self.test_area.addArrangedSubview_(test_scroll)
         self.test_matched_label = _label("", font=NSFont.systemFontOfSize_(11),
                                          color=NSColor.secondaryLabelColor())
         self.test_area.addArrangedSubview_(self.test_matched_label)
+        self.test_field.widthAnchor().constraintEqualToAnchor_(
+            self.test_area.widthAnchor()).setActive_(True)
+        test_scroll.widthAnchor().constraintEqualToAnchor_(
+            self.test_area.widthAnchor()).setActive_(True)
         self.test_area.setHidden_(True)
         self.test_area.setTranslatesAutoresizingMaskIntoConstraints_(False)
         root.addArrangedSubview_(self.test_area)
-        self.test_area.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
+        self.test_area.widthAnchor().constraintEqualToAnchor_constant_(
+            root.widthAnchor(), -32).setActive_(True)
 
         # The split item's view is a plain container; hiding editor_root
         # must not collapse the split item, so the empty state and the undo
@@ -601,10 +631,14 @@ class PhrasesWindowController(NSObject):
     def searchChanged_(self, _sender):
         self.set_search(str(self.search_field.stringValue()))
 
-    def toggleTestArea_(self, sender):
-        open_ = self.test_area.isHidden()
+    def toggleTestArea_(self, _sender):
+        self.open_test_area(bool(self.test_area.isHidden()))
+
+    @objc.python_method
+    def open_test_area(self, open_):
         self.test_area.setHidden_(not open_)
-        sender.setState_(AppKit.NSControlStateValueOn if open_ else AppKit.NSControlStateValueOff)
+        self.disclosure.setState_(
+            AppKit.NSControlStateValueOn if open_ else AppKit.NSControlStateValueOff)
 
     def switchToggled_(self, _sender):
         self.flush_autosave()
@@ -682,6 +716,12 @@ class PhrasesWindowController(NSObject):
         if not trigger.strip() and not text.strip() and self.current_id is None:
             self._fields_dirty = False
             return  # untouched empty draft: nothing to write
+        # Invalid fields are already explained by the hint labels; the status
+        # label is only for errors that have no hint (race guard, undo).
+        tok, _ = self.model.trigger_hint(trigger, self.current_id)
+        xt, _ = self.model.text_hint(text)
+        if not (tok and xt):
+            return
         entry, err = self.model.commit(self.current_id, trigger, text, enabled)
         if err is not None:
             self._flash_status(err, error=True)

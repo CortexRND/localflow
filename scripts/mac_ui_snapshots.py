@@ -29,18 +29,6 @@ def _controller(store_dir, hot_phrases=True):
     return c, store
 
 
-def _dump(c):
-    w = c.window
-    print("window frame:", w.frame())
-    print("container frame:", c.detail_container.frame())
-    print("editor_root frame:", c.editor_root.frame())
-    print("editor_root fitting:", c.editor_root.fittingSize())
-    print("text_scroll frame:", c.text_scroll.frame())
-    print("banner hidden:", c.banner.isHidden(), "frame:", c.banner.frame())
-    print("trigger frame:", c.trigger_field.frame())
-    print("disclosure frame:", c.disclosure.frame())
-
-
 def _shot(c, name):
     for dark in (False, True):
         snapshot_png(c, OUT / f"{name}-{'dark' if dark else 'light'}.png", dark=dark)
@@ -61,7 +49,6 @@ def main():
         c.reload_sidebar()
         c.select_entry(store.list()[0]["id"])
         _shot(c, "list-editing")
-        _dump(c)
 
         c, store = _controller(tmp / "validation")
         store.add("review checklist", "x")
@@ -75,7 +62,7 @@ def main():
         store.add("review checklist", "CHECK: tests, lint, types")
         c.reload_sidebar()
         c.select_entry(store.list()[0]["id"])
-        c.toggleTestArea_(c.disclosure)
+        c.open_test_area(True)
         c.set_test_input("please review checklist now")
         _shot(c, "test-drawer-open")
 
@@ -87,11 +74,15 @@ def main():
         _shot(c, "undo-bar")
 
         c, store = _controller(tmp / "search")
-        store.add("alpha", "A")
-        store.add("beta", "B")
+        store.add("review checklist", "Review this PR")
+        store.add("sign off", "Thanks")
+        store.add("standup", "yesterday:\ntoday:")
         c.reload_sidebar()
-        c.set_search("zzz")
+        c.set_search("stand")
+        c.select_entry(store.list()[-1]["id"])
         _shot(c, "search")
+        c.set_search("zzz")
+        _shot(c, "search-no-matches")
 
         c, store = _controller(tmp / "off", hot_phrases=False)
         store.add("review checklist", "CHECK")  # banner needs the editor visible

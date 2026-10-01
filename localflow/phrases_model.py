@@ -90,7 +90,8 @@ class PhrasesModel:
             return False, f"Keep it under {MAX_TEXT_CHARS:,} characters"
         lines = len(text.splitlines()) or 1
         line_word = "line" if lines == 1 else "lines"
-        return True, f"{lines} {line_word} \u00b7 {len(text):,} characters"
+        char_word = "character" if len(text) == 1 else "characters"
+        return True, f"{lines} {line_word} \u00b7 {len(text):,} {char_word}"
 
     # ---------------------------------------------------------------- actions ---
 
