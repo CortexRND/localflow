@@ -111,17 +111,30 @@ The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
 
 Hot phrases let you paste a saved long prompt by speaking a short trigger
 mid-dictation: say "review checklist" and the saved review prompt is pasted
-instead. Entries live in `~/.localflow/hot_phrases.json` (shared between the
-server, which writes it, and the desktop app, which re-reads it when it
-changes — no restart needed). Manage them in the web UI on the server's page
-(`http://localhost:8756`), including a "try it" preview box.
+instead. Entries live in `~/.localflow/hot_phrases.json`; the desktop app
+re-reads the file when it changes, so edits apply without a restart.
+
+Manage them in the native hot phrases window:
+
+```bash
+lf phrases                  # open the window
+lf phrases install-app      # also available from the menu bar ("Hot Phrases…")
+lf phrases uninstall-app
+```
+
+`install-app` writes `~/Applications/LocalFlow Hot Phrases.app` so the
+window can be opened from Spotlight/Launchpad too. The window needs
+tkinter; with a Homebrew Python that lacks it, install
+`brew install python-tk@3.X` (matching your Python minor version).
 
 Matching is on normalized words (case and punctuation are ignored), whole
 words only — "reviews checklist" does not trigger "review checklist". A
-trigger spoken mid-sentence expands inline; an utterance that is only the
-trigger ("Review checklist.") expands verbatim — Ollama cleanup and spoken
-symbols are skipped so the prompt is pasted exactly as saved. Set
-`hot_phrases = false` to disable.
+trigger spoken on its own ("Review checklist.") is pasted verbatim —
+Ollama cleanup and spoken symbols are skipped so the prompt is pasted
+exactly as saved. Mid-sentence, the trigger is expanded in place after
+cleanup, and the expansion itself is never symbol-converted ("slash"
+inside a saved prompt stays literal). Set `hot_phrases = false` to
+disable.
 
 ### Configuration
 
