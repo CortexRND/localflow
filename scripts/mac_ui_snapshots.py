@@ -61,6 +61,7 @@ def main():
         c, store = _controller(tmp / "test-drawer")
         store.add("review checklist", "CHECK: tests, lint, types")
         c.reload_sidebar()
+        c.select_entry(store.list()[0]["id"])
         c.toggleTestArea_(c.disclosure)
         c.set_test_input("please review checklist now")
         _shot(c, "test-drawer-open")

@@ -35,6 +35,7 @@ from AppKit import (
     NSToolbar,
     NSToolbarItem,
     NSStackView,
+    NSLayoutConstraint,
     NSBox,
     NSColor,
     NSFont,
@@ -281,17 +282,28 @@ class PhrasesWindowController(NSObject):
         root.setDetachesHiddenViews_(True)
         self.editor_root = root
 
-        # disabled banner: a custom box needs a real content view, its title
-        # doesn't render for NSBoxCustom.
-        self.banner = NSBox.alloc().init()
-        self.banner.setBoxType_(AppKit.NSBoxCustom)
-        self.banner.setFillColor_(NSColor.systemYellowColor().colorWithAlphaComponent_(0.18))
-        self.banner.setBorderColor_(NSColor.clearColor())
-        self.banner.setCornerRadius_(6)
-        self.banner.setContentViewMargins_(AppKit.NSMakeSize(10, 8))
-        self.banner.setContentView_(_label(
+        # disabled banner: a plain view with a layer background and a pinned
+        # wrapping label (an NSBox stretched to fill free space).
+        self.banner = NSView.alloc().init()
+        self.banner.setWantsLayer_(True)
+        self.banner.layer().setBackgroundColor_(
+            NSColor.systemYellowColor().colorWithAlphaComponent_(0.18).CGColor())
+        self.banner.layer().setCornerRadius_(6)
+        banner_label = _label(
             "Hot phrases are turned off in ~/.localflow.toml (hot_phrases = false)",
-            wrap=True))
+            wrap=True)
+        banner_label.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        self.banner.addSubview_(banner_label)
+        NSLayoutConstraint.activateConstraints_([
+            banner_label.leadingAnchor().constraintEqualToAnchor_constant_(
+                self.banner.leadingAnchor(), 10),
+            banner_label.trailingAnchor().constraintEqualToAnchor_constant_(
+                self.banner.trailingAnchor(), -10),
+            banner_label.topAnchor().constraintEqualToAnchor_constant_(
+                self.banner.topAnchor(), 6),
+            banner_label.bottomAnchor().constraintEqualToAnchor_constant_(
+                self.banner.bottomAnchor(), -6),
+        ])
         self.banner.setHidden_(self.model.hot_phrases_enabled)
         root.addArrangedSubview_(self.banner)
 
@@ -330,7 +342,9 @@ class PhrasesWindowController(NSObject):
         # Let the paste field give up space first so the controls below it
         # never clip when the window is short.
         text_scroll.setContentCompressionResistancePriority_forOrientation_(
-            250, AppKit.NSLayoutConstraintOrientationVertical)
+            50, AppKit.NSLayoutConstraintOrientationVertical)
+        text_scroll.heightAnchor().constraintGreaterThanOrEqualToConstant_(
+            80).setActive_(True)
         text_scroll.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
         self.text_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                       color=NSColor.secondaryLabelColor())
