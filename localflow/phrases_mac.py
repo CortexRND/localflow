@@ -356,6 +356,7 @@ class PhrasesWindowController(NSObject):
         text_scroll.heightAnchor().constraintGreaterThanOrEqualToConstant_(
             60).setActive_(True)
         text_scroll.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
+        self.text_scroll = text_scroll
         self.text_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                       color=NSColor.secondaryLabelColor())
         root.addArrangedSubview_(self.text_hint_label)

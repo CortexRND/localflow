@@ -29,6 +29,18 @@ def _controller(store_dir, hot_phrases=True):
     return c, store
 
 
+def _dump(c):
+    w = c.window
+    print("window frame:", w.frame())
+    print("container frame:", c.detail_container.frame())
+    print("editor_root frame:", c.editor_root.frame())
+    print("editor_root fitting:", c.editor_root.fittingSize())
+    print("text_scroll frame:", c.text_scroll.frame())
+    print("banner hidden:", c.banner.isHidden(), "frame:", c.banner.frame())
+    print("trigger frame:", c.trigger_field.frame())
+    print("disclosure frame:", c.disclosure.frame())
+
+
 def _shot(c, name):
     for dark in (False, True):
         snapshot_png(c, OUT / f"{name}-{'dark' if dark else 'light'}.png", dark=dark)
@@ -49,6 +61,7 @@ def main():
         c.reload_sidebar()
         c.select_entry(store.list()[0]["id"])
         _shot(c, "list-editing")
+        _dump(c)
 
         c, store = _controller(tmp / "validation")
         store.add("review checklist", "x")
