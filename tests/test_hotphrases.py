@@ -200,6 +200,53 @@ def test_expand_multiline_expansion():
     )
 
 
+def test_expand_casefold_unicode_mismatch_no_crash():
+    # IGNORECASE can match a spelling that normalizes differently (dotless
+    # ı case-folds to i). Whatever it does, it must not raise KeyError.
+    phrases = [("i", "EXP")]
+    result = expand_hot_phrases("use ı now", phrases)
+    assert isinstance(result, str)
+    # The ASCII trigger still works elsewhere.
+    assert expand_hot_phrases("use i now", phrases) == "use EXP now"
+
+
+def test_expand_non_ascii_trigger():
+    phrases = [("café notes", "MENU")]
+    assert expand_hot_phrases("open café notes please", phrases) == "open MENU please"
+    assert expand_hot_phrases("Café Notes.", phrases) == "MENU"
+
+
+def test_park_and_restore():
+    from localflow.hotphrases import park_hot_phrases, restore_hot_phrases
+    text, parked = park_hot_phrases("a review checklist b", PHRASES)
+    assert text == "a \x010\x01 b"
+    assert parked == ["CHECK: tests, lint, types"]
+    assert restore_hot_phrases(text, parked) == "a CHECK: tests, lint, types b"
+
+
+def test_render_dictation_symbol_word_trigger():
+    from localflow.hotphrases import render_dictation
+    from localflow.symbols import apply_spoken_symbols
+
+    phrases = [("review dash checklist", "use slash here")]
+    out = render_dictation(
+        "please review dash checklist now",
+        phrases,
+        symbols=lambda t: apply_spoken_symbols(t, ()),
+    )
+    assert out == "please use slash here now"
+    # Symbols still apply to speech around the trigger.
+    out = render_dictation(
+        "a dash b review dash checklist",
+        phrases,
+        symbols=lambda t: apply_spoken_symbols(t, ()),
+    )
+    assert out == "a-b use slash here"
+    # Whole match skips the steps entirely.
+    assert render_dictation("review dash checklist.", phrases,
+                            clean=lambda t: t + "!", symbols=None) == "use slash here"
+
+
 def test_expand_empty_phrases_and_empty_text():
     assert expand_hot_phrases("review checklist", []) == "review checklist"
     assert expand_hot_phrases("", PHRASES) == ""

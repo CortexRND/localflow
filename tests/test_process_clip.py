@@ -91,6 +91,42 @@ def test_process_clip_inline_expansion_after_cleanup(monkeypatch, tmp_path):
     assert pasted == ["PLEASE CHECK IT THEN COMMIT NOW"]
 
 
+def test_process_clip_trigger_with_spoken_symbol_word_expands(monkeypatch, tmp_path):
+    # Triggers are parked before symbols run, so "review dash checklist"
+    # expands instead of becoming "review-checklist".
+    pasted = []
+    monkeypatch.setattr(app, "paste_text", pasted.append)
+    transcriber = Mock(
+        transcribe=Mock(return_value="please review dash checklist now")
+    )
+    cleaner = Mock(clean=Mock(side_effect=lambda text: text))
+    store = _store(tmp_path, [("review dash checklist", "CHECK IT")])
+
+    app._process_clip(
+        np.zeros(16000, np.float32), _config(False), transcriber, cleaner,
+        REGISTRY, hot_phrases=store,
+    )
+
+    assert pasted == ["please CHECK IT now"]
+
+
+def test_process_clip_expansion_is_not_symbol_converted(monkeypatch, tmp_path):
+    pasted = []
+    monkeypatch.setattr(app, "paste_text", pasted.append)
+    transcriber = Mock(transcribe=Mock(return_value="a dash b review checklist"))
+    cleaner = Mock(clean=Mock(side_effect=lambda text: text))
+    store = _store(tmp_path, [("review checklist", "use slash here")])
+
+    app._process_clip(
+        np.zeros(16000, np.float32), _config(False), transcriber, cleaner,
+        REGISTRY, hot_phrases=store,
+    )
+
+    # Symbols still apply around the trigger, but the expansion's "slash"
+    # stays literal.
+    assert pasted == ["a-b use slash here"]
+
+
 def test_process_clip_hot_phrases_disabled_in_config(monkeypatch, tmp_path):
     pasted = []
     monkeypatch.setattr(app, "paste_text", pasted.append)

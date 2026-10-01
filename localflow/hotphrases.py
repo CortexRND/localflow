@@ -252,25 +252,16 @@ def match_whole(text: str, phrases: list[tuple[str, str]]) -> str | None:
     return None
 
 
-def expand_hot_phrases(text: str, phrases: list[tuple[str, str]]) -> str:
-    """Expand hot-phrase triggers inside dictated text.
+_PARK = re.compile("\x01(\\d+)\x01")  # distinct from symbols.py's \x00 placeholders
 
-    One case-insensitive regex over all triggers, longest first (word count,
-    then length) so 'pr review full' wins over 'pr review'. Each trigger's
-    normalized words are joined by [\\W_]+ so 'review-checklist' and 'review,
-    checklist' both match, and lookarounds require whole words only — so
-    'reviews checklist' does NOT match 'review checklist'. Trailing
-    punctuation is consumed only at end of string. Expansions are inserted
-    literally via a replacement function, so backslashes and \\1 are safe.
-    """
-    if not phrases or not text:
-        return text
-    whole = match_whole(text, phrases)
-    if whole is not None:
-        return whole
 
-    expansions: dict[str, str] = {}
-    alternatives = []
+def _trigger_regex(phrases: list[tuple[str, str]]) -> tuple[re.Pattern, list[str]] | None:
+    """One case-insensitive regex over all triggers, longest first (word
+    count, then length) so 'pr review full' wins over 'pr review'. Each
+    trigger is a named group — the expansion is looked up by group name, so
+    a spelling that normalizes differently from the match (e.g. IGNORECASE
+    matching dotless 'ı' against trigger 'i') can never key the wrong entry.
+    Returns (regex, expansions by group index) or None."""
     ordered = sorted(
         phrases,
         key=lambda p: (
@@ -278,19 +269,90 @@ def expand_hot_phrases(text: str, phrases: list[tuple[str, str]]) -> str:
             -len(normalize_trigger(p[0])),
         ),
     )
+    alternatives = []
+    expansions: list[str] = []
+    seen: set[str] = set()
     for trigger, expansion in ordered:
         normalized = normalize_trigger(trigger)
-        if not normalized or normalized in expansions:
+        if not normalized or normalized in seen:
             continue
-        expansions[normalized] = expansion
-        alternatives.append(r"[\W_]+".join(re.escape(w) for w in normalized.split()))
+        seen.add(normalized)
+        pattern = r"[\W_]+".join(re.escape(w) for w in normalized.split())
+        alternatives.append(f"(?P<h{len(expansions)}>{pattern})")
+        expansions.append(expansion)
     if not alternatives:
-        return text
-
+        return None
     regex = re.compile(
         r"(?<![^\W_])(?:"
         + "|".join(alternatives)
         + r")(?![^\W_])(?:[.,!?;:]+(?=\s*$))?",
         re.IGNORECASE,
     )
-    return regex.sub(lambda m: expansions[normalize_trigger(m.group(0))], text)
+    return regex, expansions
+
+
+def park_hot_phrases(text: str, phrases: list[tuple[str, str]]) -> tuple[str, list[str]]:
+    """Replace inline trigger matches with \\x01N\\x01 placeholders.
+
+    Parking before spoken-symbols runs keeps triggers intact ("review dash
+    checklist" becomes "review-checklist" under symbols and would never
+    match); the placeholders are word characters to the symbol pass, so
+    they survive it. Returns the parked text and the expansions by N —
+    literal strings, never re-scanned, so "slash" in an expansion stays
+    "slash".
+    """
+    built = _trigger_regex(phrases)
+    if built is None or not text:
+        return text, []
+    regex, expansions = built
+
+    parked: list[str] = []
+
+    def replace(match: re.Match) -> str:
+        expansion = expansions[int(match.lastgroup[1:])]
+        parked.append(expansion)
+        return f"\x01{len(parked) - 1}\x01"
+
+    return regex.sub(replace, text), parked
+
+
+def restore_hot_phrases(text: str, parked: list[str]) -> str:
+    if not parked:
+        return text
+    return _PARK.sub(lambda m: parked[int(m.group(1))], text)
+
+
+def expand_hot_phrases(text: str, phrases: list[tuple[str, str]]) -> str:
+    """Whole-utterance match -> verbatim expansion; otherwise inline."""
+    if not phrases or not text:
+        return text
+    whole = match_whole(text, phrases)
+    if whole is not None:
+        return whole
+    parked_text, parked = park_hot_phrases(text, phrases)
+    return restore_hot_phrases(parked_text, parked)
+
+
+def render_dictation(
+    text: str,
+    phrases: list[tuple[str, str]],
+    *,
+    clean=None,
+    symbols=None,
+) -> str:
+    """Shared dictation pipeline: cleanup -> park triggers -> symbols -> restore.
+
+    A whole-utterance trigger expands verbatim and skips cleanup and symbols
+    entirely. `clean`/`symbols` are callables or None; the callers own their
+    conditions (short-clip skip, config flags) and pass None when a step is
+    disabled.
+    """
+    whole = match_whole(text, phrases)
+    if whole is not None:
+        return whole
+    if clean is not None:
+        text = clean(text)
+    text, parked = park_hot_phrases(text, phrases)
+    if symbols is not None:
+        text = symbols(text)
+    return restore_hot_phrases(text, parked)
