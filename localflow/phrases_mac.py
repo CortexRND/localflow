@@ -789,11 +789,13 @@ class PhrasesWindowController(NSObject):
     def toggle_enabled(self):
         if self.current_id is None:
             return
-        trigger, text, enabled = self._editor_values()
+        _, _, enabled = self._editor_values()
         self.model.set_enabled(self.current_id, not enabled)
         self.enabled_switch.setState_(
             AppKit.NSControlStateValueOn if not enabled else AppKit.NSControlStateValueOff)
-        self._loaded = (trigger.strip(), text, not enabled)
+        # Only the switch was persisted; unsaved trigger/text edits stay pending.
+        loaded = self._loaded or ("", "", True)
+        self._loaded = (loaded[0], loaded[1], not enabled)
         self.reload_sidebar()
 
     @objc.python_method
