@@ -66,7 +66,7 @@ def test_draft_autosave_and_invalid(controller):
     c.set_fields("other", "x")
     c.flush_autosave()
     assert "Already used" in c.trigger_hint_text()
-    assert store.get(entry["id"])["text"] == "my text"
+    assert [x["text"] for x in store.list() if x["id"] == entry["id"]] == ["my text"]
 
 
 def test_search_filters(controller):
@@ -246,6 +246,19 @@ def test_preview_refreshes_on_toggle(controller):
     assert "No hot phrase matched" in str(c.test_matched_label.stringValue())
 
 
+def test_toggle_keeps_unsaved_edits(controller):
+    c, store = controller
+    a = store.add("alpha", "A")
+    b = store.add("beta", "B")
+    c.reload_sidebar()
+    c.select_entry(a["id"])
+    c.set_fields("alpha", "edited text")  # unflushed local edit
+    c.toggle_enabled()
+    c.select_entry(b["id"])  # commits the pending edit
+    assert [e["text"] for e in store.list() if e["id"] == a["id"]] == ["edited text"]
+    assert [e["enabled"] for e in store.list() if e["id"] == a["id"]] == [False]
+
+
 def test_renamed_phrase_selects_target(controller):
     c, store = controller
     a = store.add("alpha", "A")
@@ -256,7 +269,7 @@ def test_renamed_phrase_selects_target(controller):
     c.select_entry(b["id"])
     assert c.current_id == b["id"]
     assert str(c.trigger_field.stringValue()) == "beta"
-    assert [e["trigger"] for e in store.list()] == ["beta", "zeta"]
+    assert [e["trigger"] for e in store.list()] == ["zeta", "beta"]
 
 
 def test_snapshot_png(controller, tmp_path):
