@@ -79,7 +79,10 @@ def main():
         c.set_search("zzz")
         _shot(c, "search")
 
-        c, _ = _controller(tmp / "off", hot_phrases=False)
+        c, store = _controller(tmp / "off", hot_phrases=False)
+        store.add("review checklist", "CHECK")  # banner needs the editor visible
+        c.reload_sidebar()
+        c.select_entry(store.list()[0]["id"])
         _shot(c, "hot-phrases-off-banner")
 
     print(f"wrote snapshots to {OUT}")

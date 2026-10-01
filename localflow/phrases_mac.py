@@ -327,6 +327,10 @@ class PhrasesWindowController(NSObject):
         text_scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
         root.addArrangedSubview_(text_scroll)
         text_scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationVertical)
+        # Let the paste field give up space first so the controls below it
+        # never clip when the window is short.
+        text_scroll.setContentCompressionResistancePriority_forOrientation_(
+            250, AppKit.NSLayoutConstraintOrientationVertical)
         text_scroll.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
         self.text_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                       color=NSColor.secondaryLabelColor())
@@ -407,7 +411,21 @@ class PhrasesWindowController(NSObject):
         root.addArrangedSubview_(self.test_area)
         self.test_area.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
 
-        self.detail_vc.setView_(root)
+        # The split item's view is a plain container; hiding editor_root
+        # must not collapse the split item, so the empty state and the undo
+        # bar live as siblings of the editor, not inside it.
+        container = NSView.alloc().init()
+        root.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        container.addSubview_(root)
+        for anchor, const in (
+            (root.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()), None),
+            (root.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()), None),
+            (root.topAnchor().constraintEqualToAnchor_(container.topAnchor()), None),
+            (root.bottomAnchor().constraintEqualToAnchor_(container.bottomAnchor()), None),
+        ):
+            anchor.setActive_(True)
+        self.detail_container = container
+        self.detail_vc.setView_(container)
         self.split.addSplitViewItem_(NSSplitViewItem.splitViewItemWithViewController_(self.detail_vc))
 
     @objc.python_method
@@ -437,7 +455,7 @@ class PhrasesWindowController(NSObject):
         self.empty_view.addArrangedSubview_(create)
         self.empty_view.addArrangedSubview_(example)
         self.empty_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        self.detail_vc.view().addSubview_(self.empty_view)
+        self.detail_container.addSubview_(self.empty_view)
         self.empty_view.centerXAnchor().constraintEqualToAnchor_(
             self.detail_vc.view().centerXAnchor()).setActive_(True)
         self.empty_view.centerYAnchor().constraintEqualToAnchor_(
@@ -463,7 +481,7 @@ class PhrasesWindowController(NSObject):
         inner.addArrangedSubview_(undo_btn)
         self.undo_bar.setContentView_(inner)
         self.undo_bar.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        self.detail_vc.view().addSubview_(self.undo_bar)
+        self.detail_container.addSubview_(self.undo_bar)
         self.undo_bar.centerXAnchor().constraintEqualToAnchor_(
             self.detail_vc.view().centerXAnchor()).setActive_(True)
         self.undo_bar.bottomAnchor().constraintEqualToAnchor_constant_(
