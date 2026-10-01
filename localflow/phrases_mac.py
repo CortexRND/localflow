@@ -347,12 +347,11 @@ class PhrasesWindowController(NSObject):
         # never clip when the window is short.
         text_scroll.setContentCompressionResistancePriority_forOrientation_(
             50, AppKit.NSLayoutConstraintOrientationVertical)
-        # Cap the paste field at a share of the stack height so a large
-        # fitting size can't push the rows below it out of view; when space
-        # is tight (test area open) it shrinks to its minimum instead.
-        text_height = text_scroll.heightAnchor().constraintEqualToAnchor_multiplier_(
-            root.heightAnchor(), 0.45)
-        text_height.setPriority_(750)
+        # Cap the paste field so a large fitting size can't push the rows
+        # below it out of view; it grows up to 200pt and shrinks to 60pt
+        # when space is tight (e.g. the test area is open).
+        text_height = text_scroll.heightAnchor().constraintLessThanOrEqualToConstant_(200)
+        text_height.setPriority_(900)
         text_height.setActive_(True)
         text_scroll.heightAnchor().constraintGreaterThanOrEqualToConstant_(
             60).setActive_(True)
