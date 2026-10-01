@@ -21,6 +21,7 @@ from localflow.dispatch import (
     parse_work_prompts,
     write_prompts,
 )
+from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.log import setup_logging
 from localflow.meetings import (
     MeetingSession,
@@ -67,6 +68,8 @@ _prompt_gen = WorkPromptGenerator(
 # One shared instance: PromptQueue's lock is per-instance, so two instances
 # racing would be last-writer-wins over the whole queue file.
 _queue = PromptQueue()
+# Same shared-file pattern as the queue: the desktop app reads this file.
+_hot_phrases = HotPhraseStore()
 # No queue lock here on purpose: PromptQueue serialises across processes itself,
 # and status changes go through its compare-and-set. A lock here would only
 # guard the server against the server.
@@ -139,11 +142,17 @@ def _run_ffmpeg(data: bytes) -> subprocess.CompletedProcess:
 
 def _transcribe_sync(audio: np.ndarray, clean: bool) -> str:
     text = _get_transcriber().transcribe(audio)
-    if clean:
-        text = _get_cleaner().clean(text)
-    if _config.spoken_symbols and text:
-        text = apply_spoken_symbols(text, _commands)
-    return text
+    if not text:
+        return text
+    phrases = _hot_phrases.enabled() if _config.hot_phrases else []
+    return render_dictation(
+        text,
+        phrases,
+        clean=(lambda t: _get_cleaner().clean(t)) if clean else None,
+        symbols=(lambda t: apply_spoken_symbols(t, _commands))
+        if _config.spoken_symbols
+        else None,
+    )
 
 
 @app.get("/healthz")

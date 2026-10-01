@@ -12,6 +12,7 @@ from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
 from localflow.config import load_config
 from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
+from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.inject import paste_text
 from localflow.log import setup_logging
 from localflow.pushtotalk import PushToTalkController
@@ -74,6 +75,9 @@ def main() -> None:
     print(f"  stt backend:  {transcriber.backend}")
     commands = discover_commands(config.command_names, config.skills_dirs)
     print(f"  commands:     {len(commands)} registered")
+    hot_phrases = HotPhraseStore()
+    if config.hot_phrases:
+        print(f"  hot phrases:  {len(hot_phrases.enabled())} enabled")
     recorder = Recorder(sample_rate=config.sample_rate)
     cleaner = Cleaner(
         config.ollama_url,
@@ -90,7 +94,7 @@ def main() -> None:
             if audio is None:
                 break
             try:
-                _process_clip(audio, config, transcriber, cleaner, commands)
+                _process_clip(audio, config, transcriber, cleaner, commands, hot_phrases)
             except Exception:
                 log.exception("transcription pipeline failed")
             work_queue.task_done()
@@ -131,14 +135,28 @@ def _process_clip(
     transcriber: Transcriber,
     cleaner: Cleaner,
     commands: Sequence[str] = (),
+    hot_phrases: HotPhraseStore | None = None,
 ) -> None:
     start = time.monotonic()
     text = transcriber.transcribe(audio)
-    # Cleanup only pays off on real sentences; short fragments have nothing to fix.
-    if config.cleanup_enabled and text and len(text.split()) >= 5:
-        text = cleaner.clean(text)
-    if config.spoken_symbols and text:
-        text = apply_spoken_symbols(text, commands)
+    if text:
+        phrases = (
+            hot_phrases.enabled()
+            if (hot_phrases is not None and config.hot_phrases)
+            else []
+        )
+        # Cleanup only pays off on real sentences; short fragments have nothing to fix.
+        clean = (
+            (lambda t: cleaner.clean(t))
+            if (config.cleanup_enabled and len(text.split()) >= 5)
+            else None
+        )
+        symbols = (
+            (lambda t: apply_spoken_symbols(t, commands))
+            if config.spoken_symbols
+            else None
+        )
+        text = render_dictation(text, phrases, clean=clean, symbols=symbols)
     elapsed_ms = int((time.monotonic() - start) * 1000)
     log.info("transcribed %d chars in %dms", len(text or ""), elapsed_ms)
     if text:

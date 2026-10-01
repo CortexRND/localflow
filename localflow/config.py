@@ -18,6 +18,7 @@ class Config:
     hotkey: str = "alt_l"
     sounds_enabled: bool = True        # audio cue on record start/stop
     spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
+    hot_phrases: bool = True           # spoken trigger phrases expand into saved prompts
     # Registered slash-command names: after a dictated "slash", an exact spoken
     # match is snapped to the registered spelling ("slash skill part" ->
     # "/skill_part"). Names listed here plus subdirectory names of skills_dirs.

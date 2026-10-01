@@ -434,6 +434,46 @@ def ui() -> None:
     subprocess.run(["open", BASE], check=False)
 
 
+@cli.group(invoke_without_command=True)
+def phrases() -> None:
+    """Manage hot phrases in the native window (no subcommand = open it)."""
+    ctx = click.get_current_context()
+    if ctx.invoked_subcommand is not None:
+        return
+    try:
+        from localflow.phrases_window import main as window_main
+    except ImportError as exc:
+        if "tkinter" not in str(exc) and "_tkinter" not in str(exc):
+            raise
+        minor = sys.version_info[:2]
+        console.print("[red]tkinter is not available[/red] in this Python — install it:")
+        if sys.platform == "darwin":
+            console.print(f"  brew install python-tk@{minor[0]}.{minor[1]}")
+        else:
+            console.print("  sudo apt install python3-tk")
+        sys.exit(1)
+    window_main()
+
+
+@phrases.command("install-app")
+def phrases_install_app() -> None:
+    """Install a .app bundle so the window opens from Spotlight/Launchpad."""
+    from localflow.appbundle import install_app
+    path = install_app()
+    console.print(f"[green]installed[/green] {path}")
+    console.print("open it from Spotlight/Launchpad or `open " + str(path) + "`")
+
+
+@phrases.command("uninstall-app")
+def phrases_uninstall_app() -> None:
+    """Remove the hot phrases .app bundle."""
+    from localflow.appbundle import uninstall_app
+    if uninstall_app():
+        console.print("[green]uninstalled[/green]")
+    else:
+        console.print("[dim]not installed[/dim]")
+
+
 @cli.command()
 def menubar() -> None:
     """Run the macOS menu bar app (mic icon, meeting control)."""

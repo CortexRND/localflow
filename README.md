@@ -107,6 +107,35 @@ The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
 `path:` is the easiest to write by hand. List registered repos with
 `orca repo list --json`.
 
+### Hot phrases
+
+Hot phrases let you paste a saved long prompt by speaking a short trigger
+mid-dictation: say "review checklist" and the saved review prompt is pasted
+instead. Entries live in `~/.localflow/hot_phrases.json`; the desktop app
+re-reads the file when it changes, so edits apply without a restart.
+
+Manage them in the native hot phrases window:
+
+```bash
+lf phrases                  # open the window
+lf phrases install-app      # also available from the menu bar ("Hot Phrases…")
+lf phrases uninstall-app
+```
+
+`install-app` writes `~/Applications/LocalFlow Hot Phrases.app` so the
+window can be opened from Spotlight/Launchpad too. The window needs
+tkinter; with a Homebrew Python that lacks it, install
+`brew install python-tk@3.X` (matching your Python minor version).
+
+Matching is on normalized words (case and punctuation are ignored), whole
+words only — "reviews checklist" does not trigger "review checklist". A
+trigger spoken on its own ("Review checklist.") is pasted verbatim —
+Ollama cleanup and spoken symbols are skipped so the prompt is pasted
+exactly as saved. Mid-sentence, the trigger is expanded in place after
+cleanup, and the expansion itself is never symbol-converted ("slash"
+inside a saved prompt stays literal). Set `hot_phrases = false` to
+disable.
+
 ### Configuration
 
 Create `~/.localflow.toml`:
@@ -120,6 +149,7 @@ ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2:3b"
 hotkey = "alt_l"                  # bare key name = hold-to-talk; "<cmd>+<shift>+<space>" = toggle
 spoken_symbols = true             # "slash"/"dash"/"underscore" -> / - _
+hot_phrases = true                # spoken trigger phrases expand into saved prompts
 command_names = []                # extra slash-command names, e.g. ["skill_part"]
 skills_dirs = ["~/.claude/skills", "~/.agents/skills"]  # subdirectory names are registered too
 sample_rate = 16000
