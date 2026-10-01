@@ -348,9 +348,9 @@ class PhrasesWindowController(NSObject):
         text_scroll.setContentCompressionResistancePriority_forOrientation_(
             50, AppKit.NSLayoutConstraintOrientationVertical)
         # Cap the paste field so a large fitting size can't push the rows
-        # below it out of view; it grows up to 200pt and shrinks to 60pt
+        # below it out of view; it grows up to 120pt and shrinks to 60pt
         # when space is tight (e.g. the test area is open).
-        text_height = text_scroll.heightAnchor().constraintLessThanOrEqualToConstant_(200)
+        text_height = text_scroll.heightAnchor().constraintLessThanOrEqualToConstant_(120)
         text_height.setPriority_(900)
         text_height.setActive_(True)
         text_scroll.heightAnchor().constraintGreaterThanOrEqualToConstant_(
