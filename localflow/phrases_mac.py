@@ -180,7 +180,7 @@ class PhrasesWindowController(NSObject):
         scroll.setHasVerticalScroller_(True)
         scroll.setDrawsBackground_(False)
         stack.addView_inGravity_(scroll, AppKit.NSStackViewGravityTop)
-        scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutOrientationVertical)
+        scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationVertical)
 
         self.sidebar_vc.setView_(stack)
         item = NSSplitViewItem.sidebarWithViewController_(self.sidebar_vc)
@@ -301,7 +301,7 @@ class PhrasesWindowController(NSObject):
         self.trigger_field.setPlaceholderString_("e.g. review checklist")
         self.trigger_field.setDelegate_(self)
         root.addArrangedSubview_(self.trigger_field)
-        self.trigger_field.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutOrientationHorizontal)
+        self.trigger_field.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationHorizontal)
         self.trigger_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                          color=NSColor.secondaryLabelColor())
         root.addArrangedSubview_(self.trigger_hint_label)
@@ -326,7 +326,7 @@ class PhrasesWindowController(NSObject):
         text_scroll.setBorderType_(AppKit.NSLineBorder)
         text_scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
         root.addArrangedSubview_(text_scroll)
-        text_scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutOrientationVertical)
+        text_scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationVertical)
         text_scroll.widthAnchor().constraintEqualToAnchor_(root.widthAnchor()).setActive_(True)
         self.text_hint_label = _label("", font=NSFont.systemFontOfSize_(11),
                                       color=NSColor.secondaryLabelColor())
@@ -342,7 +342,7 @@ class PhrasesWindowController(NSObject):
         row.addArrangedSubview_(self.enabled_switch)
         row.addArrangedSubview_(_label("On"))
         spacer = NSView.alloc().init()
-        spacer.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutOrientationHorizontal)
+        spacer.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationHorizontal)
         row.addArrangedSubview_(spacer)
         self.delete_button = NSButton.alloc().init()
         self.delete_button.setTitle_("Delete")
