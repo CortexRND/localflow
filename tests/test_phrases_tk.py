@@ -12,7 +12,7 @@ if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
 
 from localflow.config import Config  # noqa: E402
 from localflow.hotphrases import HotPhraseStore  # noqa: E402
-from localflow.phrases_window import HotPhrasesWindow  # noqa: E402
+from localflow.phrases_tk import HotPhrasesWindow  # noqa: E402
 
 
 @pytest.fixture
