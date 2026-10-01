@@ -21,6 +21,13 @@ from localflow.dispatch import (
     parse_work_prompts,
     write_prompts,
 )
+from localflow.hotphrases import (
+    HotPhraseConflict,
+    HotPhraseError,
+    HotPhraseStore,
+    expand_hot_phrases,
+    match_whole,
+)
 from localflow.log import setup_logging
 from localflow.meetings import (
     MeetingSession,
@@ -67,6 +74,8 @@ _prompt_gen = WorkPromptGenerator(
 # One shared instance: PromptQueue's lock is per-instance, so two instances
 # racing would be last-writer-wins over the whole queue file.
 _queue = PromptQueue()
+# Same shared-file pattern as the queue: the desktop app reads this file.
+_hot_phrases = HotPhraseStore()
 # No queue lock here on purpose: PromptQueue serialises across processes itself,
 # and status changes go through its compare-and-set. A lock here would only
 # guard the server against the server.
@@ -139,10 +148,17 @@ def _run_ffmpeg(data: bytes) -> subprocess.CompletedProcess:
 
 def _transcribe_sync(audio: np.ndarray, clean: bool) -> str:
     text = _get_transcriber().transcribe(audio)
+    phrases = _hot_phrases.enabled() if _config.hot_phrases else []
+    whole = match_whole(text, phrases) if text else None
+    if whole is not None:
+        # Verbatim expansion: cleanup and spoken symbols would mangle the prompt.
+        return whole
     if clean:
         text = _get_cleaner().clean(text)
     if _config.spoken_symbols and text:
         text = apply_spoken_symbols(text, _commands)
+    if text and phrases:
+        text = expand_hot_phrases(text, phrases)
     return text
 
 
@@ -370,6 +386,64 @@ def prompts_approve(entry_id: str) -> dict:
 @app.post("/prompts/{entry_id}/reject")
 def prompts_reject(entry_id: str) -> dict:
     return _transition(entry_id, "reject", "rejected", _REJECT_FROM)
+
+
+class HotPhraseIn(BaseModel):
+    trigger: str
+    text: str
+    enabled: bool = True
+
+
+class HotPhraseUpdate(BaseModel):
+    trigger: str | None = None
+    text: str | None = None
+    enabled: bool | None = None
+
+
+class HotPhrasePreview(BaseModel):
+    text: str
+
+
+@app.get("/hot-phrases")
+def hot_phrases_list() -> dict:
+    return {"entries": _hot_phrases.list()}
+
+
+@app.post("/hot-phrases")
+def hot_phrases_create(body: HotPhraseIn) -> dict:
+    try:
+        return _hot_phrases.add(body.trigger, body.text, body.enabled)
+    except HotPhraseConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HotPhraseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/hot-phrases/preview")
+def hot_phrases_preview(body: HotPhrasePreview) -> dict:
+    # "Try it" box for the UI; the hot_phrases config flag does not apply here.
+    return {"text": expand_hot_phrases(body.text, _hot_phrases.enabled())}
+
+
+@app.patch("/hot-phrases/{entry_id}")
+def hot_phrases_update(entry_id: str, body: HotPhraseUpdate) -> dict:
+    fields = body.model_dump(exclude_unset=True)
+    try:
+        updated = _hot_phrases.update(entry_id, **fields)
+    except HotPhraseConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HotPhraseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"unknown hot phrase: {entry_id}")
+    return updated
+
+
+@app.delete("/hot-phrases/{entry_id}")
+def hot_phrases_delete(entry_id: str) -> dict:
+    if not _hot_phrases.delete(entry_id):
+        raise HTTPException(status_code=404, detail=f"unknown hot phrase: {entry_id}")
+    return {"ok": True}
 
 
 def main() -> None:
