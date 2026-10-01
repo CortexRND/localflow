@@ -114,7 +114,7 @@ mid-dictation: say "review checklist" and the saved review prompt is pasted
 instead. Entries live in `~/.localflow/hot_phrases.json`; the desktop app
 re-reads the file when it changes, so edits apply without a restart.
 
-Manage them in the native hot phrases window:
+Manage them in the hot phrases window:
 
 ```bash
 lf phrases                  # open the window
@@ -122,10 +122,17 @@ lf phrases install-app      # also available from the menu bar ("Hot Phrases…"
 lf phrases uninstall-app
 ```
 
-`install-app` writes `~/Applications/LocalFlow Hot Phrases.app` so the
-window can be opened from Spotlight/Launchpad too. The window needs
-tkinter; with a Homebrew Python that lacks it, install
-`brew install python-tk@3.X` (matching your Python minor version).
+On macOS this is a native AppKit window: a sidebar lists your phrases
+(searchable, one row each with an on/off state), edits autosave as you
+type, the switch toggles a phrase without deleting it, Delete shows an
+Undo bar, and a "Test a phrase" section previews what dictation would
+paste — including which triggers matched. `install-app` writes
+`~/Applications/LocalFlow Hot Phrases.app` so the window can be opened
+from Spotlight/Launchpad too.
+
+Elsewhere (or if PyObjC is missing on macOS) a simpler Tk window opens
+with the same features; it needs tkinter (`sudo apt install python3-tk`
+on Linux, or `brew install python-tk@3.X` for a Homebrew Python).
 
 Matching is on normalized words (case and punctuation are ignored), whole
 words only — "reviews checklist" does not trigger "review checklist". A
