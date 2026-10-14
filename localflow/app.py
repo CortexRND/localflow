@@ -3,7 +3,7 @@ import queue
 import sys
 import threading
 import time
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -15,6 +15,7 @@ from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.inject import paste_text
 from localflow.log import setup_logging
+from localflow.providers.llm_ollama import OllamaLLM
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
 from localflow.stt import Transcriber
@@ -79,14 +80,15 @@ def main() -> None:
     if config.hot_phrases:
         print(f"  hot phrases:  {len(hot_phrases.enabled())} enabled")
     recorder = Recorder(sample_rate=config.sample_rate)
-    cleaner = Cleaner(
+    ollama = OllamaLLM(
         config.ollama_url,
         config.ollama_model,
         timeout=config.cleanup_timeout,
         num_ctx=config.cleanup_num_ctx,
     )
+    cleaner = Cleaner(ollama)
 
-    work_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+    work_queue: queue.Queue[np.ndarray] = queue.Queue()
 
     def worker() -> None:
         while True:
