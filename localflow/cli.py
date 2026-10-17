@@ -442,6 +442,8 @@ def phrases() -> None:
         return
     try:
         from localflow.phrases_window import main as window_main
+
+        window_main()
     except ImportError as exc:
         if "tkinter" not in str(exc) and "_tkinter" not in str(exc):
             raise
@@ -452,7 +454,6 @@ def phrases() -> None:
         else:
             console.print("  sudo apt install python3-tk")
         sys.exit(1)
-    window_main()
 
 
 @phrases.command("install-app")
