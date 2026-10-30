@@ -6,6 +6,9 @@ from unittest import mock
 
 import pytest
 
+if sys.platform == "darwin":
+    pytest.skip("macOS uses the native AppKit hot-phrases window", allow_module_level=True)
+
 tk = pytest.importorskip("tkinter")
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
     pytest.skip("no display for Tk", allow_module_level=True)
