@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from localflow import setup_flow
 from localflow.config import Config
@@ -104,6 +105,8 @@ def test_run_checks_uses_provider_info_without_ollama_checks(monkeypatch):
         "is_running",
         lambda _self: (_ for _ in ()).throw(AssertionError("must not probe Ollama")),
     )
+    monkeypatch.setattr(setup_flow, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(setup_flow, "_mac_permission_checks", list)
     monkeypatch.setattr(setup_flow, "list_input_devices", list)
 
     checks = setup_flow.run_checks(
