@@ -49,4 +49,4 @@ jobs:
           tests/test_config.py
           tests/test_providers.py
       - name: Test
-        run: pytest -vv --full-trace
+        run: pytest -q

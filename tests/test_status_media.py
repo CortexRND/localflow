@@ -1,8 +1,9 @@
 import json
 import os
 import stat
+from types import SimpleNamespace
 
-from localflow import media
+from localflow import media, status
 from localflow.status import (
     live_state,
     read_last_text,
@@ -29,6 +30,51 @@ def test_stale_status_pid_maps_to_idle(tmp_path):
     path.write_text(json.dumps({"state": "locked", "since": 1, "pid": 999999999}))
 
     assert live_state(path) == "idle"
+
+
+def test_windows_live_state_uses_safe_process_check(monkeypatch, tmp_path):
+    path = tmp_path / "status.json"
+    path.write_text(json.dumps({"state": "locked", "since": 1, "pid": 42}))
+    checked = []
+
+    monkeypatch.setattr(status, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        status,
+        "_windows_pid_is_alive",
+        lambda pid: checked.append(pid) or False,
+    )
+
+    assert live_state(path) == "idle"
+    assert checked == [42]
+
+
+def test_windows_pid_check_opens_and_closes_process(monkeypatch):
+    calls = []
+
+    def open_process(access, inherit, pid):
+        calls.append(("open", access, inherit, pid))
+        return 123
+
+    def close_handle(handle):
+        calls.append(("close", handle))
+        return True
+
+    kernel32 = SimpleNamespace(
+        OpenProcess=open_process,
+        CloseHandle=close_handle,
+    )
+    monkeypatch.setattr(
+        status.ctypes,
+        "WinDLL",
+        lambda *_args, **_kwargs: kernel32,
+        raising=False,
+    )
+
+    assert status._windows_pid_is_alive(42)
+    assert calls == [
+        ("open", status._PROCESS_QUERY_LIMITED_INFORMATION, False, 42),
+        ("close", 123),
+    ]
 
 
 def test_title_prefix_mapping_is_pure():
