@@ -3,10 +3,11 @@ import queue
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 
+from localflow import sounds
 from localflow.audio import Recorder, rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
@@ -18,6 +19,7 @@ from localflow.dictionary import (
     stt_prompt,
 )
 from localflow.formatting import apply_spoken_formatting, apply_style
+from localflow.history import HistoryStore
 from localflow.hotkey import KeyboardHub, is_hold_key
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.inject import paste_text
@@ -47,6 +49,32 @@ def _print_banner(config) -> None:
     print("  System Settings -> Privacy & Security -> Microphone")
     print("  System Settings -> Privacy & Security -> Accessibility")
     print("=" * 60)
+
+
+def _worker_loop(work_queue, process_job, deliver_result) -> None:
+    while True:
+        item = work_queue.get()
+        try:
+            if item is None:
+                return
+            try:
+                text, error = process_job(item)
+            except Exception:
+                log.exception("worker failed to process job")
+                text, error = "", True
+            if text:
+                try:
+                    write_last_text(text)
+                except Exception:
+                    log.exception("could not write last text")
+            try:
+                deliver_result(item, text, error)
+            except Exception:
+                log.exception("could not deliver worker result")
+        except Exception:
+            log.exception("worker iteration failed")
+        finally:
+            work_queue.task_done()
 
 
 def main() -> None:
@@ -95,82 +123,39 @@ def main() -> None:
 
     work_queue: queue.Queue[Job | None] = queue.Queue()
     dictionary_store = DictionaryStore()
+    history_store = HistoryStore(enabled=config.history_enabled)
     write_state("idle")
     controller = PushToTalkController(
-        recorder, config, work_queue, on_state=write_state
+        recorder, config, work_queue, on_state=write_state,
+        history_store=history_store,
     )
 
-    def worker() -> None:
-        while True:
-            item = work_queue.get()
-            if item is None:
-                break
-            try:
-                if item.kind == "dictate":
-                    text = _process_clip(
-                        item.audio,
-                        config,
-                        transcriber,
-                        cleaner,
-                        commands,
-                        hot_phrases,
-                        app_info=item.app_info,
-                        dictionary_store=dictionary_store,
-                        paste=False,
-                    )
-                else:
-                    if (
-                        config.llm_provider == "ollama"
-                        and (not config.cleanup_enabled or not config.llm_model)
-                    ):
-                        message = (
-                            "command mode needs a local LLM — choose one in lf setup"
-                        )
-                        log.error(message)
-                        print(message)
-                        controller.note_job_result(
-                            None,
-                            item.clipboard_before,
-                            error=True,
-                            clipboard_expected=item.selection,
-                        )
-                        work_queue.task_done()
-                        continue
-                    if item.kind == "command":
-                        instruction = transcriber.transcribe(item.audio, prompt=None)
-                        if not instruction.strip():
-                            log.error("command mode received an empty instruction")
-                            controller.note_job_result(
-                                None,
-                                item.clipboard_before,
-                                error=True,
-                                clipboard_expected=item.selection,
-                            )
-                            work_queue.task_done()
-                            continue
-                        prompt = command_prompt(instruction, item.selection)
-                    else:
-                        prompt = transform_prompt(item.preset, item.selection)
-                    text = transformer.run(prompt)
-                if text:
-                    write_last_text(text)
-                controller.note_job_result(
-                    text,
-                    item.clipboard_before,
-                    error=item.kind != "dictate" and not text,
-                    clipboard_expected=item.selection,
-                )
-            except Exception:
-                log.exception("transcription pipeline failed")
-                controller.note_job_result(
-                    None,
-                    item.clipboard_before,
-                    error=item.kind != "dictate",
-                    clipboard_expected=item.selection,
-                )
-            work_queue.task_done()
+    def process_item(item):
+        return _process_job(
+            item,
+            config,
+            transcriber,
+            cleaner,
+            transformer,
+            commands,
+            hot_phrases,
+            dictionary_store,
+            history_store,
+        )
 
-    worker_thread = threading.Thread(target=worker, daemon=True)
+    def deliver_result(item, text, error):
+        controller.note_job_result(
+            text,
+            item.clipboard_before,
+            error=error,
+            clipboard_expected=item.selection,
+        )
+
+    worker_thread = threading.Thread(
+        target=_worker_loop,
+        args=(work_queue, process_item, deliver_result),
+        daemon=True,
+    )
     worker_thread.start()
 
     _print_banner(config)
@@ -226,6 +211,7 @@ def _process_clip(
     app_info: AppInfo | None = None,
     dictionary_store: DictionaryStore | None = None,
     paste: bool = True,
+    raw_text_callback: Callable[[str], None] | None = None,
 ) -> str:
     start = time.monotonic()
     if rms_dbfs(audio) < config.silence_threshold_dbfs:
@@ -234,6 +220,8 @@ def _process_clip(
     words = dictionary_store.words() if dictionary_store is not None else []
     pairs = dictionary_store.replacements() if dictionary_store is not None else []
     text = transcriber.transcribe(audio, prompt=stt_prompt(words))
+    if raw_text_callback is not None:
+        raw_text_callback(text)
     if text:
         phrases = (
             hot_phrases.enabled()
@@ -279,6 +267,179 @@ def _process_clip(
         if paste:
             paste_text(text, config.paste_method)
         print(f"{text}  ({elapsed_ms}ms)")
+    return text
+
+
+def _process_job(
+    item: Job,
+    config,
+    transcriber: Transcriber,
+    cleaner: Cleaner,
+    transformer: Transformer,
+    commands: Sequence[str],
+    hot_phrases: HotPhraseStore,
+    dictionary_store: DictionaryStore,
+    history_store: HistoryStore,
+) -> tuple[str | None, bool]:
+    raw_text = ""
+    text = None
+    status = "failed"
+    error = False
+    duration_s = (
+        len(item.audio) / config.sample_rate
+        if item.audio is not None and config.sample_rate
+        else 0
+    )
+    audio_path = None
+    if (
+        item.kind == "dictate"
+        and history_store.enabled
+        and item.audio is not None
+    ):
+        try:
+            audio_path = history_store.write_clip(item.audio, config.sample_rate)
+        except Exception:
+            log.warning("could not store dictation clip", exc_info=True)
+
+    try:
+        if item.kind == "dictate":
+            captured = []
+            text = _process_clip(
+                item.audio,
+                config,
+                transcriber,
+                cleaner,
+                commands,
+                hot_phrases,
+                app_info=item.app_info,
+                dictionary_store=dictionary_store,
+                paste=False,
+                raw_text_callback=captured.append,
+            )
+            raw_text = captured[0] if captured else ""
+            status = "ok" if text else "silent"
+        elif (
+            item.kind == "command"
+            and config.llm_provider == "ollama"
+            and (not config.cleanup_enabled or not config.llm_model)
+        ):
+            message = "command mode needs a local LLM — choose one in lf setup"
+            log.error(message)
+            print(message)
+            error = True
+        else:
+            if item.kind == "command":
+                raw_text = transcriber.transcribe(item.audio, prompt=None)
+                if not raw_text.strip():
+                    log.error("command mode received an empty instruction")
+                    error = True
+                    status = "silent"
+                else:
+                    text = transformer.run(command_prompt(raw_text, item.selection))
+            else:
+                raw_text = item.selection
+                text = transformer.run(transform_prompt(item.preset, item.selection))
+            if text:
+                status = "ok"
+            elif status != "silent":
+                status = "failed"
+                error = True
+    except Exception:
+        log.exception("transcription pipeline failed")
+        status = "failed"
+        error = True
+
+    if history_store.enabled:
+        if status == "silent":
+            history_store.delete_clip(audio_path)
+            audio_path = None
+        info = item.app_info
+        entry_id = None
+        try:
+            entry_id = history_store.add(
+                kind=item.kind,
+                app_name=info.name if info else None,
+                bundle_id=info.bundle_id if info else None,
+                category=category_for(info, config.app_category_overrides),
+                duration_s=duration_s,
+                raw_text=raw_text,
+                final_text=text or "",
+                status=status,
+                audio_path=audio_path,
+            )
+        except Exception:
+            log.exception("could not save dictation history")
+        if item.kind == "dictate" and status == "ok" and entry_id is not None:
+            try:
+                history_store.prune_audio_clips(
+                    getattr(config, "keep_audio_clips", 5)
+                )
+                streak = history_store.stats()["current_streak_days"]
+                milestone_claimed = (
+                    streak in {3, 7, 30, 100}
+                    and history_store.claim_milestone(streak)
+                )
+                if milestone_claimed and getattr(config, "sounds_enabled", True):
+                    sounds.play("achievement")
+            except Exception:
+                log.exception("could not update dictation insights")
+    return text, error
+
+
+def retry_history_entry(
+    entry_id: int,
+    history_store: HistoryStore,
+    config=None,
+    transcriber: Transcriber | None = None,
+    cleaner: Cleaner | None = None,
+    dictionary_store: DictionaryStore | None = None,
+    hot_phrases: HotPhraseStore | None = None,
+) -> str:
+    entry = history_store.get(entry_id)
+    if entry is None or entry["kind"] != "dictate" or not entry["audio_path"]:
+        raise ValueError("history entry has no retryable audio clip")
+    captured = []
+    try:
+        config = config or load_config()
+        audio, _sample_rate = history_store.load_clip(entry["audio_path"])
+        transcriber = transcriber or build_stt(config)
+        cleaner = cleaner or Cleaner(build_llm(config))
+        dictionary_store = dictionary_store or DictionaryStore()
+        hot_phrases = hot_phrases or HotPhraseStore()
+        app_info = (
+            AppInfo(entry["app_name"] or "", entry["bundle_id"] or "")
+            if entry["app_name"] or entry["bundle_id"]
+            else None
+        )
+        text = _process_clip(
+            audio,
+            config,
+            transcriber,
+            cleaner,
+            discover_commands(config.command_names, config.skills_dirs),
+            hot_phrases=hot_phrases,
+            app_info=app_info,
+            dictionary_store=dictionary_store,
+            paste=False,
+            raw_text_callback=captured.append,
+        )
+    except Exception:
+        log.exception("retry failed for history entry %s", entry_id)
+        raise
+    if not text:
+        log.warning("retry produced no text for history entry %s", entry_id)
+        raise RuntimeError("retry produced no text")
+    history_store.update(
+        entry_id,
+        status="ok",
+        raw_text=captured[0] if captured else "",
+        final_text=text,
+    )
+    try:
+        write_last_text(text)
+    except Exception:
+        log.exception("could not write retried text to last.txt")
+    history_store.prune_audio_clips(getattr(config, "keep_audio_clips", 5))
     return text
 
 

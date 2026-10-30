@@ -5,8 +5,9 @@ import time
 import numpy as np
 import pytest
 
-from localflow.pushtotalk import MIN_CLIP_SECONDS, PushToTalkController
 from localflow.context import AppInfo
+from localflow.history import HistoryStore
+from localflow.pushtotalk import MIN_CLIP_SECONDS, PushToTalkController
 
 
 def _wait_until(predicate, timeout=2.0, interval=0.005):
@@ -63,6 +64,7 @@ def make_controller(
     min_clip_seconds=MIN_CLIP_SECONDS,
     clock=time.monotonic,
     on_state=None,
+    history_store=None,
 ):
     recorder = recorder if recorder is not None else FakeRecorder()
     config = config if config is not None else FakeConfig()
@@ -76,6 +78,7 @@ def make_controller(
         min_clip_seconds=min_clip_seconds,
         clock=clock,
         on_state=on_state,
+        history_store=history_store,
     )
     return controller, recorder, config, work_queue, sounds_played
 
@@ -656,5 +659,45 @@ def test_media_paused_after_start_and_resumed_on_cancel(monkeypatch):
         controller._discard_recording()
 
         assert resumed == [{"Spotify"}]
+    finally:
+        controller.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("history_text", "fallback", "expected"),
+    [
+        ("history result", "last.txt result", "history result"),
+        ("", "last.txt result", "last.txt result"),
+    ],
+)
+def test_paste_last_prefers_history_then_falls_back(
+    tmp_path, monkeypatch, history_text, fallback, expected
+):
+    from localflow import pushtotalk
+
+    store = HistoryStore(tmp_path / "history.sqlite", enabled=True)
+    if history_text:
+        store.add(kind="dictate", status="ok", final_text=history_text)
+    pasted = []
+    monkeypatch.setattr(
+        pushtotalk, "paste_text", lambda text, _method: pasted.append(text)
+    )
+    controller, *_ = make_controller(history_store=store)
+    controller._last_text = fallback
+    try:
+        controller._events.put(("paste_last", time.monotonic()))
+        assert _wait_until(lambda: bool(pasted))
+        assert pasted == [expected]
+    finally:
+        controller.shutdown()
+
+
+def test_initial_last_text_uses_persisted_file_helper(monkeypatch):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "read_last_text", lambda: "restored text")
+    controller, *_ = make_controller()
+    try:
+        assert controller._last_text == "restored text"
     finally:
         controller.shutdown()

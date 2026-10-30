@@ -33,6 +33,33 @@ def test_store_round_trip_and_cross_instance_mtime_reload(tmp_path):
     assert second.replacements() == []
 
 
+def test_updates_validate_and_only_change_same_kind_entries(store):
+    store.add_word("Ada")
+    store.add_word("Grace")
+    store.add_replacement("teh", "the")
+    store.add_replacement("recieve", "receive")
+    original = store.list()
+
+    assert not store.update_word("Ada", "Grace")
+    assert not store.update_replacement("teh", "recieve", "receive")
+    assert store.list() == original
+
+    assert store.update_word("Ada", "Ada Lovelace")
+    assert store.update_replacement("teh", "teh", "thee")
+    assert store.list() == {
+        "words": ["Ada Lovelace", "Grace"],
+        "replacements": [
+            {"from": "teh", "to": "thee"},
+            {"from": "recieve", "to": "receive"},
+        ],
+    }
+
+    with pytest.raises(DictionaryError, match="word is empty"):
+        store.update_word("Ada Lovelace", " ")
+    with pytest.raises(DictionaryError, match="replacement"):
+        store.update_replacement("teh", "", "the")
+
+
 def test_store_treats_missing_and_corrupt_files_as_empty(store, caplog):
     assert store.list() == {"words": [], "replacements": []}
     store.path.write_text("{broken", encoding="utf-8")

@@ -219,6 +219,65 @@ class DictionaryStore:
             self._write(data)
         return True
 
+    def update_word(self, old: str, new: str) -> bool:
+        with self._exclusive():
+            old_value, new_value = _word(old), _word(new)
+            if old_value is None or new_value is None:
+                raise DictionaryError("word is empty")
+            data = self._read()
+            index = next(
+                (
+                    i for i, value in enumerate(data["words"])
+                    if value.casefold() == old_value.casefold()
+                ),
+                None,
+            )
+            if index is None:
+                return False
+            if any(
+                i != index and value.casefold() == new_value.casefold()
+                for i, value in enumerate(data["words"])
+            ):
+                return False
+            data["words"][index] = new_value
+            self._write(data)
+        return True
+
+    def update_replacement(
+        self, old_from: str, new_from: str, new_to: str
+    ) -> bool:
+        with self._exclusive():
+            old_value, source_value, target_value = (
+                _word(old_from),
+                _word(new_from),
+                _word(new_to),
+            )
+            if old_value is None or source_value is None or target_value is None:
+                raise DictionaryError(
+                    "replacement source and target must be non-empty"
+                )
+            data = self._read()
+            index = next(
+                (
+                    i for i, item in enumerate(data["replacements"])
+                    if item["from"].casefold() == old_value.casefold()
+                ),
+                None,
+            )
+            if index is None:
+                return False
+            if any(
+                i != index and item["from"].casefold() == source_value.casefold()
+                for i, item in enumerate(data["replacements"])
+            ):
+                return False
+            data["replacements"][index] = {
+                "from": source_value,
+                "to": target_value,
+            }
+            self._write(data)
+        return True
+
     def remove(self, value: str) -> bool:
         normalized = _word(value)
         if normalized is None:

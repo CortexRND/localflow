@@ -10,6 +10,7 @@ from localflow import media
 from localflow import sounds as _sounds
 from localflow.audio import Recorder
 from localflow.context import AppInfo, frontmost_app
+from localflow.history import HistoryStore
 from localflow.inject import (
     capture_selection,
     paste_text,
@@ -40,6 +41,7 @@ class PushToTalkController:
         min_clip_seconds: float = MIN_CLIP_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         on_state: Callable[[str], None] | None = None,
+        history_store: HistoryStore | None = None,
     ):
         self._recorder = recorder
         self._config = config
@@ -52,6 +54,7 @@ class PushToTalkController:
         self._triple_cancel_window = TRIPLE_CANCEL_WINDOW
         self._clock = clock
         self._on_state = on_state
+        self._history_store = history_store
         self._app_state = "idle"
         self._events: queue.Queue = queue.Queue()
         self._toggle_intent = False
@@ -215,8 +218,13 @@ class PushToTalkController:
             elif kind == "command_up":
                 self._stop_command()
             elif kind == "paste_last":
-                if self._last_text:
-                    paste_text(self._last_text, self._config.paste_method)
+                text = (
+                    self._history_store.latest_text(self._last_text)
+                    if self._history_store is not None
+                    else self._last_text
+                )
+                if text:
+                    paste_text(text, self._config.paste_method)
 
     def _timer_timeout(self) -> float:
         now = self._clock()

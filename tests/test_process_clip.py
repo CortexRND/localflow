@@ -1,3 +1,5 @@
+import queue
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
@@ -8,11 +10,14 @@ pytest.importorskip("sounddevice")
 
 from localflow import app
 from localflow.context import AppInfo
+from localflow.dictionary import DictionaryStore
+from localflow.history import HistoryStore
+from localflow.jobs import Job
 
 REGISTRY = ["skill_part", "candidate-solutioning"]
 
 
-def _config(cleanup_enabled: bool, hot_phrases: bool = True) -> SimpleNamespace:
+def _config(cleanup_enabled: bool = True, hot_phrases: bool = True) -> SimpleNamespace:
     return SimpleNamespace(
         cleanup_enabled=cleanup_enabled,
         cleanup_level="light",
@@ -27,6 +32,12 @@ def _config(cleanup_enabled: bool, hot_phrases: bool = True) -> SimpleNamespace:
         silence_threshold_dbfs=-50.0,
         paste_method="auto",
         hot_phrases=hot_phrases,
+        sample_rate=16000,
+        keep_audio_clips=5,
+        history_enabled=True,
+        sounds_enabled=True,
+        command_names=(),
+        skills_dirs=(),
     )
 
 
@@ -222,3 +233,241 @@ def test_process_clip_uses_dictionary_prompt_and_app_style(monkeypatch, tmp_path
     assert cleaner.clean.call_args.kwargs["style"] == "casual"
     assert result.startswith("the LocalFlow")
     assert pasted == [result]
+
+
+@pytest.mark.parametrize(
+    ("audio", "transcription", "expected_status", "expected_error"),
+    [
+        (np.full(16000, 0.1, dtype=np.float32), "hello there", "ok", False),
+        (np.zeros(16000, dtype=np.float32), "unused", "silent", False),
+        (
+            np.full(16000, 0.1, dtype=np.float32),
+            RuntimeError("STT failed"),
+            "failed",
+            True,
+        ),
+    ],
+)
+def test_process_job_records_dictation_outcomes(
+    tmp_path, audio, transcription, expected_status, expected_error
+):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    transcriber = Mock()
+    if isinstance(transcription, Exception):
+        transcriber.transcribe.side_effect = transcription
+    else:
+        transcriber.transcribe.return_value = transcription
+
+    text, error = app._process_job(
+        Job(kind="dictate", audio=audio, app_info=AppInfo("Editor", "editor")),
+        _config(),
+        transcriber,
+        Mock(clean=Mock(side_effect=lambda value, **_kwargs: value)),
+        Mock(),
+        (),
+        HotPhraseStore(tmp_path / "phrases.json"),
+        DictionaryStore(tmp_path / "dictionary.json"),
+        store,
+    )
+
+    row = store.recent()[0]
+    assert row["status"] == expected_status
+    assert row["kind"] == "dictate"
+    assert row["app_name"] == "Editor"
+    assert error is expected_error
+    assert bool(row["audio_path"]) is (expected_status != "silent")
+    assert row["raw_text"] == (
+        transcription if isinstance(transcription, str) and expected_status == "ok" else ""
+    )
+    assert text == (
+        "hello there"
+        if expected_status == "ok"
+        else "" if expected_status == "silent" else None
+    )
+
+
+def test_failed_dictation_keeps_retry_clip_when_successful_retention_is_zero(
+    tmp_path,
+):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    config = _config()
+    config.keep_audio_clips = 0
+    audio = np.full(16000, 0.1, dtype=np.float32)
+
+    app._process_job(
+        Job(kind="dictate", audio=audio),
+        config,
+        Mock(transcribe=Mock(side_effect=RuntimeError("STT failed"))),
+        Mock(),
+        Mock(),
+        (),
+        HotPhraseStore(tmp_path / "phrases.json"),
+        DictionaryStore(tmp_path / "dictionary.json"),
+        store,
+    )
+
+    entry = store.recent()[0]
+    assert entry["status"] == "failed"
+    assert Path(entry["audio_path"]).is_file()
+
+
+def test_disabled_history_does_not_store_a_clip(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips", enabled=False)
+    config = _config()
+
+    app._process_job(
+        Job(kind="dictate", audio=np.full(16000, 0.1, dtype=np.float32)),
+        config,
+        Mock(transcribe=Mock(side_effect=RuntimeError("STT failed"))),
+        Mock(),
+        Mock(),
+        (),
+        HotPhraseStore(tmp_path / "phrases.json"),
+        DictionaryStore(tmp_path / "dictionary.json"),
+        store,
+    )
+
+    assert not (tmp_path / "clips").exists()
+
+
+def test_retry_history_entry_reprocesses_clip_without_pasting(tmp_path, monkeypatch):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(
+        kind="dictate",
+        status="failed",
+        audio_path=clip,
+        raw_text="previous raw",
+        final_text="",
+    )
+    monkeypatch.setattr(app, "write_last_text", lambda _text: None)
+    monkeypatch.setattr(
+        app, "paste_text", lambda *_args: pytest.fail("retry must not paste")
+    )
+
+    text = app.retry_history_entry(
+        entry_id,
+        store,
+        config=_config(),
+        transcriber=Mock(transcribe=Mock(return_value="retried words")),
+        cleaner=Mock(clean=Mock(side_effect=lambda value, **_kwargs: value)),
+        dictionary_store=DictionaryStore(tmp_path / "dictionary.json"),
+        hot_phrases=HotPhraseStore(tmp_path / "phrases.json"),
+    )
+
+    updated = store.get(entry_id)
+    assert text == "retried words"
+    assert updated["status"] == "ok"
+    assert updated["raw_text"] == "retried words"
+    assert updated["final_text"] == "retried words"
+
+
+def test_retry_exception_leaves_history_fields_unchanged(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(
+        kind="dictate",
+        status="failed",
+        audio_path=clip,
+        raw_text="previous raw",
+        final_text="previous final",
+    )
+    before = store.get(entry_id)
+
+    with pytest.raises(RuntimeError, match="transcriber failed"):
+        app.retry_history_entry(
+            entry_id,
+            store,
+            config=_config(),
+            transcriber=Mock(
+                transcribe=Mock(side_effect=RuntimeError("transcriber failed"))
+            ),
+            cleaner=Mock(),
+        )
+
+    after = store.get(entry_id)
+    assert {key: after[key] for key in ("status", "raw_text", "final_text")} == {
+        key: before[key] for key in ("status", "raw_text", "final_text")
+    }
+
+
+def test_retry_empty_result_leaves_history_fields_unchanged(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(
+        kind="dictate",
+        status="failed",
+        audio_path=clip,
+        raw_text="previous raw",
+        final_text="previous final",
+    )
+    before = store.get(entry_id)
+
+    with pytest.raises(RuntimeError, match="retry produced no text"):
+        app.retry_history_entry(
+            entry_id,
+            store,
+            config=_config(),
+            transcriber=Mock(transcribe=Mock(return_value="")),
+            cleaner=Mock(),
+        )
+
+    after = store.get(entry_id)
+    assert {key: after[key] for key in ("status", "raw_text", "final_text")} == {
+        key: before[key] for key in ("status", "raw_text", "final_text")
+    }
+
+
+def test_worker_continues_when_last_text_write_fails(monkeypatch):
+    jobs = [Job(kind="dictate"), Job(kind="dictate")]
+    work_queue = queue.Queue()
+    for item in (*jobs, None):
+        work_queue.put(item)
+    processed = []
+    delivered = []
+
+    def process(item):
+        processed.append(item)
+        return f"text {len(processed)}", False
+
+    def fail_write(_text):
+        raise OSError("disk is unavailable")
+
+    monkeypatch.setattr(app, "write_last_text", fail_write)
+    app._worker_loop(
+        work_queue,
+        process,
+        lambda item, text, error: delivered.append((item, text, error)),
+    )
+
+    assert processed == jobs
+    assert delivered == [(jobs[0], "text 1", False), (jobs[1], "text 2", False)]
+    assert work_queue.unfinished_tasks == 0
+
+
+def test_achievement_cue_respects_sounds_enabled(tmp_path, monkeypatch):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    monkeypatch.setattr(
+        store, "stats", lambda: {"current_streak_days": 3}
+    )
+    claim_milestone = Mock(return_value=True)
+    monkeypatch.setattr(store, "claim_milestone", claim_milestone)
+    play = Mock()
+    monkeypatch.setattr(app.sounds, "play", play)
+    config = _config()
+    config.sounds_enabled = False
+
+    app._process_job(
+        Job(kind="dictate", audio=np.full(16000, 0.1, dtype=np.float32)),
+        config,
+        Mock(transcribe=Mock(return_value="This is a sufficiently long sentence.")),
+        Mock(clean=Mock(side_effect=lambda text, **_kwargs: text)),
+        Mock(),
+        (),
+        Mock(enabled=Mock(return_value=[])),
+        DictionaryStore(tmp_path / "dictionary.json"),
+        store,
+    )
+
+    play.assert_not_called()
+    claim_milestone.assert_called_once_with(3)

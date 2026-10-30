@@ -200,6 +200,32 @@ Imports accept CSV words or `from,to` replacements (with optional headers)
 and JSON in the dictionary file's shape. Entries are trimmed, and
 case-insensitive duplicates are skipped.
 
+### History & insights
+
+LocalFlow stores dictations, commands, and transforms in
+`~/.localflow/history.sqlite`. Successful dictations include word counts,
+WPM, daily totals, streaks, and top-app summaries. Raw transcripts remain
+available alongside the final text. Failed dictations can be retried from a
+private local audio clip; configure `[history].keep_audio_clips` to choose how
+many successful clips to retain. History is enabled by default.
+
+Open the native hub with `lf hub` to browse history, edit the dictionary and
+cleanup styles, or review the selected models. The CLI can search and manage
+history without opening the hub:
+
+```bash
+lf history list
+lf history search "project update"
+lf history --limit 20 --search "project update"
+lf history copy 12
+lf history raw last
+lf history raw 12
+lf history retry 12
+lf history delete 12
+lf history clear --yes
+lf stats
+```
+
 ### Spoken formatting
 When `[dictation].spoken_punctuation` is enabled, say “new line” or “new
 paragraph” to add line breaks, or dictate punctuation such as “comma,”
@@ -310,6 +336,10 @@ port = 8756
 [features]
 meetings = true                    # macOS only; forced false elsewhere
 hot_phrases = true                 # spoken trigger phrases expand into saved prompts
+
+[history]
+enabled = true
+keep_audio_clips = 5
 
 [meetings]
 watch = true

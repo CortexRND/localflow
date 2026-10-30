@@ -64,6 +64,10 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "meetings": "meetings_enabled",
         "hot_phrases": "hot_phrases",
     },
+    "history": {
+        "enabled": "history_enabled",
+        "keep_audio_clips": "keep_audio_clips",
+    },
     "meetings": {
         "vault_path": "vault_path",
         "notes_folder": "notes_folder",
@@ -149,6 +153,8 @@ class Config:
     orca_agent: str = "claude"
     input_device: str = ""
     setup_version: int = 0
+    history_enabled: bool = True
+    keep_audio_clips: int = 5
 
 
 def config_dir() -> Path:
@@ -361,6 +367,8 @@ _FIELD_TYPES = {
     "prompt_hotkey": str,
     "pause_media_while_dictating": bool,
     "max_recording_seconds": int,
+    "history_enabled": bool,
+    "keep_audio_clips": int,
 }
 
 
@@ -368,7 +376,9 @@ def _valid_field_value(field_name: str, value: object) -> bool:
     expected_type = _FIELD_TYPES.get(field_name)
     if expected_type is not None and type(value) is not expected_type:
         return False
-    return field_name != "max_recording_seconds" or value >= 0
+    if field_name in {"max_recording_seconds", "keep_audio_clips"}:
+        return value >= 0
+    return True
 
 
 def config_to_dict(config: Config) -> dict:
