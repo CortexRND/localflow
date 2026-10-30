@@ -178,7 +178,7 @@ class HubWindowController(NSObject):
                        f'{(row["final_text"] or row["raw_text"])[:50]}', 0, y, 430, 12)
             )
             self._button("Copy", "copyEntry:", 445, y, row["id"], 72)
-            self._button("Raw", "rawEntry:", 520, y, row["id"], 60)
+            self._button("Copy original", "rawEntry:", 500, y, row["id"], 110)
             if row["kind"] == "dictate" and row["audio_path"]:
                 self._button("Retry", "retryEntry:", 580, y, row["id"], 66)
             self._button("Delete", "deleteEntry:", 650, y, row["id"], 75)

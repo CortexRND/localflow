@@ -75,5 +75,12 @@ def test_hub_history_populated_and_empty_states(tmp_path):
         window.show_page("History")
         root.update()
         assert window.history_rows.winfo_children()
+        buttons = [
+            child.cget("text")
+            for frame in window.history_rows.winfo_children()
+            for child in frame.winfo_children()
+            if isinstance(child, tk.Button)
+        ]
+        assert "Copy original" in buttons
     finally:
         root.destroy()

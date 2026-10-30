@@ -187,7 +187,7 @@ class HubWindow:
         if actions:
             actions = [
                 ("Copy", lambda r=row: self._copy(r, False)),
-                ("Raw", lambda r=row: self._copy(r, True)),
+                ("Copy original", lambda r=row: self._copy(r, True)),
             ]
             if row["kind"] == "dictate" and row.get("audio_path"):
                 actions.append(("Retry", lambda r=row: self._retry(r)))
