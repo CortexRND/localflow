@@ -79,8 +79,8 @@ class SetupWindow:
         self._progress_var = tk.StringVar(value="")
 
         root.title("LocalFlow Setup")
-        root.geometry("720x560")
-        root.minsize(680, 520)
+        root.geometry("760x640")
+        root.minsize(700, 580)
         root.configure(background=TOKENS["paper"])
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._build_shell()
@@ -122,10 +122,10 @@ class SetupWindow:
             anchor="w",
         )
         self.subtitle_label.pack(fill="x", pady=(0, 10))
+        self.footer = tk.Frame(self.shell, bg=TOKENS["paper"])
+        self.footer.pack(side="bottom", fill="x", pady=(12, 0))
         self.body = tk.Frame(self.shell, bg=TOKENS["paper"])
         self.body.pack(fill="both", expand=True)
-        self.footer = tk.Frame(self.shell, bg=TOKENS["paper"])
-        self.footer.pack(fill="x", pady=(12, 0))
 
     def _clear(self, container) -> None:
         for child in container.winfo_children():
@@ -157,11 +157,17 @@ class SetupWindow:
         return label
 
     def _card(self, parent, title, detail, selected=False, tag=""):
-        shadow = tk.Frame(parent, bg=TOKENS["ink"], height=64)
-        shadow.pack(fill="x", pady=(0, 8))
+        offset = TOKENS["shadow"]
+        card = tk.Frame(parent, bg=TOKENS["paper"])
+        card.pack(fill="x", pady=(0, 8))
+        card.columnconfigure(0, weight=1)
+        card.rowconfigure(0, weight=1)
+        shadow = tk.Frame(card, bg=TOKENS["ink"])
+        shadow.grid(row=0, column=0, sticky="nsew", padx=(offset, 0), pady=(offset, 0))
         color = TOKENS["sun"] if selected else TOKENS["card"]
-        surface = tk.Frame(shadow, bg=color, highlightbackground=TOKENS["ink"], highlightthickness=2)
-        surface.place(x=0, y=0, relwidth=1, relheight=1, width=-TOKENS["shadow"], height=-TOKENS["shadow"])
+        surface = tk.Frame(card, bg=color, highlightbackground=TOKENS["ink"], highlightthickness=2)
+        surface.grid(row=0, column=0, sticky="nsew", padx=(0, offset), pady=(0, offset))
+        surface.lift(shadow)
         top = tk.Frame(surface, bg=color)
         top.pack(fill="x", padx=12, pady=(8, 0))
         tk.Label(top, text=title, bg=color, fg=TOKENS["ink"], font=("TkDefaultFont", 10, "bold")).pack(side="left")
@@ -169,11 +175,9 @@ class SetupWindow:
             tk.Label(top, text=tag, bg=color, fg=TOKENS["ink"], font=("TkDefaultFont", 9, "bold")).pack(side="right")
         tk.Label(
             surface, text=detail, bg=color, fg=TOKENS["muted"],
-            font=("TkDefaultFont", 10), anchor="w",
+            font=("TkDefaultFont", 10), anchor="w", justify="left", wraplength=600,
         ).pack(fill="x", padx=12, pady=(2, 8))
-        shadow.configure(height=64)
-        shadow.pack_propagate(False)
-        return shadow, surface
+        return card, surface
 
     def _scrolling_body(self):
         holder = tk.Frame(self.body, bg=TOKENS["paper"])
@@ -239,6 +243,7 @@ class SetupWindow:
 
     def _render_step_2(self) -> None:
         self._label(self.body, "Choose the speech model that turns your voice into text.")
+        self._show_operation_state()
         content = self._scrolling_body()
         rec_stt, _ = recommend(self.hardware)
         for model in self.models:
@@ -267,7 +272,6 @@ class SetupWindow:
                     child.bind("<Button-1>", lambda _e, model_id=model.id: self._select_stt(model_id))
         if self.step == 2 and not self.downloaded:
             self._start_download_checks()
-        self._show_operation_state()
 
     def _render_step_3(self) -> None:
         if self.choices.llm_provider != "ollama":
@@ -279,9 +283,11 @@ class SetupWindow:
                 self.body,
                 text="Change in Settings",
                 command=self._open_settings,
+                bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2, padx=12, pady=4,
             ).pack(anchor="w", pady=(12, 0))
             return
         self._label(self.body, "Cleanup fixes punctuation and filler words. No cleanup keeps the raw transcript.")
+        self._show_operation_state()
         content = self._scrolling_body()
         card, surface = self._card(
             content, "No cleanup (raw transcript)", "Fastest and smallest; no Ollama model needed.",
@@ -316,18 +322,17 @@ class SetupWindow:
             ).pack(anchor="w")
         if not self._ollama_checked:
             self._start_ollama_check()
-        self._show_operation_state()
 
     def _render_step_4(self) -> None:
         self._label(self.body, "Pick a microphone and the key you'll hold to talk.")
         devices = ["System default", *list_input_devices()]
         if self.device_var.get() not in devices:
             self.device_var.set("System default")
-        ttk.Label(self.body, text="Microphone").pack(anchor="w")
+        tk.Label(self.body, text="Microphone", bg=TOKENS["paper"], fg=TOKENS["ink"], font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         self.device_box = ttk.Combobox(self.body, textvariable=self.device_var, values=devices, state="readonly")
         self.device_box.pack(fill="x", pady=(2, 12))
         self.device_box.bind("<<ComboboxSelected>>", self._change_device)
-        ttk.Label(self.body, text="Hotkey").pack(anchor="w")
+        tk.Label(self.body, text="Hotkey", bg=TOKENS["paper"], fg=TOKENS["ink"], font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         self.hotkey_box = ttk.Combobox(
             self.body,
             textvariable=self.hotkey_var,
@@ -412,12 +417,6 @@ class SetupWindow:
             state="disabled" if busy else "normal",
         )
         self.primary_button.pack(side="right")
-        if self.step in (2, 3) and (self._busy or self.error_message or self.status_message):
-            self._progress_var.set(self.error_message or self.status_message)
-            tk.Label(
-                self.footer, textvariable=self._progress_var,
-                bg=TOKENS["paper"], fg=TOKENS["red"] if self.error_message else TOKENS["muted"],
-            ).pack(side="right", padx=12)
 
     def _primary_label(self) -> str:
         if self.saved:
@@ -578,11 +577,25 @@ class SetupWindow:
     def _show_operation_state(self) -> None:
         if self.step not in (2, 3):
             return
-        if self.error_message:
-            self._label(self.body, self.error_message, fg=TOKENS["red"], pady=(6, 0))
-            tk.Button(self.body, text="Retry", command=self.primary_action).pack(anchor="w", pady=(4, 0))
-        elif self.status_message:
-            self._label(self.body, self.status_message, fg=TOKENS["muted"], pady=(6, 0))
+        if not (self.error_message or self.status_message):
+            return
+        error = bool(self.error_message)
+        strip = tk.Frame(
+            self.body, bg=TOKENS["red"] if error else TOKENS["sun"],
+            highlightbackground=TOKENS["ink"], highlightthickness=2,
+        )
+        strip.pack(fill="x", pady=(0, 10))
+        self._progress_var.set(self.error_message or self.status_message)
+        tk.Label(
+            strip, textvariable=self._progress_var,
+            bg=strip["bg"], fg="#FFFFFF" if error else TOKENS["ink"],
+            font=("TkDefaultFont", 11, "bold"), anchor="w", justify="left", wraplength=520,
+        ).pack(side="left", fill="x", expand=True, padx=12, pady=8)
+        if error:
+            tk.Button(
+                strip, text="Retry", command=self.primary_action,
+                bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2,
+            ).pack(side="right", padx=8, pady=6)
 
     def _poll_events(self) -> None:
         while True:

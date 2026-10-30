@@ -10,9 +10,9 @@ tk = pytest.importorskip("tkinter")
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
     pytest.skip("no display for Tk", allow_module_level=True)
 
-from localflow import setup_tk  # noqa: E402
-from localflow.config import Config  # noqa: E402
-from localflow.models import HardwareInfo  # noqa: E402
+from localflow import setup_tk
+from localflow.config import Config
+from localflow.models import HardwareInfo
 
 
 class FakeMonitor:
@@ -32,7 +32,7 @@ class FakeMonitor:
 def test_setup_window_renders_all_seven_steps(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "run_checks", lambda _cfg: [])
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: False)
-    monkeypatch.setattr(setup_tk, "list_input_devices", lambda: [])
+    monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
     root = tk.Tk()
     root.withdraw()
@@ -64,9 +64,11 @@ def test_setup_window_renders_all_seven_steps(monkeypatch):
         window.step = 2
         window.error_message = "network unavailable"
         window._render()
+        strips = [child for child in window.body.winfo_children() if isinstance(child, tk.Frame)]
         assert any(
             isinstance(child, tk.Button) and child.cget("text") == "Retry"
-            for child in window.body.winfo_children()
+            for strip in strips
+            for child in strip.winfo_children()
         )
         window._ollama_checked = False
         window.choices = replace(window.choices, llm_provider="openai-compatible")

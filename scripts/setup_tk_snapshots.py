@@ -76,6 +76,7 @@ def main():
             window._render()
             capture(f"step-{step + 1}")
 
+        window.saved = False
         window.step = 2
         window._busy = {"stt-download"}
         window._cancel = threading.Event()
