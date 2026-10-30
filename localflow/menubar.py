@@ -15,7 +15,7 @@ import rumps
 from localflow.config import load_config
 from localflow.inject import paste_text
 from localflow.platform import current
-from localflow.status import LAST_TEXT_PATH, live_state, title_prefix
+from localflow.status import live_state, read_last_text, title_prefix
 
 _config = load_config()
 BASE = f"http://127.0.0.1:{_config.server_port}"
@@ -153,10 +153,7 @@ class LocalflowMenuBar(rumps.App):
         current().open_path(str(folder))
 
     def paste_last(self, _item) -> None:
-        try:
-            text = LAST_TEXT_PATH.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            return
+        text = read_last_text()
         if text:
             paste_text(text, _config.paste_method)
 

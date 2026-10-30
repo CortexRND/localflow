@@ -3,7 +3,13 @@ import os
 import stat
 
 from localflow import media
-from localflow.status import live_state, title_prefix, write_last_text, write_state
+from localflow.status import (
+    live_state,
+    read_last_text,
+    title_prefix,
+    write_last_text,
+    write_state,
+)
 
 
 def test_status_state_is_atomic_payload_with_pid(tmp_path):
@@ -40,6 +46,14 @@ def test_last_text_file_permissions_are_private(tmp_path):
 
     assert path.read_text() == "hello"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_read_last_text_returns_saved_text_and_empty_when_missing(tmp_path):
+    path = tmp_path / "last.txt"
+
+    assert read_last_text(path) == ""
+    write_last_text("saved text", path)
+    assert read_last_text(path) == "saved text"
 
 
 def test_media_pause_and_resume_are_noops_off_macos(monkeypatch):

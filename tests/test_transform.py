@@ -105,20 +105,57 @@ def test_capture_selection_returns_changed_clipboard_and_original(monkeypatch):
 
     monkeypatch.setattr(inject, "current", lambda: Mock(copy_selection=copy_selection))
     monkeypatch.setattr(inject.pyperclip, "paste", lambda: clipboard["text"])
+    monkeypatch.setattr(inject.pyperclip, "copy", lambda text: clipboard.update(text=text))
     monkeypatch.setattr(inject.time, "sleep", lambda _seconds: None)
 
     capture = inject.capture_selection()
 
     assert capture.text == "selected"
     assert capture.clipboard_before == "old"
+    assert clipboard["text"] == "selected"
 
 
 def test_capture_selection_returns_empty_when_clipboard_did_not_change(monkeypatch):
+    clipboard = {"text": "same"}
     monkeypatch.setattr(inject, "current", lambda: Mock(copy_selection=Mock()))
-    monkeypatch.setattr(inject.pyperclip, "paste", lambda: "same")
+    monkeypatch.setattr(inject.pyperclip, "paste", lambda: clipboard["text"])
+    monkeypatch.setattr(inject.pyperclip, "copy", lambda text: clipboard.update(text=text))
     monkeypatch.setattr(inject.time, "sleep", lambda _seconds: None)
 
     capture = inject.capture_selection()
 
     assert capture.text == ""
     assert capture.clipboard_before == "same"
+    assert clipboard["text"] == "same"
+
+
+def test_capture_selection_detects_selection_equal_to_previous_clipboard(monkeypatch):
+    clipboard = {"text": "selected"}
+
+    monkeypatch.setattr(
+        inject, "current", lambda: Mock(copy_selection=lambda: clipboard.update(text="selected"))
+    )
+    monkeypatch.setattr(inject.pyperclip, "paste", lambda: clipboard["text"])
+    monkeypatch.setattr(inject.pyperclip, "copy", lambda text: clipboard.update(text=text))
+    monkeypatch.setattr(inject.time, "sleep", lambda _seconds: None)
+
+    capture = inject.capture_selection()
+
+    assert capture.text == "selected"
+    assert capture.clipboard_before == "selected"
+
+
+@pytest.mark.parametrize(
+    ("current_text", "expected"),
+    [("selection", "restored"), ("other", "other")],
+)
+def test_restore_clipboard_only_when_selection_is_still_present(
+    monkeypatch, current_text, expected
+):
+    clipboard = {"text": current_text}
+    monkeypatch.setattr(inject.pyperclip, "paste", lambda: clipboard["text"])
+    monkeypatch.setattr(inject.pyperclip, "copy", lambda text: clipboard.update(text=text))
+
+    inject.restore_clipboard_if_matches("selection", "restored")
+
+    assert clipboard["text"] == expected

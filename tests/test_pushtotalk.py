@@ -234,20 +234,20 @@ def test_note_toggle_resolves_correctly_under_rapid_double_press():
         controller.shutdown()
 
 
-def test_shutdown_mid_recording_stops_the_mic():
-    """General case: shutdown() arrives while a recording is genuinely
-    active. The mic stream must be closed before the consumer thread exits,
-    not left open."""
+def test_shutdown_mid_recording_discards_the_clip(caplog):
     recorder = FakeRecorder()
     controller, recorder, config, work_queue, _ = make_controller(recorder=recorder)
     controller.note_start()
     assert _wait_until(lambda: recorder.start_calls == 1)
     assert recorder.recording is True
 
-    controller.shutdown()
+    with caplog.at_level("WARNING", logger="localflow.pushtotalk"):
+        controller.shutdown()
 
     assert recorder.stop_calls == 1
     assert recorder.recording is False
+    assert work_queue.empty()
+    assert "shutdown: discarded in-progress recording" in caplog.text
 
 
 def test_shutdown_pulled_by_start_lookahead_still_stops_mic():
@@ -321,6 +321,23 @@ def test_queued_short_tap_pair_never_opens_microphone():
 
         assert controller._gesture_state == "TAPPED"
         assert recorder.start_calls == 0
+    finally:
+        controller.shutdown()
+
+
+def test_escape_lookahead_cancel_discards_queued_clip(monkeypatch):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
+    controller, recorder, _config, work_queue, _sounds = make_controller()
+    try:
+        controller.note_down()
+        controller.note_cancel()
+        controller.note_up()
+
+        assert _wait_until(lambda: recorder.stop_calls == 1)
+        assert _wait_until(lambda: controller._gesture_state == "IDLE")
+        assert work_queue.empty()
     finally:
         controller.shutdown()
 
@@ -419,6 +436,28 @@ def test_max_duration_warns_once_then_stops_and_queues(monkeypatch, caplog):
         controller.shutdown()
 
 
+def test_max_duration_resets_toggle_intent(monkeypatch):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
+    clock = FakeClock()
+    config = FakeConfig()
+    config.max_recording_seconds = 1
+    controller, recorder, _config, _work_queue, _sounds = make_controller(
+        config=config, clock=clock
+    )
+    try:
+        controller.note_toggle()
+        assert _wait_until(lambda: recorder.recording)
+        clock.advance(1)
+        controller._check_timers(clock())
+
+        assert recorder.recording is False
+        assert controller._toggle_intent is False
+    finally:
+        controller.shutdown()
+
+
 def test_command_mode_creates_command_job_with_selection(monkeypatch):
     from localflow import pushtotalk
     from localflow.inject import SelectionCapture
@@ -441,6 +480,37 @@ def test_command_mode_creates_command_job_with_selection(monkeypatch):
         assert job.selection == "selected text"
         assert job.clipboard_before == "previous clipboard"
         assert job.app_info == app_info
+    finally:
+        controller.shutdown()
+
+
+def test_active_command_cancel_discards_without_job_or_release_job(monkeypatch):
+    from localflow import pushtotalk
+    from localflow.inject import SelectionCapture
+
+    monkeypatch.setattr(
+        pushtotalk,
+        "capture_selection",
+        lambda: SelectionCapture("selected", "before"),
+    )
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
+    restored = []
+    monkeypatch.setattr(
+        pushtotalk,
+        "restore_clipboard_if_matches",
+        lambda *args: restored.append(args),
+    )
+    controller, recorder, _config, work_queue, sounds = make_controller()
+    try:
+        controller._start_command()
+        controller.note_command_cancel()
+        controller.note_command_up()
+
+        assert _wait_until(lambda: not recorder.recording)
+        assert _wait_until(lambda: controller._command_active is False)
+        assert work_queue.empty()
+        assert sounds == []
+        assert restored == [("selected", "before")]
     finally:
         controller.shutdown()
 
@@ -480,6 +550,41 @@ def test_job_result_pastes_on_consumer_thread(monkeypatch):
         assert _wait_until(lambda: bool(calls))
         assert calls[0] == (("result", "auto", "before"), "pushtotalk-consumer")
         assert controller._last_text == "result"
+    finally:
+        controller.shutdown()
+
+
+def test_failed_job_result_restores_only_captured_selection(monkeypatch):
+    from localflow import pushtotalk
+
+    restored = []
+    monkeypatch.setattr(
+        pushtotalk,
+        "restore_clipboard_if_matches",
+        lambda *args: restored.append(args),
+    )
+    controller, _recorder, _config, _queue, _sounds = make_controller()
+    try:
+        controller.note_job_result(
+            None,
+            "before",
+            error=True,
+            clipboard_expected="selection",
+        )
+        assert _wait_until(lambda: bool(restored))
+        assert restored == [("selection", "before")]
+    finally:
+        controller.shutdown()
+
+
+def test_paste_last_loads_saved_text_on_controller_startup(monkeypatch):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "read_last_text", lambda: "saved text")
+    controller, _recorder, _config, _queue, _sounds = make_controller()
+
+    try:
+        assert controller._last_text == "saved text"
     finally:
         controller.shutdown()
 

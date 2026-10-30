@@ -1,6 +1,6 @@
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from pynput import keyboard
 
@@ -14,7 +14,7 @@ class KeyboardHub:
         self,
         hold_key: str | None,
         toggle_combo: str | None,
-        combos: dict[str, Callable[[], None]],
+        combos: Iterable[tuple[str, Callable[[], None]]],
         on_down: Callable[[], None],
         on_up: Callable[[], None],
         on_toggle: Callable[[], None],
@@ -22,6 +22,7 @@ class KeyboardHub:
         command_key: str | None,
         on_command_down: Callable[[], None],
         on_command_up: Callable[[], None],
+        on_command_cancel: Callable[[], None] | None = None,
     ):
         self._pressed: set[object] = set()
         self._pressed_raw: set[object] = set()
@@ -37,6 +38,7 @@ class KeyboardHub:
         self._on_cancel = on_cancel
         self._on_command_down = on_command_down
         self._on_command_up = on_command_up
+        self._on_command_cancel = on_command_cancel or (lambda: None)
 
         seen: dict[str, str] = {}
 
@@ -63,10 +65,27 @@ class KeyboardHub:
             self._toggle_combo = None
 
         self._combos = []
-        for shortcut, callback in combos.items():
+        for shortcut, callback in combos:
             if reserve("shortcut", shortcut):
-                hotkey = self._parse_combo(shortcut, callback)
+                hotkey_ref = []
+
+                def fire(
+                    callback=callback,
+                    hotkey_ref=hotkey_ref,
+                ):
+                    hotkey = hotkey_ref[0]
+                    if (
+                        self._command_key_down
+                        and self._command_combo_key is not None
+                        and self._command_combo_key in hotkey._keys
+                    ):
+                        self._command_key_down = False
+                        self._on_command_cancel()
+                    callback()
+
+                hotkey = self._parse_combo(shortcut, fire)
                 if hotkey is not None:
+                    hotkey_ref.append(hotkey)
                     self._combos.append(hotkey)
 
         if reserve("command mode", command_key):
@@ -219,7 +238,7 @@ class HotkeyListener:
         hub = KeyboardHub(
             hold_key=None,
             toggle_combo=self.combo,
-            combos={},
+            combos=[],
             on_down=lambda: None,
             on_up=lambda: None,
             on_toggle=self.on_toggle,
@@ -248,7 +267,7 @@ class HoldKeyListener:
         hub = KeyboardHub(
             hold_key=self.key_name,
             toggle_combo=None,
-            combos={},
+            combos=[],
             on_down=self.on_start,
             on_up=self.on_stop,
             on_toggle=lambda: None,

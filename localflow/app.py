@@ -129,7 +129,10 @@ def main() -> None:
                         log.error(message)
                         print(message)
                         controller.note_job_result(
-                            None, item.clipboard_before, error=True
+                            None,
+                            item.clipboard_before,
+                            error=True,
+                            clipboard_expected=item.selection,
                         )
                         work_queue.task_done()
                         continue
@@ -138,7 +141,10 @@ def main() -> None:
                         if not instruction.strip():
                             log.error("command mode received an empty instruction")
                             controller.note_job_result(
-                                None, item.clipboard_before, error=True
+                                None,
+                                item.clipboard_before,
+                                error=True,
+                                clipboard_expected=item.selection,
                             )
                             work_queue.task_done()
                             continue
@@ -152,11 +158,15 @@ def main() -> None:
                     text,
                     item.clipboard_before,
                     error=item.kind != "dictate" and not text,
+                    clipboard_expected=item.selection,
                 )
             except Exception:
                 log.exception("transcription pipeline failed")
                 controller.note_job_result(
-                    None, item.clipboard_before, error=item.kind != "dictate"
+                    None,
+                    item.clipboard_before,
+                    error=item.kind != "dictate",
+                    clipboard_expected=item.selection,
                 )
             work_queue.task_done()
 
@@ -166,15 +176,15 @@ def main() -> None:
     _print_banner(config)
     print(f"  log file:     {log_path}")
 
-    combos = {
-        shortcut: callback
+    combos = [
+        (shortcut, callback)
         for shortcut, callback in (
             (config.paste_last_hotkey, controller.note_paste_last),
             (config.polish_hotkey, lambda: controller.note_transform("polish")),
             (config.prompt_hotkey, lambda: controller.note_transform("prompt")),
         )
         if shortcut
-    }
+    ]
     listener = KeyboardHub(
         hold_key=config.hotkey if is_hold_key(config.hotkey) else None,
         toggle_combo=None if is_hold_key(config.hotkey) else config.hotkey,
@@ -186,6 +196,7 @@ def main() -> None:
         command_key=config.command_hotkey,
         on_command_down=controller.note_command_down,
         on_command_up=controller.note_command_up,
+        on_command_cancel=controller.note_command_cancel,
     )
     try:
         listener.run_forever()

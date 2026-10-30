@@ -77,7 +77,7 @@ def _hub(**overrides):
     arguments = {
         "hold_key": None,
         "toggle_combo": None,
-        "combos": {},
+        "combos": [],
         "on_down": lambda: None,
         "on_up": lambda: None,
         "on_toggle": lambda: None,
@@ -93,10 +93,10 @@ def _hub(**overrides):
 def test_keyboard_hub_routes_multiple_combos_and_escape():
     called = []
     hub = _hub(
-        combos={
-            "<ctrl>+<alt>+1": lambda: called.append("polish"),
-            "<ctrl>+<alt>+2": lambda: called.append("prompt"),
-        },
+        combos=[
+            ("<ctrl>+<alt>+1", lambda: called.append("polish")),
+            ("<ctrl>+<alt>+2", lambda: called.append("prompt")),
+        ],
         on_cancel=lambda: called.append("cancel"),
     )
     keys = (keyboard.Key.ctrl, keyboard.Key.alt, keyboard.KeyCode.from_char("1"))
@@ -145,7 +145,7 @@ def test_keyboard_hub_disables_later_duplicate_shortcuts(capsys):
     called = []
     hub = _hub(
         hold_key="f19",
-        combos={"f19": lambda: called.append("combo")},
+        combos=[("f19", lambda: called.append("combo"))],
         command_key="f19",
         on_down=lambda: called.append("hold"),
         on_command_down=lambda: called.append("command"),
@@ -181,7 +181,7 @@ def test_command_modifier_in_transform_chord_does_not_start_command():
     called = []
     hub = _hub(
         command_key="alt_r",
-        combos={"<ctrl>+<alt>+1": lambda: called.append("polish")},
+        combos=[("<ctrl>+<alt>+1", lambda: called.append("polish"))],
         on_command_down=lambda: called.append("command"),
     )
 
@@ -201,3 +201,47 @@ def test_command_modifier_in_transform_chord_does_not_start_command():
 
     assert hub._command_timer is None
     assert called == ["polish"]
+
+
+def test_polish_and_prompt_duplicate_shortcut_disables_prompt(capsys):
+    called = []
+    shortcut = "<ctrl>+<alt>+1"
+    hub = _hub(
+        combos=[
+            (shortcut, lambda: called.append("polish")),
+            (shortcut, lambda: called.append("prompt")),
+        ]
+    )
+    keys = (keyboard.Key.ctrl, keyboard.Key.alt, keyboard.KeyCode.from_char("1"))
+    for key in keys:
+        hub._press(key)
+
+    assert called == ["polish"]
+    assert "disabling shortcut" in capsys.readouterr().out
+
+
+def test_active_command_is_cancelled_before_command_key_chord_callback():
+    called = []
+    hub = _hub(
+        command_key="alt_r",
+        combos=[("<ctrl>+<alt>+1", lambda: called.append("polish"))],
+        on_command_down=lambda: called.append("command"),
+        on_command_up=lambda: called.append("command-up"),
+        on_command_cancel=lambda: called.append("command-cancel"),
+    )
+
+    class CanonicalListener:
+        @staticmethod
+        def canonical(key):
+            return keyboard.Key.alt if key == keyboard.Key.alt_r else key
+
+    hub._listener = CanonicalListener()
+    hub._command_combo_key = keyboard.Key.alt
+    hub._press(keyboard.Key.alt_r)
+    hub._command_timer.cancel()
+    hub._command_down_fire()
+    for key in (keyboard.Key.ctrl, keyboard.KeyCode.from_char("1")):
+        hub._press(key)
+    hub._release(keyboard.Key.alt_r)
+
+    assert called == ["command", "command-cancel", "polish"]

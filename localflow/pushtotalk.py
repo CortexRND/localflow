@@ -10,8 +10,13 @@ from localflow import media
 from localflow import sounds as _sounds
 from localflow.audio import Recorder
 from localflow.context import AppInfo, frontmost_app
-from localflow.inject import capture_selection, paste_text
+from localflow.inject import (
+    capture_selection,
+    paste_text,
+    restore_clipboard_if_matches,
+)
 from localflow.jobs import Job
+from localflow.status import read_last_text
 
 log = logging.getLogger("localflow.pushtotalk")
 
@@ -62,7 +67,7 @@ class PushToTalkController:
         self._command_active = False
         self._command_selection = ""
         self._command_clipboard_before = None
-        self._last_text = ""
+        self._last_text = read_last_text()
         self._paused_media: set[str] = set()
         self._thread = threading.Thread(
             target=self._run, name="pushtotalk-consumer", daemon=True
@@ -92,6 +97,9 @@ class PushToTalkController:
     def note_command_up(self) -> None:
         self._events.put(("command_up", self._clock()))
 
+    def note_command_cancel(self) -> None:
+        self._events.put(("command_cancel", self._clock()))
+
     def note_transform(self, preset: str) -> None:
         self._events.put(("transform", preset))
 
@@ -103,8 +111,11 @@ class PushToTalkController:
         text: str | None,
         clipboard_before: str | None = None,
         error: bool = False,
+        clipboard_expected: str | None = None,
     ) -> None:
-        self._events.put(("result", text, clipboard_before, error))
+        self._events.put(
+            ("result", text, clipboard_before, error, clipboard_expected)
+        )
 
     def note_toggle(self) -> None:
         with self._toggle_lock:
@@ -145,16 +156,23 @@ class PushToTalkController:
             pending = None
             if event is _SHUTDOWN:
                 if self._recorder.recording:
-                    log.warning("shutdown received mid-recording — stopping mic first")
-                    self._do_stop()
+                    log.warning("shutdown: discarded in-progress recording")
+                    if self._command_active:
+                        restore_clipboard_if_matches(
+                            self._command_selection, self._command_clipboard_before
+                        )
+                    self._discard_recording()
                 return
             if event[0] == "result":
-                self._handle_result(event[1], event[2], event[3])
+                self._handle_result(event[1], event[2], event[3], event[4])
                 continue
             if event[0] == "transform":
                 self._handle_transform(event[1])
                 continue
             kind, timestamp = event
+            if kind == "command_cancel":
+                self._cancel_command()
+                continue
             self._check_timers(timestamp)
             if kind == "start":
                 if self._recorder.recording:
@@ -238,6 +256,8 @@ class PushToTalkController:
         if elapsed >= maximum:
             log.info("max duration reached")
             self._legacy_active = False
+            with self._toggle_lock:
+                self._toggle_intent = False
             if self._command_active:
                 self._stop_command()
             else:
@@ -263,14 +283,16 @@ class PushToTalkController:
                         self._tapped_at = up_at
                         self._key_held = False
                         return None
-                self._events.put(lookahead)
+                pending = lookahead
+            else:
+                pending = None
             self._key_held = True
             self._down_at = timestamp
             if self._do_start():
                 self._gesture_state = "HELD"
             else:
                 self._gesture_state = "AWAIT_UP"
-            return None
+            return pending
 
         if self._gesture_state == "HELD":
             return None
@@ -335,6 +357,10 @@ class PushToTalkController:
             self._legacy_active and self._recorder.recording
         ):
             return
+        if self._command_active:
+            restore_clipboard_if_matches(
+                self._command_selection, self._command_clipboard_before
+            )
         self._discard_recording()
         self._legacy_active = False
         self._play("cancel")
@@ -345,6 +371,8 @@ class PushToTalkController:
             self._toggle_intent = False
         self._publish_state("idle")
         self._command_active = False
+        self._command_selection = ""
+        self._command_clipboard_before = None
         print("dictation cancelled")
 
     def _start_command(self) -> None:
@@ -372,9 +400,24 @@ class PushToTalkController:
         self._command_clipboard_before = None
         self._gesture_state = "IDLE"
 
+    def _cancel_command(self) -> None:
+        if not self._command_active:
+            return
+        restore_clipboard_if_matches(
+            self._command_selection, self._command_clipboard_before
+        )
+        self._command_active = False
+        self._discard_recording()
+        self._command_selection = ""
+        self._command_clipboard_before = None
+        self._gesture_state = "IDLE"
+
     def _handle_transform(self, preset: str) -> None:
         captured = capture_selection()
         if not captured.text:
+            restore_clipboard_if_matches(
+                captured.text, captured.clipboard_before
+            )
             log.error("%s needs selected text", preset)
             self._play("error")
             return
@@ -390,9 +433,17 @@ class PushToTalkController:
         self._publish_state("processing")
 
     def _handle_result(
-        self, text: str | None, clipboard_before: str | None, error: bool
+        self,
+        text: str | None,
+        clipboard_before: str | None,
+        error: bool,
+        clipboard_expected: str | None = None,
     ) -> None:
         if not text:
+            if clipboard_expected is not None:
+                restore_clipboard_if_matches(
+                    clipboard_expected, clipboard_before
+                )
             if error:
                 log.error("text transform returned no output")
                 print("text transform failed")

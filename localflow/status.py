@@ -48,6 +48,13 @@ def write_last_text(text: str, path: Path = LAST_TEXT_PATH) -> None:
     _write_atomic(path, text)
 
 
+def read_last_text(path: Path = LAST_TEXT_PATH) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+
+
 def live_state(path: Path = STATUS_PATH) -> str:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
