@@ -30,6 +30,7 @@ def paste_text(text: str, method: str = "auto") -> None:
     finally:
         if old_clipboard is not None:
             try:
-                pyperclip.copy(old_clipboard)
+                if pyperclip.paste() == text:
+                    pyperclip.copy(old_clipboard)
             except Exception:
                 pass

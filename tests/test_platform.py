@@ -290,21 +290,52 @@ def test_inject_facade_passes_paste_method(monkeypatch):
     from localflow import inject
 
     calls = []
-    clipboard = []
+    clipboard = ["old"]
+    copied = []
+
+    def copy(value):
+        copied.append(value)
+        clipboard[0] = value
 
     class FakePlatform:
         def paste(self, method):
             calls.append(method)
 
     monkeypatch.setattr(inject, "current", lambda: FakePlatform())
-    monkeypatch.setattr(inject.pyperclip, "paste", lambda: "old")
-    monkeypatch.setattr(inject.pyperclip, "copy", clipboard.append)
+    monkeypatch.setattr(inject.pyperclip, "paste", lambda: clipboard[0])
+    monkeypatch.setattr(inject.pyperclip, "copy", copy)
     monkeypatch.setattr(inject.time, "sleep", lambda seconds: None)
 
     inject.paste_text("text", "xdotool")
 
     assert calls == ["xdotool"]
-    assert clipboard == ["text", "old"]
+    assert copied == ["text", "old"]
+    assert clipboard == ["old"]
+
+
+def test_inject_does_not_restore_over_a_newer_clipboard_value(monkeypatch):
+    from localflow import inject
+
+    clipboard = ["old"]
+    copied = []
+
+    def copy(value):
+        copied.append(value)
+        clipboard[0] = value
+
+    class FakePlatform:
+        def paste(self, _method):
+            clipboard[0] = "new user clipboard"
+
+    monkeypatch.setattr(inject, "current", lambda: FakePlatform())
+    monkeypatch.setattr(inject.pyperclip, "paste", lambda: clipboard[0])
+    monkeypatch.setattr(inject.pyperclip, "copy", copy)
+    monkeypatch.setattr(inject.time, "sleep", lambda _seconds: None)
+
+    inject.paste_text("transcript", "xdotool")
+
+    assert copied == ["transcript"]
+    assert clipboard == ["new user clipboard"]
 
 
 def test_inject_clipboard_method_keeps_text_without_keystroke(monkeypatch):

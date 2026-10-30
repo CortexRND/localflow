@@ -80,7 +80,7 @@ def test_transcriber_discovers_entry_point_backend(monkeypatch):
         def load(self, model, language, device="auto"):
             assert (model, language, device) == ("x", None, "auto")
 
-        def transcribe(self, audio):
+        def transcribe(self, audio, *, prompt=None):
             return ""
 
     entry_point = SimpleNamespace(name="fake", load=lambda: FakeProvider)
@@ -102,7 +102,7 @@ def test_transcriber_forwards_stt_device_to_entry_point(monkeypatch):
         def load(self, model, language, device="auto"):
             seen.append((model, language, device))
 
-        def transcribe(self, audio):
+        def transcribe(self, audio, *, prompt=None):
             return ""
 
     entry_point = SimpleNamespace(name="fake", load=lambda: FakeProvider)
@@ -159,6 +159,9 @@ def test_faster_whisper_uses_cuda_device(monkeypatch):
     class WhisperModel:
         def __init__(self, *args, **kwargs):
             calls.append((args, kwargs))
+
+        def transcribe(self, audio, initial_prompt=None):
+            return [], None
 
     module = ModuleType("faster_whisper")
     module.WhisperModel = WhisperModel
@@ -325,7 +328,7 @@ def test_transcriber_faster_whisper_provider(monkeypatch):
         def __init__(self, model, device, compute_type):
             assert (model, device, compute_type) == ("tiny", "cpu", "int8")
 
-        def transcribe(self, audio, language, vad_filter):
+        def transcribe(self, audio, language, vad_filter, initial_prompt=None):
             assert language == "en"
             assert vad_filter is True
             return (
@@ -341,6 +344,80 @@ def test_transcriber_faster_whisper_provider(monkeypatch):
     assert isinstance(transcriber.provider, FasterWhisperSTT)
     assert isinstance(transcriber.provider, STTProvider)
     assert transcriber.transcribe(np.zeros(10, dtype=np.float32)) == "first second"
+
+
+def test_faster_whisper_passes_initial_prompt_and_supported_hotwords(monkeypatch):
+    calls = []
+
+    class WhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(
+            self,
+            audio,
+            language=None,
+            vad_filter=False,
+            initial_prompt=None,
+            hotwords=None,
+        ):
+            calls.append((language, vad_filter, initial_prompt, hotwords))
+            return ([SimpleNamespace(text="result")], None)
+
+    module = ModuleType("faster_whisper")
+    module.WhisperModel = WhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    transcriber = Transcriber(backend="faster-whisper")
+    assert transcriber.transcribe(
+        np.zeros(10, dtype=np.float32), prompt="Vocabulary: Ada."
+    ) == "result"
+    assert calls == [(None, True, "Vocabulary: Ada.", "Vocabulary: Ada.")]
+
+
+def test_faster_whisper_omits_unsupported_hotwords(monkeypatch):
+    calls = []
+
+    class WhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(
+            self, audio, language=None, vad_filter=False, initial_prompt=None
+        ):
+            calls.append((language, vad_filter, initial_prompt))
+            return ([SimpleNamespace(text="result")], None)
+
+    module = ModuleType("faster_whisper")
+    module.WhisperModel = WhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    transcriber = Transcriber(backend="faster-whisper")
+    transcriber.transcribe(np.zeros(10, dtype=np.float32), prompt="terms")
+
+    assert calls == [(None, True, "terms")]
+
+
+def test_mlx_whisper_receives_initial_prompt():
+    calls = []
+    provider = MlxWhisperSTT()
+    provider._mlx = SimpleNamespace(
+        transcribe=lambda _audio, **options: calls.append(options)
+        or {"text": "result"}
+    )
+    provider._mlx_repo = "repo"
+    provider.language = "en"
+
+    assert provider.transcribe(
+        np.zeros(10, dtype=np.float32), prompt="Vocabulary: Ada."
+    ) == "result"
+    assert calls == [
+        {
+            "path_or_hf_repo": "repo",
+            "language": "en",
+            "initial_prompt": "Vocabulary: Ada.",
+        }
+    ]
 
 
 def test_builtin_stt_providers_satisfy_protocol():

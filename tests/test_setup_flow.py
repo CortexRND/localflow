@@ -134,7 +134,10 @@ def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkey
     installed = []
     monkeypatch.setattr(setup_flow.platform, "system", lambda: "Darwin")
     monkeypatch.setattr("localflow.launchagent.install", lambda: installed.append(True))
-    choices = SetupChoices("fw-small", "qwen2.5:3b", "USB mic", "f19", "en", True)
+    choices = SetupChoices(
+        "fw-small", "qwen2.5:3b", "USB mic", "f19", "en", True,
+        cleanup_level="medium",
+    )
 
     result = setup_flow.apply(choices)
 
@@ -148,6 +151,7 @@ def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkey
     assert saved.hotkey == "f19"
     assert saved.language == "en"
     assert saved.setup_version == 1
+    assert saved.cleanup_level == "medium"
     assert installed == [True]
 
 
@@ -245,7 +249,7 @@ def test_try_dictation_records_and_transcribes(monkeypatch):
     monkeypatch.setattr(setup_flow, "Recorder", FakeRecorder)
 
     class Transcriber:
-        def transcribe(self, audio):
+        def transcribe(self, audio, *, prompt=None):
             calls.append(("transcribe", audio))
             return "hello"
 

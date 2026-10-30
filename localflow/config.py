@@ -30,10 +30,21 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "cleanup_timeout": "cleanup_timeout",
         "num_ctx": "cleanup_num_ctx",
     },
+    "cleanup": {
+        "level": "cleanup_level",
+        "styles_enabled": "styles_enabled",
+        "style_work": "style_work",
+        "style_email": "style_email",
+        "style_personal": "style_personal",
+        "style_other": "style_other",
+        "app_overrides": "app_category_overrides",
+    },
     "hotkey": {"key": "hotkey", "sounds": "sounds_enabled"},
     "paste": {"method": "paste_method"},
     "dictation": {
         "spoken_symbols": "spoken_symbols",
+        "spoken_punctuation": "spoken_punctuation",
+        "silence_threshold_dbfs": "silence_threshold_dbfs",
         "command_names": "command_names",
         "skills_dirs": "skills_dirs",
         "sample_rate": "sample_rate",
@@ -76,6 +87,13 @@ class Config:
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3.2:3b"
     cleanup_enabled: bool = True
+    cleanup_level: str = "light"
+    styles_enabled: bool = True
+    style_work: str = "formal"
+    style_email: str = "formal"
+    style_personal: str = "casual"
+    style_other: str = "formal"
+    app_category_overrides: list[str] = field(default_factory=list)
     cleanup_timeout: int = 120
     cleanup_num_ctx: int = 8192
     # Bare pynput Key name ('alt_l' = left Option) = hold-to-talk;
@@ -84,6 +102,8 @@ class Config:
     sounds_enabled: bool = True        # audio cue on record start/stop
     paste_method: str = "auto"
     spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
+    spoken_punctuation: bool = True
+    silence_threshold_dbfs: float = -50.0
     hot_phrases: bool = True           # spoken trigger phrases expand into saved prompts
     # Registered slash-command names: after a dictated "slash", an exact spoken
     # match is snapped to the registered spelling ("slash skill part" ->
@@ -164,6 +184,16 @@ def _config_from_v2(data: dict) -> Config:
                 continue
             if field_name == "language" and value == "":
                 value = None
+            if field_name in _ENUM_VALUES and (
+                not isinstance(value, str) or value not in _ENUM_VALUES[field_name]
+            ):
+                log.warning(
+                    "invalid config value for %s.%s: %r; using default",
+                    section,
+                    key,
+                    value,
+                )
+                continue
             setattr(config, field_name, value)
     if sys.platform != "darwin":
         config.meetings_enabled = False
@@ -291,6 +321,15 @@ def valid_config_keys() -> list[str]:
     ]
 
 
+_ENUM_VALUES = {
+    "cleanup_level": {"none", "light", "medium"},
+    "style_work": {"formal", "casual", "very_casual", "excited"},
+    "style_email": {"formal", "casual", "very_casual", "excited"},
+    "style_personal": {"formal", "casual", "very_casual", "excited"},
+    "style_other": {"formal", "casual", "very_casual", "excited"},
+}
+
+
 def config_to_dict(config: Config) -> dict:
     result: dict = {"config_version": CONFIG_VERSION}
     for section, mapping in _SECTIONS.items():
@@ -333,5 +372,13 @@ def apply_config_update(config: Config, update: dict) -> Config:
                 )
             if section == "paste" and file_key == "method" and value not in PASTE_METHODS:
                 raise ConfigError(f"invalid paste method: {value!r}")
+            if field_name in _ENUM_VALUES and (
+                not isinstance(value, str) or value not in _ENUM_VALUES[field_name]
+            ):
+                choices = ", ".join(sorted(_ENUM_VALUES[field_name]))
+                raise ConfigError(
+                    f"invalid value for config key '{section}.{file_key}'; "
+                    f"choose from: {choices}"
+                )
             changes[field_name] = value
     return replace(config, **changes)

@@ -40,6 +40,10 @@ jobs:
           localflow/providers/stt_parakeet.py
           localflow/config.py
           localflow/config_migrate.py
+          localflow/audio.py
+          localflow/context.py
+          localflow/dictionary.py
+          localflow/formatting.py
           localflow/stt.py
           tests/test_platform.py
           tests/test_config.py

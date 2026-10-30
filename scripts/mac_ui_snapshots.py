@@ -20,6 +20,9 @@ def _config(hot_phrases=True):
     return SimpleNamespace(
         hot_phrases=hot_phrases,
         spoken_symbols=True,
+        spoken_punctuation=False,
+        styles_enabled=False,
+        style_other="formal",
         command_names=[],
         skills_dirs=[],
     )
@@ -114,6 +117,12 @@ def main():
         setup.saved = True
         setup._render()
         _shot(setup, "setup-complete")
+
+        setup.saved = False
+        setup.step = 3
+        setup.cleanup_level = "medium"
+        setup._render()
+        _shot(setup, "setup-cleanup-level-medium")
 
         setup.choices = replace(setup.choices, llm_provider="openai-compatible")
         setup.step = 3

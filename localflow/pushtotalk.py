@@ -31,6 +31,7 @@ import numpy as np
 
 from localflow import sounds as _sounds
 from localflow.audio import Recorder
+from localflow.context import AppInfo, frontmost_app
 
 log = logging.getLogger("localflow.pushtotalk")
 
@@ -57,13 +58,14 @@ class PushToTalkController:
         self,
         recorder: Recorder,
         config,
-        work_queue: "queue.Queue[np.ndarray]",
+        work_queue: "queue.Queue[tuple[np.ndarray, AppInfo | None]]",
         play_sound: Callable[[str], None] = _sounds.play,
         min_clip_seconds: float = MIN_CLIP_SECONDS,
     ):
         self._recorder = recorder
         self._config = config
         self._work_queue = work_queue
+        self._recording_app_info: AppInfo | None = None
         self._play_sound = play_sound
         self._min_clip_seconds = min_clip_seconds
         self._events: "queue.Queue" = queue.Queue()
@@ -167,9 +169,11 @@ class PushToTalkController:
             self._do_start()
 
     def _do_start(self) -> None:
+        self._recording_app_info = frontmost_app()
         try:
             self._recorder.start()
         except Exception as exc:
+            self._recording_app_info = None
             log.exception("mic error")
             print(f"mic error: {exc}")
             return
@@ -179,6 +183,8 @@ class PushToTalkController:
 
     def _do_stop(self) -> None:
         audio = self._recorder.stop()
+        app_info = self._recording_app_info
+        self._recording_app_info = None
         if self._config.sounds_enabled:
             self._play_sound("stop")
         print("■ transcribing…")
@@ -186,4 +192,4 @@ class PushToTalkController:
         if duration < self._min_clip_seconds:
             log.info("clip too short (%.2fs), dropped", duration)
             return
-        self._work_queue.put(audio)
+        self._work_queue.put((audio, app_info))

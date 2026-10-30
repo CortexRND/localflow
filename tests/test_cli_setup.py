@@ -31,6 +31,17 @@ def test_setup_yes_uses_recommended_choices_without_prompts(monkeypatch, tmp_pat
     assert "setup saved" in result.output
     assert choices == [SetupChoices("fw-tiny", None, "", "alt_l", None, False)]
 
+    medium_result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "setup", "--cli", "--yes", "--stt", "fw-tiny", "--llm", "none",
+            "--cleanup-level", "medium",
+        ],
+    )
+
+    assert medium_result.exit_code == 0, medium_result.output
+    assert choices[-1].cleanup_level == "medium"
+
 
 def test_interactive_setup_uses_configured_prompt_defaults(monkeypatch):
     config = Config(
@@ -83,6 +94,7 @@ def test_interactive_setup_uses_configured_prompt_defaults(monkeypatch):
     assert prompts == {
         "Speech model": "fw-small",
         "Cleanup model": "qwen2.5:3b",
+        "Cleanup level": "light",
         "Microphone": "Studio Mic",
         "Hotkey": "f19",
         "Language (blank = autodetect)": "fr",
@@ -98,6 +110,7 @@ def test_interactive_setup_uses_configured_prompt_defaults(monkeypatch):
     assert explicit_result.exit_code == 0, explicit_result.output
     assert prompts["Speech model"] == "fw-tiny"
     assert prompts["Cleanup model"] == "none"
+    assert prompts["Cleanup level"] == "light"
 
 
 def test_setup_yes_rejects_unknown_models():

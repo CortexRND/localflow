@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from localflow.pushtotalk import MIN_CLIP_SECONDS, PushToTalkController
+from localflow.context import AppInfo
 
 
 def _wait_until(predicate, timeout=2.0, interval=0.005):
@@ -90,7 +91,10 @@ def test_rapid_start_stop_pair_is_coalesced_without_touching_mic():
         controller.shutdown()
 
 
-def test_normal_hold_above_threshold_records_and_queues_clip():
+def test_normal_hold_above_threshold_records_and_queues_clip(monkeypatch):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
     recorder = FakeRecorder(clip_seconds=1.0)
     controller, recorder, config, work_queue, sounds_played = make_controller(recorder=recorder)
     try:
@@ -107,8 +111,10 @@ def test_normal_hold_above_threshold_records_and_queues_clip():
         assert recorder.start_calls == 1
         assert recorder.stop_calls == 1
         clip = work_queue.get_nowait()
-        assert isinstance(clip, np.ndarray)
-        assert len(clip) == int(1.0 * config.sample_rate)
+        audio, app_info = clip
+        assert isinstance(audio, np.ndarray)
+        assert len(audio) == int(1.0 * config.sample_rate)
+        assert app_info is None
         assert sounds_played == []  # sounds_enabled is False in FakeConfig
     finally:
         controller.shutdown()
@@ -253,3 +259,29 @@ def test_shutdown_pulled_by_start_lookahead_still_stops_mic():
     assert recorder.start_calls == 1
     assert recorder.stop_calls == 1
     assert recorder.recording is False
+
+
+def test_frontmost_app_is_captured_on_consumer_thread(monkeypatch):
+    from localflow import pushtotalk
+
+    caller_thread = threading.get_ident()
+    captured_threads = []
+    expected = AppInfo("Editor", "com.example.editor")
+    monkeypatch.setattr(
+        pushtotalk,
+        "frontmost_app",
+        lambda: captured_threads.append(threading.get_ident()) or expected,
+    )
+    controller, recorder, _config, work_queue, _ = make_controller()
+    try:
+        controller.note_start()
+        assert _wait_until(lambda: recorder.start_calls == 1)
+        controller.note_stop()
+        assert _wait_until(lambda: not work_queue.empty())
+        audio, app_info = work_queue.get_nowait()
+        assert isinstance(audio, np.ndarray)
+        assert app_info == expected
+        assert len(captured_threads) == 1
+        assert captured_threads[0] != caller_thread
+    finally:
+        controller.shutdown()

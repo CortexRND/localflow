@@ -68,6 +68,7 @@ class SetupWindowController(NSObject):
         self.models = available_stt_models(self.hardware)
         self.stt_id = self.choices.stt_id
         self.llm_id = self.choices.llm_id or "none"
+        self.cleanup_level = self.choices.cleanup_level
         self.device = self.choices.input_device or "System default"
         self.hotkey = self.choices.hotkey
         self.language = self.choices.language
@@ -191,14 +192,33 @@ class SetupWindowController(NSObject):
         return button
 
     @objc.python_method
-    def _make_scroll(self, height):
-        scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 650, 310))
+    def _make_scroll(self, height, frame_height=310):
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 650, frame_height)
+        )
         document = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 632, height))
         scroll.setDocumentView_(document)
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(AppKit.NSNoBorder)
         self.page.addSubview_(scroll)
         return document
+
+    @objc.python_method
+    def _add_cleanup_level_control(self):
+        if self.llm_id == "none" and not (
+            self.choices.llm_provider != "ollama" and self.config.cleanup_enabled
+        ):
+            return
+        self._add_text("Cleanup level", 238, 12, True)
+        self.cleanup_level_buttons = []
+        for index, (level, title) in enumerate((("light", "Light"), ("medium", "Medium"))):
+            button = self._button(title, 8 + index * 120, 198, 104, "cleanupLevelAction_")
+            button.setTag_(index)
+            button.layer().setBackgroundColor_(
+                _color("sun" if self.cleanup_level == level else "card").CGColor()
+            )
+            self.page.addSubview_(button)
+            self.cleanup_level_buttons.append(button)
 
     @objc.python_method
     def _render(self):
@@ -270,13 +290,15 @@ class SetupWindowController(NSObject):
                 f"Configured provider: {self.choices.llm_provider}. Manage models with this provider in Settings.",
                 278,
             )
+            self._add_cleanup_level_control()
             self.page.addSubview_(
-                self._button("Change in Settings", 8, 220, 190, "settingsAction_")
+                self._button("Change in Settings", 8, 152, 190, "settingsAction_")
             )
         elif self.step == 3:
             self._add_text("Cleanup fixes punctuation and filler words; raw transcript skips the extra model.", 278)
+            self._add_cleanup_level_control()
             count = len(LLM_MODELS) + 1
-            document = self._make_scroll(max(310, count * 52))
+            document = self._make_scroll(max(310, count * 52), frame_height=160)
             options = [("none", "No cleanup (raw transcript)", "Fastest; no Ollama required.")]
             options.extend((model.id, model.label, f"{model.size_mb:,} MB  ·  {model.min_ram_gb} GB RAM recommended")
                            for model in LLM_MODELS)
@@ -643,6 +665,14 @@ class SetupWindowController(NSObject):
             self.llm_id = options[index]
             self._render()
 
+    def cleanupLevelAction_(self, sender):
+        levels = ("light", "medium")
+        index = sender.tag()
+        if 0 <= index < len(levels):
+            self.cleanup_level = levels[index]
+            self.choices = replace(self.choices, cleanup_level=self.cleanup_level)
+            self._render()
+
     def stepAction_(self, sender):
         if self.saved:
             self.window.close()
@@ -679,6 +709,7 @@ class SetupWindowController(NSObject):
                 self.choices = replace(
                     self.choices,
                     start_on_login=bool(self.start_on_login),
+                    cleanup_level=self.cleanup_level,
                 )
                 self._start_worker("apply", lambda: setup_flow.apply(self.choices))
 

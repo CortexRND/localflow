@@ -359,22 +359,30 @@ def render_dictation(
     text: str,
     phrases: list[tuple[str, str]],
     *,
+    replace=None,
+    fmt=None,
     clean=None,
     symbols=None,
+    style=None,
 ) -> str:
-    """Shared dictation pipeline: cleanup -> park triggers -> symbols -> restore.
+    """Shared text pipeline; whole-utterance triggers remain verbatim.
 
     A whole-utterance trigger expands verbatim and skips cleanup and symbols
-    entirely. `clean`/`symbols` are callables or None; the callers own their
-    conditions (short-clip skip, config flags) and pass None when a step is
-    disabled.
+    entirely. Optional callables are applied in replacement, formatting,
+    cleanup, symbol, and style order; parked phrases are restored last.
     """
     whole = match_whole(text, phrases)
     if whole is not None:
         return whole
+    if replace is not None:
+        text = replace(text)
+    if fmt is not None:
+        text = fmt(text)
     if clean is not None:
         text = clean(text)
     text, parked = park_hot_phrases(text, phrases)
     if symbols is not None:
         text = symbols(text)
+    if style is not None:
+        text = style(text)
     return restore_hot_phrases(text, parked)

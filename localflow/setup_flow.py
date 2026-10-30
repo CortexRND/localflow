@@ -47,6 +47,7 @@ class SetupChoices:
     language: str | None
     start_on_login: bool
     llm_provider: str = "ollama"
+    cleanup_level: str = "light"
 
 
 HOTKEY_OPTIONS = [
@@ -192,6 +193,7 @@ def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
             language=cfg.language,
             start_on_login=start_on_login,
             llm_provider=cfg.llm_provider,
+            cleanup_level=cfg.cleanup_level,
         )
     return SetupChoices(
         stt_id=recommended_stt,
@@ -205,6 +207,7 @@ def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
         language=cfg.language,
         start_on_login=False,
         llm_provider=cfg.llm_provider,
+        cleanup_level=cfg.cleanup_level,
     )
 
 
@@ -215,6 +218,7 @@ def apply(choices: SetupChoices):
         "dictation": {"input_device": choices.input_device},
         "hotkey": {"key": choices.hotkey},
         "setup": {"version": 1},
+        "cleanup": {"level": choices.cleanup_level},
     })
     updates["stt"]["language"] = choices.language
     if choices.llm_provider == "ollama":

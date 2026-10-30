@@ -34,6 +34,7 @@ from localflow.config import (
     valid_config_keys,
 )
 from localflow.config import config_path as resolved_config_path
+from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.dispatch import (
     QUEUE_PATH,
     STATUSES,
@@ -178,6 +179,69 @@ def config_migrate_command() -> None:
         click.echo("no legacy config found")
     else:
         click.echo(f"migrated legacy config to {resolved_config_path()}")
+
+
+@cli.group("dict")
+def dictionary() -> None:
+    """Manage personal vocabulary and transcription corrections."""
+
+
+@dictionary.command("list")
+def dictionary_list() -> None:
+    entries = DictionaryStore().list()
+    if not entries["words"] and not entries["replacements"]:
+        click.echo("No dictionary entries.")
+        return
+    for word in entries["words"]:
+        click.echo(f"word: {word}")
+    for pair in entries["replacements"]:
+        click.echo(f"{pair['from']} -> {pair['to']}")
+
+
+@dictionary.command("add")
+@click.argument("word", required=False)
+@click.option("--from", "source")
+@click.option("--to", "target")
+def dictionary_add(word: str | None, source: str | None, target: str | None) -> None:
+    if word is not None and (source is not None or target is not None):
+        raise click.UsageError("use a word or --from/--to, not both")
+    store = DictionaryStore()
+    try:
+        if word is not None and source is None and target is None:
+            added = store.add_word(word)
+            label = f"word: {word.strip()}"
+        elif word is None and source is not None and target is not None:
+            added = store.add_replacement(source, target)
+            label = f"{source.strip()} -> {target.strip()}"
+        else:
+            raise click.UsageError("provide a word or both --from and --to")
+    except DictionaryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"{'added' if added else 'already exists'}: {label}")
+
+
+@dictionary.command("remove")
+@click.argument("word_or_from")
+def dictionary_remove(word_or_from: str) -> None:
+    if not DictionaryStore().remove(word_or_from):
+        raise click.ClickException(f"dictionary entry not found: {word_or_from}")
+    click.echo(f"removed: {word_or_from}")
+
+
+@dictionary.command("import")
+@click.argument(
+    "file_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+def dictionary_import(file_path: Path) -> None:
+    try:
+        counts = DictionaryStore().import_file(file_path)
+    except (DictionaryError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        "added {added}; skipped_duplicate {skipped_duplicate}; "
+        "skipped_invalid {skipped_invalid}".format(**counts)
+    )
 
 
 @cli.group()
@@ -921,7 +985,12 @@ def _use_ollama_model(model_id: str, no_download: bool = False) -> Path:
     return path
 
 
-def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
+def _setup_cli(
+    stt_id: str | None,
+    llm_id: str | None,
+    yes: bool,
+    cleanup_level: str | None = None,
+) -> None:
     from localflow.audio import list_input_devices
     from localflow.models import (
         LLM_MODELS,
@@ -968,8 +1037,14 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
             if chosen_llm not in installed:
                 _pull_llm_cli(chosen_llm, client)
         choices = SetupChoices(
-            chosen_stt, chosen_llm, defaults.input_device, defaults.hotkey,
-            defaults.language, defaults.start_on_login, cfg.llm_provider,
+            chosen_stt,
+            chosen_llm,
+            defaults.input_device,
+            defaults.hotkey,
+            defaults.language,
+            defaults.start_on_login,
+            cfg.llm_provider,
+            cleanup_level or defaults.cleanup_level,
         )
         path = apply(choices)
         console.print(f"[green]setup saved[/green] {path}")
@@ -1023,6 +1098,11 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
         )
         chosen_llm = None
 
+    chosen_cleanup_level = click.prompt(
+        "Cleanup level",
+        default=cleanup_level or defaults.cleanup_level,
+        type=click.Choice(["light", "medium"]),
+    )
     devices = ["System default", *list_input_devices()]
     device_default = defaults.input_device if defaults.input_device in devices else "System default"
     device = click.prompt("Microphone", default=device_default, type=click.Choice(devices))
@@ -1051,6 +1131,7 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
     choices = SetupChoices(
         chosen_stt, chosen_llm, "" if device == "System default" else device,
         hotkey, language or None, start_on_login, cfg.llm_provider,
+        chosen_cleanup_level,
     )
     path = apply(choices)
     console.print(f"[green]setup saved[/green] {path}")
@@ -1061,8 +1142,21 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
 @click.option("--yes", is_flag=True, help="Use recommendations without prompts.")
 @click.option("--stt", "stt_id", default=None, help="Speech model id for --yes.")
 @click.option("--llm", "llm_id", default=None, help="Cleanup model id or none for --yes.")
+@click.option(
+    "--cleanup-level",
+    type=click.Choice(["light", "medium"]),
+    default=None,
+    help="Cleanup level (light or medium).",
+)
 @click.pass_context
-def setup(ctx, cli_mode: bool, yes: bool, stt_id: str | None, llm_id: str | None) -> None:
+def setup(
+    ctx,
+    cli_mode: bool,
+    yes: bool,
+    stt_id: str | None,
+    llm_id: str | None,
+    cleanup_level: str | None,
+) -> None:
     """Open the setup window or configure LocalFlow in the terminal."""
     if ctx.invoked_subcommand is not None:
         return
@@ -1076,7 +1170,7 @@ def setup(ctx, cli_mode: bool, yes: bool, stt_id: str | None, llm_id: str | None
         if llm_id not in {model.id for model in LLM_MODELS}:
             raise click.ClickException(f"unknown cleanup model: {llm_id}")
     if cli_mode:
-        _setup_cli(stt_id, llm_id, yes)
+        _setup_cli(stt_id, llm_id, yes, cleanup_level)
         return
     from localflow.setup_window import main as window_main
 
