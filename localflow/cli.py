@@ -15,6 +15,7 @@ import requests
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 from rich.text import Text
 
@@ -473,6 +474,360 @@ def phrases_uninstall_app() -> None:
         console.print("[green]uninstalled[/green]")
     else:
         console.print("[dim]not installed[/dim]")
+
+
+def _stt_model(model_id: str):
+    from localflow.models import STT_MODELS
+
+    return next((model for model in STT_MODELS if model.id == model_id), None)
+
+
+def _progress(title: str, operation):
+    with Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("{task.fields[detail]}"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(title, total=100, detail="")
+
+        def update(done, total, detail=""):
+            if total:
+                progress.update(task, completed=done, total=total, detail=detail)
+            else:
+                progress.update(task, detail=detail)
+
+        return operation(update)
+
+
+def _download_stt_cli(model) -> None:
+    from localflow.models import download_stt
+
+    _progress(
+        f"Downloading {model.id}",
+        lambda update: download_stt(model, lambda done, total: update(done, total, f"{done / 1_000_000:.0f}/{total / 1_000_000:.0f} MB")),
+    )
+    console.print(f"[green]downloaded[/green] {model.id}")
+
+
+def _pull_llm_cli(tag: str, client) -> None:
+    _progress(
+        f"Downloading {tag}",
+        lambda update: client.pull(
+            tag, lambda done, total, status: update(done, total, status)
+        ),
+    )
+    console.print(f"[green]downloaded[/green] {tag}")
+
+
+def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
+    from localflow.audio import list_input_devices
+    from localflow.models import (
+        LLM_MODELS,
+        DownloadError,
+        OllamaClient,
+        available_stt_models,
+        detect_hardware,
+        is_stt_downloaded,
+        recommend,
+    )
+    from localflow.setup_flow import (
+        HOTKEY_OPTIONS,
+        SetupChoices,
+        apply,
+        initial_choices,
+        run_checks,
+        try_dictation,
+    )
+
+    cfg = load_config()
+    hardware = detect_hardware()
+    defaults = initial_choices(cfg, hardware)
+    available_models = available_stt_models(hardware)
+    if yes:
+        chosen_stt = stt_id or defaults.stt_id
+        chosen_llm = (defaults.llm_id if llm_id is None else
+                      None if llm_id.lower() == "none" else llm_id)
+        model = next((entry for entry in available_models if entry.id == chosen_stt), None)
+        if model is None:
+            raise click.ClickException(f"speech model is unavailable on this hardware: {chosen_stt}")
+        if not is_stt_downloaded(model):
+            _download_stt_cli(model)
+        if chosen_llm:
+            client = OllamaClient(cfg.ollama_url)
+            if not client.is_running():
+                raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
+            try:
+                installed = client.installed()
+            except DownloadError as exc:
+                raise click.ClickException(str(exc)) from exc
+            if chosen_llm not in installed:
+                _pull_llm_cli(chosen_llm, client)
+        choices = SetupChoices(
+            chosen_stt, chosen_llm, defaults.input_device, defaults.hotkey,
+            defaults.language, defaults.start_on_login,
+        )
+        path = apply(choices)
+        console.print(f"[green]setup saved[/green] {path}")
+        return
+
+    console.print(f"[bold]Hardware:[/bold] {hardware.ram_gb:.0f} GB RAM · {hardware.free_disk_gb:.0f} GB free")
+    console.print("[bold]Checks[/bold]")
+    for check in run_checks(cfg):
+        badge = "✓" if check.ok else ("?" if check.ok is None else "✗")
+        console.print(f"  {badge} {check.label}: {check.detail}")
+    recommended_stt, recommended_llm = recommend(hardware)
+    stt_table = Table(title="Speech models", box=None)
+    stt_table.add_column("id")
+    stt_table.add_column("size")
+    for model in available_models:
+        stt_table.add_row(model.id, f"{model.size_mb:,} MB")
+    console.print(stt_table)
+    default_stt = stt_id or recommended_stt
+    chosen_stt = click.prompt("Speech model", default=default_stt)
+    model = next((entry for entry in available_models if entry.id == chosen_stt), None)
+    if model is None:
+        raise click.ClickException(f"speech model is unavailable on this hardware: {chosen_stt}")
+    if not is_stt_downloaded(model) and click.confirm(f"Download {chosen_stt} now?", default=True):
+        _download_stt_cli(model)
+
+    llm_table = Table(title="Cleanup models (or none)", box=None)
+    llm_table.add_column("id")
+    llm_table.add_column("size")
+    for llm_model in LLM_MODELS:
+        llm_table.add_row(llm_model.id, f"{llm_model.size_mb:,} MB")
+    llm_table.add_row("none", "raw transcript")
+    console.print(llm_table)
+    default_llm = llm_id or recommended_llm or "none"
+    chosen_llm = click.prompt("Cleanup model", default=default_llm)
+    if chosen_llm.lower() == "none":
+        chosen_llm = None
+    elif chosen_llm not in {item.id for item in LLM_MODELS}:
+        raise click.ClickException(f"unknown cleanup model: {chosen_llm}")
+    if chosen_llm:
+        client = OllamaClient(cfg.ollama_url)
+        if not client.is_running():
+            console.print("Ollama is not running; continue without cleanup or start `ollama serve` and rerun setup.")
+            chosen_llm = None
+        elif chosen_llm not in client.installed() and click.confirm(f"Download {chosen_llm} now?", default=True):
+            _pull_llm_cli(chosen_llm, client)
+        elif chosen_llm not in client.installed():
+            chosen_llm = None
+
+    devices = ["System default", *list_input_devices()]
+    device_default = defaults.input_device if defaults.input_device in devices else "System default"
+    device = click.prompt("Microphone", default=device_default, type=click.Choice(devices))
+    hotkey = click.prompt(
+        "Hotkey",
+        default=defaults.hotkey,
+        type=click.Choice([value for value, _label in HOTKEY_OPTIONS]),
+    )
+    language = click.prompt("Language (blank = autodetect)", default=defaults.language or "")
+    if click.confirm("Try a five-second dictation now?", default=False):
+        from localflow.stt import Transcriber
+
+        transcriber = Transcriber(
+            model_size=model.model_size,
+            language=language or None,
+            backend=model.backend,
+        )
+        transcript = try_dictation(
+            5, "" if device == "System default" else device, transcriber
+        )
+        console.print(Panel(transcript or "No speech detected.", title="Practice transcript"))
+    start_on_login = (
+        click.confirm("Start LocalFlow on login?", default=False)
+        if hardware.system == "Darwin" else False
+    )
+    choices = SetupChoices(
+        chosen_stt, chosen_llm, "" if device == "System default" else device,
+        hotkey, language or None, start_on_login,
+    )
+    path = apply(choices)
+    console.print(f"[green]setup saved[/green] {path}")
+
+
+@cli.group(invoke_without_command=True)
+@click.option("--cli", "cli_mode", is_flag=True, help="Use the terminal wizard.")
+@click.option("--yes", is_flag=True, help="Use recommendations without prompts.")
+@click.option("--stt", "stt_id", default=None, help="Speech model id for --yes.")
+@click.option("--llm", "llm_id", default=None, help="Cleanup model id or none for --yes.")
+@click.pass_context
+def setup(ctx, cli_mode: bool, yes: bool, stt_id: str | None, llm_id: str | None) -> None:
+    """Open the setup window or configure LocalFlow in the terminal."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if yes and not cli_mode:
+        raise click.UsageError("--yes requires --cli")
+    if yes and stt_id and _stt_model(stt_id) is None:
+        raise click.ClickException(f"unknown speech model: {stt_id}")
+    if yes and llm_id and llm_id.lower() != "none":
+        from localflow.models import LLM_MODELS
+
+        if llm_id not in {model.id for model in LLM_MODELS}:
+            raise click.ClickException(f"unknown cleanup model: {llm_id}")
+    if cli_mode:
+        _setup_cli(stt_id, llm_id, yes)
+        return
+    from localflow.setup_window import main as window_main
+
+    try:
+        window_main()
+    except ImportError as exc:
+        if "tkinter" not in str(exc) and "_tkinter" not in str(exc):
+            raise
+        console.print("[red]tkinter is unavailable[/red] — install Python's Tk package and retry.")
+        sys.exit(1)
+
+
+@setup.command("install-app")
+def setup_install_app() -> None:
+    """Install the setup window as a LocalFlow Setup.app bundle."""
+    from localflow.appbundle import install_app
+
+    path = install_app(
+        name="LocalFlow Setup.app",
+        bundle_id="com.cortexrnd.localflow.setup",
+        module="localflow.setup_window",
+    )
+    console.print(f"[green]installed[/green] {path}")
+
+
+@setup.command("uninstall-app")
+def setup_uninstall_app() -> None:
+    """Remove the LocalFlow Setup.app bundle."""
+    from localflow.appbundle import uninstall_app
+
+    if uninstall_app(name="LocalFlow Setup.app"):
+        console.print("[green]uninstalled[/green]")
+    else:
+        console.print("[dim]not installed[/dim]")
+
+
+@cli.group()
+def models() -> None:
+    """List and manage local speech and cleanup models."""
+
+
+@models.command("list")
+@click.option("--kind", type=click.Choice(["stt", "llm"]), default=None)
+def models_list(kind: str | None) -> None:
+    from localflow.models import (
+        LLM_MODELS,
+        OllamaClient,
+        available_stt_models,
+        current_stt_id,
+        detect_hardware,
+        is_stt_downloaded,
+        recommend,
+    )
+
+    cfg = load_config()
+    hardware = detect_hardware()
+    rec_stt, rec_llm = recommend(hardware)
+    table = Table(box=None, header_style="bold")
+    table.add_column("id")
+    table.add_column("size")
+    table.add_column("downloaded / installed")
+    table.add_column("selected")
+    table.add_column("recommended")
+    if kind in (None, "stt"):
+        for model in available_stt_models(hardware):
+            table.add_row(
+                model.id, f"{model.size_mb:,} MB",
+                "downloaded" if is_stt_downloaded(model) else "not downloaded",
+                "yes" if current_stt_id(cfg) == model.id else "",
+                "yes" if rec_stt == model.id else "",
+            )
+    if kind in (None, "llm"):
+        client = OllamaClient(cfg.ollama_url)
+        running = client.is_running()
+        installed = set(client.installed()) if running else set()
+        for model in LLM_MODELS:
+            table.add_row(
+                model.id, f"{model.size_mb:,} MB",
+                "installed" if model.id in installed else
+                "not installed" if running else "Ollama offline",
+                "yes" if cfg.cleanup_enabled and cfg.ollama_model == model.id else "",
+                "yes" if rec_llm == model.id else "",
+            )
+    console.print(table)
+
+
+@models.command("download")
+@click.argument("model_id")
+def models_download(model_id: str) -> None:
+    from localflow.models import OllamaClient, DownloadError, detect_hardware
+
+    model = _stt_model(model_id)
+    if model is not None:
+        if model.apple_silicon_only and not detect_hardware().apple_silicon:
+            raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
+        _download_stt_cli(model)
+        return
+    from localflow.models import LLM_MODELS
+
+    if model_id not in {entry.id for entry in LLM_MODELS}:
+        raise click.ClickException(f"unknown model: {model_id}")
+    client = OllamaClient(load_config().ollama_url)
+    if not client.is_running():
+        raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
+    try:
+        _pull_llm_cli(model_id, client)
+    except DownloadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@models.command("use")
+@click.argument("model_id")
+@click.option("--no-download", is_flag=True, help="Select the model without downloading it.")
+def models_use(model_id: str, no_download: bool) -> None:
+    from localflow.config import save_config
+    from localflow.models import (
+        LLM_MODELS,
+        OllamaClient,
+        detect_hardware,
+        is_stt_downloaded,
+        stt_config,
+    )
+
+    model = _stt_model(model_id)
+    if model is not None:
+        if model.apple_silicon_only and not detect_hardware().apple_silicon:
+            raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
+        if not no_download and not is_stt_downloaded(model):
+            _download_stt_cli(model)
+        path = save_config(stt_config(model))
+        console.print(f"[green]selected[/green] {model.id}  ·  {path}")
+        return
+    if model_id not in {entry.id for entry in LLM_MODELS}:
+        raise click.ClickException(f"unknown model: {model_id}")
+    cfg = load_config()
+    client = OllamaClient(cfg.ollama_url)
+    if not no_download:
+        if not client.is_running():
+            raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
+        if model_id not in client.installed():
+            _pull_llm_cli(model_id, client)
+    path = save_config({"ollama_model": model_id, "cleanup_enabled": True})
+    console.print(f"[green]selected[/green] {model_id}  ·  {path}")
+
+
+@cli.command()
+def doctor() -> None:
+    """Check LocalFlow's machine, audio, and Ollama prerequisites."""
+    from localflow.setup_flow import run_checks
+
+    table = Table(box=None)
+    table.add_column("status")
+    table.add_column("check")
+    table.add_column("detail")
+    for check in run_checks(load_config()):
+        badge = "✓" if check.ok else ("?" if check.ok is None else "✗")
+        table.add_row(badge, check.label, check.detail)
+    console.print(table)
 
 
 @cli.command()

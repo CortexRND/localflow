@@ -46,3 +46,21 @@ def test_uninstall(tmp_path):
     assert uninstall_app(dest_dir=tmp_path) is True
     assert not (tmp_path / "LocalFlow Hot Phrases.app").exists()
     assert uninstall_app(dest_dir=tmp_path) is False
+
+
+def test_install_setup_bundle_uses_custom_name_identifier_and_module(tmp_path):
+    bundle = install_app(
+        dest_dir=tmp_path,
+        python="/usr/bin/python3",
+        name="LocalFlow Setup.app",
+        bundle_id="com.cortexrnd.localflow.setup",
+        module="localflow.setup_window",
+    )
+    plist = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+    launcher = bundle / "Contents" / "MacOS" / "launcher"
+
+    assert bundle == tmp_path / "LocalFlow Setup.app"
+    assert plist["CFBundleName"] == "LocalFlow Setup"
+    assert plist["CFBundleIdentifier"] == "com.cortexrnd.localflow.setup"
+    assert "-m localflow.setup_window" in launcher.read_text()
+    assert uninstall_app(dest_dir=tmp_path, name="LocalFlow Setup.app")

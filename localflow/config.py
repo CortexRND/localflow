@@ -1,7 +1,13 @@
 import tomllib
+import json
+import os
+import stat
+import tempfile
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import get_args, get_origin, get_type_hints
 
+CONFIG_PATH = Path.home() / ".localflow.toml"
 
 @dataclass
 class Config:
@@ -53,12 +59,14 @@ class Config:
     # Orca dispatch target, e.g. "id:<repoId>"; empty = dispatch not configured.
     orca_repo: str = ""
     orca_agent: str = "claude"
+    input_device: str = ""
+    setup_version: int = 0
 
 
-def load_config() -> Config:
-    """Read ~/.localflow.toml (tomllib) if present, override defaults; missing file OK."""
+def load_config(path: Path | None = None) -> Config:
+    """Read the local TOML config if present; missing file is OK."""
     config = Config()
-    path = Path.home() / ".localflow.toml"
+    path = path or CONFIG_PATH
     if not path.exists():
         return config
 
@@ -71,3 +79,98 @@ def load_config() -> Config:
             setattr(config, key, value)
 
     return config
+
+
+def _toml_key(key: str) -> str:
+    if key and all(char.isalnum() or char in "_-" for char in key) and not key[0].isdigit():
+        return key
+    return json.dumps(key, ensure_ascii=False)
+
+
+def _toml_value(value) -> str:
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise ValueError(f"unsupported TOML value: {type(value).__name__}")
+
+
+def _serialize_toml(data: dict) -> str:
+    lines = []
+    for key, value in data.items():
+        if isinstance(value, dict):
+            lines.append(f"[{_toml_key(key)}]")
+            lines.extend(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items())
+        else:
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _validate_update(key: str, value) -> None:
+    expected = get_type_hints(Config)[key]
+    accepted = tuple(
+        arg for arg in get_args(expected) if arg is not type(None)
+    ) or (expected,)
+    origin = get_origin(expected)
+    if origin is list:
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{key} must be a list of strings")
+        return
+    for candidate in accepted:
+        if candidate is bool and isinstance(value, bool):
+            return
+        if candidate is int and isinstance(value, int) and not isinstance(value, bool):
+            return
+        if candidate is float and isinstance(value, (float, int)) and not isinstance(value, bool):
+            return
+        if candidate is str and isinstance(value, str):
+            return
+    names = " or ".join(item.__name__ for item in accepted)
+    raise ValueError(f"{key} must be {names}")
+
+
+def save_config(updates: dict, path: Path | None = None) -> Path:
+    """Merge validated fields into TOML and atomically replace the config."""
+    path = path or CONFIG_PATH
+    known_keys = {item.name for item in fields(Config)}
+    unknown = set(updates) - known_keys
+    if unknown:
+        raise ValueError(f"unknown config key(s): {', '.join(sorted(unknown))}")
+
+    existing = {}
+    previous = None
+    if path.exists():
+        previous = path.read_bytes()
+        existing = tomllib.loads(previous.decode("utf-8"))
+    for key, value in updates.items():
+        if value is None:
+            existing.pop(key, None)
+            continue
+        _validate_update(key, value)
+        existing[key] = value
+
+    serialized = _serialize_toml(existing)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if previous is not None:
+        backup = path.with_name(path.name + ".bak")
+        backup.write_bytes(previous)
+        backup.chmod(stat.S_IMODE(path.stat().st_mode))
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(serialized)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    return path

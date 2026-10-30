@@ -26,7 +26,7 @@ source .venv/bin/activate
 
 # Install package
 echo "Installing localflow..."
-pip install -e ".[mlx,menubar]"
+pip install -e ".[mlx,menubar,macos-permissions]"
 
 # The hot-phrases window needs tkinter (Homebrew Python doesn't ship it).
 if ! .venv/bin/python -c "import tkinter" 2>/dev/null; then
@@ -37,16 +37,5 @@ if ! .venv/bin/python -c "import tkinter" 2>/dev/null; then
 fi
 
 echo ""
-echo "✓ Setup complete!"
-echo ""
-echo "Next steps:"
-echo "1. Grant microphone + accessibility permissions (System Settings → Privacy & Security)"
-echo "2. Start recording:  .venv/bin/localflow"
-echo "3. Or start server:  .venv/bin/localflow-server"
-echo ""
-echo "Optional:"
-echo "  To enable transcript cleanup (Ollama), install and pull:"
-echo "    brew install ollama"
-echo "    ollama pull llama3.2:3b"
-echo "  Then set cleanup_enabled = true in ~/.localflow.toml"
-echo ""
+echo "✓ Setup complete — opening the LocalFlow setup wizard."
+.venv/bin/lf setup
