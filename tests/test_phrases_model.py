@@ -16,6 +16,9 @@ def _config(hot_phrases=True, spoken_symbols=True):
     return SimpleNamespace(
         hot_phrases=hot_phrases,
         spoken_symbols=spoken_symbols,
+        spoken_punctuation=False,
+        styles_enabled=False,
+        style_other="formal",
         command_names=[],
         skills_dirs=[],
     )

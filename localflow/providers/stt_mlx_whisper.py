@@ -36,10 +36,13 @@ class MlxWhisperSTT:
             np.zeros(1600, dtype=np.float32), path_or_hf_repo=self._mlx_repo
         )
 
-    def transcribe(self, audio: np.ndarray) -> str:
-        result = self._mlx.transcribe(
-            audio, path_or_hf_repo=self._mlx_repo, language=self.language
-        )
+    def transcribe(
+        self, audio: np.ndarray, *, prompt: str | None = None
+    ) -> str:
+        options = {"path_or_hf_repo": self._mlx_repo, "language": self.language}
+        if prompt is not None:
+            options["initial_prompt"] = prompt
+        result = self._mlx.transcribe(audio, **options)
         return result["text"].strip()
 
     def list_models(self) -> list[ModelInfo]:

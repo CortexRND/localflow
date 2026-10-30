@@ -12,6 +12,9 @@ from tkinter import messagebox, ttk
 
 from localflow.commands import discover_commands
 from localflow.config import load_config
+from localflow.context import category_for
+from localflow.dictionary import DictionaryStore, apply_replacements
+from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.hotphrases import (
     HOT_PHRASES_PATH,
     HotPhraseError,
@@ -416,7 +419,27 @@ class HotPhrasesWindow:
         if self.config.spoken_symbols:
             symbols = lambda t: apply_spoken_symbols(t, self.commands)  # noqa: E731
         phrases = self.store.enabled() if self.config.hot_phrases else []
-        return render_dictation(said, phrases, symbols=symbols)
+        dictionary = DictionaryStore()
+        words = dictionary.words()
+        style_name = (
+            getattr(self.config, f"style_{category_for(None)}")
+            if self.config.styles_enabled
+            else None
+        )
+        return render_dictation(
+            said,
+            phrases,
+            replace=lambda value: apply_replacements(
+                value, dictionary.replacements()
+            ),
+            fmt=apply_spoken_formatting if self.config.spoken_punctuation else None,
+            symbols=symbols,
+            style=(
+                (lambda value: apply_style(value, style_name, words))
+                if style_name
+                else None
+            ),
+        )
 
     def _render_preview(self) -> None:
         self._preview_job = None

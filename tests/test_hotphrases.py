@@ -247,6 +247,50 @@ def test_render_dictation_symbol_word_trigger():
                             clean=lambda t: t + "!", symbols=None) == "use slash here"
 
 
+def test_render_dictation_pipeline_order_and_whole_match_bypass():
+    from localflow.hotphrases import render_dictation
+    from localflow.formatting import apply_style
+
+    calls = []
+
+    def stage(name):
+        def apply(text):
+            calls.append(name)
+            return text + f" {name}"
+
+        return apply
+
+    phrases = [("ship it", "DEPLOY")]
+    rendered = render_dictation(
+        "please ship it",
+        phrases,
+        replace=stage("replace"),
+        fmt=stage("format"),
+        clean=stage("clean"),
+        symbols=stage("symbols"),
+        style=stage("style"),
+    )
+    assert calls == ["replace", "format", "clean", "symbols", "style"]
+    assert rendered == "please DEPLOY replace format clean symbols style"
+
+    calls.clear()
+    assert render_dictation(
+        "ship it.",
+        phrases,
+        replace=stage("replace"),
+        fmt=stage("format"),
+        clean=stage("clean"),
+        symbols=stage("symbols"),
+        style=stage("style"),
+    ) == "DEPLOY"
+    assert calls == []
+    assert render_dictation(
+        "Say ship it.",
+        phrases,
+        style=lambda value: apply_style(value, "very_casual"),
+    ) == "say DEPLOY"
+
+
 def test_expand_empty_phrases_and_empty_text():
     assert expand_hot_phrases("review checklist", []) == "review checklist"
     assert expand_hot_phrases("", PHRASES) == ""

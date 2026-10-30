@@ -7,6 +7,16 @@ import sounddevice as sd
 log = logging.getLogger("localflow.audio")
 
 
+def rms_dbfs(audio: np.ndarray) -> float:
+    samples = np.asarray(audio, dtype=np.float64)
+    if samples.size == 0:
+        return float("-inf")
+    rms = float(np.sqrt(np.mean(np.square(samples))))
+    if rms == 0:
+        return float("-inf")
+    return 20.0 * np.log10(rms)
+
+
 class Recorder:
     def __init__(self, sample_rate: int = 16000, device: str | None = None):
         self.sample_rate = sample_rate
@@ -71,7 +81,7 @@ class Recorder:
 def list_input_devices() -> list[str]:
     try:
         devices = sd.query_devices()
-    except Exception:
+    except sd.PortAudioError:
         return []
     return sorted({
         str(device["name"])

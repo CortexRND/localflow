@@ -49,12 +49,21 @@ def test_v2_round_trip_for_non_default_config(isolated_config, monkeypatch):
         llm_base_url="https://example.test/v1",
         llm_model="model",
         cleanup_enabled=False,
+        cleanup_level="medium",
+        styles_enabled=False,
+        style_work="excited",
+        style_email="very_casual",
+        style_personal="formal",
+        style_other="casual",
+        app_category_overrides=["com.example.editor=work"],
         cleanup_timeout=17,
         cleanup_num_ctx=4096,
         hotkey="<cmd>+<shift>+<space>",
         sounds_enabled=False,
         paste_method="clipboard",
         spoken_symbols=False,
+        spoken_punctuation=False,
+        silence_threshold_dbfs=-45.5,
         command_names=["one", "two"],
         skills_dirs=["/skills"],
         sample_rate=8000,
@@ -93,6 +102,22 @@ def test_unknown_section_and_key_are_warned(isolated_config, caplog):
     assert loaded.model_size == "tiny"
     assert "unknown config key stt.unknown" in caplog.text
     assert "unknown config section 'unknown'" in caplog.text
+
+
+def test_invalid_cleanup_enums_are_logged_and_defaulted(isolated_config, caplog):
+    isolated_config.write_text(
+        '[cleanup]\nlevel = "aggressive"\nstyle_work = "wild"\n'
+        'style_personal = 12\n',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        loaded = config.load_config()
+
+    assert loaded.cleanup_level == "light"
+    assert loaded.style_work == "formal"
+    assert loaded.style_personal == "casual"
+    assert caplog.text.count("invalid config value for cleanup.") == 3
 
 
 def test_malformed_toml_raises_config_error(isolated_config):
@@ -284,6 +309,9 @@ def test_config_to_dict_and_partial_update():
         ({"missing": {"key": "x"}}, "unknown config key 'missing'"),
         ({"server": {"port": "9000"}}, "invalid type for config key 'server.port'"),
         ({"paste": {"method": "invalid"}}, "invalid paste method"),
+        ({"cleanup": {"level": "aggressive"}}, "invalid value.*cleanup.level"),
+        ({"cleanup": {"level": []}}, "invalid type for config key 'cleanup.level'"),
+        ({"cleanup": {"style_work": "wild"}}, "invalid value.*cleanup.style_work"),
     ],
 )
 def test_apply_config_update_validates(update, message):

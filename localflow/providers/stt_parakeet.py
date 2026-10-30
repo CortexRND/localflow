@@ -45,7 +45,9 @@ class ParakeetSTT:
         result = self._parakeet.generate(mel)[0]
         return result.text.strip()
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(
+        self, audio: np.ndarray, *, prompt: str | None = None
+    ) -> str:
         return self._parakeet_generate(audio)
 
     def list_models(self) -> list[ModelInfo]:

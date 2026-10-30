@@ -24,6 +24,9 @@ from localflow.config import (
     load_config,
     save_config,
 )
+from localflow.audio import rms_dbfs
+from localflow.context import category_for
+from localflow.dictionary import DictionaryStore, apply_replacements, stt_prompt
 from localflow.dispatch import (
     PromptQueue,
     StatusConflict,
@@ -31,6 +34,7 @@ from localflow.dispatch import (
     write_prompts,
 )
 from localflow.hotphrases import HotPhraseStore, render_dictation
+from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.log import setup_logging
 from localflow.meetings import (
     MeetingSession,
@@ -85,6 +89,7 @@ _prompt_gen = WorkPromptGenerator(build_workprompts_llm(_config))
 _queue = PromptQueue()
 # Same shared-file pattern as the queue: the desktop app reads this file.
 _hot_phrases = HotPhraseStore()
+_dictionary = DictionaryStore()
 # No queue lock here on purpose: PromptQueue serialises across processes itself,
 # and status changes go through its compare-and-set. A lock here would only
 # guard the server against the server.
@@ -177,17 +182,44 @@ def _run_ffmpeg(data: bytes) -> subprocess.CompletedProcess:
 
 
 def _transcribe_sync(audio: np.ndarray, clean: bool) -> str:
-    text = _get_transcriber().transcribe(audio)
+    if rms_dbfs(audio) < _config.silence_threshold_dbfs:
+        log.info("silence gate: audio below %.1f dBFS", _config.silence_threshold_dbfs)
+        return ""
+    words = _dictionary.words()
+    replacements = _dictionary.replacements()
+    text = _get_transcriber().transcribe(audio, prompt=stt_prompt(words))
     if not text:
         return text
     phrases = _hot_phrases.enabled() if _config.hot_phrases else []
+    category = category_for(None, _config.app_category_overrides)
+    style_name = getattr(_config, f"style_{category}") if _config.styles_enabled else None
+    level = _config.cleanup_level if _config.cleanup_enabled else "none"
+    should_clean = (
+        clean and level != "none" and len(text.split()) >= 5
+    )
+    clean_step = (
+        lambda value: _get_cleaner().clean(
+            value,
+            level=level,
+            style=style_name,
+            vocabulary=words,
+        )
+    ) if should_clean else None
+    style = (
+        (lambda value: apply_style(value, style_name, words))
+        if style_name
+        else None
+    )
     return render_dictation(
         text,
         phrases,
-        clean=(lambda t: _get_cleaner().clean(t)) if clean else None,
+        replace=lambda value: apply_replacements(value, replacements),
+        fmt=apply_spoken_formatting if _config.spoken_punctuation else None,
+        clean=clean_step,
         symbols=(lambda t: apply_spoken_symbols(t, _commands))
         if _config.spoken_symbols
         else None,
+        style=style,
     )
 
 

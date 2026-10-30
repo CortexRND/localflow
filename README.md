@@ -182,6 +182,53 @@ cleanup, and the expansion itself is never symbol-converted ("slash"
 inside a saved prompt stays literal). Set `hot_phrases = false` to
 disable.
 
+### Dictionary
+
+The local dictionary supplies vocabulary to speech recognition and can
+correct commonly misheard words before cleanup. It lives at
+`~/.localflow/dictionary.json` and is separate from the hot-phrase store.
+
+```bash
+lf dict list
+lf dict add LocalFlow
+lf dict add --from "local flow" --to "LocalFlow"
+lf dict remove LocalFlow
+lf dict import vocabulary.csv
+```
+
+Imports accept CSV words or `from,to` replacements (with optional headers)
+and JSON in the dictionary file's shape. Entries are trimmed, and
+case-insensitive duplicates are skipped.
+
+### Spoken formatting
+
+When `[dictation].spoken_punctuation` is enabled, say “new line” or “new
+paragraph” to add line breaks, or dictate punctuation such as “comma,”
+“question mark,” and “period.” “Scratch that” removes the preceding
+sentence or clause. The setting defaults to `true`.
+
+### Cleanup levels & styles
+
+Cleanup level controls how much the optional local language model changes a
+transcript: `light` fixes dictation errors without rewording, while `medium`
+may lightly rephrase awkward sentences. The setup wizard and
+`lf setup --cli --cleanup-level light|medium` let you choose; the default is
+`light`. Choosing No cleanup disables the LLM step.
+
+Style is selected by the frontmost app category (work, email, personal, or
+other) and can be configured in `[cleanup]`:
+
+```toml
+[cleanup]
+level = "light"
+styles_enabled = true
+style_work = "formal"
+style_email = "formal"
+style_personal = "casual"
+style_other = "formal"
+app_overrides = ["com.example.editor=work"]
+```
+
 ### Configuration
 
 Configuration is stored at `platformdirs`' user config location

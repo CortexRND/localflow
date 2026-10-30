@@ -65,6 +65,7 @@ class SetupWindow:
         self.models = available_stt_models(self.hardware)
         self.stt_var = tk.StringVar(value=self.choices.stt_id)
         self.llm_var = tk.StringVar(value=self.choices.llm_id or "none")
+        self.cleanup_level_var = tk.StringVar(value=self.choices.cleanup_level)
         self.device_var = tk.StringVar(value=self.choices.input_device or "System default")
         self.hotkey_var = tk.StringVar(value=self._hotkey_label(self.choices.hotkey))
         self.language_var = tk.StringVar(value=self.choices.language or "")
@@ -294,6 +295,8 @@ class SetupWindow:
                 self.body,
                 f"Configured provider: {self.choices.llm_provider}. Manage models with this provider in Settings.",
             )
+            if self.config.cleanup_enabled:
+                self._render_cleanup_level_control(self.body)
             tk.Button(
                 self.body,
                 text="Change in Settings",
@@ -304,6 +307,8 @@ class SetupWindow:
         self._label(self.body, "Cleanup fixes punctuation and filler words. No cleanup keeps the raw transcript.")
         self._show_operation_state()
         content = self._scrolling_body()
+        if self.llm_var.get() != "none":
+            self._render_cleanup_level_control(content)
         card, surface = self._card(
             content, "No cleanup (raw transcript)", "Fastest and smallest; no Ollama model needed.",
             selected=self.llm_var.get() == "none",
@@ -337,6 +342,29 @@ class SetupWindow:
             ).pack(anchor="w")
         if not self._ollama_checked:
             self._start_ollama_check()
+
+    def _render_cleanup_level_control(self, parent) -> None:
+        level_row = tk.Frame(parent, bg=TOKENS["paper"])
+        level_row.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            level_row,
+            text="Cleanup level",
+            bg=TOKENS["paper"],
+            fg=TOKENS["ink"],
+            font=("TkDefaultFont", 10, "bold"),
+        ).pack(side="left", padx=(0, 10))
+        for level, label in (("light", "Light"), ("medium", "Medium")):
+            tk.Button(
+                level_row,
+                text=label,
+                command=lambda value=level: self._select_cleanup_level(value),
+                bg=TOKENS["sun"] if self.cleanup_level_var.get() == level else TOKENS["card"],
+                fg=TOKENS["ink"],
+                relief="solid",
+                bd=2,
+                padx=14,
+                pady=4,
+            ).pack(side="left", padx=(0, 8))
 
     def _render_step_4(self) -> None:
         self._label(self.body, "Pick a microphone and the key you'll hold to talk.")
@@ -844,8 +872,16 @@ class SetupWindow:
                 self.choices = replace(
                     self.choices,
                     start_on_login=bool(self.start_login_var.get()),
+                    cleanup_level=self.cleanup_level_var.get(),
                 )
                 self._start_job("apply", lambda: setup_flow.apply(self.choices))
+
+    def _select_cleanup_level(self, level: str) -> None:
+        if level not in ("light", "medium"):
+            return
+        self.cleanup_level_var.set(level)
+        self.choices = replace(self.choices, cleanup_level=level)
+        self._render()
 
     def skip_trial(self) -> None:
         self._continue()

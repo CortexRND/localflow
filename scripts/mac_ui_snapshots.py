@@ -115,6 +115,12 @@ def main():
         setup._render()
         _shot(setup, "setup-complete")
 
+        setup.saved = False
+        setup.step = 3
+        setup.cleanup_level = "medium"
+        setup._render()
+        _shot(setup, "setup-cleanup-level-medium")
+
         setup.choices = replace(setup.choices, llm_provider="openai-compatible")
         setup.step = 3
         setup.saved = False

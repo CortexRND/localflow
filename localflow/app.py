@@ -7,10 +7,17 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from localflow.audio import Recorder
+from localflow.audio import Recorder, rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
 from localflow.config import load_config
+from localflow.context import AppInfo, category_for
+from localflow.dictionary import (
+    DictionaryStore,
+    apply_replacements,
+    stt_prompt,
+)
+from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.inject import paste_text
@@ -81,15 +88,26 @@ def main() -> None:
     )
     cleaner = Cleaner(build_llm(config))
 
-    work_queue: queue.Queue[np.ndarray] = queue.Queue()
+    work_queue: queue.Queue[tuple[np.ndarray, AppInfo | None] | None] = queue.Queue()
+    dictionary_store = DictionaryStore()
 
     def worker() -> None:
         while True:
-            audio = work_queue.get()
-            if audio is None:
+            item = work_queue.get()
+            if item is None:
                 break
+            audio, app_info = item
             try:
-                _process_clip(audio, config, transcriber, cleaner, commands, hot_phrases)
+                _process_clip(
+                    audio,
+                    config,
+                    transcriber,
+                    cleaner,
+                    commands,
+                    hot_phrases,
+                    app_info=app_info,
+                    dictionary_store=dictionary_store,
+                )
             except Exception:
                 log.exception("transcription pipeline failed")
             work_queue.task_done()
@@ -131,9 +149,16 @@ def _process_clip(
     cleaner: Cleaner,
     commands: Sequence[str] = (),
     hot_phrases: HotPhraseStore | None = None,
-) -> None:
+    app_info: AppInfo | None = None,
+    dictionary_store: DictionaryStore | None = None,
+) -> str:
     start = time.monotonic()
-    text = transcriber.transcribe(audio)
+    if rms_dbfs(audio) < config.silence_threshold_dbfs:
+        log.info("silence gate: audio below %.1f dBFS", config.silence_threshold_dbfs)
+        return ""
+    words = dictionary_store.words() if dictionary_store is not None else []
+    pairs = dictionary_store.replacements() if dictionary_store is not None else []
+    text = transcriber.transcribe(audio, prompt=stt_prompt(words))
     if text:
         phrases = (
             hot_phrases.enabled()
@@ -141,22 +166,44 @@ def _process_clip(
             else []
         )
         # Cleanup only pays off on real sentences; short fragments have nothing to fix.
-        clean = (
-            (lambda t: cleaner.clean(t))
-            if (config.cleanup_enabled and len(text.split()) >= 5)
-            else None
+        category = category_for(app_info, config.app_category_overrides)
+        style_name = (
+            getattr(config, f"style_{category}") if config.styles_enabled else None
         )
+        level = config.cleanup_level if config.cleanup_enabled else "none"
+        clean = None
+        if level != "none" and len(text.split()) >= 5:
+            clean = lambda value: cleaner.clean(
+                value,
+                level=level,
+                style=style_name,
+                vocabulary=words,
+            )
         symbols = (
             (lambda t: apply_spoken_symbols(t, commands))
             if config.spoken_symbols
             else None
         )
-        text = render_dictation(text, phrases, clean=clean, symbols=symbols)
+        style = (
+            (lambda value: apply_style(value, style_name, words))
+            if style_name
+            else None
+        )
+        text = render_dictation(
+            text,
+            phrases,
+            replace=lambda value: apply_replacements(value, pairs),
+            fmt=apply_spoken_formatting if config.spoken_punctuation else None,
+            clean=clean,
+            symbols=symbols,
+            style=style,
+        )
     elapsed_ms = int((time.monotonic() - start) * 1000)
     log.info("transcribed %d chars in %dms", len(text or ""), elapsed_ms)
     if text:
         paste_text(text, config.paste_method)
         print(f"{text}  ({elapsed_ms}ms)")
+    return text
 
 
 if __name__ == "__main__":

@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -190,3 +194,39 @@ def test_loopback_post_config_requires_token(monkeypatch):
         response = client.post("/api/config", json={"stt": {"device": "cpu"}})
 
     assert response.status_code == 401
+
+
+def test_server_silence_gate_skips_transcription(monkeypatch):
+    monkeypatch.setattr(server, "_config", Config())
+    transcriber = Mock()
+    monkeypatch.setattr(server, "_get_transcriber", lambda: transcriber)
+
+    assert server._transcribe_sync(np.zeros(16000, dtype=np.float32), True) == ""
+    transcriber.transcribe.assert_not_called()
+
+
+def test_server_uses_other_style_category(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_config",
+        Config(
+            cleanup_enabled=False,
+            styles_enabled=True,
+            style_other="very_casual",
+            spoken_symbols=False,
+        ),
+    )
+    transcriber = Mock(transcribe=Mock(return_value="Hello world."))
+    monkeypatch.setattr(server, "_get_transcriber", lambda: transcriber)
+    monkeypatch.setattr(
+        server,
+        "_dictionary",
+        SimpleNamespace(words=lambda: [], replacements=lambda: []),
+    )
+    monkeypatch.setattr(
+        server, "_hot_phrases", SimpleNamespace(enabled=lambda: [])
+    )
+
+    assert server._transcribe_sync(
+        np.full(16000, 0.1, dtype=np.float32), False
+    ) == "hello world"

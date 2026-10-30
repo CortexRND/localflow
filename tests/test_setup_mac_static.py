@@ -54,9 +54,11 @@ def test_mac_snapshot_script_captures_each_setup_step_and_provider_states():
     source = SNAPSHOTS.read_text(encoding="utf-8")
     assert "from localflow.setup_mac import SetupWindowController" in source
     assert "for step in range(7):" in source
+    assert "setup-cleanup-level-medium" in source
     assert 'setup-non-ollama-provider' in source
     assert 'setup-download-progress' in source
     assert 'setup-download-error' in source
+    assert "cleanupLevelAction_" in SRC.read_text(encoding="utf-8")
 
 
 def test_setup_mac_requires_ollama_for_selected_cleanup_and_reads_login_choice():

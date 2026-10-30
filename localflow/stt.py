@@ -69,6 +69,8 @@ class Transcriber:
         self.provider = provider
         self.backend = "faster-whisper"
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, *, prompt: str | None = None) -> str:
         """audio: 1-D float32 16kHz. Return joined stripped text."""
-        return self.provider.transcribe(audio)
+        if prompt is None:
+            return self.provider.transcribe(audio)
+        return self.provider.transcribe(audio, prompt=prompt)

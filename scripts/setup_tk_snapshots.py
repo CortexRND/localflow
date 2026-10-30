@@ -79,6 +79,13 @@ def main():
                 capture("finish")
 
         window.saved = False
+        window.status_message = ""
+        window.error_message = ""
+        window.step = 3
+        window.cleanup_level_var.set("medium")
+        window._render()
+        capture("cleanup-level-medium")
+
         window.step = 2
         window._busy = {"stt-download"}
         window._cancel = threading.Event()

@@ -269,6 +269,48 @@ def test_cleanup_step_blocks_offline_ollama_selection(monkeypatch):
         root.destroy()
 
 
+def test_cleanup_level_control_is_hidden_for_no_cleanup_and_persists(monkeypatch):
+    monkeypatch.setattr(setup_tk.setup_flow, "run_checks", lambda _cfg: [])
+    monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: True)
+    monkeypatch.setattr(setup_tk, "list_input_devices", list)
+    monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
+    root = tk.Tk()
+    root.withdraw()
+    window = setup_tk.SetupWindow(
+        root,
+        Config(),
+        HardwareInfo("Linux", "x86_64", 8, False, 50),
+    )
+    try:
+        window.step = 3
+        window.llm_var.set("llama3.2:1b")
+        window._ollama_checked = True
+        window._render()
+        labels = [
+            child.cget("text")
+            for child in _descendants(window.body)
+            if isinstance(child, tk.Button)
+        ]
+        assert "Light" in labels
+        assert "Medium" in labels
+
+        window._select_cleanup_level("medium")
+        assert window.cleanup_level_var.get() == "medium"
+        assert window.choices.cleanup_level == "medium"
+
+        window.llm_var.set("none")
+        window._render()
+        labels = [
+            child.cget("text")
+            for child in _descendants(window.body)
+            if isinstance(child, tk.Button)
+        ]
+        assert "Light" not in labels
+        assert "Medium" not in labels
+    finally:
+        root.destroy()
+
+
 def test_back_is_disabled_while_stt_or_ollama_download_is_busy(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "run_checks", lambda _cfg: [])
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: True)
