@@ -6,25 +6,36 @@ from unittest import mock
 
 import pytest
 
+if sys.platform == "darwin":
+    pytest.skip("macOS uses the native AppKit hot-phrases window", allow_module_level=True)
+
 tk = pytest.importorskip("tkinter")
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
     pytest.skip("no display for Tk", allow_module_level=True)
 
-from localflow.config import Config  # noqa: E402
-from localflow.hotphrases import HotPhraseStore  # noqa: E402
-from localflow.phrases_tk import HotPhrasesWindow  # noqa: E402
+from localflow.config import Config
+from localflow.hotphrases import HotPhraseStore
+from localflow.phrases_tk import HotPhrasesWindow
+
+
+@pytest.fixture(scope="module")
+def root():
+    root = tk.Tk()
+    root.withdraw()
+    yield root
+    root.destroy()
 
 
 @pytest.fixture
-def window(tmp_path):
-    root = tk.Tk()
-    root.withdraw()
+def window(root, tmp_path):
+    window = tk.Toplevel(root)
+    window.withdraw()
     store = HotPhraseStore(tmp_path / "hot_phrases.json")
-    w = HotPhrasesWindow(root, store, Config())
+    w = HotPhrasesWindow(window, store, Config())
     w.pump = lambda: [root.update() for _ in range(5)]
     w.pump()
     yield w, store
-    root.destroy()
+    window.destroy()
 
 
 def test_add_edit_toggle_delete(window):

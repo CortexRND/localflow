@@ -13,6 +13,11 @@ from localflow.log import setup_logging
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+POSIX_LOCK_TEST = pytest.mark.skipif(
+    sys.platform == "win32" or os.environ.get("LOCALFLOW_PLATFORM") == "win32",
+    reason="POSIX file locking tests are not supported on Windows",
+)
+
 
 @pytest.fixture(autouse=True)
 def home_in_tmp(tmp_path, monkeypatch):
@@ -54,6 +59,7 @@ def _spawn_acquire(tmp_path: Path, name: str, hold_seconds: float = 0.0) -> subp
     )
 
 
+@POSIX_LOCK_TEST
 def test_acquire_returns_handle_and_writes_pid_timestamp(tmp_path):
     lock = SI.acquire("test")
     try:
@@ -68,6 +74,7 @@ def test_acquire_returns_handle_and_writes_pid_timestamp(tmp_path):
         lock.close()
 
 
+@POSIX_LOCK_TEST
 def test_read_holder_reflects_written_pid_and_timestamp(tmp_path):
     lock = SI.acquire("test")
     try:
@@ -78,6 +85,7 @@ def test_read_holder_reflects_written_pid_and_timestamp(tmp_path):
         lock.close()
 
 
+@POSIX_LOCK_TEST
 def test_second_acquire_fails_in_child_process(tmp_path):
     """The real incident: two separate OS processes both grabbing the lock.
     flock is associated with the open file description, so a genuine
@@ -93,6 +101,7 @@ def test_second_acquire_fails_in_child_process(tmp_path):
         lock.close()
 
 
+@POSIX_LOCK_TEST
 def test_acquire_succeeds_after_release(tmp_path):
     lock = SI.acquire("test")
     assert lock is not None
@@ -104,6 +113,7 @@ def test_acquire_succeeds_after_release(tmp_path):
     assert out.strip() == "ACQUIRED"
 
 
+@POSIX_LOCK_TEST
 def test_stale_lock_releases_on_holder_death(tmp_path):
     """Mirrors the Jul 30 incident: a holder process dies (killed, not
     graceful exit) without explicit cleanup. flock must release the lock
