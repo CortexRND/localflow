@@ -1,7 +1,15 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from localflow import server
 from localflow.config import Config
+
+
+@pytest.fixture(autouse=True)
+def disable_meeting_watcher(monkeypatch):
+    monkeypatch.setattr(
+        server, "_config", Config(meetings_enabled=False, meeting_watch=False)
+    )
 
 
 class FakePlatform:

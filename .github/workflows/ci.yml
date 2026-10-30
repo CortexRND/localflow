@@ -22,7 +22,10 @@ jobs:
           cache: pip
       - name: Install PortAudio
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 pulseaudio
+      - name: Start PulseAudio
+        if: runner.os == 'Linux'
+        run: pulseaudio --start --exit-idle-time=-1
       - name: Install dependencies
         run: pip install -e . ruff pytest
       - name: Ruff
