@@ -136,7 +136,6 @@ def test_shortcut_card_and_pause_media_toggle_render(monkeypatch):
         assert any("Command:" in str(label) for label in labels)
     finally:
         window.close()
-        root.destroy()
 
 
 def test_stt_download_renders_once_and_advances_after_completion(
