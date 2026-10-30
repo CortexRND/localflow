@@ -115,6 +115,45 @@ The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
 `path:` is the easiest to write by hand. List registered repos with
 `orca repo list --json`.
 
+### Hot phrases
+
+Hot phrases let you paste a saved long prompt by speaking a short trigger
+mid-dictation: say "review checklist" and the saved review prompt is pasted
+instead. Entries live in `~/.localflow/hot_phrases.json`; the desktop app
+re-reads the file when it changes, so edits apply without a restart.
+
+Manage them in the hot phrases window:
+
+```bash
+lf phrases                  # open the window
+lf phrases install-app      # also available from the menu bar ("Hot Phrases…")
+lf phrases uninstall-app
+```
+
+On macOS this is a native AppKit window: a sidebar lists your phrases
+(searchable, one row each with an on/off state), edits autosave as you
+type, the switch toggles a phrase without deleting it, Delete shows an
+Undo bar, and a "Test a phrase" section previews what dictation would
+paste — including which triggers matched. `install-app` writes
+`~/Applications/LocalFlow Hot Phrases.app` so the window can be opened
+from Spotlight/Launchpad too.
+
+Elsewhere (or if PyObjC is missing on macOS) a simpler Tk window opens
+as a fallback. It keeps the classic layout — an entry list plus explicit
+Save/Revert buttons and a confirm dialog on delete; the sidebar,
+autosave and undo design above is macOS-only. The fallback needs
+tkinter (`sudo apt install python3-tk` on Linux, or
+`brew install python-tk@3.X` for a Homebrew Python).
+
+Matching is on normalized words (case and punctuation are ignored), whole
+words only — "reviews checklist" does not trigger "review checklist". A
+trigger spoken on its own ("Review checklist.") is pasted verbatim —
+Ollama cleanup and spoken symbols are skipped so the prompt is pasted
+exactly as saved. Mid-sentence, the trigger is expanded in place after
+cleanup, and the expansion itself is never symbol-converted ("slash"
+inside a saved prompt stays literal). Set `hot_phrases = false` to
+disable.
+
 ### Configuration
 
 Configuration is stored at `platformdirs`' user config location
@@ -136,7 +175,7 @@ lf secret status
 The v2 file uses nested sections:
 
 ```toml
-config_version = 2
+ config_version = 2
 
 [stt]
 provider = "auto"                  # auto | mlx-whisper | mlx | faster-whisper | parakeet
@@ -171,6 +210,7 @@ port = 8756
 
 [features]
 meetings = true                    # macOS only; forced false elsewhere
+hot_phrases = true                 # spoken trigger phrases expand into saved prompts
 
 [meetings]
 watch = true

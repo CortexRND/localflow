@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -865,6 +865,7 @@ dependencies = [
     { name = "numpy" },
     { name = "platformdirs" },
     { name = "pynput" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
     { name = "pyperclip" },
     { name = "python-multipart" },
     { name = "requests" },
@@ -900,6 +901,7 @@ requires-dist = [
     { name = "parakeet-mlx", marker = "extra == 'parakeet'" },
     { name = "platformdirs" },
     { name = "pynput" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'", specifier = ">=10" },
     { name = "pyperclip" },
     { name = "python-multipart" },
     { name = "requests" },

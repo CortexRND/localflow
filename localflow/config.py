@@ -39,7 +39,10 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "sample_rate": "sample_rate",
     },
     "server": {"host": "server_host", "port": "server_port"},
-    "features": {"meetings": "meetings_enabled"},
+    "features": {
+        "meetings": "meetings_enabled",
+        "hot_phrases": "hot_phrases",
+    },
     "meetings": {
         "vault_path": "vault_path",
         "notes_folder": "notes_folder",
@@ -79,6 +82,10 @@ class Config:
     sounds_enabled: bool = True        # audio cue on record start/stop
     paste_method: str = "auto"
     spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
+    hot_phrases: bool = True           # spoken trigger phrases expand into saved prompts
+    # Registered slash-command names: after a dictated "slash", an exact spoken
+    # match is snapped to the registered spelling ("slash skill part" ->
+    # "/skill_part"). Names listed here plus subdirectory names of skills_dirs.
     command_names: list[str] = field(default_factory=list)
     skills_dirs: list[str] = field(
         default_factory=lambda: ["~/.claude/skills", "~/.agents/skills"]

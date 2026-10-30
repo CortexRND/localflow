@@ -5,6 +5,8 @@ must be running (`lf serve`) for meeting features, but the menu bar app
 stays up regardless and shows server state.
 """
 
+import subprocess
+import sys
 import webbrowser
 
 import requests
@@ -33,6 +35,7 @@ class LocalflowMenuBar(rumps.App):
             "Dismiss detection", callback=self.dismiss
         )
         self.open_ui_item = rumps.MenuItem("Open web UI", callback=self.open_ui)
+        self.phrases_item = rumps.MenuItem("Hot Phrases…", callback=self.open_phrases)
         self.open_notes_item = rumps.MenuItem(
             "Open notes folder", callback=self.open_notes
         )
@@ -43,6 +46,7 @@ class LocalflowMenuBar(rumps.App):
             self.dismiss_item,
             None,
             self.open_ui_item,
+            self.phrases_item,
             self.open_notes_item,
         ]
         self._session_active = False
@@ -121,6 +125,11 @@ class LocalflowMenuBar(rumps.App):
 
     def open_ui(self, _item) -> None:
         webbrowser.open(BASE)
+
+    def open_phrases(self, _item) -> None:
+        # A separate process: rumps owns this process's AppKit main loop, so
+        # the Tk window can't run in-process.
+        subprocess.Popen([sys.executable, "-m", "localflow.phrases_window"])
 
     def open_notes(self, _item) -> None:
         from pathlib import Path

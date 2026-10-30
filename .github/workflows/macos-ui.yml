@@ -1,0 +1,39 @@
+name: macOS UI
+
+on:
+  push:
+    branches: ["devin/**", "main"]
+    paths:
+      - "localflow/phrases*"
+      - "localflow/hotphrases.py"
+      - "tests/test_phrases*"
+      - "scripts/mac_ui_snapshots.py"
+      - ".github/workflows/macos-ui.yml"
+  pull_request:
+    paths:
+      - "localflow/phrases*"
+      - "localflow/hotphrases.py"
+      - "tests/test_phrases*"
+      - "scripts/mac_ui_snapshots.py"
+      - ".github/workflows/macos-ui.yml"
+  workflow_dispatch:
+
+jobs:
+  mac-ui:
+    runs-on: macos-14
+    env:
+      PYNPUT_BACKEND: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest
+      - run: pytest -q tests/test_hotphrases.py tests/test_phrases_model.py tests/test_phrases_mac.py tests/test_phrases_mac_static.py
+      - run: python scripts/mac_ui_snapshots.py
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-ui-screenshots
+          path: artifacts/mac-ui

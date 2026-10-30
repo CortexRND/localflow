@@ -20,6 +20,7 @@ dependencies = [
     "rich",
     "platformdirs",
     "keyring",
+    "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

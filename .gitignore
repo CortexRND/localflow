@@ -1,3 +1,5 @@
 .venv/
+.venv-tk/
 __pycache__/
 *.pyc
+artifacts/
