@@ -69,6 +69,15 @@ def test_setup_mac_requires_ollama_for_selected_cleanup_and_reads_login_choice()
     assert 'if "stt-download" in self.busy:' in source
     assert 'if "llm-pull" in self.busy:' in source
     assert 'model_id=model.id' in source
-    assert 'self._start_worker("llm-pull", pull, model_id=model_id)' in source
+    assert (
+        'self._start_worker("llm-pull", pull, model_id=model_id, job_token=token)'
+        in source
+    )
     assert 'self.back_button.setEnabled_(not model_busy)' in source
     assert 'if self.busy & {"stt-download", "llm-pull"}:' in source
+    assert '("progress", "stt-download", token, done, total)' in source
+    assert 'job_token=token' in source
+    assert 'self.job_token = None' in source
+    assert 'friendly_download_error(error) if model_job' in source
+    assert 'elif self._progress_stalled:' in source
+    assert 'self.busy.difference_update({"stt-download", "llm-pull"})' in source

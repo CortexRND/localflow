@@ -168,6 +168,17 @@ def test_stt_download_uses_catalog(monkeypatch):
     assert downloaded == ["fw-tiny"]
 
 
+def test_stt_download_uses_friendly_click_error(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("connection timed out at https://example.test/model")
+
+    monkeypatch.setattr("localflow.models.download_stt", fail)
+    result = CliRunner().invoke(cli_module.cli, ["stt", "download", "fw-tiny"])
+
+    assert result.exit_code == 1
+    assert "Network problem while downloading" in result.output
+
+
 @pytest.mark.parametrize(
     ("arguments", "extra"),
     [

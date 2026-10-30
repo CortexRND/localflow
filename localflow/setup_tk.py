@@ -21,6 +21,7 @@ from localflow.models import (
     available_stt_models,
     detect_hardware,
     download_stt,
+    friendly_download_error,
     is_stt_downloaded,
     recommend,
 )
@@ -80,6 +81,7 @@ class SetupWindow:
         self._mic_error = ""
         self._busy: set[str] = set()
         self._cancel: threading.Event | None = None
+        self._job_token = None
         self._events: queue.Queue = queue.Queue()
         self._clock = time.monotonic
         self._stall_timeout = 30.0
@@ -504,6 +506,7 @@ class SetupWindow:
     def _download_stt(self) -> None:
         selected = next(model for model in self.models if model.id == self.stt_var.get())
         cancel = self._cancel = threading.Event()
+        token = self._job_token = object()
         self.error_message = ""
         self.status_message = "Preparing download…"
         self._busy.add("stt-download")
@@ -516,19 +519,22 @@ class SetupWindow:
             try:
                 path = download_stt(
                     selected,
-                    lambda done, total: self._events.put(("progress", "stt-download", done, total)),
+                    lambda done, total: self._events.put(
+                        ("progress", "stt-download", token, done, total)
+                    ),
                     cancel,
                 )
             except Exception as exc:
-                self._events.put(("error", "stt-download", selected.id, exc))
+                self._events.put(("error", "stt-download", token, selected.id, exc))
             else:
-                self._events.put(("done", "stt-download", selected.id, path))
+                self._events.put(("done", "stt-download", token, selected.id, path))
 
         threading.Thread(target=work, name="setup-stt-download", daemon=True).start()
 
     def _pull_llm(self) -> None:
         selected = self.llm_var.get()
         cancel = self._cancel = threading.Event()
+        token = self._job_token = object()
         self.error_message = ""
         self.status_message = "Preparing Ollama download…"
         self._busy.add("llm-pull")
@@ -543,14 +549,14 @@ class SetupWindow:
                 client.pull(
                     selected,
                     lambda done, total, status: self._events.put(
-                        ("progress", "llm-pull", done, total, status)
+                        ("progress", "llm-pull", token, done, total, status)
                     ),
                     cancel,
                 )
             except Exception as exc:
-                self._events.put(("error", "llm-pull", selected, exc))
+                self._events.put(("error", "llm-pull", token, selected, exc))
             else:
-                self._events.put(("done", "llm-pull", selected, selected))
+                self._events.put(("done", "llm-pull", token, selected, selected))
 
         threading.Thread(target=work, name="setup-llm-pull", daemon=True).start()
 
@@ -636,12 +642,26 @@ class SetupWindow:
             except queue.Empty:
                 break
             kind, key, *data = event
+            model_job = key in {"stt-download", "llm-pull"}
+            if model_job:
+                token, *data = data
+                if token is not self._job_token:
+                    if kind == "done":
+                        model_id, _result = data
+                        if key == "stt-download":
+                            self.downloaded[model_id] = True
+                        elif model_id not in self.ollama_models:
+                            self.ollama_models.append(model_id)
+                    continue
             if kind == "progress":
                 done, total, *extra = data
-                if key in {"stt-download", "llm-pull"} and done != self._last_progress_bytes:
-                    self._last_progress_bytes = done
-                    self._last_progress_at = self._clock()
-                    self._progress_stalled = False
+                if model_job:
+                    if done != self._last_progress_bytes:
+                        self._last_progress_bytes = done
+                        self._last_progress_at = self._clock()
+                        self._progress_stalled = False
+                    elif self._progress_stalled:
+                        continue
                 status = extra[0] if extra else ""
                 prefix = f"{done / 1_000_000:.0f} / {total / 1_000_000:.0f} MB"
                 self.status_message = f"{prefix}  ·  {status}".strip(" ·") if status else prefix
@@ -652,6 +672,8 @@ class SetupWindow:
                     data if key in {"stt-download", "llm-pull"} else (None, data[0])
                 )
                 self._busy.discard(key)
+                if model_job:
+                    self._job_token = None
                 self._cancel = None
                 if key == "monitor":
                     self._mic_error = str(error) or error.__class__.__name__
@@ -660,7 +682,10 @@ class SetupWindow:
                 elif isinstance(error, DownloadCancelled):
                     self.status_message = "Download cancelled."
                 else:
-                    self.error_message = str(error) or error.__class__.__name__
+                    self.error_message = (
+                        friendly_download_error(error) if model_job
+                        else str(error) or error.__class__.__name__
+                    )
                 if key == "stt-checks" or key == "checks":
                     self.status_message = str(error)
                 if key == "checks":
@@ -676,6 +701,8 @@ class SetupWindow:
                     data if key in {"stt-download", "llm-pull"} else (None, data[0])
                 )
                 self._busy.discard(key)
+                if model_job:
+                    self._job_token = None
                 if key == "checks":
                     self.checks = result
                 elif key == "stt-checks":
@@ -826,6 +853,12 @@ class SetupWindow:
     def cancel_download(self) -> None:
         if self._cancel is not None:
             self._cancel.set()
+            self._busy.difference_update({"stt-download", "llm-pull"})
+            self._cancel = None
+            self._job_token = None
+            self.error_message = ""
+            self.status_message = "Download cancelled."
+            self._render()
 
     def _recheck_ollama(self) -> None:
         self._ollama_checked = False

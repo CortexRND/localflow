@@ -20,6 +20,7 @@ from localflow.models import (
     available_stt_models,
     detect_hardware,
     download_stt,
+    friendly_download_error,
     is_stt_downloaded,
     recommend,
 )
@@ -83,6 +84,7 @@ class SetupWindowController(NSObject):
         self.error_message = ""
         self.busy = set()
         self.cancel_event = None
+        self.job_token = None
         self.events = queue.Queue()
         self._clock = time.monotonic
         self._stall_timeout = 30.0
@@ -376,7 +378,7 @@ class SetupWindowController(NSObject):
         self.window.makeKeyAndOrderFront_(None)
 
     @objc.python_method
-    def _start_worker(self, key, function, model_id=None):
+    def _start_worker(self, key, function, model_id=None, job_token=None):
         self.busy.add(key)
         self.error_message = ""
         if model_id is not None:
@@ -386,12 +388,16 @@ class SetupWindowController(NSObject):
             try:
                 result = function()
             except Exception as exc:
-                if model_id is not None:
+                if job_token is not None:
+                    self.events.put(("error", key, job_token, model_id, exc))
+                elif model_id is not None:
                     self.events.put(("error", key, model_id, exc))
                 else:
                     self.events.put(("error", key, exc))
             else:
-                if model_id is not None:
+                if job_token is not None:
+                    self.events.put(("done", key, job_token, model_id, result))
+                elif model_id is not None:
                     self.events.put(("done", key, model_id, result))
                 else:
                     self.events.put(("done", key, result))
@@ -432,6 +438,7 @@ class SetupWindowController(NSObject):
     def _start_download(self):
         model = next(item for item in self.models if item.id == self.stt_id)
         self.cancel_event = threading.Event()
+        token = self.job_token = object()
         self.error_message = ""
         self.status_message = "Preparing download…"
         self._last_progress_at = self._clock()
@@ -440,18 +447,20 @@ class SetupWindowController(NSObject):
         cancel = self.cancel_event
 
         def progress(done, total):
-            self.events.put(("progress", "stt-download", done, total))
+            self.events.put(("progress", "stt-download", token, done, total))
 
         self._start_worker(
             "stt-download",
             lambda: download_stt(model, progress, cancel),
             model_id=model.id,
+            job_token=token,
         )
 
     @objc.python_method
     def _start_pull(self):
         model_id = self.llm_id
         self.cancel_event = threading.Event()
+        token = self.job_token = object()
         self.error_message = ""
         self.status_message = "Preparing Ollama download…"
         self._last_progress_at = self._clock()
@@ -463,11 +472,13 @@ class SetupWindowController(NSObject):
         def pull():
             client.pull(
                 model_id,
-                lambda done, total, status: self.events.put(("progress", "llm-pull", done, total, status)),
+                lambda done, total, status: self.events.put(
+                    ("progress", "llm-pull", token, done, total, status)
+                ),
                 cancel,
             )
             return model_id
-        self._start_worker("llm-pull", pull, model_id=model_id)
+        self._start_worker("llm-pull", pull, model_id=model_id, job_token=token)
 
     @objc.python_method
     def _start_trial(self):
@@ -509,12 +520,26 @@ class SetupWindowController(NSObject):
             except queue.Empty:
                 self._check_download_stall()
                 return
+            model_job = key in {"stt-download", "llm-pull"}
+            if model_job:
+                token, *data = data
+                if token is not self.job_token:
+                    if kind == "done":
+                        model_id, _result = data
+                        if key == "stt-download":
+                            self.downloaded[model_id] = True
+                        elif model_id not in self.ollama_models:
+                            self.ollama_models.append(model_id)
+                    continue
             if kind == "progress":
                 done, total, *rest = data
-                if key in {"stt-download", "llm-pull"} and done != self._last_progress_bytes:
-                    self._last_progress_bytes = done
-                    self._last_progress_at = self._clock()
-                    self._progress_stalled = False
+                if model_job:
+                    if done != self._last_progress_bytes:
+                        self._last_progress_bytes = done
+                        self._last_progress_at = self._clock()
+                        self._progress_stalled = False
+                    elif self._progress_stalled:
+                        continue
                 self.status_message = (
                     f"{done / 1_000_000:.0f} / {total / 1_000_000:.0f} MB"
                     + (f"  ·  {rest[0]}" if rest and rest[0] else "")
@@ -524,11 +549,16 @@ class SetupWindowController(NSObject):
                     data if key in {"stt-download", "llm-pull"} else (None, data[0])
                 )
                 self.busy.discard(key)
+                if model_job:
+                    self.job_token = None
                 self.cancel_event = None
                 if isinstance(error, DownloadCancelled):
                     self.status_message = "Download cancelled."
                 else:
-                    self.error_message = str(error) or error.__class__.__name__
+                    self.error_message = (
+                        friendly_download_error(error) if model_job
+                        else str(error) or error.__class__.__name__
+                    )
                 if key == "checks":
                     self.checks = []
                 if key == "stt-checks":
@@ -540,6 +570,8 @@ class SetupWindowController(NSObject):
                     data if key in {"stt-download", "llm-pull"} else (None, data[0])
                 )
                 self.busy.discard(key)
+                if model_job:
+                    self.job_token = None
                 self.cancel_event = None
                 if key == "checks":
                     self.checks = result
@@ -698,6 +730,12 @@ class SetupWindowController(NSObject):
     def cancelAction_(self, sender):
         if self.cancel_event is not None:
             self.cancel_event.set()
+            self.busy.difference_update({"stt-download", "llm-pull"})
+            self.cancel_event = None
+            self.job_token = None
+            self.error_message = ""
+            self.status_message = "Download cancelled."
+            self._render()
 
     def settingsAction_(self, sender):
         webbrowser.open(f"http://127.0.0.1:{self.config.server_port}/settings")

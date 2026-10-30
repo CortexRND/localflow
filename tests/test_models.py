@@ -181,6 +181,7 @@ def test_download_stt_reports_monotone_progress_and_total(tmp_path, monkeypatch)
 def test_download_stt_sets_hub_timeouts_without_overriding(monkeypatch):
     monkeypatch.delenv("HF_HUB_DOWNLOAD_TIMEOUT", raising=False)
     monkeypatch.setenv("HF_HUB_ETAG_TIMEOUT", "7")
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
     cancel = threading.Event()
     cancel.set()
 
@@ -189,6 +190,22 @@ def test_download_stt_sets_hub_timeouts_without_overriding(monkeypatch):
 
     assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "30"
     assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "7"
+    assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+
+
+def test_friendly_download_error_bounds_messages_and_logs_full_exception(caplog):
+    xet_error = RuntimeError(
+        "Xet reconstruction failed at https://cdn.example/" + ("segment/" * 40)
+    )
+    generic_error = RuntimeError("Short summary\n" + ("details " * 40))
+
+    assert models.friendly_download_error(xet_error) == (
+        "Network problem while downloading — check your connection, then Retry."
+    )
+    assert str(xet_error) in caplog.text
+    assert models.friendly_download_error(generic_error) == "Short summary"
+    assert "Short summary" in caplog.text
+    assert len(models.friendly_download_error(RuntimeError("x" * 200))) == 140
 
 
 def test_download_stt_cancels_between_files(tmp_path, monkeypatch):

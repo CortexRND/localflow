@@ -399,3 +399,66 @@ def test_download_stall_message_after_timeout():
     window._check_download_stall()
 
     assert window.status_message == "No progress for 30s — check your connection, or Cancel."
+
+
+def test_stall_message_survives_zero_byte_progress_ticks():
+    class Root:
+        @staticmethod
+        def after(*_args):
+            return None
+
+    window = setup_tk.SetupWindow.__new__(setup_tk.SetupWindow)
+    token = object()
+    window._job_token = token
+    window._events = setup_tk.queue.Queue()
+    window._events.put(("progress", "stt-download", token, 0, 100))
+    window._busy = {"stt-download"}
+    window._last_progress_bytes = 0
+    window._last_progress_at = 0.0
+    window._progress_stalled = True
+    window._clock = lambda: 31.0
+    window._stall_timeout = 30.0
+    window.status_message = "No progress for 30s — check your connection, or Cancel."
+    window.error_message = ""
+    window.step = 2
+    window.root = Root()
+    window._check_download_stall = lambda: None
+
+    window._poll_events()
+
+    assert window.status_message == "No progress for 30s — check your connection, or Cancel."
+
+
+def test_cancel_releases_busy_and_ignores_stale_download_error():
+    class Root:
+        @staticmethod
+        def after(*_args):
+            return None
+
+    token = object()
+    cancel = threading.Event()
+    window = setup_tk.SetupWindow.__new__(setup_tk.SetupWindow)
+    window._cancel = cancel
+    window._job_token = token
+    window._busy = {"stt-download"}
+    window._events = setup_tk.queue.Queue()
+    window._events.put(
+        ("error", "stt-download", token, "fw-base", RuntimeError("stale error"))
+    )
+    window.error_message = ""
+    window.status_message = ""
+    window.step = 2
+    window.root = Root()
+    window._render = lambda: None
+    window._check_download_stall = lambda: None
+
+    window.cancel_download()
+
+    assert cancel.is_set()
+    assert not window._busy
+    assert window._cancel is None
+    assert window._job_token is None
+    assert window.status_message == "Download cancelled."
+    window._poll_events()
+    assert window.error_message == ""
+    assert window.status_message == "Download cancelled."

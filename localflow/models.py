@@ -3,6 +3,7 @@
 import ctypes
 import importlib.util
 import json
+import logging
 import os
 import platform
 import shutil
@@ -18,6 +19,7 @@ from faster_whisper.utils import _MODELS
 
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
@@ -286,6 +288,25 @@ class DownloadCancelled(DownloadError):
     """A model download was cancelled by the caller."""
 
 
+def friendly_download_error(exc: Exception) -> str:
+    logging.getLogger(__name__).warning(
+        "Model download failed: %s",
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    message = str(exc)
+    if (
+        isinstance(exc, (requests.ConnectionError, requests.Timeout, OSError))
+        or any(
+            marker in message.lower()
+            for marker in ("connect", "timed out", "network", "reconstruction")
+        )
+    ):
+        return "Network problem while downloading — check your connection, then Retry."
+    first_line = message.splitlines()[0].strip() if message else ""
+    return (first_line or exc.__class__.__name__)[:140]
+
+
 def _stt_cache_blobs(repo: str) -> Path:
     from huggingface_hub.constants import HF_HUB_CACHE
 
@@ -299,6 +320,7 @@ def download_stt(
 ) -> Path:
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     if cancel is not None and cancel.is_set():
         raise DownloadCancelled("Download cancelled")
     try:

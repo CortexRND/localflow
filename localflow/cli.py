@@ -800,12 +800,20 @@ def _progress(title: str, operation):
 
 
 def _download_stt_cli(model) -> None:
-    from localflow.models import download_stt
+    from localflow.models import download_stt, friendly_download_error
 
-    _progress(
-        f"Downloading {model.id}",
-        lambda update: download_stt(model, lambda done, total: update(done, total, f"{done / 1_000_000:.0f}/{total / 1_000_000:.0f} MB")),
-    )
+    try:
+        _progress(
+            f"Downloading {model.id}",
+            lambda update: download_stt(
+                model,
+                lambda done, total: update(
+                    done, total, f"{done / 1_000_000:.0f}/{total / 1_000_000:.0f} MB"
+                ),
+            ),
+        )
+    except Exception as exc:
+        raise click.ClickException(friendly_download_error(exc)) from exc
     console.print(f"[green]downloaded[/green] {model.id}")
 
 
@@ -820,12 +828,17 @@ def _require_stt_runtime(model) -> None:
 
 
 def _pull_llm_cli(tag: str, client) -> None:
-    _progress(
-        f"Downloading {tag}",
-        lambda update: client.pull(
-            tag, lambda done, total, status: update(done, total, status)
-        ),
-    )
+    from localflow.models import friendly_download_error
+
+    try:
+        _progress(
+            f"Downloading {tag}",
+            lambda update: client.pull(
+                tag, lambda done, total, status: update(done, total, status)
+            ),
+        )
+    except Exception as exc:
+        raise click.ClickException(friendly_download_error(exc)) from exc
     console.print(f"[green]downloaded[/green] {tag}")
 
 
@@ -843,7 +856,7 @@ def _download_stt_model(model_id: str):
 
 
 def _pull_ollama_model(tag: str, config=None) -> None:
-    from localflow.models import DownloadError, OllamaClient
+    from localflow.models import DownloadError, OllamaClient, friendly_download_error
 
     config = config or load_config()
     if config.llm_provider != "ollama":
@@ -856,7 +869,7 @@ def _pull_ollama_model(tag: str, config=None) -> None:
     try:
         _pull_llm_cli(tag, client)
     except DownloadError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(friendly_download_error(exc)) from exc
 
 
 def _use_stt_model(model_id: str, no_download: bool = False) -> Path:
@@ -877,7 +890,12 @@ def _use_stt_model(model_id: str, no_download: bool = False) -> Path:
 
 
 def _use_ollama_model(model_id: str, no_download: bool = False) -> Path:
-    from localflow.models import DownloadError, LLM_MODELS, OllamaClient
+    from localflow.models import (
+        LLM_MODELS,
+        DownloadError,
+        OllamaClient,
+        friendly_download_error,
+    )
 
     if model_id not in {entry.id for entry in LLM_MODELS}:
         raise click.ClickException(f"unknown model: {model_id}")
@@ -894,7 +912,7 @@ def _use_ollama_model(model_id: str, no_download: bool = False) -> Path:
             try:
                 _pull_llm_cli(model_id, client)
             except DownloadError as exc:
-                raise click.ClickException(str(exc)) from exc
+                raise click.ClickException(friendly_download_error(exc)) from exc
     updated = apply_config_update(
         config, {"llm": {"model": model_id, "cleanup_enabled": True}}
     )
