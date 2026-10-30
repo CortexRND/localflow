@@ -108,6 +108,14 @@ async def _api_auth(request: Request, call_next):
         supplied_token = request.headers.get("X-Localflow-Token") or request.query_params.get(
             "token"
         )
+        if supplied_token != _api_token:
+            host_header = request.headers.get("Host", "")
+            try:
+                host = urlparse(f"//{host_header}").hostname
+            except ValueError:
+                host = None
+            if (host or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+                return JSONResponse({"detail": "invalid host"}, status_code=403)
         if loopback and request.method in ("GET", "HEAD", "OPTIONS"):
             origin = request.headers.get("Origin")
             if origin:
