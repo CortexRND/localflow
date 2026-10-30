@@ -3,16 +3,16 @@
 import os
 import threading
 import time
+import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
 
-import tkinter as tk
 from PIL import ImageGrab
 
+from localflow import setup_tk
 from localflow.config import Config
 from localflow.models import HardwareInfo
 from localflow.setup_flow import Check
-from localflow import setup_tk
 
 
 class _Monitor:

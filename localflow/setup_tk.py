@@ -108,8 +108,10 @@ class SetupWindow:
             self.shell,
             bg=TOKENS["paper"],
             fg=TOKENS["ink"],
-            font=("TkDefaultFont", 24, "bold"),
+            font=("TkDefaultFont", 18, "bold"),
             anchor="w",
+            justify="left",
+            wraplength=640,
         )
         self.title_label.pack(fill="x", pady=(16, 2))
         self.subtitle_label = tk.Label(
@@ -162,7 +164,7 @@ class SetupWindow:
         surface.place(x=0, y=0, relwidth=1, relheight=1, width=-TOKENS["shadow"], height=-TOKENS["shadow"])
         top = tk.Frame(surface, bg=color)
         top.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Label(top, text=title, bg=color, fg=TOKENS["ink"], font=("TkDefaultFont", 12, "bold")).pack(side="left")
+        tk.Label(top, text=title, bg=color, fg=TOKENS["ink"], font=("TkDefaultFont", 10, "bold")).pack(side="left")
         if tag:
             tk.Label(top, text=tag, bg=color, fg=TOKENS["ink"], font=("TkDefaultFont", 9, "bold")).pack(side="right")
         tk.Label(
