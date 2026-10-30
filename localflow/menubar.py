@@ -13,11 +13,13 @@ import requests
 import rumps
 
 from localflow.config import load_config
+from localflow.history import HistoryStore
 from localflow.inject import paste_text
 from localflow.platform import current
 from localflow.status import live_state, read_last_text, title_prefix
 
 _config = load_config()
+_history = HistoryStore(enabled=_config.history_enabled)
 BASE = f"http://127.0.0.1:{_config.server_port}"
 
 IDLE_ICON = "🎙"
@@ -38,6 +40,7 @@ class LocalflowMenuBar(rumps.App):
         )
         self.open_ui_item = rumps.MenuItem("Open web UI", callback=self.open_ui)
         self.phrases_item = rumps.MenuItem("Hot Phrases…", callback=self.open_phrases)
+        self.hub_item = rumps.MenuItem("LocalFlow Hub…", callback=self.open_hub)
         self.open_notes_item = rumps.MenuItem(
             "Open notes folder", callback=self.open_notes
         )
@@ -52,6 +55,7 @@ class LocalflowMenuBar(rumps.App):
             None,
             self.open_ui_item,
             self.phrases_item,
+            self.hub_item,
             self.open_notes_item,
             self.paste_last_item,
         ]
@@ -145,6 +149,9 @@ class LocalflowMenuBar(rumps.App):
         # the Tk window can't run in-process.
         subprocess.Popen([sys.executable, "-m", "localflow.phrases_window"])
 
+    def open_hub(self, _item) -> None:
+        subprocess.Popen([sys.executable, "-m", "localflow.hub_window"])
+
     def open_notes(self, _item) -> None:
         from pathlib import Path
 
@@ -153,7 +160,7 @@ class LocalflowMenuBar(rumps.App):
         current().open_path(str(folder))
 
     def paste_last(self, _item) -> None:
-        text = read_last_text()
+        text = _history.latest_text(read_last_text())
         if text:
             paste_text(text, _config.paste_method)
 

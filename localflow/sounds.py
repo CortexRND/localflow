@@ -7,6 +7,7 @@ _SOUNDS = {
     "cancel": "/System/Library/Sounds/Funk.aiff",
     "warn": "/System/Library/Sounds/Sosumi.aiff",
     "error": "/System/Library/Sounds/Basso.aiff",
+    "achievement": "/System/Library/Sounds/Glass.aiff",
 }
 
 

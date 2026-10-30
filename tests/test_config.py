@@ -347,12 +347,29 @@ def test_hotkey_and_dictation_fields_validate_and_round_trip(isolated_config):
     ).pause_media_while_dictating is True
 
 
+def test_history_config_defaults_round_trip_and_validation(isolated_config):
+    assert Config().history_enabled is True
+    assert Config().keep_audio_clips == 5
+
+    expected = Config(history_enabled=False, keep_audio_clips=0)
+    config.save_config(expected)
+
+    assert config.load_config() == expected
+    updated = config.apply_config_update(
+        Config(), {"history": {"enabled": False, "keep_audio_clips": 3}}
+    )
+    assert updated.history_enabled is False
+    assert updated.keep_audio_clips == 3
+
+
 @pytest.mark.parametrize(
     "contents",
     [
         '[hotkey]\ncommand = 7\n',
         '[dictation]\npause_media = "yes"\n',
         "[dictation]\nmax_recording_seconds = -1\n",
+        '[history]\nenabled = "yes"\n',
+        "[history]\nkeep_audio_clips = -1\n",
     ],
 )
 def test_invalid_new_config_fields_default_when_loaded(isolated_config, caplog, contents):
@@ -365,12 +382,21 @@ def test_invalid_new_config_fields_default_when_loaded(isolated_config, caplog, 
     assert loaded.command_hotkey == Config().command_hotkey
     assert loaded.pause_media_while_dictating is False
     assert loaded.max_recording_seconds == 1200
+    assert loaded.history_enabled is True
+    assert loaded.keep_audio_clips == 5
 
 
 def test_apply_config_update_rejects_negative_max_recording_duration():
     with pytest.raises(ConfigError, match="invalid value.*max_recording_seconds"):
         config.apply_config_update(
             Config(), {"dictation": {"max_recording_seconds": -1}}
+        )
+
+
+def test_apply_config_update_rejects_negative_history_clip_retention():
+    with pytest.raises(ConfigError, match="invalid value.*keep_audio_clips"):
+        config.apply_config_update(
+            Config(), {"history": {"keep_audio_clips": -1}}
         )
 
 

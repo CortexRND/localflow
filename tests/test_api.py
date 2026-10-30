@@ -7,13 +7,15 @@ from fastapi.testclient import TestClient
 
 from localflow import server
 from localflow.config import Config
+from localflow.history import HistoryStore
 
 
 @pytest.fixture(autouse=True)
-def disable_meeting_watcher(monkeypatch):
+def disable_meeting_watcher(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server, "_config", Config(meetings_enabled=False, meeting_watch=False)
     )
+    monkeypatch.setattr(server, "_history", HistoryStore(tmp_path / "history.sqlite"))
 
 
 class FakePlatform:
@@ -203,6 +205,9 @@ def test_server_silence_gate_skips_transcription(monkeypatch):
 
     assert server._transcribe_sync(np.zeros(16000, dtype=np.float32), True) == ""
     transcriber.transcribe.assert_not_called()
+    row = server._history.recent()[0]
+    assert row["status"] == "silent"
+    assert row["app_name"] == "phone"
 
 
 def test_server_uses_other_style_category(monkeypatch):
@@ -252,3 +257,8 @@ def test_server_cleans_short_transcript_when_requested(monkeypatch):
         np.full(16000, 0.1, dtype=np.float32), True
     ) == "Cleaned."
     cleaner.clean.assert_called_once()
+    row = server._history.recent()[0]
+    assert row["kind"] == "dictate"
+    assert row["app_name"] == "phone"
+    assert row["raw_text"] == "hello world"
+    assert row["final_text"] == "Cleaned."

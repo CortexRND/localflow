@@ -1,6 +1,7 @@
 import ctypes
 import json
 import os
+import subprocess
 import tempfile
 import time
 from ctypes import wintypes
@@ -45,8 +46,17 @@ def _windows_pid_is_alive(pid: int) -> bool:
 def _pid_is_alive(pid: int) -> bool:
     if _IS_WINDOWS:
         return _windows_pid_is_alive(pid)
-    os.kill(pid, 0)
-    return True
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "pid="],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return bool(result.stdout.strip())
 
 
 def title_prefix(state: str) -> str:

@@ -5,6 +5,7 @@ run the components themselves.
 """
 
 import json
+import subprocess
 import sys
 import time
 from dataclasses import asdict, replace
@@ -17,7 +18,13 @@ import requests
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
@@ -43,6 +50,7 @@ from localflow.dispatch import (
     dispatch,
     orca_available,
 )
+from localflow.history import HistoryStore
 from localflow.platform import current
 from localflow.platform.base import PASTE_METHODS
 from localflow.providers import registry
@@ -52,6 +60,10 @@ from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set
 console = Console()
 _config = load_config()
 BASE = f"http://127.0.0.1:{_config.server_port}"
+
+
+def _history_store() -> HistoryStore:
+    return HistoryStore(enabled=load_config().history_enabled)
 
 
 def _get(path: str, timeout: float = 5) -> dict:
@@ -184,6 +196,139 @@ def config_migrate_command() -> None:
 @cli.group("dict")
 def dictionary() -> None:
     """Manage personal vocabulary and transcription corrections."""
+
+
+@cli.group("history", invoke_without_command=True)
+@click.option("--limit", type=click.IntRange(min=1, max=1000), default=50)
+@click.option("--search", default=None)
+@click.pass_context
+def history_cli(ctx, limit: int, search: str | None) -> None:
+    """Search and manage local dictation history."""
+    if ctx.invoked_subcommand is None:
+        _show_history(_history_store().recent(limit=limit, query=search))
+
+
+def _show_history(entries: list[dict]) -> None:
+    if not entries:
+        click.echo("No history entries.")
+        return
+    table = Table("ID", "When", "Kind", "App", "Status", "Text")
+    for entry in entries:
+        when = datetime.fromtimestamp(entry["ts"]).strftime("%Y-%m-%d %H:%M")
+        table.add_row(
+            str(entry["id"]),
+            when,
+            entry["kind"],
+            entry["app_name"] or "Unknown",
+            entry["status"],
+            (entry["final_text"] or entry["raw_text"] or "").replace("\n", " ")[:80],
+        )
+    console.print(table)
+
+
+@history_cli.command("list")
+@click.option("--limit", type=click.IntRange(min=1, max=1000), default=20)
+def history_list(limit: int) -> None:
+    _show_history(_history_store().recent(limit=limit))
+
+
+@history_cli.command("search")
+@click.argument("query")
+@click.option("--limit", type=click.IntRange(min=1, max=1000), default=100)
+def history_search(query: str, limit: int) -> None:
+    _show_history(_history_store().recent(query=query, limit=limit))
+
+
+def _history_entry(entry_id: str) -> dict:
+    store = _history_store()
+    if entry_id == "last":
+        rows = store.recent(limit=1)
+        entry = rows[0] if rows else None
+    else:
+        try:
+            entry = store.get(int(entry_id))
+        except ValueError as exc:
+            raise click.ClickException(f"invalid history entry {entry_id!r}") from exc
+    if entry is None:
+        raise click.ClickException(f"history entry {entry_id} not found")
+    return entry
+
+
+@history_cli.command("copy")
+@click.argument("entry_id")
+def history_copy(entry_id: str) -> None:
+    import pyperclip
+
+    pyperclip.copy(_history_entry(entry_id)["final_text"] or "")
+    click.echo("Copied final text.")
+
+
+@history_cli.command("raw")
+@click.argument("entry_id")
+def history_raw(entry_id: str) -> None:
+    import pyperclip
+
+    pyperclip.copy(_history_entry(entry_id)["raw_text"] or "")
+    click.echo("Copied raw transcript.")
+
+
+@history_cli.command("retry")
+@click.argument("entry_id")
+def history_retry(entry_id: str) -> None:
+    from localflow.app import retry_history_entry
+
+    store = _history_store()
+    try:
+        text = retry_history_entry(_history_entry(entry_id)["id"], store)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not text:
+        raise click.ClickException("retry produced no text")
+    import pyperclip
+
+    pyperclip.copy(text)
+    click.echo("Retried dictation and copied the result.")
+
+
+@history_cli.command("delete")
+@click.argument("entry_id")
+def history_delete(entry_id: str) -> None:
+    entry = _history_entry(entry_id)
+    if not _history_store().delete(entry["id"]):
+        raise click.ClickException(f"history entry {entry_id} not found")
+    click.echo(f"Deleted history entry {entry['id']}.")
+
+
+@history_cli.command("clear")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def history_clear(yes: bool) -> None:
+    if not yes:
+        click.confirm("Delete all history entries and stored clips?", abort=True)
+    count = _history_store().clear()
+    click.echo(f"Cleared {count} history entries.")
+
+
+@cli.command("stats")
+def stats_command() -> None:
+    stats = _history_store().stats()
+    click.echo(f"Dictations: {stats['total_dictations']}")
+    click.echo(f"Words: {stats['total_words']}")
+    click.echo(f"Average WPM: {stats['avg_wpm']:.1f}")
+    click.echo(f"Words today: {stats['words_today']}")
+    click.echo(f"Words this week: {stats['words_7d']}")
+    click.echo(f"Current streak: {stats['current_streak_days']} days")
+    click.echo(f"Longest streak: {stats['longest_streak_days']} days")
+    if stats["top_apps"]:
+        click.echo(
+            "Top apps: "
+            + ", ".join(f"{name} ({count})" for name, count in stats["top_apps"])
+        )
+
+
+@cli.command("hub")
+def hub_command() -> None:
+    """Open the native history and settings hub."""
+    subprocess.Popen([sys.executable, "-m", "localflow.hub_window"])
 
 
 @dictionary.command("list")

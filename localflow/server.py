@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from localflow import api as api_logic
 from localflow import sounds
 from localflow.apitoken import load_or_create
+from localflow.audio import rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
 from localflow.config import (
@@ -24,7 +25,6 @@ from localflow.config import (
     load_config,
     save_config,
 )
-from localflow.audio import rms_dbfs
 from localflow.context import category_for
 from localflow.dictionary import DictionaryStore, apply_replacements, stt_prompt
 from localflow.dispatch import (
@@ -33,8 +33,9 @@ from localflow.dispatch import (
     parse_work_prompts,
     write_prompts,
 )
-from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.formatting import apply_spoken_formatting, apply_style
+from localflow.history import HistoryStore
+from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.log import setup_logging
 from localflow.meetings import (
     MeetingSession,
@@ -90,6 +91,7 @@ _queue = PromptQueue()
 # Same shared-file pattern as the queue: the desktop app reads this file.
 _hot_phrases = HotPhraseStore()
 _dictionary = DictionaryStore()
+_history: HistoryStore | None = None
 # No queue lock here on purpose: PromptQueue serialises across processes itself,
 # and status changes go through its compare-and-set. A lock here would only
 # guard the server against the server.
@@ -151,6 +153,30 @@ def _get_cleaner() -> Cleaner:
     return _cleaner
 
 
+def _get_history() -> HistoryStore:
+    global _history
+    if _history is None:
+        _history = HistoryStore(enabled=_config.history_enabled)
+    return _history
+
+
+def _record_phone_history(
+    audio: np.ndarray, raw_text: str, final_text: str, status: str
+) -> None:
+    try:
+        _get_history().add(
+            kind="dictate",
+            app_name="phone",
+            category="other",
+            duration_s=len(audio) / 16000,
+            raw_text=raw_text,
+            final_text=final_text,
+            status=status,
+        )
+    except Exception:
+        log.exception("could not save server dictation history")
+
+
 def _decode_audio(data: bytes) -> np.ndarray:
     try:
         proc = _run_ffmpeg(data)
@@ -184,41 +210,57 @@ def _run_ffmpeg(data: bytes) -> subprocess.CompletedProcess:
 def _transcribe_sync(audio: np.ndarray, clean: bool) -> str:
     if rms_dbfs(audio) < _config.silence_threshold_dbfs:
         log.info("silence gate: audio below %.1f dBFS", _config.silence_threshold_dbfs)
+        _record_phone_history(audio, "", "", "silent")
         return ""
     words = _dictionary.words()
     replacements = _dictionary.replacements()
-    text = _get_transcriber().transcribe(audio, prompt=stt_prompt(words))
-    if not text:
-        return text
-    phrases = _hot_phrases.enabled() if _config.hot_phrases else []
-    category = category_for(None, _config.app_category_overrides)
-    style_name = getattr(_config, f"style_{category}") if _config.styles_enabled else None
-    level = _config.cleanup_level if _config.cleanup_enabled else "none"
-    should_clean = clean and level != "none"
-    clean_step = (
-        lambda value: _get_cleaner().clean(
-            value,
-            level=level,
-            style=style_name,
-            vocabulary=words,
+    raw_text = ""
+    try:
+        raw_text = _get_transcriber().transcribe(audio, prompt=stt_prompt(words))
+        if not raw_text:
+            _record_phone_history(audio, raw_text, "", "silent")
+            return raw_text
+        phrases = _hot_phrases.enabled() if _config.hot_phrases else []
+        category = category_for(None, _config.app_category_overrides)
+        style_name = (
+            getattr(_config, f"style_{category}") if _config.styles_enabled else None
         )
-    ) if should_clean else None
-    style = (
-        (lambda value: apply_style(value, style_name, words))
-        if style_name
-        else None
+        level = _config.cleanup_level if _config.cleanup_enabled else "none"
+        should_clean = clean and level != "none"
+        clean_step = (
+            lambda value: _get_cleaner().clean(
+                value,
+                level=level,
+                style=style_name,
+                vocabulary=words,
+            )
+        ) if should_clean else None
+        style = (
+            (lambda value: apply_style(value, style_name, words))
+            if style_name
+            else None
+        )
+        final_text = render_dictation(
+            raw_text,
+            phrases,
+            replace=lambda value: apply_replacements(value, replacements),
+            fmt=apply_spoken_formatting if _config.spoken_punctuation else None,
+            clean=clean_step,
+            symbols=(lambda t: apply_spoken_symbols(t, _commands))
+            if _config.spoken_symbols
+            else None,
+            style=style,
+        )
+    except Exception:
+        _record_phone_history(audio, raw_text, "", "failed")
+        raise
+    _record_phone_history(
+        audio,
+        raw_text,
+        final_text,
+        "ok" if final_text else "silent",
     )
-    return render_dictation(
-        text,
-        phrases,
-        replace=lambda value: apply_replacements(value, replacements),
-        fmt=apply_spoken_formatting if _config.spoken_punctuation else None,
-        clean=clean_step,
-        symbols=(lambda t: apply_spoken_symbols(t, _commands))
-        if _config.spoken_symbols
-        else None,
-        style=style,
-    )
+    return final_text
 
 
 @app.get("/healthz")
@@ -249,7 +291,7 @@ def api_config() -> dict:
 
 @app.put("/api/config")
 def api_config_update(body: dict) -> dict:
-    global _config, _transcriber, _cleaner, _ollama, _commands
+    global _config, _transcriber, _cleaner, _ollama, _commands, _history
     with _config_lock:
         try:
             updated = apply_config_update(_config, body)
@@ -267,6 +309,7 @@ def api_config_update(body: dict) -> dict:
         _transcriber = None
         _cleaner = None
         _ollama = new_llm
+        _history = None
         result = config_to_dict(_config)
     return {**result, "restart_required": api_logic.restart_required(body)}
 

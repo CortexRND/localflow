@@ -35,6 +35,20 @@ def test_stale_status_pid_maps_to_idle(tmp_path):
     assert live_state(path) == "idle"
 
 
+def test_posix_pid_check_uses_ps_not_signal_zero(monkeypatch):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout="42\n")
+
+    monkeypatch.setattr(status, "_IS_WINDOWS", False)
+    monkeypatch.setattr(status.subprocess, "run", run)
+
+    assert status._pid_is_alive(42)
+    assert calls[0][0] == ["ps", "-p", "42", "-o", "pid="]
+
+
 def test_windows_live_state_uses_safe_process_check(monkeypatch, tmp_path):
     path = tmp_path / "status.json"
     path.write_text(json.dumps({"state": "locked", "since": 1, "pid": 42}))

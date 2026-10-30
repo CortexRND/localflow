@@ -5,6 +5,10 @@ on:
     branches: ["devin/**", "main"]
     paths:
       - "localflow/phrases*"
+      - "localflow/hub*"
+      - "localflow/history.py"
+      - "localflow/app.py"
+      - "localflow/menubar.py"
       - "localflow/hotphrases.py"
       - "tests/test_phrases*"
       - "localflow/setup*"
@@ -15,10 +19,16 @@ on:
       - "tests/test_models.py"
       - "tests/test_config.py"
       - "scripts/mac_ui_snapshots.py"
+      - "tests/test_hub_mac_static.py"
+      - "tests/test_history.py"
       - ".github/workflows/macos-ui.yml"
   pull_request:
     paths:
       - "localflow/phrases*"
+      - "localflow/hub*"
+      - "localflow/history.py"
+      - "localflow/app.py"
+      - "localflow/menubar.py"
       - "localflow/hotphrases.py"
       - "tests/test_phrases*"
       - "localflow/setup*"
@@ -29,6 +39,8 @@ on:
       - "tests/test_models.py"
       - "tests/test_config.py"
       - "scripts/mac_ui_snapshots.py"
+      - "tests/test_hub_mac_static.py"
+      - "tests/test_history.py"
       - ".github/workflows/macos-ui.yml"
   workflow_dispatch:
 
@@ -43,7 +55,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e . pytest
-      - run: pytest -q tests/test_hotphrases.py tests/test_phrases_model.py tests/test_phrases_mac.py tests/test_phrases_mac_static.py tests/test_setup_flow.py tests/test_setup_tk.py tests/test_setup_mac_static.py tests/test_models.py tests/test_config.py tests/test_appbundle.py
+      - run: pytest -q tests/test_hotphrases.py tests/test_phrases_model.py tests/test_phrases_mac.py tests/test_phrases_mac_static.py tests/test_hub_mac_static.py tests/test_setup_flow.py tests/test_setup_tk.py tests/test_setup_mac_static.py tests/test_models.py tests/test_config.py tests/test_appbundle.py tests/test_history.py
       - run: python scripts/mac_ui_snapshots.py
         if: always()
       - uses: actions/upload-artifact@v4

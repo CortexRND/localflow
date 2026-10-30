@@ -8,10 +8,16 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
+from localflow.config import Config
+from localflow.dictionary import DictionaryStore
+from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore
+from localflow.hub_mac import build_window as build_hub_window
 from localflow.phrases_mac import build_window, snapshot_png
-from localflow.setup_mac import SetupWindowController
 from localflow.setup_flow import Check
+from localflow.setup_mac import SetupWindowController
 
 OUT = Path("artifacts/mac-ui")
 
@@ -38,6 +44,33 @@ def _controller(store_dir, hot_phrases=True):
 def _shot(c, name):
     for dark in (False, True):
         snapshot_png(c, OUT / f"{name}-{'dark' if dark else 'light'}.png", dark=dark)
+
+
+def _hub_snapshots(base):
+    for state in ("empty", "populated", "error"):
+        history = HistoryStore(base / f"hub-{state}.sqlite", base / f"clips-{state}")
+        dictionary = DictionaryStore(base / f"dictionary-{state}.json")
+        config = Config()
+        if state == "populated":
+            history.add(
+                kind="dictate", status="ok", app_name="Editor",
+                raw_text="A raw transcript", final_text="A polished transcript.",
+                duration_s=30,
+                audio_path=history.write_clip(np.zeros(1600, dtype=np.float32), 16000),
+            )
+            history.add(
+                kind="command", status="ok", app_name="Browser",
+                raw_text="Make this concise", final_text="A concise selection.",
+            )
+            dictionary.add_word("LocalFlow")
+            dictionary.add_replacement("teh", "the")
+        controller = build_hub_window(history, dictionary, config)
+        for page in ("Home", "History", "Dictionary", "Style", "Models"):
+            controller.page_errors.clear()
+            if state == "error":
+                controller.page_errors[page] = "Unable to load local data."
+            controller.show_page(page)
+            _shot(controller, f"hub-{page.lower()}-{state}")
 
 
 def main():
@@ -143,6 +176,7 @@ def main():
         setup.error_message = "Network connection interrupted."
         setup._render()
         _shot(setup, "setup-download-error")
+        _hub_snapshots(tmp)
 
     print(f"wrote snapshots to {OUT}")
 
