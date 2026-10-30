@@ -38,7 +38,8 @@ def restart_required(update: dict) -> list[str]:
             continue
         for key in values:
             if section in restart_sections or (
-                section == "dictation" and key == "sample_rate"
+                section == "dictation"
+                and key in {"sample_rate", "max_recording_seconds", "pause_media"}
             ):
                 required.append(f"{section}.{key}")
     return required

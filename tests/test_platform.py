@@ -338,6 +338,31 @@ def test_inject_does_not_restore_over_a_newer_clipboard_value(monkeypatch):
     assert clipboard == ["new user clipboard"]
 
 
+def test_inject_restores_clipboard_captured_before_selection(monkeypatch):
+    from localflow import inject
+
+    clipboard = ["transformed"]
+    copied = []
+
+    def copy(value):
+        copied.append(value)
+        clipboard[0] = value
+
+    class FakePlatform:
+        def paste(self, _method):
+            pass
+
+    monkeypatch.setattr(inject, "current", lambda: FakePlatform())
+    monkeypatch.setattr(inject.pyperclip, "paste", lambda: clipboard[0])
+    monkeypatch.setattr(inject.pyperclip, "copy", copy)
+    monkeypatch.setattr(inject.time, "sleep", lambda _seconds: None)
+
+    inject.paste_text("transformed", "xdotool", clipboard_before="original")
+
+    assert copied == ["transformed", "original"]
+    assert clipboard == ["original"]
+
+
 def test_inject_clipboard_method_keeps_text_without_keystroke(monkeypatch):
     from localflow import inject
 
@@ -353,6 +378,51 @@ def test_inject_clipboard_method_keeps_text_without_keystroke(monkeypatch):
     inject.paste_text("transcript", "clipboard")
 
     assert clipboard == ["transcript"]
+
+
+def test_macos_selection_copy_uses_command_c(monkeypatch):
+    from localflow.platform import darwin
+
+    calls = []
+    monkeypatch.setattr(darwin.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    DarwinPlatform().copy_selection()
+
+    assert calls[0][0][0] == [
+        "osascript",
+        "-e",
+        'tell application "System Events" to keystroke "c" using command down',
+    ]
+    assert calls[0][1]["timeout"] == 2
+
+
+def test_linux_selection_copy_uses_ctrl_c(monkeypatch):
+    from contextlib import nullcontext
+
+    from pynput import keyboard
+
+    events = []
+
+    class FakeController:
+        def pressed(self, key):
+            events.append(("pressed", key))
+            return nullcontext()
+
+        def press(self, key):
+            events.append(("press", key))
+
+        def release(self, key):
+            events.append(("release", key))
+
+    monkeypatch.setattr(keyboard, "Controller", FakeController)
+
+    LinuxPlatform().copy_selection()
+
+    assert events == [
+        ("pressed", keyboard.Key.ctrl),
+        ("press", "c"),
+        ("release", "c"),
+    ]
 
 
 def test_cli_rejects_unknown_paste_method():

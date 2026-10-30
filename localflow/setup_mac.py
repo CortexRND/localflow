@@ -71,6 +71,7 @@ class SetupWindowController(NSObject):
         self.cleanup_level = self.choices.cleanup_level
         self.device = self.choices.input_device or "System default"
         self.hotkey = self.choices.hotkey
+        self.pause_media = self.choices.pause_media_while_dictating
         self.language = self.choices.language
         self.start_on_login = self.choices.start_on_login
         self.step = 0
@@ -322,7 +323,7 @@ class SetupWindowController(NSObject):
                 button = self._button(title, 8, 8, 150, action)
                 self.page.addSubview_(button)
             else:
-                button = self._button("Refresh models", 8, 8, 150, "recheckAction_")
+                button = self._button("Refresh models", 250, 198, 150, "recheckAction_")
                 self.page.addSubview_(button)
         elif self.step == 4:
             self._add_text("Pick a microphone and the key you'll hold to talk.", 278)
@@ -349,6 +350,22 @@ class SetupWindowController(NSObject):
             self.hotkey_popup.setTarget_(self)
             self.hotkey_popup.setAction_(objc.selector(self.hotkeyChanged_, signature=b"v@:@"))
             self.page.addSubview_(self.hotkey_popup)
+            shortcut_text = (
+                f"Hold {self.hotkey} · Double-tap locks · Esc cancels\n"
+                f"Paste last {self.choices.paste_last_hotkey} · Command {self.choices.command_hotkey}"
+                f" · Polish {self.choices.polish_hotkey} · Prompt {self.choices.prompt_hotkey}"
+            )
+            shortcut_view = self._label(shortcut_text, 8, 44, 632, 38, 9)
+            self.page.addSubview_(shortcut_view)
+            self.pause_switch = NSButton.alloc().initWithFrame_(NSMakeRect(8, 8, 300, 24))
+            self.pause_switch.setButtonType_(AppKit.NSSwitchButton)
+            self.pause_switch.setTitle_("Pause music while I talk")
+            self.pause_switch.setState_(AppKit.NSOnState if self.pause_media else AppKit.NSOffState)
+            self.pause_switch.setTarget_(self)
+            self.pause_switch.setAction_(
+                objc.selector(self.pauseMediaChanged_, signature=b"v@:@")
+            )
+            self.page.addSubview_(self.pause_switch)
             self._add_text("Live mic level", 116, 12, True)
             self.meter = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(8, 88, 620, 18))
             self.meter.setIndeterminate_(False)
@@ -517,14 +534,15 @@ class SetupWindowController(NSObject):
     @objc.python_method
     def _advance(self):
         if self.step == 4:
-            self.choices = SetupChoices(
-                self.stt_id,
-                None if self.llm_id == "none" else self.llm_id,
-                "" if self.device == "System default" else self.device,
-                self.hotkey,
-                self.language,
-                self.start_on_login,
-                self.choices.llm_provider,
+            self.choices = replace(
+                self.choices,
+                stt_id=self.stt_id,
+                llm_id=None if self.llm_id == "none" else self.llm_id,
+                input_device="" if self.device == "System default" else self.device,
+                hotkey=self.hotkey,
+                language=self.language,
+                start_on_login=self.start_on_login,
+                pause_media_while_dictating=self.pause_media,
             )
         if self.step == 4 and self.monitor is not None:
             self.monitor.stop()
@@ -740,6 +758,9 @@ class SetupWindowController(NSObject):
 
     def hotkeyChanged_(self, sender):
         self.hotkey = sender.selectedItem().representedObject()
+
+    def pauseMediaChanged_(self, sender):
+        self.pause_media = sender.state() == AppKit.NSOnState
 
     def skipAction_(self, sender):
         self._advance()

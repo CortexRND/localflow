@@ -70,6 +70,9 @@ class SetupWindow:
         self.hotkey_var = tk.StringVar(value=self._hotkey_label(self.choices.hotkey))
         self.language_var = tk.StringVar(value=self.choices.language or "")
         self.start_login_var = tk.BooleanVar(value=self.choices.start_on_login)
+        self.pause_media_var = tk.BooleanVar(
+            value=self.choices.pause_media_while_dictating
+        )
         self.step = 0
         self.saved = False
         self.checks = None
@@ -383,6 +386,26 @@ class SetupWindow:
             state="readonly",
         )
         self.hotkey_box.pack(fill="x", pady=(2, 12))
+        key_labels = dict(HOTKEY_OPTIONS)
+        shortcuts = [
+            f"Hold: {key_labels.get(self._hotkey_value(self.hotkey_var.get()), self.hotkey_var.get())}",
+            "Double-tap: lock  ·  Esc: cancel",
+            f"Paste last: {self.choices.paste_last_hotkey or 'disabled'}",
+            f"Command: {self.choices.command_hotkey or 'disabled'}",
+            f"Polish: {self.choices.polish_hotkey or 'disabled'}",
+            f"Prompt: {self.choices.prompt_hotkey or 'disabled'}",
+        ]
+        card = tk.LabelFrame(self.body, text="Shortcuts", bg=TOKENS["paper"])
+        card.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            card, text="\n".join(shortcuts), justify="left",
+            bg=TOKENS["paper"], fg=TOKENS["ink"],
+        ).pack(anchor="w", padx=8, pady=4)
+        tk.Checkbutton(
+            self.body, text="Pause music while I talk",
+            variable=self.pause_media_var, bg=TOKENS["paper"],
+            activebackground=TOKENS["paper"],
+        ).pack(anchor="w", pady=(0, 8))
         self._label(self.body, "Live mic level", font=("TkDefaultFont", 11, "bold"))
         self.meter = tk.Canvas(self.body, height=18, bg=TOKENS["card"], highlightbackground=TOKENS["ink"], highlightthickness=1)
         self.meter.pack(fill="x")
@@ -821,6 +844,13 @@ class SetupWindow:
                 language=self.language_var.get() or None,
                 start_on_login=bool(self.start_login_var.get()),
                 llm_provider=self.choices.llm_provider,
+                cleanup_level=self.choices.cleanup_level,
+                paste_last_hotkey=self.choices.paste_last_hotkey,
+                command_hotkey=self.choices.command_hotkey,
+                polish_hotkey=self.choices.polish_hotkey,
+                prompt_hotkey=self.choices.prompt_hotkey,
+                pause_media_while_dictating=bool(self.pause_media_var.get()),
+                max_recording_seconds=self.choices.max_recording_seconds,
             )
         self._mic_error = ""
         self.step = min(6, self.step + 1)

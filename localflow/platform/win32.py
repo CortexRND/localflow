@@ -18,6 +18,14 @@ def _xml_escape(value: str) -> str:
 class Win32Platform:
     name = "win32"
 
+    def copy_selection(self) -> None:
+        from pynput import keyboard
+
+        controller = keyboard.Controller()
+        with controller.pressed(keyboard.Key.ctrl):
+            controller.press("c")
+            controller.release("c")
+
     def paste(self, method: str = "auto") -> None:
         if method not in ("auto", "pynput"):
             raise ValueError(f"unknown paste method: {method!r}")

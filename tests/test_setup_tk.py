@@ -106,6 +106,38 @@ def test_setup_window_renders_all_seven_steps(monkeypatch):
         root.destroy()
 
 
+def test_shortcut_card_and_pause_media_toggle_render(monkeypatch):
+    monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
+    monkeypatch.setattr(setup_tk, "list_input_devices", list)
+    root = _new_root()
+    root.withdraw()
+    window = setup_tk.SetupWindow(
+        root,
+        Config(),
+        HardwareInfo("Linux", "x86_64", 8, False, 50),
+    )
+    try:
+        window.step = 4
+        window._render()
+        root.update_idletasks()
+        descendants = []
+        stack = [window.body]
+        while stack:
+            widget = stack.pop()
+            descendants.append(widget)
+            stack.extend(widget.winfo_children())
+        labels = [
+            widget.cget("text")
+            for widget in descendants
+            if isinstance(widget, (tk.Label, tk.LabelFrame, tk.Checkbutton))
+        ]
+        assert any("Shortcuts" in str(label) for label in labels)
+        assert any("Pause music while I talk" in str(label) for label in labels)
+        assert any("Command:" in str(label) for label in labels)
+    finally:
+        window.close()
+
+
 def test_stt_download_renders_once_and_advances_after_completion(
     monkeypatch, tmp_path
 ):

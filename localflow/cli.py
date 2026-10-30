@@ -1045,6 +1045,12 @@ def _setup_cli(
             defaults.start_on_login,
             cfg.llm_provider,
             cleanup_level or defaults.cleanup_level,
+            defaults.paste_last_hotkey,
+            defaults.command_hotkey,
+            defaults.polish_hotkey,
+            defaults.prompt_hotkey,
+            defaults.pause_media_while_dictating,
+            defaults.max_recording_seconds,
         )
         path = apply(choices)
         console.print(f"[green]setup saved[/green] {path}")
@@ -1111,6 +1117,26 @@ def _setup_cli(
         default=defaults.hotkey,
         type=click.Choice([value for value, _label in HOTKEY_OPTIONS]),
     )
+    hotkey_labels = dict(HOTKEY_OPTIONS)
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"Hold: {hotkey_labels.get(hotkey, hotkey)}",
+                    "Double-tap: lock  ·  Esc: cancel",
+                    f"Paste last: {defaults.paste_last_hotkey or 'disabled'}",
+                    f"Command: {defaults.command_hotkey or 'disabled'}",
+                    f"Polish: {defaults.polish_hotkey or 'disabled'}",
+                    f"Prompt: {defaults.prompt_hotkey or 'disabled'}",
+                ]
+            ),
+            title="Your shortcuts",
+        )
+    )
+    pause_media = click.confirm(
+        "Pause music while I talk?",
+        default=defaults.pause_media_while_dictating,
+    )
     language = click.prompt("Language (blank = autodetect)", default=defaults.language or "")
     if click.confirm("Try a five-second dictation now?", default=False):
         from localflow.stt import Transcriber
@@ -1132,6 +1158,12 @@ def _setup_cli(
         chosen_stt, chosen_llm, "" if device == "System default" else device,
         hotkey, language or None, start_on_login, cfg.llm_provider,
         chosen_cleanup_level,
+        defaults.paste_last_hotkey,
+        defaults.command_hotkey,
+        defaults.polish_hotkey,
+        defaults.prompt_hotkey,
+        pause_media,
+        defaults.max_recording_seconds,
     )
     path = apply(choices)
     console.print(f"[green]setup saved[/green] {path}")

@@ -30,11 +30,30 @@ def test_initial_choices_reuse_existing_config_after_setup(monkeypatch):
             input_device="Studio Mic",
             hotkey="f19",
             language="fr",
+            paste_last_hotkey="<ctrl>+<shift>+v",
+            command_hotkey="f18",
+            polish_hotkey="f16",
+            prompt_hotkey="f17",
+            pause_media_while_dictating=True,
+            max_recording_seconds=600,
         ),
         HardwareInfo("Linux", "x86_64", 16, False, 50),
     )
 
-    assert choices == SetupChoices("fw-small", "qwen2.5:3b", "Studio Mic", "f19", "fr", False)
+    assert (
+        choices.stt_id,
+        choices.llm_id,
+        choices.input_device,
+        choices.hotkey,
+        choices.language,
+        choices.start_on_login,
+    ) == ("fw-small", "qwen2.5:3b", "Studio Mic", "f19", "fr", False)
+    assert choices.paste_last_hotkey == "<ctrl>+<shift>+v"
+    assert choices.command_hotkey == "f18"
+    assert choices.polish_hotkey == "f16"
+    assert choices.prompt_hotkey == "f17"
+    assert choices.pause_media_while_dictating is True
+    assert choices.max_recording_seconds == 600
 
 
 def test_initial_choices_replaces_models_unavailable_on_current_hardware():
@@ -137,6 +156,8 @@ def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkey
     choices = SetupChoices(
         "fw-small", "qwen2.5:3b", "USB mic", "f19", "en", True,
         cleanup_level="medium",
+        pause_media_while_dictating=True,
+        max_recording_seconds=600,
     )
 
     result = setup_flow.apply(choices)
@@ -152,6 +173,10 @@ def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkey
     assert saved.language == "en"
     assert saved.setup_version == 1
     assert saved.cleanup_level == "medium"
+    assert saved.paste_last_hotkey == Config().paste_last_hotkey
+    assert saved.command_hotkey == "alt_r"
+    assert saved.pause_media_while_dictating is True
+    assert saved.max_recording_seconds == 600
     assert installed == [True]
 
 

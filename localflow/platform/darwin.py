@@ -4,6 +4,10 @@ from pathlib import Path
 _SOUNDS = {
     "start": "/System/Library/Sounds/Pop.aiff",
     "stop": "/System/Library/Sounds/Bottle.aiff",
+    "lock": "/System/Library/Sounds/Tink.aiff",
+    "cancel": "/System/Library/Sounds/Funk.aiff",
+    "warn": "/System/Library/Sounds/Sosumi.aiff",
+    "error": "/System/Library/Sounds/Basso.aiff",
 }
 
 
@@ -24,6 +28,17 @@ class DarwinPlatform:
                 'tell application "System Events" to keystroke "v" using command down',
             ],
             check=False,
+        )
+
+    def copy_selection(self) -> None:
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                'tell application "System Events" to keystroke "c" using command down',
+            ],
+            check=False,
+            timeout=2,
         )
 
     def notify(self, title: str, message: str) -> None:

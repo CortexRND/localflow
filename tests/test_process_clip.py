@@ -57,6 +57,24 @@ def test_process_clip_short_command_skips_cleanup(monkeypatch):
     assert pasted == ["/candidate-solutioning"]
 
 
+def test_process_clip_can_return_text_without_pasting(monkeypatch):
+    pasted = []
+    monkeypatch.setattr(app, "paste_text", lambda *args: pasted.append(args))
+    transcriber = Mock(transcribe=Mock(return_value="A complete sentence for the test."))
+    cleaner = Mock(clean=Mock(side_effect=lambda text, **_kwargs: text))
+
+    result = app._process_clip(
+        np.full(16000, 0.1, np.float32),
+        _config(False),
+        transcriber,
+        cleaner,
+        paste=False,
+    )
+
+    assert result == "A complete sentence for the test."
+    assert pasted == []
+
+
 # --------------------------------------------------------------- hot phrases ---
 
 from localflow.hotphrases import HotPhraseStore

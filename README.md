@@ -201,11 +201,31 @@ and JSON in the dictionary file's shape. Entries are trimmed, and
 case-insensitive duplicates are skipped.
 
 ### Spoken formatting
-
 When `[dictation].spoken_punctuation` is enabled, say “new line” or “new
 paragraph” to add line breaks, or dictate punctuation such as “comma,”
 “question mark,” and “period.” “Scratch that” removes the preceding
 sentence or clause. The setting defaults to `true`.
+
+## Shortcuts
+
+The default hold key records dictation. Double-tap it to lock recording;
+press Esc to cancel. The shortcut card in setup lists the configured paste-last,
+Command Mode, Polish, and prompt-engineering keys. On macOS, the defaults are
+Right Option for Command Mode, Ctrl+Option+1 for Polish, Ctrl+Option+2 for
+prompt engineering, and Ctrl+Cmd+V to paste the last transcript. On other
+platforms, paste-last defaults to Ctrl+Shift+V. Set a shortcut to an empty
+string in `[hotkey]` to disable it. `max_recording_seconds` defaults to 1200;
+set it to 0 for no duration limit.
+
+## Command Mode & transforms
+
+Hold the configured Command Mode key, speak an instruction, and release it.
+LocalFlow transcribes the instruction and applies it to the selected text, or
+writes the requested text when there is no selection. Polish rewrites selected
+text without changing its meaning; prompt engineering turns selected notes
+into a structured prompt. These actions require a configured local or
+OpenAI-compatible LLM. Audio, selection capture, and paste actions remain
+local to the machine.
 
 ### Cleanup levels & styles
 

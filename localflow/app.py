@@ -18,15 +18,18 @@ from localflow.dictionary import (
     stt_prompt,
 )
 from localflow.formatting import apply_spoken_formatting, apply_style
-from localflow.hotkey import HoldKeyListener, HotkeyListener, is_hold_key
+from localflow.hotkey import KeyboardHub, is_hold_key
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.inject import paste_text
+from localflow.jobs import Job
 from localflow.log import setup_logging
 from localflow.providers.factory import build_llm, build_stt
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
+from localflow.status import write_last_text, write_state
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
+from localflow.transform import Transformer, command_prompt, transform_prompt
 
 log = logging.getLogger("localflow.app")
 
@@ -86,52 +89,123 @@ def main() -> None:
         sample_rate=config.sample_rate,
         device=config.input_device or None,
     )
-    cleaner = Cleaner(build_llm(config))
+    llm = build_llm(config)
+    cleaner = Cleaner(llm)
+    transformer = Transformer(llm)
 
-    work_queue: queue.Queue[tuple[np.ndarray, AppInfo | None] | None] = queue.Queue()
+    work_queue: queue.Queue[Job | None] = queue.Queue()
     dictionary_store = DictionaryStore()
+    write_state("idle")
+    controller = PushToTalkController(
+        recorder, config, work_queue, on_state=write_state
+    )
 
     def worker() -> None:
         while True:
             item = work_queue.get()
             if item is None:
                 break
-            audio, app_info = item
             try:
-                _process_clip(
-                    audio,
-                    config,
-                    transcriber,
-                    cleaner,
-                    commands,
-                    hot_phrases,
-                    app_info=app_info,
-                    dictionary_store=dictionary_store,
+                if item.kind == "dictate":
+                    text = _process_clip(
+                        item.audio,
+                        config,
+                        transcriber,
+                        cleaner,
+                        commands,
+                        hot_phrases,
+                        app_info=item.app_info,
+                        dictionary_store=dictionary_store,
+                        paste=False,
+                    )
+                else:
+                    if (
+                        config.llm_provider == "ollama"
+                        and (not config.cleanup_enabled or not config.llm_model)
+                    ):
+                        message = (
+                            "command mode needs a local LLM — choose one in lf setup"
+                        )
+                        log.error(message)
+                        print(message)
+                        controller.note_job_result(
+                            None,
+                            item.clipboard_before,
+                            error=True,
+                            clipboard_expected=item.selection,
+                        )
+                        work_queue.task_done()
+                        continue
+                    if item.kind == "command":
+                        instruction = transcriber.transcribe(item.audio, prompt=None)
+                        if not instruction.strip():
+                            log.error("command mode received an empty instruction")
+                            controller.note_job_result(
+                                None,
+                                item.clipboard_before,
+                                error=True,
+                                clipboard_expected=item.selection,
+                            )
+                            work_queue.task_done()
+                            continue
+                        prompt = command_prompt(instruction, item.selection)
+                    else:
+                        prompt = transform_prompt(item.preset, item.selection)
+                    text = transformer.run(prompt)
+                if text:
+                    write_last_text(text)
+                controller.note_job_result(
+                    text,
+                    item.clipboard_before,
+                    error=item.kind != "dictate" and not text,
+                    clipboard_expected=item.selection,
                 )
             except Exception:
                 log.exception("transcription pipeline failed")
+                controller.note_job_result(
+                    None,
+                    item.clipboard_before,
+                    error=item.kind != "dictate",
+                    clipboard_expected=item.selection,
+                )
             work_queue.task_done()
 
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
 
-    # Owns the real recorder.start()/stop() pipeline on its own daemon
-    # thread; note_start/note_stop/note_toggle below are enqueue-only and
-    # safe to call directly from the pynput event-tap callback thread.
-    controller = PushToTalkController(recorder, config, work_queue)
-
     _print_banner(config)
     print(f"  log file:     {log_path}")
 
-    if is_hold_key(config.hotkey):
-        listener = HoldKeyListener(config.hotkey, controller.note_start, controller.note_stop)
-    else:
-        listener = HotkeyListener(config.hotkey, controller.note_toggle)
+    combos = [
+        (shortcut, callback)
+        for shortcut, callback in (
+            (config.paste_last_hotkey, controller.note_paste_last),
+            (config.polish_hotkey, lambda: controller.note_transform("polish")),
+            (config.prompt_hotkey, lambda: controller.note_transform("prompt")),
+        )
+        if shortcut
+    ]
+    listener = KeyboardHub(
+        hold_key=config.hotkey if is_hold_key(config.hotkey) else None,
+        toggle_combo=None if is_hold_key(config.hotkey) else config.hotkey,
+        combos=combos,
+        on_down=controller.note_down,
+        on_up=controller.note_up,
+        on_toggle=controller.note_toggle,
+        on_cancel=controller.note_cancel,
+        command_key=config.command_hotkey,
+        on_command_down=controller.note_command_down,
+        on_command_up=controller.note_command_up,
+        on_command_cancel=controller.note_command_cancel,
+    )
     try:
         listener.run_forever()
     except KeyboardInterrupt:
         print("\nexiting…")
-        return
+    finally:
+        controller.shutdown()
+        work_queue.put(None)
+        worker_thread.join(timeout=1)
 
     # run_forever() returned on its own — the listener died (macOS disabled
     # the event tap after a timeout, or pynput crashed). Exiting 0 here
@@ -151,6 +225,7 @@ def _process_clip(
     hot_phrases: HotPhraseStore | None = None,
     app_info: AppInfo | None = None,
     dictionary_store: DictionaryStore | None = None,
+    paste: bool = True,
 ) -> str:
     start = time.monotonic()
     if rms_dbfs(audio) < config.silence_threshold_dbfs:
@@ -201,7 +276,8 @@ def _process_clip(
     elapsed_ms = int((time.monotonic() - start) * 1000)
     log.info("transcribed %d chars in %dms", len(text or ""), elapsed_ms)
     if text:
-        paste_text(text, config.paste_method)
+        if paste:
+            paste_text(text, config.paste_method)
         print(f"{text}  ({elapsed_ms}ms)")
     return text
 
