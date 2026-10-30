@@ -22,7 +22,8 @@ def test_install_writes_bundle(tmp_path):
     assert launcher.read_text() == (
         "#!/bin/bash\nexec /usr/bin/python3 -m localflow.phrases_window \"$@\"\n"
     )
-    assert launcher.stat().st_mode & stat.S_IXUSR
+    if os.name != "nt":
+        assert launcher.stat().st_mode & stat.S_IXUSR
 
 
 def test_install_quotes_python_path(tmp_path):
@@ -37,7 +38,8 @@ def test_install_is_idempotent(tmp_path):
     second = install_app(dest_dir=tmp_path, python="/usr/bin/python3")
     assert first == second
     launcher = second / "Contents" / "MacOS" / "launcher"
-    assert os.access(launcher, os.X_OK)
+    if os.name != "nt":
+        assert os.access(launcher, os.X_OK)
 
 
 def test_uninstall(tmp_path):

@@ -19,6 +19,8 @@ dependencies = [
     "python-multipart",
     "click",
     "rich",
+    "platformdirs",
+    "keyring",
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
 ]
 
@@ -36,6 +38,18 @@ macos-permissions = [
 localflow = "localflow.app:main"
 localflow-server = "localflow.server:main"
 lf = "localflow.cli:main"
+
+[project.entry-points."localflow.stt_providers"]
+faster-whisper = "localflow.providers.stt_faster_whisper:FasterWhisperSTT"
+mlx-whisper = "localflow.providers.stt_mlx_whisper:MlxWhisperSTT"
+parakeet = "localflow.providers.stt_parakeet:ParakeetSTT"
+
+[project.entry-points."localflow.llm_providers"]
+ollama = "localflow.providers.llm_ollama:OllamaLLM"
+openai-compatible = "localflow.providers.llm_openai_compat:OpenAICompatLLM"
+
+[dependency-groups]
+dev = ["ruff"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["localflow"]

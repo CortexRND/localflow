@@ -4,11 +4,13 @@ Talks to the running localflow server over HTTP; `lf serve` / `lf dictate`
 run the components themselves.
 """
 
-import subprocess
+import json
 import sys
 import time
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import click
 import requests
@@ -19,7 +21,18 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, T
 from rich.table import Table
 from rich.text import Text
 
-from localflow.config import load_config
+from localflow import api as api_logic
+from localflow.apitoken import read as read_api_token
+from localflow.config import (
+    config_field,
+    config_toml,
+    legacy_config_path,
+    load_config,
+    migrate_legacy,
+    save_config,
+    valid_config_keys,
+)
+from localflow.config import config_path as resolved_config_path
 from localflow.dispatch import (
     QUEUE_PATH,
     STATUSES,
@@ -28,19 +41,24 @@ from localflow.dispatch import (
     dispatch,
     orca_available,
 )
+from localflow.platform import current
+from localflow.platform.base import PASTE_METHODS
+from localflow.providers import registry
+from localflow.providers.factory import build_llm
+from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set_secret
 
 console = Console()
 _config = load_config()
 BASE = f"http://127.0.0.1:{_config.server_port}"
 
 
-def _get(path: str) -> dict:
+def _get(path: str, timeout: float = 5) -> dict:
     try:
-        resp = requests.get(BASE + path, timeout=5)
+        resp = requests.get(BASE + path, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
     except requests.ConnectionError:
-        console.print(f"[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
+        console.print("[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
         sys.exit(1)
 
 
@@ -48,7 +66,7 @@ def _post(path: str, json: dict | None = None) -> dict:
     try:
         resp = requests.post(BASE + path, json=json, timeout=600)
     except requests.ConnectionError:
-        console.print(f"[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
+        console.print("[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
         sys.exit(1)
     if not resp.ok:
         try:
@@ -65,30 +83,282 @@ def cli() -> None:
     """localflow: local dictation + meeting transcription to Obsidian."""
 
 
-@cli.command()
-def status() -> None:
-    """Server, watcher, and session state."""
-    st = _get("/meeting/status")
-    table = Table(show_header=False, box=None)
-    table.add_row("server", "[green]up[/green]")
-    watcher = "[green]watching[/green]" if st["watching"] else f"[red]off[/red] {st['watch_error']}"
-    table.add_row("watcher", watcher)
-    table.add_row("mic busy", "[yellow]yes[/yellow]" if st["mic_busy"] else "no")
-    if st["detected"]:
-        table.add_row("detected", f"[bold yellow]meeting ({st['platform'] or '?'})[/bold yellow]")
-    session = st.get("session")
-    if session:
-        table.add_row(
-            "session",
-            f"[bold red]● {session['title']}[/bold red] ({session['category']}) "
-            f"{session['seconds'] // 60}m{session['seconds'] % 60:02d}s, "
-            f"{session['segment_count']} segments",
+@cli.group()
+def config() -> None:
+    """Inspect and edit localflow configuration."""
+
+
+@config.command("path")
+def config_path_command() -> None:
+    """Print the resolved v2 path and legacy-file status."""
+    path = resolved_config_path()
+    legacy = legacy_config_path()
+    click.echo(f"path: {path}")
+    click.echo(f"legacy: {'exists' if legacy.exists() else 'missing'} ({legacy})")
+
+
+@config.command("show")
+def config_show() -> None:
+    """Print the v2 TOML that would be written for the current config."""
+    click.echo(config_toml(load_config()), nl=False)
+
+
+@config.command("get")
+@click.argument("section_key")
+def config_get(section_key: str) -> None:
+    """Print SECTION.KEY."""
+    try:
+        _section, field_name = config_field(section_key)
+    except KeyError:
+        raise click.ClickException(
+            f"unknown config key {section_key!r}; valid keys: "
+            + ", ".join(valid_config_keys())
         )
+    value = getattr(load_config(), field_name)
+    if isinstance(value, (list, bool)):
+        output = json.dumps(value)
     else:
-        table.add_row("session", "none")
-    if st.get("last_saved"):
-        table.add_row("last saved", st["last_saved"]["notes_path"])
-    console.print(table)
+        output = "" if value is None else str(value)
+    click.echo(output)
+
+
+def _coerce_config_value(current: object, raw: str) -> object:
+    if isinstance(current, bool):
+        if raw.lower() not in ("true", "false"):
+            raise click.ClickException("boolean values must be true or false")
+        return raw.lower() == "true"
+    if isinstance(current, int) and not isinstance(current, bool):
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise click.ClickException(f"invalid integer: {raw!r}") from exc
+    if isinstance(current, float):
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise click.ClickException(f"invalid float: {raw!r}") from exc
+    if isinstance(current, list):
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    if current is None:
+        return raw or None
+    return raw
+
+
+@config.command("set")
+@click.argument("section_key")
+@click.argument("raw_value")
+def config_set(section_key: str, raw_value: str) -> None:
+    """Set SECTION.KEY to VALUE and write the v2 config."""
+    try:
+        _section, field_name = config_field(section_key)
+    except KeyError:
+        raise click.ClickException(
+            f"unknown config key {section_key!r}; valid keys: "
+            + ", ".join(valid_config_keys())
+        )
+    if section_key == "paste.method" and raw_value not in PASTE_METHODS:
+        raise click.ClickException(
+            f"invalid paste method {raw_value!r}; valid methods: "
+            + ", ".join(PASTE_METHODS)
+        )
+    current = load_config()
+    setattr(current, field_name, _coerce_config_value(getattr(current, field_name), raw_value))
+    path = save_config(current)
+    click.echo(f"saved {path}")
+
+
+@config.command("migrate")
+def config_migrate_command() -> None:
+    """Force migration of the legacy flat config file."""
+    migrated = migrate_legacy()
+    if migrated is None:
+        click.echo("no legacy config found")
+    else:
+        click.echo(f"migrated legacy config to {resolved_config_path()}")
+
+
+@cli.group()
+def secret() -> None:
+    """Manage provider API-key secrets."""
+
+
+@secret.command("set")
+@click.argument("name")
+def secret_set(name: str) -> None:
+    """Prompt for and store NAME in the keyring."""
+    value = click.prompt("secret", hide_input=True)
+    try:
+        set_secret(name, value)
+    except SecretsUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"stored {name}")
+
+
+@secret.command("unset")
+@click.argument("name")
+def secret_unset(name: str) -> None:
+    """Delete NAME from the keyring."""
+    try:
+        delete_secret(name)
+    except SecretsUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"removed {name}")
+
+
+@secret.command("status")
+def secret_status() -> None:
+    """Show whether each supported secret is configured."""
+    for name in ("llm_api_key", "fireworks_api_key"):
+        state = "configured" if get_secret(name) else "not configured"
+        click.echo(f"{name}: {state}")
+
+
+def _flatten_status(value: dict, prefix: str = ""):
+    for key, item in value.items():
+        name = f"{prefix}.{key}" if prefix else key
+        if isinstance(item, dict):
+            yield from _flatten_status(item, name)
+        else:
+            yield name, item
+
+
+@cli.command()
+@click.option("--json", "json_output", is_flag=True, help="Print JSON.")
+def status(json_output: bool) -> None:
+    """Show localflow status."""
+    result = api_logic.status(load_config(), current(), False)
+    try:
+        result["meeting"] = _get("/meeting/status", timeout=2)
+    except (SystemExit, requests.RequestException, ValueError):
+        result["meeting"] = {"server": "down"}
+    if json_output:
+        click.echo(json.dumps(result))
+        return
+    for key, value in _flatten_status(result):
+        click.echo(f"{key}: {value}")
+
+
+@cli.group()
+def stt() -> None:
+    """Inspect and select speech-to-text providers."""
+
+
+@stt.command("list")
+@click.option("--json", "json_output", is_flag=True, help="Print JSON.")
+def stt_list(json_output: bool) -> None:
+    """List STT providers and models."""
+    config = load_config()
+    providers = api_logic.stt_providers()
+    error = None
+    selected = api_logic.resolve_stt_provider(config.stt_backend)
+    try:
+        models = [
+            asdict(model)
+            for model in registry.stt_provider_class(selected)().list_models()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        models = []
+        error = str(exc)
+    result = {"providers": providers, "models": models, "error": error}
+    if json_output:
+        click.echo(json.dumps(result))
+        return
+    for provider in providers:
+        state = "available" if provider["available"] else "unavailable"
+        click.echo(f"{provider['id']}: {state}")
+    for model in models:
+        click.echo(f"{model['id']}: {model.get('label', '')}")
+    if error:
+        console.print(f"[red]error:[/red] {error}")
+
+
+@stt.command("use")
+@click.argument("provider")
+@click.argument("model", required=False)
+@click.option("--device", type=click.Choice(("auto", "cpu", "cuda")), default="auto")
+def stt_use(provider: str, model: str | None, device: str) -> None:
+    """Select an STT provider, optional MODEL, and DEVICE."""
+    selected = api_logic.resolve_stt_provider(provider)
+    try:
+        registry.stt_provider_class(selected)
+    except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    config = load_config()
+    config.stt_backend = provider
+    config.model_size = model or config.model_size
+    config.stt_device = device
+    click.echo(f"saved {save_config(config)}")
+
+
+@cli.group()
+def llm() -> None:
+    """Inspect and select language-model providers."""
+
+
+@llm.command("list")
+@click.option("--provider", default=None)
+@click.option("--base-url", default=None)
+@click.option("--json", "json_output", is_flag=True, help="Print JSON.")
+def llm_list(
+    provider: str | None, base_url: str | None, json_output: bool
+) -> None:
+    """List models from an LLM provider."""
+    config = load_config()
+    selected = provider or config.llm_provider
+    selected_config = replace(
+        config,
+        llm_provider=selected,
+        llm_base_url=base_url or config.llm_base_url,
+    )
+    try:
+        models = [
+            asdict(model) for model in build_llm(selected_config, timeout=10).list_models()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        if json_output:
+            click.echo(json.dumps({"models": [], "error": str(exc)}))
+        else:
+            console.print(f"[red]error:[/red] {exc}")
+        raise click.exceptions.Exit(1)
+    result = {"models": models, "error": None}
+    if json_output:
+        click.echo(json.dumps(result))
+    else:
+        for model in models:
+            click.echo(f"{model['id']}: {model.get('label', '')}")
+
+
+@llm.command("use")
+@click.argument("provider")
+@click.option("--base-url", default=None)
+@click.option("--model", "model_name", default=None)
+def llm_use(provider: str, base_url: str | None, model_name: str | None) -> None:
+    """Select an LLM provider and optional endpoint or model."""
+    if provider not in registry.list_llm_ids():
+        raise click.ClickException(f"unknown LLM provider: {provider}")
+    config = load_config()
+    config.llm_provider = provider
+    if base_url is not None:
+        config.llm_base_url = base_url
+    if model_name is not None:
+        config.llm_model = model_name
+    click.echo(f"saved {save_config(config)}")
+
+
+@llm.command("test")
+@click.option("--provider", default=None)
+@click.option("--base-url", default=None)
+@click.option("--model", "model_name", default=None)
+def llm_test(
+    provider: str | None, base_url: str | None, model_name: str | None
+) -> None:
+    """Test connectivity to an LLM provider."""
+    result = api_logic.test_llm(load_config(), provider, base_url, model_name)
+    if result["ok"]:
+        console.print(f"[green]ok[/green] {result['detail'] or 'reachable'}")
+        return
+    console.print(f"[red]{result['detail']}[/red]")
+    raise click.exceptions.Exit(1)
 
 
 @cli.group()
@@ -197,7 +467,7 @@ def open_note(query: tuple[str, ...]) -> None:
         console.print("[red]no match[/red]")
         sys.exit(1)
     newest = max(matches, key=lambda p: p.stat().st_mtime)
-    subprocess.run(["open", str(newest)], check=False)
+    current().open_path(str(newest))
     console.print(f"opened {newest.name}")
 
 
@@ -432,7 +702,8 @@ def dictate() -> None:
 @cli.command()
 def ui() -> None:
     """Open the web UI in the default browser."""
-    subprocess.run(["open", BASE], check=False)
+    token = read_api_token() or ""
+    current().open_path(f"{BASE}/settings?token={quote(token)}")
 
 
 @cli.group(invoke_without_command=True)
@@ -839,45 +1110,82 @@ def menubar() -> None:
 
 @cli.group()
 def agent() -> None:
-    """Run localflow on login via a launchd LaunchAgent (always on)."""
+    """Alias of `lf autostart` (launchd LaunchAgent on macOS)."""
 
 
-@agent.command("install")
-def agent_install() -> None:
-    """Install and load the LaunchAgent so localflow starts on login."""
-    from localflow.launchagent import install
+def _autostart_install() -> None:
+    platform = current()
     try:
-        path = install()
-    except RuntimeError as exc:
+        path = platform.autostart_install()
+    except (RuntimeError, OSError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
-    console.print(f"[green]installed[/green] {path}")
-    console.print("localflow starts on login and relaunches if it crashes; "
-                  "a clean exit stays down until next login (KeepAlive).")
+    if platform.name == "darwin":
+        console.print(f"[green]installed[/green] {path}")
+        console.print("localflow starts on login and relaunches if it crashes; "
+                      "a clean exit stays down until next login (KeepAlive).")
+    else:
+        console.print(f"installed: {path}")
+        console.print("localflow will start at login")
 
 
-@agent.command("uninstall")
-def agent_uninstall() -> None:
-    """Unload and remove the LaunchAgent."""
-    from localflow.launchagent import uninstall
+def _autostart_uninstall() -> None:
     try:
-        uninstall()
-    except RuntimeError as exc:
+        current().autostart_uninstall()
+    except (RuntimeError, OSError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
     console.print("[green]uninstalled[/green]")
 
 
-@agent.command("status")
-def agent_status() -> None:
-    """Show whether the LaunchAgent is loaded and running."""
-    from localflow.launchagent import status
+def _autostart_status() -> None:
     try:
-        result = status()
-    except RuntimeError as exc:
+        result = current().autostart_status()
+    except (RuntimeError, OSError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
     console.print(result)
+
+
+@agent.command("install")
+def agent_install() -> None:
+    """Alias of `lf autostart install` (launchd LaunchAgent on macOS)."""
+    _autostart_install()
+
+
+@agent.command("uninstall")
+def agent_uninstall() -> None:
+    """Alias of `lf autostart uninstall` (launchd LaunchAgent on macOS)."""
+    _autostart_uninstall()
+
+
+@agent.command("status")
+def agent_status() -> None:
+    """Alias of `lf autostart status` (launchd LaunchAgent on macOS)."""
+    _autostart_status()
+
+
+@cli.group()
+def autostart() -> None:
+    """Run localflow on login."""
+
+
+@autostart.command("install")
+def autostart_install() -> None:
+    """Install autostart for the current platform."""
+    _autostart_install()
+
+
+@autostart.command("uninstall")
+def autostart_uninstall() -> None:
+    """Remove autostart for the current platform."""
+    _autostart_uninstall()
+
+
+@autostart.command("status")
+def autostart_status() -> None:
+    """Show current autostart status."""
+    _autostart_status()
 
 
 def main() -> None:

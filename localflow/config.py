@@ -1,28 +1,87 @@
-import tomllib
 import json
+import logging
 import os
-import stat
+import sys
 import tempfile
-from dataclasses import dataclass, field, fields
+import tomllib
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import get_args, get_origin, get_type_hints
 
-CONFIG_PATH = Path.home() / ".localflow.toml"
+import platformdirs
+
+from localflow.platform.base import PASTE_METHODS
+
+log = logging.getLogger("localflow.config")
+
+CONFIG_VERSION = 2
+
+_SECTIONS: dict[str, dict[str, str]] = {
+    "stt": {
+        "provider": "stt_backend",
+        "model": "model_size",
+        "language": "language",
+        "device": "stt_device",
+    },
+    "llm": {
+        "provider": "llm_provider",
+        "base_url": "llm_base_url",
+        "model": "llm_model",
+        "cleanup_enabled": "cleanup_enabled",
+        "cleanup_timeout": "cleanup_timeout",
+        "num_ctx": "cleanup_num_ctx",
+    },
+    "hotkey": {"key": "hotkey", "sounds": "sounds_enabled"},
+    "paste": {"method": "paste_method"},
+    "dictation": {
+        "spoken_symbols": "spoken_symbols",
+        "command_names": "command_names",
+        "skills_dirs": "skills_dirs",
+        "sample_rate": "sample_rate",
+        "input_device": "input_device",
+    },
+    "server": {"host": "server_host", "port": "server_port"},
+    "features": {
+        "meetings": "meetings_enabled",
+        "hot_phrases": "hot_phrases",
+    },
+    "meetings": {
+        "vault_path": "vault_path",
+        "notes_folder": "notes_folder",
+        "logs_folder": "logs_folder",
+        "watch": "meeting_watch",
+        "chunk_seconds": "meeting_chunk_seconds",
+        "min_busy_seconds": "meeting_min_busy_seconds",
+        "auto_start": "meeting_auto_start",
+        "work_prompts": "work_prompts",
+        "fireworks_model": "fireworks_model",
+        "prompts_dir": "prompts_dir",
+        "orca_repo": "orca_repo",
+        "orca_agent": "orca_agent",
+    },
+    "setup": {"version": "setup_version"},
+}
+
+
+class ConfigError(RuntimeError):
+    """Raised when a configuration file cannot be parsed."""
 
 @dataclass
 class Config:
     model_size: str = "base"           # whisper model size (ignored by parakeet: fixed model id)
-    stt_backend: str = "auto"          # auto | mlx | faster-whisper | parakeet
+    stt_backend: str = "auto"          # auto | mlx-whisper | faster-whisper | parakeet | entry-point id
     language: str | None = None        # None = autodetect (parakeet is English-only)
-    ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.2:3b"
+    stt_device: str = "auto"
+    llm_provider: str = "ollama"       # ollama | openai-compatible | entry-point id
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3.2:3b"
     cleanup_enabled: bool = True
-    cleanup_timeout: int = 120         # seconds; long dictations need more time
-    cleanup_num_ctx: int = 8192        # Ollama context window for cleanup
+    cleanup_timeout: int = 120
+    cleanup_num_ctx: int = 8192
     # Bare pynput Key name ('alt_l' = left Option) = hold-to-talk;
     # GlobalHotKeys combo ('<cmd>+<shift>+<space>') = toggle.
     hotkey: str = "alt_l"
     sounds_enabled: bool = True        # audio cue on record start/stop
+    paste_method: str = "auto"
     spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
     hot_phrases: bool = True           # spoken trigger phrases expand into saved prompts
     # Registered slash-command names: after a dictated "slash", an exact spoken
@@ -33,144 +92,243 @@ class Config:
         default_factory=lambda: ["~/.claude/skills", "~/.agents/skills"]
     )
     sample_rate: int = 16000
-    # Bind loopback by default: the API (mic recording, transcription, prompt
-    # approve/reject) has no auth, so 0.0.0.0 exposed it to the whole LAN.
-    # Set to "0.0.0.0" explicitly in config to opt into network access.
+    # Bind loopback by default: the API has no auth, so 0.0.0.0 exposes it to
+    # the whole LAN. Set "0.0.0.0" explicitly to opt into network access.
     server_host: str = "127.0.0.1"
     server_port: int = 8756
-    # Meeting transcription -> Obsidian. ~/projs is itself a vault (it has a
-    # .obsidian/ at its root), which is where the work these notes describe
-    # lives, so notes land beside the repos rather than in a separate vault.
+    meetings_enabled: bool = sys.platform == "darwin"  # meeting watcher needs CoreAudio; forced off elsewhere
     vault_path: str = "~/projs"
     notes_folder: str = "notes/meetings"
     logs_folder: str = "notes/transcripts"
-    meeting_watch: bool = True         # detect mic-in-use and notify
-    meeting_chunk_seconds: int = 30    # transcribe in chunks of this length
-    meeting_min_busy_seconds: int = 12 # sustained mic use before "meeting detected"
-    # Work-prompt extraction from meeting notes (open-weights model on Fireworks).
-    # Key comes from FIREWORKS_API_KEY env var or fireworks_api_key here.
-    work_prompts: bool = True
-    fireworks_api_key: str = ""
-    fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
-    # Auto-start transcription on detection instead of only notifying.
+    meeting_watch: bool = True
+    meeting_chunk_seconds: int = 30
+    meeting_min_busy_seconds: int = 12
     meeting_auto_start: bool = True
-    # Where extracted work prompts are written, one file per prompt.
+    work_prompts: bool = True
+    fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
     prompts_dir: str = "~/projs/prompts/meetings"
-    # Orca dispatch target, e.g. "id:<repoId>"; empty = dispatch not configured.
-    orca_repo: str = ""
+    orca_repo: str = ""                # Orca dispatch target, e.g. "id:<repoId>"; empty = not configured
     orca_agent: str = "claude"
     input_device: str = ""
     setup_version: int = 0
 
 
-def load_config(path: Path | None = None) -> Config:
-    """Read the local TOML config if present; missing file is OK."""
+def config_dir() -> Path:
+    return Path(platformdirs.user_config_dir("localflow", appauthor=False))
+
+
+def config_path() -> Path:
+    override = os.environ.get("LOCALFLOW_CONFIG")
+    if override:
+        return Path(override)
+    return config_dir() / "config.toml"
+
+
+def legacy_config_path() -> Path:
+    return Path.home() / ".localflow.toml"
+
+
+def _parse(path: Path) -> dict:
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def _config_from_v2(data: dict) -> Config:
+    version = data.get("config_version")
+    if version is None:
+        log.warning("missing config_version; assuming %d", CONFIG_VERSION)
+    elif version > CONFIG_VERSION:
+        raise ConfigError(
+            f"config_version {version} is newer than this localflow supports "
+            f"({CONFIG_VERSION})"
+        )
     config = Config()
-    path = path or CONFIG_PATH
-    if not path.exists():
-        return config
+    for section, values in data.items():
+        if section == "config_version":
+            continue
+        mapping = _SECTIONS.get(section)
+        if mapping is None:
+            log.warning("unknown config section %r", section)
+            continue
+        if not isinstance(values, dict):
+            log.warning("config section %r is not a table", section)
+            continue
+        for key, value in values.items():
+            field_name = mapping.get(key)
+            if field_name is None:
+                log.warning("unknown config key %s.%s", section, key)
+                continue
+            if field_name == "language" and value == "":
+                value = None
+            setattr(config, field_name, value)
+    if sys.platform != "darwin":
+        config.meetings_enabled = False
+    return config
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (str, int, float)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    raise TypeError(f"unsupported config value: {value!r}")
 
-    with path.open("rb") as f:
-        data = tomllib.load(f)
 
-    known_keys = {f.name for f in fields(Config)}
-    for key, value in data.items():
-        if key in known_keys:
-            setattr(config, key, value)
+def config_toml(config: Config) -> str:
+    lines = [f"config_version = {CONFIG_VERSION}", ""]
+    for section, mapping in _SECTIONS.items():
+        lines.append(f"[{section}]")
+        for file_key, field_name in mapping.items():
+            value = getattr(config, field_name)
+            if value is None:
+                continue
+            lines.append(f"{file_key} = {_toml_value(value)}")
+        lines.append("")
+    return "\n".join(lines)
 
+
+def save_config(config: Config, path: Path | None = None) -> Path:
+    target = Path(path) if path is not None else config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(config_toml(config))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return target
+
+
+def migrate_legacy(path: Path | None = None) -> Config | None:
+    source = Path(path) if path is not None else legacy_config_path()
+    if not source.exists():
+        return None
+    from localflow.config_migrate import migrate_v1
+
+    data, fireworks_key = migrate_v1(_parse(source))
+    config = _config_from_v2(data)
+    if fireworks_key:
+        from localflow.secrets import SecretsUnavailable, set_secret
+
+        try:
+            set_secret("fireworks_api_key", fireworks_key)
+        except SecretsUnavailable:
+            if not (
+                os.environ.get("LOCALFLOW_FIREWORKS_API_KEY")
+                or os.environ.get("FIREWORKS_API_KEY")
+            ):
+                os.environ.setdefault("FIREWORKS_API_KEY", fireworks_key)
+                log.warning(
+                    "not migrating ~/.localflow.toml: fireworks_api_key could not "
+                    "be stored in the keyring; set FIREWORKS_API_KEY in the "
+                    "environment (or fix the keyring) and rerun `lf config migrate`"
+                )
+                return config
+            log.warning(
+                "keyring unavailable; using the existing fireworks API key "
+                "environment variable"
+            )
+    target = config_path()
+    save_config(config, target)
+    log.info(
+        "migrated ~/.localflow.toml to %s; the old file was left in place",
+        target,
+    )
     return config
 
 
-def _toml_key(key: str) -> str:
-    if key and all(char.isalnum() or char in "_-" for char in key) and not key[0].isdigit():
-        return key
-    return json.dumps(key, ensure_ascii=False)
+def load_config() -> Config:
+    """Load v2 config, migrating the legacy flat file when needed."""
+    target = config_path()
+    if target.exists():
+        return _config_from_v2(_parse(target))
+    legacy = legacy_config_path()
+    if legacy.exists():
+        migrated = migrate_legacy(legacy)
+        if migrated is not None:
+            return migrated
+    config = Config()
+    if sys.platform != "darwin":
+        config.meetings_enabled = False
+    return config
 
 
-def _toml_value(value) -> str:
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return repr(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    raise ValueError(f"unsupported TOML value: {type(value).__name__}")
-
-
-def _serialize_toml(data: dict) -> str:
-    lines = []
-    for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"[{_toml_key(key)}]")
-            lines.extend(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items())
-        else:
-            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
-    return "\n".join(lines) + ("\n" if lines else "")
-
-
-def _validate_update(key: str, value) -> None:
-    expected = get_type_hints(Config)[key]
-    accepted = tuple(
-        arg for arg in get_args(expected) if arg is not type(None)
-    ) or (expected,)
-    origin = get_origin(expected)
-    if origin is list:
-        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-            raise ValueError(f"{key} must be a list of strings")
-        return
-    for candidate in accepted:
-        if candidate is bool and isinstance(value, bool):
-            return
-        if candidate is int and isinstance(value, int) and not isinstance(value, bool):
-            return
-        if candidate is float and isinstance(value, (float, int)) and not isinstance(value, bool):
-            return
-        if candidate is str and isinstance(value, str):
-            return
-    names = " or ".join(item.__name__ for item in accepted)
-    raise ValueError(f"{key} must be {names}")
-
-
-def save_config(updates: dict, path: Path | None = None) -> Path:
-    """Merge validated fields into TOML and atomically replace the config."""
-    path = path or CONFIG_PATH
-    known_keys = {item.name for item in fields(Config)}
-    unknown = set(updates) - known_keys
-    if unknown:
-        raise ValueError(f"unknown config key(s): {', '.join(sorted(unknown))}")
-
-    existing = {}
-    previous = None
-    if path.exists():
-        previous = path.read_bytes()
-        existing = tomllib.loads(previous.decode("utf-8"))
-    for key, value in updates.items():
-        if value is None:
-            existing.pop(key, None)
-            continue
-        _validate_update(key, value)
-        existing[key] = value
-
-    serialized = _serialize_toml(existing)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if previous is not None:
-        backup = path.with_name(path.name + ".bak")
-        backup.write_bytes(previous)
-        backup.chmod(stat.S_IMODE(path.stat().st_mode))
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def config_field(section_key: str) -> tuple[str, str]:
+    """Return (section, field_name) for a dotted section.key."""
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
-            temp_file.write(serialized)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_name, path)
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
-    return path
+        section, key = section_key.split(".", 1)
+    except ValueError as exc:
+        raise KeyError(section_key) from exc
+    field_name = _SECTIONS.get(section, {}).get(key)
+    if field_name is None:
+        raise KeyError(section_key)
+    return section, field_name
+
+
+def valid_config_keys() -> list[str]:
+    return [
+        f"{section}.{key}"
+        for section, mapping in _SECTIONS.items()
+        for key in mapping
+    ]
+
+
+def config_to_dict(config: Config) -> dict:
+    result: dict = {"config_version": CONFIG_VERSION}
+    for section, mapping in _SECTIONS.items():
+        result[section] = {
+            file_key: getattr(config, field_name)
+            for file_key, field_name in mapping.items()
+        }
+    return result
+
+
+def apply_config_update(config: Config, update: dict) -> Config:
+    changes: dict[str, object] = {}
+    for section, values in update.items():
+        mapping = _SECTIONS.get(section)
+        if mapping is None or not isinstance(values, dict):
+            raise ConfigError(f"unknown config key '{section}'")
+        for file_key, value in values.items():
+            field_name = mapping.get(file_key)
+            if field_name is None:
+                raise ConfigError(f"unknown config key '{section}.{file_key}'")
+            current = getattr(config, field_name)
+            if field_name == "language":
+                valid_type = value is None or isinstance(value, str)
+            elif isinstance(current, bool):
+                valid_type = type(value) is bool
+            elif isinstance(current, int):
+                valid_type = type(value) is int
+            elif isinstance(current, float):
+                valid_type = type(value) is float
+            elif isinstance(current, list):
+                valid_type = (
+                    isinstance(value, list)
+                    and all(isinstance(item, str) for item in value)
+                )
+            else:
+                valid_type = isinstance(value, str)
+            if not valid_type:
+                raise ConfigError(
+                    f"invalid type for config key '{section}.{file_key}'"
+                )
+            if section == "paste" and file_key == "method" and value not in PASTE_METHODS:
+                raise ConfigError(f"invalid paste method: {value!r}")
+            changes[field_name] = value
+    return replace(config, **changes)
