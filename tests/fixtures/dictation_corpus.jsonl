@@ -1,0 +1,41 @@
+{"name":"period","input":"send it period","config_overrides":{"category":"other","spoken_formatting":true},"expected":"send it."}
+{"name":"comma","input":"send it comma","config_overrides":{"category":"other","spoken_formatting":true},"expected":"send it,"}
+{"name":"question mark","input":"is it ready question mark","config_overrides":{"category":"other","spoken_formatting":true},"expected":"is it ready?"}
+{"name":"exclamation point","input":"send it exclamation point","config_overrides":{"category":"other","spoken_formatting":true},"expected":"send it!"}
+{"name":"colon","input":"note colon","config_overrides":{"category":"other","spoken_formatting":true},"expected":"note:"}
+{"name":"semicolon","input":"one semicolon","config_overrides":{"category":"other","spoken_formatting":true},"expected":"one;"}
+{"name":"new line","input":"first line new line second line","config_overrides":{"category":"other","spoken_formatting":true},"expected":"first line\nSecond line"}
+{"name":"new paragraph","input":"first paragraph new paragraph second paragraph","config_overrides":{"category":"other","spoken_formatting":true},"expected":"first paragraph\n\nSecond paragraph"}
+{"name":"keep sentence terminator before new line","input":"Call me. New line. Thanks","config_overrides":{"category":"other","spoken_formatting":true},"expected":"Call me.\nThanks"}
+{"name":"determiner new line guard","input":"I need a new line of credit.","config_overrides":{"category":"other","spoken_formatting":true},"expected":"I need a new line of credit."}
+{"name":"determiner my new line guard","input":"my new line of work","config_overrides":{"category":"other","spoken_formatting":true},"expected":"my new line of work"}
+{"name":"renew line guard","input":"renew line today","config_overrides":{"category":"other","spoken_formatting":true},"expected":"renew line today"}
+{"name":"capitalize after line break","input":"hello new line world","config_overrides":{"category":"other","spoken_formatting":true},"expected":"hello\nWorld"}
+{"name":"scratch after sentence","input":"I went home. Scratch that. I stayed in.","config_overrides":{"category":"other","spoken_formatting":true},"expected":"I stayed in."}
+{"name":"scratch removes latest sentence","input":"A. B. Scratch that.","config_overrides":{"category":"other","spoken_formatting":true},"expected":"A."}
+{"name":"scratch alone","input":"Scratch that.","config_overrides":{"category":"other","spoken_formatting":true},"expected":""}
+{"name":"scratch literal itch","input":"Do not scratch that itch.","config_overrides":{"category":"other","spoken_formatting":true},"expected":"Do not scratch that itch."}
+{"name":"scratch before newline","input":"remove this scratch that\nlast line","config_overrides":{"category":"other","spoken_formatting":true},"expected":"last line"}
+{"name":"scratch after comma","input":"buy milk, scratch that, buy eggs","config_overrides":{"category":"other","spoken_formatting":true},"expected":"buy eggs"}
+{"name":"scratch keeps earlier sentence","input":"first clause. remove this, scratch that. keep this","config_overrides":{"category":"other","spoken_formatting":true},"expected":"first clause. Keep this"}
+{"name":"dictionary replacement","input":"teh typo","config_overrides":{"category":"other"},"replacements":[["teh","the"]],"expected":"the typo"}
+{"name":"case-insensitive dictionary replacement","input":"TEH typo","config_overrides":{"category":"other"},"replacements":[["teh","the"]],"expected":"the typo"}
+{"name":"Unicode dotless i replacement","input":"ı","config_overrides":{"category":"other"},"replacements":[["i","I"]],"expected":"I"}
+{"name":"Unicode dotted I replacement","input":"İ","config_overrides":{"category":"other"},"replacements":[["i","I"]],"expected":"I"}
+{"name":"Unicode replacement target","input":"cafe","config_overrides":{"category":"other"},"replacements":[["cafe","café"]],"expected":"café"}
+{"name":"multiword replacement","input":"local flow helps","config_overrides":{"category":"other"},"replacements":[["local flow","LocalFlow"]],"expected":"LocalFlow helps"}
+{"name":"work formal style","input":"Hello there.","config_overrides":{"category":"work","style":"formal"},"expected":"Hello there."}
+{"name":"email casual style","input":"Hello there.","config_overrides":{"category":"email","style":"casual"},"expected":"Hello there"}
+{"name":"personal very casual style","input":"Hello friend.","config_overrides":{"category":"personal","style":"very_casual"},"expected":"hello friend"}
+{"name":"other excited style","input":"Great news!","config_overrides":{"category":"other","style":"excited"},"expected":"Great news!"}
+{"name":"work casual style","input":"One sentence.","config_overrides":{"category":"work","style":"casual"},"expected":"One sentence"}
+{"name":"email formal style","input":"Email sentence.","config_overrides":{"category":"email","style":"formal"},"expected":"Email sentence."}
+{"name":"personal casual style","input":"Quick note.","config_overrides":{"category":"personal","style":"casual"},"expected":"Quick note"}
+{"name":"other very casual style","input":"Hello team.","config_overrides":{"category":"other","style":"very_casual"},"expected":"hello team"}
+{"name":"whole utterance hot phrase","input":"review checklist","config_overrides":{"category":"other","spoken_formatting":true},"phrases":[["review checklist","1. Check agenda\n2. Confirm owners"]],"expected":"1. Check agenda\n2. Confirm owners"}
+{"name":"inline hot phrase","input":"start review checklist now","config_overrides":{"category":"other"},"phrases":[["review checklist","project review agenda"]],"expected":"start project review agenda now"}
+{"name":"inline hot phrase preserves punctuation","input":"check project kickoff, then continue","config_overrides":{"category":"other","spoken_formatting":true},"phrases":[["project kickoff","Project Kickoff Agenda"]],"expected":"check Project Kickoff Agenda, then continue"}
+{"name":"empty input","input":"","config_overrides":{"category":"other","spoken_formatting":true},"expected":""}
+{"name":"whitespace preserved without formatting","input":" \t  ","config_overrides":{"category":"other"},"expected":" \t  "}
+{"name":"whitespace normalized with formatting","input":" \t  ","config_overrides":{"category":"other","spoken_formatting":true},"expected":""}
+{"name":"empty after replacement","input":"   ","config_overrides":{"category":"other","spoken_formatting":true},"replacements":[],"expected":""}

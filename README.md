@@ -2,6 +2,8 @@
 
 Local push-to-talk dictation for macOS. Fully offline STT using Whisper (faster-whisper), optional LLM cleanup, and phone access via Tailscale.
 
+See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a feature-by-feature overview.
+
 ## What it is
 
 An open-source WisprFlow-style dictation app:

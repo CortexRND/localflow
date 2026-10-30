@@ -9,7 +9,6 @@ from AppKit import (
     NSAlert,
     NSApplication,
     NSButton,
-    NSColor,
     NSFont,
     NSMakeRect,
     NSTextField,
@@ -21,15 +20,10 @@ from Foundation import NSObject
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
-from localflow.setup_mac import TOKENS
+from localflow.mac_style import color as _color
+from localflow.mac_style import style_flat_button as _style_button
 
 PAGES = ("Home", "History", "Dictionary", "Style", "Models")
-
-
-def _color(token):
-    value = TOKENS[token].lstrip("#")
-    red, green, blue = (int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
-    return NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, 1)
 
 
 def _label(text, x, y, width=650, size=14, color="ink"):
@@ -82,11 +76,14 @@ class HubWindowController(NSObject):
         self.root_view.addSubview_(self.sidebar)
         brand = _label("LOCALFLOW  /  HUB", 22, 635, 175, 15, "sun")
         self.sidebar.addSubview_(brand)
+        self.sidebar_buttons = []
         for index, page in enumerate(PAGES):
             button = NSButton.buttonWithTitle_target_action_(page, self, "showPage:")
             button.setFrame_(NSMakeRect(16, 575 - index * 46, 175, 34))
             button.setTag_(index)
+            _style_button(button, selected=page == self.page)
             self.sidebar.addSubview_(button)
+            self.sidebar_buttons.append(button)
         self.body = NSView.alloc().initWithFrame_(NSMakeRect(235, 20, 780, 660))
         self.root_view.addSubview_(self.body)
 
@@ -95,6 +92,7 @@ class HubWindowController(NSObject):
         button = NSButton.buttonWithTitle_target_action_(title, self, action)
         button.setFrame_(NSMakeRect(x, y, width, 32))
         button.setTag_(tag)
+        _style_button(button)
         container = parent if parent is not None else self.body
         container.addSubview_(button)
         return button
@@ -109,6 +107,8 @@ class HubWindowController(NSObject):
     @objc.python_method
     def show_page(self, page):
         self.page = page
+        for button in self.sidebar_buttons:
+            _style_button(button, selected=PAGES[button.tag()] == page)
         for view in self.body.subviews():
             view.removeFromSuperview()
         self.body.addSubview_(_label(page, 0, 610, size=24))
@@ -190,11 +190,18 @@ class HubWindowController(NSObject):
         rows = rows[:8]
         for index, row in enumerate(rows):
             y = 455 - index * 52
+            card = NSView.alloc().initWithFrame_(NSMakeRect(0, y - 10, 740, 50))
+            card.setWantsLayer_(True)
+            card.layer().setBackgroundColor_(_color("card").CGColor())
+            card.layer().setBorderColor_(_color("ink").CGColor())
+            card.layer().setBorderWidth_(2)
+            card.layer().setCornerRadius_(10)
+            self.history_results.addSubview_(card)
             self.history_results.addSubview_(
                 _label(
                     f'{row["id"]} · {row["kind"]} · {row["status"]} · '
                     f'{(row["final_text"] or row["raw_text"])[:42]}',
-                    0, y, 310, 12,
+                    10, y - 8, 300, 12,
                 )
             )
             self._button(
@@ -443,24 +450,14 @@ class HubWindowController(NSObject):
         button.setTarget_(self)
         button.setAction_(objc.selector(getattr(self, action), signature=b"v@:@"))
         button.setTag_(tag)
-        button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-        button.setFont_(NSFont.boldSystemFontOfSize_(12))
-        button.setWantsLayer_(True)
-        button.layer().setBackgroundColor_(
-            _color("sun" if selected else "card").CGColor()
-        )
-        button.layer().setBorderColor_(_color("ink").CGColor())
-        button.layer().setBorderWidth_(2)
-        button.layer().setCornerRadius_(10)
+        _style_button(button, selected=selected)
         (parent if parent is not None else self.body).addSubview_(button)
         return button
 
     @objc.python_method
     def _update_segment_buttons(self, buttons, selected):
         for index, button in enumerate(buttons):
-            button.layer().setBackgroundColor_(
-                _color("sun" if index == selected else "card").CGColor()
-            )
+            _style_button(button, selected=index == selected)
 
     def selectCleanupLevel_(self, sender):
         self.cleanup_selection = self.cleanup_options[sender.tag()]
