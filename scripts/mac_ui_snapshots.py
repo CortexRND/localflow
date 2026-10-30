@@ -20,6 +20,9 @@ def _config(hot_phrases=True):
     return SimpleNamespace(
         hot_phrases=hot_phrases,
         spoken_symbols=True,
+        spoken_punctuation=False,
+        styles_enabled=False,
+        style_other="formal",
         command_names=[],
         skills_dirs=[],
     )

@@ -49,6 +49,28 @@ def test_replacements_are_longest_first_case_insensitive_and_literal():
         [("cat", "dog"), ("catalog", "map"), ("c++", "C sharp")],
     ) == "map, dog and C sharp"
     assert apply_replacements("concatenate", [("cat", "dog")]) == "concatenate"
+    assert apply_replacements("ı İ", [("i", "I")]) == "I I"
+
+
+def test_windows_lock_calls_msvcrt_lock_and_unlock(store, monkeypatch):
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+
+        def __init__(self):
+            self.calls = []
+
+        def locking(self, fd, mode, count):
+            self.calls.append((mode, count))
+
+    fake = FakeMsvcrt()
+    monkeypatch.setattr(dictionary, "fcntl", None)
+    monkeypatch.setattr(dictionary, "msvcrt", fake)
+
+    with store._exclusive():
+        pass
+
+    assert fake.calls == [(fake.LK_LOCK, 1), (fake.LK_UNLCK, 1)]
 
 
 def test_stt_prompt_keeps_order_and_drops_overflow():

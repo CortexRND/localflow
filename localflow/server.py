@@ -194,9 +194,7 @@ def _transcribe_sync(audio: np.ndarray, clean: bool) -> str:
     category = category_for(None, _config.app_category_overrides)
     style_name = getattr(_config, f"style_{category}") if _config.styles_enabled else None
     level = _config.cleanup_level if _config.cleanup_enabled else "none"
-    should_clean = (
-        clean and level != "none" and len(text.split()) >= 5
-    )
+    should_clean = clean and level != "none"
     clean_step = (
         lambda value: _get_cleaner().clean(
             value,

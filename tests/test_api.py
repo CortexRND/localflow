@@ -230,3 +230,25 @@ def test_server_uses_other_style_category(monkeypatch):
     assert server._transcribe_sync(
         np.full(16000, 0.1, dtype=np.float32), False
     ) == "hello world"
+
+
+def test_server_cleans_short_transcript_when_requested(monkeypatch):
+    monkeypatch.setattr(
+        server, "_config", Config(cleanup_enabled=True, cleanup_level="light")
+    )
+    monkeypatch.setattr(
+        server, "_dictionary", SimpleNamespace(words=lambda: [], replacements=lambda: [])
+    )
+    monkeypatch.setattr(server, "_hot_phrases", SimpleNamespace(enabled=lambda: []))
+    monkeypatch.setattr(
+        server,
+        "_get_transcriber",
+        lambda: Mock(transcribe=Mock(return_value="hello world")),
+    )
+    cleaner = Mock(clean=Mock(return_value="Cleaned."))
+    monkeypatch.setattr(server, "_get_cleaner", lambda: cleaner)
+
+    assert server._transcribe_sync(
+        np.full(16000, 0.1, dtype=np.float32), True
+    ) == "Cleaned."
+    cleaner.clean.assert_called_once()

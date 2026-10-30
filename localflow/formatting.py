@@ -6,9 +6,13 @@ import re
 from collections.abc import Sequence
 
 _BREAK = re.compile(
-    r"[ \t]*[,;]*[ \t]*(?P<command>new paragraph|new line)\b[.,!?;:]*[ \t]*",
+    r"[ \t]*[,;]*[ \t]*(?<!\w)(?P<command>new paragraph|new line)\b[.,!?;:]*[ \t]*",
     re.IGNORECASE,
 )
+_DETERMINERS = {
+    "a", "an", "the", "my", "your", "our", "his", "her", "their", "its",
+    "this", "that", "any", "one", "every", "each", "no", "another",
+}
 _PUNCTUATION = {
     "full stop": ".",
     "period": ".",
@@ -37,16 +41,36 @@ def apply_spoken_formatting(text: str) -> str:
     def replace_break(match: re.Match) -> str:
         return "\n\n" if match.group("command").casefold() == "new paragraph" else "\n"
 
-    text = _BREAK.sub(replace_break, text)
+    def replace_break_if_command(match: re.Match) -> str:
+        prefix = text[: match.start("command")].rstrip(" \t,;")
+        previous = re.search(r"(\w+)$", prefix)
+        following = re.match(r"\s*(\w+)", text[match.end() :])
+        if previous and previous.group(1).casefold() in _DETERMINERS:
+            return match.group()
+        if following and following.group(1).casefold() == "of":
+            return match.group()
+        return replace_break(match)
+
+    text = _BREAK.sub(replace_break_if_command, text)
     text = _SPOKEN_PUNCTUATION.sub(
         lambda match: _PUNCTUATION[match.group("command").casefold()],
         text,
     )
     for match in reversed(list(_SCRATCH.finditer(text))):
         prefix = text[: match.start()].rstrip(" \t,.!?;:")
-        boundary = max(prefix.rfind(mark) for mark in ".?!\n")
         suffix = text[match.end() :]
-        if boundary >= 0 and text[boundary] == "\n":
+        before = prefix.rstrip(" \t")
+        after = suffix
+        prior_boundary = not before or before[-1] in ".,!?;:\n"
+        next_boundary = (
+            not after
+            or match.group().endswith(tuple(".,!?;:"))
+            or after[0] in ".,!?;:\n"
+        )
+        if not prior_boundary and not next_boundary:
+            continue
+        boundary = max(prefix.rfind(mark) for mark in ".?!\n")
+        if suffix.startswith("\n") and (boundary < 0 or text[boundary] == "\n"):
             suffix = suffix.lstrip(" \t")
             suffix = suffix.removeprefix("\n")
         text = text[: boundary + 1] + suffix

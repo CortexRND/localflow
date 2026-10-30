@@ -18,6 +18,11 @@ try:
 except ImportError:  # non-POSIX; the store falls back to in-process locking
     fcntl = None
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
 log = logging.getLogger("localflow.dictionary")
 
 DICTIONARY_PATH = Path("~/.localflow/dictionary.json").expanduser()
@@ -73,12 +78,12 @@ class DictionaryStore:
     @contextmanager
     def _exclusive(self):
         with self._lock:
-            if fcntl is None:
+            if fcntl is None and msvcrt is None:
                 yield
                 return
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                lock_file = self._lock_path.open("a+")
+                lock_file = self._lock_path.open("a+b" if fcntl is None else "a+")
             except OSError:
                 log.warning(
                     "dictionary lock unavailable, proceeding unlocked: %s",
@@ -89,7 +94,11 @@ class DictionaryStore:
                 return
             with lock_file as handle:
                 try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    else:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
                 except OSError:
                     log.warning(
                         "dictionary lock unavailable, proceeding unlocked: %s",
@@ -101,7 +110,11 @@ class DictionaryStore:
                 try:
                     yield
                 finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    else:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _read(self) -> dict[str, list]:
         try:
@@ -359,7 +372,17 @@ def apply_replacements(
         re.IGNORECASE,
     )
     targets = {source.casefold(): target for source, target in ordered}
-    return pattern.sub(lambda match: targets[match.group().casefold()], text)
+    def replace(match: re.Match) -> str:
+        matched = match.group()
+        target = targets.get(matched.casefold())
+        if target is not None:
+            return target
+        for source, replacement in ordered:
+            if re.fullmatch(re.escape(source), matched, re.IGNORECASE):
+                return replacement
+        return matched
+
+    return pattern.sub(replace, text)
 
 
 def stt_prompt(words: list[str] | tuple[str, ...]) -> str | None:

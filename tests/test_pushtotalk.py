@@ -91,7 +91,10 @@ def test_rapid_start_stop_pair_is_coalesced_without_touching_mic():
         controller.shutdown()
 
 
-def test_normal_hold_above_threshold_records_and_queues_clip():
+def test_normal_hold_above_threshold_records_and_queues_clip(monkeypatch):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
     recorder = FakeRecorder(clip_seconds=1.0)
     controller, recorder, config, work_queue, sounds_played = make_controller(recorder=recorder)
     try:
