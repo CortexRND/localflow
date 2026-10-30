@@ -49,7 +49,7 @@ def test_process_clip_short_command_skips_cleanup(monkeypatch):
 
 # --------------------------------------------------------------- hot phrases ---
 
-from localflow.hotphrases import HotPhraseStore  # noqa: E402
+from localflow.hotphrases import HotPhraseStore
 
 
 def _store(tmp_path, entries):
@@ -61,7 +61,7 @@ def _store(tmp_path, entries):
 
 def test_process_clip_whole_match_skips_cleanup_and_symbols(monkeypatch, tmp_path):
     pasted = []
-    monkeypatch.setattr(app, "paste_text", pasted.append)
+    monkeypatch.setattr(app, "paste_text", lambda text, _method="auto": pasted.append(text))
     transcriber = Mock(transcribe=Mock(return_value="Review checklist."))
     cleaner = Mock(clean=Mock(side_effect=AssertionError("cleanup must not run")))
     store = _store(tmp_path, [("review checklist", "check slash dash back\nsecond line")])
@@ -77,7 +77,7 @@ def test_process_clip_whole_match_skips_cleanup_and_symbols(monkeypatch, tmp_pat
 
 def test_process_clip_inline_expansion_after_cleanup(monkeypatch, tmp_path):
     pasted = []
-    monkeypatch.setattr(app, "paste_text", pasted.append)
+    monkeypatch.setattr(app, "paste_text", lambda text, _method="auto": pasted.append(text))
     transcriber = Mock(
         transcribe=Mock(return_value="please review checklist then commit now")
     )
@@ -96,7 +96,7 @@ def test_process_clip_trigger_with_spoken_symbol_word_expands(monkeypatch, tmp_p
     # Triggers are parked before symbols run, so "review dash checklist"
     # expands instead of becoming "review-checklist".
     pasted = []
-    monkeypatch.setattr(app, "paste_text", pasted.append)
+    monkeypatch.setattr(app, "paste_text", lambda text, _method="auto": pasted.append(text))
     transcriber = Mock(
         transcribe=Mock(return_value="please review dash checklist now")
     )
@@ -113,7 +113,7 @@ def test_process_clip_trigger_with_spoken_symbol_word_expands(monkeypatch, tmp_p
 
 def test_process_clip_expansion_is_not_symbol_converted(monkeypatch, tmp_path):
     pasted = []
-    monkeypatch.setattr(app, "paste_text", pasted.append)
+    monkeypatch.setattr(app, "paste_text", lambda text, _method="auto": pasted.append(text))
     transcriber = Mock(transcribe=Mock(return_value="a dash b review checklist"))
     cleaner = Mock(clean=Mock(side_effect=lambda text: text))
     store = _store(tmp_path, [("review checklist", "use slash here")])
@@ -130,7 +130,7 @@ def test_process_clip_expansion_is_not_symbol_converted(monkeypatch, tmp_path):
 
 def test_process_clip_hot_phrases_disabled_in_config(monkeypatch, tmp_path):
     pasted = []
-    monkeypatch.setattr(app, "paste_text", pasted.append)
+    monkeypatch.setattr(app, "paste_text", lambda text, _method="auto": pasted.append(text))
     transcriber = Mock(transcribe=Mock(return_value="review checklist"))
     cleaner = Mock(clean=Mock(side_effect=lambda text: text))
     store = _store(tmp_path, [("review checklist", "CHECK IT")])
