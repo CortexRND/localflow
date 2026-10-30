@@ -22,6 +22,14 @@ if sys.platform == "win32":
         _tk_probe.withdraw()
         _tk_probe.destroy()
 
+
+def _new_root():
+    try:
+        return tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk runtime unavailable: {exc}")
+
+
 from localflow import setup_tk
 from localflow.config import Config
 from localflow.models import HardwareInfo
@@ -46,7 +54,7 @@ def test_setup_window_renders_all_seven_steps(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: False)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -105,7 +113,7 @@ def test_stt_download_renders_once_and_advances_after_completion(
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: False)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -172,7 +180,7 @@ def test_ollama_pull_advances_after_completion(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: True)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -216,7 +224,7 @@ def test_continue_from_microphone_step_stops_and_clears_monitor(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: False)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -244,7 +252,7 @@ def test_cleanup_step_blocks_offline_ollama_selection(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: False)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -274,7 +282,7 @@ def test_cleanup_level_control_is_hidden_for_no_cleanup_and_persists(monkeypatch
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: True)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -316,7 +324,7 @@ def test_back_is_disabled_while_stt_or_ollama_download_is_busy(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: True)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -349,7 +357,7 @@ def test_microphone_error_stays_inline_and_clears_on_navigation(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: False)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
@@ -393,7 +401,7 @@ def test_finish_reads_start_on_login_checkbox_before_apply(monkeypatch):
     monkeypatch.setattr(setup_tk.setup_flow, "ollama_installed", lambda: False)
     monkeypatch.setattr(setup_tk, "list_input_devices", list)
     monkeypatch.setattr(setup_tk, "MicLevelMonitor", FakeMonitor)
-    root = tk.Tk()
+    root = _new_root()
     root.withdraw()
     window = setup_tk.SetupWindow(
         root,
