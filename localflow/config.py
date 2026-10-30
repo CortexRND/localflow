@@ -39,7 +39,14 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "style_other": "style_other",
         "app_overrides": "app_category_overrides",
     },
-    "hotkey": {"key": "hotkey", "sounds": "sounds_enabled"},
+    "hotkey": {
+        "key": "hotkey",
+        "sounds": "sounds_enabled",
+        "paste_last": "paste_last_hotkey",
+        "command": "command_hotkey",
+        "polish": "polish_hotkey",
+        "prompt": "prompt_hotkey",
+    },
     "paste": {"method": "paste_method"},
     "dictation": {
         "spoken_symbols": "spoken_symbols",
@@ -49,6 +56,8 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "skills_dirs": "skills_dirs",
         "sample_rate": "sample_rate",
         "input_device": "input_device",
+        "max_recording_seconds": "max_recording_seconds",
+        "pause_media": "pause_media_while_dictating",
     },
     "server": {"host": "server_host", "port": "server_port"},
     "features": {
@@ -99,6 +108,12 @@ class Config:
     # Bare pynput Key name ('alt_l' = left Option) = hold-to-talk;
     # GlobalHotKeys combo ('<cmd>+<shift>+<space>') = toggle.
     hotkey: str = "alt_l"
+    paste_last_hotkey: str = (
+        "<ctrl>+<cmd>+v" if sys.platform == "darwin" else "<ctrl>+<shift>+v"
+    )
+    command_hotkey: str = "alt_r"
+    polish_hotkey: str = "<ctrl>+<alt>+1"
+    prompt_hotkey: str = "<ctrl>+<alt>+2"
     sounds_enabled: bool = True        # audio cue on record start/stop
     paste_method: str = "auto"
     spoken_symbols: bool = True        # dictated "slash"/"dash"/"underscore" -> / - _
@@ -113,6 +128,8 @@ class Config:
         default_factory=lambda: ["~/.claude/skills", "~/.agents/skills"]
     )
     sample_rate: int = 16000
+    max_recording_seconds: int = 1200
+    pause_media_while_dictating: bool = False
     # Bind loopback by default: the API has no auth, so 0.0.0.0 exposes it to
     # the whole LAN. Set "0.0.0.0" explicitly to opt into network access.
     server_host: str = "127.0.0.1"
@@ -187,6 +204,14 @@ def _config_from_v2(data: dict) -> Config:
             if field_name in _ENUM_VALUES and (
                 not isinstance(value, str) or value not in _ENUM_VALUES[field_name]
             ):
+                log.warning(
+                    "invalid config value for %s.%s: %r; using default",
+                    section,
+                    key,
+                    value,
+                )
+                continue
+            if field_name in _FIELD_TYPES and not _valid_field_value(field_name, value):
                 log.warning(
                     "invalid config value for %s.%s: %r; using default",
                     section,
@@ -329,6 +354,22 @@ _ENUM_VALUES = {
     "style_other": {"formal", "casual", "very_casual", "excited"},
 }
 
+_FIELD_TYPES = {
+    "paste_last_hotkey": str,
+    "command_hotkey": str,
+    "polish_hotkey": str,
+    "prompt_hotkey": str,
+    "pause_media_while_dictating": bool,
+    "max_recording_seconds": int,
+}
+
+
+def _valid_field_value(field_name: str, value: object) -> bool:
+    expected_type = _FIELD_TYPES.get(field_name)
+    if expected_type is not None and type(value) is not expected_type:
+        return False
+    return field_name != "max_recording_seconds" or value >= 0
+
 
 def config_to_dict(config: Config) -> dict:
     result: dict = {"config_version": CONFIG_VERSION}
@@ -369,6 +410,10 @@ def apply_config_update(config: Config, update: dict) -> Config:
             if not valid_type:
                 raise ConfigError(
                     f"invalid type for config key '{section}.{file_key}'"
+                )
+            if field_name in _FIELD_TYPES and not _valid_field_value(field_name, value):
+                raise ConfigError(
+                    f"invalid value for config key '{section}.{file_key}'"
                 )
             if section == "paste" and file_key == "method" and value not in PASTE_METHODS:
                 raise ConfigError(f"invalid paste method: {value!r}")

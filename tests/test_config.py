@@ -84,6 +84,12 @@ def test_v2_round_trip_for_non_default_config(isolated_config, monkeypatch):
         orca_agent="agent",
         input_device="Studio Mic",
         setup_version=1,
+        paste_last_hotkey="<ctrl>+<cmd>+v",
+        command_hotkey="alt_r",
+        polish_hotkey="<ctrl>+<alt>+1",
+        prompt_hotkey="<ctrl>+<alt>+2",
+        pause_media_while_dictating=True,
+        max_recording_seconds=600,
     )
 
     config.save_config(expected)
@@ -317,6 +323,55 @@ def test_config_to_dict_and_partial_update():
 def test_apply_config_update_validates(update, message):
     with pytest.raises(ConfigError, match=message):
         config.apply_config_update(Config(), update)
+
+
+def test_hotkey_and_dictation_fields_validate_and_round_trip(isolated_config):
+    expected = Config(
+        paste_last_hotkey="<ctrl>+<cmd>+v",
+        command_hotkey="",
+        polish_hotkey="<ctrl>+<alt>+1",
+        prompt_hotkey="<ctrl>+<alt>+2",
+        pause_media_while_dictating=True,
+        max_recording_seconds=0,
+    )
+
+    config.save_config(expected)
+
+    assert config.load_config() == expected
+    assert config.apply_config_update(
+        Config(),
+        {
+            "hotkey": {"command": ""},
+            "dictation": {"pause_media": True, "max_recording_seconds": 0},
+        },
+    ).pause_media_while_dictating is True
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        '[hotkey]\ncommand = 7\n',
+        '[dictation]\npause_media = "yes"\n',
+        "[dictation]\nmax_recording_seconds = -1\n",
+    ],
+)
+def test_invalid_new_config_fields_default_when_loaded(isolated_config, caplog, contents):
+    isolated_config.write_text(contents, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        loaded = config.load_config()
+
+    assert "invalid config value" in caplog.text
+    assert loaded.command_hotkey == Config().command_hotkey
+    assert loaded.pause_media_while_dictating is False
+    assert loaded.max_recording_seconds == 1200
+
+
+def test_apply_config_update_rejects_negative_max_recording_duration():
+    with pytest.raises(ConfigError, match="invalid value.*max_recording_seconds"):
+        config.apply_config_update(
+            Config(), {"dictation": {"max_recording_seconds": -1}}
+        )
 
 
 def test_factory_builds_ollama(isolated_config):

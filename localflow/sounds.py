@@ -2,6 +2,16 @@
 
 from localflow.platform import current
 
+_SOUNDS = {
+    "lock": "/System/Library/Sounds/Tink.aiff",
+    "cancel": "/System/Library/Sounds/Funk.aiff",
+    "warn": "/System/Library/Sounds/Sosumi.aiff",
+    "error": "/System/Library/Sounds/Basso.aiff",
+}
+
 
 def play(cue: str) -> None:
-    current().play_sound(cue)
+    platform = current()
+    if cue in _SOUNDS and platform.name != "darwin":
+        return
+    platform.play_sound(cue)

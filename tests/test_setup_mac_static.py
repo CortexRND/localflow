@@ -83,3 +83,12 @@ def test_setup_mac_requires_ollama_for_selected_cleanup_and_reads_login_choice()
     assert 'friendly_download_error(error) if model_job' in source
     assert 'elif self._progress_stalled:' in source
     assert 'self.busy.difference_update({"stt-download", "llm-pull"})' in source
+
+
+def test_setup_mac_places_refresh_models_and_shortcuts_without_overlap():
+    source = SRC.read_text(encoding="utf-8")
+
+    assert 'self._button("Refresh models", 250, 198' in source
+    assert "Hold {self.hotkey} · Double-tap locks · Esc cancels" in source
+    assert "Pause music while I talk" in source
+    assert "self.pauseMediaChanged_" in source

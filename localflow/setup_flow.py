@@ -48,6 +48,14 @@ class SetupChoices:
     start_on_login: bool
     llm_provider: str = "ollama"
     cleanup_level: str = "light"
+    paste_last_hotkey: str = (
+        "<ctrl>+<cmd>+v" if sys.platform == "darwin" else "<ctrl>+<shift>+v"
+    )
+    command_hotkey: str = "alt_r"
+    polish_hotkey: str = "<ctrl>+<alt>+1"
+    prompt_hotkey: str = "<ctrl>+<alt>+2"
+    pause_media_while_dictating: bool = False
+    max_recording_seconds: int = 1200
 
 
 HOTKEY_OPTIONS = [
@@ -194,6 +202,12 @@ def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
             start_on_login=start_on_login,
             llm_provider=cfg.llm_provider,
             cleanup_level=cfg.cleanup_level,
+            paste_last_hotkey=cfg.paste_last_hotkey,
+            command_hotkey=cfg.command_hotkey,
+            polish_hotkey=cfg.polish_hotkey,
+            prompt_hotkey=cfg.prompt_hotkey,
+            pause_media_while_dictating=cfg.pause_media_while_dictating,
+            max_recording_seconds=cfg.max_recording_seconds,
         )
     return SetupChoices(
         stt_id=recommended_stt,
@@ -208,6 +222,12 @@ def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
         start_on_login=False,
         llm_provider=cfg.llm_provider,
         cleanup_level=cfg.cleanup_level,
+        paste_last_hotkey=cfg.paste_last_hotkey,
+        command_hotkey=cfg.command_hotkey,
+        polish_hotkey=cfg.polish_hotkey,
+        prompt_hotkey=cfg.prompt_hotkey,
+        pause_media_while_dictating=cfg.pause_media_while_dictating,
+        max_recording_seconds=cfg.max_recording_seconds,
     )
 
 
@@ -215,8 +235,18 @@ def apply(choices: SetupChoices):
     current = load_config()
     updates = stt_config_from_id(choices.stt_id)
     updates.update({
-        "dictation": {"input_device": choices.input_device},
-        "hotkey": {"key": choices.hotkey},
+        "dictation": {
+            "input_device": choices.input_device,
+            "pause_media": choices.pause_media_while_dictating,
+            "max_recording_seconds": choices.max_recording_seconds,
+        },
+        "hotkey": {
+            "key": choices.hotkey,
+            "paste_last": choices.paste_last_hotkey,
+            "command": choices.command_hotkey,
+            "polish": choices.polish_hotkey,
+            "prompt": choices.prompt_hotkey,
+        },
         "setup": {"version": 1},
         "cleanup": {"level": choices.cleanup_level},
     })

@@ -53,6 +53,12 @@ def test_interactive_setup_uses_configured_prompt_defaults(monkeypatch):
         input_device="Studio Mic",
         hotkey="f19",
         language="fr",
+        paste_last_hotkey="<ctrl>+<shift>+v",
+        command_hotkey="f18",
+        polish_hotkey="f16",
+        prompt_hotkey="f17",
+        pause_media_while_dictating=True,
+        max_recording_seconds=600,
     )
     choices = []
     prompts = {}
@@ -100,7 +106,14 @@ def test_interactive_setup_uses_configured_prompt_defaults(monkeypatch):
         "Language (blank = autodetect)": "fr",
     }
     assert confirmations["Start LocalFlow on login?"] is True
+    assert confirmations["Pause music while I talk?"] is True
     assert choices[0].start_on_login is True
+    assert choices[0].paste_last_hotkey == "<ctrl>+<shift>+v"
+    assert choices[0].command_hotkey == "f18"
+    assert choices[0].polish_hotkey == "f16"
+    assert choices[0].prompt_hotkey == "f17"
+    assert choices[0].pause_media_while_dictating is True
+    assert choices[0].max_recording_seconds == 600
 
     prompts.clear()
     explicit_result = CliRunner().invoke(

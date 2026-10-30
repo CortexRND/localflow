@@ -13,7 +13,9 @@ import requests
 import rumps
 
 from localflow.config import load_config
+from localflow.inject import paste_text
 from localflow.platform import current
+from localflow.status import LAST_TEXT_PATH, live_state, title_prefix
 
 _config = load_config()
 BASE = f"http://127.0.0.1:{_config.server_port}"
@@ -39,6 +41,9 @@ class LocalflowMenuBar(rumps.App):
         self.open_notes_item = rumps.MenuItem(
             "Open notes folder", callback=self.open_notes
         )
+        self.paste_last_item = rumps.MenuItem(
+            "Paste last transcript", callback=self.paste_last
+        )
         self.menu = [
             self.status_item,
             None,
@@ -48,11 +53,15 @@ class LocalflowMenuBar(rumps.App):
             self.open_ui_item,
             self.phrases_item,
             self.open_notes_item,
+            self.paste_last_item,
         ]
         self._session_active = False
         self._was_detected = False
+        self._base_icon = IDLE_ICON
         self.timer = rumps.Timer(self.refresh, 3)
         self.timer.start()
+        self.status_timer = rumps.Timer(self.refresh_dictation_status, 0.5)
+        self.status_timer.start()
 
     # ------------------------------------------------------------- polling ---
 
@@ -60,7 +69,8 @@ class LocalflowMenuBar(rumps.App):
         try:
             st = requests.get(BASE + "/meeting/status", timeout=3).json()
         except Exception:
-            self.title = DOWN_ICON
+            self._base_icon = DOWN_ICON
+            self.refresh_dictation_status()
             self.status_item.title = "server: down (lf serve)"
             self._session_active = False
             return
@@ -69,7 +79,7 @@ class LocalflowMenuBar(rumps.App):
         self._session_active = bool(session)
         if session:
             minutes, seconds = divmod(session["seconds"], 60)
-            self.title = LIVE_ICON
+            self._base_icon = LIVE_ICON
             self.status_item.title = (
                 f"recording: {session['title']} — "
                 f"{minutes}m{seconds:02d}s, {session['segment_count']} segments"
@@ -78,7 +88,7 @@ class LocalflowMenuBar(rumps.App):
         else:
             self.toggle_item.title = "Start meeting transcription"
             if st.get("detected"):
-                self.title = DETECTED_ICON
+                self._base_icon = DETECTED_ICON
                 platform = st.get("platform") or "?"
                 self.status_item.title = f"meeting detected ({platform})"
                 if not self._was_detected:
@@ -87,10 +97,14 @@ class LocalflowMenuBar(rumps.App):
                         f"{platform} — start transcription from the menu bar.",
                     )
             else:
-                self.title = IDLE_ICON
+                self._base_icon = IDLE_ICON
                 busy = "mic in use" if st.get("mic_busy") else "idle"
                 self.status_item.title = f"watching · {busy}"
         self._was_detected = bool(st.get("detected"))
+        self.refresh_dictation_status()
+
+    def refresh_dictation_status(self, _timer=None) -> None:
+        self.title = f"{title_prefix(live_state())}{self._base_icon}"
 
     # ------------------------------------------------------------- actions ---
 
@@ -137,6 +151,14 @@ class LocalflowMenuBar(rumps.App):
         folder = Path(_config.vault_path).expanduser() / _config.notes_folder
         folder.mkdir(parents=True, exist_ok=True)
         current().open_path(str(folder))
+
+    def paste_last(self, _item) -> None:
+        try:
+            text = LAST_TEXT_PATH.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return
+        if text:
+            paste_text(text, _config.paste_method)
 
 
 def main() -> None:

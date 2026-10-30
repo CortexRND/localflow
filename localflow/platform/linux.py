@@ -24,6 +24,14 @@ def _desktop_exec(program: str) -> str:
 class LinuxPlatform:
     name = "linux"
 
+    def copy_selection(self) -> None:
+        from pynput import keyboard
+
+        controller = keyboard.Controller()
+        with controller.pressed(keyboard.Key.ctrl):
+            controller.press("c")
+            controller.release("c")
+
     def paste(self, method: str = "auto") -> None:
         global _wayland_warned
         if method == "auto":

@@ -52,9 +52,18 @@ class FakeRecorder:
 class FakeConfig:
     sounds_enabled = False
     sample_rate = 16000
+    max_recording_seconds = 1200
+    paste_method = "auto"
 
 
-def make_controller(recorder=None, config=None, work_queue=None, min_clip_seconds=MIN_CLIP_SECONDS):
+def make_controller(
+    recorder=None,
+    config=None,
+    work_queue=None,
+    min_clip_seconds=MIN_CLIP_SECONDS,
+    clock=time.monotonic,
+    on_state=None,
+):
     recorder = recorder if recorder is not None else FakeRecorder()
     config = config if config is not None else FakeConfig()
     work_queue = work_queue if work_queue is not None else queue.Queue()
@@ -65,6 +74,8 @@ def make_controller(recorder=None, config=None, work_queue=None, min_clip_second
         work_queue,
         play_sound=lambda cue: sounds_played.append(cue),
         min_clip_seconds=min_clip_seconds,
+        clock=clock,
+        on_state=on_state,
     )
     return controller, recorder, config, work_queue, sounds_played
 
@@ -111,7 +122,8 @@ def test_normal_hold_above_threshold_records_and_queues_clip(monkeypatch):
         assert recorder.start_calls == 1
         assert recorder.stop_calls == 1
         clip = work_queue.get_nowait()
-        audio, app_info = clip
+        assert clip.kind == "dictate"
+        audio, app_info = clip.audio, clip.app_info
         assert isinstance(audio, np.ndarray)
         assert len(audio) == int(1.0 * config.sample_rate)
         assert app_info is None
@@ -278,10 +290,266 @@ def test_frontmost_app_is_captured_on_consumer_thread(monkeypatch):
         assert _wait_until(lambda: recorder.start_calls == 1)
         controller.note_stop()
         assert _wait_until(lambda: not work_queue.empty())
-        audio, app_info = work_queue.get_nowait()
+        clip = work_queue.get_nowait()
+        assert clip.kind == "dictate"
+        audio, app_info = clip.audio, clip.app_info
         assert isinstance(audio, np.ndarray)
         assert app_info == expected
         assert len(captured_threads) == 1
         assert captured_threads[0] != caller_thread
+    finally:
+        controller.shutdown()
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def test_queued_short_tap_pair_never_opens_microphone():
+    clock = FakeClock()
+    controller, recorder, _config, _work_queue, _sounds = make_controller(clock=clock)
+    try:
+        controller._events.put(("up", 0.1))
+        controller._handle_down(0.0)
+
+        assert controller._gesture_state == "TAPPED"
+        assert recorder.start_calls == 0
+    finally:
+        controller.shutdown()
+
+
+def test_short_tap_locks_on_second_down_and_triple_tap_cancels(monkeypatch):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
+    config = FakeConfig()
+    config.sounds_enabled = True
+    controller, recorder, _config, work_queue, sounds_played = make_controller(config=config)
+    try:
+        controller._handle_down(0.0)
+        controller._handle_up(0.1)
+        assert controller._gesture_state == "TAPPED"
+
+        controller._handle_down(0.3)
+        controller._handle_up(0.31)
+        assert controller._gesture_state == "LOCKED"
+        assert recorder.recording is True
+        assert sounds_played == ["start", "lock"]
+
+        controller._handle_down(0.6)
+        assert recorder.recording is False
+        assert controller._gesture_state == "AWAIT_UP"
+        assert work_queue.empty()
+        assert sounds_played[-1] == "cancel"
+        controller._handle_up(0.61)
+        assert controller._gesture_state == "IDLE"
+    finally:
+        controller.shutdown()
+
+
+@pytest.mark.parametrize("state", ["HELD", "TAPPED", "LOCKED"])
+def test_escape_cancels_active_gesture_states(monkeypatch, state):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
+    controller, recorder, _config, work_queue, _sounds = make_controller()
+    try:
+        controller._handle_down(0.0)
+        if state in {"TAPPED", "LOCKED"}:
+            controller._handle_up(0.1)
+        if state == "LOCKED":
+            controller._handle_down(0.2)
+        assert controller._gesture_state == state
+
+        controller._handle_cancel()
+
+        assert recorder.recording is False
+        assert controller._gesture_state == (
+            "AWAIT_UP" if state in {"HELD", "LOCKED"} else "IDLE"
+        )
+        assert work_queue.empty()
+    finally:
+        controller.shutdown()
+
+
+def test_escape_is_ignored_while_idle():
+    controller, recorder, _config, work_queue, sounds_played = make_controller()
+    try:
+        controller._handle_cancel()
+
+        assert recorder.start_calls == recorder.stop_calls == 0
+        assert work_queue.empty()
+        assert sounds_played == []
+    finally:
+        controller.shutdown()
+
+
+def test_max_duration_warns_once_then_stops_and_queues(monkeypatch, caplog):
+    from localflow import pushtotalk
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
+    clock = FakeClock()
+    config = FakeConfig()
+    config.sounds_enabled = True
+    controller, recorder, _config, work_queue, sounds_played = make_controller(
+        config=config, clock=clock
+    )
+    try:
+        assert controller._do_start() is True
+        clock.advance(1140)
+        controller._check_timers(clock())
+        controller._check_timers(clock())
+        assert sounds_played.count("warn") == 1
+
+        clock.advance(60)
+        with caplog.at_level("INFO", logger="localflow.pushtotalk"):
+            controller._check_timers(clock())
+
+        assert recorder.recording is False
+        assert not work_queue.empty()
+        assert "max duration reached" in caplog.text
+    finally:
+        controller.shutdown()
+
+
+def test_command_mode_creates_command_job_with_selection(monkeypatch):
+    from localflow import pushtotalk
+    from localflow.inject import SelectionCapture
+
+    monkeypatch.setattr(
+        pushtotalk, "capture_selection",
+        lambda: SelectionCapture("selected text", "previous clipboard"),
+    )
+    app_info = AppInfo("Editor", "example.editor")
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: app_info)
+    controller, recorder, _config, work_queue, _sounds = make_controller()
+    try:
+        controller._start_command()
+        assert controller._gesture_state == "COMMAND"
+        assert recorder.recording is True
+        controller._stop_command()
+
+        job = work_queue.get_nowait()
+        assert job.kind == "command"
+        assert job.selection == "selected text"
+        assert job.clipboard_before == "previous clipboard"
+        assert job.app_info == app_info
+    finally:
+        controller.shutdown()
+
+
+def test_transform_selection_is_enqueued_as_a_job(monkeypatch):
+    from localflow import pushtotalk
+    from localflow.inject import SelectionCapture
+
+    monkeypatch.setattr(pushtotalk, "frontmost_app", lambda: None)
+    monkeypatch.setattr(
+        pushtotalk, "capture_selection",
+        lambda: SelectionCapture("selected", "clipboard"),
+    )
+    controller, _recorder, _config, work_queue, _sounds = make_controller()
+    try:
+        controller._handle_transform("polish")
+        job = work_queue.get_nowait()
+        assert job.kind == "transform"
+        assert job.preset == "polish"
+        assert job.selection == "selected"
+        assert job.clipboard_before == "clipboard"
+    finally:
+        controller.shutdown()
+
+
+def test_job_result_pastes_on_consumer_thread(monkeypatch):
+    from localflow import pushtotalk
+
+    calls = []
+    monkeypatch.setattr(
+        pushtotalk, "paste_text",
+        lambda *args: calls.append((args, threading.current_thread().name)),
+    )
+    controller, _recorder, _config, _queue, _sounds = make_controller()
+    try:
+        controller.note_job_result("result", "before")
+        assert _wait_until(lambda: bool(calls))
+        assert calls[0] == (("result", "auto", "before"), "pushtotalk-consumer")
+        assert controller._last_text == "result"
+    finally:
+        controller.shutdown()
+
+
+def test_status_transitions_cover_recording_processing_and_idle():
+    states = []
+    controller, _recorder, _config, _queue, _sounds = make_controller(
+        on_state=states.append
+    )
+    try:
+        controller._do_start()
+        controller._do_stop()
+        controller.note_job_result("result")
+
+        assert _wait_until(lambda: states and states[-1] == "idle")
+        assert states == ["recording", "processing", "idle"]
+    finally:
+        controller.shutdown()
+
+
+def test_media_paused_after_start_and_resumed_after_stop(monkeypatch):
+    from types import SimpleNamespace
+
+    from localflow import media
+
+    events = []
+    monkeypatch.setattr(media, "pause_playing", lambda: events.append("pause") or {"Music"})
+    monkeypatch.setattr(
+        media, "resume", lambda paused: events.append(("resume", paused))
+    )
+    config = SimpleNamespace(
+        sounds_enabled=False,
+        sample_rate=16000,
+        max_recording_seconds=1200,
+        pause_media_while_dictating=True,
+        paste_method="auto",
+    )
+    controller, _recorder, _config, work_queue, _sounds = make_controller(
+        config=config
+    )
+    try:
+        controller._do_start()
+        controller._do_stop()
+
+        assert events == ["pause", ("resume", {"Music"})]
+        assert work_queue.get_nowait().kind == "dictate"
+    finally:
+        controller.shutdown()
+
+
+def test_media_paused_after_start_and_resumed_on_cancel(monkeypatch):
+    from types import SimpleNamespace
+
+    from localflow import media
+
+    resumed = []
+    monkeypatch.setattr(media, "pause_playing", lambda: {"Spotify"})
+    monkeypatch.setattr(media, "resume", lambda paused: resumed.append(paused))
+    config = SimpleNamespace(
+        sounds_enabled=False,
+        sample_rate=16000,
+        max_recording_seconds=1200,
+        pause_media_while_dictating=True,
+        paste_method="auto",
+    )
+    controller, _recorder, _config, _queue, _sounds = make_controller(config=config)
+    try:
+        controller._do_start()
+        controller._discard_recording()
+
+        assert resumed == [{"Spotify"}]
     finally:
         controller.shutdown()
