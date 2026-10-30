@@ -1,7 +1,10 @@
 import json
 import os
 import stat
+import sys
 from types import SimpleNamespace
+
+import pytest
 
 from localflow import media, status
 from localflow.status import (
@@ -85,6 +88,10 @@ def test_title_prefix_mapping_is_pure():
     assert title_prefix("idle") == ""
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows does not expose POSIX file mode bits",
+)
 def test_last_text_file_permissions_are_private(tmp_path):
     path = tmp_path / "last.txt"
 
