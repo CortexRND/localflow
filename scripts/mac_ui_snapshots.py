@@ -62,6 +62,15 @@ def _hub_snapshots(base):
                 kind="command", status="ok", app_name="Browser",
                 raw_text="Make this concise", final_text="A concise selection.",
             )
+            for index in range(10):
+                history.add(
+                    kind="dictate",
+                    status="ok",
+                    app_name="Editor",
+                    raw_text=f"Raw history item {index + 1}",
+                    final_text=f"History item {index + 1}.",
+                    duration_s=12,
+                )
             dictionary.add_word("LocalFlow")
             dictionary.add_replacement("teh", "the")
         controller = build_hub_window(history, dictionary, config)

@@ -80,3 +80,14 @@ def test_hub_settings_use_segmented_controls_and_reload_models_config():
     assert "self.dictionary.update_replacement(" in source
     assert '"selectCleanupLevel_"' in source
     assert '"selectStyle_"' in source
+
+
+def test_hub_buttons_use_setup_pop_art_tokens():
+    source = SOURCE.read_text(encoding="utf-8")
+    style = (ROOT / "localflow" / "mac_style.py").read_text(encoding="utf-8")
+    assert "from localflow.mac_style import color as _color" in source
+    assert "from localflow.setup_mac import TOKENS" in style
+    assert "def style_flat_button(button, selected=False)" in style
+    assert 'selected=page == self.page' in source
+    assert "selected=PAGES[button.tag()] == page" in source
+    assert "button.layer().setBorderWidth_(2)" in style
