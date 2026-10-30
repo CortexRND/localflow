@@ -37,6 +37,7 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "command_names": "command_names",
         "skills_dirs": "skills_dirs",
         "sample_rate": "sample_rate",
+        "input_device": "input_device",
     },
     "server": {"host": "server_host", "port": "server_port"},
     "features": {
@@ -57,6 +58,7 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "orca_repo": "orca_repo",
         "orca_agent": "orca_agent",
     },
+    "setup": {"version": "setup_version"},
 }
 
 
@@ -108,6 +110,8 @@ class Config:
     prompts_dir: str = "~/projs/prompts/meetings"
     orca_repo: str = ""                # Orca dispatch target, e.g. "id:<repoId>"; empty = not configured
     orca_agent: str = "claude"
+    input_device: str = ""
+    setup_version: int = 0
 
 
 def config_dir() -> Path:

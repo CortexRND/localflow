@@ -8,8 +8,9 @@ log = logging.getLogger("localflow.audio")
 
 
 class Recorder:
-    def __init__(self, sample_rate: int = 16000):
+    def __init__(self, sample_rate: int = 16000, device: str | None = None):
         self.sample_rate = sample_rate
+        self.device = device
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._stream: sd.InputStream | None = None
@@ -24,13 +25,16 @@ class Recorder:
         with self._lock:
             self._chunks = []
         try:
-            device = sd.query_devices(kind="input")
-            log.info("opening input stream on device: %s", device.get("name"))
+            device = self.device
+            if device is None:
+                device = sd.query_devices(kind="input").get("name")
+            log.info("opening input stream on device: %s", device or "system default")
             self._stream = sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=1,
                 dtype="float32",
                 callback=self._callback,
+                device=self.device,
             )
             self._stream.start()
         except Exception:
@@ -62,3 +66,15 @@ class Recorder:
     @property
     def recording(self) -> bool:
         return self._recording
+
+
+def list_input_devices() -> list[str]:
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return []
+    return sorted({
+        str(device["name"])
+        for device in devices
+        if device.get("max_input_channels", 0) > 0 and device.get("name")
+    })

@@ -11,12 +11,11 @@ An open-source WisprFlow-style dictation app:
 - **Instant paste** into the frontmost app
 - **Server mode** for phone access: record in browser over HTTPS (Tailscale), get transcript, copy to clipboard
 
-## Requirements
+## Getting started (launcher)
 
-- **macOS** (10.13+)
-- **Python 3.11+**
-- **ffmpeg** (via Homebrew: `brew install ffmpeg`)
-- **Ollama** (optional, for cleanup): `ollama pull llama3.2:3b`
+LocalFlow's native setup wizard checks your machine, helps select and download
+speech and cleanup models, and configures your microphone and hotkey. Audio and
+speech recognition stay local.
 
 ### Platform support
 
@@ -26,18 +25,47 @@ An open-source WisprFlow-style dictation app:
 | Linux | Best-effort support | Disabled |
 | Windows | Best-effort support | Disabled |
 
-## Install
+On macOS, use Python 3.11+ and Homebrew to run the installer from a checkout:
 
 ```bash
-git clone <repo> && cd localflow
-./setup.sh
+git clone https://github.com/CortexRND/localflow.git
+cd localflow
+./install.sh
 ```
 
-Or manually:
+Or run `install.sh --with-ollama` to install and start Ollama for optional
+transcript cleanup. The installer also works from a downloaded script and
+clones LocalFlow into `~/.localflow/app` (override with `LOCALFLOW_HOME`).
+
+After installation, reopen setup to switch models at any time:
+
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e .
+lf setup
 ```
+
+For terminal-only or automated setup, use `lf setup --cli` or
+`lf setup --cli --yes --stt fw-base --llm none`. `lf models list` shows model
+download status, and `lf doctor` checks local prerequisites.
+
+## Choosing models
+
+The speech model controls transcription speed, accuracy, memory use, and
+download size. The wizard recommends a model for your hardware, but you can
+switch later with `lf setup`. `lf models list --kind stt` lists the catalog;
+`lf models download fw-small` downloads a model and `lf models use fw-small`
+selects it.
+
+The same catalog is available through the provider commands: `lf stt list`,
+`lf stt download fw-tiny`, and `lf stt use faster-whisper small`. For Ollama,
+`lf llm list`, `lf llm pull llama3.2:1b`, and `lf llm use ollama --model
+llama3.2:1b` manage the configured cleanup model. Non-Ollama providers are
+configured and tested with `lf llm use` and `lf llm test`; their models are
+managed by that provider rather than downloaded by LocalFlow.
+
+Transcript cleanup is optional. Select an Ollama model in setup or use
+`lf models list --kind llm`; cleanup models require Ollama and additional disk
+space and memory. Choose `none` to keep the raw transcript and avoid the extra
+model.
 
 ## Usage
 
@@ -178,7 +206,7 @@ The v2 file uses nested sections:
  config_version = 2
 
 [stt]
-provider = "auto"                  # auto | mlx-whisper | mlx | faster-whisper | parakeet
+provider = "auto"                  # auto | mlx-whisper | faster-whisper | parakeet
 model = "base"                     # tiny, base, small, medium, large-v3
 # language = "en"                  # omit for autodetect (parakeet is English-only)
 device = "auto"
@@ -203,6 +231,10 @@ spoken_symbols = true              # "slash"/"dash"/"underscore" -> / - _
 command_names = []
 skills_dirs = ["~/.claude/skills", "~/.agents/skills"]
 sample_rate = 16000
+input_device = ""                  # empty = system default
+
+[setup]
+version = 0
 
 [server]
 host = "127.0.0.1"

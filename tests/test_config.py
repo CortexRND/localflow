@@ -73,6 +73,8 @@ def test_v2_round_trip_for_non_default_config(isolated_config, monkeypatch):
         prompts_dir="/prompts",
         orca_repo="path:/repo",
         orca_agent="agent",
+        input_device="Studio Mic",
+        setup_version=1,
     )
 
     config.save_config(expected)

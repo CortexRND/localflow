@@ -4,11 +4,14 @@ Used by the macOS UI workflow; writes artifacts/mac-ui/<state>-<light|dark>.png.
 """
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 from localflow.hotphrases import HotPhraseStore
 from localflow.phrases_mac import build_window, snapshot_png
+from localflow.setup_mac import SetupWindowController
+from localflow.setup_flow import Check
 
 OUT = Path("artifacts/mac-ui")
 
@@ -89,6 +92,48 @@ def main():
         c.reload_sidebar()
         c.select_entry(store.list()[0]["id"])
         _shot(c, "hot-phrases-off-banner")
+
+        setup = SetupWindowController.alloc().init()
+        setup.snapshot_mode = True
+        setup.checks = [
+            Check("ffmpeg", "ffmpeg", True, "Installed", "", ""),
+            Check("ollama-installed", "Ollama installed", True, "Installed", "", ""),
+            Check("ollama-running", "Ollama running", True, "Ready", "", ""),
+            Check("microphone-device", "Input device", True, "1 input device found", "", ""),
+        ]
+        setup.downloaded = {model.id: True for model in setup.models}
+        setup.ollama_checked = True
+        setup.ollama_running = True
+        setup.ollama_models = ["llama3.2:1b"]
+        setup.llm_id = "llama3.2:1b"
+        setup.status_message = ""
+        for step in range(7):
+            setup.step = step
+            setup._render()
+            _shot(setup, f"setup-step-{step + 1}")
+        setup.saved = True
+        setup._render()
+        _shot(setup, "setup-complete")
+
+        setup.choices = replace(setup.choices, llm_provider="openai-compatible")
+        setup.step = 3
+        setup.saved = False
+        setup._render()
+        _shot(setup, "setup-non-ollama-provider")
+
+        setup.choices = replace(setup.choices, llm_provider="ollama")
+        setup.step = 2
+        setup.busy.add("stt-download")
+        setup.status_message = "43 / 78 MB"
+        setup.error_message = ""
+        setup._render()
+        _shot(setup, "setup-download-progress")
+
+        setup.busy.clear()
+        setup.status_message = "Download failed."
+        setup.error_message = "Network connection interrupted."
+        setup._render()
+        _shot(setup, "setup-download-error")
 
     print(f"wrote snapshots to {OUT}")
 

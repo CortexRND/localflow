@@ -75,7 +75,10 @@ def main() -> None:
     hot_phrases = HotPhraseStore()
     if config.hot_phrases:
         print(f"  hot phrases:  {len(hot_phrases.enabled())} enabled")
-    recorder = Recorder(sample_rate=config.sample_rate)
+    recorder = Recorder(
+        sample_rate=config.sample_rate,
+        device=config.input_device or None,
+    )
     cleaner = Cleaner(build_llm(config))
 
     work_queue: queue.Queue[np.ndarray] = queue.Queue()

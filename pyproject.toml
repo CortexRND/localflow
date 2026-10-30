@@ -8,6 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "faster-whisper",
+    "huggingface_hub",
     "sounddevice",
     "numpy",
     "pynput",
@@ -27,6 +28,11 @@ dependencies = [
 mlx = ["mlx-whisper"]
 parakeet = ["parakeet-mlx"]
 menubar = ["rumps"]
+macos-permissions = [
+    "pyobjc-framework-AVFoundation>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-IOKit>=10; sys_platform == 'darwin'",
+]
 
 [project.scripts]
 localflow = "localflow.app:main"
