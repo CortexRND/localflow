@@ -119,30 +119,32 @@ def _mac_permission_checks() -> list[Check]:
 
 def run_checks(cfg: Config) -> list[Check]:
     ffmpeg_installed = shutil.which("ffmpeg") is not None
-    ollama_exists = ollama_installed()
     checks = [
         Check(
             "ffmpeg", "ffmpeg", ffmpeg_installed,
-            "Installed" if ffmpeg_installed else "Not found on PATH",
-            "Install ffmpeg", "brew install ffmpeg",
-        ),
-        Check(
-            "ollama-installed", "Ollama installed", ollama_exists,
-            "Installed" if ollama_exists else "Not installed",
-            "Get Ollama", "https://ollama.com/download",
+            "Installed" if ffmpeg_installed else "Not found — run: brew install ffmpeg",
+            "Install ffmpeg", "https://formulae.brew.sh/formula/ffmpeg",
         ),
     ]
     if cfg.llm_provider == "ollama":
+        ollama_exists = ollama_installed()
+        checks.append(Check(
+            "ollama-installed", "Ollama installed", ollama_exists,
+            "Installed" if ollama_exists else "Not installed",
+            "Get Ollama", "https://ollama.com/download",
+        ))
         running = OllamaClient(cfg.llm_base_url).is_running()
-        running_detail = "Ready" if running else "Not running"
+        checks.append(Check(
+            "ollama-running", "Ollama running", running,
+            "Ready" if running else "Not running",
+            "Start Ollama", "https://ollama.com/download",
+        ))
     else:
-        running = None
-        running_detail = f"Not used (configured provider: {cfg.llm_provider})"
-    checks.append(Check(
-        "ollama-running", "Ollama running", running,
-        running_detail,
-        "Start Ollama", "https://ollama.com/download",
-    ))
+        checks.append(Check(
+            "llm-provider", "Cleanup model", None,
+            f"Using {cfg.llm_provider} ({cfg.llm_model})",
+            "Open settings", "",
+        ))
     devices = list_input_devices()
     checks.append(Check(
         "microphone-device", "Input device", bool(devices),

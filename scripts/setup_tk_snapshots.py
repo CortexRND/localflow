@@ -1,5 +1,6 @@
 """Capture each Tk setup screen and representative download states."""
 
+import os
 import threading
 import time
 from dataclasses import replace
@@ -29,7 +30,9 @@ class _Monitor:
 
 
 def main():
-    output = Path.home() / "rea-runs" / "shots-A"
+    output = Path(
+        os.environ.get("LOCALFLOW_SHOTS_DIR", str(Path.home() / "rea-runs" / "shots-A"))
+    )
     output.mkdir(parents=True, exist_ok=True)
     setup_tk.MicLevelMonitor = _Monitor
     root = tk.Tk()

@@ -63,6 +63,39 @@ def test_detect_hardware_uses_platform_memory_and_disk(monkeypatch, tmp_path):
     assert not info.apple_silicon
 
 
+def test_detect_hardware_uses_windows_global_memory_status(monkeypatch, tmp_path):
+    class Kernel32:
+        @staticmethod
+        def GlobalMemoryStatusEx(status):
+            status._obj.ullTotalPhys = 8 * 1024**3
+            return 1
+
+    monkeypatch.setattr(models.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(models.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(
+        models.ctypes, "windll", SimpleNamespace(kernel32=Kernel32()), raising=False
+    )
+    monkeypatch.setattr(models.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(models.shutil, "disk_usage", lambda _path: SimpleNamespace(free=2**30))
+
+    info = models.detect_hardware()
+
+    assert info.ram_gb == 8.0
+    assert info.machine == "AMD64"
+
+
+def test_detect_hardware_falls_back_when_ram_probe_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(models.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(models.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(models.os, "sysconf", lambda _key: (_ for _ in ()).throw(OSError("no probe")))
+    monkeypatch.setattr(models.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(models.shutil, "disk_usage", lambda _path: SimpleNamespace(free=2**30))
+
+    info = models.detect_hardware()
+
+    assert info.ram_gb == 0.0
+
+
 def test_current_stt_id_resolves_config_backend(monkeypatch):
     assert models.current_stt_id(Config(stt_backend="parakeet")) == "parakeet-v2"
     assert models.current_stt_id(Config(stt_backend="faster-whisper", model_size="tiny")) == "fw-tiny"

@@ -68,6 +68,34 @@ def test_run_checks_reports_all_cross_platform_requirements(monkeypatch):
         "ffmpeg", "ollama-installed", "ollama-running", "microphone-device",
     ]
     assert [check.ok for check in checks] == [True, True, False, True]
+    assert checks[0].fix_url == "https://formulae.brew.sh/formula/ffmpeg"
+
+
+def test_run_checks_uses_provider_info_without_ollama_checks(monkeypatch):
+    monkeypatch.setattr(setup_flow.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(
+        setup_flow, "ollama_installed",
+        lambda: (_ for _ in ()).throw(AssertionError("must not probe Ollama")),
+    )
+    monkeypatch.setattr(
+        setup_flow.OllamaClient,
+        "is_running",
+        lambda _self: (_ for _ in ()).throw(AssertionError("must not probe Ollama")),
+    )
+    monkeypatch.setattr(setup_flow, "list_input_devices", list)
+
+    checks = setup_flow.run_checks(
+        Config(llm_provider="openai-compatible", llm_model="gpt-local")
+    )
+
+    assert [check.key for check in checks] == [
+        "ffmpeg", "llm-provider", "microphone-device",
+    ]
+    assert checks[0].detail == "Not found — run: brew install ffmpeg"
+    assert checks[1] == setup_flow.Check(
+        "llm-provider", "Cleanup model", None,
+        "Using openai-compatible (gpt-local)", "Open settings", "",
+    )
 
 
 def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkeypatch):

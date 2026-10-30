@@ -65,6 +65,7 @@ _SECTIONS: dict[str, dict[str, str]] = {
 class ConfigError(RuntimeError):
     """Raised when a configuration file cannot be parsed."""
 
+
 @dataclass
 class Config:
     model_size: str = "base"           # whisper model size (ignored by parakeet: fixed model id)
@@ -167,6 +168,8 @@ def _config_from_v2(data: dict) -> Config:
     if sys.platform != "darwin":
         config.meetings_enabled = False
     return config
+
+
 def _toml_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"

@@ -1,5 +1,6 @@
 """Local speech and cleanup model catalogs, downloads, and hardware guidance."""
 
+import ctypes
 import importlib.util
 import json
 import os
@@ -165,11 +166,33 @@ class HardwareInfo:
 def detect_hardware() -> HardwareInfo:
     system = platform.system()
     machine = platform.machine()
-    if system == "Darwin":
-        output = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
-        ram_bytes = int(output.strip())
-    else:
-        ram_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    try:
+        if system == "Darwin":
+            output = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
+            ram_bytes = int(output.strip())
+        elif system == "Windows":
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sllAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(status)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                raise OSError("GlobalMemoryStatusEx failed")
+            ram_bytes = status.ullTotalPhys
+        else:
+            ram_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except Exception:  # noqa: BLE001
+        ram_bytes = 0
     free_bytes = shutil.disk_usage(Path.home()).free
     return HardwareInfo(
         system=system,
