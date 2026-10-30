@@ -48,6 +48,23 @@ def test_schema_crud_search_and_last_ok(tmp_path):
     assert not store.delete(failed)
 
 
+def test_history_search_escapes_like_metacharacters_and_supports_offsets(tmp_path):
+    store = _store(tmp_path)
+    literal_percent = store.add(
+        kind="dictate", raw_text="100% ready", final_text="literal", ts=3
+    )
+    store.add(kind="dictate", raw_text="100 ready", final_text="plain", ts=2)
+    underscore = store.add(
+        kind="dictate", raw_text="a_b", final_text="underscore", ts=1
+    )
+
+    assert [row["id"] for row in store.recent(query="%")] == [literal_percent]
+    assert [row["id"] for row in store.recent(query="_")] == [underscore]
+    assert [row["id"] for row in store.recent(limit=2, offset=2)] == [
+        row["id"] for row in store.recent(limit=3)[2:]
+    ]
+
+
 def test_disabled_history_does_not_add_rows(tmp_path):
     path = tmp_path / "history.sqlite"
     enabled = HistoryStore(path)

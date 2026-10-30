@@ -42,3 +42,41 @@ def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     assert '"Home", "History", "Dictionary", "Style", "Models"' in snapshots
     assert '"Unable to load local data."' in snapshots
     assert "localflow/hub*" in workflow
+
+
+def test_label_calls_do_not_repeat_positional_parameters():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    helper = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_label"
+    )
+    parameter_names = [argument.arg for argument in helper.args.args]
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "_label":
+            continue
+        positional = set(parameter_names[:len(node.args)])
+        keywords = {keyword.arg for keyword in node.keywords}
+        assert not positional & keywords
+
+
+def test_appkit_history_uses_a_cleared_paged_results_container():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "self.history_results.subviews()" in source
+    assert "view.removeFromSuperview()" in source
+    assert "offset=self.history_offset" in source
+    assert '"olderHistory:"' in source
+    assert '"newerHistory:"' in source
+
+
+def test_hub_settings_use_segmented_controls_and_reload_models_config():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "NSPopUpButton" not in source
+    assert '"strict"' not in source
+    assert '("formal", "casual", "very_casual", "excited")' in source
+    assert "self.config = load_config()" in source
+    assert "self.dictionary.update_word(" in source
+    assert "self.dictionary.update_replacement(" in source
+    assert '"selectCleanupLevel_"' in source
+    assert '"selectStyle_"' in source

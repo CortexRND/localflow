@@ -51,6 +51,32 @@ def _print_banner(config) -> None:
     print("=" * 60)
 
 
+def _worker_loop(work_queue, process_job, deliver_result) -> None:
+    while True:
+        item = work_queue.get()
+        try:
+            if item is None:
+                return
+            try:
+                text, error = process_job(item)
+            except Exception:
+                log.exception("worker failed to process job")
+                text, error = "", True
+            if text:
+                try:
+                    write_last_text(text)
+                except Exception:
+                    log.exception("could not write last text")
+            try:
+                deliver_result(item, text, error)
+            except Exception:
+                log.exception("could not deliver worker result")
+        except Exception:
+            log.exception("worker iteration failed")
+        finally:
+            work_queue.task_done()
+
+
 def main() -> None:
     """Desktop entrypoint (console script `localflow`)."""
     # Acquire the single-instance lock before anything else — in particular
@@ -104,33 +130,32 @@ def main() -> None:
         history_store=history_store,
     )
 
-    def worker() -> None:
-        while True:
-            item = work_queue.get()
-            if item is None:
-                break
-            text, error = _process_job(
-                item,
-                config,
-                transcriber,
-                cleaner,
-                transformer,
-                commands,
-                hot_phrases,
-                dictionary_store,
-                history_store,
-            )
-            if text:
-                write_last_text(text)
-            controller.note_job_result(
-                text,
-                item.clipboard_before,
-                error=error,
-                clipboard_expected=item.selection,
-            )
-            work_queue.task_done()
+    def process_item(item):
+        return _process_job(
+            item,
+            config,
+            transcriber,
+            cleaner,
+            transformer,
+            commands,
+            hot_phrases,
+            dictionary_store,
+            history_store,
+        )
 
-    worker_thread = threading.Thread(target=worker, daemon=True)
+    def deliver_result(item, text, error):
+        controller.note_job_result(
+            text,
+            item.clipboard_before,
+            error=error,
+            clipboard_expected=item.selection,
+        )
+
+    worker_thread = threading.Thread(
+        target=_worker_loop,
+        args=(work_queue, process_item, deliver_result),
+        daemon=True,
+    )
     worker_thread.start()
 
     _print_banner(config)
@@ -350,7 +375,11 @@ def _process_job(
                     getattr(config, "keep_audio_clips", 5)
                 )
                 streak = history_store.stats()["current_streak_days"]
-                if streak in {3, 7, 30, 100} and history_store.claim_milestone(streak):
+                milestone_claimed = (
+                    streak in {3, 7, 30, 100}
+                    and history_store.claim_milestone(streak)
+                )
+                if milestone_claimed and getattr(config, "sounds_enabled", True):
                     sounds.play("achievement")
             except Exception:
                 log.exception("could not update dictation insights")
@@ -369,19 +398,19 @@ def retry_history_entry(
     entry = history_store.get(entry_id)
     if entry is None or entry["kind"] != "dictate" or not entry["audio_path"]:
         raise ValueError("history entry has no retryable audio clip")
-    config = config or load_config()
-    audio, _sample_rate = history_store.load_clip(entry["audio_path"])
-    transcriber = transcriber or build_stt(config)
-    cleaner = cleaner or Cleaner(build_llm(config))
-    dictionary_store = dictionary_store or DictionaryStore()
-    hot_phrases = hot_phrases or HotPhraseStore()
-    app_info = (
-        AppInfo(entry["app_name"] or "", entry["bundle_id"] or "")
-        if entry["app_name"] or entry["bundle_id"]
-        else None
-    )
     captured = []
     try:
+        config = config or load_config()
+        audio, _sample_rate = history_store.load_clip(entry["audio_path"])
+        transcriber = transcriber or build_stt(config)
+        cleaner = cleaner or Cleaner(build_llm(config))
+        dictionary_store = dictionary_store or DictionaryStore()
+        hot_phrases = hot_phrases or HotPhraseStore()
+        app_info = (
+            AppInfo(entry["app_name"] or "", entry["bundle_id"] or "")
+            if entry["app_name"] or entry["bundle_id"]
+            else None
+        )
         text = _process_clip(
             audio,
             config,
@@ -395,28 +424,21 @@ def retry_history_entry(
             raw_text_callback=captured.append,
         )
     except Exception:
-        history_store.update(
-            entry_id,
-            status="failed",
-            raw_text=captured[0] if captured else entry["raw_text"],
-            final_text="",
-        )
+        log.exception("retry failed for history entry %s", entry_id)
         raise
     if not text:
-        history_store.update(
-            entry_id,
-            status="failed",
-            raw_text=captured[0] if captured else entry["raw_text"],
-            final_text="",
-        )
-        return ""
+        log.warning("retry produced no text for history entry %s", entry_id)
+        raise RuntimeError("retry produced no text")
     history_store.update(
         entry_id,
         status="ok",
         raw_text=captured[0] if captured else "",
         final_text=text,
     )
-    write_last_text(text)
+    try:
+        write_last_text(text)
+    except Exception:
+        log.exception("could not write retried text to last.txt")
     history_store.prune_audio_clips(getattr(config, "keep_audio_clips", 5))
     return text
 

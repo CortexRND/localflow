@@ -64,6 +64,15 @@ def main():
                 raw_text="Make this concise",
                 final_text="A concise selection.",
             )
+            for index in range(10):
+                history.add(
+                    kind="dictate",
+                    status="ok",
+                    app_name="Editor",
+                    raw_text=f"Raw transcript example {index + 1}",
+                    final_text=f"Polished dictation example {index + 1}.",
+                    duration_s=18,
+                )
             dictionary.add_word("LocalFlow")
             dictionary.add_replacement("teh", "the")
             for page in PAGES:

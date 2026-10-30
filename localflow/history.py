@@ -201,19 +201,23 @@ class HistoryStore:
             )
             return cursor.rowcount > 0
 
-    def recent(self, limit: int = 50, query: str | None = None) -> list[dict]:
+    def recent(
+        self, limit: int = 50, query: str | None = None, offset: int = 0
+    ) -> list[dict]:
         if not self.enabled:
             return []
         limit = max(0, int(limit))
+        offset = max(0, int(offset))
         if limit == 0:
             return []
         sql = "SELECT * FROM dictations"
         params: list[object] = []
         if query:
-            sql += " WHERE raw_text LIKE ? OR final_text LIKE ?"
-            params.extend((f"%{query}%", f"%{query}%"))
-        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
-        params.append(limit)
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            sql += " WHERE raw_text LIKE ? ESCAPE '\\' OR final_text LIKE ? ESCAPE '\\'"
+            params.extend((f"%{escaped}%", f"%{escaped}%"))
+        sql += " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
         with self._lock, self._connect() as connection:
             return [dict(row) for row in connection.execute(sql, params).fetchall()]
 

@@ -1,3 +1,4 @@
+import queue
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock
@@ -34,6 +35,7 @@ def _config(cleanup_enabled: bool = True, hot_phrases: bool = True) -> SimpleNam
         sample_rate=16000,
         keep_audio_clips=5,
         history_enabled=True,
+        sounds_enabled=True,
         command_names=(),
         skills_dirs=(),
     )
@@ -358,3 +360,114 @@ def test_retry_history_entry_reprocesses_clip_without_pasting(tmp_path, monkeypa
     assert updated["status"] == "ok"
     assert updated["raw_text"] == "retried words"
     assert updated["final_text"] == "retried words"
+
+
+def test_retry_exception_leaves_history_fields_unchanged(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(
+        kind="dictate",
+        status="failed",
+        audio_path=clip,
+        raw_text="previous raw",
+        final_text="previous final",
+    )
+    before = store.get(entry_id)
+
+    with pytest.raises(RuntimeError, match="transcriber failed"):
+        app.retry_history_entry(
+            entry_id,
+            store,
+            config=_config(),
+            transcriber=Mock(
+                transcribe=Mock(side_effect=RuntimeError("transcriber failed"))
+            ),
+            cleaner=Mock(),
+        )
+
+    after = store.get(entry_id)
+    assert {key: after[key] for key in ("status", "raw_text", "final_text")} == {
+        key: before[key] for key in ("status", "raw_text", "final_text")
+    }
+
+
+def test_retry_empty_result_leaves_history_fields_unchanged(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(
+        kind="dictate",
+        status="failed",
+        audio_path=clip,
+        raw_text="previous raw",
+        final_text="previous final",
+    )
+    before = store.get(entry_id)
+
+    with pytest.raises(RuntimeError, match="retry produced no text"):
+        app.retry_history_entry(
+            entry_id,
+            store,
+            config=_config(),
+            transcriber=Mock(transcribe=Mock(return_value="")),
+            cleaner=Mock(),
+        )
+
+    after = store.get(entry_id)
+    assert {key: after[key] for key in ("status", "raw_text", "final_text")} == {
+        key: before[key] for key in ("status", "raw_text", "final_text")
+    }
+
+
+def test_worker_continues_when_last_text_write_fails(monkeypatch):
+    jobs = [Job(kind="dictate"), Job(kind="dictate")]
+    work_queue = queue.Queue()
+    for item in (*jobs, None):
+        work_queue.put(item)
+    processed = []
+    delivered = []
+
+    def process(item):
+        processed.append(item)
+        return f"text {len(processed)}", False
+
+    def fail_write(_text):
+        raise OSError("disk is unavailable")
+
+    monkeypatch.setattr(app, "write_last_text", fail_write)
+    app._worker_loop(
+        work_queue,
+        process,
+        lambda item, text, error: delivered.append((item, text, error)),
+    )
+
+    assert processed == jobs
+    assert delivered == [(jobs[0], "text 1", False), (jobs[1], "text 2", False)]
+    assert work_queue.unfinished_tasks == 0
+
+
+def test_achievement_cue_respects_sounds_enabled(tmp_path, monkeypatch):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    monkeypatch.setattr(
+        store, "stats", lambda: {"current_streak_days": 3}
+    )
+    claim_milestone = Mock(return_value=True)
+    monkeypatch.setattr(store, "claim_milestone", claim_milestone)
+    play = Mock()
+    monkeypatch.setattr(app.sounds, "play", play)
+    config = _config()
+    config.sounds_enabled = False
+
+    app._process_job(
+        Job(kind="dictate", audio=np.full(16000, 0.1, dtype=np.float32)),
+        config,
+        Mock(transcribe=Mock(return_value="This is a sufficiently long sentence.")),
+        Mock(clean=Mock(side_effect=lambda text, **_kwargs: text)),
+        Mock(),
+        (),
+        Mock(enabled=Mock(return_value=[])),
+        DictionaryStore(tmp_path / "dictionary.json"),
+        store,
+    )
+
+    play.assert_not_called()
+    claim_milestone.assert_called_once_with(3)

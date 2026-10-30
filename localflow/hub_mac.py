@@ -12,7 +12,6 @@ from AppKit import (
     NSColor,
     NSFont,
     NSMakeRect,
-    NSPopUpButton,
     NSTextField,
     NSView,
     NSWindow,
@@ -20,7 +19,7 @@ from AppKit import (
 from Foundation import NSObject
 
 from localflow.config import apply_config_update, load_config, save_config
-from localflow.dictionary import DictionaryStore
+from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
 from localflow.setup_mac import TOKENS
 
@@ -92,11 +91,12 @@ class HubWindowController(NSObject):
         self.root_view.addSubview_(self.body)
 
     @objc.python_method
-    def _button(self, title, action, x, y, tag=0, width=150):
+    def _button(self, title, action, x, y, tag=0, width=150, parent=None):
         button = NSButton.buttonWithTitle_target_action_(title, self, action)
         button.setFrame_(NSMakeRect(x, y, width, 32))
         button.setTag_(tag)
-        self.body.addSubview_(button)
+        container = parent if parent is not None else self.body
+        container.addSubview_(button)
         return button
 
     @objc.python_method
@@ -142,7 +142,7 @@ class HubWindowController(NSObject):
             card.layer().setBorderColor_(_color("ink").CGColor())
             card.layer().setBorderWidth_(1)
             card.addSubview_(_label(title.upper(), 10, 42, 148, 10, "muted"))
-            card.addSubview_(_label(str(value), 10, 12, 148, 20, size=18))
+            card.addSubview_(_label(str(value), 10, 12, 148, size=18))
             self.body.addSubview_(card)
         self.body.addSubview_(
             _label(
@@ -166,27 +166,79 @@ class HubWindowController(NSObject):
         self.search_field = self._field("", 0, 565, 350)
         self._button("Search", "searchHistory:", 360, 565)
         self._button("Clear history", "clearHistory:", 530, 565)
+        self.history_offset = 0
+        self.history_query = ""
+        self.history_results = NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 25, 760, 510)
+        )
+        self.body.addSubview_(self.history_results)
         self._render_history("")
 
     @objc.python_method
-    def _render_history(self, query):
-        rows = self.history.recent(query=query or None, limit=8)
+    def _render_history(self, query=None):
+        if query is not None:
+            self.history_query = query
+            self.history_offset = 0
+        for view in list(self.history_results.subviews()):
+            view.removeFromSuperview()
+        rows = self.history.recent(
+            query=self.history_query or None,
+            limit=9,
+            offset=self.history_offset,
+        )
+        has_older = len(rows) > 8
+        rows = rows[:8]
         for index, row in enumerate(rows):
-            y = 510 - index * 58
-            self.body.addSubview_(
-                _label(f'{row["id"]} · {row["kind"]} · {row["status"]} · '
-                       f'{(row["final_text"] or row["raw_text"])[:50]}', 0, y, 430, 12)
+            y = 455 - index * 52
+            self.history_results.addSubview_(
+                _label(
+                    f'{row["id"]} · {row["kind"]} · {row["status"]} · '
+                    f'{(row["final_text"] or row["raw_text"])[:42]}',
+                    0, y, 310, 12,
+                )
             )
-            self._button("Copy", "copyEntry:", 445, y, row["id"], 72)
-            self._button("Copy original", "rawEntry:", 500, y, row["id"], 110)
+            self._button(
+                "Copy", "copyEntry:", 320, y, row["id"], 66,
+                parent=self.history_results,
+            )
+            self._button(
+                "Copy original", "rawEntry:", 390, y, row["id"], 110,
+                parent=self.history_results,
+            )
             if row["kind"] == "dictate" and row["audio_path"]:
-                self._button("Retry", "retryEntry:", 580, y, row["id"], 66)
-            self._button("Delete", "deleteEntry:", 650, y, row["id"], 75)
+                self._button(
+                    "Retry", "retryEntry:", 505, y, row["id"], 65,
+                    parent=self.history_results,
+                )
+            self._button(
+                "Delete", "deleteEntry:", 575, y, row["id"], 75,
+                parent=self.history_results,
+            )
         if not rows:
-            self.body.addSubview_(_label("No matching history entries.", 0, 510, color="muted"))
+            self.history_results.addSubview_(
+                _label("No matching history entries.", 0, 455, color="muted")
+            )
+        if self.history_offset:
+            self._button(
+                "Newer", "newerHistory:", 320, 8, width=80,
+                parent=self.history_results,
+            )
+        if has_older:
+            self._button(
+                "Older", "olderHistory:", 410, 8, width=80,
+                parent=self.history_results,
+            )
 
     def searchHistory_(self, _sender):
         self._render_history(self.search_field.stringValue())
+
+    def newerHistory_(self, _sender):
+        self.history_offset = max(0, self.history_offset - 8)
+        self._render_history()
+
+    def olderHistory_(self, _sender):
+        self.history_offset += 8
+        self._render_history()
 
     def copyEntry_(self, sender):
         import pyperclip
@@ -262,8 +314,12 @@ class HubWindowController(NSObject):
     def addWord_(self, _sender):
         try:
             if self.editing_word:
-                self.dictionary.remove(self.editing_word)
-            self.dictionary.add_word(self.word_field.stringValue())
+                if not self.dictionary.update_word(
+                    self.editing_word, self.word_field.stringValue()
+                ):
+                    raise DictionaryError("word already exists or was removed")
+            else:
+                self.dictionary.add_word(self.word_field.stringValue())
             self.editing_word = None
             self.show_page("Dictionary")
         except Exception as exc:  # noqa: BLE001
@@ -273,10 +329,18 @@ class HubWindowController(NSObject):
     def addReplacement_(self, _sender):
         try:
             if self.editing_source:
-                self.dictionary.remove(self.editing_source)
-            self.dictionary.add_replacement(
-                self.from_field.stringValue(), self.to_field.stringValue()
-            )
+                if not self.dictionary.update_replacement(
+                    self.editing_source,
+                    self.from_field.stringValue(),
+                    self.to_field.stringValue(),
+                ):
+                    raise DictionaryError(
+                        "replacement source already exists or was removed"
+                    )
+            else:
+                self.dictionary.add_replacement(
+                    self.from_field.stringValue(), self.to_field.stringValue()
+                )
             self.editing_source = None
             self.show_page("Dictionary")
         except Exception as exc:  # noqa: BLE001
@@ -318,10 +382,24 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _page_style(self):
-        self.cleanup_popup = self._popup(
-            ("none", "light", "medium", "strict"), self.config.cleanup_level, 565
-        )
-        self.style_popups = {}
+        self.cleanup_options = ("none", "light", "medium")
+        self.cleanup_selection = self.config.cleanup_level
+        self.cleanup_buttons = []
+        self.style_options = ("formal", "casual", "very_casual", "excited")
+        self.style_selections = {}
+        self.style_buttons = {}
+        self.style_tag_map = {}
+        self.body.addSubview_(_label("Cleanup level", 0, 560, 145, 12))
+        for index, (value, title) in enumerate(
+            zip(self.cleanup_options, ("None", "Light", "Medium"))
+        ):
+            self.cleanup_buttons.append(
+                self._segment_button(
+                    title, "selectCleanupLevel_", index,
+                    155 + index * 105, 555, 95,
+                    selected=value == self.cleanup_selection,
+                )
+            )
         examples = {
             "work": "Please share the updated timeline.",
             "email": "Thanks for following up.",
@@ -329,29 +407,78 @@ class HubWindowController(NSObject):
             "other": "The main point is clear.",
         }
         for index, (category, example) in enumerate(examples.items()):
-            y = 505 - index * 62
-            self.body.addSubview_(_label(f"{category.title()} · {example}", 0, y, 450, 12))
-            self.style_popups[category] = self._popup(
-                ("formal", "casual", "very_casual"),
-                getattr(self.config, f"style_{category}"), y,
+            y = 465 - index * 78
+            self.body.addSubview_(
+                _label(f"{category.title()} style", 0, y + 22, 180, 12)
             )
-        self._button("Save style", "saveStyle:", 0, 235, width=150)
+            self.body.addSubview_(
+                _label(example, 0, y - 3, 180, 10, "muted")
+            )
+            self.style_selections[category] = getattr(
+                self.config, f"style_{category}"
+            )
+            self.style_buttons[category] = []
+            for option_index, value in enumerate(self.style_options):
+                tag = index * len(self.style_options) + option_index
+                self.style_tag_map[tag] = (category, value)
+                self.style_buttons[category].append(
+                    self._segment_button(
+                        value.replace("_", " ").title(),
+                        "selectStyle_",
+                        tag,
+                        190 + option_index * 132,
+                        y + 12,
+                        124,
+                        selected=value == self.style_selections[category],
+                    )
+                )
+        self._button("Save style", "saveStyle:", 0, 145, width=150)
 
     @objc.python_method
-    def _popup(self, choices, selected, y):
-        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(470, y, 220, 30), False)
-        popup.addItemsWithTitles_(list(choices))
-        popup.selectItemWithTitle_(selected)
-        self.body.addSubview_(popup)
-        return popup
+    def _segment_button(
+        self, title, action, tag, x, y, width, *, selected, parent=None
+    ):
+        button = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, width, 34))
+        button.setTitle_(title)
+        button.setTarget_(self)
+        button.setAction_(objc.selector(getattr(self, action), signature=b"v@:@"))
+        button.setTag_(tag)
+        button.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        button.setFont_(NSFont.boldSystemFontOfSize_(12))
+        button.setWantsLayer_(True)
+        button.layer().setBackgroundColor_(
+            _color("sun" if selected else "card").CGColor()
+        )
+        button.layer().setBorderColor_(_color("ink").CGColor())
+        button.layer().setBorderWidth_(2)
+        button.layer().setCornerRadius_(10)
+        (parent if parent is not None else self.body).addSubview_(button)
+        return button
+
+    @objc.python_method
+    def _update_segment_buttons(self, buttons, selected):
+        for index, button in enumerate(buttons):
+            button.layer().setBackgroundColor_(
+                _color("sun" if index == selected else "card").CGColor()
+            )
+
+    def selectCleanupLevel_(self, sender):
+        self.cleanup_selection = self.cleanup_options[sender.tag()]
+        self._update_segment_buttons(self.cleanup_buttons, sender.tag())
+
+    def selectStyle_(self, sender):
+        category, value = self.style_tag_map[sender.tag()]
+        self.style_selections[category] = value
+        selected = self.style_options.index(value)
+        self._update_segment_buttons(self.style_buttons[category], selected)
 
     def saveStyle_(self, _sender):
         update = {
             "cleanup": {
-                "level": self.cleanup_popup.titleOfSelectedItem(),
+                "level": self.cleanup_selection,
                 **{
-                    f"style_{name}": popup.titleOfSelectedItem()
-                    for name, popup in self.style_popups.items()
+                    f"style_{name}": value
+                    for name, value in self.style_selections.items()
                 },
             }
         }
@@ -366,6 +493,7 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _page_models(self):
+        self.config = load_config()
         self.body.addSubview_(
             _label(
                 f"Speech model: {self.config.stt_backend} / {self.config.model_size}\n"

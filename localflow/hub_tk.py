@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from localflow.config import apply_config_update, load_config, save_config
-from localflow.dictionary import DictionaryStore
+from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
 from localflow.setup_tk import TOKENS
 
@@ -153,28 +153,59 @@ class HubWindow:
     def _page_history(self):
         bar = tk.Frame(self.body, bg=TOKENS["paper"])
         bar.pack(fill="x", pady=(0, 10))
-        query = tk.StringVar()
-        entry = tk.Entry(bar, textvariable=query, font=("TkDefaultFont", 11))
-        entry.pack(side="left", fill="x", expand=True, ipady=6)
-        self._button(bar, "Search", lambda: self._render_history(query.get())).pack(
-            side="left", padx=8
+        self.history_query = tk.StringVar()
+        self.history_offset = 0
+        entry = tk.Entry(
+            bar, textvariable=self.history_query, font=("TkDefaultFont", 11)
         )
+        entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self._button(bar, "Search", self._search_history).pack(side="left", padx=8)
         self._button(
             bar, "Clear history", self._clear_history, bg=TOKENS["red"]
         ).pack(side="right")
         self.history_rows = tk.Frame(self.body, bg=TOKENS["paper"])
         self.history_rows.pack(fill="both", expand=True)
-        self._render_history("")
+        self.history_pager = tk.Frame(self.body, bg=TOKENS["paper"])
+        self.history_pager.pack(fill="x")
+        self._render_history()
 
-    def _render_history(self, query):
+    def _search_history(self):
+        self.history_offset = 0
+        self._render_history()
+
+    def _change_history_page(self, offset):
+        self.history_offset = max(0, self.history_offset + offset)
+        self._render_history()
+
+    def _render_history(self):
         for child in self.history_rows.winfo_children():
             child.destroy()
-        rows = self.history.recent(query=query or None, limit=100)
+        for child in self.history_pager.winfo_children():
+            child.destroy()
+        rows = self.history.recent(
+            query=self.history_query.get() or None,
+            limit=9,
+            offset=self.history_offset,
+        )
+        has_older = len(rows) > 8
+        rows = rows[:8]
         if not rows:
             tk.Label(self.history_rows, text="No matching history entries.",
                      bg=TOKENS["paper"], fg=TOKENS["muted"]).pack(anchor="w")
         for row in rows:
             self._history_line(self.history_rows, row, actions=True)
+        if self.history_offset:
+            self._button(
+                self.history_pager,
+                "Newer",
+                lambda: self._change_history_page(-8),
+            ).pack(side="left")
+        if has_older:
+            self._button(
+                self.history_pager,
+                "Older",
+                lambda: self._change_history_page(8),
+            ).pack(side="right")
 
     def _history_line(self, parent, row, actions):
         frame = tk.Frame(parent, bg=TOKENS["card"], padx=10, pady=8,
@@ -294,8 +325,12 @@ class HubWindow:
     def _add_word(self):
         try:
             if self.editing_word:
-                self.dictionary.remove(self.editing_word)
-            self.dictionary.add_word(self.word_var.get())
+                if not self.dictionary.update_word(
+                    self.editing_word, self.word_var.get()
+                ):
+                    raise DictionaryError("word already exists or was removed")
+            else:
+                self.dictionary.add_word(self.word_var.get())
             self.editing_word = None
             self.word_var.set("")
             self._render_dictionary()
@@ -305,8 +340,14 @@ class HubWindow:
     def _add_replacement(self):
         try:
             if self.editing_source:
-                self.dictionary.remove(self.editing_source)
-            self.dictionary.add_replacement(self.from_var.get(), self.to_var.get())
+                if not self.dictionary.update_replacement(
+                    self.editing_source, self.from_var.get(), self.to_var.get()
+                ):
+                    raise DictionaryError(
+                        "replacement source already exists or was removed"
+                    )
+            else:
+                self.dictionary.add_replacement(self.from_var.get(), self.to_var.get())
             self.editing_source = None
             self.from_var.set("")
             self.to_var.set("")
@@ -331,11 +372,55 @@ class HubWindow:
             except Exception as exc:  # noqa: BLE001
                 self.set_page_error("Dictionary", str(exc))
 
+    def _segmented_control(self, parent, variable, choices):
+        buttons = {}
+
+        def select(value):
+            variable.set(value)
+            for option, button in buttons.items():
+                button.configure(
+                    bg=TOKENS["sun"] if option == value else TOKENS["card"]
+                )
+
+        for value, label in choices:
+            button = tk.Button(
+                parent,
+                text=label,
+                command=lambda choice=value: select(choice),
+                bg=TOKENS["card"],
+                fg=TOKENS["ink"],
+                relief="solid",
+                bd=2,
+                padx=8,
+                pady=4,
+                font=("TkDefaultFont", 9, "bold"),
+            )
+            button.pack(side="left", padx=2)
+            buttons[value] = button
+        select(variable.get())
+        return buttons
+
     def _page_style(self):
         self.cleanup_var = tk.StringVar(value=self.config.cleanup_level)
-        tk.Label(self.body, text="Cleanup level", bg=TOKENS["paper"]).pack(anchor="w")
-        tk.OptionMenu(self.body, self.cleanup_var, "none", "light", "medium", "strict").pack(anchor="w", pady=5)
+        cleanup_row = tk.Frame(self.body, bg=TOKENS["paper"])
+        cleanup_row.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            cleanup_row, text="Cleanup level", bg=TOKENS["paper"], fg=TOKENS["ink"],
+            font=("TkDefaultFont", 10, "bold"),
+        ).pack(side="left", padx=(0, 10))
+        self.cleanup_buttons = self._segmented_control(
+            cleanup_row,
+            self.cleanup_var,
+            (("none", "None"), ("light", "Light"), ("medium", "Medium")),
+        )
         self.style_vars = {}
+        self.style_buttons = {}
+        style_choices = (
+            ("formal", "Formal"),
+            ("casual", "Casual"),
+            ("very_casual", "Very casual"),
+            ("excited", "Excited"),
+        )
         examples = {
             "work": "Please share the updated timeline.",
             "email": "Thanks for following up.",
@@ -344,12 +429,19 @@ class HubWindow:
         }
         for category, example in examples.items():
             row = tk.Frame(self.body, bg=TOKENS["paper"])
-            row.pack(fill="x", pady=5)
-            tk.Label(row, text=f"{category.title()} style", bg=TOKENS["paper"], width=18, anchor="w").pack(side="left")
+            row.pack(fill="x", pady=(7, 0))
+            tk.Label(
+                row, text=f"{category.title()} style", bg=TOKENS["paper"],
+                fg=TOKENS["ink"], width=15, anchor="w",
+            ).pack(side="left")
             var = tk.StringVar(value=getattr(self.config, f"style_{category}"))
             self.style_vars[category] = var
-            tk.OptionMenu(row, var, "formal", "casual", "very_casual").pack(side="left")
-            tk.Label(row, text=example, bg=TOKENS["paper"], fg=TOKENS["muted"]).pack(side="left", padx=10)
+            self.style_buttons[category] = self._segmented_control(
+                row, var, style_choices
+            )
+            tk.Label(
+                self.body, text=example, bg=TOKENS["paper"], fg=TOKENS["muted"],
+            ).pack(anchor="w", padx=15)
         self._button(self.body, "Save style", self._save_style).pack(anchor="w", pady=14)
 
     def _save_style(self):
@@ -368,6 +460,7 @@ class HubWindow:
             self.set_page_error("Style", str(exc))
 
     def _page_models(self):
+        self.config = load_config()
         tk.Label(
             self.body,
             text=f"Speech model: {self.config.stt_backend} / {self.config.model_size}\n"
