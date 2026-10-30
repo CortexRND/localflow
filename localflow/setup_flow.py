@@ -158,9 +158,15 @@ def run_checks(cfg: Config) -> list[Check]:
 
 def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
     recommended_stt, recommended_llm = recommend(hw)
+    available_stt = available_stt_models(hw)
+    available_stt_ids = {model.id for model in available_stt}
+    if recommended_stt not in available_stt_ids:
+        recommended_stt = next(
+            model.id for model in available_stt if model.backend == "faster-whisper"
+        )
     if cfg.setup_version > 0:
         stt_id = current_stt_id(cfg)
-        if stt_id not in {model.id for model in available_stt_models(hw)}:
+        if stt_id not in available_stt_ids:
             stt_id = recommended_stt
         valid_llm = {model.id for model in LLM_MODELS}
         llm_id = (
@@ -189,7 +195,11 @@ def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
         )
     return SetupChoices(
         stt_id=recommended_stt,
-        llm_id=recommended_llm if cfg.llm_provider == "ollama" else None,
+        llm_id=(
+            recommended_llm
+            if cfg.llm_provider == "ollama" and ollama_installed()
+            else None
+        ),
         input_device=cfg.input_device,
         hotkey=cfg.hotkey,
         language=cfg.language,
@@ -213,10 +223,13 @@ def apply(choices: SetupChoices):
             "cleanup_enabled": choices.llm_id is not None,
         }
     path = save_config(apply_config_update(current, updates))
-    if choices.start_on_login and platform.system() == "Darwin":
-        from localflow.launchagent import install
+    if platform.system() == "Darwin":
+        from localflow import launchagent
 
-        install()
+        if choices.start_on_login:
+            launchagent.install()
+        elif launchagent.status() != "not installed":
+            launchagent.uninstall()
     return path
 
 

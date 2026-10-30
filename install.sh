@@ -57,7 +57,7 @@ cd "$REPO"
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 if [[ "$(uname -m)" == "arm64" ]]; then
-    .venv/bin/pip install -e ".[mlx,menubar,macos-permissions]"
+    .venv/bin/pip install -e ".[mlx,parakeet,menubar,macos-permissions]"
 else
     .venv/bin/pip install -e ".[macos-permissions]"
 fi

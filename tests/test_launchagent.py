@@ -21,6 +21,14 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture
+def installed_plist(home):
+    path = home / "Library" / "LaunchAgents" / f"{L.LABEL}.plist"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    return path
+
+
 # ------------------------------------------------------------- plist_content ---
 
 def test_plist_is_valid_xml_with_expected_keys():
@@ -192,23 +200,32 @@ def test_uninstall_when_never_installed_does_not_raise(home, monkeypatch):
 
 # ---------------------------------------------------------------------- status ---
 
-def test_status_running(monkeypatch):
+def test_status_running(installed_plist, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run(returncode=0, stdout="state = running\n"))
     result = L.status()
     assert "running" in result
     assert "com.cortexrnd.localflow" in result
 
 
-def test_status_loaded_not_running(monkeypatch):
+def test_status_loaded_not_running(installed_plist, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run(returncode=0, stdout="state = not running\n"))
     result = L.status()
     assert "not running" in result
 
 
-def test_status_not_loaded(monkeypatch):
+def test_status_not_loaded(installed_plist, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run(returncode=3, stderr="Could not find service"))
     result = L.status()
     assert "not loaded" in result
+
+
+def test_status_not_installed_does_not_call_launchctl(monkeypatch):
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("launchctl should not be queried without a plist")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+
+    assert L.status() == "not installed"
 
 
 # -------------------------------------------------------------- no real launchctl ---

@@ -75,6 +75,8 @@ def main():
                 window.status_message = "Setup saved."
             window._render()
             capture(f"step-{step + 1}")
+            if step == 6:
+                capture("finish")
 
         window.saved = False
         window.step = 2
@@ -96,6 +98,14 @@ def main():
         window.error_message = ""
         window._render()
         capture("non-ollama-provider")
+
+        window.choices = replace(window.choices, llm_provider="ollama")
+        window.step = 3
+        window.ollama_running = False
+        window.llm_var.set("llama3.2:1b")
+        window.error_message = "Ollama isn't running — start it, or choose No cleanup."
+        window._render()
+        capture("ollama-offline")
     finally:
         root.destroy()
     print(f"wrote setup screenshots to {output}")

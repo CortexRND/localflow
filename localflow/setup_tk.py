@@ -4,11 +4,14 @@ import queue
 import subprocess
 import sys
 import threading
-import webbrowser
-from pathlib import Path
+import time
 import tkinter as tk
+import webbrowser
+from dataclasses import replace
+from pathlib import Path
 from tkinter import messagebox, ttk
 
+from localflow import setup_flow
 from localflow.audio import list_input_devices
 from localflow.config import load_config
 from localflow.models import (
@@ -21,8 +24,12 @@ from localflow.models import (
     is_stt_downloaded,
     recommend,
 )
-from localflow import setup_flow
-from localflow.setup_flow import HOTKEY_OPTIONS, MicLevelMonitor, SetupChoices, initial_choices
+from localflow.setup_flow import (
+    HOTKEY_OPTIONS,
+    MicLevelMonitor,
+    SetupChoices,
+    initial_choices,
+)
 
 TOKENS = {
     "paper": "#FFF8E7",
@@ -70,9 +77,15 @@ class SetupWindow:
         self._ollama_checked = False
         self.status_message = ""
         self.error_message = ""
+        self._mic_error = ""
         self._busy: set[str] = set()
         self._cancel: threading.Event | None = None
         self._events: queue.Queue = queue.Queue()
+        self._clock = time.monotonic
+        self._stall_timeout = 30.0
+        self._last_progress_at = None
+        self._last_progress_bytes = None
+        self._progress_stalled = False
         self._monitor: MicLevelMonitor | None = None
         self._monitor_started = False
         self._test_transcriber = None
@@ -344,6 +357,8 @@ class SetupWindow:
         self.meter = tk.Canvas(self.body, height=18, bg=TOKENS["card"], highlightbackground=TOKENS["ink"], highlightthickness=1)
         self.meter.pack(fill="x")
         self.meter_bar = self.meter.create_rectangle(0, 0, 0, 18, fill=TOKENS["red"], outline="")
+        if self._mic_error:
+            self._label(self.body, self._mic_error, fg=TOKENS["red"])
         self.meter.bind("<Configure>", lambda _e: self._draw_meter())
         self._start_monitor()
         self._update_meter()
@@ -384,11 +399,14 @@ class SetupWindow:
             ).pack(anchor="w", pady=(10, 0))
 
     def _render_footer(self) -> None:
+        self._clear(self.footer)
         busy = bool(self._busy)
+        model_busy = bool(self._busy & {"stt-download", "llm-pull"})
         if self.step > 0 and not self.saved:
             tk.Button(
                 self.footer, text="Back", command=self.back,
                 bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2,
+                state="disabled" if model_busy else "normal",
             ).pack(side="left")
         if self._cancel is not None and busy and self.step in (2, 3):
             tk.Button(
@@ -489,7 +507,10 @@ class SetupWindow:
         self.error_message = ""
         self.status_message = "Preparing download…"
         self._busy.add("stt-download")
-        self._render_footer()
+        self._last_progress_at = self._clock()
+        self._last_progress_bytes = 0
+        self._progress_stalled = False
+        self._render()
 
         def work():
             try:
@@ -499,9 +520,9 @@ class SetupWindow:
                     cancel,
                 )
             except Exception as exc:
-                self._events.put(("error", "stt-download", exc))
+                self._events.put(("error", "stt-download", selected.id, exc))
             else:
-                self._events.put(("done", "stt-download", path))
+                self._events.put(("done", "stt-download", selected.id, path))
 
         threading.Thread(target=work, name="setup-stt-download", daemon=True).start()
 
@@ -511,6 +532,10 @@ class SetupWindow:
         self.error_message = ""
         self.status_message = "Preparing Ollama download…"
         self._busy.add("llm-pull")
+        self._last_progress_at = self._clock()
+        self._last_progress_bytes = 0
+        self._progress_stalled = False
+        self._render()
 
         def work():
             try:
@@ -523,9 +548,9 @@ class SetupWindow:
                     cancel,
                 )
             except Exception as exc:
-                self._events.put(("error", "llm-pull", exc))
+                self._events.put(("error", "llm-pull", selected, exc))
             else:
-                self._events.put(("done", "llm-pull", selected))
+                self._events.put(("done", "llm-pull", selected, selected))
 
         threading.Thread(target=work, name="setup-llm-pull", daemon=True).start()
 
@@ -555,10 +580,17 @@ class SetupWindow:
         self._start_job("monitor", self._monitor.start)
 
     def _change_device(self, _event=None) -> None:
+        self._mic_error = ""
         if self._monitor is not None:
             self._monitor.stop()
             self._monitor = None
         self._start_monitor()
+
+    def _stop_monitor(self) -> None:
+        if self._monitor is not None:
+            self._monitor.stop()
+            self._monitor = None
+        self._monitor_started = False
 
     def _update_meter(self) -> None:
         if self.step == 4 and self._monitor is not None:
@@ -606,21 +638,29 @@ class SetupWindow:
             kind, key, *data = event
             if kind == "progress":
                 done, total, *extra = data
+                if key in {"stt-download", "llm-pull"} and done != self._last_progress_bytes:
+                    self._last_progress_bytes = done
+                    self._last_progress_at = self._clock()
+                    self._progress_stalled = False
                 status = extra[0] if extra else ""
                 prefix = f"{done / 1_000_000:.0f} / {total / 1_000_000:.0f} MB"
                 self.status_message = f"{prefix}  ·  {status}".strip(" ·") if status else prefix
                 if self.step in (2, 3):
                     self._progress_var.set(self.status_message)
             elif kind == "error":
-                error = data[0]
+                model_id, error = (
+                    data if key in {"stt-download", "llm-pull"} else (None, data[0])
+                )
                 self._busy.discard(key)
                 self._cancel = None
-                if isinstance(error, DownloadCancelled):
+                if key == "monitor":
+                    self._mic_error = str(error) or error.__class__.__name__
+                    self.error_message = ""
+                    self.status_message = ""
+                elif isinstance(error, DownloadCancelled):
                     self.status_message = "Download cancelled."
                 else:
                     self.error_message = str(error) or error.__class__.__name__
-                if key == "monitor":
-                    self.status_message = "Microphone meter unavailable."
                 if key == "stt-checks" or key == "checks":
                     self.status_message = str(error)
                 if key == "checks":
@@ -632,7 +672,9 @@ class SetupWindow:
                     self._ollama_checked = True
                 self._render()
             elif kind == "done":
-                result = data[0]
+                model_id, result = (
+                    data if key in {"stt-download", "llm-pull"} else (None, data[0])
+                )
                 self._busy.discard(key)
                 if key == "checks":
                     self.checks = result
@@ -642,12 +684,16 @@ class SetupWindow:
                     self.ollama_running, self.ollama_models = result
                     self._ollama_checked = True
                 elif key == "stt-download":
-                    self.downloaded[self.stt_var.get()] = True
+                    self.downloaded[model_id] = True
                     self.status_message = f"Downloaded {Path(result).name}"
+                    if self.step == 2 and self.stt_var.get() == model_id:
+                        self._continue()
                 elif key == "llm-pull":
-                    if result not in self.ollama_models:
-                        self.ollama_models.append(result)
-                    self.status_message = f"Downloaded {result}"
+                    if model_id not in self.ollama_models:
+                        self.ollama_models.append(model_id)
+                    self.status_message = f"Downloaded {model_id}"
+                    if self.step == 3 and self.llm_var.get() == model_id:
+                        self._continue()
                 elif key == "trial":
                     self.status_message = result or "No speech detected. Try again near your microphone."
                     self.step = 5
@@ -658,9 +704,22 @@ class SetupWindow:
                     self._monitor_started = True
                 self._cancel = None
                 self._render()
+        self._check_download_stall()
         if self.step == 4:
             self._draw_meter()
         self.root.after(100, self._poll_events)
+
+    def _check_download_stall(self) -> None:
+        if not self._busy.intersection({"stt-download", "llm-pull"}):
+            return
+        if self._last_progress_at is None or self._progress_stalled:
+            return
+        if self._clock() - self._last_progress_at < self._stall_timeout:
+            return
+        self._progress_stalled = True
+        self.status_message = "No progress for 30s — check your connection, or Cancel."
+        self.error_message = ""
+        self._render()
 
     def _fix_check(self, check) -> None:
         if not check.fix_url:
@@ -671,10 +730,14 @@ class SetupWindow:
             messagebox.showinfo("Run this command", check.fix_url, parent=self.root)
 
     def _select_stt(self, model_id: str) -> None:
+        if "stt-download" in self._busy:
+            return
         self.stt_var.set(model_id)
         self._render()
 
     def _select_llm(self, model_id: str) -> None:
+        if "llm-pull" in self._busy:
+            return
         self.llm_var.set(model_id)
         self._render()
 
@@ -684,7 +747,17 @@ class SetupWindow:
     def _continue(self) -> None:
         self.error_message = ""
         self.status_message = ""
+        if (
+            self.step == 3
+            and self.choices.llm_provider == "ollama"
+            and self.llm_var.get() != "none"
+            and not self.ollama_running
+        ):
+            self.error_message = "Ollama isn't running — start it, or choose No cleanup."
+            self._render()
+            return
         if self.step == 4:
+            self._stop_monitor()
             self.choices = SetupChoices(
                 stt_id=self.stt_var.get(),
                 llm_id=None if self.llm_var.get() == "none" else self.llm_var.get(),
@@ -694,6 +767,7 @@ class SetupWindow:
                 start_on_login=bool(self.start_login_var.get()),
                 llm_provider=self.choices.llm_provider,
             )
+        self._mic_error = ""
         self.step = min(6, self.step + 1)
         self._render()
 
@@ -701,10 +775,14 @@ class SetupWindow:
         self._continue()
 
     def back(self) -> None:
+        if self._busy & {"stt-download", "llm-pull"}:
+            return
         if self.step > 0 and not self.saved:
-            if self.step == 4 and self._monitor is not None:
-                self._monitor.stop()
-                self._monitor = None
+            if self.step == 4:
+                self._stop_monitor()
+            self.error_message = ""
+            self.status_message = ""
+            self._mic_error = ""
             self.step -= 1
             self._render()
 
@@ -736,6 +814,10 @@ class SetupWindow:
                 self._start_trial()
         elif self.step == 6:
             if "apply" not in self._busy:
+                self.choices = replace(
+                    self.choices,
+                    start_on_login=bool(self.start_login_var.get()),
+                )
                 self._start_job("apply", lambda: setup_flow.apply(self.choices))
 
     def skip_trial(self) -> None:
@@ -759,9 +841,7 @@ class SetupWindow:
         subprocess.Popen([sys.executable, "-m", "localflow.app"])
 
     def close(self) -> None:
-        if self._monitor is not None:
-            self._monitor.stop()
-            self._monitor = None
+        self._stop_monitor()
         self.root.destroy()
 
 

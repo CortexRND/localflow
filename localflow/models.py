@@ -15,6 +15,10 @@ from typing import Callable
 
 import requests
 from faster_whisper.utils import _MODELS
+
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
 from localflow.config import Config
@@ -207,11 +211,25 @@ def available_stt_models(hw: HardwareInfo) -> tuple[SttModel, ...]:
     return tuple(
         model for model in STT_MODELS
         if not model.apple_silicon_only or hw.apple_silicon
+        if runtime_available(model.backend)
     )
 
 
+def runtime_available(backend: str) -> bool:
+    module = {
+        "mlx-whisper": "mlx_whisper",
+        "parakeet": "parakeet_mlx",
+    }.get(backend)
+    if module is None:
+        return True
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def recommend(hw: HardwareInfo) -> tuple[str, str | None]:
-    if hw.apple_silicon:
+    if hw.apple_silicon and runtime_available("mlx-whisper"):
         stt_id = "mlx-small" if hw.ram_gb >= 16 else "mlx-base"
     else:
         stt_id = "fw-base" if hw.ram_gb >= 8 else "fw-tiny"
@@ -225,7 +243,10 @@ def recommend(hw: HardwareInfo) -> tuple[str, str | None]:
 
 
 def stt_config(model: SttModel) -> dict:
-    return {"stt": {"provider": model.backend, "model": model.model_size}}
+    stt = {"provider": model.backend, "model": model.model_size}
+    if model.backend in ("mlx-whisper", "parakeet"):
+        stt["device"] = "auto"
+    return {"stt": stt}
 
 
 def current_stt_id(config: Config) -> str:
@@ -276,6 +297,8 @@ def download_stt(
     on_progress: Callable[[int, int], None],
     cancel: threading.Event | None = None,
 ) -> Path:
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
     if cancel is not None and cancel.is_set():
         raise DownloadCancelled("Download cancelled")
     try:

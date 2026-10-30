@@ -7,7 +7,9 @@ from Foundation import NSMakePoint, NSMakeRect, NSObject, NSTimer, NSURL
 
 import queue
 import threading
+import time
 import webbrowser
+from dataclasses import replace
 
 from localflow import setup_flow
 from localflow.config import load_config
@@ -82,6 +84,11 @@ class SetupWindowController(NSObject):
         self.busy = set()
         self.cancel_event = None
         self.events = queue.Queue()
+        self._clock = time.monotonic
+        self._stall_timeout = 30.0
+        self._last_progress_at = None
+        self._last_progress_bytes = None
+        self._progress_stalled = False
         self.monitor = None
         self._build_window()
         self._render()
@@ -197,6 +204,8 @@ class SetupWindowController(NSObject):
         self.title.setStringValue_(_STEP_TITLES[self.step])
         self.subtitle.setStringValue_(f"Step {self.step + 1} of 7")
         self.back_button.setHidden_(self.step == 0 or self.saved)
+        model_busy = bool(self.busy & {"stt-download", "llm-pull"})
+        self.back_button.setEnabled_(not model_busy)
         self.primary_button.setHidden_(False)
         self.status.setStringValue_(self.error_message or self.status_message)
         self.status.setTextColor_(_color("red" if self.error_message else "muted"))
@@ -367,17 +376,25 @@ class SetupWindowController(NSObject):
         self.window.makeKeyAndOrderFront_(None)
 
     @objc.python_method
-    def _start_worker(self, key, function):
+    def _start_worker(self, key, function, model_id=None):
         self.busy.add(key)
         self.error_message = ""
+        if model_id is not None:
+            self._render()
 
         def run():
             try:
                 result = function()
             except Exception as exc:
-                self.events.put(("error", key, exc))
+                if model_id is not None:
+                    self.events.put(("error", key, model_id, exc))
+                else:
+                    self.events.put(("error", key, exc))
             else:
-                self.events.put(("done", key, result))
+                if model_id is not None:
+                    self.events.put(("done", key, model_id, result))
+                else:
+                    self.events.put(("done", key, result))
 
         threading.Thread(target=run, name=f"setup-{key}", daemon=True).start()
         self.primary_button.setEnabled_(False)
@@ -415,27 +432,42 @@ class SetupWindowController(NSObject):
     def _start_download(self):
         model = next(item for item in self.models if item.id == self.stt_id)
         self.cancel_event = threading.Event()
+        self.error_message = ""
+        self.status_message = "Preparing download…"
+        self._last_progress_at = self._clock()
+        self._last_progress_bytes = 0
+        self._progress_stalled = False
         cancel = self.cancel_event
 
         def progress(done, total):
             self.events.put(("progress", "stt-download", done, total))
 
-        self._start_worker("stt-download", lambda: download_stt(model, progress, cancel))
+        self._start_worker(
+            "stt-download",
+            lambda: download_stt(model, progress, cancel),
+            model_id=model.id,
+        )
 
     @objc.python_method
     def _start_pull(self):
+        model_id = self.llm_id
         self.cancel_event = threading.Event()
+        self.error_message = ""
+        self.status_message = "Preparing Ollama download…"
+        self._last_progress_at = self._clock()
+        self._last_progress_bytes = 0
+        self._progress_stalled = False
         cancel = self.cancel_event
         client = OllamaClient(self.config.llm_base_url)
 
         def pull():
             client.pull(
-                self.llm_id,
+                model_id,
                 lambda done, total, status: self.events.put(("progress", "llm-pull", done, total, status)),
                 cancel,
             )
-            return self.llm_id
-        self._start_worker("llm-pull", pull)
+            return model_id
+        self._start_worker("llm-pull", pull, model_id=model_id)
 
     @objc.python_method
     def _start_trial(self):
@@ -475,15 +507,22 @@ class SetupWindowController(NSObject):
             try:
                 kind, key, *data = self.events.get_nowait()
             except queue.Empty:
+                self._check_download_stall()
                 return
             if kind == "progress":
                 done, total, *rest = data
+                if key in {"stt-download", "llm-pull"} and done != self._last_progress_bytes:
+                    self._last_progress_bytes = done
+                    self._last_progress_at = self._clock()
+                    self._progress_stalled = False
                 self.status_message = (
                     f"{done / 1_000_000:.0f} / {total / 1_000_000:.0f} MB"
                     + (f"  ·  {rest[0]}" if rest and rest[0] else "")
                 )
             elif kind == "error":
-                error = data[0]
+                model_id, error = (
+                    data if key in {"stt-download", "llm-pull"} else (None, data[0])
+                )
                 self.busy.discard(key)
                 self.cancel_event = None
                 if isinstance(error, DownloadCancelled):
@@ -497,7 +536,9 @@ class SetupWindowController(NSObject):
                 if key == "ollama-check":
                     self.ollama_checked = True
             else:
-                result = data[0]
+                model_id, result = (
+                    data if key in {"stt-download", "llm-pull"} else (None, data[0])
+                )
                 self.busy.discard(key)
                 self.cancel_event = None
                 if key == "checks":
@@ -508,11 +549,16 @@ class SetupWindowController(NSObject):
                     self.ollama_running, self.ollama_models = result
                     self.ollama_checked = True
                 elif key == "stt-download":
-                    self.downloaded[self.stt_id] = True
+                    self.downloaded[model_id] = True
                     self.status_message = "Speech model downloaded."
+                    if self.step == 2 and self.stt_id == model_id:
+                        self._advance()
                 elif key == "llm-pull":
-                    self.ollama_models.append(result)
-                    self.status_message = f"Downloaded {result}"
+                    if model_id not in self.ollama_models:
+                        self.ollama_models.append(model_id)
+                    self.status_message = f"Downloaded {model_id}"
+                    if self.step == 3 and self.llm_id == model_id:
+                        self._advance()
                 elif key == "trial":
                     self.status_message = result or "No speech detected. Try again near your microphone."
                 elif key == "apply":
@@ -521,6 +567,19 @@ class SetupWindowController(NSObject):
                 elif key == "monitor":
                     self.status_message = ""
             self._render()
+
+    @objc.python_method
+    def _check_download_stall(self):
+        if not self.busy.intersection({"stt-download", "llm-pull"}):
+            return
+        if self._last_progress_at is None or self._progress_stalled:
+            return
+        if self._clock() - self._last_progress_at < self._stall_timeout:
+            return
+        self._progress_stalled = True
+        self.status_message = "No progress for 30s — check your connection, or Cancel."
+        self.error_message = ""
+        self._render()
 
     @objc.python_method
     def _fix_check(self, index):
@@ -537,12 +596,16 @@ class SetupWindowController(NSObject):
 
     @objc.python_method
     def _select_stt(self, index):
+        if "stt-download" in self.busy:
+            return
         if 0 <= index < len(self.models):
             self.stt_id = self.models[index].id
             self._render()
 
     @objc.python_method
     def _select_llm(self, index):
+        if "llm-pull" in self.busy:
+            return
         options = ["none", *(model.id for model in LLM_MODELS)]
         if 0 <= index < len(options):
             self.llm_id = options[index]
@@ -560,9 +623,15 @@ class SetupWindowController(NSObject):
                 self._start_download()
         elif self.step == 3:
             if (
+                self.choices.llm_provider == "ollama"
+                and self.llm_id != "none"
+                and not self.ollama_running
+            ):
+                self.error_message = "Ollama isn't running — start it, or choose No cleanup."
+                self._render()
+            elif (
                 self.choices.llm_provider != "ollama"
                 or self.llm_id == "none"
-                or not self.ollama_running
                 or self.llm_id in self.ollama_models
             ):
                 self._advance()
@@ -575,14 +644,22 @@ class SetupWindowController(NSObject):
                 self._start_trial()
         elif self.step == 6:
             if "apply" not in self.busy:
+                self.choices = replace(
+                    self.choices,
+                    start_on_login=bool(self.start_on_login),
+                )
                 self._start_worker("apply", lambda: setup_flow.apply(self.choices))
 
     def backAction_(self, sender):
+        if self.busy & {"stt-download", "llm-pull"}:
+            return
         if self.step > 0 and not self.saved:
             if self.step == 4 and self.monitor is not None:
                 self.monitor.stop()
                 self.monitor = None
             self.step -= 1
+            self.status_message = ""
+            self.error_message = ""
             self._render()
 
     def selectStt_(self, sender):

@@ -117,6 +117,8 @@ def uninstall() -> None:
 
 def status() -> str:
     """One-line running/not-loaded summary from `launchctl print`."""
+    if not _plist_path().exists():
+        return "not installed"
     result = subprocess.run(
         ["launchctl", "print", _gui_target()],
         capture_output=True, text=True,

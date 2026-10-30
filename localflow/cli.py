@@ -809,6 +809,16 @@ def _download_stt_cli(model) -> None:
     console.print(f"[green]downloaded[/green] {model.id}")
 
 
+def _require_stt_runtime(model) -> None:
+    from localflow.models import runtime_available
+
+    extra = {"mlx-whisper": "mlx", "parakeet": "parakeet"}.get(model.backend)
+    if extra and not runtime_available(model.backend):
+        raise click.ClickException(
+            f"install the runtime: pip install -e '.[{extra}]'"
+        )
+
+
 def _pull_llm_cli(tag: str, client) -> None:
     _progress(
         f"Downloading {tag}",
@@ -825,6 +835,7 @@ def _download_stt_model(model_id: str):
     model = _stt_model(model_id)
     if model is None:
         raise click.ClickException(f"unknown speech model: {model_id}")
+    _require_stt_runtime(model)
     if model.apple_silicon_only and not detect_hardware().apple_silicon:
         raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
     _download_stt_cli(model)
@@ -854,6 +865,7 @@ def _use_stt_model(model_id: str, no_download: bool = False) -> Path:
     model = _stt_model(model_id)
     if model is None:
         raise click.ClickException(f"unknown speech model: {model_id}")
+    _require_stt_runtime(model)
     if model.apple_silicon_only and not detect_hardware().apple_silicon:
         raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
     if not no_download and not is_stt_downloaded(model):
@@ -900,7 +912,6 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
         available_stt_models,
         detect_hardware,
         is_stt_downloaded,
-        recommend,
     )
     from localflow.setup_flow import (
         HOTKEY_OPTIONS,
@@ -951,14 +962,13 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
     for check in run_checks(cfg):
         badge = "✓" if check.ok else ("?" if check.ok is None else "✗")
         console.print(f"  {badge} {check.label}: {check.detail}")
-    recommended_stt, recommended_llm = recommend(hardware)
     stt_table = Table(title="Speech models", box=None)
     stt_table.add_column("id")
     stt_table.add_column("size")
     for model in available_models:
         stt_table.add_row(model.id, f"{model.size_mb:,} MB")
     console.print(stt_table)
-    default_stt = stt_id or recommended_stt
+    default_stt = stt_id if stt_id is not None else defaults.stt_id
     chosen_stt = click.prompt("Speech model", default=default_stt)
     model = next((entry for entry in available_models if entry.id == chosen_stt), None)
     if model is None:
@@ -974,7 +984,7 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
             llm_table.add_row(llm_model.id, f"{llm_model.size_mb:,} MB")
         llm_table.add_row("none", "raw transcript")
         console.print(llm_table)
-        default_llm = llm_id or recommended_llm or "none"
+        default_llm = (llm_id if llm_id is not None else defaults.llm_id) or "none"
         chosen_llm = click.prompt("Cleanup model", default=default_llm)
         if chosen_llm.lower() == "none":
             chosen_llm = None
@@ -1017,7 +1027,7 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
         )
         console.print(Panel(transcript or "No speech detected.", title="Practice transcript"))
     start_on_login = (
-        click.confirm("Start LocalFlow on login?", default=False)
+        click.confirm("Start LocalFlow on login?", default=defaults.start_on_login)
         if hardware.system == "Darwin" else False
     )
     choices = SetupChoices(

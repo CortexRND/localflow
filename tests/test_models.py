@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -37,11 +38,13 @@ def test_catalog_repos_are_consistent_and_ids_unique():
         (models.HardwareInfo("Darwin", "arm64", 16, True, 10), ("mlx-small", "llama3.2:3b")),
     ],
 )
-def test_recommendations(hw, expected):
+def test_recommendations(hw, expected, monkeypatch):
+    monkeypatch.setattr(models, "runtime_available", lambda _backend: True)
     assert models.recommend(hw) == expected
 
 
-def test_available_stt_models_filters_apple_silicon_only():
+def test_available_stt_models_filters_apple_silicon_only(monkeypatch):
+    monkeypatch.setattr(models, "runtime_available", lambda _backend: True)
     linux = models.available_stt_models(models.HardwareInfo("Linux", "x86_64", 8, False, 10))
     mac = models.available_stt_models(models.HardwareInfo("Darwin", "arm64", 8, True, 10))
 
@@ -49,10 +52,38 @@ def test_available_stt_models_filters_apple_silicon_only():
     assert len(mac) == len(models.STT_MODELS)
 
 
+def test_available_stt_models_filters_missing_runtimes(monkeypatch):
+    monkeypatch.setattr(
+        models,
+        "runtime_available",
+        lambda backend: backend == "faster-whisper",
+    )
+
+    available = models.available_stt_models(
+        models.HardwareInfo("Darwin", "arm64", 8, True, 10)
+    )
+
+    assert all(model.backend == "faster-whisper" for model in available)
+
+
+def test_recommendations_fall_back_when_mlx_runtime_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        models, "runtime_available", lambda backend: backend != "mlx-whisper"
+    )
+
+    assert models.recommend(
+        models.HardwareInfo("Darwin", "arm64", 16, True, 10)
+    )[0] == "fw-base"
+
+
 def test_detect_hardware_uses_platform_memory_and_disk(monkeypatch, tmp_path):
     monkeypatch.setattr(models.platform, "system", lambda: "Linux")
     monkeypatch.setattr(models.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(models.os, "sysconf", lambda key: 4096 if key == "SC_PAGE_SIZE" else 1024**2)
+    monkeypatch.setattr(
+        models.os, "sysconf",
+        lambda key: 4096 if key == "SC_PAGE_SIZE" else 1024**2,
+        raising=False,
+    )
     monkeypatch.setattr(models.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(models.shutil, "disk_usage", lambda _path: SimpleNamespace(free=2**30))
 
@@ -87,7 +118,11 @@ def test_detect_hardware_uses_windows_global_memory_status(monkeypatch, tmp_path
 def test_detect_hardware_falls_back_when_ram_probe_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(models.platform, "system", lambda: "Linux")
     monkeypatch.setattr(models.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(models.os, "sysconf", lambda _key: (_ for _ in ()).throw(OSError("no probe")))
+    monkeypatch.setattr(
+        models.os, "sysconf",
+        lambda _key: (_ for _ in ()).throw(OSError("no probe")),
+        raising=False,
+    )
     monkeypatch.setattr(models.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(models.shutil, "disk_usage", lambda _path: SimpleNamespace(free=2**30))
 
@@ -106,7 +141,13 @@ def test_current_stt_id_resolves_config_backend(monkeypatch):
 
 def test_stt_config_uses_nested_provider_ids():
     assert models.stt_config(models._STT_BY_ID["mlx-small"]) == {
-        "stt": {"provider": "mlx-whisper", "model": "small"}
+        "stt": {"provider": "mlx-whisper", "model": "small", "device": "auto"}
+    }
+    assert models.stt_config(models._STT_BY_ID["parakeet-v2"]) == {
+        "stt": {"provider": "parakeet", "model": "large-v3", "device": "auto"}
+    }
+    assert models.stt_config(models._STT_BY_ID["fw-small"]) == {
+        "stt": {"provider": "faster-whisper", "model": "small"}
     }
 
 
@@ -135,6 +176,19 @@ def test_download_stt_reports_monotone_progress_and_total(tmp_path, monkeypatch)
     assert [done for done, _total in progress] == sorted(done for done, _total in progress)
     assert all(total == 20 for _done, total in progress)
     assert progress[-1][0] == 20
+
+
+def test_download_stt_sets_hub_timeouts_without_overriding(monkeypatch):
+    monkeypatch.delenv("HF_HUB_DOWNLOAD_TIMEOUT", raising=False)
+    monkeypatch.setenv("HF_HUB_ETAG_TIMEOUT", "7")
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(models.DownloadCancelled):
+        models.download_stt(models.STT_MODELS[0], lambda *_: None, cancel)
+
+    assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "30"
+    assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "7"
 
 
 def test_download_stt_cancels_between_files(tmp_path, monkeypatch):

@@ -55,6 +55,28 @@ def test_initial_choices_skips_ollama_recommendation_for_other_provider():
     assert choices.llm_provider == "openai-compatible"
 
 
+def test_initial_choices_skips_ollama_default_when_not_installed(monkeypatch):
+    monkeypatch.setattr(setup_flow, "ollama_installed", lambda: False)
+
+    choices = setup_flow.initial_choices(
+        Config(),
+        HardwareInfo("Linux", "x86_64", 16, False, 50),
+    )
+
+    assert choices.llm_id is None
+
+
+def test_initial_choices_uses_ollama_recommendation_when_installed(monkeypatch):
+    monkeypatch.setattr(setup_flow, "ollama_installed", lambda: True)
+
+    choices = setup_flow.initial_choices(
+        Config(),
+        HardwareInfo("Linux", "x86_64", 16, False, 50),
+    )
+
+    assert choices.llm_id == "llama3.2:3b"
+
+
 def test_run_checks_reports_all_cross_platform_requirements(monkeypatch):
     monkeypatch.setattr(setup_flow.shutil, "which", lambda command: "/usr/bin/" + command)
     monkeypatch.setattr(setup_flow, "ollama_installed", lambda: True)
@@ -124,6 +146,42 @@ def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkey
     assert saved.language == "en"
     assert saved.setup_version == 1
     assert installed == [True]
+
+
+def test_apply_uninstalls_launchagent_when_startup_is_disabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(setup_flow, "load_config", Config)
+    monkeypatch.setattr(
+        setup_flow, "save_config", lambda _config: tmp_path / "config.toml"
+    )
+    monkeypatch.setattr(setup_flow.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "localflow.launchagent.status", lambda: "loaded, not running"
+    )
+    uninstalled = []
+    monkeypatch.setattr(
+        "localflow.launchagent.uninstall", lambda: uninstalled.append(True)
+    )
+
+    setup_flow.apply(SetupChoices("fw-base", None, "", "alt_l", None, False))
+
+    assert uninstalled == [True]
+
+
+def test_apply_does_not_uninstall_missing_launchagent(monkeypatch, tmp_path):
+    monkeypatch.setattr(setup_flow, "load_config", Config)
+    monkeypatch.setattr(
+        setup_flow, "save_config", lambda _config: tmp_path / "config.toml"
+    )
+    monkeypatch.setattr(setup_flow.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr("localflow.launchagent.status", lambda: "not installed")
+    uninstalled = []
+    monkeypatch.setattr(
+        "localflow.launchagent.uninstall", lambda: uninstalled.append(True)
+    )
+
+    setup_flow.apply(SetupChoices("fw-base", None, "", "alt_l", None, False))
+
+    assert uninstalled == []
 
 
 def test_apply_disables_cleanup_when_no_model_is_selected(monkeypatch):
