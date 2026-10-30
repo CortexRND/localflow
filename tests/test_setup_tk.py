@@ -2,6 +2,7 @@
 
 import os
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -41,7 +42,7 @@ def test_setup_window_renders_all_seven_steps(monkeypatch):
         HardwareInfo("Linux", "x86_64", 8, False, 50),
     )
     window.downloaded = {model.id: True for model in window.models}
-    window.ollama_checked = True
+    window._ollama_checked = True
     rendered = []
     try:
         for step in range(7):
@@ -67,5 +68,17 @@ def test_setup_window_renders_all_seven_steps(monkeypatch):
             isinstance(child, tk.Button) and child.cget("text") == "Retry"
             for child in window.body.winfo_children()
         )
+        window._ollama_checked = False
+        window.choices = replace(window.choices, llm_provider="openai-compatible")
+        window.step = 3
+        window._render()
+        root.update_idletasks()
+        assert window._primary_label() == "Continue"
+        assert any(
+            isinstance(child, tk.Button) and child.cget("text") == "Change in Settings"
+            for child in window.body.winfo_children()
+        )
+        assert "ollama-check" not in window._busy
+        assert window._ollama_checked is False
     finally:
         root.destroy()

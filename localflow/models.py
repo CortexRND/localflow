@@ -118,14 +118,14 @@ STT_MODELS = tuple(
     ]
     + [
         _stt_model(
-            f"mlx-{size}", label, "mlx", size, _MLX_REPOS[size],
+            f"mlx-{size}", label, "mlx-whisper", size, _MLX_REPOS[size],
             speed, accuracy, blurb, apple_silicon_only=True,
         )
         for size, label, speed, accuracy, blurb in _MLX_CATALOG
     ]
     + [
         _stt_model(
-            "mlx-large-v3-turbo", "Large v3 Turbo", "mlx", "large-v3-turbo",
+            "mlx-large-v3-turbo", "Large v3 Turbo", "mlx-whisper", "large-v3-turbo",
             _MLX_REPOS["large-v3-turbo"], 5, 5,
             "Near-large accuracy with fast Apple Silicon decoding.",
             apple_silicon_only=True,
@@ -202,7 +202,7 @@ def recommend(hw: HardwareInfo) -> tuple[str, str | None]:
 
 
 def stt_config(model: SttModel) -> dict:
-    return {"stt_backend": model.backend, "model_size": model.model_size}
+    return {"stt": {"provider": model.backend, "model": model.model_size}}
 
 
 def current_stt_id(config: Config) -> str:
@@ -210,7 +210,7 @@ def current_stt_id(config: Config) -> str:
     size = config.model_size
     if backend == "parakeet":
         return "parakeet-v2"
-    if backend == "mlx":
+    if backend in ("mlx", "mlx-whisper"):
         candidate = f"mlx-{size}"
     elif backend == "faster-whisper":
         candidate = f"fw-{size}"

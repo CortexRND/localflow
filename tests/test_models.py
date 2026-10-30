@@ -71,6 +71,12 @@ def test_current_stt_id_resolves_config_backend(monkeypatch):
     assert models.current_stt_id(Config(stt_backend="auto", model_size="small")) == "fw-small"
 
 
+def test_stt_config_uses_nested_provider_ids():
+    assert models.stt_config(models._STT_BY_ID["mlx-small"]) == {
+        "stt": {"provider": "mlx-whisper", "model": "small"}
+    }
+
+
 def test_download_stt_reports_monotone_progress_and_total(tmp_path, monkeypatch):
     files = [
         SimpleNamespace(rfilename="weights.bin", size=12),

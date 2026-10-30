@@ -49,3 +49,17 @@ def test_stt_and_llm_use_save_nested_config(monkeypatch, tmp_path):
     assert loaded.stt_device == "cuda"
     assert loaded.llm_provider == "openai-compatible"
     assert loaded.llm_model == "remote"
+
+
+def test_stt_mlx_alias_saves_canonical_provider_id(monkeypatch, tmp_path):
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(path))
+    monkeypatch.setattr(config, "legacy_config_path", lambda: tmp_path / "legacy.toml")
+    config.save_config(Config())
+
+    result = CliRunner().invoke(
+        cli_module.cli, ["stt", "use", "mlx", "small"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert config.load_config().stt_backend == "mlx-whisper"

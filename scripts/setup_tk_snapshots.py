@@ -2,6 +2,7 @@
 
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import tkinter as tk
@@ -28,7 +29,7 @@ class _Monitor:
 
 
 def main():
-    output = Path.home() / "rea-runs" / "shots" / "setup-tk"
+    output = Path.home() / "rea-runs" / "shots-A"
     output.mkdir(parents=True, exist_ok=True)
     setup_tk.MicLevelMonitor = _Monitor
     root = tk.Tk()
@@ -45,9 +46,10 @@ def main():
         Check("microphone-device", "Input device", True, "1 input device found", "", ""),
     ]
     window.downloaded = {model.id: False for model in window.models}
-    window.ollama_checked = True
+    window._ollama_checked = True
     window.ollama_running = True
     window.ollama_models = ["llama3.2:1b"]
+    window.llm_var.set("llama3.2:1b")
 
     def capture(name):
         root.update()
@@ -84,6 +86,12 @@ def main():
         window.error_message = "Network connection interrupted."
         window._render()
         capture("download-error")
+
+        window.choices = replace(window.choices, llm_provider="openai-compatible")
+        window.step = 3
+        window.error_message = ""
+        window._render()
+        capture("non-ollama-provider")
     finally:
         root.destroy()
     print(f"wrote setup screenshots to {output}")

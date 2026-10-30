@@ -40,17 +40,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "$SCRIPT_DIR/pyproject.toml" && -d "$SCRIPT_DIR/.git" ]]; then
     REPO="$SCRIPT_DIR"
 else
-    REPO="${LOCALFLOW_HOME:-$HOME/Applications/LocalFlow}"
+    REPO="${LOCALFLOW_HOME:-$HOME/.localflow/app}"
     if [[ ! -d "$REPO/.git" ]]; then
+        if [[ -e "$REPO" ]]; then
+            echo "Install destination exists but is not a git checkout: $REPO" >&2
+            exit 1
+        fi
         mkdir -p "$(dirname "$REPO")"
         git clone "${LOCALFLOW_REPO_URL:-https://github.com/CortexRND/localflow.git}" "$REPO"
+    else
+        git -C "$REPO" pull --ff-only
     fi
 fi
 
 cd "$REPO"
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/pip install -e ".[mlx,menubar,macos-permissions]"
+if [[ "$(uname -m)" == "arm64" ]]; then
+    .venv/bin/pip install -e ".[mlx,menubar]"
+else
+    .venv/bin/pip install -e .
+fi
 
 if [[ "$WITH_OLLAMA" -eq 1 ]]; then
     if ! command -v ollama >/dev/null 2>&1; then
@@ -70,4 +80,4 @@ fi
 
 .venv/bin/lf setup install-app
 echo "Opening LocalFlow Setup..."
-.venv/bin/lf setup
+exec .venv/bin/lf setup

@@ -7,6 +7,7 @@ from Foundation import NSMakePoint, NSMakeRect, NSObject, NSTimer, NSURL
 
 import queue
 import threading
+import webbrowser
 
 from localflow import setup_flow
 from localflow.config import load_config
@@ -253,6 +254,14 @@ class SetupWindowController(NSObject):
                 button.setFrameOrigin_(NSMakePoint(8, max(0, max(310, len(self.models) * 52) - (index + 1) * 52)))
             if not self.snapshot_mode and not self.downloaded and "stt-checks" not in self.busy:
                 self._start_download_checks()
+        elif self.step == 3 and self.choices.llm_provider != "ollama":
+            self._add_text(
+                f"Configured provider: {self.choices.llm_provider}. Manage models with this provider in Settings.",
+                278,
+            )
+            self.page.addSubview_(
+                self._button("Change in Settings", 8, 220, 190, "settingsAction_")
+            )
         elif self.step == 3:
             self._add_text("Cleanup fixes punctuation and filler words; raw transcript skips the extra model.", 278)
             count = len(LLM_MODELS) + 1
@@ -344,7 +353,10 @@ class SetupWindowController(NSObject):
         elif self.step == 2:
             self.primary_button.setTitle_("Continue" if self.downloaded.get(self.stt_id) else "Download & continue")
         elif self.step == 3:
-            self.primary_button.setTitle_("Continue" if self.llm_id == "none" or not self.ollama_running or self.llm_id in self.ollama_models else "Download & continue")
+            if self.choices.llm_provider != "ollama":
+                self.primary_button.setTitle_("Continue")
+            else:
+                self.primary_button.setTitle_("Continue" if self.llm_id == "none" or not self.ollama_running or self.llm_id in self.ollama_models else "Download & continue")
         elif self.step == 5:
             self.primary_button.setTitle_("Record 5 seconds")
         elif self.step == 6:
@@ -384,12 +396,12 @@ class SetupWindowController(NSObject):
 
     @objc.python_method
     def _start_ollama_check(self):
-        if self.ollama_checked:
+        if self.ollama_checked or self.choices.llm_provider != "ollama":
             return
         self.ollama_checked = True
 
         def check():
-            client = OllamaClient(self.config.ollama_url)
+            client = OllamaClient(self.config.llm_base_url)
             return (True, client.installed()) if client.is_running() else (False, [])
         self._start_worker("ollama-check", check)
 
@@ -414,7 +426,7 @@ class SetupWindowController(NSObject):
     def _start_pull(self):
         self.cancel_event = threading.Event()
         cancel = self.cancel_event
-        client = OllamaClient(self.config.ollama_url)
+        client = OllamaClient(self.config.llm_base_url)
 
         def pull():
             client.pull(
@@ -447,6 +459,7 @@ class SetupWindowController(NSObject):
                 self.hotkey,
                 self.language,
                 self.start_on_login,
+                self.choices.llm_provider,
             )
         if self.step == 4 and self.monitor is not None:
             self.monitor.stop()
@@ -546,7 +559,12 @@ class SetupWindowController(NSObject):
             elif "stt-download" not in self.busy:
                 self._start_download()
         elif self.step == 3:
-            if self.llm_id == "none" or not self.ollama_running or self.llm_id in self.ollama_models:
+            if (
+                self.choices.llm_provider != "ollama"
+                or self.llm_id == "none"
+                or not self.ollama_running
+                or self.llm_id in self.ollama_models
+            ):
                 self._advance()
             elif "llm-pull" not in self.busy:
                 self._start_pull()
@@ -603,6 +621,9 @@ class SetupWindowController(NSObject):
     def cancelAction_(self, sender):
         if self.cancel_event is not None:
             self.cancel_event.set()
+
+    def settingsAction_(self, sender):
+        webbrowser.open(f"http://127.0.0.1:{self.config.server_port}/settings")
 
     def fixAction_(self, sender):
         self._fix_check(sender.tag())

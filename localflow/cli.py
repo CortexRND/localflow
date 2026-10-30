@@ -24,6 +24,7 @@ from rich.text import Text
 from localflow import api as api_logic
 from localflow.apitoken import read as read_api_token
 from localflow.config import (
+    apply_config_update,
     config_field,
     config_toml,
     legacy_config_path,
@@ -150,7 +151,7 @@ def _coerce_config_value(current: object, raw: str) -> object:
 def config_set(section_key: str, raw_value: str) -> None:
     """Set SECTION.KEY to VALUE and write the v2 config."""
     try:
-        _section, field_name = config_field(section_key)
+        section, field_name = config_field(section_key)
     except KeyError:
         raise click.ClickException(
             f"unknown config key {section_key!r}; valid keys: "
@@ -162,8 +163,10 @@ def config_set(section_key: str, raw_value: str) -> None:
             + ", ".join(PASTE_METHODS)
         )
     current = load_config()
-    setattr(current, field_name, _coerce_config_value(getattr(current, field_name), raw_value))
-    path = save_config(current)
+    key = section_key.split(".", 1)[1]
+    value = _coerce_config_value(getattr(current, field_name), raw_value)
+    updated = apply_config_update(current, {section: {key: value}})
+    path = save_config(updated)
     click.echo(f"saved {path}")
 
 
@@ -284,10 +287,25 @@ def stt_use(provider: str, model: str | None, device: str) -> None:
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
     config = load_config()
-    config.stt_backend = provider
-    config.model_size = model or config.model_size
-    config.stt_device = device
-    click.echo(f"saved {save_config(config)}")
+    provider_id = "mlx-whisper" if provider == "mlx" else provider
+    updated = apply_config_update(
+        config,
+        {
+            "stt": {
+                "provider": provider_id,
+                "model": model or config.model_size,
+                "device": device,
+            }
+        },
+    )
+    click.echo(f"saved {save_config(updated)}")
+
+
+@stt.command("download")
+@click.argument("model_id")
+def stt_download(model_id: str) -> None:
+    """Download a catalog speech model without selecting it."""
+    _download_stt_model(model_id)
 
 
 @cli.group()
@@ -337,12 +355,13 @@ def llm_use(provider: str, base_url: str | None, model_name: str | None) -> None
     if provider not in registry.list_llm_ids():
         raise click.ClickException(f"unknown LLM provider: {provider}")
     config = load_config()
-    config.llm_provider = provider
+    values = {"provider": provider}
     if base_url is not None:
-        config.llm_base_url = base_url
+        values["base_url"] = base_url
     if model_name is not None:
-        config.llm_model = model_name
-    click.echo(f"saved {save_config(config)}")
+        values["model"] = model_name
+    updated = apply_config_update(config, {"llm": values})
+    click.echo(f"saved {save_config(updated)}")
 
 
 @llm.command("test")
@@ -359,6 +378,13 @@ def llm_test(
         return
     console.print(f"[red]{result['detail']}[/red]")
     raise click.exceptions.Exit(1)
+
+
+@llm.command("pull")
+@click.argument("tag")
+def llm_pull(tag: str) -> None:
+    """Pull an Ollama model tag."""
+    _pull_ollama_model(tag)
 
 
 @cli.group()
@@ -793,6 +819,78 @@ def _pull_llm_cli(tag: str, client) -> None:
     console.print(f"[green]downloaded[/green] {tag}")
 
 
+def _download_stt_model(model_id: str):
+    from localflow.models import detect_hardware
+
+    model = _stt_model(model_id)
+    if model is None:
+        raise click.ClickException(f"unknown speech model: {model_id}")
+    if model.apple_silicon_only and not detect_hardware().apple_silicon:
+        raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
+    _download_stt_cli(model)
+    return model
+
+
+def _pull_ollama_model(tag: str, config=None) -> None:
+    from localflow.models import DownloadError, OllamaClient
+
+    config = config or load_config()
+    if config.llm_provider != "ollama":
+        raise click.ClickException(
+            "model downloads are only available for the Ollama provider; change in Settings"
+        )
+    client = OllamaClient(config.llm_base_url)
+    if not client.is_running():
+        raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
+    try:
+        _pull_llm_cli(tag, client)
+    except DownloadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _use_stt_model(model_id: str, no_download: bool = False) -> Path:
+    from localflow.models import detect_hardware, is_stt_downloaded, stt_config
+
+    model = _stt_model(model_id)
+    if model is None:
+        raise click.ClickException(f"unknown speech model: {model_id}")
+    if model.apple_silicon_only and not detect_hardware().apple_silicon:
+        raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
+    if not no_download and not is_stt_downloaded(model):
+        _download_stt_cli(model)
+    updated = apply_config_update(load_config(), stt_config(model))
+    path = save_config(updated)
+    console.print(f"[green]selected[/green] {model.id}  ·  {path}")
+    return path
+
+
+def _use_ollama_model(model_id: str, no_download: bool = False) -> Path:
+    from localflow.models import DownloadError, LLM_MODELS, OllamaClient
+
+    if model_id not in {entry.id for entry in LLM_MODELS}:
+        raise click.ClickException(f"unknown model: {model_id}")
+    config = load_config()
+    if config.llm_provider != "ollama":
+        raise click.ClickException(
+            "model selection is only available for the Ollama provider; change in Settings"
+        )
+    if not no_download:
+        client = OllamaClient(config.llm_base_url)
+        if not client.is_running():
+            raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
+        if model_id not in client.installed():
+            try:
+                _pull_llm_cli(model_id, client)
+            except DownloadError as exc:
+                raise click.ClickException(str(exc)) from exc
+    updated = apply_config_update(
+        config, {"llm": {"model": model_id, "cleanup_enabled": True}}
+    )
+    path = save_config(updated)
+    console.print(f"[green]selected[/green] {model_id}  ·  {path}")
+    return path
+
+
 def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
     from localflow.audio import list_input_devices
     from localflow.models import (
@@ -821,13 +919,17 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
         chosen_stt = stt_id or defaults.stt_id
         chosen_llm = (defaults.llm_id if llm_id is None else
                       None if llm_id.lower() == "none" else llm_id)
+        if cfg.llm_provider != "ollama" and chosen_llm:
+            raise click.ClickException(
+                "LLM downloads are only available for Ollama; change the provider in Settings"
+            )
         model = next((entry for entry in available_models if entry.id == chosen_stt), None)
         if model is None:
             raise click.ClickException(f"speech model is unavailable on this hardware: {chosen_stt}")
         if not is_stt_downloaded(model):
             _download_stt_cli(model)
-        if chosen_llm:
-            client = OllamaClient(cfg.ollama_url)
+        if chosen_llm and cfg.llm_provider == "ollama":
+            client = OllamaClient(cfg.llm_base_url)
             if not client.is_running():
                 raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
             try:
@@ -838,7 +940,7 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
                 _pull_llm_cli(chosen_llm, client)
         choices = SetupChoices(
             chosen_stt, chosen_llm, defaults.input_device, defaults.hotkey,
-            defaults.language, defaults.start_on_login,
+            defaults.language, defaults.start_on_login, cfg.llm_provider,
         )
         path = apply(choices)
         console.print(f"[green]setup saved[/green] {path}")
@@ -864,28 +966,34 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
     if not is_stt_downloaded(model) and click.confirm(f"Download {chosen_stt} now?", default=True):
         _download_stt_cli(model)
 
-    llm_table = Table(title="Cleanup models (or none)", box=None)
-    llm_table.add_column("id")
-    llm_table.add_column("size")
-    for llm_model in LLM_MODELS:
-        llm_table.add_row(llm_model.id, f"{llm_model.size_mb:,} MB")
-    llm_table.add_row("none", "raw transcript")
-    console.print(llm_table)
-    default_llm = llm_id or recommended_llm or "none"
-    chosen_llm = click.prompt("Cleanup model", default=default_llm)
-    if chosen_llm.lower() == "none":
+    if cfg.llm_provider == "ollama":
+        llm_table = Table(title="Cleanup models (or none)", box=None)
+        llm_table.add_column("id")
+        llm_table.add_column("size")
+        for llm_model in LLM_MODELS:
+            llm_table.add_row(llm_model.id, f"{llm_model.size_mb:,} MB")
+        llm_table.add_row("none", "raw transcript")
+        console.print(llm_table)
+        default_llm = llm_id or recommended_llm or "none"
+        chosen_llm = click.prompt("Cleanup model", default=default_llm)
+        if chosen_llm.lower() == "none":
+            chosen_llm = None
+        elif chosen_llm not in {item.id for item in LLM_MODELS}:
+            raise click.ClickException(f"unknown cleanup model: {chosen_llm}")
+        if chosen_llm:
+            client = OllamaClient(cfg.llm_base_url)
+            if not client.is_running():
+                console.print("Ollama is not running; continue without cleanup or start `ollama serve` and rerun setup.")
+                chosen_llm = None
+            elif chosen_llm not in client.installed() and click.confirm(f"Download {chosen_llm} now?", default=True):
+                _pull_llm_cli(chosen_llm, client)
+            elif chosen_llm not in client.installed():
+                chosen_llm = None
+    else:
+        console.print(
+            f"LLM provider: {cfg.llm_provider}. Change provider or model in Settings."
+        )
         chosen_llm = None
-    elif chosen_llm not in {item.id for item in LLM_MODELS}:
-        raise click.ClickException(f"unknown cleanup model: {chosen_llm}")
-    if chosen_llm:
-        client = OllamaClient(cfg.ollama_url)
-        if not client.is_running():
-            console.print("Ollama is not running; continue without cleanup or start `ollama serve` and rerun setup.")
-            chosen_llm = None
-        elif chosen_llm not in client.installed() and click.confirm(f"Download {chosen_llm} now?", default=True):
-            _pull_llm_cli(chosen_llm, client)
-        elif chosen_llm not in client.installed():
-            chosen_llm = None
 
     devices = ["System default", *list_input_devices()]
     device_default = defaults.input_device if defaults.input_device in devices else "System default"
@@ -914,7 +1022,7 @@ def _setup_cli(stt_id: str | None, llm_id: str | None, yes: bool) -> None:
     )
     choices = SetupChoices(
         chosen_stt, chosen_llm, "" if device == "System default" else device,
-        hotkey, language or None, start_on_login,
+        hotkey, language or None, start_on_login, cfg.llm_provider,
     )
     path = apply(choices)
     console.print(f"[green]setup saved[/green] {path}")
@@ -1013,15 +1121,19 @@ def models_list(kind: str | None) -> None:
                 "yes" if rec_stt == model.id else "",
             )
     if kind in (None, "llm"):
-        client = OllamaClient(cfg.ollama_url)
-        running = client.is_running()
-        installed = set(client.installed()) if running else set()
+        running = cfg.llm_provider == "ollama"
+        installed = set()
+        if running:
+            client = OllamaClient(cfg.llm_base_url)
+            running = client.is_running()
+            installed = set(client.installed()) if running else set()
         for model in LLM_MODELS:
             table.add_row(
                 model.id, f"{model.size_mb:,} MB",
+                "managed by Settings" if cfg.llm_provider != "ollama" else
                 "installed" if model.id in installed else
                 "not installed" if running else "Ollama offline",
-                "yes" if cfg.cleanup_enabled and cfg.ollama_model == model.id else "",
+                "yes" if cfg.llm_provider == "ollama" and cfg.cleanup_enabled and cfg.llm_model == model.id else "",
                 "yes" if rec_llm == model.id else "",
             )
     console.print(table)
@@ -1030,60 +1142,26 @@ def models_list(kind: str | None) -> None:
 @models.command("download")
 @click.argument("model_id")
 def models_download(model_id: str) -> None:
-    from localflow.models import OllamaClient, DownloadError, detect_hardware
-
     model = _stt_model(model_id)
     if model is not None:
-        if model.apple_silicon_only and not detect_hardware().apple_silicon:
-            raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
-        _download_stt_cli(model)
+        _download_stt_model(model_id)
         return
     from localflow.models import LLM_MODELS
 
     if model_id not in {entry.id for entry in LLM_MODELS}:
         raise click.ClickException(f"unknown model: {model_id}")
-    client = OllamaClient(load_config().ollama_url)
-    if not client.is_running():
-        raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
-    try:
-        _pull_llm_cli(model_id, client)
-    except DownloadError as exc:
-        raise click.ClickException(str(exc)) from exc
+    _pull_ollama_model(model_id)
 
 
 @models.command("use")
 @click.argument("model_id")
 @click.option("--no-download", is_flag=True, help="Select the model without downloading it.")
 def models_use(model_id: str, no_download: bool) -> None:
-    from localflow.config import save_config
-    from localflow.models import (
-        LLM_MODELS,
-        OllamaClient,
-        detect_hardware,
-        is_stt_downloaded,
-        stt_config,
-    )
-
     model = _stt_model(model_id)
     if model is not None:
-        if model.apple_silicon_only and not detect_hardware().apple_silicon:
-            raise click.ClickException(f"{model_id} is only available on Apple Silicon.")
-        if not no_download and not is_stt_downloaded(model):
-            _download_stt_cli(model)
-        path = save_config(stt_config(model))
-        console.print(f"[green]selected[/green] {model.id}  ·  {path}")
+        _use_stt_model(model_id, no_download)
         return
-    if model_id not in {entry.id for entry in LLM_MODELS}:
-        raise click.ClickException(f"unknown model: {model_id}")
-    cfg = load_config()
-    client = OllamaClient(cfg.ollama_url)
-    if not no_download:
-        if not client.is_running():
-            raise click.ClickException("Ollama is not running; start it with `ollama serve`.")
-        if model_id not in client.installed():
-            _pull_llm_cli(model_id, client)
-    path = save_config({"ollama_model": model_id, "cleanup_enabled": True})
-    console.print(f"[green]selected[/green] {model_id}  ·  {path}")
+    _use_ollama_model(model_id, no_download)
 
 
 @cli.command()

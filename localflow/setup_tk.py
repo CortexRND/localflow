@@ -268,6 +268,17 @@ class SetupWindow:
         self._show_operation_state()
 
     def _render_step_3(self) -> None:
+        if self.choices.llm_provider != "ollama":
+            self._label(
+                self.body,
+                f"Configured provider: {self.choices.llm_provider}. Manage models with this provider in Settings.",
+            )
+            tk.Button(
+                self.body,
+                text="Change in Settings",
+                command=self._open_settings,
+            ).pack(anchor="w", pady=(12, 0))
+            return
         self._label(self.body, "Cleanup fixes punctuation and filler words. No cleanup keeps the raw transcript.")
         content = self._scrolling_body()
         card, surface = self._card(
@@ -418,6 +429,8 @@ class SetupWindow:
                 return "Downloading…"
             return "Continue" if self.downloaded.get(self.stt_var.get()) else "Download & continue"
         if self.step == 3:
+            if self.choices.llm_provider != "ollama":
+                return "Continue"
             selected = self.llm_var.get()
             if selected == "none" or not self.ollama_running:
                 return "Continue"
@@ -459,10 +472,10 @@ class SetupWindow:
             )
 
     def _start_ollama_check(self) -> None:
-        if "ollama-check" not in self._busy:
+        if self.choices.llm_provider == "ollama" and "ollama-check" not in self._busy:
             self._ollama_checked = True
             def check():
-                client = OllamaClient(self.config.ollama_url)
+                client = OllamaClient(self.config.llm_base_url)
                 if not client.is_running():
                     return False, []
                 return True, client.installed()
@@ -500,7 +513,7 @@ class SetupWindow:
 
         def work():
             try:
-                client = OllamaClient(self.config.ollama_url)
+                client = OllamaClient(self.config.llm_base_url)
                 client.pull(
                     selected,
                     lambda done, total, status: self._events.put(
@@ -650,6 +663,9 @@ class SetupWindow:
         self.llm_var.set(model_id)
         self._render()
 
+    def _open_settings(self) -> None:
+        webbrowser.open(f"http://127.0.0.1:{self.config.server_port}/settings")
+
     def _continue(self) -> None:
         self.error_message = ""
         self.status_message = ""
@@ -661,6 +677,7 @@ class SetupWindow:
                 hotkey=self._hotkey_value(self.hotkey_var.get()),
                 language=self.language_var.get() or None,
                 start_on_login=bool(self.start_login_var.get()),
+                llm_provider=self.choices.llm_provider,
             )
         self.step = min(6, self.step + 1)
         self._render()
@@ -689,6 +706,9 @@ class SetupWindow:
             elif not self._busy:
                 self._download_stt()
         elif self.step == 3:
+            if self.choices.llm_provider != "ollama":
+                self._continue()
+                return
             selected = self.llm_var.get()
             if selected == "none" or not self.ollama_running or selected in self.ollama_models:
                 self._continue()

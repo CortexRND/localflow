@@ -25,7 +25,7 @@ def test_initial_choices_reuse_existing_config_after_setup(monkeypatch):
             setup_version=1,
             model_size="small",
             stt_backend="faster-whisper",
-            ollama_model="qwen2.5:3b",
+            llm_model="qwen2.5:3b",
             input_device="Studio Mic",
             hotkey="f19",
             language="fr",
@@ -45,6 +45,16 @@ def test_initial_choices_replaces_models_unavailable_on_current_hardware():
     assert choices.stt_id == "fw-base"
 
 
+def test_initial_choices_skips_ollama_recommendation_for_other_provider():
+    choices = setup_flow.initial_choices(
+        Config(llm_provider="openai-compatible"),
+        HardwareInfo("Linux", "x86_64", 8, False, 50),
+    )
+
+    assert choices.llm_id is None
+    assert choices.llm_provider == "openai-compatible"
+
+
 def test_run_checks_reports_all_cross_platform_requirements(monkeypatch):
     monkeypatch.setattr(setup_flow.shutil, "which", lambda command: "/usr/bin/" + command)
     monkeypatch.setattr(setup_flow, "ollama_installed", lambda: True)
@@ -61,8 +71,13 @@ def test_run_checks_reports_all_cross_platform_requirements(monkeypatch):
 
 
 def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkeypatch):
-    written = {}
-    monkeypatch.setattr(setup_flow, "save_config", lambda updates: written.update(updates) or tmp_path / "config.toml")
+    written = []
+    monkeypatch.setattr(setup_flow, "load_config", Config)
+    monkeypatch.setattr(
+        setup_flow,
+        "save_config",
+        lambda config: written.append(config) or tmp_path / "config.toml",
+    )
     installed = []
     monkeypatch.setattr(setup_flow.platform, "system", lambda: "Darwin")
     monkeypatch.setattr("localflow.launchagent.install", lambda: installed.append(True))
@@ -71,29 +86,57 @@ def test_apply_writes_configuration_and_can_install_launchagent(tmp_path, monkey
     result = setup_flow.apply(choices)
 
     assert result == tmp_path / "config.toml"
-    assert written == {
-        "stt_backend": "faster-whisper",
-        "model_size": "small",
-        "ollama_model": "qwen2.5:3b",
-        "cleanup_enabled": True,
-        "input_device": "USB mic",
-        "hotkey": "f19",
-        "language": "en",
-        "setup_version": 1,
-    }
+    saved = written[0]
+    assert saved.stt_backend == "faster-whisper"
+    assert saved.model_size == "small"
+    assert saved.llm_model == "qwen2.5:3b"
+    assert saved.cleanup_enabled is True
+    assert saved.input_device == "USB mic"
+    assert saved.hotkey == "f19"
+    assert saved.language == "en"
+    assert saved.setup_version == 1
     assert installed == [True]
 
 
 def test_apply_disables_cleanup_when_no_model_is_selected(monkeypatch):
-    written = {}
-    monkeypatch.setattr(setup_flow, "save_config", lambda updates: written.update(updates) or Path("config"))
+    written = []
+    monkeypatch.setattr(setup_flow, "load_config", Config)
+    monkeypatch.setattr(
+        setup_flow, "save_config", lambda config: written.append(config) or Path("config")
+    )
     monkeypatch.setattr(setup_flow.platform, "system", lambda: "Linux")
 
     setup_flow.apply(SetupChoices("fw-base", None, "", "alt_l", None, False))
 
-    assert written["cleanup_enabled"] is False
-    assert written["ollama_model"] == Config().ollama_model
-    assert "language" not in written
+    assert written[0].cleanup_enabled is False
+    assert written[0].llm_model == Config().llm_model
+    assert written[0].language is None
+
+
+def test_apply_keeps_non_ollama_provider_configuration(monkeypatch):
+    current = Config(
+        llm_provider="openai-compatible",
+        llm_base_url="https://example.test/v1",
+        llm_model="configured-model",
+    )
+    written = []
+    monkeypatch.setattr(setup_flow, "load_config", lambda: current)
+    monkeypatch.setattr(
+        setup_flow, "save_config", lambda config: written.append(config) or Path("config")
+    )
+    monkeypatch.setattr(setup_flow.platform, "system", lambda: "Linux")
+
+    setup_flow.apply(
+        SetupChoices(
+            "fw-base", None, "", "alt_l", None, False,
+            llm_provider="openai-compatible",
+        )
+    )
+
+    assert written[0].llm_provider == "openai-compatible"
+    assert written[0].llm_base_url == "https://example.test/v1"
+    assert written[0].llm_model == "configured-model"
+    assert written[0].cleanup_enabled is True
 
 
 def test_try_dictation_records_and_transcribes(monkeypatch):

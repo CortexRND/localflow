@@ -13,7 +13,7 @@ import numpy as np
 import sounddevice as sd
 
 from localflow.audio import Recorder, list_input_devices
-from localflow.config import Config, save_config
+from localflow.config import Config, apply_config_update, load_config, save_config
 from localflow.models import (
     HardwareInfo,
     STT_MODELS,
@@ -46,6 +46,7 @@ class SetupChoices:
     hotkey: str
     language: str | None
     start_on_login: bool
+    llm_provider: str = "ollama"
 
 
 HOTKEY_OPTIONS = [
@@ -131,10 +132,15 @@ def run_checks(cfg: Config) -> list[Check]:
             "Get Ollama", "https://ollama.com/download",
         ),
     ]
-    running = OllamaClient(cfg.ollama_url).is_running()
+    if cfg.llm_provider == "ollama":
+        running = OllamaClient(cfg.llm_base_url).is_running()
+        running_detail = "Ready" if running else "Not running"
+    else:
+        running = None
+        running_detail = f"Not used (configured provider: {cfg.llm_provider})"
     checks.append(Check(
         "ollama-running", "Ollama running", running,
-        "Ready" if running else "Not running",
+        running_detail,
         "Start Ollama", "https://ollama.com/download",
     ))
     devices = list_input_devices()
@@ -155,7 +161,13 @@ def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
         if stt_id not in {model.id for model in available_stt_models(hw)}:
             stt_id = recommended_stt
         valid_llm = {model.id for model in LLM_MODELS}
-        llm_id = cfg.ollama_model if cfg.cleanup_enabled and cfg.ollama_model in valid_llm else None
+        llm_id = (
+            cfg.llm_model
+            if cfg.llm_provider == "ollama"
+            and cfg.cleanup_enabled
+            and cfg.llm_model in valid_llm
+            else None
+        )
         start_on_login = False
         if hw.system == "Darwin":
             try:
@@ -171,28 +183,34 @@ def initial_choices(cfg: Config, hw: HardwareInfo) -> SetupChoices:
             hotkey=cfg.hotkey,
             language=cfg.language,
             start_on_login=start_on_login,
+            llm_provider=cfg.llm_provider,
         )
     return SetupChoices(
         stt_id=recommended_stt,
-        llm_id=recommended_llm,
+        llm_id=recommended_llm if cfg.llm_provider == "ollama" else None,
         input_device=cfg.input_device,
         hotkey=cfg.hotkey,
         language=cfg.language,
         start_on_login=False,
+        llm_provider=cfg.llm_provider,
     )
 
 
 def apply(choices: SetupChoices):
+    current = load_config()
     updates = stt_config_from_id(choices.stt_id)
     updates.update({
-        "ollama_model": choices.llm_id or Config().ollama_model,
-        "cleanup_enabled": choices.llm_id is not None,
-        "input_device": choices.input_device,
-        "hotkey": choices.hotkey,
-        "language": choices.language,
-        "setup_version": 1,
+        "dictation": {"input_device": choices.input_device},
+        "hotkey": {"key": choices.hotkey},
+        "setup": {"version": 1},
     })
-    path = save_config(updates)
+    updates["stt"]["language"] = choices.language
+    if choices.llm_provider == "ollama":
+        updates["llm"] = {
+            "model": choices.llm_id or current.llm_model,
+            "cleanup_enabled": choices.llm_id is not None,
+        }
+    path = save_config(apply_config_update(current, updates))
     if choices.start_on_login and platform.system() == "Darwin":
         from localflow.launchagent import install
 

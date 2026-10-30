@@ -1,5 +1,4 @@
-"""Install a minimal .app bundle that launches the hot-phrases Tk window,
-so it can be opened from Spotlight/Launchpad like a native app."""
+"""Install a minimal .app bundle that launches a LocalFlow module."""
 
 import plistlib
 import shlex

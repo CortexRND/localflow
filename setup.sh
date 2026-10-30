@@ -7,7 +7,7 @@ echo "==============="
 # Check for Homebrew
 if ! command -v brew &> /dev/null; then
     echo "Error: Homebrew not found. Install it with:"
-    echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+    printf "  %s\n" "/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
     exit 1
 fi
 
@@ -22,11 +22,10 @@ fi
 # Create venv
 echo "Creating virtual environment..."
 python3 -m venv .venv
-source .venv/bin/activate
 
 # Install package
 echo "Installing localflow..."
-pip install -e ".[mlx,menubar,macos-permissions]"
+.venv/bin/pip install -e ".[mlx,menubar,macos-permissions]"
 
 # The hot-phrases window needs tkinter (Homebrew Python doesn't ship it).
 if ! .venv/bin/python -c "import tkinter" 2>/dev/null; then

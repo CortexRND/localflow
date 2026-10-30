@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 SRC = Path(__file__).parent.parent / "localflow" / "setup_mac.py"
+SNAPSHOTS = Path(__file__).parent.parent / "scripts" / "mac_ui_snapshots.py"
 
 
 def _methods():
@@ -47,3 +48,12 @@ def test_setup_helpers_are_not_exported_as_selectors():
         "_start_checks", "_start_download", "_start_pull", "_start_trial",
         "_advance", "_select_stt", "_select_llm", "_fix_check",
     } <= names
+
+
+def test_mac_snapshot_script_captures_each_setup_step_and_provider_states():
+    source = SNAPSHOTS.read_text()
+    assert "from localflow.setup_mac import SetupWindowController" in source
+    assert "for step in range(7):" in source
+    assert 'setup-non-ollama-provider' in source
+    assert 'setup-download-progress' in source
+    assert 'setup-download-error' in source
