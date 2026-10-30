@@ -9,8 +9,18 @@ from dataclasses import replace
 import pytest
 
 tk = pytest.importorskip("tkinter")
+if sys.platform == "darwin":
+    pytest.skip("the macOS setup wizard uses AppKit", allow_module_level=True)
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
     pytest.skip("no display for Tk", allow_module_level=True)
+if sys.platform == "win32":
+    try:
+        _tk_probe = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk runtime unavailable: {exc}", allow_module_level=True)
+    else:
+        _tk_probe.withdraw()
+        _tk_probe.destroy()
 
 from localflow import setup_tk
 from localflow.config import Config
