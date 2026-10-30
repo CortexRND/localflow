@@ -1,3 +1,4 @@
+import re
 from collections.abc import Sequence
 
 from localflow.providers.base import LLMProvider
@@ -64,6 +65,15 @@ class Cleaner:
             prompt += "\n\n" + vocabulary_line
         try:
             cleaned = self.llm.complete(prompt, f"Text:\n{text}")
-            return cleaned if cleaned else text
+            if not cleaned:
+                return text
+            cleaned = re.sub(
+                r"^\s*Text:[ \t\r\n]*",
+                "",
+                cleaned,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            return cleaned if cleaned.strip() else text
         except Exception:
             return text

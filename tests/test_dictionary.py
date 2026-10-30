@@ -144,3 +144,7 @@ def test_dict_cli_rejects_incomplete_replacements():
     result = CliRunner().invoke(cli, ["dict", "add", "--from", "teh"])
     assert result.exit_code != 0
     assert "both --from and --to" in result.output
+
+
+def test_stt_prompt_is_none_without_words():
+    assert stt_prompt([]) is None

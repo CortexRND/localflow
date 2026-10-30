@@ -15,7 +15,15 @@ from localflow.formatting import apply_spoken_formatting, apply_style
         ("is it ready question mark", "is it ready?"),
         ("a new line b", "a\nB"),
         ("one, new paragraph. two", "one\n\nTwo"),
+        ("Call me. New line. Thanks", "Call me.\nThanks"),
+        ("Hi, new paragraph, thanks", "Hi\n\nThanks"),
         ("scratch that. keep this", "keep this"),
+        (
+            "I went home. Scratch that. I stayed in.",
+            "I stayed in.",
+        ),
+        ("A. B. Scratch that.", "A."),
+        ("Scratch that.", ""),
         (
             "first clause. remove this, scratch that. keep this",
             "first clause. Keep this",
@@ -117,6 +125,18 @@ def test_cleanup_prompt_snapshots_and_fallback():
 
     assert Cleaner(EmptyLLM()).clean("unchanged") == "unchanged"
     assert Cleaner(FailedLLM()).clean("unchanged") == "unchanged"
+
+
+def test_cleaner_strips_one_leading_text_label_and_falls_back_if_empty():
+    class LLM:
+        def __init__(self, response):
+            self.response = response
+
+        def complete(self, _system, _user):
+            return self.response
+
+    assert Cleaner(LLM("tExT:\n  cleaned output")).clean("input") == "cleaned output"
+    assert Cleaner(LLM("Text:\n \t")).clean("input") == "input"
 
 
 def test_cleanup_none_skips_llm():

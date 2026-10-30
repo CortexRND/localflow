@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 
 _BREAK = re.compile(
-    r"[ \t]*[,;.!?]*[ \t]*(?P<command>new paragraph|new line)\b[.,!?;:]*[ \t]*",
+    r"[ \t]*[,;]*[ \t]*(?P<command>new paragraph|new line)\b[.,!?;:]*[ \t]*",
     re.IGNORECASE,
 )
 _PUNCTUATION = {
@@ -43,7 +43,8 @@ def apply_spoken_formatting(text: str) -> str:
         text,
     )
     for match in reversed(list(_SCRATCH.finditer(text))):
-        boundary = max(text.rfind(mark, 0, match.start()) for mark in ".?!\n")
+        prefix = text[: match.start()].rstrip(" \t,.!?;:")
+        boundary = max(prefix.rfind(mark) for mark in ".?!\n")
         suffix = text[match.end() :]
         if boundary >= 0 and text[boundary] == "\n":
             suffix = suffix.lstrip(" \t")
