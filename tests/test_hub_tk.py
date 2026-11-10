@@ -8,14 +8,14 @@ from localflow.history import HistoryStore
 from localflow.hub_tk import PAGES, HubWindow
 
 
-def _window(tmp_path):
+def _window(tmp_path, theme="light"):
     try:
         root = tk.Tk()
     except tk.TclError as exc:
         pytest.skip(f"Tk unavailable: {exc}")
     history = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
     dictionary = DictionaryStore(tmp_path / "dictionary.json")
-    window = HubWindow(root, history, dictionary, Config())
+    window = HubWindow(root, history, dictionary, Config(), theme=theme)
     return root, window, history, dictionary
 
 
@@ -34,15 +34,7 @@ def test_hub_renders_all_pages_and_error_states(tmp_path):
 
 
 def test_sidebar_uses_fixed_dark_palette_and_title_case_labels(tmp_path):
-    root = tk.Tk()
-    root.withdraw()
-    window = HubWindow(
-        root,
-        HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips"),
-        DictionaryStore(tmp_path / "dictionary.json"),
-        Config(),
-        theme="dark",
-    )
+    root, window, _history, _dictionary = _window(tmp_path, theme="dark")
     try:
         assert window.sidebar.cget("bg") == "#0B0A08"
         for page, button in window.nav_buttons.items():

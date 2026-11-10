@@ -20,7 +20,10 @@ from localflow.phrases_tk import HotPhrasesWindow
 
 @pytest.fixture(scope="module")
 def root():
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk unavailable: {exc}")
     root.withdraw()
     yield root
     root.destroy()
