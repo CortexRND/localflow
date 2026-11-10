@@ -46,7 +46,7 @@ on:
 
 jobs:
   mac-ui:
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       PYNPUT_BACKEND: dummy
     steps:
