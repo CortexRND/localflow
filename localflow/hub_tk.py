@@ -59,33 +59,28 @@ class HubWindow:
         self.shell = tk.Frame(self.root, bg=self.tokens["paper"])
         self.shell.pack(fill="both", expand=True)
         self.sidebar = tk.Frame(
-            self.shell, bg=self.tokens["ink"], width=200, padx=16, pady=24,
+            self.shell, bg=self.tokens["sidebar"], width=200, padx=16, pady=24,
         )
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
-        brand = tk.Frame(self.sidebar, bg=self.tokens["ink"])
+        brand = tk.Frame(self.sidebar, bg=self.tokens["sidebar"])
         brand.pack(anchor="w", pady=(0, 24))
         mark = tk.Canvas(
-            brand, width=14, height=14, bg=self.tokens["ink"],
+            brand, width=14, height=14, bg=self.tokens["sidebar"],
             highlightthickness=0,
         )
         mark.create_oval(2, 2, 12, 12, fill=self.tokens["sun"], outline="")
         mark.pack(side="left", padx=(0, 7))
         tk.Label(
-            brand, text="localflow", bg=self.tokens["ink"], fg=self.tokens["paper"],
+            brand, text="localflow", bg=self.tokens["sidebar"],
+            fg=self.tokens["sidebar_text"],
             font=(self.font_family, 17, "bold"),
         ).pack(side="left")
         self.nav_buttons = {}
-        paper = self.tokens["paper"].lstrip("#")
-        ink = self.tokens["ink"].lstrip("#")
-        self.sidebar_muted = "#%02X%02X%02X" % tuple(
-            round(int(ink[i:i + 2], 16) * 0.25 + int(paper[i:i + 2], 16) * 0.75)
-            for i in (0, 2, 4)
-        )
         for page in PAGES:
             button = self._button(
-                self.sidebar, page.lower(), lambda page=page: self.show_page(page),
-                kind="sidebar",
+                self.sidebar, page, lambda page=page: self.show_page(page),
+                kind="sidebar", anchor="w", padx=12,
             )
             button.pack(fill="x", pady=2, ipady=5)
             self.nav_buttons[page] = button
@@ -105,7 +100,10 @@ class HubWindow:
                 self.tokens["surface"], 0,
             ),
             "destructive": (self.tokens["red"], "#FFFFFF", self.tokens["red"], 0),
-            "sidebar": (self.tokens["ink"], self.sidebar_muted, self.tokens["ink"], 0),
+            "sidebar": (
+                self.tokens["sidebar"], self.tokens["sidebar_text"],
+                self.tokens["sidebar"], 0,
+            ),
         }
         bg, fg, border, border_width = colors[kind]
         options = {
@@ -147,15 +145,21 @@ class HubWindow:
         for page, button in self.nav_buttons.items():
             if page != title:
                 button.configure(
-                    bg=self.tokens["ink"], fg=self.sidebar_muted,
-                    activebackground=self.tokens["ink"], activeforeground=self.sidebar_muted,
+                    bg=self.tokens["sidebar"], fg=self.tokens["sidebar_text"],
+                    activebackground=self.tokens["sidebar"],
+                    activeforeground=self.tokens["sidebar_text"],
                 )
         heading = tk.Frame(self.body, bg=self.tokens["paper"])
         heading.pack(fill="x", pady=(0, 20))
         tk.Label(
             heading, text=title, bg=self.tokens["paper"], fg=self.tokens["ink"],
             font=(self.font_family, 20, "bold"),
-        ).pack(anchor="w")
+        ).pack(side="left")
+        if title == "History":
+            self._button(
+                heading, "Clear history", self._clear_history,
+                kind="ghost", fg=self.tokens["red"],
+            ).pack(side="right")
         if title == "Home":
             halftone = tk.Canvas(
                 heading, width=150, height=100, bg=self.tokens["paper"],
@@ -208,7 +212,7 @@ class HubWindow:
         card = tk.Frame(parent, bg=self.tokens["paper"], height=112)
         card.pack_propagate(False)
         if highlighted:
-            shadow = tk.Frame(card, bg=self.tokens["ink"])
+            shadow = tk.Frame(card, bg=self.tokens["shadow"])
             shadow.place(x=3, y=3, relwidth=1, relheight=1)
             surface = tk.Frame(
                 card, bg=background, padx=CARD_PADDING, pady=14,
@@ -304,13 +308,15 @@ class HubWindow:
         bar = tk.Frame(self.body, bg=self.tokens["paper"])
         bar.pack(fill="x", pady=(0, 10))
         self.history_query = tk.StringVar()
+        self.history_placeholder = "Search transcripts"
         self.history_offset = 0
-        entry = self._entry(bar, textvariable=self.history_query)
-        entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self.history_entry = self._entry(bar, textvariable=self.history_query)
+        self.history_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self.history_query.set(self.history_placeholder)
+        self.history_entry.configure(fg=self.tokens["muted"])
+        self.history_entry.bind("<FocusIn>", self._focus_history_search)
+        self.history_entry.bind("<FocusOut>", self._blur_history_search)
         self._button(bar, "Search", self._search_history).pack(side="left", padx=8)
-        self._button(
-            bar, "Clear history", self._clear_history, bg=self.tokens["red"]
-        ).pack(side="right")
         self.history_rows = tk.Frame(self.body, bg=self.tokens["paper"])
         self.history_rows.pack(fill="both", expand=True)
         self.history_pager = tk.Frame(self.body, bg=self.tokens["paper"])
@@ -320,6 +326,20 @@ class HubWindow:
     def _search_history(self):
         self.history_offset = 0
         self._render_history()
+
+    def _history_search_value(self):
+        value = self.history_query.get()
+        return "" if value == self.history_placeholder else value
+
+    def _focus_history_search(self, _event=None):
+        if self.history_query.get() == self.history_placeholder:
+            self.history_query.set("")
+            self.history_entry.configure(fg=self.tokens["ink"])
+
+    def _blur_history_search(self, _event=None):
+        if not self.history_query.get():
+            self.history_query.set(self.history_placeholder)
+            self.history_entry.configure(fg=self.tokens["muted"])
 
     def _change_history_page(self, offset):
         self.history_offset = max(0, self.history_offset + offset)
@@ -331,14 +351,17 @@ class HubWindow:
         for child in self.history_pager.winfo_children():
             child.destroy()
         rows = self.history.recent(
-            query=self.history_query.get() or None,
+            query=self._history_search_value() or None,
             limit=9,
             offset=self.history_offset,
         )
         has_older = len(rows) > 8
         rows = rows[:8]
         if not rows:
-            if self.history_query.get():
+            self.history_rows.configure(
+                bg=self.tokens["paper"], highlightthickness=0,
+            )
+            if self._history_search_value():
                 empty = (
                     "No matching entries",
                     "Try another search or start a new dictation.",
@@ -354,8 +377,17 @@ class HubWindow:
                 )
             self._empty_state(self.history_rows, *empty)
         else:
-            for row in rows:
+            self.history_rows.configure(
+                bg=self.tokens["surface"],
+                highlightbackground=self.tokens["line"],
+                highlightthickness=1,
+            )
+            for index, row in enumerate(rows):
                 self._history_line(self.history_rows, row, actions=True)
+                if index < len(rows) - 1:
+                    tk.Frame(
+                        self.history_rows, bg=self.tokens["line"], height=1,
+                    ).pack(fill="x")
         pager = tk.Frame(self.history_pager, bg=self.tokens["paper"])
         pager.pack(pady=(12, 0))
         controls = tk.Frame(pager, bg=self.tokens["paper"])
@@ -377,15 +409,15 @@ class HubWindow:
         older.configure(state="normal" if has_older else "disabled")
 
     def _clear_history_search(self):
-        self.history_query.set("")
+        self.history_query.set(self.history_placeholder)
+        self.history_entry.configure(fg=self.tokens["muted"])
         self._search_history()
 
     def _history_line(self, parent, row, actions):
         frame = tk.Frame(
-            parent, bg=self.tokens["surface"], height=56, padx=CARD_PADDING,
-            highlightbackground=self.tokens["line"], highlightthickness=1,
+            parent, bg=self.tokens["surface"], height=48, padx=CARD_PADDING,
         )
-        frame.pack(fill="x", pady=(0, 1))
+        frame.pack(fill="x")
         frame.pack_propagate(False)
         text = _one_line(
             row.get("final_text") or row.get("raw_text") or "(no text)",
@@ -423,7 +455,7 @@ class HubWindow:
                 font=(self.font_family, 9, "bold"), padx=8, pady=3,
             ).pack(side="right", padx=(8, 0))
         text_block = tk.Frame(frame, bg=self.tokens["surface"])
-        text_block.pack(side="left", fill="both", expand=True, pady=7)
+        text_block.pack(side="left", fill="both", expand=True, pady=4)
         tk.Label(
             text_block, text=text, bg=self.tokens["surface"], fg=self.tokens["ink"],
             font=(self.font_family, 13), anchor="w", justify="left",

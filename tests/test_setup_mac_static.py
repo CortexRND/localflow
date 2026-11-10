@@ -92,3 +92,42 @@ def test_setup_mac_places_refresh_models_and_shortcuts_without_overlap():
     assert "Hold {self.hotkey} · Double-tap locks · Esc cancels" in source
     assert "Pause music while I talk" in source
     assert "self.pauseMediaChanged_" in source
+
+
+def test_setup_mac_shows_errors_on_non_download_steps():
+    source = SRC.read_text(encoding="utf-8")
+    assert "elif self.error_message and self.step != 5:" in source
+    assert 'self.status.setTextColor_(_color("red", self.tokens))' in source
+
+
+def test_setup_mac_cleanup_levels_are_light_medium_and_hidden_for_none():
+    source = SRC.read_text(encoding="utf-8")
+    assert 'if self.llm_id == "none":' in source
+    assert 'levels = (("light", "Light"), ("medium", "Medium"))' in source
+    assert 'levels = ("light", "medium")' in source
+
+
+def test_setup_mac_keeps_one_description_and_uses_rounded_model_controls():
+    source = SRC.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    controller = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SetupWindowController"
+    )
+    renderer = next(
+        node for node in controller.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_render"
+    )
+    render_source = ast.get_source_segment(source, renderer)
+    for duplicate in (
+        "Choose the speech model that turns your voice into text.",
+        "Cleanup fixes punctuation and filler words; raw transcript skips the extra model.",
+        "Pick a microphone and the key you'll hold to talk.",
+        "Record five seconds of speech.",
+        "Try a short phrase near your microphone.",
+    ):
+        assert duplicate not in render_source
+    assert "NSMakeRect(17, 28, 16, 16)" in source
+    assert "NSMakeRect(4, 4, 8, 8)" in source
+    assert "NSMakeRect(meter_x + dot_index * 13, 49, 10, 4)" in source
+    assert "NSMakeRect(548, 248, 180, 160)" in render_source

@@ -195,7 +195,12 @@ class HotPhrasesWindow:
         self.tree.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         scroll.grid(row=1, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scroll.set)
+        self.phrase_scroll = scroll
+        self.phrase_dividers = []
+        self.tree.configure(yscrollcommand=self._sync_phrase_scroll)
+        self.tree.bind(
+            "<Configure>", lambda _event: self._draw_phrase_dividers(), add=True
+        )
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Button-1>", self._on_tree_click, add=True)
         self.tree.bind("<space>", lambda _e: self.toggle_selected())
@@ -387,6 +392,25 @@ class HotPhrasesWindow:
                 self._set_editor("", "", True)
         self._update_buttons()
         self._schedule_preview()
+        self.tree.after_idle(self._draw_phrase_dividers)
+
+    def _sync_phrase_scroll(self, *args) -> None:
+        self.phrase_scroll.set(*args)
+        self._draw_phrase_dividers()
+
+    def _draw_phrase_dividers(self) -> None:
+        for divider in self.phrase_dividers:
+            divider.destroy()
+        self.phrase_dividers.clear()
+        for item in self.tree.get_children():
+            bounds = self.tree.bbox(item)
+            if not bounds:
+                continue
+            x, y, width, height = bounds
+            if y + height < self.tree.winfo_height():
+                divider = tk.Frame(self.tree, bg=self.tokens["line"], height=1)
+                divider.place(x=x, y=y + height - 1, width=width)
+                self.phrase_dividers.append(divider)
 
     def _poll(self) -> None:
         try:

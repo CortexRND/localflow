@@ -66,7 +66,7 @@ def style_button(button, kind="secondary", palette=None):
         "destructive_ghost": palette["paper"],
         "selected": palette["ink"],
         "sidebar": palette["sun"],
-        "sidebar_idle": palette["ink"],
+        "sidebar_idle": palette["sidebar"],
         "destructive": palette["red"],
     }
     foregrounds = {
@@ -76,7 +76,7 @@ def style_button(button, kind="secondary", palette=None):
         "destructive_ghost": palette["red"],
         "selected": palette["paper"],
         "sidebar": SUN_TEXT,
-        "sidebar_idle": palette["muted"],
+        "sidebar_idle": palette["sidebar_text"],
         "destructive": "#FFFFFF",
     }
     button.setBordered_(False)
@@ -94,7 +94,7 @@ def style_button(button, kind="secondary", palette=None):
         else (0 if kind in ("ghost", "destructive_ghost") else 1)
     )
     if kind == "primary":
-        layer.setShadowColor_(color(palette["ink"], {"fill": palette["ink"]}).CGColor())
+        layer.setShadowColor_(color(palette["shadow"]).CGColor())
         layer.setShadowOffset_(NSMakeSize(SHADOW_OFFSET, -SHADOW_OFFSET))
         layer.setShadowRadius_(0)
         layer.setShadowOpacity_(1)
@@ -123,7 +123,7 @@ def style_surface(view, palette=None, *, fill="surface", border="line", shadow=F
     layer.setBorderWidth_(1.5 if shadow else 1)
     layer.setCornerRadius_(RADIUS["card"])
     if shadow:
-        layer.setShadowColor_(color(palette["ink"], {"fill": palette["ink"]}).CGColor())
+        layer.setShadowColor_(color(palette["shadow"]).CGColor())
         layer.setShadowOffset_(NSMakeSize(SHADOW_OFFSET, -SHADOW_OFFSET))
         layer.setShadowRadius_(0)
         layer.setShadowOpacity_(1)

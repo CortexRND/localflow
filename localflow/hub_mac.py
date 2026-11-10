@@ -37,8 +37,8 @@ PAGES = ("Home", "History", "Dictionary", "Style", "Models")
 
 
 def _label(
-    text, x, y, width=650, size=14, color="ink", palette=None, height=28,
-    weight="regular",
+    text, x, y, width=650, size=14, color="ink", *,
+    palette=None, height=28, weight="regular",
 ):
     label = NSTextField.labelWithString_(text)
     label.setFrame_(NSMakeRect(x, y, width, height))
@@ -87,10 +87,12 @@ class HubWindowController(NSObject):
         self.window.setContentView_(self.root_view)
         self.sidebar = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 200, 700))
         self.sidebar.setWantsLayer_(True)
-        self.sidebar.layer().setBackgroundColor_(_color("ink", self.tokens).CGColor())
+        self.sidebar.layer().setBackgroundColor_(_color("sidebar", self.tokens).CGColor())
         self.root_view.addSubview_(self.sidebar)
-        brand = _label("localflow", 42, 25, 145, 24, 17, "paper", self.tokens, 26)
-        self.sidebar.addSubview_(brand)
+        self.brand = _label(
+            "localflow", 42, 25, 145, 17, "sidebar_text", palette=self.tokens, height=26
+        )
+        self.sidebar.addSubview_(self.brand)
         mark = NSView.alloc().initWithFrame_(NSMakeRect(22, 31, 10, 10))
         mark.setWantsLayer_(True)
         mark.layer().setBackgroundColor_(_color("sun", self.tokens).CGColor())
@@ -99,13 +101,16 @@ class HubWindowController(NSObject):
         self.sidebar_buttons = []
         for index, page in enumerate(PAGES):
             button = NSButton.buttonWithTitle_target_action_(page, self, "showPage:")
-            button.setFrame_(NSMakeRect(12, 76 + index * 44, 176, 36))
+            button.setFrame_(NSMakeRect(16, 76 + index * 44, 168, 36))
+            button.setTitle_(f"\u2002\u2002{page}")
+            button.setAlignment_(AppKit.NSTextAlignmentLeft)
             button.setTag_(index)
             _style_button(button, selected=page == self.page, palette=self.tokens)
             self.sidebar.addSubview_(button)
             self.sidebar_buttons.append(button)
         self.body = FlippedView.alloc().initWithFrame_(NSMakeRect(232, 24, 780, 652))
         self.root_view.addSubview_(self.body)
+        self.window.setDelegate_(self)
 
     @objc.python_method
     def _button(
@@ -127,7 +132,7 @@ class HubWindowController(NSObject):
         self.body.addSubview_(
             _label(
                 text, 0, self.cursor_y, 720, size, color,
-                self.tokens, height, weight,
+                palette=self.tokens, height=height, weight=weight,
             )
         )
         self.cursor_y += height + gap
@@ -145,6 +150,10 @@ class HubWindowController(NSObject):
         self.tokens = tokens_for_window(self.window)
         self.page = page
         self.root_view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
+        self.sidebar.layer().setBackgroundColor_(
+            _color("sidebar", self.tokens).CGColor()
+        )
+        self.brand.setTextColor_(_color("sidebar_text", self.tokens))
         for button in self.sidebar_buttons:
             _style_button(
                 button, selected=PAGES[button.tag()] == page,
@@ -154,8 +163,13 @@ class HubWindowController(NSObject):
             view.removeFromSuperview()
         self.cursor_y = 0
         self.body.addSubview_(
-            _label(page, 0, self.cursor_y, 700, 20, "ink", self.tokens, 28)
+            _label(page, 0, self.cursor_y, 700, 20, "ink", palette=self.tokens, height=28)
         )
+        if page == "History":
+            self._button(
+                "Clear history", "clearHistory:", 610, 0, width=130,
+                kind="destructive_ghost",
+            )
         self.cursor_y = 48
         error = self.page_errors.get(page)
         if error:
@@ -173,10 +187,10 @@ class HubWindowController(NSObject):
         bar.layer().setBackgroundColor_(_color("red", self.tokens).CGColor())
         card.addSubview_(bar)
         card.addSubview_(
-            _label("Something went wrong", 16, 8, 660, 18, 13, "red", self.tokens, 18)
+            _label("Something went wrong", 16, 8, 660, 13, "red", palette=self.tokens, height=18)
         )
         card.addSubview_(
-            _label(message, 16, 30, 660, 18, 11, "muted", self.tokens, 18)
+            _label(message, 16, 30, 660, 11, "muted", palette=self.tokens, height=18)
         )
         self.body.addSubview_(card)
         self.cursor_y += 70
@@ -264,14 +278,14 @@ class HubWindowController(NSObject):
                 _label(
                     title.upper(), 16, 16, 140, 16,
                     SUN_TEXT if title == "Streak" else "muted",
-                    self.tokens, 18, "semibold",
+                    palette=self.tokens, height=18, weight="semibold",
                 )
             )
             card.addSubview_(
                 _label(
                     str(value), 16, 42, 140, 32,
                     SUN_TEXT if title == "Streak" else "ink",
-                    self.tokens, 34, "bold",
+                    palette=self.tokens, height=34, weight="bold",
                 )
             )
             self.body.addSubview_(card)
@@ -281,7 +295,7 @@ class HubWindowController(NSObject):
                 f'Today  {stats["words_today"]} words     Last 7 days  '
                 f'{stats["words_7d"]} words     Longest streak  {longest_streak} day'
                 f'{"s" if longest_streak != 1 else ""}',
-                0, self.cursor_y, 740, 12, "muted", self.tokens, 20,
+                0, self.cursor_y, 740, 12, "muted", palette=self.tokens, height=20,
             )
         )
         self.cursor_y += 36
@@ -316,10 +330,10 @@ class HubWindowController(NSObject):
             NSMakeRect(x, y, width, height)
         )
         state.addSubview_(
-            _label(title, 24, 58, width - 48, 24, 15, "ink", self.tokens, 28, "semibold")
+            _label(title, 24, 58, width - 48, 15, "ink", palette=self.tokens, height=28, weight="semibold")
         )
         state.addSubview_(
-            _label(detail, 24, 96, width - 48, 14, 13, "muted", self.tokens, 28)
+            _label(detail, 24, 96, width - 48, 13, "muted", palette=self.tokens, height=28)
         )
         self._button(
             action, selector, 24, 140, width=138, parent=state,
@@ -364,7 +378,7 @@ class HubWindowController(NSObject):
         parent.addSubview_(
             _label(
                 text, 14, y + 7, text_width, 13,
-                "ink", self.tokens, 18,
+                "ink", palette=self.tokens, height=18,
             )
         )
         parent.addSubview_(
@@ -372,7 +386,7 @@ class HubWindowController(NSObject):
                 f'{row.get("app_name") or "Unknown"}  ·  {date_label}  ·  '
                 f'{row["kind"].title()}',
                 14, y + 30, text_width, 11,
-                "muted", self.tokens, 16,
+                "muted", palette=self.tokens, height=16,
             )
         )
         if status != "ok":
@@ -387,9 +401,7 @@ class HubWindowController(NSObject):
             chip.addSubview_(
                 _label(
                     "Failed" if status == "failed" else "Silent",
-                    8, 2, 58, 17, 9,
-                    "paper" if status == "failed" else "muted",
-                    self.tokens, 18, "semibold",
+                    8, 2, 58, 9, "paper" if status == "failed" else "muted", palette=self.tokens, height=18, weight="semibold",
                 )
             )
             parent.addSubview_(chip)
@@ -398,14 +410,11 @@ class HubWindowController(NSObject):
     def _page_history(self):
         self.history_offset = 0
         self.history_query = ""
-        self.search_field = self._field(self.history_query, 0, self.cursor_y, 390)
-        self._button("Search", "searchHistory:", 404, self.cursor_y, width=100)
-        self._button(
-            "Clear history", "clearHistory:", 610, self.cursor_y,
-            width=130, kind="destructive",
-        )
+        self.search_field = self._field(self.history_query, 0, self.cursor_y, 600)
+        self.search_field.setPlaceholderString_("Search transcripts")
+        self._button("Search", "searchHistory:", 612, self.cursor_y, width=100)
         self.cursor_y += 48
-        self.history_results_height = 450 if self.page_errors.get("History") else 520
+        self.history_results_height = 520
         self.history_results = FlippedView.alloc().initWithFrame_(
             NSMakeRect(0, self.cursor_y, 760, self.history_results_height)
         )
@@ -426,6 +435,7 @@ class HubWindowController(NSObject):
         )
         has_older = len(rows) > 8
         rows = rows[:8]
+        listing_height = 330
         if not rows:
             empty = (
                 (
@@ -446,6 +456,7 @@ class HubWindowController(NSObject):
                 self.history_results, 0, 110, 720, 220, *empty,
             )
         else:
+            listing_height = len(rows) * 56
             listing = FlippedView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, 740, len(rows) * 56)
             )
@@ -462,7 +473,11 @@ class HubWindowController(NSObject):
                         _color("line", self.tokens).CGColor()
                     )
                     listing.addSubview_(divider)
-        page_y = self.history_results_height - 52
+        page_y = listing_height + 16
+        self.history_results_height = page_y + 36
+        self.history_results.setFrame_(
+            NSMakeRect(0, self.cursor_y, 760, self.history_results_height)
+        )
         if self.history_offset:
             self._button(
                 "Newer", "newerHistory:", 270, page_y, width=90,
@@ -471,7 +486,7 @@ class HubWindowController(NSObject):
         self.history_results.addSubview_(
             _label(
                 f"Page {self.history_offset // 8 + 1}",
-                370, page_y + 8, 90, 13, "muted", self.tokens, 18, "semibold",
+                370, page_y + 8, 90, 13, "muted", palette=self.tokens, height=18, weight="semibold",
             )
         )
         if has_older:
@@ -558,7 +573,7 @@ class HubWindowController(NSObject):
             self.body.addSubview_(
                 _label(
                     notice, 10, self.cursor_y + 8, 700, 11,
-                    SUN_TEXT, self.tokens, 20,
+                    SUN_TEXT, palette=self.tokens, height=20,
                 )
             )
             self.cursor_y += 44
@@ -588,7 +603,7 @@ class HubWindowController(NSObject):
                 self.dictionary_results.addSubview_(
                     _label(
                         label, 14, y + 17, 460, 13, "ink",
-                        self.tokens, 20,
+                        palette=self.tokens, height=20,
                     )
                 )
                 self._button(
@@ -710,7 +725,7 @@ class HubWindowController(NSObject):
         self.body.addSubview_(
             _label(
                 "Cleanup level", 0, self.cursor_y + 8, 150, 15,
-                "ink", self.tokens, 22, "semibold",
+                "ink", palette=self.tokens, height=22, weight="semibold",
             )
         )
         cleanup_group = self._segment_group(
@@ -739,11 +754,11 @@ class HubWindowController(NSObject):
             self.body.addSubview_(
                 _label(
                     f"{category.title()} style", 0, y + 4, 160, 15,
-                    "ink", self.tokens, 22, "semibold",
+                    "ink", palette=self.tokens, height=22, weight="semibold",
                 )
             )
             self.body.addSubview_(
-                _label(example, 0, y + 29, 160, 11, "muted", self.tokens, 18)
+                _label(example, 0, y + 29, 160, 11, "muted", palette=self.tokens, height=18)
             )
             self.style_selections[category] = getattr(self.config, f"style_{category}")
             self.style_buttons[category] = []
@@ -840,7 +855,7 @@ class HubWindowController(NSObject):
             _label(
                 f"Speech model: {self.config.stt_backend} / {self.config.model_size}\n"
                 f"Cleanup model: {self.config.llm_provider} / {self.config.llm_model or 'not selected'}",
-                0, self.cursor_y, 700, 13, "ink", self.tokens, 54,
+                0, self.cursor_y, 700, 13, "ink", palette=self.tokens, height=54,
             )
         )
         self._button(

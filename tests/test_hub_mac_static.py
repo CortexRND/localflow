@@ -61,6 +61,31 @@ def test_label_calls_do_not_repeat_positional_parameters():
         assert not positional & keywords
 
 
+def test_appkit_label_helpers_keep_optional_layout_options_keyword_only():
+    modules = (
+        ("hub_mac.py", {"palette", "height", "weight"}),
+        ("setup_mac.py", {"height"}),
+        ("phrases_mac.py", {"font", "color", "wrap"}),
+    )
+    for filename, keyword_only in modules:
+        tree = ast.parse((ROOT / "localflow" / filename).read_text(encoding="utf-8"))
+        helper = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_label"
+        )
+        assert keyword_only <= {arg.arg for arg in helper.args.kwonlyargs}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            is_label = (
+                isinstance(node.func, ast.Name) and node.func.id == "_label"
+            ) or (
+                isinstance(node.func, ast.Attribute) and node.func.attr == "_label"
+            )
+            if is_label:
+                assert len(node.args) <= 6, f"{filename}:{node.lineno}"
+
+
 def test_appkit_history_uses_a_cleared_paged_results_container():
     source = SOURCE.read_text(encoding="utf-8")
     assert "self.history_results.subviews()" in source
@@ -68,6 +93,33 @@ def test_appkit_history_uses_a_cleared_paged_results_container():
     assert "offset=self.history_offset" in source
     assert '"olderHistory:"' in source
     assert '"newerHistory:"' in source
+    assert "page_y = listing_height + 16" in source
+    assert "self.history_results.setFrame_(" in source
+    assert "self.history_results_height - 52" not in source
+
+
+def test_history_search_and_clear_history_use_the_header_layout():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert 'self.search_field.setPlaceholderString_("Search transcripts")' in source
+    assert '"Clear history", "clearHistory:", 610, 0' in source
+    assert 'kind="destructive_ghost"' in source
+    assert '"Clear history", "clearHistory:", 610, self.cursor_y' not in source
+
+
+def test_window_appearance_callback_is_registered_on_a_retained_controller():
+    source = SOURCE.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    controller = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "HubWindowController"
+    )
+    assert any(
+        isinstance(base, ast.Name) and base.id == "NSObject"
+        for base in controller.bases
+    )
+    assert "self.window.setDelegate_(self)" in source
+    assert "controller = build_window()" in source
+    assert "AppHelper.runEventLoop()" in source
 
 
 def test_hub_settings_use_segmented_controls_and_reload_models_config():
@@ -88,6 +140,10 @@ def test_hub_buttons_use_setup_pop_art_tokens():
     assert "color as _color" in source
     assert "from localflow.ui_tokens import" in style
     assert "def style_flat_button(button, selected=False, palette=None)" in style
+    assert '_color("sidebar", self.tokens)' in source
+    assert "button.setAlignment_(AppKit.NSTextAlignmentLeft)" in source
+    assert '"sidebar_idle": palette["sidebar"]' in style
+    assert "color(palette[\"shadow\"])" in style
     assert 'selected=page == self.page' in source
     assert "selected=PAGES[button.tag()] == page" in source
     assert "layer.setBorderWidth_(" in style

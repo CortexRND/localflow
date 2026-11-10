@@ -73,7 +73,7 @@ _EXAMPLE_TEXT = (
 _TOOLBAR_NEW = "newPhrase"
 
 
-def _label(text, font=None, color=None, wrap=False):
+def _label(text, *, font=None, color=None, wrap=False):
     field = NSTextField.labelWithString_(text)
     if font is not None:
         field.setFont_(font)
@@ -191,6 +191,8 @@ class PhrasesWindowController(NSObject):
         self.table.setRowHeight_(56)
         self.table.setBackgroundColor_(_color("surface", self.tokens))
         self.table.setUsesAlternatingRowBackgroundColors_(False)
+        self.table.setGridStyleMask_(AppKit.NSTableViewSolidHorizontalGridLineMask)
+        self.table.setGridColor_(_color("line", self.tokens))
         self.table.setDataSource_(self)
         self.table.setDelegate_(self)
         self.table.setUsesAutomaticRowHeights_(False)
@@ -1014,6 +1016,7 @@ class PhrasesWindowController(NSObject):
         self.tokens = tokens_for_window(self.window)
         self.window.setBackgroundColor_(_color("paper", self.tokens))
         self.table.setBackgroundColor_(_color("surface", self.tokens))
+        self.table.setGridColor_(_color("line", self.tokens))
         self.table.reloadData()
         self.search_field.setBackgroundColor_(_color("surface", self.tokens))
         self.sidebar_container.layer().setBackgroundColor_(

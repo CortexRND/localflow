@@ -104,6 +104,7 @@ class SetupWindow:
         root.minsize(720, 600)
         root.configure(background=self.tokens["paper"])
         root.protocol("WM_DELETE_WINDOW", self.close)
+        self._configure_scrollbar_style()
         self._build_shell()
         self._render()
         root.after(100, self._poll_events)
@@ -174,6 +175,40 @@ class SetupWindow:
         self.body = tk.Frame(self.shell, bg=self.tokens["paper"])
         self.body.pack(fill="both", expand=True)
 
+    def _configure_scrollbar_style(self) -> None:
+        style = ttk.Style(self.root)
+        style.layout(
+            "Slim.Vertical.TScrollbar",
+            [
+                (
+                    "Vertical.Scrollbar.trough",
+                    {
+                        "sticky": "ns",
+                        "children": [
+                            ("Vertical.Scrollbar.thumb", {"sticky": "nswe"})
+                        ],
+                    },
+                )
+            ],
+        )
+        style.configure(
+            "Slim.Vertical.TScrollbar",
+            width=8,
+            troughcolor=self.tokens["paper"],
+            background=self.tokens["line"],
+            bordercolor=self.tokens["paper"],
+            darkcolor=self.tokens["line"],
+            lightcolor=self.tokens["line"],
+            arrowcolor=self.tokens["paper"],
+            borderwidth=0,
+            relief="flat",
+        )
+        style.map(
+            "Slim.Vertical.TScrollbar",
+            background=[("active", self.tokens["line"])],
+            troughcolor=[("!disabled", self.tokens["paper"])],
+        )
+
     def _clear(self, container) -> None:
         for child in container.winfo_children():
             child.destroy()
@@ -189,6 +224,11 @@ class SetupWindow:
         self._clear(self.body)
         self._clear(self.footer_content)
         getattr(self, f"_render_step_{self.step}")()
+        if self.error_message and (
+            self.step in (0, 4, 6)
+            or (self.step == 3 and self.choices.llm_provider != "ollama")
+        ):
+            self._label(self.body, self.error_message, fg=self.tokens["red"])
         self._render_footer()
 
     def _label(self, parent, text, *, font=None, fg=None, wrap=620, pady=(0, 8)):
@@ -212,7 +252,7 @@ class SetupWindow:
         card.columnconfigure(0, weight=1)
         card.rowconfigure(0, weight=1)
         if selected:
-            shadow = tk.Frame(card, bg=self.tokens["ink"])
+            shadow = tk.Frame(card, bg=self.tokens["shadow"])
             shadow.grid(
                 row=0, column=0, sticky="nsew",
                 padx=(offset, 0), pady=(offset, 0),
@@ -232,14 +272,13 @@ class SetupWindow:
         top = tk.Frame(surface, bg=color)
         top.pack(fill="x", padx=CARD_PADDING, pady=(12, 0))
         radio = tk.Canvas(
-            top, width=18, height=18, bg=color, highlightthickness=0,
+            top, width=16, height=16, bg=color, highlightthickness=0,
         )
         radio.create_oval(
-            1, 1, 17, 17, outline=SUN_TEXT if selected else self.tokens["ink"],
-            width=2, fill=self.tokens["sun"] if selected else color,
+            1, 1, 15, 15, outline=self.tokens["ink"], width=2, fill=color,
         )
         if selected:
-            radio.create_oval(6, 6, 12, 12, fill=SUN_TEXT, outline="")
+            radio.create_oval(4, 4, 12, 12, fill=self.tokens["sun"], outline="")
         radio.pack(side="left", padx=(0, 8))
         tk.Label(
             top, text=title, bg=color, fg=self.tokens["ink"],
@@ -271,30 +310,38 @@ class SetupWindow:
         holder = tk.Frame(self.body, bg=self.tokens["paper"])
         holder.pack(fill="both", expand=True)
         canvas = tk.Canvas(holder, bg=self.tokens["paper"], highlightthickness=0)
-        scroll = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        scroll = ttk.Scrollbar(
+            holder, orient="vertical", command=canvas.yview,
+            style="Slim.Vertical.TScrollbar",
+        )
         content = tk.Frame(canvas, bg=self.tokens["paper"], padx=12, pady=12)
         window = canvas.create_window((0, 0), window=content, anchor="nw")
         content.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(
+                window, width=max(1, event.width - 12)
+            ),
+        )
         canvas.configure(yscrollcommand=scroll.set)
         canvas.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         return content
 
-    def _halftone(self, parent, width=196, height=170):
+    def _halftone(self, parent, width=144, height=112):
         canvas = tk.Canvas(
             parent, width=width, height=height, bg=self.tokens["paper"],
             highlightthickness=0,
         )
-        for row in range(10):
-            for column in range(10 - row):
-                radius = max(1, 4 - (row + column) // 4)
-                x, y = 8 + column * 18, 8 + row * 16
+        for row in range(7):
+            for column in range(7 - row):
+                radius = max(1, 3 - (row + column) // 4)
+                x, y = 8 + column * 16, 8 + row * 14
                 canvas.create_oval(
                     x, y, x + radius * 2, y + radius * 2,
                     fill=self.tokens["sun"], outline="",
                 )
-        canvas.place(relx=1, x=-4, y=0, anchor="ne")
+        canvas.place(relx=1, rely=1, x=-8, y=-8, anchor="se")
         canvas.tk.call("lower", canvas._w)
 
     def _model_card(self, parent, model, selected, tags):
@@ -302,7 +349,7 @@ class SetupWindow:
         card = tk.Frame(parent, bg=self.tokens["paper"])
         card.pack(fill="x", pady=(0, CARD_GAP))
         if selected:
-            shadow = tk.Frame(card, bg=self.tokens["ink"])
+            shadow = tk.Frame(card, bg=self.tokens["shadow"])
             shadow.place(x=offset, y=offset, relwidth=1, relheight=1)
         surface = tk.Frame(
             card, bg=self.tokens["surface"],
@@ -313,16 +360,15 @@ class SetupWindow:
         top = tk.Frame(surface, bg=self.tokens["surface"])
         top.pack(fill="x", padx=CARD_PADDING, pady=(12, 4))
         radio = tk.Canvas(
-            top, width=18, height=18, bg=self.tokens["surface"],
+            top, width=16, height=16, bg=self.tokens["surface"],
             highlightthickness=0,
         )
         radio.create_oval(
-            1, 1, 17, 17,
-            outline=SUN_TEXT if selected else self.tokens["ink"], width=2,
-            fill=self.tokens["sun"] if selected else self.tokens["surface"],
+            1, 1, 15, 15, outline=self.tokens["ink"], width=2,
+            fill=self.tokens["surface"],
         )
         if selected:
-            radio.create_oval(6, 6, 12, 12, fill=SUN_TEXT, outline="")
+            radio.create_oval(4, 4, 12, 12, fill=self.tokens["sun"], outline="")
         radio.pack(side="left", padx=(0, 8))
         tk.Label(
             top, text=model.label, bg=self.tokens["surface"], fg=self.tokens["ink"],
@@ -356,13 +402,15 @@ class SetupWindow:
                 fg=self.tokens["muted"], font=(self.font_family, 11),
             ).pack(side="left", padx=(0, 5))
             dots = tk.Canvas(
-                metadata, width=48, height=12, bg=self.tokens["surface"],
+                metadata, width=62, height=8, bg=self.tokens["surface"],
                 highlightthickness=0,
             )
             for index in range(5):
-                x = 2 + index * 9
-                dots.create_oval(
-                    x, 3, x + 6, 9,
+                x = index * 13
+                dots.create_polygon(
+                    x + 2, 2, x + 8, 2, x + 10, 4,
+                    x + 8, 6, x + 2, 6, x, 4,
+                    smooth=True, splinesteps=8,
                     fill=self.tokens["ink"] if index < score else self.tokens["line"],
                     outline="",
                 )
@@ -425,7 +473,6 @@ class SetupWindow:
         ).pack(anchor="w", pady=(6, 0))
 
     def _render_step_2(self) -> None:
-        self._label(self.body, "Choose the speech model that turns your voice into text.")
         self._show_operation_state()
         content = self._scrolling_body()
         rec_stt, _ = recommend(self.hardware)
@@ -464,7 +511,6 @@ class SetupWindow:
                 bg=self.tokens["surface"], fg=self.tokens["ink"], relief="solid", bd=2, padx=12, pady=4,
             ).pack(anchor="w", pady=(12, 0))
             return
-        self._label(self.body, "Cleanup fixes punctuation and filler words. No cleanup keeps the raw transcript.")
         self._show_operation_state()
         content = self._scrolling_body()
         if self.llm_var.get() != "none":
@@ -504,6 +550,8 @@ class SetupWindow:
             self._start_ollama_check()
 
     def _render_cleanup_level_control(self, parent) -> None:
+        if self.llm_var.get() == "none":
+            return
         level_row = tk.Frame(parent, bg=self.tokens["paper"])
         level_row.pack(fill="x", pady=(0, 8))
         tk.Label(
@@ -533,7 +581,7 @@ class SetupWindow:
         def select(value):
             self._select_cleanup_level(value)
 
-        for level, label in (("none", "None"), ("light", "Light"), ("medium", "Medium")):
+        for level, label in (("light", "Light"), ("medium", "Medium")):
             button = tk.Button(
                 group, text=label, command=lambda value=level: select(value),
                 bg=self.tokens["surface"], fg=self.tokens["ink"],
@@ -545,7 +593,6 @@ class SetupWindow:
         style_selection()
 
     def _render_step_4(self) -> None:
-        self._label(self.body, "Pick a microphone and the key you'll hold to talk.")
         devices = ["System default", *list_input_devices()]
         if self.device_var.get() not in devices:
             self.device_var.set("System default")
@@ -570,7 +617,10 @@ class SetupWindow:
             f"Polish: {self.choices.polish_hotkey or 'disabled'}",
             f"Prompt: {self.choices.prompt_hotkey or 'disabled'}",
         ]
-        card = tk.LabelFrame(self.body, text="Shortcuts", bg=self.tokens["paper"])
+        card = tk.LabelFrame(
+            self.body, text="Shortcuts", bg=self.tokens["paper"],
+            fg=self.tokens["ink"],
+        )
         card.pack(fill="x", pady=(0, 8))
         tk.Label(
             card, text="\n".join(shortcuts), justify="left",
@@ -579,7 +629,8 @@ class SetupWindow:
         tk.Checkbutton(
             self.body, text="Pause music while I talk",
             variable=self.pause_media_var, bg=self.tokens["paper"],
-            activebackground=self.tokens["paper"],
+            fg=self.tokens["ink"], activebackground=self.tokens["paper"],
+            activeforeground=self.tokens["ink"],
         ).pack(anchor="w", pady=(0, 8))
         self._label(self.body, "Live mic level", font=(self.font_family, 11, "bold"))
         self.meter = tk.Canvas(self.body, height=18, bg=self.tokens["surface"], highlightbackground=self.tokens["ink"], highlightthickness=1)
@@ -592,7 +643,6 @@ class SetupWindow:
         self._update_meter()
 
     def _render_step_5(self) -> None:
-        self._label(self.body, "Record five seconds of speech. The selected speech model will transcribe it.")
         self.transcript = tk.Text(
             self.body, height=7, wrap="word", bg=self.tokens["surface"], fg=self.tokens["ink"],
             relief="solid", bd=2, font=(self.font_family, 12),
@@ -620,7 +670,6 @@ class SetupWindow:
                 bg=self.tokens["paper"], activebackground=self.tokens["paper"],
             ).pack(anchor="w", pady=(8, 0))
         if self.saved:
-            self._label(self.body, "You're all set. Run `localflow` whenever you're ready.", font=(self.font_family, 13, "bold"))
             tk.Button(
                 self.body, text="Launch localflow now", command=self._launch_localflow,
                 bg=self.tokens["sun"], fg=SUN_TEXT, relief="solid", bd=2,
@@ -653,8 +702,18 @@ class SetupWindow:
                 bd=1, highlightbackground=self.tokens["line"], padx=16, pady=6,
             ).pack(side="left", padx=(8, 0))
         text = self._primary_label()
+        self.primary_shell = tk.Frame(
+            self.footer_content, bg=self.tokens["paper"],
+        )
+        self.primary_shell.pack(side="right")
+        self.primary_shadow = tk.Frame(
+            self.primary_shell, bg=self.tokens["shadow"],
+        )
+        self.primary_shadow.place(
+            x=SHADOW_OFFSET, y=SHADOW_OFFSET, relwidth=1, relheight=1,
+        )
         self.primary_button = tk.Button(
-            self.footer_content,
+            self.primary_shell,
             text=text,
             command=self.primary_action,
             bg=self.tokens["cobalt"],
@@ -670,7 +729,11 @@ class SetupWindow:
             font=(self.font_family, 13, "bold"),
             state="disabled" if busy else "normal",
         )
-        self.primary_button.pack(side="right", ipady=2)
+        self.primary_button.pack(
+            fill="both", padx=(0, SHADOW_OFFSET), pady=(0, SHADOW_OFFSET),
+            ipady=2,
+        )
+        self.primary_shadow.lower()
 
     def _primary_label(self) -> str:
         if self.saved:
