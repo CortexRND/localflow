@@ -26,6 +26,7 @@ from localflow.mac_style import (
     HalftoneView,
     color as _color,
     font as _font,
+    segmented as _segmented,
     style_button,
     style_flat_button as _style_button,
     style_surface,
@@ -230,12 +231,14 @@ class HubWindowController(NSObject):
             self.style_selections = styles
             if cleanup in self.cleanup_options:
                 self._update_segment_buttons(
-                    self.cleanup_buttons, self.cleanup_options.index(cleanup)
+                    self.cleanup_group, self.cleanup_buttons,
+                    self.cleanup_options.index(cleanup),
                 )
             for category, value in styles.items():
                 if value in self.style_options:
                     self._update_segment_buttons(
-                        self.style_buttons[category], self.style_options.index(value)
+                        self.style_groups[category], self.style_buttons[category],
+                        self.style_options.index(value),
                     )
         elif state[0] == "dictionary":
             _kind, word, source, target, editing_word, editing_source = state
@@ -721,6 +724,7 @@ class HubWindowController(NSObject):
         self.style_options = ("formal", "casual", "very_casual", "excited")
         self.style_selections = {}
         self.style_buttons = {}
+        self.style_groups = {}
         self.style_tag_map = {}
         self.body.addSubview_(
             _label(
@@ -729,19 +733,22 @@ class HubWindowController(NSObject):
             )
         )
         cleanup_group = self._segment_group(
-            self.cursor_y, 160, 330, ("None", "Light", "Medium"),
-            "selectCleanupLevel_", "cleanup",
+            self.cursor_y, 180, 330,
         )
+        self.cleanup_group = cleanup_group
         for index, (value, title) in enumerate(
             zip(self.cleanup_options, ("None", "Light", "Medium"))
         ):
             button = self._segment_button(
                 title, "selectCleanupLevel_", index,
                 index * 110, 1, 110,
-                selected=value == self.cleanup_selection,
                 parent=cleanup_group,
             )
             self.cleanup_buttons.append(button)
+        _segmented(
+            cleanup_group, self.cleanup_buttons,
+            self.cleanup_options.index(self.cleanup_selection), self.tokens,
+        )
         self.cursor_y += 58
         examples = {
             "work": "Please share the updated timeline.",
@@ -762,11 +769,8 @@ class HubWindowController(NSObject):
             )
             self.style_selections[category] = getattr(self.config, f"style_{category}")
             self.style_buttons[category] = []
-            group = self._segment_group(
-                y, 180, 540,
-                ("Formal", "Casual", "Very casual", "Excited"),
-                "selectStyle_", category,
-            )
+            group = self._segment_group(y, 180, 540)
+            self.style_groups[category] = group
             for option_index, value in enumerate(self.style_options):
                 tag = index * len(self.style_options) + option_index
                 self.style_tag_map[tag] = (category, value)
@@ -776,10 +780,14 @@ class HubWindowController(NSObject):
                         "selectStyle_",
                         tag,
                         option_index * 135, 1, 135,
-                        selected=value == self.style_selections[category],
                         parent=group,
                     )
                 )
+            _segmented(
+                group, self.style_buttons[category],
+                self.style_options.index(self.style_selections[category]),
+                self.tokens,
+            )
             self.cursor_y += 86
         self._button(
             "Save style", "saveStyle:", 0, self.cursor_y,
@@ -787,47 +795,41 @@ class HubWindowController(NSObject):
         )
 
     @objc.python_method
-    def _segment_group(self, y, x, width, _titles, _action, _identifier):
+    def _segment_group(self, y, x, width):
         group = FlippedView.alloc().initWithFrame_(
             NSMakeRect(x, y, width, 36)
         )
-        group.setWantsLayer_(True)
-        group.layer().setBorderColor_(_color("line", self.tokens).CGColor())
-        group.layer().setBorderWidth_(1)
-        group.layer().setCornerRadius_(10)
         self.body.addSubview_(group)
         return group
 
     @objc.python_method
-    def _segment_button(
-        self, title, action, tag, x, y, width, *, selected, parent=None
-    ):
+    def _segment_button(self, title, action, tag, x, y, width, *, parent=None):
         button = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, width, 34))
         button.setTitle_(title)
         button.setTarget_(self)
         button.setAction_(objc.selector(getattr(self, action), signature=b"v@:@"))
         button.setTag_(tag)
-        style_button(button, "selected" if selected else "secondary", self.tokens)
+        button.setBordered_(False)
         (parent if parent is not None else self.body).addSubview_(button)
         return button
 
     @objc.python_method
-    def _update_segment_buttons(self, buttons, selected):
-        for index, button in enumerate(buttons):
-            style_button(
-                button, "selected" if index == selected else "secondary",
-                self.tokens,
-            )
+    def _update_segment_buttons(self, group, buttons, selected):
+        _segmented(group, buttons, selected, self.tokens)
 
     def selectCleanupLevel_(self, sender):
         self.cleanup_selection = self.cleanup_options[sender.tag()]
-        self._update_segment_buttons(self.cleanup_buttons, sender.tag())
+        self._update_segment_buttons(
+            self.cleanup_group, self.cleanup_buttons, sender.tag()
+        )
 
     def selectStyle_(self, sender):
         category, value = self.style_tag_map[sender.tag()]
         self.style_selections[category] = value
         selected = self.style_options.index(value)
-        self._update_segment_buttons(self.style_buttons[category], selected)
+        self._update_segment_buttons(
+            self.style_groups[category], self.style_buttons[category], selected
+        )
 
     def saveStyle_(self, _sender):
         update = {

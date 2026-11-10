@@ -129,5 +129,45 @@ def test_setup_mac_keeps_one_description_and_uses_rounded_model_controls():
         assert duplicate not in render_source
     assert "NSMakeRect(17, 28, 16, 16)" in source
     assert "NSMakeRect(4, 4, 8, 8)" in source
-    assert "NSMakeRect(meter_x + dot_index * 13, 49, 10, 4)" in source
+    assert "NSMakeRect(meter_x + dot_index * 11, 48, 7, 7)" in source
+    assert "setCornerRadius_(3.5)" in source
     assert "NSMakeRect(548, 248, 180, 160)" in render_source
+
+
+def test_setup_header_labels_refresh_from_current_appearance_tokens():
+    source = SRC.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    controller = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SetupWindowController"
+    )
+    methods = {
+        node.name: node for node in controller.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    refresh = ast.get_source_segment(source, methods["_refresh_header_colors"])
+    render = ast.get_source_segment(source, methods["_render"])
+    assert "tokens_for_window(self.window)" in render
+    assert "_refresh_header_colors()" in render
+    for label in ("brand", "step_label", "title", "subtitle", "status"):
+        assert f"self.{label}" in refresh
+    assert "_color(token, self.tokens)" in refresh
+
+
+def test_setup_model_cards_use_scroll_content_width_and_measured_badges():
+    source = SRC.read_text(encoding="utf-8")
+    assert "content_width = scroll.contentSize().width" in source
+    assert "NSMakeRect(0, 0, content_width, height)" in source
+    assert (
+        "card_width = parent.bounds().size.width - 8 "
+        "if parent is not None else 710"
+    ) in source
+    assert "pill_label.sizeToFit()" in source
+    assert "self._label(meter_name, meter_x, 43, 60, 11, height=18)" in source
+
+
+def test_setup_cleanup_uses_shared_segmented_control_and_exact_width():
+    source = SRC.read_text(encoding="utf-8")
+    assert "segmented as _segmented" in source
+    assert "group_width = len(levels) * 102" in source
+    assert "_segmented(group, self.cleanup_level_buttons, selected, self.tokens)" in source

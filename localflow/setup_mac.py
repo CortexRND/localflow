@@ -31,6 +31,7 @@ from localflow.mac_style import (
     HalftoneView,
     color as _style_color,
     font as _font,
+    segmented as _segmented,
     style_button,
     style_surface,
     tokens_for_window,
@@ -189,11 +190,25 @@ class SetupWindowController(NSObject):
         return view
 
     @objc.python_method
+    def _refresh_header_colors(self):
+        for label, token in (
+            (self.brand, "ink"),
+            (self.step_label, "ink"),
+            (self.title, "ink"),
+            (self.subtitle, "muted"),
+            (self.status, "muted"),
+        ):
+            label.setTextColor_(_color(token, self.tokens))
+
+    @objc.python_method
     def _add_card_button(
         self, title, detail, index, y, selected=False, action="selectStt_",
         *, parent=None, tags=(), meters=None,
     ):
-        card = FlippedView.alloc().initWithFrame_(NSMakeRect(0, y, 710, 76))
+        card_width = parent.bounds().size.width - 8 if parent is not None else 710
+        card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, y, card_width, 76)
+        )
         style_surface(
             card, self.tokens, border="ink" if selected else "line",
             shadow=selected,
@@ -212,9 +227,16 @@ class SetupWindowController(NSObject):
             dot.layer().setBackgroundColor_(_color("sun", self.tokens).CGColor())
             radio.addSubview_(dot)
         card.addSubview_(self._label(title, 46, 10, 390, 15, True, height=22))
-        pill_widths = [max(70, len(label) * 6 + 16) for label in tags]
-        pill_x = 702 - sum(pill_widths) - 4 * max(0, len(tags) - 1)
-        for label, pill_width in zip(tags, pill_widths):
+        pills = []
+        for label in tags:
+            pill_label = self._label(label, 0, 0, 200, 10, True, height=16)
+            pill_label.sizeToFit()
+            label_width = pill_label.frame().size.width
+            pills.append((label, label_width + 16, pill_label))
+        pill_x = card_width - 12 - sum(
+            width for _label, width, _view in pills
+        ) - 4 * max(0, len(pills) - 1)
+        for label, pill_width, pill_label in pills:
             if label == "Downloaded":
                 fill, text_color = (
                     surface_tint("success", self.tokens), "success",
@@ -231,8 +253,8 @@ class SetupWindowController(NSObject):
             pill.setWantsLayer_(True)
             pill.layer().setBackgroundColor_(_color(fill, self.tokens).CGColor())
             pill.layer().setCornerRadius_(10)
-            pill_label = self._label(
-                label, 8, 2, max(54, pill_width - 16), 10, True, height=16
+            pill_label.setFrame_(
+                NSMakeRect(8, 2, pill_width - 16, 16)
             )
             pill_label.setTextColor_(_color(text_color, self.tokens))
             pill.addSubview_(pill_label)
@@ -242,14 +264,16 @@ class SetupWindowController(NSObject):
             card.addSubview_(self._label(detail, 46, 43, 70, 11, height=18))
             meter_x = 130
             for meter_name, score in meters:
-                card.addSubview_(self._label(meter_name, meter_x, 43, 52, 11, height=18))
-                meter_x += 54
+                card.addSubview_(
+                    self._label(meter_name, meter_x, 43, 60, 11, height=18)
+                )
+                meter_x += 64
                 for dot_index in range(5):
                     dot_view = AppKit.NSView.alloc().initWithFrame_(
-                        NSMakeRect(meter_x + dot_index * 13, 49, 10, 4)
+                        NSMakeRect(meter_x + dot_index * 11, 48, 7, 7)
                     )
                     dot_view.setWantsLayer_(True)
-                    dot_view.layer().setCornerRadius_(2)
+                    dot_view.layer().setCornerRadius_(3.5)
                     dot_view.layer().setBackgroundColor_(
                         _color(
                             "ink" if dot_index < score else "line",
@@ -257,9 +281,13 @@ class SetupWindowController(NSObject):
                         ).CGColor()
                     )
                     card.addSubview_(dot_view)
-                meter_x += 65
+                meter_x += 59
         else:
-            card.addSubview_(self._label(detail, 46, 43, 620, 11, height=18))
+            card.addSubview_(
+                self._label(
+                    detail, 46, 43, card_width - 58, 11, height=18
+                )
+            )
         button = NSButton.alloc().initWithFrame_(card.bounds())
         button.setTitle_("")
         button.setBordered_(False)
@@ -277,10 +305,13 @@ class SetupWindowController(NSObject):
         scroll = AppKit.NSScrollView.alloc().initWithFrame_(
             NSMakeRect(8, y, 720, frame_height)
         )
-        document = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 700, height))
-        scroll.setDocumentView_(document)
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(AppKit.NSNoBorder)
+        content_width = scroll.contentSize().width
+        document = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, content_width, height)
+        )
+        scroll.setDocumentView_(document)
         self.page.addSubview_(scroll)
         if y == self.cursor_y:
             self.cursor_y += frame_height + 12
@@ -293,13 +324,10 @@ class SetupWindowController(NSObject):
         self._add_text("Cleanup level", size=13, bold=True)
         self.cleanup_level_buttons = []
         levels = (("light", "Light"), ("medium", "Medium"))
+        group_width = len(levels) * 102
         group = FlippedView.alloc().initWithFrame_(
-            NSMakeRect(8, self.cursor_y, 306, 36)
+            NSMakeRect(8, self.cursor_y, group_width, 36)
         )
-        group.setWantsLayer_(True)
-        group.layer().setBorderColor_(_color("line", self.tokens).CGColor())
-        group.layer().setBorderWidth_(1)
-        group.layer().setCornerRadius_(10)
         for index, (level, title) in enumerate(levels):
             button = self._button(
                 title, index * 102, 1, 102, "cleanupLevelAction_"
@@ -313,10 +341,18 @@ class SetupWindowController(NSObject):
             group.addSubview_(button)
             self.cleanup_level_buttons.append(button)
         self.page.addSubview_(group)
+        selected = next(
+            (index for index, (level, _title) in enumerate(levels)
+             if level == self.cleanup_level),
+            0,
+        )
+        _segmented(group, self.cleanup_level_buttons, selected, self.tokens)
         self.cursor_y += 48
 
     @objc.python_method
     def _render_legacy(self):
+        self.tokens = tokens_for_window(self.window)
+        self._refresh_header_colors()
         self._clear_page()
         self.title.setStringValue_(_STEP_TITLES[self.step])
         self.subtitle.setStringValue_(f"Step {self.step + 1} of 7")
@@ -325,7 +361,9 @@ class SetupWindowController(NSObject):
         self.back_button.setEnabled_(not model_busy)
         self.primary_button.setHidden_(False)
         self.status.setStringValue_(self.error_message or self.status_message)
-        self.status.setTextColor_(_color("red" if self.error_message else "muted"))
+        self.status.setTextColor_(
+            _color("red" if self.error_message else "muted", self.tokens)
+        )
         self.primary_button.setEnabled_(not bool(self.busy))
         self.cancel_button.setHidden_(
             self.cancel_event is None or self.step not in (2, 3)
@@ -513,6 +551,7 @@ class SetupWindowController(NSObject):
     @objc.python_method
     def _render(self):
         self.tokens = tokens_for_window(self.window)
+        self._refresh_header_colors()
         self.root.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
         style_button(self.back_button, "secondary", self.tokens)
         style_button(self.primary_button, "primary", self.tokens)

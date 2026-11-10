@@ -147,3 +147,46 @@ def test_hub_buttons_use_setup_pop_art_tokens():
     assert 'selected=page == self.page' in source
     assert "selected=PAGES[button.tag()] == page" in source
     assert "layer.setBorderWidth_(" in style
+
+
+def test_hub_sidebar_items_use_borderless_flat_button_style():
+    source = SOURCE.read_text(encoding="utf-8")
+    style_path = ROOT / "localflow" / "mac_style.py"
+    style_source = style_path.read_text(encoding="utf-8")
+    tree = ast.parse(style_source)
+    flat_style = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "style_flat_button"
+    )
+    flat_source = ast.get_source_segment(style_source, flat_style)
+    assert "style_flat_button as _style_button" in source
+    assert "_style_button(" in source
+    assert "selected=PAGES[button.tag()] == page" in source
+    assert "button.setBordered_(False)" in flat_source
+    assert "layer.setBorderWidth_(0)" in flat_source
+    assert 'color("sun" if selected else "sidebar", palette)' in flat_source
+
+
+def test_hub_style_rows_use_the_shared_segmented_helper():
+    hub_source = SOURCE.read_text(encoding="utf-8")
+    setup_path = ROOT / "localflow" / "setup_mac.py"
+    setup_source = setup_path.read_text(encoding="utf-8")
+    hub_tree = ast.parse(hub_source)
+    controller = next(
+        node for node in hub_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "HubWindowController"
+    )
+    style_page = next(
+        node for node in controller.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_page_style"
+    )
+    style_page_source = ast.get_source_segment(hub_source, style_page)
+    assert "segmented as _segmented" in hub_source
+    assert "self._segment_group(y, 180, 540)" in style_page_source
+    assert "self.style_groups[category] = group" in style_page_source
+    assert "_segmented(" in style_page_source
+    assert "segmented as _segmented" in setup_source
+    assert (
+        "_segmented(group, self.cleanup_level_buttons, selected, self.tokens)"
+        in setup_source
+    )

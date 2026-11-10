@@ -2,7 +2,7 @@
 
 import AppKit
 from AppKit import NSColor
-from Foundation import NSMakeSize
+from Foundation import NSMakeRect, NSMakeSize
 
 from localflow.ui_tokens import LIGHT, RADIUS, SHADOW_OFFSET, SUN_TEXT, tokens_for
 
@@ -111,7 +111,57 @@ def style_button(button, kind="secondary", palette=None):
 
 
 def style_flat_button(button, selected=False, palette=None):
-    return style_button(button, "sidebar" if selected else "sidebar_idle", palette)
+    palette = palette or LIGHT
+    button.setBordered_(False)
+    button.setFont_(font(13, "semibold"))
+    button.setWantsLayer_(True)
+    layer = button.layer()
+    layer.setBackgroundColor_(
+        color("sun" if selected else "sidebar", palette).CGColor()
+    )
+    layer.setCornerRadius_(RADIUS["button"])
+    layer.setBorderColor_(NSColor.clearColor().CGColor())
+    layer.setBorderWidth_(0)
+    layer.setShadowOpacity_(0)
+    button.setContentTintColor_(
+        color(SUN_TEXT if selected else palette["sidebar_text"])
+    )
+    return button
+
+
+def segmented(group, buttons, selected, palette=None):
+    palette = palette or LIGHT
+    group.setWantsLayer_(True)
+    layer = group.layer()
+    layer.setBackgroundColor_(color("surface", palette).CGColor())
+    layer.setBorderColor_(color("line", palette).CGColor())
+    layer.setBorderWidth_(1)
+    layer.setCornerRadius_(RADIUS["button"])
+    layer.setMasksToBounds_(True)
+    if not buttons:
+        return buttons
+    bounds = group.bounds()
+    width = bounds.size.width / len(buttons)
+    height = bounds.size.height
+    for index, button in enumerate(buttons):
+        is_selected = index == selected
+        button.setFrame_(
+            NSMakeRect(index * width, 1, width, height - 2)
+        )
+        button.setBordered_(False)
+        button.setFont_(font(13, "semibold"))
+        button.setAlignment_(AppKit.NSTextAlignmentCenter)
+        button.setWantsLayer_(True)
+        button.layer().setBackgroundColor_(
+            color("ink", palette).CGColor()
+            if is_selected else NSColor.clearColor().CGColor()
+        )
+        button.layer().setBorderWidth_(0)
+        button.layer().setCornerRadius_(8 if is_selected else 0)
+        button.setContentTintColor_(
+            color("paper" if is_selected else "ink", palette)
+        )
+    return buttons
 
 
 def style_surface(view, palette=None, *, fill="surface", border="line", shadow=False):
