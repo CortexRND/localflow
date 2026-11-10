@@ -26,19 +26,21 @@ from localflow.models import (
 )
 from localflow.setup_flow import HOTKEY_OPTIONS, MicLevelMonitor, SetupChoices, initial_choices
 from localflow.stt import Transcriber
-
-TOKENS = {
-    "paper": "#FFF8E7",
-    "card": "#FFFFFF",
-    "ink": "#111111",
-    "muted": "#4A4A4A",
-    "cobalt": "#1D4ED8",
-    "sun": "#FFD60A",
-    "red": "#E63946",
-    "shadow": 4,
-    "radius": 10,
-    "space": (4, 8, 12, 16, 24, 32),
-}
+from localflow.mac_style import (
+    FlippedView,
+    HalftoneView,
+    color as _style_color,
+    font as _font,
+    style_button,
+    style_surface,
+    tokens_for_window,
+)
+from localflow.ui_tokens import (
+    LIGHT,
+    SUN_TEXT,
+    TOKENS as TOKENS,
+    surface_tint,
+)
 
 _STEP_TITLES = (
     "Let's get you talking.",
@@ -51,10 +53,8 @@ _STEP_TITLES = (
 )
 
 
-def _color(name):
-    value = TOKENS[name].lstrip("#")
-    red, green, blue = (int(value[index:index + 2], 16) / 255 for index in (0, 2, 4))
-    return NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, 1.0)
+def _color(name, palette=None):
+    return _style_color(name, palette)
 
 
 class SetupWindowController(NSObject):
@@ -63,6 +63,7 @@ class SetupWindowController(NSObject):
         if self is None:
             return None
         self.config = load_config()
+        self.tokens = LIGHT
         self.hardware = detect_hardware()
         self.choices = initial_choices(self.config, self.hardware)
         self.models = available_stt_models(self.hardware)
@@ -109,39 +110,56 @@ class SetupWindowController(NSObject):
             | AppKit.NSWindowStyleMaskMiniaturizable
         )
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 720, 560), style, AppKit.NSBackingStoreBuffered, False
+            NSMakeRect(0, 0, 800, 700), style, AppKit.NSBackingStoreBuffered, False
         )
         self.window.setTitle_("LocalFlow Setup")
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self)
-        self.root = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 720, 530))
+        self.root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 800, 670))
         self.root.setWantsLayer_(True)
-        self.root.layer().setBackgroundColor_(_color("paper").CGColor())
+        self.root.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
         self.window.setContentView_(self.root)
-        self.brand = self._label("LOCALFLOW   /   SETUP", 32, 494, 656, 18, 11, True)
-        self.title = self._label("", 32, 448, 656, 36, 26, True)
-        self.subtitle = self._label("", 32, 420, 656, 18, 12)
-        self.page = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, 88, 656, 316))
+        self.brand = self._label("localflow", 56, 22, 180, 24, 17, True)
+        self.step_label = self._label("", 660, 27, 108, 16, 11, True)
+        self.progress_segments = []
+        for index in range(7):
+            segment = AppKit.NSView.alloc().initWithFrame_(
+                NSMakeRect(32 + index * 106, 62, 102, 4)
+            )
+            segment.setWantsLayer_(True)
+            self.root.addSubview_(segment)
+            self.progress_segments.append(segment)
+        self.title = self._label("", 32, 86, 736, 38, 28, True)
+        self.subtitle = self._label("", 32, 130, 736, 24, 13)
+        self.page = FlippedView.alloc().initWithFrame_(NSMakeRect(32, 174, 736, 420))
         self.root.addSubview_(self.brand)
+        mark = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, 25, 14, 14))
+        mark.setWantsLayer_(True)
+        mark.layer().setBackgroundColor_(_color("sun", self.tokens).CGColor())
+        mark.layer().setCornerRadius_(7)
+        self.root.addSubview_(mark)
         self.root.addSubview_(self.title)
         self.root.addSubview_(self.subtitle)
         self.root.addSubview_(self.page)
-        self.back_button = self._button("Back", 32, 24, 100, "backAction_")
-        self.primary_button = self._button("Get started", 548, 20, 140, "stepAction_", True)
-        self.status = self._label("", 150, 30, 270, 22, 11)
+        divider = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, 612, 736, 1))
+        divider.setWantsLayer_(True)
+        divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
+        self.root.addSubview_(divider)
+        self.back_button = self._button("Back", 32, 628, 100, "backAction_")
+        self.primary_button = self._button("Get started", 636, 624, 132, "stepAction_", True)
+        self.status = self._label("", 152, 629, 450, 20, 11)
         self.root.addSubview_(self.back_button)
         self.root.addSubview_(self.primary_button)
         self.root.addSubview_(self.status)
-        self.cancel_button = self._button("Cancel", 438, 20, 96, "cancelAction_")
+        self.cancel_button = self._button("Cancel", 520, 624, 100, "cancelAction_")
         self.root.addSubview_(self.cancel_button)
 
     @objc.python_method
     def _label(self, text, x, y, width, height, size=13, bold=False):
         label = AppKit.NSTextField.labelWithString_(text)
         label.setFrame_(NSMakeRect(x, y, width, height))
-        font = NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
-        label.setFont_(font)
-        label.setTextColor_(_color("ink" if bold else "muted"))
+        label.setFont_(_font(size, "bold" if bold else "regular"))
+        label.setTextColor_(_color("ink" if bold else "muted", self.tokens))
         label.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
         label.setMaximumNumberOfLines_(0)
         return label
@@ -152,15 +170,7 @@ class SetupWindowController(NSObject):
         button.setTitle_(title)
         button.setTarget_(self)
         button.setAction_(objc.selector(getattr(self, action), signature=b"v@:@"))
-        button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-        button.setFont_(NSFont.boldSystemFontOfSize_(12))
-        button.setWantsLayer_(True)
-        button.layer().setBackgroundColor_(_color("cobalt" if primary else "card").CGColor())
-        button.layer().setBorderColor_(_color("ink").CGColor())
-        button.layer().setBorderWidth_(2)
-        button.layer().setCornerRadius_(10)
-        if primary:
-            button.setContentTintColor_(_color("card"))
+        style_button(button, "primary" if primary else "secondary", self.tokens)
         return button
 
     @objc.python_method
@@ -169,60 +179,146 @@ class SetupWindowController(NSObject):
             view.removeFromSuperview()
 
     @objc.python_method
-    def _add_text(self, text, y, size=13, bold=False):
-        view = self._label(text, 8, y, 632, 30, size, bold)
+    def _add_text(self, text, y=None, size=13, bold=False, height=26):
+        if y is None:
+            y = self.cursor_y
+        view = self._label(text, 8, y, 710, height, size, bold)
         self.page.addSubview_(view)
+        if y == self.cursor_y:
+            self.cursor_y += height + 12
         return view
 
     @objc.python_method
-    def _add_card_button(self, title, detail, index, y, selected=False, action="selectStt_"):
-        text = ("● " if selected else "○ ") + title + "\n" + detail
-        button = NSButton.alloc().initWithFrame_(NSMakeRect(8, y, 620, 46))
-        button.setTitle_(text)
-        button.setAlignment_(AppKit.NSTextAlignmentLeft)
-        button.setFont_(NSFont.systemFontOfSize_(12))
+    def _add_card_button(
+        self, title, detail, index, y, selected=False, action="selectStt_",
+        *, parent=None, tags=(), meters=None,
+    ):
+        card = FlippedView.alloc().initWithFrame_(NSMakeRect(0, y, 710, 76))
+        style_surface(
+            card, self.tokens, border="ink" if selected else "line",
+            shadow=selected,
+        )
+        radio = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(17, 28, 16, 16))
+        radio.setWantsLayer_(True)
+        radio.layer().setCornerRadius_(8)
+        radio.layer().setBorderWidth_(2)
+        radio.layer().setBorderColor_(
+            _color(SUN_TEXT if selected else "ink", self.tokens).CGColor()
+        )
+        radio.layer().setBackgroundColor_(
+            _color("sun" if selected else "surface", self.tokens).CGColor()
+        )
+        card.addSubview_(radio)
+        if selected:
+            dot = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(5, 5, 6, 6))
+            dot.setWantsLayer_(True)
+            dot.layer().setCornerRadius_(3)
+            dot.layer().setBackgroundColor_(_color(SUN_TEXT, self.tokens).CGColor())
+            radio.addSubview_(dot)
+        card.addSubview_(self._label(title, 46, 10, 390, 22, 15, True))
+        pill_widths = [max(70, len(label) * 6 + 16) for label in tags]
+        pill_x = 702 - sum(pill_widths) - 4 * max(0, len(tags) - 1)
+        for label, pill_width in zip(tags, pill_widths):
+            if label == "Downloaded":
+                fill, text_color = (
+                    surface_tint("success", self.tokens), "success",
+                )
+            elif label == "English only":
+                fill, text_color = (
+                    surface_tint("muted", self.tokens), "muted",
+                )
+            else:
+                fill, text_color = self.tokens["sun"], SUN_TEXT
+            pill = FlippedView.alloc().initWithFrame_(
+                NSMakeRect(pill_x, 10, pill_width, 20)
+            )
+            pill.setWantsLayer_(True)
+            pill.layer().setBackgroundColor_(_color(fill, self.tokens).CGColor())
+            pill.layer().setCornerRadius_(10)
+            pill_label = self._label(
+                label, 8, 2, max(54, pill_width - 16), 16, 10, True
+            )
+            pill_label.setTextColor_(_color(text_color, self.tokens))
+            pill.addSubview_(pill_label)
+            card.addSubview_(pill)
+            pill_x += pill_width + 4
+        if meters:
+            card.addSubview_(self._label(detail, 46, 43, 70, 18, 11))
+            meter_x = 130
+            for meter_name, score in meters:
+                card.addSubview_(self._label(meter_name, meter_x, 43, 52, 18, 11))
+                meter_x += 54
+                for dot_index in range(5):
+                    dot_view = AppKit.NSView.alloc().initWithFrame_(
+                        NSMakeRect(meter_x + dot_index * 11, 48, 7, 7)
+                    )
+                    dot_view.setWantsLayer_(True)
+                    dot_view.layer().setCornerRadius_(3.5)
+                    dot_view.layer().setBackgroundColor_(
+                        _color(
+                            "ink" if dot_index < score else "line",
+                            self.tokens,
+                        ).CGColor()
+                    )
+                    card.addSubview_(dot_view)
+                meter_x += 67
+        else:
+            card.addSubview_(self._label(detail, 46, 43, 620, 18, 11))
+        button = NSButton.alloc().initWithFrame_(card.bounds())
+        button.setTitle_("")
+        button.setBordered_(False)
         button.setTag_(index)
         button.setTarget_(self)
         button.setAction_(objc.selector(getattr(self, action), signature=b"v@:@"))
-        button.setWantsLayer_(True)
-        button.layer().setBackgroundColor_(_color("sun" if selected else "card").CGColor())
-        button.layer().setBorderColor_(_color("ink").CGColor())
-        button.layer().setBorderWidth_(2)
-        button.layer().setCornerRadius_(10)
-        self.page.addSubview_(button)
+        card.addSubview_(button)
+        (parent if parent is not None else self.page).addSubview_(card)
         return button
 
     @objc.python_method
-    def _make_scroll(self, height, frame_height=310):
+    def _make_scroll(self, height, frame_height=310, y=None):
+        if y is None:
+            y = self.cursor_y
         scroll = AppKit.NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, 650, frame_height)
+            NSMakeRect(8, y, 720, frame_height)
         )
-        document = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 632, height))
+        document = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 700, height))
         scroll.setDocumentView_(document)
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(AppKit.NSNoBorder)
         self.page.addSubview_(scroll)
+        if y == self.cursor_y:
+            self.cursor_y += frame_height + 12
         return document
 
     @objc.python_method
     def _add_cleanup_level_control(self):
-        if self.llm_id == "none" and not (
-            self.choices.llm_provider != "ollama" and self.config.cleanup_enabled
-        ):
-            return
-        self._add_text("Cleanup level", 238, 12, True)
+        self._add_text("Cleanup level", size=13, bold=True)
         self.cleanup_level_buttons = []
-        for index, (level, title) in enumerate((("light", "Light"), ("medium", "Medium"))):
-            button = self._button(title, 8 + index * 120, 198, 104, "cleanupLevelAction_")
-            button.setTag_(index)
-            button.layer().setBackgroundColor_(
-                _color("sun" if self.cleanup_level == level else "card").CGColor()
+        levels = (("none", "None"), ("light", "Light"), ("medium", "Medium"))
+        group = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(8, self.cursor_y, 306, 36)
+        )
+        group.setWantsLayer_(True)
+        group.layer().setBorderColor_(_color("line", self.tokens).CGColor())
+        group.layer().setBorderWidth_(1)
+        group.layer().setCornerRadius_(10)
+        for index, (level, title) in enumerate(levels):
+            button = self._button(
+                title, index * 102, 1, 102, "cleanupLevelAction_"
             )
-            self.page.addSubview_(button)
+            button.setTag_(index)
+            style_button(
+                button,
+                "selected" if self.cleanup_level == level else "secondary",
+                self.tokens,
+            )
+            group.addSubview_(button)
             self.cleanup_level_buttons.append(button)
+        self.page.addSubview_(group)
+        self.cursor_y += 48
 
     @objc.python_method
-    def _render(self):
+    def _render_legacy(self):
         self._clear_page()
         self.title.setStringValue_(_STEP_TITLES[self.step])
         self.subtitle.setStringValue_(f"Step {self.step + 1} of 7")
@@ -415,6 +511,345 @@ class SetupWindowController(NSObject):
             self.primary_button.setTitle_("Get started" if self.step == 0 else "Continue")
         self.window.center()
         self.window.makeKeyAndOrderFront_(None)
+
+    @objc.python_method
+    def _render(self):
+        self.tokens = tokens_for_window(self.window)
+        self.root.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
+        style_button(self.back_button, "secondary", self.tokens)
+        style_button(self.primary_button, "primary", self.tokens)
+        style_button(self.cancel_button, "secondary", self.tokens)
+        subtitles = (
+            "Choose a local voice setup that fits your machine.",
+            "Check that audio and model services are ready.",
+            "Pick the speech model that transcribes your voice.",
+            "Optional cleanup keeps your transcript clear and readable.",
+            "Choose how LocalFlow listens and responds.",
+            "Try a short dictation before you finish.",
+            "Review your choices and start dictating.",
+        )
+        self.title.setStringValue_(_STEP_TITLES[self.step])
+        self.subtitle.setStringValue_(subtitles[self.step])
+        self.step_label.setStringValue_(f"STEP {self.step + 1} OF 7")
+        for index, segment in enumerate(self.progress_segments):
+            segment.layer().setBackgroundColor_(
+                _color("cobalt" if index <= self.step else "line", self.tokens).CGColor()
+            )
+        self.back_button.setHidden_(self.step == 0 or self.saved)
+        self.back_button.setEnabled_(not bool(self.busy & {"stt-download", "llm-pull"}))
+        self.primary_button.setEnabled_(not bool(self.busy))
+        self.cancel_button.setHidden_(
+            self.cancel_event is None or self.step not in (2, 3)
+        )
+        self.status.setStringValue_("")
+        self._clear_page()
+        self.cursor_y = 8
+
+        if self.step == 0:
+            stt_id, llm_id = recommend(self.hardware)
+            self.page.addSubview_(
+                HalftoneView.alloc().initWithFrame_palette_(
+                    NSMakeRect(540, 0, 180, 160), self.tokens
+                )
+            )
+            self._add_text(
+                "A local voice setup, ready in a few minutes.",
+                size=20, bold=True, height=34,
+            )
+            self._add_text(
+                f"{self.hardware.ram_gb:.0f} GB memory  ·  "
+                f"{self.hardware.free_disk_gb:.0f} GB free disk  ·  "
+                f"{'Apple Silicon' if self.hardware.apple_silicon else 'CPU'}",
+            )
+            self._add_text(f"Suggested speech model: {stt_id}  ·  Cleanup: {llm_id or 'off'}")
+            self._add_text("Your audio and models stay on this machine.")
+        elif self.step == 1:
+            self._add_text("Nothing here blocks setup. Fix what you can; revisit any time.")
+            if self.checks is None:
+                self._add_text("Checking this machine…")
+                if not self.snapshot_mode:
+                    self._start_checks()
+            else:
+                for index, check in enumerate(self.checks):
+                    color_name = "success" if check.ok else ("muted" if check.ok is None else "red")
+                    self.page.addSubview_(
+                        self._label(
+                            f"{check.label}  ·  {check.detail}",
+                            8, self.cursor_y, 510, 28, 13,
+                        )
+                    )
+                    status = self._label(
+                        "Ready" if check.ok else ("Check" if check.ok is None else "Needs attention"),
+                        526, self.cursor_y, 150, 28, 11, True,
+                    )
+                    status.setTextColor_(_color(color_name, self.tokens))
+                    self.page.addSubview_(status)
+                    if check.fix_label:
+                        button = self._button(
+                            check.fix_label, 560, self.cursor_y, 150, "fixAction_"
+                        )
+                        button.setTag_(index)
+                        self.page.addSubview_(button)
+                    self.cursor_y += 38
+                self.page.addSubview_(
+                    self._button("Recheck", 8, self.cursor_y, 120, "recheckAction_")
+                )
+        elif self.step == 2:
+            self._add_text("Choose the speech model that turns your voice into text.")
+            self._add_text("Models stay on this machine. Size is shown before download.", size=11)
+            if self.status_message or self.error_message:
+                self._add_callout()
+            rec, _ = recommend(self.hardware)
+            document = self._make_scroll(
+                max(240, len(self.models) * 84), frame_height=272,
+            )
+            for index, model in enumerate(self.models):
+                tags = []
+                if model.id == rec:
+                    tags.append("Recommended")
+                if self.downloaded.get(model.id):
+                    tags.append("Downloaded")
+                if model.english_only:
+                    tags.append("English only")
+                size = (
+                    f"{model.size_mb / 1000:.1f} GB"
+                    if model.size_mb >= 1000 else f"{model.size_mb:,} MB"
+                )
+                self._add_card_button(
+                    model.label, size, index, index * 84,
+                    self.stt_id == model.id, parent=document, tags=tags,
+                    meters=(("Speed", model.speed), ("Accuracy", model.accuracy)),
+                )
+            if not self.snapshot_mode and not self.downloaded and "stt-checks" not in self.busy:
+                self._start_download_checks()
+        elif self.step == 3:
+            self._add_text(
+                "Cleanup fixes punctuation and filler words; raw transcript skips the extra model."
+            )
+            self._add_cleanup_level_control()
+            if self.choices.llm_provider != "ollama":
+                self._add_text(
+                    f"Configured provider: {self.choices.llm_provider}. "
+                    "Manage models with this provider in Settings."
+                )
+                self.page.addSubview_(
+                    self._button(
+                        "Change in Settings", 8, self.cursor_y, 190, "settingsAction_"
+                    )
+                )
+            else:
+                options = [
+                    ("none", "No cleanup (raw transcript)", "Fastest; no Ollama required.")
+                ]
+                options.extend(
+                    (
+                        model.id,
+                        model.label,
+                        f"{model.size_mb:,} MB  ·  {model.min_ram_gb} GB RAM recommended",
+                    )
+                    for model in LLM_MODELS
+                )
+                document = self._make_scroll(
+                    max(240, len(options) * 84), frame_height=182,
+                )
+                for index, (model_id, label, detail) in enumerate(options):
+                    tags = ["Downloaded"] if model_id in self.ollama_models else []
+                    self._add_card_button(
+                        label, detail, index, index * 84,
+                        self.llm_id == model_id, "selectLlm_",
+                        parent=document, tags=tags,
+                    )
+                if not self.snapshot_mode and not self.ollama_checked:
+                    self._start_ollama_check()
+                if not self.ollama_running:
+                    self._add_text("Ollama is not running. Cleanup is optional.")
+                    installed = setup_flow.ollama_installed()
+                    action = "recheckAction_" if installed else "ollamaDownloadAction_"
+                    title = "Recheck Ollama" if installed else "Get Ollama"
+                    self.page.addSubview_(
+                        self._button(title, 8, self.cursor_y, 150, action)
+                    )
+                else:
+                    self.page.addSubview_(
+                        self._button(
+                            "Refresh models", 8, self.cursor_y, 150, "recheckAction_"
+                        )
+                    )
+        elif self.step == 4:
+            self._add_text("Pick a microphone and the key you'll hold to talk.")
+            self.page.addSubview_(
+                self._label("Microphone", 8, self.cursor_y, 200, 20, 11, True)
+            )
+            self.device_popup = AppKit.NSPopUpButton.alloc().initWithFrame_(
+                NSMakeRect(8, self.cursor_y + 22, 710, 30)
+            )
+            self.device_popup.addItemWithTitle_("System default")
+            self.device_popup.lastItem().setRepresentedObject_("")
+            for device in setup_flow.list_input_devices():
+                self.device_popup.addItemWithTitle_(device)
+                self.device_popup.lastItem().setRepresentedObject_(device)
+            for index in range(self.device_popup.numberOfItems()):
+                represented = self.device_popup.itemAtIndex_(index).representedObject()
+                if represented == ("" if self.device == "System default" else self.device):
+                    self.device_popup.selectItemAtIndex_(index)
+            self.device_popup.setTarget_(self)
+            self.device_popup.setAction_(objc.selector(self.deviceChanged_, signature=b"v@:@"))
+            self.page.addSubview_(self.device_popup)
+            self.cursor_y += 66
+            self.page.addSubview_(
+                self._label("Hotkey", 8, self.cursor_y, 200, 20, 11, True)
+            )
+            self.hotkey_popup = AppKit.NSPopUpButton.alloc().initWithFrame_(
+                NSMakeRect(8, self.cursor_y + 22, 710, 30)
+            )
+            for value, label in HOTKEY_OPTIONS:
+                self.hotkey_popup.addItemWithTitle_(label)
+                self.hotkey_popup.lastItem().setRepresentedObject_(value)
+            for index in range(self.hotkey_popup.numberOfItems()):
+                if self.hotkey_popup.itemAtIndex_(index).representedObject() == self.hotkey:
+                    self.hotkey_popup.selectItemAtIndex_(index)
+            self.hotkey_popup.setTarget_(self)
+            self.hotkey_popup.setAction_(objc.selector(self.hotkeyChanged_, signature=b"v@:@"))
+            self.page.addSubview_(self.hotkey_popup)
+            self.cursor_y += 64
+            shortcut_card = FlippedView.alloc().initWithFrame_(
+                NSMakeRect(8, self.cursor_y, 710, 66)
+            )
+            style_surface(shortcut_card, self.tokens)
+            shortcut_card.addSubview_(
+                self._label(
+                    f"Hold {self.hotkey}  ·  Double-tap locks  ·  Esc cancels\n"
+                    f"Paste last {self.choices.paste_last_hotkey or 'disabled'}  ·  "
+                    f"Command {self.choices.command_hotkey or 'disabled'}  ·  "
+                    f"Polish {self.choices.polish_hotkey or 'disabled'}  ·  "
+                    f"Prompt {self.choices.prompt_hotkey or 'disabled'}",
+                    16, 12, 678, 44, 11,
+                )
+            )
+            self.page.addSubview_(shortcut_card)
+            self.cursor_y += 76
+            self.pause_switch = NSButton.alloc().initWithFrame_(
+                NSMakeRect(8, self.cursor_y, 320, 24)
+            )
+            self.pause_switch.setButtonType_(AppKit.NSSwitchButton)
+            self.pause_switch.setTitle_("Pause music while I talk")
+            self.pause_switch.setState_(
+                AppKit.NSOnState if self.pause_media else AppKit.NSOffState
+            )
+            self.pause_switch.setTarget_(self)
+            self.pause_switch.setAction_(
+                objc.selector(self.pauseMediaChanged_, signature=b"v@:@")
+            )
+            self.page.addSubview_(self.pause_switch)
+            self.cursor_y += 34
+            self._add_text("Live mic level", size=11, bold=True)
+            self.meter = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect(8, self.cursor_y, 710, 18)
+            )
+            self.meter.setIndeterminate_(False)
+            self.meter.setMinValue_(0)
+            self.meter.setMaxValue_(1)
+            self.page.addSubview_(self.meter)
+            if not self.snapshot_mode:
+                self._start_monitor()
+        elif self.step == 5:
+            self._add_text(
+                "Record five seconds of speech. Your selected speech model will transcribe it.",
+                size=15, height=40,
+            )
+            self._add_text(
+                self.status_message or "Try a short phrase near your microphone.",
+                size=13, height=30,
+            )
+            if self.error_message:
+                self._add_callout()
+            self.page.addSubview_(
+                self._button("Skip", 8, self.cursor_y, 110, "skipAction_")
+            )
+        else:
+            self._add_text(
+                f"Speech: {self.stt_id}  ·  Cleanup: "
+                f"{self.llm_id if self.llm_id != 'none' else 'off'}",
+                size=15, bold=True,
+            )
+            self._add_text(f"Microphone: {self.device}  ·  Hotkey: {self.hotkey}")
+            if self.hardware.system == "Darwin":
+                self.login_switch = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(8, self.cursor_y, 320, 28)
+                )
+                self.login_switch.setButtonType_(AppKit.NSSwitchButton)
+                self.login_switch.setTitle_("Start LocalFlow on login")
+                self.login_switch.setState_(
+                    AppKit.NSOnState if self.start_on_login else AppKit.NSOffState
+                )
+                self.login_switch.setTarget_(self)
+                self.login_switch.setAction_(
+                    objc.selector(self.loginChanged_, signature=b"v@:@")
+                )
+                self.page.addSubview_(self.login_switch)
+                self.cursor_y += 36
+            if self.saved:
+                self._add_text("You're all set. Run `localflow` whenever you're ready.")
+                self.page.addSubview_(
+                    self._button(
+                        "Launch localflow now", 8, self.cursor_y, 190, "launchAction_"
+                    )
+                )
+
+        if self.step in (2, 3) and (self.error_message or self.status_message):
+            self.status.setStringValue_(self.error_message or self.status_message)
+        if self.saved:
+            self.primary_button.setTitle_("Close")
+        elif self.step == 2:
+            self.primary_button.setTitle_(
+                "Continue" if self.downloaded.get(self.stt_id) else "Download & continue"
+            )
+        elif self.step == 3:
+            self.primary_button.setTitle_(
+                "Continue" if self.choices.llm_provider != "ollama"
+                or self.llm_id == "none" or not self.ollama_running
+                or self.llm_id in self.ollama_models else "Download & continue"
+            )
+        elif self.step == 5:
+            self.primary_button.setTitle_(
+                "Recording…" if "trial" in self.busy else "Record 5 seconds"
+            )
+        elif self.step == 6:
+            self.primary_button.setTitle_("Finish")
+        else:
+            self.primary_button.setTitle_("Get started" if self.step == 0 else "Continue")
+        self.window.makeKeyAndOrderFront_(None)
+
+    @objc.python_method
+    def _add_callout(self):
+        error = bool(self.error_message)
+        box = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(8, self.cursor_y, 710, 58)
+        )
+        style_surface(box, self.tokens)
+        bar = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 4, 58))
+        bar.setWantsLayer_(True)
+        bar.layer().setBackgroundColor_(
+            _color("red" if error else "cobalt", self.tokens).CGColor()
+        )
+        box.addSubview_(bar)
+        box.addSubview_(
+            self._label(
+                "Download error" if error else "Download progress",
+                16, 8, 670, 18, 13, True,
+            )
+        )
+        box.addSubview_(
+            self._label(
+                self.error_message or self.status_message,
+                16, 30, 670, 18, 11,
+            )
+        )
+        self.page.addSubview_(box)
+        self.cursor_y += 70
+
+    def windowDidChangeEffectiveAppearance_(self, _notification):
+        self._render()
 
     @objc.python_method
     def _start_worker(self, key, function, model_id=None, job_token=None):
@@ -684,7 +1119,7 @@ class SetupWindowController(NSObject):
             self._render()
 
     def cleanupLevelAction_(self, sender):
-        levels = ("light", "medium")
+        levels = ("none", "light", "medium")
         index = sender.tag()
         if 0 <= index < len(levels):
             self.cleanup_level = levels[index]

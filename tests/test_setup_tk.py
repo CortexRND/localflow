@@ -184,8 +184,9 @@ def test_stt_download_renders_once_and_advances_after_completion(
             for child in _descendants(window.body)
         )
         assert any(
-            isinstance(child, tk.Frame) and child.cget("bg") == setup_tk.TOKENS["sun"]
-            for child in window.body.winfo_children()
+            isinstance(child, tk.Label)
+            and child.cget("text") == "Download progress"
+            for child in _descendants(window.body)
         )
         window._select_stt("fw-base")
         assert window.stt_var.get() == "fw-tiny"
