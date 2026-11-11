@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tomllib
@@ -51,6 +52,12 @@ def test_install_ps1_exposes_piped_install_options() -> None:
     assert "WithOllama" in script
     assert "NoLaunch" in script
     assert "LOCALFLOW_REF" in script
+
+
+def test_install_ps1_does_not_call_exit() -> None:
+    script = (ROOT / "install.ps1").read_text(encoding="utf-8")
+
+    assert re.search(r"^\s*exit\b", script, re.MULTILINE) is None
 
 
 def test_mit_license_is_declared_in_project_metadata() -> None:

@@ -29,8 +29,7 @@ if ($Help) {
 }
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-    Write-Error "LocalFlow's installer supports Windows only."
-    exit 1
+    throw "LocalFlow's installer supports Windows only."
 }
 
 $WithOllama = $WithOllama -or ($env:LOCALFLOW_WITH_OLLAMA -eq '1')
@@ -46,6 +45,26 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) {
         throw "$FilePath $($ArgumentList -join ' ') failed with exit code $LASTEXITCODE."
     }
+}
+
+function Set-GitRef {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryPath,
+        [Parameter(Mandatory = $true)][string]$RequestedRef
+    )
+
+    Invoke-Checked -FilePath $GitPath -ArgumentList @('-C', $RepositoryPath, 'fetch', 'origin')
+    $refObject = "$RequestedRef^{commit}"
+    & $GitPath -C $RepositoryPath rev-parse --verify --quiet $refObject *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-Checked -FilePath $GitPath -ArgumentList @(
+            '-C', $RepositoryPath, 'fetch', 'origin', $RequestedRef
+        )
+    }
+    Invoke-Checked -FilePath $GitPath -ArgumentList @(
+        '-C', $RepositoryPath, 'checkout', $RequestedRef
+    )
 }
 
 function Replace-RepositoryFiles {
@@ -84,6 +103,12 @@ $ref = $env:LOCALFLOW_REF
 
 if ($scriptRepo) {
     $repo = $scriptRepo
+    if (-not [string]::IsNullOrWhiteSpace($ref)) {
+        if (-not $gitCommand) {
+            throw 'git is required to check out LOCALFLOW_REF from a checkout.'
+        }
+        Set-GitRef -GitPath $gitCommand.Source -RepositoryPath $repo -RequestedRef $ref
+    }
 } else {
     $repo = $env:LOCALFLOW_HOME
     if ([string]::IsNullOrWhiteSpace($repo)) {
@@ -92,7 +117,11 @@ if ($scriptRepo) {
 
     if ($gitCommand) {
         if (Test-Path -LiteralPath (Join-Path $repo '.git')) {
-            Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('-C', $repo, 'pull', '--ff-only')
+            if ([string]::IsNullOrWhiteSpace($ref)) {
+                Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('-C', $repo, 'pull', '--ff-only')
+            } else {
+                Set-GitRef -GitPath $gitCommand.Source -RepositoryPath $repo -RequestedRef $ref
+            }
         } else {
             $parent = Split-Path -Parent $repo
             if (-not (Test-Path -LiteralPath $parent)) {
@@ -104,12 +133,7 @@ if ($scriptRepo) {
                 $clonePath = Join-Path $temporaryRoot 'checkout'
                 Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('clone', $repoUrl, $clonePath)
                 if (-not [string]::IsNullOrWhiteSpace($ref)) {
-                    $refObject = "$ref^{commit}"
-                    & $gitCommand.Source -C $clonePath rev-parse --verify --quiet $refObject *> $null
-                    if ($LASTEXITCODE -ne 0) {
-                        Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('-C', $clonePath, 'fetch', 'origin', $ref)
-                    }
-                    Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('-C', $clonePath, 'checkout', $ref)
+                    Set-GitRef -GitPath $gitCommand.Source -RepositoryPath $clonePath -RequestedRef $ref
                 }
                 Replace-RepositoryFiles -Source $clonePath -Destination $repo
             } finally {
@@ -117,15 +141,6 @@ if ($scriptRepo) {
             }
         }
 
-        if (-not [string]::IsNullOrWhiteSpace($ref) -and
-            (Test-Path -LiteralPath (Join-Path $repo '.git'))) {
-            $refObject = "$ref^{commit}"
-            & $gitCommand.Source -C $repo rev-parse --verify --quiet $refObject *> $null
-            if ($LASTEXITCODE -ne 0) {
-                Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('-C', $repo, 'fetch', 'origin', $ref)
-            }
-            Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('-C', $repo, 'checkout', $ref)
-        }
     } else {
         $archiveRef = $ref
         if ([string]::IsNullOrWhiteSpace($archiveRef)) {
@@ -335,6 +350,6 @@ if ($NoLaunch) {
     $lfPath = Join-Path $repo '.venv\Scripts\lf.exe'
     & $lfPath setup
     if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+        throw "lf setup failed with exit code $LASTEXITCODE."
     }
 }

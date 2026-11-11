@@ -119,8 +119,7 @@ if [[ "$OS" == "Darwin" ]]; then
         exit 1
     fi
     if ! python3 -c \
-        'import sys, tkinter; raise SystemExit(sys.version_info < (3, 11))' \
-        >/dev/null 2>&1; then
+        'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
         echo "Python 3.11+ is required; install it with: brew install python@3.12" >&2
         exit 1
     fi
@@ -155,7 +154,7 @@ fi
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR=""
-REFRESH_REPO=0
+EXISTING_INSTALL=0
 if [[ -n "$SCRIPT_SOURCE" && -f "$SCRIPT_SOURCE" ]]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" && pwd)"
 fi
@@ -165,8 +164,7 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/pyproject.toml" \
 else
     REPO="${LOCALFLOW_HOME:-$HOME/.localflow/app}"
     if [[ -e "$REPO/.git" ]]; then
-        git -C "$REPO" pull --ff-only
-        REFRESH_REPO=1
+        EXISTING_INSTALL=1
     else
         if [[ -e "$REPO" ]]; then
             echo "Install destination exists but is not a git checkout: $REPO" >&2
@@ -174,22 +172,25 @@ else
         fi
         mkdir -p "$(dirname "$REPO")"
         git clone "${LOCALFLOW_REPO_URL:-https://github.com/CortexRND/localflow.git}" "$REPO"
-        REFRESH_REPO=1
     fi
 fi
 
-if [[ "$REFRESH_REPO" -eq 1 && -n "${LOCALFLOW_REF:-}" ]]; then
+if [[ -n "${LOCALFLOW_REF:-}" ]]; then
+    git -C "$REPO" fetch origin
     if ! git -C "$REPO" rev-parse --verify --quiet \
         "${LOCALFLOW_REF}^{commit}" >/dev/null; then
         git -C "$REPO" fetch origin "$LOCALFLOW_REF"
     fi
     git -C "$REPO" checkout "$LOCALFLOW_REF"
+elif [[ "$EXISTING_INSTALL" -eq 1 ]]; then
+    git -C "$REPO" pull --ff-only
 fi
 
 cd "$REPO"
 if [[ "$USE_UV" -eq 1 ]]; then
     uv venv --python 3.12 .venv
-    if ! .venv/bin/python -c 'import tkinter' >/dev/null 2>&1; then
+    if [[ "$OS" == "Linux" ]] \
+        && ! .venv/bin/python -c 'import tkinter' >/dev/null 2>&1; then
         echo "The uv-managed Python does not include tkinter." >&2
         exit 1
     fi
@@ -197,7 +198,8 @@ if [[ "$USE_UV" -eq 1 ]]; then
     uv pip install --python .venv/bin/python -e .
 else
     "$PYTHON" -m venv .venv
-    if ! .venv/bin/python -c 'import tkinter' >/dev/null 2>&1; then
+    if [[ "$OS" == "Linux" ]] \
+        && ! .venv/bin/python -c 'import tkinter' >/dev/null 2>&1; then
         echo "Python 3.11+ with tkinter is required." >&2
         exit 1
     fi
