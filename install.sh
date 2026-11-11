@@ -106,6 +106,7 @@ wait_for_ollama() {
         fi
         sleep 1
     done
+    echo "Warning: Ollama did not respond within 30 seconds; LocalFlow setup will show it as unavailable." >&2
     return 0
 }
 

@@ -73,7 +73,20 @@ function Replace-RepositoryFiles {
         [Parameter(Mandatory = $true)][string]$Destination
     )
 
-    if (-not (Test-Path -LiteralPath $Destination)) {
+    if (Test-Path -LiteralPath $Destination) {
+        $destinationItems = @(Get-ChildItem -LiteralPath $Destination -Force)
+        if ($destinationItems.Count -gt 0) {
+            $projectFile = Join-Path $Destination 'pyproject.toml'
+            $isLocalFlowInstall = $false
+            if (Test-Path -LiteralPath $projectFile -PathType Leaf) {
+                $isLocalFlowInstall = [bool](Select-String -LiteralPath $projectFile `
+                    -Pattern '^\s*name\s*=\s*"localflow"\s*(?:#.*)?$' -Quiet)
+            }
+            if (-not $isLocalFlowInstall) {
+                throw "Install destination exists but is not a LocalFlow install: $Destination"
+            }
+        }
+    } else {
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     }
     Get-ChildItem -LiteralPath $Destination -Force |
@@ -279,7 +292,9 @@ if ($WithOllama) {
             '--accept-source-agreements', '--accept-package-agreements'
         )
         $ollama = Get-Command ollama -ErrorAction SilentlyContinue
-        if (-not $ollama) {
+        if ($ollama) {
+            $ollamaPath = $ollama.Source
+        } else {
             $ollamaCandidates = @(
                 (Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'),
                 (Join-Path $env:ProgramFiles 'Ollama\ollama.exe')

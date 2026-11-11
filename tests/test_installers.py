@@ -60,6 +60,12 @@ def test_install_ps1_does_not_call_exit() -> None:
     assert re.search(r"^\s*exit\b", script, re.MULTILINE) is None
 
 
+def test_install_ps1_rejects_non_localflow_install_destination() -> None:
+    script = (ROOT / "install.ps1").read_text(encoding="utf-8")
+
+    assert "is not a LocalFlow install" in script
+
+
 def test_mit_license_is_declared_in_project_metadata() -> None:
     license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
