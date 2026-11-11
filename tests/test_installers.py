@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -13,15 +14,33 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = ROOT / "install.sh"
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def _find_bash() -> str | None:
+    if os.name != "nt":
+        return shutil.which("bash")
+
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        return None
+    for git_directory in Path(git_executable).resolve().parents:
+        for relative_path in (("bin", "bash.exe"), ("usr", "bin", "bash.exe")):
+            candidate = git_directory.joinpath(*relative_path)
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+BASH = _find_bash()
+
+
+@pytest.mark.skipif(BASH is None, reason="Bash is not installed")
 def test_install_sh_passes_bash_syntax_check() -> None:
-    subprocess.run(["bash", "-n", INSTALL_SH.name], check=True, cwd=ROOT)
+    subprocess.run([BASH, "-n", INSTALL_SH.name], check=True, cwd=ROOT)
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+@pytest.mark.skipif(BASH is None, reason="Bash is not installed")
 def test_install_sh_help_lists_supported_options() -> None:
     result = subprocess.run(
-        ["bash", INSTALL_SH.name, "--help"],
+        [BASH, INSTALL_SH.name, "--help"],
         check=True,
         capture_output=True,
         text=True,
@@ -33,10 +52,10 @@ def test_install_sh_help_lists_supported_options() -> None:
     assert "--no-system-deps" in result.stdout
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+@pytest.mark.skipif(BASH is None, reason="Bash is not installed")
 def test_install_sh_unknown_option_exits_two() -> None:
     result = subprocess.run(
-        ["bash", INSTALL_SH.name, "--not-an-installer-option"],
+        [BASH, INSTALL_SH.name, "--not-an-installer-option"],
         capture_output=True,
         text=True,
         cwd=ROOT,
