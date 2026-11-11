@@ -15,13 +15,13 @@ INSTALL_SH = ROOT / "install.sh"
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
 def test_install_sh_passes_bash_syntax_check() -> None:
-    subprocess.run(["bash", "-n", str(INSTALL_SH)], check=True, cwd=ROOT)
+    subprocess.run(["bash", "-n", INSTALL_SH.name], check=True, cwd=ROOT)
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
 def test_install_sh_help_lists_supported_options() -> None:
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--help"],
+        ["bash", INSTALL_SH.name, "--help"],
         check=True,
         capture_output=True,
         text=True,
@@ -36,7 +36,7 @@ def test_install_sh_help_lists_supported_options() -> None:
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
 def test_install_sh_unknown_option_exits_two() -> None:
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--not-an-installer-option"],
+        ["bash", INSTALL_SH.name, "--not-an-installer-option"],
         capture_output=True,
         text=True,
         cwd=ROOT,
