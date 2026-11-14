@@ -1,7 +1,9 @@
 """Native Tk hub for history, insights, and local settings."""
 
+import queue
 import subprocess
 import sys
+import threading
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, font as tkfont, messagebox
@@ -9,6 +11,7 @@ from tkinter import filedialog, font as tkfont, messagebox
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
+from localflow.meeting_client import MeetingClient
 from localflow.ui_tokens import (
     CARD_GAP,
     CARD_PADDING,
@@ -19,7 +22,7 @@ from localflow.ui_tokens import (
     tokens_for,
 )
 
-PAGES = ("Home", "History", "Dictionary", "Style", "Models")
+PAGES = ("Home", "Meetings", "History", "Dictionary", "Style", "Models")
 
 
 def _one_line(text, limit):
@@ -35,6 +38,8 @@ class HubWindow:
         dictionary_store: DictionaryStore | None = None,
         config=None,
         theme="light",
+        meeting_client=None,
+        initial_page="Home",
     ):
         self.root = root
         self.tokens = tokens_for(theme)
@@ -46,6 +51,21 @@ class HubWindow:
             else HistoryStore(enabled=self.config.history_enabled)
         )
         self.dictionary = dictionary_store or DictionaryStore()
+        self.meeting_client = meeting_client or MeetingClient()
+        self._meeting_after = None
+        self._meeting_notes_after = None
+        self._meeting_notes_dirty = False
+        self._meeting_notes_text = ""
+        self._meeting_title = "Meeting"
+        self._meeting_templates = []
+        self._meeting_template = ""
+        self._meeting_status_data = {}
+        self._meeting_session_active = False
+        self._meeting_last_saved = None
+        self._meeting_chat = []
+        self._meeting_busy = False
+        self._meeting_results = queue.Queue()
+        self._meeting_dispatch_after = None
         self.page = "Home"
         self.page_errors: dict[str, str] = {}
         root.title("LocalFlow Hub")
@@ -53,7 +73,10 @@ class HubWindow:
         root.minsize(820, 560)
         root.configure(bg=self.tokens["paper"])
         self._build_shell()
-        self.show_page("Home")
+        self._meeting_dispatch_after = root.after(
+            25, self._meeting_dispatch_results
+        )
+        self.show_page(initial_page)
 
     def _build_shell(self):
         self.shell = tk.Frame(self.root, bg=self.tokens["paper"])
@@ -192,6 +215,11 @@ class HubWindow:
             ).pack(fill="x", anchor="w")
 
     def show_page(self, page: str):
+        if self.page == "Meetings":
+            self._meeting_capture_fields()
+            if self._meeting_after is not None:
+                self.root.after_cancel(self._meeting_after)
+                self._meeting_after = None
         self.page = page
         self._clear()
         self._header(page)
@@ -772,10 +800,509 @@ class HubWindow:
             lambda: subprocess.Popen([sys.executable, "-m", "localflow.setup_window"]),
         ).pack(anchor="w", pady=12)
 
+    def _meeting_capture_fields(self):
+        if hasattr(self, "meeting_notes"):
+            self._meeting_notes_text = self.meeting_notes.get("1.0", "end-1c")
+        if hasattr(self, "meeting_title_entry"):
+            self._meeting_title = self.meeting_title_entry.get()
+        if hasattr(self, "meeting_template_var"):
+            self._meeting_template = self.meeting_template_var.get()
 
-def main():
+    def _meeting_request(self, operation, callback, *args):
+        def run():
+            try:
+                result = getattr(self.meeting_client, operation)(*args)
+                error = None
+            except Exception as exc:  # noqa: BLE001
+                result, error = None, exc
+            self._meeting_results.put((callback, result, error))
+
+        threading.Thread(
+            target=run, name=f"localflow-meeting-{operation}", daemon=True
+        ).start()
+
+    def _meeting_dispatch_results(self):
+        self._meeting_dispatch_after = None
+        while True:
+            try:
+                callback, result, error = self._meeting_results.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(result, error)
+            except tk.TclError:
+                pass
+        try:
+            if self.root.winfo_exists():
+                self._meeting_dispatch_after = self.root.after(
+                    25, self._meeting_dispatch_results
+                )
+        except tk.TclError:
+            pass
+
+    def _page_meetings(self):
+        self.meeting_down = tk.Frame(self.body, bg=self.tokens["paper"])
+        self.meeting_down_label = tk.Label(
+            self.meeting_down, text="LocalFlow server not running.",
+            bg=self.tokens["paper"], fg=self.tokens["muted"],
+            font=(self.font_family, 13),
+        )
+        self.meeting_down_label.pack(anchor="w", pady=(8, 12))
+        self._button(
+            self.meeting_down, "Retry", self._meeting_retry, kind="secondary",
+        ).pack(anchor="w")
+
+        self.meeting_content = tk.Frame(self.body, bg=self.tokens["paper"])
+        self.meeting_watch = tk.Label(
+            self.meeting_content, text="", bg=self.tokens["paper"],
+            fg=self.tokens["muted"], font=(self.font_family, 11),
+            anchor="w", justify="left", wraplength=720,
+        )
+        self.meeting_watch.pack(fill="x", pady=(0, 12))
+        self.meeting_error = tk.Label(
+            self.meeting_content, text="", bg=self.tokens["paper"],
+            fg=self.tokens["red"], font=(self.font_family, 12),
+            anchor="w", justify="left", wraplength=720,
+        )
+
+        self.meeting_setup = tk.Frame(self.meeting_content, bg=self.tokens["paper"])
+        tk.Label(
+            self.meeting_setup, text="Meeting title", bg=self.tokens["paper"],
+            fg=self.tokens["ink"], font=(self.font_family, 11, "bold"),
+        ).pack(anchor="w", pady=(0, 5))
+        self.meeting_title_entry = self._entry(
+            self.meeting_setup, width=48,
+        )
+        self.meeting_title_entry.insert(0, self._meeting_title)
+        self.meeting_title_entry.pack(fill="x", ipady=6, pady=(0, 12))
+        tk.Label(
+            self.meeting_setup, text="Notes template", bg=self.tokens["paper"],
+            fg=self.tokens["ink"], font=(self.font_family, 11, "bold"),
+        ).pack(anchor="w", pady=(0, 5))
+        self.meeting_template_var = tk.StringVar(
+            value=self._meeting_template or "general"
+        )
+        self.meeting_template_label_var = tk.StringVar(value="General")
+        self.meeting_template_menu = tk.OptionMenu(
+            self.meeting_setup, self.meeting_template_label_var, "General"
+        )
+        self.meeting_template_menu.configure(
+            bg=self.tokens["surface"], fg=self.tokens["ink"],
+            activebackground=self.tokens["surface"], relief="flat",
+            highlightthickness=1, highlightbackground=self.tokens["line"],
+            font=(self.font_family, 12), anchor="w",
+        )
+        self.meeting_template_menu.pack(fill="x", pady=(0, 12))
+        self.meeting_setup.pack(fill="x")
+
+        notes_heading = tk.Frame(self.meeting_content, bg=self.tokens["paper"])
+        notes_heading.pack(fill="x", pady=(0, 5))
+        tk.Label(
+            notes_heading, text="Your notes", bg=self.tokens["paper"],
+            fg=self.tokens["ink"], font=(self.font_family, 13, "bold"),
+        ).pack(side="left")
+        self.meeting_notes_status = tk.Label(
+            notes_heading, text="", bg=self.tokens["paper"],
+            fg=self.tokens["muted"], font=(self.font_family, 10),
+        )
+        self.meeting_notes_status.pack(side="right")
+        self.meeting_notes = tk.Text(
+            self.meeting_content, height=7, wrap="word",
+            bg=self.tokens["surface"], fg=self.tokens["ink"],
+            insertbackground=self.tokens["ink"], relief="flat",
+            highlightbackground=self.tokens["line"],
+            highlightcolor=self.tokens["cobalt"], highlightthickness=1,
+            font=(self.font_family, 12), padx=10, pady=8,
+        )
+        self.meeting_notes.pack(fill="x")
+        if self._meeting_notes_text:
+            self.meeting_notes.insert("1.0", self._meeting_notes_text)
+        self.meeting_notes.bind("<<Modified>>", self._meeting_notes_changed)
+
+        self.meeting_action = self._button(
+            self.meeting_content, "Start meeting transcription",
+            self._meeting_toggle, kind="primary",
+        )
+        self.meeting_action.pack(anchor="w", pady=(12, 10))
+        self.meeting_live = tk.Label(
+            self.meeting_content, text="", bg=self.tokens["surface"],
+            fg=self.tokens["ink"], justify="left", anchor="nw",
+            font=(self.font_family, 11), padx=12, pady=10,
+            wraplength=700, highlightbackground=self.tokens["line"],
+            highlightthickness=1,
+        )
+        self.meeting_live.pack(fill="x", pady=(0, 12))
+
+        self.meeting_saved_frame = tk.Frame(
+            self.meeting_content, bg=self.tokens["surface"],
+            highlightbackground=self.tokens["line"], highlightthickness=1,
+            padx=12, pady=10,
+        )
+        self.meeting_saved_label = tk.Label(
+            self.meeting_saved_frame, text="", bg=self.tokens["surface"],
+            fg=self.tokens["ink"], anchor="w", justify="left",
+            wraplength=580, font=(self.font_family, 11),
+        )
+        self.meeting_saved_label.pack(side="left", fill="x", expand=True)
+        self._button(
+            self.meeting_saved_frame, "Open notes", self._meeting_open_notes,
+        ).pack(side="right", padx=(12, 0))
+
+        self.meeting_chat_frame = tk.Frame(
+            self.meeting_content, bg=self.tokens["paper"]
+        )
+        tk.Label(
+            self.meeting_chat_frame, text="Ask the transcript",
+            bg=self.tokens["paper"], fg=self.tokens["ink"],
+            font=(self.font_family, 13, "bold"),
+        ).pack(anchor="w", pady=(16, 6))
+        ask_row = tk.Frame(self.meeting_chat_frame, bg=self.tokens["paper"])
+        ask_row.pack(fill="x")
+        self.meeting_question = self._entry(ask_row)
+        self.meeting_question.pack(side="left", fill="x", expand=True, ipady=6)
+        self._button(
+            ask_row, "Ask", self._meeting_ask, kind="primary",
+        ).pack(side="left", padx=(8, 0))
+        self.meeting_chat_answers = tk.Frame(
+            self.meeting_chat_frame, bg=self.tokens["paper"]
+        )
+        self.meeting_chat_answers.pack(fill="x", pady=(8, 0))
+
+        self.meeting_down.pack_forget()
+        self.meeting_content.pack(fill="both", expand=True)
+        self._meeting_render()
+        self._meeting_request("templates", self._meeting_templates_loaded)
+        self._meeting_poll()
+
+    def _meeting_retry(self):
+        self.meeting_down.pack_forget()
+        self.meeting_content.pack(fill="both", expand=True)
+        self._meeting_request("templates", self._meeting_templates_loaded)
+        self._meeting_poll()
+
+    def _meeting_templates_loaded(self, result, error):
+        if error:
+            return
+        self._meeting_templates = result.get("templates", [])
+        default = result.get("default", "general")
+        menu = self.meeting_template_menu["menu"]
+        menu.delete(0, "end")
+        for template in self._meeting_templates:
+            template_id = template["id"]
+            menu.add_command(
+                label=template["name"],
+                command=lambda value=template_id, name=template["name"]:
+                    self._meeting_select_template(value, name),
+            )
+        valid_ids = {template["id"] for template in self._meeting_templates}
+        if self._meeting_template not in valid_ids:
+            self._meeting_template = default
+        self._meeting_select_template(
+            self._meeting_template or default,
+            next(
+                (
+                    template["name"] for template in self._meeting_templates
+                    if template["id"] == (self._meeting_template or default)
+                ),
+                default,
+            ),
+        )
+
+    def _meeting_select_template(self, template_id, name):
+        self._meeting_template = template_id
+        self.meeting_template_var.set(template_id)
+        self.meeting_template_label_var.set(name)
+
+    def _meeting_poll(self):
+        if self.page != "Meetings":
+            return
+        self._meeting_request("status", self._meeting_status_received)
+
+    def _meeting_status_received(self, result, error):
+        if self.page != "Meetings":
+            return
+        if error:
+            self.meeting_content.pack_forget()
+            self.meeting_down.pack(fill="x", anchor="w")
+            self.meeting_down_label.configure(text=str(error))
+            self._meeting_schedule_poll()
+            return
+        self.meeting_down.pack_forget()
+        self.meeting_content.pack(fill="both", expand=True)
+        self._meeting_status_data = result
+        if result.get("last_saved"):
+            self._meeting_last_saved = result["last_saved"]
+        session = result.get("session")
+        if session and not self._meeting_session_active and not self._meeting_notes_dirty:
+            self._meeting_notes_text = session.get("user_notes", "")
+            self.meeting_notes.delete("1.0", "end")
+            self.meeting_notes.insert("1.0", self._meeting_notes_text)
+            self.meeting_notes.edit_modified(False)
+            template_id = session.get("template") or "general"
+            template = next(
+                (
+                    item for item in self._meeting_templates
+                    if item["id"] == template_id
+                ),
+                None,
+            )
+            self._meeting_select_template(
+                template_id, template["name"] if template else template_id
+            )
+        self._meeting_session_active = bool(session)
+        self._meeting_render()
+        self._meeting_schedule_poll()
+
+    def _meeting_schedule_poll(self):
+        if self.page == "Meetings" and self._meeting_after is None:
+            self._meeting_after = self.root.after(2000, self._meeting_poll_timer)
+
+    def _meeting_poll_timer(self):
+        self._meeting_after = None
+        self._meeting_poll()
+
+    def _meeting_render(self):
+        status = self._meeting_status_data
+        session = status.get("session")
+        if session:
+            audio = session.get("system_audio")
+            if audio == "on":
+                watch = "mic + system audio"
+            elif audio == "error":
+                watch = "mic only — system audio unavailable"
+                if session.get("system_audio_error"):
+                    watch += f" — {session['system_audio_error']}"
+            else:
+                watch = "mic only"
+            if session.get("title"):
+                watch = f"{session['title']} · {watch}"
+            self.meeting_watch.configure(text=watch)
+            self.meeting_watch.pack(fill="x", pady=(0, 12))
+            self.meeting_setup.pack_forget()
+            self.meeting_action.configure(
+                text=(
+                    f"Stop & save notes — {int(session.get('seconds', 0)) // 60}m"
+                    f"{int(session.get('seconds', 0)) % 60:02d}s · "
+                    f"{session.get('segment_count', 0)} segments"
+                ),
+                state="disabled" if self._meeting_busy else "normal",
+            )
+            self.meeting_live.configure(
+                text=(
+                    "\n\n".join(
+                        f"[{segment.get('stamp', '00:00')}] "
+                        f"{'Me' if segment.get('source') == 'me' else 'Others'}: "
+                        f"{segment.get('text', '')}"
+                        for segment in session.get("segments", [])
+                    )
+                    or "(listening — first transcript segment lands after ~30s)"
+                )
+            )
+            self.meeting_live.pack(fill="x", pady=(0, 12))
+        else:
+            watch = (
+                "mic in use" if status.get("watching") and status.get("mic_busy")
+                else "watching" if status.get("watching")
+                else "watcher off" if status.get("watch_error")
+                else ""
+            )
+            self.meeting_watch.configure(text=watch)
+            if watch:
+                self.meeting_watch.pack(fill="x", pady=(0, 12))
+            else:
+                self.meeting_watch.pack_forget()
+            self.meeting_setup.pack(fill="x")
+            self.meeting_action.configure(
+                text="Start meeting transcription",
+                state="disabled" if self._meeting_busy else "normal",
+            )
+            self.meeting_live.pack_forget()
+
+        self.meeting_template_menu.configure(
+            state="disabled" if session else "normal"
+        )
+        if self._meeting_last_saved and not session:
+            saved = self._meeting_last_saved
+            prefix = "Enhanced notes: " if saved.get("enhanced") else "Saved: "
+            self.meeting_saved_label.configure(
+                text=prefix + saved.get("notes_path", "")
+            )
+            self.meeting_saved_frame.pack(fill="x", pady=(0, 10))
+        else:
+            self.meeting_saved_frame.pack_forget()
+        if status.get("chat_available") or self._meeting_last_saved:
+            self.meeting_chat_frame.pack(fill="x")
+        else:
+            self.meeting_chat_frame.pack_forget()
+        self._meeting_render_chat()
+
+    def _meeting_notes_changed(self, _event=None):
+        if self.meeting_notes.edit_modified():
+            self.meeting_notes.edit_modified(False)
+            self._meeting_notes_dirty = True
+            self._meeting_notes_text = self.meeting_notes.get("1.0", "end-1c")
+            if self._meeting_status_data.get("session"):
+                self.meeting_notes_status.configure(
+                    text="Editing…", fg=self.tokens["muted"]
+                )
+                if self._meeting_notes_after is not None:
+                    self.root.after_cancel(self._meeting_notes_after)
+                self._meeting_notes_after = self.root.after(
+                    800, self._meeting_save_notes
+                )
+            else:
+                self.meeting_notes_status.configure(
+                    text="Kept for when you start", fg=self.tokens["muted"]
+                )
+
+    def _meeting_save_notes(self, callback=None):
+        self._meeting_notes_after = None
+        text = self.meeting_notes.get("1.0", "end-1c")
+        if self.meeting_notes_status.winfo_exists():
+            self.meeting_notes_status.configure(
+                text="Saving…", fg=self.tokens["muted"]
+            )
+
+        def saved(_result, error):
+            if error:
+                self._meeting_notes_dirty = True
+                self.meeting_notes_status.configure(
+                    text=f"Not saved — {error}", fg=self.tokens["red"]
+                )
+            else:
+                self._meeting_notes_dirty = (
+                    self.meeting_notes.get("1.0", "end-1c") != text
+                )
+                if self._meeting_notes_dirty:
+                    self.meeting_notes_status.configure(
+                        text="Editing…", fg=self.tokens["muted"]
+                    )
+                else:
+                    self.meeting_notes_status.configure(
+                        text="Saved " + datetime.now().strftime("%H:%M"),
+                        fg=self.tokens["success"],
+                    )
+            if callback:
+                callback(error)
+
+        self._meeting_request("save_notes", saved, text)
+
+    def _meeting_toggle(self):
+        if self._meeting_busy:
+            return
+        session = self._meeting_status_data.get("session")
+        self._meeting_busy = True
+        self.meeting_error.configure(text="")
+        self.meeting_error.pack_forget()
+        self.meeting_action.configure(state="disabled")
+        if not session:
+            title = self.meeting_title_entry.get().strip() or "Meeting"
+            template = self.meeting_template_var.get()
+            notes = self.meeting_notes.get("1.0", "end-1c")
+
+            def started(result, error):
+                self._meeting_busy = False
+                if error:
+                    self._meeting_show_error(error)
+                    return
+                self._meeting_notes_dirty = False
+                self._meeting_last_saved = None
+                self._meeting_chat.clear()
+                self.meeting_notes_status.configure(
+                    text="Saved" if notes else "", fg=self.tokens["muted"]
+                )
+                self._meeting_poll()
+
+            self._meeting_request(
+                "start", started, title, "", template, notes
+            )
+            return
+
+        self._meeting_notes_dirty = True
+
+        def flushed(error):
+            if error:
+                self._meeting_busy = False
+                self._meeting_show_error(
+                    f"Notes could not be saved; the meeting is still running — {error}"
+                )
+                self._meeting_render()
+                return
+            self.meeting_action.configure(
+                text=(
+                    "Enhancing your notes…"
+                    if self.meeting_notes.get("1.0", "end-1c").strip()
+                    else "Summarizing & saving…"
+                )
+            )
+
+            def stopped(result, stop_error):
+                self._meeting_busy = False
+                if stop_error:
+                    self._meeting_show_error(stop_error)
+                else:
+                    self._meeting_last_saved = result
+                    self._meeting_notes_dirty = False
+                    self.meeting_notes.delete("1.0", "end")
+                    self.meeting_notes.edit_modified(False)
+                    self.meeting_notes_status.configure(text="")
+                self._meeting_poll()
+
+            self._meeting_request("stop", stopped)
+
+        if self._meeting_notes_after is not None:
+            self.root.after_cancel(self._meeting_notes_after)
+            self._meeting_notes_after = None
+        self._meeting_save_notes(flushed)
+
+    def _meeting_show_error(self, error):
+        self.meeting_error.configure(text=f"Meeting: {error}")
+        self.meeting_error.pack(fill="x", pady=(0, 8), before=self.meeting_action)
+        self.meeting_action.configure(state="normal")
+
+    def _meeting_open_notes(self):
+        if self._meeting_last_saved and self._meeting_last_saved.get("notes_path"):
+            from localflow.platform import current
+
+            current().open_path(self._meeting_last_saved["notes_path"])
+
+    def _meeting_ask(self):
+        question = self.meeting_question.get().strip()
+        if not question or self._meeting_busy:
+            return
+        self.meeting_question.delete(0, "end")
+        entry = {"question": question, "answer": "Reading the transcript…"}
+        self._meeting_chat.insert(0, entry)
+        self._meeting_render_chat()
+
+        def answered(result, error):
+            entry["answer"] = (
+                f"Couldn’t answer — {error}" if error else result.get("answer", "")
+            )
+            entry["error"] = error is not None
+            self._meeting_render_chat()
+
+        self._meeting_request("chat", answered, question)
+
+    def _meeting_render_chat(self):
+        if not hasattr(self, "meeting_chat_answers"):
+            return
+        for child in self.meeting_chat_answers.winfo_children():
+            child.destroy()
+        for item in self._meeting_chat:
+            tk.Label(
+                self.meeting_chat_answers,
+                text=f"You: {item['question']}\n{item['answer']}",
+                bg=self.tokens["paper"],
+                fg=self.tokens["red"] if item.get("error") else self.tokens["ink"],
+                anchor="w", justify="left", wraplength=700,
+                font=(self.font_family, 11),
+            ).pack(fill="x", pady=(0, 8))
+
+
+def main(initial_page="Home"):
     root = tk.Tk()
-    HubWindow(root)
+    HubWindow(root, initial_page=initial_page)
     root.mainloop()
 
 

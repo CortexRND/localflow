@@ -50,7 +50,10 @@ jobs:
           tests/test_providers.py
           localflow/meeting_templates.py
           localflow/system_audio.py
+          localflow/meeting_client.py
           tests/test_meetings.py
           tests/test_meeting_api.py
+          tests/test_meeting_client.py
+          tests/test_hub_meetings_tk.py
       - name: Test
         run: pytest -q

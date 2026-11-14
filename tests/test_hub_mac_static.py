@@ -39,6 +39,9 @@ def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text()
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()
     assert "from localflow.hub_mac import build_window" in snapshots
+    assert "SnapshotMeetingClient" in snapshots
+    assert '("idle", "running", "saved")' in snapshots
+    assert 'f"hub-meetings-{state}"' in snapshots
     assert '"Home", "History", "Dictionary", "Style", "Models"' in snapshots
     assert '"Unable to load local data."' in snapshots
     assert "localflow/hub*" in workflow
@@ -118,7 +121,7 @@ def test_window_appearance_callback_is_registered_on_a_retained_controller():
         for base in controller.bases
     )
     assert "self.window.setDelegate_(self)" in source
-    assert "controller = build_window()" in source
+    assert "controller = build_window(initial_page=initial_page)" in source
     assert "AppHelper.runEventLoop()" in source
 
 

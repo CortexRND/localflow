@@ -239,6 +239,8 @@ If system audio can't be opened the meeting still records the mic and the panel 
 "mic only — system audio unavailable" (hover for the reason). Wear headphones: on
 speakers the mic also hears the remote side, which then appears twice.
 
+The Hub's Meetings page offers the same features (`lf hub` or menu bar → Meeting notes…).
+
 ### Hot phrases
 
 Hot phrases let you paste a saved long prompt by speaking a short trigger

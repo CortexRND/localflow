@@ -1,7 +1,10 @@
 """Native AppKit history and settings hub for macOS."""
 
+import queue
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 
 import AppKit
@@ -10,9 +13,11 @@ from AppKit import (
     NSAlert,
     NSApplication,
     NSButton,
+    NSComboBox,
     NSMakeRect,
     NSScrollView,
     NSTextField,
+    NSTextView,
     NSView,
     NSWindow,
 )
@@ -21,6 +26,8 @@ from Foundation import NSObject
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
+from localflow.meeting_client import MeetingClient
+from localflow.platform import current
 from localflow.mac_style import (
     FlippedView,
     HalftoneView,
@@ -34,7 +41,7 @@ from localflow.mac_style import (
 )
 from localflow.ui_tokens import LIGHT, SUN_TEXT, TOKENS as TOKENS
 
-PAGES = ("Home", "History", "Dictionary", "Style", "Models")
+PAGES = ("Home", "Meetings", "History", "Dictionary", "Style", "Models")
 
 
 def _label(
@@ -52,23 +59,45 @@ def _label(
 class HubWindowController(NSObject):
     def init(self):
         config = load_config()
-        return self.initWithHistory_dictionary_config_(
-            HistoryStore(enabled=config.history_enabled), DictionaryStore(), config
+        return self.initWithHistory_dictionary_config_meetingClient_initialPage_(
+            HistoryStore(enabled=config.history_enabled), DictionaryStore(), config,
+            None, "Home",
         )
 
-    def initWithHistory_dictionary_config_(self, history, dictionary, config):
+    def initWithHistory_dictionary_config_meetingClient_initialPage_(
+        self, history, dictionary, config, meeting_client, initial_page
+    ):
         self = super().init()  # noqa: PLW0642
         if self is None:
             return None
         self.history = history
         self.dictionary = dictionary
         self.config = config
+        self.meeting_client = meeting_client or MeetingClient()
+        self.meeting_events = queue.Queue()
+        self.meeting_status = {}
+        self.meeting_templates = []
+        self.meeting_last_saved = None
+        self.meeting_answers = []
+        self.meeting_notes_text = ""
+        self.meeting_title_value = "Meeting"
+        self.meeting_template_value = ""
+        self.meeting_notes_dirty = False
+        self.meeting_notes_due = None
+        self.meeting_busy = False
+        self.meeting_error = ""
+        self.meeting_next_poll = 0
+        self.meeting_session_active = False
         self.tokens = LIGHT
         self.page = "Home"
         self.page_errors = {}
         self.page_notices = {}
         self._build_window()
-        self.show_page("Home")
+        self.show_page(initial_page)
+        self.meeting_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.2, self, objc.selector(self.meetingTimerTick_, signature=b"v@:@"),
+            None, True,
+        )
         return self
 
     @objc.python_method
@@ -148,6 +177,8 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def show_page(self, page):
+        if self.page == "Meetings" and hasattr(self, "meeting_notes"):
+            self._meeting_capture_state()
         self.tokens = tokens_for_window(self.window)
         self.page = page
         self.root_view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
@@ -851,6 +882,459 @@ class HubWindowController(NSObject):
             self.show_page("Style")
 
     @objc.python_method
+    def _meeting_button(self, title, action, x, y, width, kind="secondary"):
+        return self._button(
+            title, action, x, y, width=width, kind=kind,
+        )
+
+    @objc.python_method
+    def _page_meetings(self):
+        self.meeting_message = _label(
+            "Connecting to LocalFlow…", 0, 0, 600, 13,
+            "muted", palette=self.tokens, height=28,
+        )
+        self.body.addSubview_(self.meeting_message)
+        self.meeting_retry = self._button(
+            "Retry", "meetingRetry:", 0, 36, width=100,
+        )
+        self.meeting_retry.setHidden_(True)
+        self.meeting_watch = _label(
+            "", 0, 0, 720, 11, "muted", palette=self.tokens, height=22,
+        )
+        self.body.addSubview_(self.meeting_watch)
+        self.meeting_title_label = _label(
+            "Meeting title", 0, 28, 150, 11,
+            "ink", palette=self.tokens, height=18, weight="semibold",
+        )
+        self.body.addSubview_(self.meeting_title_label)
+        self.meeting_title = self._field(self.meeting_title_value, 0, 48, 420)
+        self.meeting_template_label = _label(
+            "Notes template", 440, 28, 150, 11,
+            "ink", palette=self.tokens, height=18, weight="semibold",
+        )
+        self.body.addSubview_(self.meeting_template_label)
+        self.meeting_template = NSComboBox.alloc().initWithFrame_(
+            NSMakeRect(440, 48, 300, 32)
+        )
+        self.meeting_template.setCompletes_(False)
+        self.body.addSubview_(self.meeting_template)
+
+        self.body.addSubview_(
+            _label(
+                "Your notes", 0, 92, 300, 13,
+                "ink", palette=self.tokens, height=22, weight="semibold",
+            )
+        )
+        self.meeting_notes_scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, 118, 740, 146)
+        )
+        self.meeting_notes_scroll.setHasVerticalScroller_(True)
+        self.meeting_notes_scroll.setAutohidesScrollers_(True)
+        self.meeting_notes_scroll.setDrawsBackground_(True)
+        self.meeting_notes = NSTextView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 720, 142)
+        )
+        self.meeting_notes.setFont_(_font(13))
+        self.meeting_notes.setBackgroundColor_(_color("surface", self.tokens))
+        self.meeting_notes.setTextColor_(_color("ink", self.tokens))
+        self.meeting_notes.setString_(self.meeting_notes_text)
+        self.meeting_notes.setDelegate_(self)
+        self.meeting_notes_scroll.setDocumentView_(self.meeting_notes)
+        style_surface(self.meeting_notes_scroll, self.tokens)
+        self.body.addSubview_(self.meeting_notes_scroll)
+        self.meeting_notes_status = _label(
+            "", 0, 268, 600, 10, "muted", palette=self.tokens, height=18,
+        )
+        self.body.addSubview_(self.meeting_notes_status)
+        self.meeting_error_label = _label(
+            "", 0, 290, 720, 11, "red", palette=self.tokens, height=22,
+        )
+        self.body.addSubview_(self.meeting_error_label)
+        self.meeting_action = self._button(
+            "Start meeting transcription", "meetingAction:", 0, 318,
+            width=250, kind="primary",
+        )
+        self.meeting_live_label = _label(
+            "", 8, 8, 724, 11, "ink", palette=self.tokens, height=82,
+        )
+        self.meeting_live_label.setLineBreakMode_(
+            AppKit.NSLineBreakByWordWrapping
+        )
+        self.meeting_live_label.setMaximumNumberOfLines_(0)
+        self.meeting_live_card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 362, 740, 98)
+        )
+        style_surface(self.meeting_live_card, self.tokens)
+        self.meeting_live_card.addSubview_(self.meeting_live_label)
+        self.body.addSubview_(self.meeting_live_card)
+        self.meeting_saved_label = _label(
+            "", 0, 476, 565, 11, "ink", palette=self.tokens, height=32,
+        )
+        self.body.addSubview_(self.meeting_saved_label)
+        self.meeting_open_notes = self._button(
+            "Open notes", "meetingOpenNotes:", 584, 472, width=140,
+        )
+        self.meeting_chat_heading = _label(
+            "Ask the transcript", 0, 516, 400, 13,
+            "ink", palette=self.tokens, height=22, weight="semibold",
+        )
+        self.body.addSubview_(self.meeting_chat_heading)
+        self.meeting_question = self._field("", 0, 542, 580)
+        self.meeting_question.setPlaceholderString_("Ask about this meeting")
+        self._button("Ask", "meetingAsk:", 596, 542, width=100, kind="primary")
+        self.meeting_answer_scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, 584, 740, 64)
+        )
+        self.meeting_answer_scroll.setHasVerticalScroller_(True)
+        self.meeting_answer_scroll.setAutohidesScrollers_(True)
+        self.meeting_answer_content = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 740, 64)
+        )
+        self.meeting_answer_scroll.setDocumentView_(self.meeting_answer_content)
+        self.body.addSubview_(self.meeting_answer_scroll)
+        self._meeting_render()
+        self._meeting_worker("templates")
+        self._meeting_poll()
+
+    @objc.python_method
+    def _meeting_worker(self, operation, *args):
+        method = "save_notes" if operation.startswith("notes_") else operation
+
+        def run():
+            try:
+                result = getattr(self.meeting_client, method)(*args)
+                error = None
+            except Exception as exc:  # noqa: BLE001
+                result, error = None, exc
+            self.meeting_events.put((operation, result, error))
+
+        threading.Thread(
+            target=run, name=f"localflow-meeting-{operation}", daemon=True
+        ).start()
+
+    @objc.python_method
+    def _meeting_poll(self):
+        if self.page != "Meetings":
+            return
+        self.meeting_next_poll = time.monotonic() + 2
+        self._meeting_worker("status")
+
+    @objc.python_method
+    def _meeting_event(self, operation, result, error):
+        if operation == "templates":
+            if not error:
+                self.meeting_templates = result.get("templates", [])
+                self.meeting_template.removeAllItems()
+                self.meeting_template.addItemsWithObjectValues_(
+                    [item["name"] for item in self.meeting_templates]
+                )
+                default = result.get("default", "general")
+                desired = self.meeting_template_value or default
+                selected = next(
+                    (
+                        index for index, item in enumerate(self.meeting_templates)
+                        if item["id"] == desired
+                    ),
+                    next(
+                        (
+                            index for index, item in enumerate(self.meeting_templates)
+                            if item["id"] == default
+                        ),
+                        0,
+                    ),
+                )
+                if self.meeting_templates:
+                    self.meeting_template.selectItemAtIndex_(selected)
+                    self.meeting_template_value = self.meeting_templates[selected]["id"]
+            return
+        if operation == "notes_autosave":
+            if error:
+                self.meeting_notes_dirty = True
+                self.meeting_error = str(error)
+                self._meeting_render()
+                return
+            self.meeting_notes_dirty = False
+            self.meeting_notes_status.setStringValue_(
+                "Saved " + datetime.now().strftime("%H:%M")
+            )
+            self.meeting_notes_status.setTextColor_(_color("success", self.tokens))
+            return
+        if operation == "notes_stop_flush":
+            if error:
+                self.meeting_busy = False
+                self.meeting_notes_dirty = True
+                self.meeting_error = (
+                    "Notes could not be saved; the meeting is still running — "
+                    + str(error)
+                )
+                self._meeting_render()
+                return
+            self._meeting_worker("stop")
+            self.meeting_action.setTitle_("Enhancing your notes…")
+            return
+        if operation == "status":
+            if error:
+                self.meeting_status = {}
+                self.meeting_error = ""
+                self.meeting_message.setStringValue_(str(error))
+                self.meeting_retry.setHidden_(False)
+                for view in self._meeting_page_controls():
+                    view.setHidden_(True)
+            else:
+                self.meeting_status = result
+                self.meeting_message.setStringValue_("")
+                self.meeting_retry.setHidden_(True)
+                if result.get("last_saved"):
+                    self.meeting_last_saved = result["last_saved"]
+                session = result.get("session")
+                if (
+                    session and not self.meeting_session_active
+                    and not self.meeting_notes_dirty
+                ):
+                    self._meeting_adopting_notes = True
+                    self.meeting_notes_text = session.get("user_notes", "")
+                    self.meeting_notes.setString_(self.meeting_notes_text)
+                    self._meeting_adopting_notes = False
+                if session and session.get("template"):
+                    selected = next(
+                        (
+                            index for index, item in enumerate(self.meeting_templates)
+                            if item["id"] == session["template"]
+                        ),
+                        -1,
+                    )
+                    if selected >= 0:
+                        self.meeting_template.selectItemAtIndex_(selected)
+                        self.meeting_template_value = self.meeting_templates[selected]["id"]
+                self.meeting_session_active = bool(session)
+                self._meeting_render()
+            if self.page == "Meetings":
+                self.meeting_next_poll = time.monotonic() + 2
+            return
+        if operation == "start":
+            self.meeting_busy = False
+            if error:
+                self.meeting_error = str(error)
+                self._meeting_render()
+            else:
+                self.meeting_notes_dirty = False
+                self.meeting_last_saved = None
+                self.meeting_answers.clear()
+                self.meeting_notes_status.setStringValue_(
+                    "Saved" if self.meeting_notes.string() else ""
+                )
+                self._meeting_poll()
+            return
+        if operation == "stop":
+            self.meeting_busy = False
+            if error:
+                self.meeting_error = str(error)
+            else:
+                self.meeting_last_saved = result
+                self._meeting_adopting_notes = True
+                self.meeting_notes.setString_("")
+                self._meeting_adopting_notes = False
+                self.meeting_notes_text = ""
+                self.meeting_notes_dirty = False
+                self.meeting_notes_status.setStringValue_("")
+            self._meeting_render()
+            self._meeting_poll()
+            return
+        if operation == "chat":
+            self.meeting_busy = False
+            answer = f"Couldn’t answer — {error}" if error else result.get("answer", "")
+            self.meeting_answers[0]["answer"] = answer
+            self.meeting_answers[0]["error"] = error is not None
+            self._meeting_render_chat()
+
+    @objc.python_method
+    def _meeting_page_controls(self):
+        return (
+            self.meeting_watch, self.meeting_title_label, self.meeting_title,
+            self.meeting_template_label, self.meeting_template,
+            self.meeting_notes_scroll, self.meeting_notes_status,
+            self.meeting_error_label, self.meeting_action, self.meeting_live_card,
+            self.meeting_saved_label, self.meeting_open_notes,
+            self.meeting_chat_heading,
+            self.meeting_question, self.meeting_answer_scroll,
+        )
+
+    @objc.python_method
+    def _meeting_render(self):
+        if not hasattr(self, "meeting_action"):
+            return
+        for view in self._meeting_page_controls():
+            view.setHidden_(False)
+        self.meeting_error_label.setStringValue_(self.meeting_error or "")
+        session = self.meeting_status.get("session")
+        if session:
+            self.meeting_title_label.setHidden_(True)
+            self.meeting_title.setHidden_(True)
+            system_audio = session.get("system_audio")
+            watch = (
+                "mic + system audio" if system_audio == "on"
+                else "mic only — system audio unavailable" if system_audio == "error"
+                else "mic only"
+            )
+            if session.get("title"):
+                watch = f"{session['title']} · {watch}"
+            if system_audio == "error" and session.get("system_audio_error"):
+                watch += " — " + session["system_audio_error"]
+            self.meeting_watch.setStringValue_(watch)
+            self.meeting_template.setEnabled_(False)
+            self.meeting_action.setTitle_(
+                f"Stop & save notes — {int(session.get('seconds', 0)) // 60}m"
+                f"{int(session.get('seconds', 0)) % 60:02d}s · "
+                f"{session.get('segment_count', 0)} segments"
+            )
+            lines = [
+                f"[{segment.get('stamp', '00:00')}] "
+                f"{'Me' if segment.get('source') == 'me' else 'Others'}: "
+                f"{segment.get('text', '')}"
+                for segment in session.get("segments", [])
+            ]
+            self.meeting_live_label.setStringValue_(
+                "\n\n".join(lines) or "(listening — first transcript segment lands after ~30s)"
+            )
+        else:
+            self.meeting_title_label.setHidden_(False)
+            self.meeting_title.setHidden_(False)
+            watch = (
+                "mic in use" if self.meeting_status.get("watching")
+                and self.meeting_status.get("mic_busy")
+                else "watching" if self.meeting_status.get("watching")
+                else "watcher off" if self.meeting_status.get("watch_error")
+                else ""
+            )
+            self.meeting_watch.setStringValue_(watch)
+            self.meeting_template.setEnabled_(True)
+            self.meeting_action.setTitle_("Start meeting transcription")
+            self.meeting_live_label.setStringValue_("")
+        self.meeting_action.setEnabled_(not self.meeting_busy)
+        saved = self.meeting_last_saved if not session else None
+        self.meeting_saved_label.setHidden_(not bool(saved))
+        self.meeting_open_notes.setHidden_(not bool(saved))
+        if saved:
+            label = "Enhanced notes: " if saved.get("enhanced") else "Saved: "
+            self.meeting_saved_label.setStringValue_(
+                label + saved.get("notes_path", "")
+            )
+        chat_available = bool(
+            self.meeting_status.get("chat_available") or self.meeting_last_saved
+        )
+        self.meeting_chat_heading.setHidden_(not chat_available)
+        self.meeting_question.setHidden_(not chat_available)
+        self.meeting_answer_scroll.setHidden_(
+            not chat_available or not self.meeting_answers
+        )
+        self._meeting_render_chat()
+
+    @objc.python_method
+    def _meeting_render_chat(self):
+        if not hasattr(self, "meeting_answer_content"):
+            return
+        for view in list(self.meeting_answer_content.subviews()):
+            view.removeFromSuperview()
+        height = max(64, len(self.meeting_answers) * 44)
+        self.meeting_answer_content.setFrame_(NSMakeRect(0, 0, 740, height))
+        for index, item in enumerate(self.meeting_answers):
+            label = _label(
+                f"You: {item['question']}\n{item['answer']}",
+                0, index * 44, 720, 11,
+                "red" if item.get("error") else "ink",
+                palette=self.tokens, height=42,
+            )
+            label.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+            label.setMaximumNumberOfLines_(2)
+            self.meeting_answer_content.addSubview_(label)
+
+    def meetingTimerTick_(self, _timer):
+        while True:
+            try:
+                operation, result, error = self.meeting_events.get_nowait()
+            except queue.Empty:
+                break
+            if self.page == "Meetings":
+                self._meeting_event(operation, result, error)
+        if self.page == "Meetings":
+            if (
+                self.meeting_notes_due is not None
+                and time.monotonic() >= self.meeting_notes_due
+            ):
+                self.meeting_notes_due = None
+                self._meeting_worker("notes_autosave", self.meeting_notes.string())
+                self.meeting_notes_status.setStringValue_("Saving…")
+            if time.monotonic() >= self.meeting_next_poll:
+                self._meeting_poll()
+
+    def textDidChange_(self, _notification):
+        if self.page != "Meetings" or getattr(self, "_meeting_adopting_notes", False):
+            return
+        self.meeting_notes_dirty = True
+        self.meeting_notes_text = self.meeting_notes.string()
+        self.meeting_notes_status.setStringValue_("Editing…")
+        self.meeting_notes_status.setTextColor_(_color("muted", self.tokens))
+        if self.meeting_status.get("session"):
+            self.meeting_notes_due = time.monotonic() + 0.8
+        else:
+            self.meeting_notes_status.setStringValue_("Kept for when you start")
+
+    def meetingAction_(self, _sender):
+        if self.meeting_busy:
+            return
+        if not self.meeting_status.get("session"):
+            title = self.meeting_title.stringValue() or "Meeting"
+            index = self.meeting_template.indexOfSelectedItem()
+            template = (
+                self.meeting_templates[index]["id"]
+                if 0 <= index < len(self.meeting_templates) else ""
+            )
+            self.meeting_busy = True
+            self.meeting_error = ""
+            self.meeting_title_value = title
+            self.meeting_template_value = template
+            self._meeting_render()
+            self._meeting_worker(
+                "start", title, "", template, self.meeting_notes.string()
+            )
+            return
+        self.meeting_busy = True
+        self.meeting_error = ""
+        self.meeting_notes_due = None
+        self.meeting_action.setEnabled_(False)
+        self.meeting_notes_status.setStringValue_("Saving…")
+        self._meeting_worker("notes_stop_flush", self.meeting_notes.string())
+
+    def meetingRetry_(self, _sender):
+        self.meeting_message.setStringValue_("Connecting…")
+        self._meeting_poll()
+
+    @objc.python_method
+    def _meeting_capture_state(self):
+        self.meeting_notes_text = self.meeting_notes.string()
+        self.meeting_title_value = self.meeting_title.stringValue()
+        selected = self.meeting_template.indexOfSelectedItem()
+        if 0 <= selected < len(self.meeting_templates):
+            self.meeting_template_value = self.meeting_templates[selected]["id"]
+
+    def meetingOpenNotes_(self, _sender):
+        if self.meeting_last_saved and self.meeting_last_saved.get("notes_path"):
+            current().open_path(self.meeting_last_saved["notes_path"])
+
+    def meetingAsk_(self, _sender):
+        question = self.meeting_question.stringValue().strip()
+        if not question or self.meeting_busy:
+            return
+        self.meeting_pending_question = question
+        self.meeting_question.setStringValue_("")
+        self.meeting_busy = True
+        self.meeting_answers.insert(
+            0, {"question": question, "answer": "Reading the transcript…"}
+        )
+        self._meeting_render_chat()
+        self._meeting_worker("chat", question)
+
+    @objc.python_method
     def _page_models(self):
         self.config = load_config()
         self.body.addSubview_(
@@ -872,18 +1356,23 @@ class HubWindowController(NSObject):
         subprocess.Popen([sys.executable, "-m", "localflow.setup_window"])
 
 
-def build_window(history=None, dictionary=None, config=None):
+def build_window(
+    history=None, dictionary=None, config=None, meeting_client=None,
+    initial_page="Home",
+):
     config = config or load_config()
-    return HubWindowController.alloc().initWithHistory_dictionary_config_(
+    return HubWindowController.alloc().initWithHistory_dictionary_config_meetingClient_initialPage_(
         history or HistoryStore(enabled=config.history_enabled),
         dictionary or DictionaryStore(),
         config,
+        meeting_client,
+        initial_page,
     )
 
 
-def main():
+def main(initial_page="Home"):
     app = NSApplication.sharedApplication()
-    controller = build_window()
+    controller = build_window(initial_page=initial_page)
     controller.window.makeKeyAndOrderFront_(None)
     app.activateIgnoringOtherApps_(True)
     from PyObjCTools import AppHelper
