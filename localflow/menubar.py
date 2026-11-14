@@ -12,7 +12,7 @@ import webbrowser
 import requests
 import rumps
 
-from localflow.apitoken import load_or_create
+from localflow.apitoken import load
 from localflow.config import load_config
 from localflow.history import HistoryStore
 from localflow.inject import paste_text
@@ -147,7 +147,8 @@ class LocalflowMenuBar(rumps.App):
         self.refresh()
 
     def open_ui(self, _item) -> None:
-        webbrowser.open(f"{BASE}?token={load_or_create()}")
+        token = load()
+        webbrowser.open(f"{BASE}?token={token}" if token else BASE)
 
     def open_phrases(self, _item) -> None:
         # A separate process: rumps owns this process's AppKit main loop, so

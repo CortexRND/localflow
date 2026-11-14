@@ -2,7 +2,7 @@
 
 import requests
 
-from localflow.apitoken import load_or_create
+from localflow.apitoken import load
 from localflow.config import load_config
 
 
@@ -20,15 +20,17 @@ class MeetingClient:
         if base_url is None:
             base_url = f"http://127.0.0.1:{load_config().server_port}"
         self.base_url = base_url.rstrip("/")
-        self.token = token if token is not None else load_or_create()
+        self.token = token if token is not None else load()
         self.http = http
 
     def _request(self, method: str, path: str, *, timeout=3, json=None) -> dict:
+        options = {"timeout": timeout}
+        if self.token:
+            options["headers"] = {"X-Localflow-Token": self.token}
         try:
             response = getattr(self.http, method)(
                 f"{self.base_url}{path}",
-                headers={"X-Localflow-Token": self.token},
-                timeout=timeout,
+                **options,
                 **({"json": json} if json is not None else {}),
             )
         except requests.RequestException as exc:

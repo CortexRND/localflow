@@ -82,3 +82,19 @@ def test_client_maps_server_detail_and_connection_errors():
         match="LocalFlow server not running — start it with `lf serve`",
     ):
         client.status()
+
+
+def test_client_defaults_to_existing_token_and_omits_empty_header(monkeypatch):
+    http = FakeHTTP()
+    monkeypatch.setattr("localflow.meeting_client.load", lambda: "issued-token")
+
+    client = MeetingClient("http://localhost:9876", http=http)
+    client.status()
+    assert http.calls[0][2]["headers"] == {
+        "X-Localflow-Token": "issued-token"
+    }
+
+    monkeypatch.setattr("localflow.meeting_client.load", lambda: "")
+    client = MeetingClient("http://localhost:9876", http=http)
+    client.status()
+    assert "headers" not in http.calls[1][2]
