@@ -21,7 +21,7 @@ from AppKit import (
     NSView,
     NSWindow,
 )
-from Foundation import NSObject
+from Foundation import NSObject, NSTimer
 
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore

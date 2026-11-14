@@ -35,6 +35,16 @@ def test_appkit_hub_has_valid_selector_names():
     assert not invalid
 
 
+def test_appkit_hub_imports_foundation_timer():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "Foundation"
+        and any(alias.name == "NSTimer" for alias in node.names)
+        for node in tree.body
+    )
+
+
 def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text()
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()
