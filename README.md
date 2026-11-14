@@ -27,17 +27,60 @@ speech recognition stay local.
 | Linux | Best-effort support | Disabled |
 | Windows | Best-effort support | Disabled |
 
-On macOS, use Python 3.11+ and Homebrew to run the installer from a checkout:
+### macOS and Linux
 
-```bash
+Install with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/CortexRND/localflow/main/install.sh | bash
+```
+
+To install and start Ollama for optional transcript cleanup:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/CortexRND/localflow/main/install.sh | bash -s -- --with-ollama
+```
+
+Or run from a checkout:
+
+```sh
 git clone https://github.com/CortexRND/localflow.git
 cd localflow
 ./install.sh
 ```
 
-Or run `install.sh --with-ollama` to install and start Ollama for optional
-transcript cleanup. The installer also works from a downloaded script and
-clones LocalFlow into `~/.localflow/app` (override with `LOCALFLOW_HOME`).
+The installer creates a Python environment and installs LocalFlow. macOS
+requires Homebrew; its setup app is placed in `~/Applications`. Linux installs
+system dependencies and creates `~/.local/bin/lf` plus desktop launchers. When
+piped, the app checkout defaults to `~/.localflow/app`; override it with
+`LOCALFLOW_HOME`.
+
+### Windows
+
+Install with:
+
+```powershell
+irm https://raw.githubusercontent.com/CortexRND/localflow/main/install.ps1 | iex
+```
+
+To install and start Ollama for optional transcript cleanup:
+
+```powershell
+$env:LOCALFLOW_WITH_OLLAMA=1
+irm https://raw.githubusercontent.com/CortexRND/localflow/main/install.ps1 | iex
+```
+
+Or run from a checkout:
+
+```powershell
+git clone https://github.com/CortexRND/localflow.git
+cd localflow
+.\install.ps1
+```
+
+The installer creates a Python environment, Start Menu shortcuts, and the
+`lf` command in `.venv\Scripts`. A piped install uses
+`$HOME\.localflow\app` by default; override it with `LOCALFLOW_HOME`.
 
 After installation, reopen setup to switch models at any time:
 
@@ -469,3 +512,9 @@ Create a Shortcut that POSTs audio to `/transcribe`:
 - **localflow/app.py**: Desktop CLI entrypoint
 - **localflow/server.py**: FastAPI web server for phone access
 - **localflow/static/index.html**: Single-page mobile app (no external assets)
+
+## License
+
+LocalFlow is licensed under the MIT License; see [LICENSE](LICENSE).
+Dependencies retain their own licenses (for example, pynput is LGPL-3.0 and is
+installed from PyPI rather than bundled).

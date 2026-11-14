@@ -6,6 +6,8 @@ build-backend = "hatchling.build"
 name = "localflow"
 version = "0.1.0"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "faster-whisper",
     "huggingface_hub",
