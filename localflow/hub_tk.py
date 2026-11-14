@@ -64,6 +64,11 @@ class HubWindow:
         self._meeting_last_saved = None
         self._meeting_chat = []
         self._meeting_busy = False
+        self._meeting_notes_save_in_flight = False
+        self._meeting_notes_save_pending = False
+        self._meeting_stop_flush_pending = False
+        self._meeting_stop_flush_callback = None
+        self._meeting_error_message = ""
         self._meeting_results = queue.Queue()
         self._meeting_dispatch_after = None
         self.page = "Home"
@@ -1155,37 +1160,105 @@ class HubWindow:
                     text="Kept for when you start", fg=self.tokens["muted"]
                 )
 
+    def _meeting_notes_visible(self):
+        if self.page != "Meetings" or not hasattr(self, "meeting_notes"):
+            return False
+        try:
+            return bool(self.meeting_notes.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _meeting_current_notes_text(self):
+        if self._meeting_notes_visible():
+            try:
+                return self.meeting_notes.get("1.0", "end-1c")
+            except tk.TclError:
+                pass
+        return self._meeting_notes_text
+
+    def _meeting_set_notes_status(self, text, color):
+        if self._meeting_notes_visible():
+            try:
+                self.meeting_notes_status.configure(text=text, fg=color)
+            except tk.TclError:
+                pass
+
     def _meeting_save_notes(self, callback=None):
         self._meeting_notes_after = None
-        text = self.meeting_notes.get("1.0", "end-1c")
-        if self.meeting_notes_status.winfo_exists():
-            self.meeting_notes_status.configure(
-                text="Saving…", fg=self.tokens["muted"]
+        if callback is not None:
+            self._meeting_stop_flush_callback = callback
+            self._meeting_stop_flush_pending = True
+            self._meeting_notes_save_pending = False
+            self._meeting_set_notes_status("Saving…", self.tokens["muted"])
+        else:
+            self._meeting_notes_save_pending = True
+        self._meeting_advance_notes_save()
+
+    def _meeting_advance_notes_save(self):
+        if self._meeting_notes_save_in_flight:
+            return
+        if self._meeting_stop_flush_pending:
+            is_stop_flush = True
+            self._meeting_stop_flush_pending = False
+        elif self._meeting_notes_save_pending:
+            is_stop_flush = False
+            self._meeting_notes_save_pending = False
+        else:
+            return
+        text = self._meeting_current_notes_text()
+        self._meeting_notes_save_in_flight = True
+        self._meeting_notes_dirty = True
+        self._meeting_set_notes_status("Saving…", self.tokens["muted"])
+        self._meeting_request(
+            "save_notes",
+            lambda _result, error: self._meeting_notes_saved(
+                text, is_stop_flush, error
+            ),
+            text,
+        )
+
+    def _meeting_notes_saved(self, text, is_stop_flush, error):
+        self._meeting_notes_save_in_flight = False
+        current_text = self._meeting_current_notes_text()
+        if error:
+            self._meeting_notes_dirty = True
+            self._meeting_set_notes_status(
+                f"Not saved — {error}", self.tokens["red"]
             )
+            if is_stop_flush:
+                self._meeting_notes_save_pending = False
+                self._meeting_stop_flush_pending = False
+                callback = self._meeting_stop_flush_callback
+                self._meeting_stop_flush_callback = None
+                if callback:
+                    callback(error)
+                return
+            if self._meeting_stop_flush_pending or self._meeting_notes_save_pending:
+                self._meeting_advance_notes_save()
+            return
 
-        def saved(_result, error):
-            if error:
-                self._meeting_notes_dirty = True
-                self.meeting_notes_status.configure(
-                    text=f"Not saved — {error}", fg=self.tokens["red"]
-                )
-            else:
-                self._meeting_notes_dirty = (
-                    self.meeting_notes.get("1.0", "end-1c") != text
-                )
-                if self._meeting_notes_dirty:
-                    self.meeting_notes_status.configure(
-                        text="Editing…", fg=self.tokens["muted"]
-                    )
-                else:
-                    self.meeting_notes_status.configure(
-                        text="Saved " + datetime.now().strftime("%H:%M"),
-                        fg=self.tokens["success"],
-                    )
+        self._meeting_notes_dirty = current_text != text
+        if is_stop_flush:
+            if self._meeting_notes_dirty:
+                self._meeting_notes_save_pending = False
+                self._meeting_stop_flush_pending = True
+                self._meeting_advance_notes_save()
+                return
+            callback = self._meeting_stop_flush_callback
+            self._meeting_stop_flush_callback = None
             if callback:
-                callback(error)
+                callback(None)
+            return
 
-        self._meeting_request("save_notes", saved, text)
+        if self._meeting_stop_flush_pending or self._meeting_notes_save_pending:
+            self._meeting_advance_notes_save()
+        elif self._meeting_notes_dirty:
+            self._meeting_set_notes_status("Editing…", self.tokens["muted"])
+        else:
+            self._meeting_set_notes_status(
+                "Saved " + datetime.now().strftime("%H:%M"),
+                self.tokens["success"],
+            )
 
     def _meeting_toggle(self):
         if self._meeting_busy:

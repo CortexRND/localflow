@@ -84,6 +84,10 @@ class HubWindowController(NSObject):
         self.meeting_template_value = ""
         self.meeting_notes_dirty = False
         self.meeting_notes_due = None
+        self.meeting_notes_save_in_flight = False
+        self.meeting_notes_save_pending = False
+        self.meeting_stop_flush_pending = False
+        self.meeting_active_notes_text = ""
         self.meeting_busy = False
         self.meeting_error = ""
         self.meeting_next_poll = 0
@@ -1020,6 +1024,89 @@ class HubWindowController(NSObject):
         self._meeting_worker("status")
 
     @objc.python_method
+    def _meeting_current_notes_text(self):
+        if self.page == "Meetings" and hasattr(self, "meeting_notes"):
+            return self.meeting_notes.string()
+        return self.meeting_notes_text
+
+    @objc.python_method
+    def _meeting_request_notes_save(self, stop_flush=False):
+        if stop_flush:
+            self.meeting_stop_flush_pending = True
+            self.meeting_notes_save_pending = False
+            if self.page == "Meetings":
+                self.meeting_notes_status.setStringValue_("Saving…")
+        else:
+            self.meeting_notes_save_pending = True
+        self._meeting_advance_notes_save()
+
+    @objc.python_method
+    def _meeting_advance_notes_save(self):
+        if self.meeting_notes_save_in_flight:
+            return
+        if self.meeting_stop_flush_pending:
+            operation = "notes_stop_flush"
+            self.meeting_stop_flush_pending = False
+        elif self.meeting_notes_save_pending:
+            operation = "notes_autosave"
+            self.meeting_notes_save_pending = False
+        else:
+            return
+        text = self._meeting_current_notes_text()
+        self.meeting_notes_save_in_flight = True
+        self.meeting_active_notes_text = text
+        self.meeting_notes_dirty = True
+        if self.page == "Meetings":
+            self.meeting_notes_status.setStringValue_("Saving…")
+        self._meeting_worker(operation, text)
+
+    @objc.python_method
+    def _meeting_notes_save_completed(self, operation, error):
+        self.meeting_notes_save_in_flight = False
+        text = self.meeting_active_notes_text
+        current_text = self._meeting_current_notes_text()
+        is_stop_flush = operation == "notes_stop_flush"
+        if error:
+            self.meeting_notes_dirty = True
+            self.meeting_error = str(error)
+            if is_stop_flush:
+                self.meeting_busy = False
+                self.meeting_stop_flush_pending = False
+                self.meeting_notes_save_pending = False
+                self.meeting_error = (
+                    "Notes could not be saved; the meeting is still running — "
+                    + str(error)
+                )
+                if self.page == "Meetings":
+                    self._meeting_render()
+                return
+            if self.meeting_stop_flush_pending or self.meeting_notes_save_pending:
+                self._meeting_advance_notes_save()
+            elif self.page == "Meetings":
+                self._meeting_render()
+            return
+
+        self.meeting_error = ""
+        self.meeting_notes_dirty = current_text != text
+        if is_stop_flush:
+            if self.meeting_notes_dirty:
+                self.meeting_notes_save_pending = False
+                self.meeting_stop_flush_pending = True
+                self._meeting_advance_notes_save()
+                return
+            self._meeting_worker("stop")
+            if self.page == "Meetings":
+                self.meeting_action.setTitle_("Enhancing your notes…")
+            return
+        if self.meeting_stop_flush_pending or self.meeting_notes_save_pending:
+            self._meeting_advance_notes_save()
+        elif self.page == "Meetings" and not self.meeting_notes_dirty:
+            self.meeting_notes_status.setStringValue_(
+                "Saved " + datetime.now().strftime("%H:%M")
+            )
+            self.meeting_notes_status.setTextColor_(_color("success", self.tokens))
+
+    @objc.python_method
     def _meeting_event(self, operation, result, error):
         if operation == "templates":
             if not error:
@@ -1047,30 +1134,8 @@ class HubWindowController(NSObject):
                     self.meeting_template.selectItemAtIndex_(selected)
                     self.meeting_template_value = self.meeting_templates[selected]["id"]
             return
-        if operation == "notes_autosave":
-            if error:
-                self.meeting_notes_dirty = True
-                self.meeting_error = str(error)
-                self._meeting_render()
-                return
-            self.meeting_notes_dirty = False
-            self.meeting_notes_status.setStringValue_(
-                "Saved " + datetime.now().strftime("%H:%M")
-            )
-            self.meeting_notes_status.setTextColor_(_color("success", self.tokens))
-            return
-        if operation == "notes_stop_flush":
-            if error:
-                self.meeting_busy = False
-                self.meeting_notes_dirty = True
-                self.meeting_error = (
-                    "Notes could not be saved; the meeting is still running — "
-                    + str(error)
-                )
-                self._meeting_render()
-                return
-            self._meeting_worker("stop")
-            self.meeting_action.setTitle_("Enhancing your notes…")
+        if operation in {"notes_autosave", "notes_stop_flush"}:
+            self._meeting_notes_save_completed(operation, error)
             return
         if operation == "status":
             if error:
@@ -1262,8 +1327,7 @@ class HubWindowController(NSObject):
                 and time.monotonic() >= self.meeting_notes_due
             ):
                 self.meeting_notes_due = None
-                self._meeting_worker("notes_autosave", self.meeting_notes.string())
-                self.meeting_notes_status.setStringValue_("Saving…")
+                self._meeting_request_notes_save()
             if time.monotonic() >= self.meeting_next_poll:
                 self._meeting_poll()
 
@@ -1302,8 +1366,7 @@ class HubWindowController(NSObject):
         self.meeting_error = ""
         self.meeting_notes_due = None
         self.meeting_action.setEnabled_(False)
-        self.meeting_notes_status.setStringValue_("Saving…")
-        self._meeting_worker("notes_stop_flush", self.meeting_notes.string())
+        self._meeting_request_notes_save(stop_flush=True)
 
     def meetingRetry_(self, _sender):
         self.meeting_message.setStringValue_("Connecting…")

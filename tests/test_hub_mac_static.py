@@ -45,6 +45,15 @@ def test_appkit_hub_imports_foundation_timer():
     )
 
 
+def test_appkit_meeting_note_saves_are_serialized_before_stop():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "def _meeting_request_notes_save(self, stop_flush=False):" in source
+    assert "if self.meeting_notes_save_in_flight:" in source
+    assert "self.meeting_stop_flush_pending = True" in source
+    assert "self.meeting_notes_dirty = current_text != text" in source
+    assert 'self._meeting_worker("stop")' in source
+
+
 def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text()
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()

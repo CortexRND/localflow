@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -86,6 +87,55 @@ class FakeMeetingClient:
 
     def dismiss(self):
         self.calls.append(("dismiss",))
+
+
+class _ManualResult:
+    def __init__(self):
+        self.event = threading.Event()
+        self.error = None
+        self.completed = False
+
+    def wait(self):
+        if not self.event.wait(timeout=5):
+            raise TimeoutError("manual meeting request was not completed")
+        self.completed = True
+        if self.error:
+            raise self.error
+        return {"ok": True}
+
+    def complete(self, error=None):
+        self.error = error
+        self.event.set()
+
+
+class ManualMeetingClient(FakeMeetingClient):
+    def __init__(self, state="idle"):
+        super().__init__(state)
+        self.pending_saves = []
+        self.pending_starts = []
+        self.completed_saves = 0
+
+    def start(self, title, category, template, user_notes):
+        pending = _ManualResult()
+        self.pending_starts.append(pending)
+        self.calls.append(("start", title, category, template, user_notes))
+        result = pending.wait()
+        self.state = "running"
+        return result
+
+    def save_notes(self, notes):
+        pending = _ManualResult()
+        self.pending_saves.append(pending)
+        self.calls.append(("save_notes", notes))
+        result = pending.wait()
+        self.completed_saves += 1
+        return result
+
+    def complete_save(self, index, error=None):
+        self.pending_saves[index].complete(error)
+
+    def complete_start(self, index, error=None):
+        self.pending_starts[index].complete(error)
 
 
 def _window(tmp_path, client):
@@ -222,5 +272,43 @@ def test_meeting_notes_autosave_uses_latest_text(tmp_path):
             root.update()
             time.sleep(0.02)
         assert ("save_notes", "Latest draft") in client.calls
+    finally:
+        root.destroy()
+
+
+def test_stop_waits_for_inflight_autosave_then_flushes_latest_notes(tmp_path):
+    client = ManualMeetingClient("running")
+    root, window = _window(tmp_path, client)
+    try:
+        _pump(root, lambda: bool(window._meeting_status_data.get("session")))
+        window.meeting_notes.delete("1.0", "end")
+        window.meeting_notes.insert("1.0", "a")
+        root.update()
+        _pump(root, lambda: ("save_notes", "a") in client.calls)
+
+        window.meeting_notes.insert("end", "b")
+        root.update()
+        window._meeting_toggle()
+        assert [
+            call for call in client.calls if call[0] == "save_notes"
+        ] == [("save_notes", "a")]
+        assert not any(call[0] == "stop" for call in client.calls)
+
+        client.complete_save(0)
+        _pump(
+            root,
+            lambda: ("save_notes", "ab") in client.calls,
+        )
+        assert [
+            call for call in client.calls if call[0] == "save_notes"
+        ] == [("save_notes", "a"), ("save_notes", "ab")]
+        assert not any(call[0] == "stop" for call in client.calls)
+
+        client.complete_save(1)
+        _pump(root, lambda: any(call[0] == "stop" for call in client.calls))
+        assert client.completed_saves == 2
+        assert client.calls.index(("stop",)) > client.calls.index(
+            ("save_notes", "ab")
+        )
     finally:
         root.destroy()
