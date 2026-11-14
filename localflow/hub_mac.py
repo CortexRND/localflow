@@ -1111,6 +1111,8 @@ class HubWindowController(NSObject):
         if operation == "templates":
             if not error:
                 self.meeting_templates = result.get("templates", [])
+                if self.page != "Meetings":
+                    return
                 self.meeting_template.removeAllItems()
                 self.meeting_template.addItemsWithObjectValues_(
                     [item["name"] for item in self.meeting_templates]
@@ -1141,14 +1143,14 @@ class HubWindowController(NSObject):
             if error:
                 self.meeting_status = {}
                 self.meeting_error = ""
-                self.meeting_message.setStringValue_(str(error))
-                self.meeting_retry.setHidden_(False)
-                for view in self._meeting_page_controls():
-                    view.setHidden_(True)
+                self.meeting_session_active = False
+                if self.page == "Meetings":
+                    self.meeting_message.setStringValue_(str(error))
+                    self.meeting_retry.setHidden_(False)
+                    for view in self._meeting_page_controls():
+                        view.setHidden_(True)
             else:
                 self.meeting_status = result
-                self.meeting_message.setStringValue_("")
-                self.meeting_retry.setHidden_(True)
                 if result.get("last_saved"):
                     self.meeting_last_saved = result["last_saved"]
                 session = result.get("session")
@@ -1156,10 +1158,11 @@ class HubWindowController(NSObject):
                     session and not self.meeting_session_active
                     and not self.meeting_notes_dirty
                 ):
-                    self._meeting_adopting_notes = True
                     self.meeting_notes_text = session.get("user_notes", "")
-                    self.meeting_notes.setString_(self.meeting_notes_text)
-                    self._meeting_adopting_notes = False
+                    if self.page == "Meetings":
+                        self._meeting_adopting_notes = True
+                        self.meeting_notes.setString_(self.meeting_notes_text)
+                        self._meeting_adopting_notes = False
                 if session and session.get("template"):
                     selected = next(
                         (
@@ -1169,10 +1172,14 @@ class HubWindowController(NSObject):
                         -1,
                     )
                     if selected >= 0:
-                        self.meeting_template.selectItemAtIndex_(selected)
                         self.meeting_template_value = self.meeting_templates[selected]["id"]
+                        if self.page == "Meetings":
+                            self.meeting_template.selectItemAtIndex_(selected)
                 self.meeting_session_active = bool(session)
-                self._meeting_render()
+                if self.page == "Meetings":
+                    self.meeting_message.setStringValue_("")
+                    self.meeting_retry.setHidden_(True)
+                    self._meeting_render()
             if self.page == "Meetings":
                 self.meeting_next_poll = time.monotonic() + 2
             return
@@ -1180,14 +1187,16 @@ class HubWindowController(NSObject):
             self.meeting_busy = False
             if error:
                 self.meeting_error = str(error)
-                self._meeting_render()
+                if self.page == "Meetings":
+                    self._meeting_render()
             else:
                 self.meeting_notes_dirty = False
                 self.meeting_last_saved = None
                 self.meeting_answers.clear()
-                self.meeting_notes_status.setStringValue_(
-                    "Saved" if self.meeting_notes.string() else ""
-                )
+                if self.page == "Meetings":
+                    self.meeting_notes_status.setStringValue_(
+                        "Saved" if self.meeting_notes.string() else ""
+                    )
                 self._meeting_poll()
             return
         if operation == "stop":
@@ -1196,13 +1205,18 @@ class HubWindowController(NSObject):
                 self.meeting_error = str(error)
             else:
                 self.meeting_last_saved = result
-                self._meeting_adopting_notes = True
-                self.meeting_notes.setString_("")
-                self._meeting_adopting_notes = False
                 self.meeting_notes_text = ""
                 self.meeting_notes_dirty = False
-                self.meeting_notes_status.setStringValue_("")
-            self._meeting_render()
+                self.meeting_session_active = False
+                self.meeting_status["session"] = None
+                self.meeting_status["last_saved"] = result
+                if self.page == "Meetings":
+                    self._meeting_adopting_notes = True
+                    self.meeting_notes.setString_("")
+                    self._meeting_adopting_notes = False
+                    self.meeting_notes_status.setStringValue_("")
+            if self.page == "Meetings":
+                self._meeting_render()
             self._meeting_poll()
             return
         if operation == "chat":
@@ -1210,7 +1224,8 @@ class HubWindowController(NSObject):
             answer = f"Couldn’t answer — {error}" if error else result.get("answer", "")
             self.meeting_answers[0]["answer"] = answer
             self.meeting_answers[0]["error"] = error is not None
-            self._meeting_render_chat()
+            if self.page == "Meetings":
+                self._meeting_render_chat()
 
     @objc.python_method
     def _meeting_page_controls(self):
@@ -1296,7 +1311,7 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _meeting_render_chat(self):
-        if not hasattr(self, "meeting_answer_content"):
+        if self.page != "Meetings" or not hasattr(self, "meeting_answer_content"):
             return
         for view in list(self.meeting_answer_content.subviews()):
             view.removeFromSuperview()
@@ -1319,15 +1334,14 @@ class HubWindowController(NSObject):
                 operation, result, error = self.meeting_events.get_nowait()
             except queue.Empty:
                 break
-            if self.page == "Meetings":
-                self._meeting_event(operation, result, error)
+            self._meeting_event(operation, result, error)
+        if (
+            self.meeting_notes_due is not None
+            and time.monotonic() >= self.meeting_notes_due
+        ):
+            self.meeting_notes_due = None
+            self._meeting_request_notes_save()
         if self.page == "Meetings":
-            if (
-                self.meeting_notes_due is not None
-                and time.monotonic() >= self.meeting_notes_due
-            ):
-                self.meeting_notes_due = None
-                self._meeting_request_notes_save()
             if time.monotonic() >= self.meeting_next_poll:
                 self._meeting_poll()
 

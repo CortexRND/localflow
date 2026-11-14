@@ -54,6 +54,19 @@ def test_appkit_meeting_note_saves_are_serialized_before_stop():
     assert 'self._meeting_worker("stop")' in source
 
 
+def test_appkit_meeting_completions_drain_while_page_is_hidden():
+    source = SOURCE.read_text(encoding="utf-8")
+    timer = next(
+        method for method in _controller_methods()
+        if method.name == "meetingTimerTick_"
+    )
+    timer_source = ast.get_source_segment(source, timer)
+    assert "self._meeting_event(operation, result, error)" in timer_source
+    assert timer_source.index("self._meeting_event(operation, result, error)") < (
+        timer_source.index('if self.page == "Meetings":')
+    )
+
+
 def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text()
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()

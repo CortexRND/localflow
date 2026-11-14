@@ -284,7 +284,7 @@ def test_stop_waits_for_inflight_autosave_then_flushes_latest_notes(tmp_path):
         window.meeting_notes.delete("1.0", "end")
         window.meeting_notes.insert("1.0", "a")
         root.update()
-        _pump(root, lambda: ("save_notes", "a") in client.calls)
+        _pump(root, lambda: ("save_notes", "a") in client.calls, timeout=4)
 
         window.meeting_notes.insert("end", "b")
         root.update()
@@ -310,5 +310,41 @@ def test_stop_waits_for_inflight_autosave_then_flushes_latest_notes(tmp_path):
         assert client.calls.index(("stop",)) > client.calls.index(
             ("save_notes", "ab")
         )
+    finally:
+        root.destroy()
+
+
+def test_start_completion_after_navigating_away_restores_action(tmp_path):
+    client = ManualMeetingClient()
+    root, window = _window(tmp_path, client)
+    try:
+        _pump(root, lambda: bool(window._meeting_status_data))
+        window._meeting_toggle()
+        _pump(root, lambda: any(call[0] == "start" for call in client.calls))
+        window.show_page("Home")
+
+        client.complete_start(0)
+        _pump(root, lambda: not window._meeting_busy)
+        window.show_page("Meetings")
+        _pump(root, lambda: bool(window._meeting_status_data.get("session")))
+
+        assert not window._meeting_busy
+        assert window.meeting_action.cget("state") == "normal"
+    finally:
+        root.destroy()
+
+
+def test_stop_flush_completion_after_navigating_away_still_stops(tmp_path):
+    client = ManualMeetingClient("running")
+    root, window = _window(tmp_path, client)
+    try:
+        _pump(root, lambda: bool(window._meeting_status_data.get("session")))
+        window._meeting_toggle()
+        _pump(root, lambda: ("save_notes", "Initial note") in client.calls)
+        window.show_page("Home")
+
+        client.complete_save(0)
+        _pump(root, lambda: any(call[0] == "stop" for call in client.calls))
+        assert ("stop",) in client.calls
     finally:
         root.destroy()

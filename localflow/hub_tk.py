@@ -976,6 +976,8 @@ class HubWindow:
         self.meeting_down.pack_forget()
         self.meeting_content.pack(fill="both", expand=True)
         self._meeting_render()
+        if self._meeting_error_message:
+            self._meeting_show_error(self._meeting_error_message)
         self._meeting_request("templates", self._meeting_templates_loaded)
         self._meeting_poll()
 
@@ -989,6 +991,8 @@ class HubWindow:
         if error:
             return
         self._meeting_templates = result.get("templates", [])
+        if self.page != "Meetings":
+            return
         default = result.get("default", "general")
         menu = self.meeting_template_menu["menu"]
         menu.delete(0, "end")
@@ -1024,25 +1028,26 @@ class HubWindow:
         self._meeting_request("status", self._meeting_status_received)
 
     def _meeting_status_received(self, result, error):
-        if self.page != "Meetings":
-            return
         if error:
+            self._meeting_status_data = {}
+            self._meeting_session_active = False
+            if self.page != "Meetings":
+                return
             self.meeting_content.pack_forget()
             self.meeting_down.pack(fill="x", anchor="w")
             self.meeting_down_label.configure(text=str(error))
             self._meeting_schedule_poll()
             return
-        self.meeting_down.pack_forget()
-        self.meeting_content.pack(fill="both", expand=True)
         self._meeting_status_data = result
         if result.get("last_saved"):
             self._meeting_last_saved = result["last_saved"]
         session = result.get("session")
         if session and not self._meeting_session_active and not self._meeting_notes_dirty:
             self._meeting_notes_text = session.get("user_notes", "")
-            self.meeting_notes.delete("1.0", "end")
-            self.meeting_notes.insert("1.0", self._meeting_notes_text)
-            self.meeting_notes.edit_modified(False)
+            if self.page == "Meetings":
+                self.meeting_notes.delete("1.0", "end")
+                self.meeting_notes.insert("1.0", self._meeting_notes_text)
+                self.meeting_notes.edit_modified(False)
             template_id = session.get("template") or "general"
             template = next(
                 (
@@ -1051,10 +1056,16 @@ class HubWindow:
                 ),
                 None,
             )
-            self._meeting_select_template(
-                template_id, template["name"] if template else template_id
-            )
+            self._meeting_template = template_id
+            if self.page == "Meetings":
+                self._meeting_select_template(
+                    template_id, template["name"] if template else template_id
+                )
         self._meeting_session_active = bool(session)
+        if self.page != "Meetings":
+            return
+        self.meeting_down.pack_forget()
+        self.meeting_content.pack(fill="both", expand=True)
         self._meeting_render()
         self._meeting_schedule_poll()
 
@@ -1265,6 +1276,7 @@ class HubWindow:
             return
         session = self._meeting_status_data.get("session")
         self._meeting_busy = True
+        self._meeting_error_message = ""
         self.meeting_error.configure(text="")
         self.meeting_error.pack_forget()
         self.meeting_action.configure(state="disabled")
@@ -1281,9 +1293,10 @@ class HubWindow:
                 self._meeting_notes_dirty = False
                 self._meeting_last_saved = None
                 self._meeting_chat.clear()
-                self.meeting_notes_status.configure(
-                    text="Saved" if notes else "", fg=self.tokens["muted"]
-                )
+                if self._meeting_notes_visible():
+                    self.meeting_notes_status.configure(
+                        text="Saved" if notes else "", fg=self.tokens["muted"]
+                    )
                 self._meeting_poll()
 
             self._meeting_request(
@@ -1299,15 +1312,18 @@ class HubWindow:
                 self._meeting_show_error(
                     f"Notes could not be saved; the meeting is still running — {error}"
                 )
-                self._meeting_render()
+                if self.page == "Meetings":
+                    self._meeting_render()
                 return
-            self.meeting_action.configure(
-                text=(
-                    "Enhancing your notes…"
-                    if self.meeting_notes.get("1.0", "end-1c").strip()
-                    else "Summarizing & saving…"
+            notes_text = self._meeting_current_notes_text()
+            if self.page == "Meetings":
+                self.meeting_action.configure(
+                    text=(
+                        "Enhancing your notes…"
+                        if notes_text.strip()
+                        else "Summarizing & saving…"
+                    )
                 )
-            )
 
             def stopped(result, stop_error):
                 self._meeting_busy = False
@@ -1316,9 +1332,14 @@ class HubWindow:
                 else:
                     self._meeting_last_saved = result
                     self._meeting_notes_dirty = False
-                    self.meeting_notes.delete("1.0", "end")
-                    self.meeting_notes.edit_modified(False)
-                    self.meeting_notes_status.configure(text="")
+                    self._meeting_notes_text = ""
+                    self._meeting_session_active = False
+                    self._meeting_status_data["session"] = None
+                    self._meeting_status_data["last_saved"] = result
+                    if self._meeting_notes_visible():
+                        self.meeting_notes.delete("1.0", "end")
+                        self.meeting_notes.edit_modified(False)
+                        self.meeting_notes_status.configure(text="")
                 self._meeting_poll()
 
             self._meeting_request("stop", stopped)
@@ -1329,6 +1350,9 @@ class HubWindow:
         self._meeting_save_notes(flushed)
 
     def _meeting_show_error(self, error):
+        self._meeting_error_message = str(error)
+        if not self._meeting_notes_visible():
+            return
         self.meeting_error.configure(text=f"Meeting: {error}")
         self.meeting_error.pack(fill="x", pady=(0, 8), before=self.meeting_action)
         self.meeting_action.configure(state="normal")
@@ -1358,10 +1382,15 @@ class HubWindow:
         self._meeting_request("chat", answered, question)
 
     def _meeting_render_chat(self):
-        if not hasattr(self, "meeting_chat_answers"):
+        if (
+            self.page != "Meetings" or not hasattr(self, "meeting_chat_answers")
+        ):
             return
-        for child in self.meeting_chat_answers.winfo_children():
-            child.destroy()
+        try:
+            for child in self.meeting_chat_answers.winfo_children():
+                child.destroy()
+        except tk.TclError:
+            return
         for item in self._meeting_chat:
             tk.Label(
                 self.meeting_chat_answers,
