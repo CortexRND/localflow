@@ -12,6 +12,7 @@ import webbrowser
 import requests
 import rumps
 
+from localflow.apitoken import load
 from localflow.config import load_config
 from localflow.history import HistoryStore
 from localflow.inject import paste_text
@@ -41,6 +42,9 @@ class LocalflowMenuBar(rumps.App):
         self.open_ui_item = rumps.MenuItem("Open web UI", callback=self.open_ui)
         self.phrases_item = rumps.MenuItem("Hot Phrases…", callback=self.open_phrases)
         self.hub_item = rumps.MenuItem("LocalFlow Hub…", callback=self.open_hub)
+        self.meeting_notes_item = rumps.MenuItem(
+            "Meeting notes…", callback=self.open_meeting_notes
+        )
         self.open_notes_item = rumps.MenuItem(
             "Open notes folder", callback=self.open_notes
         )
@@ -56,6 +60,7 @@ class LocalflowMenuBar(rumps.App):
             self.open_ui_item,
             self.phrases_item,
             self.hub_item,
+            self.meeting_notes_item,
             self.open_notes_item,
             self.paste_last_item,
         ]
@@ -142,7 +147,8 @@ class LocalflowMenuBar(rumps.App):
         self.refresh()
 
     def open_ui(self, _item) -> None:
-        webbrowser.open(BASE)
+        token = load()
+        webbrowser.open(f"{BASE}?token={token}" if token else BASE)
 
     def open_phrases(self, _item) -> None:
         # A separate process: rumps owns this process's AppKit main loop, so
@@ -151,6 +157,11 @@ class LocalflowMenuBar(rumps.App):
 
     def open_hub(self, _item) -> None:
         subprocess.Popen([sys.executable, "-m", "localflow.hub_window"])
+
+    def open_meeting_notes(self, _item) -> None:
+        subprocess.Popen([
+            sys.executable, "-m", "localflow.hub_window", "--page", "Meetings"
+        ])
 
     def open_notes(self, _item) -> None:
         from pathlib import Path

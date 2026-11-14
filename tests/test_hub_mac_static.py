@@ -35,10 +35,45 @@ def test_appkit_hub_has_valid_selector_names():
     assert not invalid
 
 
+def test_appkit_hub_imports_foundation_timer():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "Foundation"
+        and any(alias.name == "NSTimer" for alias in node.names)
+        for node in tree.body
+    )
+
+
+def test_appkit_meeting_note_saves_are_serialized_before_stop():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "def _meeting_request_notes_save(self, stop_flush=False):" in source
+    assert "if self.meeting_notes_save_in_flight:" in source
+    assert "self.meeting_stop_flush_pending = True" in source
+    assert "self.meeting_notes_dirty = current_text != text" in source
+    assert 'self._meeting_worker("stop")' in source
+
+
+def test_appkit_meeting_completions_drain_while_page_is_hidden():
+    source = SOURCE.read_text(encoding="utf-8")
+    timer = next(
+        method for method in _controller_methods()
+        if method.name == "meetingTimerTick_"
+    )
+    timer_source = ast.get_source_segment(source, timer)
+    assert "self._meeting_event(operation, result, error)" in timer_source
+    assert timer_source.index("self._meeting_event(operation, result, error)") < (
+        timer_source.index('if self.page == "Meetings":')
+    )
+
+
 def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text()
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()
     assert "from localflow.hub_mac import build_window" in snapshots
+    assert "SnapshotMeetingClient" in snapshots
+    assert '("idle", "running", "saved")' in snapshots
+    assert 'f"hub-meetings-{state}"' in snapshots
     assert '"Home", "History", "Dictionary", "Style", "Models"' in snapshots
     assert '"Unable to load local data."' in snapshots
     assert "localflow/hub*" in workflow
@@ -118,7 +153,7 @@ def test_window_appearance_callback_is_registered_on_a_retained_controller():
         for base in controller.bases
     )
     assert "self.window.setDelegate_(self)" in source
-    assert "controller = build_window()" in source
+    assert "controller = build_window(initial_page=initial_page)" in source
     assert "AppHelper.runEventLoop()" in source
 
 

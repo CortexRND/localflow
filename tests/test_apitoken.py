@@ -24,3 +24,21 @@ def test_read_returns_token_or_none(monkeypatch, tmp_path):
     assert apitoken.read() is None
     path.write_text("token-value\n")
     assert apitoken.read() == "token-value"
+
+
+def test_load_reads_existing_token_without_changing_file(monkeypatch, tmp_path):
+    path = tmp_path / "api-token"
+    monkeypatch.setattr(apitoken, "token_path", lambda: path)
+
+    token = apitoken.load_or_create()
+    contents = path.read_bytes()
+
+    assert apitoken.load() == token
+    assert path.read_bytes() == contents
+
+
+def test_load_returns_empty_when_token_file_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "api-token"
+    monkeypatch.setattr(apitoken, "token_path", lambda: path)
+
+    assert apitoken.load() == ""

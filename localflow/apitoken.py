@@ -15,6 +15,14 @@ def read() -> str | None:
         return None
 
 
+def load() -> str:
+    """Read the issued token without rotating it, or return empty if missing."""
+    try:
+        return token_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def load_or_create() -> str:
     token = secrets.token_urlsafe(32)
     path = token_path()
