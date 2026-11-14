@@ -985,7 +985,9 @@ class HubWindowController(NSObject):
         self.body.addSubview_(self.meeting_chat_heading)
         self.meeting_question = self._field("", 0, 542, 580)
         self.meeting_question.setPlaceholderString_("Ask about this meeting")
-        self._button("Ask", "meetingAsk:", 596, 542, width=100, kind="primary")
+        self.meeting_ask = self._button(
+            "Ask", "meetingAsk:", 596, 542, width=100, kind="primary",
+        )
         self.meeting_answer_scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, 584, 740, 64)
         )
@@ -1096,7 +1098,7 @@ class HubWindowController(NSObject):
                 return
             self._meeting_worker("stop")
             if self.page == "Meetings":
-                self.meeting_action.setTitle_("Enhancing your notes…")
+                self._meeting_set_action_title("Enhancing your notes…")
             return
         if self.meeting_stop_flush_pending or self.meeting_notes_save_pending:
             self._meeting_advance_notes_save()
@@ -1235,8 +1237,50 @@ class HubWindowController(NSObject):
             self.meeting_notes_scroll, self.meeting_notes_status,
             self.meeting_error_label, self.meeting_action, self.meeting_live_card,
             self.meeting_saved_label, self.meeting_open_notes,
-            self.meeting_chat_heading,
-            self.meeting_question, self.meeting_answer_scroll,
+            self.meeting_chat_heading, self.meeting_question,
+            self.meeting_ask, self.meeting_answer_scroll,
+        )
+
+    @objc.python_method
+    def _meeting_set_action_title(self, title):
+        self.meeting_action.setTitle_(title)
+        self.meeting_action.sizeToFit()
+        frame = self.meeting_action.frame()
+        self.meeting_action.setFrame_(
+            NSMakeRect(
+                frame.origin.x, frame.origin.y, frame.size.width + 24, 36
+            )
+        )
+
+    @objc.python_method
+    def _meeting_layout(self, session):
+        action_frame = self.meeting_action.frame()
+        watch_y = action_frame.origin.y + action_frame.size.height + 4
+        self.meeting_watch.setFrame_(
+            NSMakeRect(action_frame.origin.x, watch_y, 720, 22)
+        )
+        live_y = watch_y + 30
+        self.meeting_live_card.setFrame_(NSMakeRect(0, live_y, 740, 98))
+        self.meeting_live_card.setHidden_(not bool(session))
+        saved_y = live_y + (108 if session else 8)
+        self.meeting_saved_label.setFrame_(
+            NSMakeRect(0, saved_y, 565, 32)
+        )
+        self.meeting_open_notes.setFrame_(
+            NSMakeRect(584, saved_y - 4, 140, 36)
+        )
+        chat_y = saved_y + 44
+        self.meeting_chat_heading.setFrame_(
+            NSMakeRect(0, chat_y, 400, 22)
+        )
+        self.meeting_question.setFrame_(
+            NSMakeRect(0, chat_y + 26, 580, 32)
+        )
+        self.meeting_ask.setFrame_(
+            NSMakeRect(596, chat_y + 26, 100, 36)
+        )
+        self.meeting_answer_scroll.setFrame_(
+            NSMakeRect(0, chat_y + 68, 740, 64)
         )
 
     @objc.python_method
@@ -1262,7 +1306,7 @@ class HubWindowController(NSObject):
                 watch += " — " + session["system_audio_error"]
             self.meeting_watch.setStringValue_(watch)
             self.meeting_template.setEnabled_(False)
-            self.meeting_action.setTitle_(
+            self._meeting_set_action_title(
                 f"Stop & save notes — {int(session.get('seconds', 0)) // 60}m"
                 f"{int(session.get('seconds', 0)) % 60:02d}s · "
                 f"{session.get('segment_count', 0)} segments"
@@ -1288,8 +1332,9 @@ class HubWindowController(NSObject):
             )
             self.meeting_watch.setStringValue_(watch)
             self.meeting_template.setEnabled_(True)
-            self.meeting_action.setTitle_("Start meeting transcription")
+            self._meeting_set_action_title("Start meeting transcription")
             self.meeting_live_label.setStringValue_("")
+        self._meeting_layout(session)
         self.meeting_action.setEnabled_(not self.meeting_busy)
         saved = self.meeting_last_saved if not session else None
         self.meeting_saved_label.setHidden_(not bool(saved))
@@ -1300,10 +1345,12 @@ class HubWindowController(NSObject):
                 label + saved.get("notes_path", "")
             )
         chat_available = bool(
-            self.meeting_status.get("chat_available") or self.meeting_last_saved
+            not session
+            and (self.meeting_status.get("chat_available") or self.meeting_last_saved)
         )
         self.meeting_chat_heading.setHidden_(not chat_available)
         self.meeting_question.setHidden_(not chat_available)
+        self.meeting_ask.setHidden_(not chat_available)
         self.meeting_answer_scroll.setHidden_(
             not chat_available or not self.meeting_answers
         )

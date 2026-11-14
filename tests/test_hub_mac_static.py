@@ -67,6 +67,34 @@ def test_appkit_meeting_completions_drain_while_page_is_hidden():
     )
 
 
+def test_appkit_meeting_status_and_transcript_follow_the_action():
+    source = SOURCE.read_text(encoding="utf-8")
+    methods = {
+        method.name: ast.get_source_segment(source, method)
+        for method in _controller_methods()
+    }
+    layout = methods["_meeting_layout"]
+    render = methods["_meeting_render"]
+    action_title = methods["_meeting_set_action_title"]
+
+    assert "action_frame = self.meeting_action.frame()" in layout
+    assert "action_frame.origin.y + action_frame.size.height + 4" in layout
+    assert "self.meeting_live_card.setHidden_(not bool(session))" in layout
+    assert "saved_y = live_y + (108 if session else 8)" in layout
+    assert "self.meeting_action.sizeToFit()" in action_title
+    assert "frame.size.width + 24" in action_title
+
+    for view in (
+        "meeting_chat_heading",
+        "meeting_question",
+        "meeting_ask",
+    ):
+        assert f"self.{view}.setHidden_(not chat_available)" in render
+    assert "self.meeting_answer_scroll.setHidden_(" in render
+    assert "not chat_available or not self.meeting_answers" in render
+    assert "not session" in render
+
+
 def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text()
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()
