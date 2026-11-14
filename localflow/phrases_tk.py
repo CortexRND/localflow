@@ -8,7 +8,7 @@ works without the server; the dictation app re-reads the file on change.
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 
 from localflow.commands import discover_commands
 from localflow.config import load_config
@@ -22,6 +22,14 @@ from localflow.hotphrases import (
     render_dictation,
 )
 from localflow.symbols import apply_spoken_symbols
+from localflow.ui_tokens import (
+    CARD_PADDING,
+    PAGE_MARGIN,
+    SUN_TEXT,
+    TOKENS as TOKENS,
+    resolve_tk_font,
+    tokens_for,
+)
 
 _POLL_MS = 1500
 _PREVIEW_DEBOUNCE_MS = 200
@@ -34,8 +42,10 @@ def _first_line(text: str, limit: int = 60) -> str:
 
 
 class HotPhrasesWindow:
-    def __init__(self, root: tk.Tk, store: HotPhraseStore, config=None):
+    def __init__(self, root: tk.Tk, store: HotPhraseStore, config=None, theme="light"):
         self.root = root
+        self.tokens = tokens_for(theme)
+        self.font_family = resolve_tk_font(tkfont.families(root))
         self.store = store
         self.config = config if config is not None else load_config()
         self.commands = (
@@ -52,6 +62,8 @@ class HotPhrasesWindow:
         root.title("LocalFlow \u2014 Hot Phrases")
         root.geometry("940x620")
         root.minsize(720, 480)
+        root.configure(bg=self.tokens["paper"])
+        self._configure_style()
         self._build()
         self._bind_keys()
         self.refresh()
@@ -61,8 +73,89 @@ class HotPhrasesWindow:
 
     # ---------------------------------------------------------------- layout ---
 
+    def _configure_style(self):
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "TFrame", background=self.tokens["paper"],
+        )
+        style.configure(
+            "TLabel", background=self.tokens["paper"], foreground=self.tokens["ink"],
+            font=(self.font_family, 13),
+        )
+        style.configure(
+            "Heading.TLabel", background=self.tokens["paper"],
+            foreground=self.tokens["ink"], font=(self.font_family, 15, "bold"),
+        )
+        style.configure(
+            "Card.TFrame", background=self.tokens["surface"],
+            bordercolor=self.tokens["line"], relief="solid", borderwidth=1,
+        )
+        style.configure("CardChild.TFrame", background=self.tokens["surface"])
+        style.configure(
+            "Card.TLabel", background=self.tokens["surface"],
+            foreground=self.tokens["ink"], font=(self.font_family, 13),
+        )
+        style.configure(
+            "Card.TCheckbutton", background=self.tokens["surface"],
+            foreground=self.tokens["ink"], font=(self.font_family, 13),
+        )
+        style.configure(
+            "CardHeading.TLabel", background=self.tokens["surface"],
+            foreground=self.tokens["ink"], font=(self.font_family, 15, "bold"),
+        )
+        style.configure(
+            "TButton", background=self.tokens["surface"], foreground=self.tokens["ink"],
+            bordercolor=self.tokens["line"], padding=(16, 7),
+            font=(self.font_family, 13, "bold"),
+        )
+        style.map(
+            "TButton",
+            background=[("active", self.tokens["sun"])],
+            foreground=[("active", SUN_TEXT)],
+        )
+        style.configure(
+            "Accent.TButton", background=self.tokens["cobalt"],
+            foreground="#FFFFFF", bordercolor=self.tokens["cobalt"],
+            padding=(18, 8), font=(self.font_family, 13, "bold"),
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", self.tokens["ink"])],
+            foreground=[("active", self.tokens["paper"])],
+        )
+        style.configure(
+            "TEntry", fieldbackground=self.tokens["surface"],
+            foreground=self.tokens["ink"], bordercolor=self.tokens["line"],
+            padding=7, font=(self.font_family, 13),
+        )
+        style.configure(
+            "Treeview", background=self.tokens["surface"],
+            fieldbackground=self.tokens["surface"], foreground=self.tokens["ink"],
+            rowheight=56, font=(self.font_family, 13),
+        )
+        style.configure(
+            "Treeview.Heading", background=self.tokens["paper"],
+            foreground=self.tokens["muted"], font=(self.font_family, 11, "bold"),
+        )
+        style.configure(
+            "TLabelframe", background=self.tokens["paper"],
+            bordercolor=self.tokens["line"], relief="solid",
+        )
+        style.configure(
+            "TLabelframe.Label", background=self.tokens["paper"],
+            foreground=self.tokens["muted"], font=(self.font_family, 11, "bold"),
+        )
+        style.map(
+            "Treeview", background=[("selected", self.tokens["cobalt"])],
+            foreground=[("selected", "#FFFFFF")],
+        )
+
     def _build(self) -> None:
-        outer = ttk.Frame(self.root, padding=14)
+        outer = ttk.Frame(self.root, padding=PAGE_MARGIN)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=2, uniform="cols")
         outer.columnconfigure(1, weight=3, uniform="cols")
@@ -81,11 +174,11 @@ class HotPhrasesWindow:
         outer.bind("<Configure>", lambda e: intro.configure(wraplength=max(300, e.width - 40)))
 
         # -- list --
-        left = ttk.Frame(outer)
+        left = ttk.Frame(outer, style="Card.TFrame", padding=CARD_PADDING)
         left.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
-        ttk.Label(left, text="Hot phrases", style="Heading.TLabel").grid(
+        ttk.Label(left, text="Hot phrases", style="CardHeading.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 6)
         )
         self.tree = ttk.Treeview(
@@ -95,19 +188,24 @@ class HotPhrasesWindow:
         self.tree.heading("on", text="On")
         self.tree.heading("trigger", text="Trigger")
         self.tree.heading("preview", text="Pastes")
-        self.tree.column("on", width=44, minwidth=44, stretch=False, anchor="center")
-        self.tree.column("trigger", width=150, minwidth=90)
-        self.tree.column("preview", width=180, minwidth=90)
-        self.tree.tag_configure("off", foreground="#8a8a8a")
+        self.tree.column("on", width=40, minwidth=40, stretch=False, anchor="center")
+        self.tree.column("trigger", width=126, minwidth=85)
+        self.tree.column("preview", width=140, minwidth=90)
+        self.tree.tag_configure("off", foreground=self.tokens["muted"])
         self.tree.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         scroll.grid(row=1, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scroll.set)
+        self.phrase_scroll = scroll
+        self.phrase_dividers = []
+        self.tree.configure(yscrollcommand=self._sync_phrase_scroll)
+        self.tree.bind(
+            "<Configure>", lambda _event: self._draw_phrase_dividers(), add=True
+        )
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Button-1>", self._on_tree_click, add=True)
         self.tree.bind("<space>", lambda _e: self.toggle_selected())
 
-        list_buttons = ttk.Frame(left)
+        list_buttons = ttk.Frame(left, style="CardChild.TFrame")
         list_buttons.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(list_buttons, text="New", command=self.new_phrase).pack(side="left")
         self.toggle_btn = ttk.Button(
@@ -120,26 +218,35 @@ class HotPhrasesWindow:
         self.delete_btn.pack(side="left", padx=(6, 0))
 
         # -- editor --
-        right = ttk.Frame(outer)
+        right = ttk.Frame(outer, style="Card.TFrame", padding=CARD_PADDING)
         right.grid(row=1, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
         right.rowconfigure(4, weight=1)
-        self.editor_title = ttk.Label(right, text="New hot phrase", style="Heading.TLabel")
+        self.editor_title = ttk.Label(
+            right, text="New hot phrase", style="CardHeading.TLabel"
+        )
         self.editor_title.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        ttk.Label(right, text="Trigger \u2014 what you say").grid(row=1, column=0, sticky="w")
+        ttk.Label(
+            right, text="Trigger \u2014 what you say", style="Card.TLabel"
+        ).grid(row=1, column=0, sticky="w")
         self.trigger_var = tk.StringVar()
         self.trigger_entry = ttk.Entry(right, textvariable=self.trigger_var)
         self.trigger_entry.grid(row=2, column=0, sticky="ew", pady=(2, 10))
 
-        ttk.Label(right, text="Pasted text").grid(row=3, column=0, sticky="w")
+        ttk.Label(right, text="Pasted text", style="Card.TLabel").grid(
+            row=3, column=0, sticky="w"
+        )
         text_frame = ttk.Frame(right)
         text_frame.grid(row=4, column=0, sticky="nsew", pady=(2, 8))
         text_frame.rowconfigure(0, weight=1)
         text_frame.columnconfigure(0, weight=1)
         self.text = tk.Text(
-            text_frame, wrap="word", undo=True, height=10, relief="solid",
-            borderwidth=1, padx=8, pady=6, highlightthickness=0,
+            text_frame, wrap="word", undo=True, height=10, relief="flat",
+            borderwidth=1, padx=CARD_PADDING, pady=10, highlightthickness=1,
+            background=self.tokens["surface"], foreground=self.tokens["ink"],
+            insertbackground=self.tokens["ink"], highlightbackground=self.tokens["line"],
+            font=(self.font_family, 13),
         )
         self.text.grid(row=0, column=0, sticky="nsew")
         text_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.text.yview)
@@ -147,11 +254,14 @@ class HotPhrasesWindow:
         self.text.configure(yscrollcommand=text_scroll.set)
 
         self.enabled_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(right, text="Enabled", variable=self.enabled_var).grid(
+        ttk.Checkbutton(
+            right, text="Enabled", variable=self.enabled_var,
+            style="Card.TCheckbutton",
+        ).grid(
             row=5, column=0, sticky="w"
         )
 
-        edit_buttons = ttk.Frame(right)
+        edit_buttons = ttk.Frame(right, style="CardChild.TFrame")
         edit_buttons.grid(row=6, column=0, sticky="w", pady=(8, 0))
         self.save_btn = ttk.Button(
             edit_buttons, text="Add", command=self.save, style="Accent.TButton"
@@ -170,7 +280,8 @@ class HotPhrasesWindow:
         self.try_out = tk.Text(
             try_frame, height=4, wrap="word", relief="flat", borderwidth=0,
             highlightthickness=0, padx=4, pady=6, state="disabled",
-            background=self.root.cget("background"),
+            background=self.tokens["paper"], foreground=self.tokens["ink"],
+            font=(self.font_family, 13),
         )
         self.try_out.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.try_var.trace_add("write", lambda *_: self._schedule_preview())
@@ -281,6 +392,25 @@ class HotPhrasesWindow:
                 self._set_editor("", "", True)
         self._update_buttons()
         self._schedule_preview()
+        self.tree.after_idle(self._draw_phrase_dividers)
+
+    def _sync_phrase_scroll(self, *args) -> None:
+        self.phrase_scroll.set(*args)
+        self._draw_phrase_dividers()
+
+    def _draw_phrase_dividers(self) -> None:
+        for divider in self.phrase_dividers:
+            divider.destroy()
+        self.phrase_dividers.clear()
+        for item in self.tree.get_children():
+            bounds = self.tree.bbox(item)
+            if not bounds:
+                continue
+            x, y, width, height = bounds
+            if y + height < self.tree.winfo_height():
+                divider = tk.Frame(self.tree, bg=self.tokens["line"], height=1)
+                divider.place(x=x, y=y + height - 1, width=width)
+                self.phrase_dividers.append(divider)
 
     def _poll(self) -> None:
         try:

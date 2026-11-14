@@ -47,7 +47,15 @@ from Foundation import (
 )
 
 from localflow.hotphrases import HOT_PHRASES_PATH, HotPhraseStore
+from localflow.mac_style import (
+    color as _color,
+    font as _font,
+    style_button,
+    style_surface,
+    tokens_for_window,
+)
 from localflow.phrases_model import PhrasesModel
+from localflow.ui_tokens import LIGHT, SUN_TEXT, TOKENS as TOKENS
 
 _AUTOSAVE_DELAY = 0.6
 _POLL_INTERVAL = 1.5
@@ -65,7 +73,7 @@ _EXAMPLE_TEXT = (
 _TOOLBAR_NEW = "newPhrase"
 
 
-def _label(text, font=None, color=None, wrap=False):
+def _label(text, *, font=None, color=None, wrap=False):
     field = NSTextField.labelWithString_(text)
     if font is not None:
         field.setFont_(font)
@@ -98,6 +106,7 @@ class PhrasesWindowController(NSObject):
         if self is None:
             return None
         self.model = PhrasesModel(store, config)
+        self.tokens = LIGHT
         self.confirm_discard = self._confirm_discard_alert
         self.current_id = None
         self.query = ""
@@ -140,6 +149,8 @@ class PhrasesWindowController(NSObject):
             NSMakeRect(0, 0, 900, 600), style, AppKit.NSBackingStoreBuffered, False
         )
         self.window.setTitle_("Hot Phrases")
+        self.tokens = tokens_for_window(self.window)
+        self.window.setBackgroundColor_(_color("paper", self.tokens))
         self.window.setMinSize_(AppKit.NSMakeSize(680, 440))
         self.window.setFrameAutosaveName_("LocalFlowHotPhrases")
         self.window.setDelegate_(self)
@@ -166,6 +177,7 @@ class PhrasesWindowController(NSObject):
 
         self.search_field = NSSearchField.alloc().init()
         self.search_field.setPlaceholderString_("Search phrases")
+        self.search_field.setBackgroundColor_(_color("surface", self.tokens))
         self.search_field.setDelegate_(self)
         self.search_field.setTarget_(self)
         self.search_field.setAction_(objc.selector(self.searchChanged_, signature=b"v@:@"))
@@ -176,7 +188,11 @@ class PhrasesWindowController(NSObject):
         self.table.addTableColumn_(col)
         self.table.setHeaderView_(None)
         self.table.setStyle_(AppKit.NSTableViewStyleSourceList)
-        self.table.setRowHeight_(44)
+        self.table.setRowHeight_(56)
+        self.table.setBackgroundColor_(_color("surface", self.tokens))
+        self.table.setUsesAlternatingRowBackgroundColors_(False)
+        self.table.setGridStyleMask_(AppKit.NSTableViewSolidHorizontalGridLineMask)
+        self.table.setGridColor_(_color("line", self.tokens))
         self.table.setDataSource_(self)
         self.table.setDelegate_(self)
         self.table.setUsesAutomaticRowHeights_(False)
@@ -186,12 +202,20 @@ class PhrasesWindowController(NSObject):
         scroll.setHasVerticalScroller_(True)
         scroll.setAutohidesScrollers_(True)
         scroll.setDrawsBackground_(False)
+        scroll.setWantsLayer_(True)
+        scroll.layer().setBorderColor_(_color("line", self.tokens).CGColor())
+        scroll.layer().setBorderWidth_(1)
+        scroll.layer().setCornerRadius_(12)
+        self.phrase_scroll = scroll
         stack.addView_inGravity_(scroll, AppKit.NSStackViewGravityTop)
         scroll.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationVertical)
 
         # Pin the stack's top to the safe area so the unified titlebar's
         # traffic-light buttons don't overlap the search field.
         container = NSView.alloc().init()
+        container.setWantsLayer_(True)
+        container.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
+        self.sidebar_container = container
         stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
         container.addSubview_(stack)
         for c in (
@@ -237,7 +261,7 @@ class PhrasesWindowController(NSObject):
             return _label("No matches", color=NSColor.secondaryLabelColor())
         e = self._entries[row]
         enabled = bool(e.get("enabled"))
-        color = NSColor.labelColor() if enabled else NSColor.tertiaryLabelColor()
+        color = _color("ink" if enabled else "muted", self.tokens)
 
         cell = NSView.alloc().init()
         trigger = _label(
@@ -249,7 +273,7 @@ class PhrasesWindowController(NSObject):
         sub = _label(
             _first_line(e["text"]),
             font=NSFont.systemFontOfSize_(11),
-            color=color if not enabled else NSColor.secondaryLabelColor(),
+            color=_color("muted", self.tokens),
         )
         sub.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
 
@@ -316,6 +340,7 @@ class PhrasesWindowController(NSObject):
         root.setEdgeInsets_(AppKit.NSEdgeInsets(12, 16, 12, 16))
         root.setSpacing_(6)
         root.setDetachesHiddenViews_(True)
+        style_surface(root, self.tokens)
         self.editor_root = root
 
         # disabled banner: a plain view with a layer background and a pinned
@@ -323,11 +348,12 @@ class PhrasesWindowController(NSObject):
         self.banner = NSView.alloc().init()
         self.banner.setWantsLayer_(True)
         self.banner.layer().setBackgroundColor_(
-            NSColor.systemYellowColor().colorWithAlphaComponent_(0.18).CGColor())
+            _color("sun", self.tokens).colorWithAlphaComponent_(0.24).CGColor())
         self.banner.layer().setCornerRadius_(6)
         banner_label = _label(
             "Hot phrases are turned off in ~/.localflow.toml (hot_phrases = false)",
             wrap=True)
+        banner_label.setTextColor_(_color(SUN_TEXT, self.tokens))
         banner_label.setTranslatesAutoresizingMaskIntoConstraints_(False)
         self.banner.addSubview_(banner_label)
         NSLayoutConstraint.activateConstraints_([
@@ -351,6 +377,8 @@ class PhrasesWindowController(NSObject):
         root.addArrangedSubview_(_label("When I say", font=NSFont.boldSystemFontOfSize_(13)))
         self.trigger_field = NSTextField.alloc().init()
         self.trigger_field.setPlaceholderString_("e.g. review checklist")
+        self.trigger_field.setBackgroundColor_(_color("surface", self.tokens))
+        self.trigger_field.setTextColor_(_color("ink", self.tokens))
         self.trigger_field.setDelegate_(self)
         root.addArrangedSubview_(self.trigger_field)
         self.trigger_field.setContentHuggingPriority_forOrientation_(1, AppKit.NSLayoutConstraintOrientationHorizontal)
@@ -362,7 +390,10 @@ class PhrasesWindowController(NSObject):
         root.addArrangedSubview_(_label("Paste this", font=NSFont.boldSystemFontOfSize_(13)))
         self.text_view = NSTextView.alloc().init()
         self.text_view.setRichText_(False)
-        self.text_view.setFont_(NSFont.systemFontOfSize_(13))
+        self.text_view.setFont_(_font(13))
+        self.text_view.setTextColor_(_color("ink", self.tokens))
+        self.text_view.setInsertionPointColor_(_color("ink", self.tokens))
+        self.text_view.setBackgroundColor_(_color("surface", self.tokens))
         self.text_view.setAutomaticQuoteSubstitutionEnabled_(False)
         self.text_view.setAutomaticDashSubstitutionEnabled_(False)
         self.text_view.setAutomaticTextReplacementEnabled_(False)
@@ -413,10 +444,7 @@ class PhrasesWindowController(NSObject):
         row.addArrangedSubview_(spacer)
         self.delete_button = NSButton.alloc().init()
         self.delete_button.setTitle_("Delete")
-        self.delete_button.setBezelStyle_(AppKit.NSBezelStyleAccessoryBarAction)
-        self.delete_button.setAttributedTitle_(
-            NSAttributedString.alloc().initWithString_attributes_(
-                "Delete", {AppKit.NSForegroundColorAttributeName: NSColor.systemRedColor()}))
+        style_button(self.delete_button, "destructive", self.tokens)
         self.delete_button.setTarget_(self)
         self.delete_button.setAction_(objc.selector(self.deleteClicked_, signature=b"v@:@"))
         row.addArrangedSubview_(self.delete_button)
@@ -495,6 +523,8 @@ class PhrasesWindowController(NSObject):
         # must not collapse the split item, so the empty state and the undo
         # bar live as siblings of the editor, not inside it.
         container = NSView.alloc().init()
+        container.setWantsLayer_(True)
+        container.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
         root.setTranslatesAutoresizingMaskIntoConstraints_(False)
         container.addSubview_(root)
         for anchor, const in (
@@ -527,11 +557,12 @@ class PhrasesWindowController(NSObject):
         create = NSButton.buttonWithTitle_target_action_(
             "Create Hot Phrase", self, objc.selector(self.newPhraseClicked_, signature=b"v@:@"))
         create.setKeyEquivalent_("\r")
-        create.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        style_button(create, "primary", self.tokens)
+        self.create_button = create
         example = NSButton.buttonWithTitle_target_action_(
             "Add an example", self, objc.selector(self.addExampleClicked_, signature=b"v@:@"))
-        example.setBordered_(False)
-        example.setContentTintColor_(NSColor.controlAccentColor())
+        style_button(example, "ghost", self.tokens)
+        self.example_button = example
         self.empty_view.addArrangedSubview_(title)
         self.empty_view.addArrangedSubview_(subtitle)
         self.empty_view.addArrangedSubview_(create)
@@ -550,7 +581,7 @@ class PhrasesWindowController(NSObject):
     def _build_undo_bar(self):
         self.undo_bar = NSBox.alloc().init()
         self.undo_bar.setBoxType_(AppKit.NSBoxCustom)
-        self.undo_bar.setFillColor_(NSColor.controlBackgroundColor())
+        self.undo_bar.setFillColor_(_color("surface", self.tokens))
         self.undo_bar.setCornerRadius_(6)
         inner = NSStackView.alloc().init()
         inner.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationHorizontal)
@@ -981,6 +1012,37 @@ class PhrasesWindowController(NSObject):
     def windowShouldClose_(self, _sender):
         return self._leave_editor()
 
+    def windowDidChangeEffectiveAppearance_(self, _note):
+        self.tokens = tokens_for_window(self.window)
+        self.window.setBackgroundColor_(_color("paper", self.tokens))
+        self.table.setBackgroundColor_(_color("surface", self.tokens))
+        self.table.setGridColor_(_color("line", self.tokens))
+        self.table.reloadData()
+        self.search_field.setBackgroundColor_(_color("surface", self.tokens))
+        self.sidebar_container.layer().setBackgroundColor_(
+            _color("paper", self.tokens).CGColor()
+        )
+        self.phrase_scroll.layer().setBorderColor_(
+            _color("line", self.tokens).CGColor()
+        )
+        self.banner.layer().setBackgroundColor_(
+            _color("sun", self.tokens).colorWithAlphaComponent_(0.24).CGColor()
+        )
+        self.detail_container.layer().setBackgroundColor_(
+            _color("paper", self.tokens).CGColor()
+        )
+        style_surface(self.editor_root, self.tokens)
+        self.trigger_field.setBackgroundColor_(_color("surface", self.tokens))
+        self.trigger_field.setTextColor_(_color("ink", self.tokens))
+        self.text_view.setBackgroundColor_(_color("surface", self.tokens))
+        self.text_view.setTextColor_(_color("ink", self.tokens))
+        self.text_view.setInsertionPointColor_(_color("ink", self.tokens))
+        self.undo_bar.setFillColor_(_color("surface", self.tokens))
+        style_button(self.delete_button, "destructive", self.tokens)
+        style_button(self.create_button, "primary", self.tokens)
+        style_button(self.example_button, "ghost", self.tokens)
+        return True
+
     # -- app delegate --
 
     def applicationShouldTerminate_(self, _app):
@@ -1139,6 +1201,8 @@ def snapshot_png(controller, path, dark=False):
     """Render the window to PNG without screen-recording permission."""
     name = AppKit.NSAppearanceNameDarkAqua if dark else AppKit.NSAppearanceNameAqua
     controller.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_(name))
+    if hasattr(controller, "windowDidChangeEffectiveAppearance_"):
+        controller.windowDidChangeEffectiveAppearance_(None)
     controller.window.orderFrontRegardless()
     controller.window.displayIfNeeded()
     # Let layout and the appearance change settle before reading pixels.

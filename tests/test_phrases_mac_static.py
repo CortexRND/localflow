@@ -59,3 +59,10 @@ def test_every_python_method_is_marked():
         "empty_state_visible", "undo_bar_visible",
     ]:
         assert expected in names, f"{expected} missing @objc.python_method"
+
+
+def test_phrase_table_uses_horizontal_dividers_and_a_single_scroll_card():
+    source = SRC.read_text()
+    assert "NSTableViewSolidHorizontalGridLineMask" in source
+    assert 'self.table.setGridColor_(_color("line", self.tokens))' in source
+    assert "scroll.layer().setBorderWidth_(1)" in source

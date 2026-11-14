@@ -9,7 +9,7 @@ import tkinter as tk
 import webbrowser
 from dataclasses import replace
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 
 from localflow import setup_flow
 from localflow.audio import list_input_devices
@@ -31,19 +31,10 @@ from localflow.setup_flow import (
     SetupChoices,
     initial_choices,
 )
-
-TOKENS = {
-    "paper": "#FFF8E7",
-    "card": "#FFFFFF",
-    "ink": "#111111",
-    "muted": "#4A4A4A",
-    "cobalt": "#1D4ED8",
-    "sun": "#FFD60A",
-    "red": "#E63946",
-    "shadow": 4,
-    "radius": 10,
-    "space": (4, 8, 12, 16, 24, 32),
-}
+from localflow.ui_tokens import (
+    CARD_GAP, CARD_PADDING, PAGE_MARGIN, SHADOW_OFFSET, SUN_TEXT,
+    TOKENS as TOKENS, resolve_tk_font, surface_tint, tokens_for,
+)
 
 _STEP_TITLES = (
     "Let's get you talking.",
@@ -54,11 +45,22 @@ _STEP_TITLES = (
     "Give it a try.",
     "All set.",
 )
+_STEP_SUBTITLES = (
+    "Choose a local voice setup that fits your machine.",
+    "Check that audio and model services are ready.",
+    "Pick the speech model that transcribes your voice.",
+    "Optional cleanup keeps your transcript clear and readable.",
+    "Choose how LocalFlow listens and responds.",
+    "Try a short dictation before you finish.",
+    "Review your choices and start dictating.",
+)
 
 
 class SetupWindow:
-    def __init__(self, root: tk.Tk, config=None, hardware=None):
+    def __init__(self, root: tk.Tk, config=None, hardware=None, theme="light"):
         self.root = root
+        self.tokens = tokens_for(theme)
+        self.font_family = resolve_tk_font(tkfont.families(root))
         self.config = config or load_config()
         self.hardware = hardware or detect_hardware()
         self.choices = initial_choices(self.config, self.hardware)
@@ -98,10 +100,11 @@ class SetupWindow:
         self._progress_var = tk.StringVar(value="")
 
         root.title("LocalFlow Setup")
-        root.geometry("760x640")
-        root.minsize(700, 580)
-        root.configure(background=TOKENS["paper"])
+        root.geometry("800x680")
+        root.minsize(720, 600)
+        root.configure(background=self.tokens["paper"])
         root.protocol("WM_DELETE_WINDOW", self.close)
+        self._configure_scrollbar_style()
         self._build_shell()
         self._render()
         root.after(100, self._poll_events)
@@ -113,38 +116,98 @@ class SetupWindow:
         return next((option for option, text in HOTKEY_OPTIONS if text == label), "alt_l")
 
     def _build_shell(self) -> None:
-        self.shell = tk.Frame(self.root, bg=TOKENS["paper"], padx=28, pady=18)
-        self.shell.pack(fill="both", expand=True)
-        self.brand = tk.Label(
-            self.shell,
-            text="LOCALFLOW   /   SETUP",
-            bg=TOKENS["paper"],
-            fg=TOKENS["muted"],
-            font=("TkDefaultFont", 10, "bold"),
+        self.shell = tk.Frame(
+            self.root, bg=self.tokens["paper"], padx=PAGE_MARGIN, pady=24
         )
-        self.brand.pack(anchor="w")
+        self.shell.pack(fill="both", expand=True)
+        header = tk.Frame(self.shell, bg=self.tokens["paper"])
+        header.pack(fill="x")
+        mark = tk.Canvas(
+            header, width=18, height=20, bg=self.tokens["paper"],
+            highlightthickness=0,
+        )
+        mark.create_oval(4, 5, 14, 15, fill=self.tokens["sun"], outline="")
+        mark.pack(side="left", padx=(0, 6))
+        self.brand = tk.Label(
+            header, text="localflow", bg=self.tokens["paper"],
+            fg=self.tokens["ink"], font=(self.font_family, 17, "bold"),
+        )
+        self.brand.pack(side="left")
+        self.step_label = tk.Label(
+            header, bg=self.tokens["paper"], fg=self.tokens["muted"],
+            font=(self.font_family, 11, "bold"),
+        )
+        self.step_label.pack(side="right")
+        self.progress = tk.Frame(self.shell, bg=self.tokens["paper"])
+        self.progress.pack(fill="x", pady=(16, 20))
+        self.progress_segments = []
+        for index in range(7):
+            segment = tk.Frame(self.progress, height=4, bg=self.tokens["line"])
+            segment.pack(
+                side="left", fill="x", expand=True,
+                padx=(0, 4 if index < 6 else 0),
+            )
+            self.progress_segments.append(segment)
         self.title_label = tk.Label(
             self.shell,
-            bg=TOKENS["paper"],
-            fg=TOKENS["ink"],
-            font=("TkDefaultFont", 18, "bold"),
+            bg=self.tokens["paper"],
+            fg=self.tokens["ink"],
+            font=(self.font_family, 28, "bold"),
             anchor="w",
             justify="left",
-            wraplength=640,
+            wraplength=680,
         )
-        self.title_label.pack(fill="x", pady=(16, 2))
+        self.title_label.pack(fill="x", pady=(0, 4))
         self.subtitle_label = tk.Label(
             self.shell,
-            bg=TOKENS["paper"],
-            fg=TOKENS["muted"],
-            font=("TkDefaultFont", 11),
+            bg=self.tokens["paper"],
+            fg=self.tokens["muted"],
+            font=(self.font_family, 13),
             anchor="w",
         )
-        self.subtitle_label.pack(fill="x", pady=(0, 10))
-        self.footer = tk.Frame(self.shell, bg=TOKENS["paper"])
-        self.footer.pack(side="bottom", fill="x", pady=(12, 0))
-        self.body = tk.Frame(self.shell, bg=TOKENS["paper"])
+        self.subtitle_label.pack(fill="x", pady=(0, 20))
+        self.footer_shell = tk.Frame(self.shell, bg=self.tokens["paper"])
+        self.footer_shell.pack(side="bottom", fill="x", pady=(16, 0))
+        tk.Frame(self.footer_shell, height=1, bg=self.tokens["line"]).pack(fill="x")
+        self.footer = tk.Frame(self.footer_shell, bg=self.tokens["paper"])
+        self.footer.pack(fill="x", pady=(16, 0))
+        self.footer_content = self.footer
+        self.body = tk.Frame(self.shell, bg=self.tokens["paper"])
         self.body.pack(fill="both", expand=True)
+
+    def _configure_scrollbar_style(self) -> None:
+        style = ttk.Style(self.root)
+        style.layout(
+            "Slim.Vertical.TScrollbar",
+            [
+                (
+                    "Vertical.Scrollbar.trough",
+                    {
+                        "sticky": "ns",
+                        "children": [
+                            ("Vertical.Scrollbar.thumb", {"sticky": "nswe"})
+                        ],
+                    },
+                )
+            ],
+        )
+        style.configure(
+            "Slim.Vertical.TScrollbar",
+            width=8,
+            troughcolor=self.tokens["paper"],
+            background=self.tokens["line"],
+            bordercolor=self.tokens["paper"],
+            darkcolor=self.tokens["line"],
+            lightcolor=self.tokens["line"],
+            arrowcolor=self.tokens["paper"],
+            borderwidth=0,
+            relief="flat",
+        )
+        style.map(
+            "Slim.Vertical.TScrollbar",
+            background=[("active", self.tokens["line"])],
+            troughcolor=[("!disabled", self.tokens["paper"])],
+        )
 
     def _clear(self, container) -> None:
         for child in container.winfo_children():
@@ -152,22 +215,29 @@ class SetupWindow:
 
     def _render(self) -> None:
         self.title_label.configure(text=_STEP_TITLES[self.step])
-        self.subtitle_label.configure(
-            text=f"Step {self.step + 1} of 7  ·  {self.hardware.machine or self.hardware.system}"
-            if self.step == 0 else f"Step {self.step + 1} of 7"
-        )
+        self.subtitle_label.configure(text=_STEP_SUBTITLES[self.step])
+        self.step_label.configure(text=f"STEP {self.step + 1} OF 7")
+        for index, segment in enumerate(self.progress_segments):
+            segment.configure(
+                bg=self.tokens["cobalt"] if index <= self.step else self.tokens["line"]
+            )
         self._clear(self.body)
-        self._clear(self.footer)
+        self._clear(self.footer_content)
         getattr(self, f"_render_step_{self.step}")()
+        if self.error_message and (
+            self.step in (0, 4, 6)
+            or (self.step == 3 and self.choices.llm_provider != "ollama")
+        ):
+            self._label(self.body, self.error_message, fg=self.tokens["red"])
         self._render_footer()
 
     def _label(self, parent, text, *, font=None, fg=None, wrap=620, pady=(0, 8)):
         label = tk.Label(
             parent,
             text=text,
-            bg=TOKENS["paper"],
-            fg=fg or TOKENS["ink"],
-            font=font or ("TkDefaultFont", 11),
+            bg=self.tokens["paper"],
+            fg=fg or self.tokens["ink"],
+            font=font or (self.font_family, 11),
             justify="left",
             anchor="w",
             wraplength=wrap,
@@ -176,49 +246,191 @@ class SetupWindow:
         return label
 
     def _card(self, parent, title, detail, selected=False, tag=""):
-        offset = TOKENS["shadow"]
-        card = tk.Frame(parent, bg=TOKENS["paper"])
-        card.pack(fill="x", pady=(0, 8))
+        offset = SHADOW_OFFSET if selected else 0
+        card = tk.Frame(parent, bg=self.tokens["paper"])
+        card.pack(fill="x", pady=(0, CARD_GAP))
         card.columnconfigure(0, weight=1)
         card.rowconfigure(0, weight=1)
-        shadow = tk.Frame(card, bg=TOKENS["ink"])
-        shadow.grid(row=0, column=0, sticky="nsew", padx=(offset, 0), pady=(offset, 0))
-        color = TOKENS["sun"] if selected else TOKENS["card"]
-        surface = tk.Frame(card, bg=color, highlightbackground=TOKENS["ink"], highlightthickness=2)
-        surface.grid(row=0, column=0, sticky="nsew", padx=(0, offset), pady=(0, offset))
-        surface.lift(shadow)
+        if selected:
+            shadow = tk.Frame(card, bg=self.tokens["shadow"])
+            shadow.grid(
+                row=0, column=0, sticky="nsew",
+                padx=(offset, 0), pady=(offset, 0),
+            )
+        color = self.tokens["surface"]
+        surface = tk.Frame(
+            card, bg=color,
+            highlightbackground=self.tokens["ink"] if selected else self.tokens["line"],
+            highlightthickness=2 if selected else 1,
+        )
+        surface.grid(
+            row=0, column=0, sticky="nsew",
+            padx=(0, offset), pady=(0, offset),
+        )
+        if selected:
+            surface.lift(shadow)
         top = tk.Frame(surface, bg=color)
-        top.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Label(top, text=title, bg=color, fg=TOKENS["ink"], font=("TkDefaultFont", 10, "bold")).pack(side="left")
-        if tag:
-            tk.Label(top, text=tag, bg=color, fg=TOKENS["ink"], font=("TkDefaultFont", 9, "bold")).pack(side="right")
+        top.pack(fill="x", padx=CARD_PADDING, pady=(12, 0))
+        radio = tk.Canvas(
+            top, width=16, height=16, bg=color, highlightthickness=0,
+        )
+        radio.create_oval(
+            1, 1, 15, 15, outline=self.tokens["ink"], width=2, fill=color,
+        )
+        if selected:
+            radio.create_oval(4, 4, 12, 12, fill=self.tokens["sun"], outline="")
+        radio.pack(side="left", padx=(0, 8))
         tk.Label(
-            surface, text=detail, bg=color, fg=TOKENS["muted"],
-            font=("TkDefaultFont", 10), anchor="w", justify="left", wraplength=600,
-        ).pack(fill="x", padx=12, pady=(2, 8))
+            top, text=title, bg=color, fg=self.tokens["ink"],
+            font=(self.font_family, 15, "bold"),
+        ).pack(side="left")
+        if tag:
+            if tag == "Downloaded":
+                tag_bg, tag_fg = (
+                    surface_tint("success", self.tokens), self.tokens["success"],
+                )
+            elif tag == "English only":
+                tag_bg, tag_fg = (
+                    surface_tint("muted", self.tokens), self.tokens["muted"],
+                )
+            else:
+                tag_bg, tag_fg = self.tokens["sun"], SUN_TEXT
+            tk.Label(
+                top, text=tag, bg=tag_bg,
+                fg=tag_fg, font=(self.font_family, 10, "bold"),
+                padx=8, pady=3,
+            ).pack(side="right")
+        tk.Label(
+            surface, text=detail, bg=color, fg=self.tokens["muted"],
+            font=(self.font_family, 13), anchor="w", justify="left", wraplength=600,
+        ).pack(fill="x", padx=CARD_PADDING, pady=(6, 12))
         return card, surface
 
     def _scrolling_body(self):
-        holder = tk.Frame(self.body, bg=TOKENS["paper"])
+        holder = tk.Frame(self.body, bg=self.tokens["paper"])
         holder.pack(fill="both", expand=True)
-        canvas = tk.Canvas(holder, bg=TOKENS["paper"], highlightthickness=0)
-        scroll = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
-        content = tk.Frame(canvas, bg=TOKENS["paper"])
+        canvas = tk.Canvas(holder, bg=self.tokens["paper"], highlightthickness=0)
+        scroll = ttk.Scrollbar(
+            holder, orient="vertical", command=canvas.yview,
+            style="Slim.Vertical.TScrollbar",
+        )
+        content = tk.Frame(canvas, bg=self.tokens["paper"], padx=12, pady=12)
         window = canvas.create_window((0, 0), window=content, anchor="nw")
         content.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(
+                window, width=max(1, event.width - 12)
+            ),
+        )
         canvas.configure(yscrollcommand=scroll.set)
         canvas.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         return content
 
+    def _halftone(self, parent, width=144, height=112):
+        canvas = tk.Canvas(
+            parent, width=width, height=height, bg=self.tokens["paper"],
+            highlightthickness=0,
+        )
+        for row in range(7):
+            for column in range(7 - row):
+                radius = max(1, 3 - (row + column) // 4)
+                x, y = 8 + column * 16, 8 + row * 14
+                canvas.create_oval(
+                    x, y, x + radius * 2, y + radius * 2,
+                    fill=self.tokens["sun"], outline="",
+                )
+        canvas.place(relx=1, rely=1, x=-8, y=-8, anchor="se")
+        canvas.tk.call("lower", canvas._w)
+
+    def _model_card(self, parent, model, selected, tags):
+        offset = SHADOW_OFFSET if selected else 0
+        card = tk.Frame(parent, bg=self.tokens["paper"])
+        card.pack(fill="x", pady=(0, CARD_GAP))
+        if selected:
+            shadow = tk.Frame(card, bg=self.tokens["shadow"])
+            shadow.place(x=offset, y=offset, relwidth=1, relheight=1)
+        surface = tk.Frame(
+            card, bg=self.tokens["surface"],
+            highlightbackground=self.tokens["ink"] if selected else self.tokens["line"],
+            highlightthickness=2 if selected else 1,
+        )
+        surface.pack(fill="x", padx=(0, offset), pady=(0, offset))
+        top = tk.Frame(surface, bg=self.tokens["surface"])
+        top.pack(fill="x", padx=CARD_PADDING, pady=(12, 4))
+        radio = tk.Canvas(
+            top, width=16, height=16, bg=self.tokens["surface"],
+            highlightthickness=0,
+        )
+        radio.create_oval(
+            1, 1, 15, 15, outline=self.tokens["ink"], width=2,
+            fill=self.tokens["surface"],
+        )
+        if selected:
+            radio.create_oval(4, 4, 12, 12, fill=self.tokens["sun"], outline="")
+        radio.pack(side="left", padx=(0, 8))
+        tk.Label(
+            top, text=model.label, bg=self.tokens["surface"], fg=self.tokens["ink"],
+            font=(self.font_family, 15, "bold"),
+        ).pack(side="left")
+        for label in tags:
+            if label == "Downloaded":
+                tag_bg, tag_fg = (
+                    surface_tint("success", self.tokens), self.tokens["success"],
+                )
+            elif label == "English only":
+                tag_bg, tag_fg = (
+                    surface_tint("muted", self.tokens), self.tokens["muted"],
+                )
+            else:
+                tag_bg, tag_fg = self.tokens["sun"], SUN_TEXT
+            tk.Label(
+                top, text=label, bg=tag_bg, fg=tag_fg,
+                font=(self.font_family, 10, "bold"), padx=7, pady=3,
+            ).pack(side="right", padx=(4, 0))
+        metadata = tk.Frame(surface, bg=self.tokens["surface"])
+        metadata.pack(fill="x", padx=CARD_PADDING, pady=(0, 12))
+        size = f"{model.size_mb / 1000:.1f} GB" if model.size_mb >= 1000 else f"{model.size_mb:,} MB"
+        tk.Label(
+            metadata, text=size, bg=self.tokens["surface"], fg=self.tokens["muted"],
+            font=(self.font_family, 11),
+        ).pack(side="left", padx=(0, 16))
+        for label, score in (("Speed", model.speed), ("Accuracy", model.accuracy)):
+            tk.Label(
+                metadata, text=label, bg=self.tokens["surface"],
+                fg=self.tokens["muted"], font=(self.font_family, 11),
+            ).pack(side="left", padx=(0, 5))
+            dots = tk.Canvas(
+                metadata, width=62, height=8, bg=self.tokens["surface"],
+                highlightthickness=0,
+            )
+            for index in range(5):
+                x = index * 13
+                dots.create_polygon(
+                    x + 2, 2, x + 8, 2, x + 10, 4,
+                    x + 8, 6, x + 2, 6, x, 4,
+                    smooth=True, splinesteps=8,
+                    fill=self.tokens["ink"] if index < score else self.tokens["line"],
+                    outline="",
+                )
+            dots.pack(side="left", padx=(0, 14))
+        if model.blurb:
+            tk.Label(
+                surface, text=model.blurb, bg=self.tokens["surface"],
+                fg=self.tokens["muted"], font=(self.font_family, 11),
+                anchor="w", justify="left", wraplength=560,
+            ).pack(fill="x", padx=CARD_PADDING, pady=(0, 12))
+        return card, surface
+
     def _render_step_0(self) -> None:
         rec_stt, rec_llm = recommend(self.hardware)
+        self._halftone(self.body)
         self._label(
             self.body,
             f"{self.hardware.ram_gb:.0f} GB memory  ·  {self.hardware.free_disk_gb:.0f} GB free disk"
             f"  ·  {'Apple Silicon' if self.hardware.apple_silicon else 'CPU'}",
-            font=("TkDefaultFont", 12, "bold"),
+            font=(self.font_family, 12, "bold"),
         )
         self._card(
             self.body,
@@ -235,33 +447,32 @@ class SetupWindow:
     def _render_step_1(self) -> None:
         self._label(self.body, "Nothing here blocks setup. Fix what you can; you can revisit any time.")
         if self.checks is None:
-            self._label(self.body, "Checking this machine…", fg=TOKENS["muted"])
+            self._label(self.body, "Checking this machine…", fg=self.tokens["muted"])
             self._start_checks()
             return
         if self.error_message or self.status_message:
             self._label(
                 self.body, self.error_message or self.status_message,
-                fg=TOKENS["red"] if self.error_message else TOKENS["muted"],
+                fg=self.tokens["red"] if self.error_message else self.tokens["muted"],
             )
         for check in self.checks:
-            row = tk.Frame(self.body, bg=TOKENS["paper"])
+            row = tk.Frame(self.body, bg=self.tokens["paper"])
             row.pack(fill="x", pady=3)
             badge = "✓" if check.ok else ("?" if check.ok is None else "✗")
-            color = "#16803C" if check.ok else (TOKENS["muted"] if check.ok is None else TOKENS["red"])
-            tk.Label(row, text=badge, fg=color, bg=TOKENS["paper"], font=("TkDefaultFont", 12, "bold")).pack(side="left")
-            tk.Label(row, text=f"{check.label}  ·  {check.detail}", fg=TOKENS["ink"], bg=TOKENS["paper"], anchor="w").pack(side="left", padx=8)
+            color = "#16803C" if check.ok else (self.tokens["muted"] if check.ok is None else self.tokens["red"])
+            tk.Label(row, text=badge, fg=color, bg=self.tokens["paper"], font=(self.font_family, 12, "bold")).pack(side="left")
+            tk.Label(row, text=f"{check.label}  ·  {check.detail}", fg=self.tokens["ink"], bg=self.tokens["paper"], anchor="w").pack(side="left", padx=8)
             if check.fix_label:
                 tk.Button(
                     row, text=check.fix_label, command=lambda item=check: self._fix_check(item),
-                    bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=1,
+                    bg=self.tokens["surface"], fg=self.tokens["ink"], relief="solid", bd=1,
                 ).pack(side="right")
         tk.Button(
             self.body, text="Recheck", command=self._recheck_checks,
-            bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=1,
+            bg=self.tokens["surface"], fg=self.tokens["ink"], relief="solid", bd=1,
         ).pack(anchor="w", pady=(6, 0))
 
     def _render_step_2(self) -> None:
-        self._label(self.body, "Choose the speech model that turns your voice into text.")
         self._show_operation_state()
         content = self._scrolling_body()
         rec_stt, _ = recommend(self.hardware)
@@ -269,20 +480,13 @@ class SetupWindow:
             downloaded = self.downloaded.get(model.id, False)
             tags = []
             if model.id == rec_stt:
-                tags.append("RECOMMENDED")
+                tags.append("Recommended")
             if downloaded:
-                tags.append("DOWNLOADED")
+                tags.append("Downloaded")
             if model.english_only:
-                tags.append("ENGLISH ONLY")
-            detail = (
-                f"{model.size_mb:,} MB   ·   Speed {'●' * model.speed}{'○' * (5 - model.speed)}"
-                f"   Accuracy {'●' * model.accuracy}{'○' * (5 - model.accuracy)}"
-            )
-            if model.blurb:
-                detail += f"   ·   {model.blurb}"
-            card, surface = self._card(
-                content, model.label, detail,
-                selected=self.stt_var.get() == model.id, tag="  ".join(tags),
+                tags.append("English only")
+            card, surface = self._model_card(
+                content, model, self.stt_var.get() == model.id, tags,
             )
             for widget in (card, surface, *surface.winfo_children()):
                 widget.bind("<Button-1>", lambda _e, model_id=model.id: self._select_stt(model_id))
@@ -304,10 +508,9 @@ class SetupWindow:
                 self.body,
                 text="Change in Settings",
                 command=self._open_settings,
-                bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2, padx=12, pady=4,
+                bg=self.tokens["surface"], fg=self.tokens["ink"], relief="solid", bd=2, padx=12, pady=4,
             ).pack(anchor="w", pady=(12, 0))
             return
-        self._label(self.body, "Cleanup fixes punctuation and filler words. No cleanup keeps the raw transcript.")
         self._show_operation_state()
         content = self._scrolling_body()
         if self.llm_var.get() != "none":
@@ -319,7 +522,7 @@ class SetupWindow:
         for widget in (card, surface, *surface.winfo_children()):
             widget.bind("<Button-1>", lambda _e: self._select_llm("none"))
         for model in LLM_MODELS:
-            status = "DOWNLOADED" if model.id in self.ollama_models else ""
+            status = "Downloaded" if model.id in self.ollama_models else ""
             card, surface = self._card(
                 content,
                 model.label,
@@ -336,10 +539,10 @@ class SetupWindow:
             self._label(content, "Ollama is ready.", fg="#16803C")
             tk.Button(content, text="Refresh models", command=self._recheck_ollama).pack(anchor="w")
         elif setup_flow.ollama_installed():
-            self._label(content, "Start Ollama with `ollama serve` or open the Ollama app, then recheck.", fg=TOKENS["muted"])
+            self._label(content, "Start Ollama with `ollama serve` or open the Ollama app, then recheck.", fg=self.tokens["muted"])
             tk.Button(content, text="Recheck", command=self._start_ollama_check).pack(anchor="w")
         else:
-            self._label(content, "Ollama is not installed. Cleanup is optional; install it when you want it.", fg=TOKENS["muted"])
+            self._label(content, "Ollama is not installed. Cleanup is optional; install it when you want it.", fg=self.tokens["muted"])
             tk.Button(
                 content, text="Get Ollama", command=lambda: webbrowser.open("https://ollama.com/download"),
             ).pack(anchor="w")
@@ -347,38 +550,57 @@ class SetupWindow:
             self._start_ollama_check()
 
     def _render_cleanup_level_control(self, parent) -> None:
-        level_row = tk.Frame(parent, bg=TOKENS["paper"])
+        if self.llm_var.get() == "none":
+            return
+        level_row = tk.Frame(parent, bg=self.tokens["paper"])
         level_row.pack(fill="x", pady=(0, 8))
         tk.Label(
             level_row,
             text="Cleanup level",
-            bg=TOKENS["paper"],
-            fg=TOKENS["ink"],
-            font=("TkDefaultFont", 10, "bold"),
+            bg=self.tokens["paper"],
+            fg=self.tokens["ink"],
+            font=(self.font_family, 10, "bold"),
         ).pack(side="left", padx=(0, 10))
+        group = tk.Frame(
+            level_row, bg=self.tokens["surface"],
+            highlightbackground=self.tokens["line"], highlightthickness=1,
+        )
+        group.pack(side="left")
+        self.cleanup_level_buttons = {}
+
+        def style_selection():
+            for option, button in self.cleanup_level_buttons.items():
+                chosen = option == self.cleanup_level_var.get()
+                button.configure(
+                    bg=self.tokens["ink"] if chosen else self.tokens["surface"],
+                    fg=self.tokens["paper"] if chosen else self.tokens["ink"],
+                    activebackground=self.tokens["ink"] if chosen else self.tokens["surface"],
+                    activeforeground=self.tokens["paper"] if chosen else self.tokens["ink"],
+                )
+
+        def select(value):
+            self._select_cleanup_level(value)
+
         for level, label in (("light", "Light"), ("medium", "Medium")):
-            tk.Button(
-                level_row,
-                text=label,
-                command=lambda value=level: self._select_cleanup_level(value),
-                bg=TOKENS["sun"] if self.cleanup_level_var.get() == level else TOKENS["card"],
-                fg=TOKENS["ink"],
-                relief="solid",
-                bd=2,
-                padx=14,
-                pady=4,
-            ).pack(side="left", padx=(0, 8))
+            button = tk.Button(
+                group, text=label, command=lambda value=level: select(value),
+                bg=self.tokens["surface"], fg=self.tokens["ink"],
+                activebackground=self.tokens["surface"], relief="flat", bd=0,
+                padx=16, pady=6, font=(self.font_family, 13, "bold"),
+            )
+            button.pack(side="left", fill="x", expand=True)
+            self.cleanup_level_buttons[level] = button
+        style_selection()
 
     def _render_step_4(self) -> None:
-        self._label(self.body, "Pick a microphone and the key you'll hold to talk.")
         devices = ["System default", *list_input_devices()]
         if self.device_var.get() not in devices:
             self.device_var.set("System default")
-        tk.Label(self.body, text="Microphone", bg=TOKENS["paper"], fg=TOKENS["ink"], font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        tk.Label(self.body, text="Microphone", bg=self.tokens["paper"], fg=self.tokens["ink"], font=(self.font_family, 11, "bold")).pack(anchor="w")
         self.device_box = ttk.Combobox(self.body, textvariable=self.device_var, values=devices, state="readonly")
         self.device_box.pack(fill="x", pady=(2, 12))
         self.device_box.bind("<<ComboboxSelected>>", self._change_device)
-        tk.Label(self.body, text="Hotkey", bg=TOKENS["paper"], fg=TOKENS["ink"], font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        tk.Label(self.body, text="Hotkey", bg=self.tokens["paper"], fg=self.tokens["ink"], font=(self.font_family, 11, "bold")).pack(anchor="w")
         self.hotkey_box = ttk.Combobox(
             self.body,
             textvariable=self.hotkey_var,
@@ -395,45 +617,48 @@ class SetupWindow:
             f"Polish: {self.choices.polish_hotkey or 'disabled'}",
             f"Prompt: {self.choices.prompt_hotkey or 'disabled'}",
         ]
-        card = tk.LabelFrame(self.body, text="Shortcuts", bg=TOKENS["paper"])
+        card = tk.LabelFrame(
+            self.body, text="Shortcuts", bg=self.tokens["paper"],
+            fg=self.tokens["ink"],
+        )
         card.pack(fill="x", pady=(0, 8))
         tk.Label(
             card, text="\n".join(shortcuts), justify="left",
-            bg=TOKENS["paper"], fg=TOKENS["ink"],
+            bg=self.tokens["paper"], fg=self.tokens["ink"],
         ).pack(anchor="w", padx=8, pady=4)
         tk.Checkbutton(
             self.body, text="Pause music while I talk",
-            variable=self.pause_media_var, bg=TOKENS["paper"],
-            activebackground=TOKENS["paper"],
+            variable=self.pause_media_var, bg=self.tokens["paper"],
+            fg=self.tokens["ink"], activebackground=self.tokens["paper"],
+            activeforeground=self.tokens["ink"],
         ).pack(anchor="w", pady=(0, 8))
-        self._label(self.body, "Live mic level", font=("TkDefaultFont", 11, "bold"))
-        self.meter = tk.Canvas(self.body, height=18, bg=TOKENS["card"], highlightbackground=TOKENS["ink"], highlightthickness=1)
+        self._label(self.body, "Live mic level", font=(self.font_family, 11, "bold"))
+        self.meter = tk.Canvas(self.body, height=18, bg=self.tokens["surface"], highlightbackground=self.tokens["ink"], highlightthickness=1)
         self.meter.pack(fill="x")
-        self.meter_bar = self.meter.create_rectangle(0, 0, 0, 18, fill=TOKENS["red"], outline="")
+        self.meter_bar = self.meter.create_rectangle(0, 0, 0, 18, fill=self.tokens["red"], outline="")
         if self._mic_error:
-            self._label(self.body, self._mic_error, fg=TOKENS["red"])
+            self._label(self.body, self._mic_error, fg=self.tokens["red"])
         self.meter.bind("<Configure>", lambda _e: self._draw_meter())
         self._start_monitor()
         self._update_meter()
 
     def _render_step_5(self) -> None:
-        self._label(self.body, "Record five seconds of speech. The selected speech model will transcribe it.")
         self.transcript = tk.Text(
-            self.body, height=7, wrap="word", bg=TOKENS["card"], fg=TOKENS["ink"],
-            relief="solid", bd=2, font=("TkDefaultFont", 12),
+            self.body, height=7, wrap="word", bg=self.tokens["surface"], fg=self.tokens["ink"],
+            relief="solid", bd=2, font=(self.font_family, 12),
         )
         self.transcript.pack(fill="both", expand=True, pady=(8, 10))
         self.transcript.insert("1.0", self.status_message or "Your practice transcript will appear here.")
         self.transcript.configure(state="disabled")
         if self.error_message:
-            self._label(self.body, self.error_message, fg=TOKENS["red"])
+            self._label(self.body, self.error_message, fg=self.tokens["red"])
 
     def _render_step_6(self) -> None:
         self._label(
             self.body,
             f"Speech: {self.stt_var.get()}    ·    Cleanup: "
             f"{self.llm_var.get() if self.llm_var.get() != 'none' else 'off'}",
-            font=("TkDefaultFont", 12, "bold"),
+            font=(self.font_family, 12, "bold"),
         )
         self._label(
             self.body,
@@ -442,52 +667,73 @@ class SetupWindow:
         if self.hardware.system == "Darwin":
             tk.Checkbutton(
                 self.body, text="Start LocalFlow on login", variable=self.start_login_var,
-                bg=TOKENS["paper"], activebackground=TOKENS["paper"],
+                bg=self.tokens["paper"], activebackground=self.tokens["paper"],
             ).pack(anchor="w", pady=(8, 0))
         if self.saved:
-            self._label(self.body, "You're all set. Run `localflow` whenever you're ready.", font=("TkDefaultFont", 13, "bold"))
             tk.Button(
                 self.body, text="Launch localflow now", command=self._launch_localflow,
-                bg=TOKENS["sun"], fg=TOKENS["ink"], relief="solid", bd=2,
+                bg=self.tokens["sun"], fg=SUN_TEXT, relief="solid", bd=2,
             ).pack(anchor="w", pady=(10, 0))
 
     def _render_footer(self) -> None:
-        self._clear(self.footer)
+        self._clear(self.footer_content)
         busy = bool(self._busy)
         model_busy = bool(self._busy & {"stt-download", "llm-pull"})
         if self.step > 0 and not self.saved:
             tk.Button(
-                self.footer, text="Back", command=self.back,
-                bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2,
+                self.footer_content, text="Back", command=self.back,
+                bg=self.tokens["surface"], fg=self.tokens["ink"],
+                activebackground=self.tokens["surface"], relief="solid",
+                bd=1, highlightbackground=self.tokens["line"], padx=16, pady=6,
                 state="disabled" if model_busy else "normal",
             ).pack(side="left")
         if self._cancel is not None and busy and self.step in (2, 3):
             tk.Button(
-                self.footer, text="Cancel", command=self.cancel_download,
-                bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2,
+                self.footer_content, text="Cancel", command=self.cancel_download,
+                bg=self.tokens["surface"], fg=self.tokens["ink"],
+                activebackground=self.tokens["surface"], relief="solid",
+                bd=1, highlightbackground=self.tokens["line"], padx=16, pady=6,
             ).pack(side="left", padx=(8, 0))
         if self.step == 5 and not self.saved:
             tk.Button(
-                self.footer, text="Skip", command=self.next_step,
-                bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2,
+                self.footer_content, text="Skip", command=self.next_step,
+                bg=self.tokens["surface"], fg=self.tokens["ink"],
+                activebackground=self.tokens["surface"], relief="solid",
+                bd=1, highlightbackground=self.tokens["line"], padx=16, pady=6,
             ).pack(side="left", padx=(8, 0))
         text = self._primary_label()
+        self.primary_shell = tk.Frame(
+            self.footer_content, bg=self.tokens["paper"],
+        )
+        self.primary_shell.pack(side="right")
+        self.primary_shadow = tk.Frame(
+            self.primary_shell, bg=self.tokens["shadow"],
+        )
+        self.primary_shadow.place(
+            x=SHADOW_OFFSET, y=SHADOW_OFFSET, relwidth=1, relheight=1,
+        )
         self.primary_button = tk.Button(
-            self.footer,
+            self.primary_shell,
             text=text,
             command=self.primary_action,
-            bg=TOKENS["cobalt"],
+            bg=self.tokens["cobalt"],
             fg="#FFFFFF",
-            activebackground=TOKENS["cobalt"],
+            activebackground=self.tokens["cobalt"],
             activeforeground="#FFFFFF",
             relief="solid",
-            bd=2,
-            padx=20,
-            pady=8,
-            font=("TkDefaultFont", 11, "bold"),
+            bd=0,
+            highlightbackground=self.tokens["ink"],
+            highlightthickness=1,
+            padx=16,
+            pady=6,
+            font=(self.font_family, 13, "bold"),
             state="disabled" if busy else "normal",
         )
-        self.primary_button.pack(side="right")
+        self.primary_button.pack(
+            fill="both", padx=(0, SHADOW_OFFSET), pady=(0, SHADOW_OFFSET),
+            ipady=2,
+        )
+        self.primary_shadow.lower()
 
     def _primary_label(self) -> str:
         if self.saved:
@@ -659,7 +905,7 @@ class SetupWindow:
             return
         width = max(1, self.meter.winfo_width())
         level = self._monitor.level() if self._monitor is not None else 0.0
-        color = TOKENS["red"] if level > 0.6 else TOKENS["cobalt"]
+        color = self.tokens["red"] if level > 0.6 else self.tokens["cobalt"]
         self.meter.coords(self.meter_bar, 0, 0, int(width * level), 18)
         self.meter.itemconfigure(self.meter_bar, fill=color)
 
@@ -670,21 +916,33 @@ class SetupWindow:
             return
         error = bool(self.error_message)
         strip = tk.Frame(
-            self.body, bg=TOKENS["red"] if error else TOKENS["sun"],
-            highlightbackground=TOKENS["ink"], highlightthickness=2,
+            self.body, bg=self.tokens["surface"],
+            highlightbackground=self.tokens["line"], highlightthickness=1,
         )
         strip.pack(fill="x", pady=(0, 10))
+        tk.Frame(strip, width=4, bg=self.tokens["red"] if error else self.tokens["cobalt"]).pack(
+            side="left", fill="y",
+        )
         self._progress_var.set(self.error_message or self.status_message)
+        content = tk.Frame(strip, bg=self.tokens["surface"])
+        content.pack(side="left", fill="both", expand=True, padx=12, pady=10)
         tk.Label(
-            strip, textvariable=self._progress_var,
-            bg=strip["bg"], fg="#FFFFFF" if error else TOKENS["ink"],
-            font=("TkDefaultFont", 11, "bold"), anchor="w", justify="left", wraplength=520,
-        ).pack(side="left", fill="x", expand=True, padx=12, pady=8)
+            content, text="Download error" if error else "Download progress",
+            bg=self.tokens["surface"], fg=self.tokens["red"] if error else self.tokens["ink"],
+            font=(self.font_family, 13, "bold"), anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            content, textvariable=self._progress_var,
+            bg=self.tokens["surface"], fg=self.tokens["muted"],
+            font=(self.font_family, 13), anchor="w", justify="left",
+            wraplength=520,
+        ).pack(anchor="w", pady=(2, 0))
         if error:
             tk.Button(
                 strip, text="Retry", command=self.primary_action,
-                bg=TOKENS["card"], fg=TOKENS["ink"], relief="solid", bd=2,
-            ).pack(side="right", padx=8, pady=6)
+                bg=self.tokens["surface"], fg=self.tokens["ink"],
+                relief="solid", bd=1, highlightbackground=self.tokens["line"],
+            ).pack(side="right", padx=12, pady=10)
 
     def _poll_events(self) -> None:
         while True:
@@ -907,7 +1165,7 @@ class SetupWindow:
                 self._start_job("apply", lambda: setup_flow.apply(self.choices))
 
     def _select_cleanup_level(self, level: str) -> None:
-        if level not in ("light", "medium"):
+        if level not in ("none", "light", "medium"):
             return
         self.cleanup_level_var.set(level)
         self.choices = replace(self.choices, cleanup_level=level)

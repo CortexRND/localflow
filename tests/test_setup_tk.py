@@ -65,13 +65,34 @@ def test_setup_window_renders_all_seven_steps(monkeypatch):
     window._ollama_checked = True
     rendered = []
     try:
+        style = setup_tk.ttk.Style(root)
+        scrollbar_layout = repr(style.layout("Slim.Vertical.TScrollbar"))
+        assert "uparrow" not in scrollbar_layout and "downarrow" not in scrollbar_layout
+        assert int(style.configure("Slim.Vertical.TScrollbar")["width"]) == 8
+        assert style.lookup("Slim.Vertical.TScrollbar", "troughcolor") == window.tokens["paper"]
+        assert style.lookup("Slim.Vertical.TScrollbar", "background") == window.tokens["line"]
         for step in range(7):
             window.step = step
             window._render()
             root.update_idletasks()
             assert window.title_label.cget("text")
             assert window.primary_button.winfo_exists()
+            assert window.primary_shadow.cget("bg") == window.tokens["shadow"]
             rendered.append(window.title_label.cget("text"))
+            if step == 2:
+                canvases = [
+                    child for child in _descendants(window.body)
+                    if isinstance(child, tk.Canvas)
+                ]
+                assert any(
+                    child.cget("width") == "16" and child.cget("height") == "16"
+                    for child in canvases
+                )
+                assert any(
+                    child.cget("width") == "62" and child.cget("height") == "8"
+                    and len(child.find_all()) == 5
+                    for child in canvases
+                )
         assert rendered == [
             "Let's get you talking.",
             "A quick setup check.",
@@ -102,6 +123,22 @@ def test_setup_window_renders_all_seven_steps(monkeypatch):
         )
         assert "ollama-check" not in window._busy
         assert window._ollama_checked is False
+        window.step = 6
+        window.error_message = "Could not save settings"
+        window._render()
+        assert any(
+            isinstance(child, tk.Label)
+            and child.cget("text") == "Could not save settings"
+            for child in window.body.winfo_children()
+        )
+        window._clear(window.body)
+        window.llm_var.set("whisper-tiny")
+        window._render_cleanup_level_control(window.body)
+        assert set(window.cleanup_level_buttons) == {"light", "medium"}
+        window._clear(window.body)
+        window.llm_var.set("none")
+        window._render_cleanup_level_control(window.body)
+        assert not window.body.winfo_children()
     finally:
         root.destroy()
 
@@ -134,6 +171,17 @@ def test_shortcut_card_and_pause_media_toggle_render(monkeypatch):
         assert any("Shortcuts" in str(label) for label in labels)
         assert any("Pause music while I talk" in str(label) for label in labels)
         assert any("Command:" in str(label) for label in labels)
+        pause_toggle = next(
+            widget for widget in descendants
+            if isinstance(widget, tk.Checkbutton)
+        )
+        shortcuts_card = next(
+            widget for widget in descendants
+            if isinstance(widget, tk.LabelFrame)
+        )
+        assert pause_toggle.cget("fg") == window.tokens["ink"]
+        assert pause_toggle.cget("activeforeground") == window.tokens["ink"]
+        assert shortcuts_card.cget("fg") == window.tokens["ink"]
     finally:
         window.close()
 
@@ -171,7 +219,7 @@ def test_stt_download_renders_once_and_advances_after_completion(
 
         assert window.error_message == ""
         primary_buttons = [
-            child for child in window.footer.winfo_children()
+            child for child in _descendants(window.footer)
             if isinstance(child, tk.Button)
             and child.cget("text") in {"Download & continue", "Downloading…"}
         ]
@@ -184,8 +232,9 @@ def test_stt_download_renders_once_and_advances_after_completion(
             for child in _descendants(window.body)
         )
         assert any(
-            isinstance(child, tk.Frame) and child.cget("bg") == setup_tk.TOKENS["sun"]
-            for child in window.body.winfo_children()
+            isinstance(child, tk.Label)
+            and child.cget("text") == "Download progress"
+            for child in _descendants(window.body)
         )
         window._select_stt("fw-base")
         assert window.stt_var.get() == "fw-tiny"
