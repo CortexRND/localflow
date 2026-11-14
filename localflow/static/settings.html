@@ -5,21 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="localflow-token" content="__LOCALFLOW_TOKEN__">
 <title>localflow settings</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Anton&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #6438d8;
-    --fg: #f2e8d0;
-    --accent: #edff45;
-    --paper: #faf5e8;
-    --ink: #2a1a5e;
-    --rule: color-mix(in srgb, var(--bg) 25%, var(--paper));
-    --ok: #1f7a3f;
-    --bad: #b3261e;
-    --font-display: "Anton", "Arial Narrow", Impact, sans-serif;
+    /* mirrors localflow/ui_tokens.py LIGHT so web and native Hub match */
+    --bg: #141414;        /* sidebar */
+    --fg: #FBF6EC;        /* sidebar text */
+    --accent: #FFD23F;    /* sun */
+    --paper: #FBF6EC;
+    --ink: #141414;
+    --cobalt: #2346D8;
+    --rule: #E6DFD0;
+    --ok: #1F7A3F;   /* darker than ui_tokens success: small text needs 4.5:1 */
+    --bad: #B3261E;  /* darker than ui_tokens red, same reason */
+    --font-display: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    --font-sans: ui-sans-serif, system-ui, sans-serif;
+    --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--font-sans); }
@@ -28,7 +28,7 @@
 
   .shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
   nav { padding: 2rem 1.25rem; border-right: 1px solid color-mix(in srgb, var(--fg) 30%, var(--bg)); }
-  nav h1 { font: 400 2.6rem/0.9 var(--font-display); text-transform: uppercase; margin: 0 0 0.25rem; }
+  nav h1 { font: 800 1.9rem/1 var(--font-display); letter-spacing: -0.02em; text-transform: uppercase; margin: 0 0 0.25rem; }
   nav .sub { font-family: var(--font-mono); font-size: 0.65rem; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 2rem; }
   nav .sub b { color: var(--accent); }
   nav button {
@@ -41,9 +41,9 @@
 
   main { padding: 2rem clamp(1.25rem, 4vw, 3rem); background: var(--paper); color: var(--ink); }
   section[hidden] { display: none; }
-  h2 { font: 400 2.2rem/0.9 var(--font-display); text-transform: uppercase; margin: 0 0 1.5rem; color: var(--bg); }
+  h2 { font: 800 1.75rem/1.1 var(--font-display); letter-spacing: -0.02em; text-transform: uppercase; margin: 0 0 1.5rem; color: var(--bg); }
   .eyebrow { display: inline-block; border: 1px solid var(--bg); color: var(--bg); font: 800 0.62rem var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase; padding: 0.3rem 0.7rem; margin-bottom: 1rem; }
-  .card { border: 1px solid var(--rule); padding: 1.25rem; margin-bottom: 1.25rem; max-width: 46rem; background: #fff8; }
+  .card { border: 1px solid var(--rule); padding: 1.25rem; margin-bottom: 1.25rem; max-width: 46rem; background: #FFFFFF; border-radius: 12px; box-shadow: 3px 3px 0 var(--ink); }
   .row { display: grid; grid-template-columns: 180px 1fr; gap: 0.5rem 1rem; align-items: center; margin-bottom: 0.9rem; }
   .row label { font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
   .row .hint { grid-column: 2; font-size: 0.8rem; opacity: 0.75; margin-top: -0.4rem; }
@@ -51,15 +51,15 @@
     width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--bg); background: #fff; color: var(--ink); font: inherit; border-radius: 0;
   }
   textarea { font-family: var(--font-mono); font-size: 0.8rem; min-height: 16rem; }
-  input[type=checkbox] { width: 1.1rem; height: 1.1rem; accent-color: var(--bg); }
+  input[type=checkbox] { width: 1.1rem; height: 1.1rem; accent-color: var(--cobalt); }
   .inline { display: flex; gap: 0.5rem; align-items: center; }
   .inline > * { flex: 1; }
   .inline > button { flex: 0 0 auto; }
   button.btn {
-    background: var(--bg); color: var(--fg); border: 1px solid var(--bg); padding: 0.5rem 1rem; cursor: pointer;
+    background: var(--cobalt); color: #FFFFFF; border: 1px solid var(--cobalt); border-radius: 10px; padding: 0.5rem 1rem; cursor: pointer;
     font: 800 0.72rem var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase;
   }
-  button.btn.secondary { background: transparent; color: var(--bg); }
+  button.btn.secondary { background: transparent; color: var(--cobalt); }
   button.btn:disabled { opacity: 0.5; cursor: default; }
   .actions { display: flex; gap: 0.75rem; align-items: center; margin-top: 1rem; }
   .badge { display: inline-block; font: 800 0.62rem var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; padding: 0.15rem 0.5rem; border: 1px solid currentColor; }
@@ -81,6 +81,8 @@
     .row { grid-template-columns: 1fr; }
     .row .hint { grid-column: 1; }
   }
+  main :focus-visible { outline-color: var(--cobalt); }
+  input[type=text], input[type=password], input[type=number], select, textarea { border-radius: 10px; }
 </style>
 </head>
 <body>
