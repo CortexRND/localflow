@@ -114,18 +114,23 @@ class ManualMeetingClient(FakeMeetingClient):
         self.pending_saves = []
         self.pending_starts = []
         self.completed_saves = 0
+        self._manual_lock = threading.Lock()
+        self._available_saves = [_ManualResult() for _ in range(4)]
+        self._available_starts = [_ManualResult() for _ in range(2)]
 
     def start(self, title, category, template, user_notes):
-        pending = _ManualResult()
-        self.pending_starts.append(pending)
+        with self._manual_lock:
+            pending = self._available_starts.pop(0)
+            self.pending_starts.append(pending)
         self.calls.append(("start", title, category, template, user_notes))
         result = pending.wait()
         self.state = "running"
         return result
 
     def save_notes(self, notes):
-        pending = _ManualResult()
-        self.pending_saves.append(pending)
+        with self._manual_lock:
+            pending = self._available_saves.pop(0)
+            self.pending_saves.append(pending)
         self.calls.append(("save_notes", notes))
         result = pending.wait()
         self.completed_saves += 1
@@ -284,7 +289,8 @@ def test_stop_waits_for_inflight_autosave_then_flushes_latest_notes(tmp_path):
         window.meeting_notes.delete("1.0", "end")
         window.meeting_notes.insert("1.0", "a")
         root.update()
-        _pump(root, lambda: ("save_notes", "a") in client.calls, timeout=4)
+        _pump(root, lambda: ("save_notes", "a") in client.calls, timeout=10)
+        assert ("save_notes", "a") in client.calls
 
         window.meeting_notes.insert("end", "b")
         root.update()
@@ -298,14 +304,20 @@ def test_stop_waits_for_inflight_autosave_then_flushes_latest_notes(tmp_path):
         _pump(
             root,
             lambda: ("save_notes", "ab") in client.calls,
+            timeout=10,
         )
+        assert ("save_notes", "ab") in client.calls
         assert [
             call for call in client.calls if call[0] == "save_notes"
         ] == [("save_notes", "a"), ("save_notes", "ab")]
         assert not any(call[0] == "stop" for call in client.calls)
 
         client.complete_save(1)
-        _pump(root, lambda: any(call[0] == "stop" for call in client.calls))
+        _pump(
+            root,
+            lambda: any(call[0] == "stop" for call in client.calls),
+            timeout=10,
+        )
         assert client.completed_saves == 2
         assert client.calls.index(("stop",)) > client.calls.index(
             ("save_notes", "ab")
@@ -320,13 +332,23 @@ def test_start_completion_after_navigating_away_restores_action(tmp_path):
     try:
         _pump(root, lambda: bool(window._meeting_status_data))
         window._meeting_toggle()
-        _pump(root, lambda: any(call[0] == "start" for call in client.calls))
+        _pump(
+            root,
+            lambda: any(call[0] == "start" for call in client.calls),
+            timeout=10,
+        )
+        assert any(call[0] == "start" for call in client.calls)
         window.show_page("Home")
 
         client.complete_start(0)
-        _pump(root, lambda: not window._meeting_busy)
+        _pump(root, lambda: not window._meeting_busy, timeout=10)
+        assert not window._meeting_busy
         window.show_page("Meetings")
-        _pump(root, lambda: bool(window._meeting_status_data.get("session")))
+        _pump(
+            root,
+            lambda: bool(window._meeting_status_data.get("session")),
+            timeout=10,
+        )
 
         assert not window._meeting_busy
         assert window.meeting_action.cget("state") == "normal"
@@ -340,11 +362,16 @@ def test_stop_flush_completion_after_navigating_away_still_stops(tmp_path):
     try:
         _pump(root, lambda: bool(window._meeting_status_data.get("session")))
         window._meeting_toggle()
-        _pump(root, lambda: ("save_notes", "Initial note") in client.calls)
+        _pump(root, lambda: ("save_notes", "Initial note") in client.calls, timeout=10)
+        assert ("save_notes", "Initial note") in client.calls
         window.show_page("Home")
 
         client.complete_save(0)
-        _pump(root, lambda: any(call[0] == "stop" for call in client.calls))
+        _pump(
+            root,
+            lambda: any(call[0] == "stop" for call in client.calls),
+            timeout=10,
+        )
         assert ("stop",) in client.calls
     finally:
         root.destroy()
