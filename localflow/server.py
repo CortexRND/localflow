@@ -115,7 +115,9 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
-    if request.url.path.startswith("/api/") or request.url.path == "/settings":
+    is_api = request.url.path.startswith("/api/") or request.url.path == "/settings"
+    is_meeting = request.url.path.startswith("/meeting/")
+    if is_api or is_meeting:
         client_host = request.client.host if request.client else ""
         loopback = client_host in ("127.0.0.1", "::1", "localhost")
         supplied_token = request.headers.get("X-Localflow-Token") or request.query_params.get(
@@ -129,7 +131,7 @@ async def _api_auth(request: Request, call_next):
                 host = None
             if (host or "").lower() not in ("127.0.0.1", "localhost", "::1"):
                 return JSONResponse({"detail": "invalid host"}, status_code=403)
-        if loopback and request.method in ("GET", "HEAD", "OPTIONS"):
+        if loopback and (is_meeting or request.method in ("GET", "HEAD", "OPTIONS")):
             origin = request.headers.get("Origin")
             if origin:
                 origin_host = urlparse(origin).netloc
@@ -489,6 +491,7 @@ def meeting_status() -> dict:
         "capture_system_audio": _config.capture_system_audio,
         "session": live,
         "last_saved": last_saved,
+        "chat_available": _chat_transcript_path() is not None,
     }
 
 

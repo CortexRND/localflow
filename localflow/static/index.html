@@ -1087,6 +1087,13 @@
   let notesTimer = null;
   let notesInFlight = null;    // promise of the save currently on the wire
   let notesLoadedFor = null;   // session we've synced the textarea from
+  const meetingToken = new URLSearchParams(location.search).get('token') || '';
+
+  function meetingFetch(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    if (meetingToken) headers.set('X-Localflow-Token', meetingToken);
+    return fetch(path, { ...options, headers });
+  }
 
   function fmtSeconds(s) {
     const m = Math.floor(s / 60);
@@ -1100,7 +1107,7 @@
 
   async function loadTemplates() {
     try {
-      const resp = await fetch('/meeting/templates');
+      const resp = await meetingFetch('/meeting/templates');
       if (!resp.ok) return;
       const data = await resp.json();
       meetingTemplate.textContent = '';
@@ -1127,7 +1134,7 @@
     setNotesStatus('Saving…');
     notesInFlight = (async () => {
       try {
-        const resp = await fetch('/meeting/notes', {
+        const resp = await meetingFetch('/meeting/notes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ notes: text }),
@@ -1144,6 +1151,8 @@
       }
     })();
     await notesInFlight;
+    if (notesDirty) return saveNotes();
+    return true;
   }
 
   meetingNotes.addEventListener('input', () => {
@@ -1161,7 +1170,7 @@
 
   async function pollMeeting() {
     try {
-      const resp = await fetch('/meeting/status');
+      const resp = await meetingFetch('/meeting/status');
       if (!resp.ok) return;
       const st = await resp.json();
       const live = st.session;
@@ -1205,6 +1214,10 @@
         meetingBtn.classList.remove('live');
       }
       if (st.last_saved && !live) showSaved(st.last_saved);
+      else if (st.chat_available && !live) {
+        meetingChat.style.display = 'block';
+        chatScope.textContent = 'most recent saved meeting';
+      }
     } catch (_) { /* server briefly away; next poll recovers */ }
   }
 
@@ -1219,7 +1232,7 @@
   }
 
   meetingDismiss.addEventListener('click', async () => {
-    await fetch('/meeting/dismiss', { method: 'POST' });
+    await meetingFetch('/meeting/dismiss', { method: 'POST' });
     meetingBanner.style.display = 'none';
   });
 
@@ -1232,7 +1245,7 @@
         meetingSaved.style.display = 'none';
         meetingChat.style.display = 'none';
         chatLog.textContent = '';
-        const resp = await fetch('/meeting/start', {
+        const resp = await meetingFetch('/meeting/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1247,10 +1260,13 @@
         notesLoadedFor = 'local';
         setNotesStatus(meetingNotes.value ? 'Saved' : '');
       } else {
-        await saveNotes();  // the last keystrokes must make it into the notes
+        const notesSaved = await saveNotes();
+        if (!notesSaved || notesDirty) {
+          throw new Error('notes could not be saved; the meeting is still running');
+        }
         meetingBtn.textContent = meetingNotes.value.trim()
           ? 'Enhancing your notes…' : 'Summarizing & saving…';
-        const resp = await fetch('/meeting/stop', { method: 'POST' });
+        const resp = await meetingFetch('/meeting/stop', { method: 'POST' });
         if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText);
         const saved = await resp.json();
         showSaved(saved);
@@ -1286,7 +1302,7 @@
     chatItem('q', question);
     const answer = chatItem('a pending', 'Reading the transcript…');
     try {
-      const resp = await fetch('/meeting/chat', {
+      const resp = await meetingFetch('/meeting/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),

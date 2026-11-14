@@ -577,12 +577,13 @@ def answer_question(llm: LLMProvider, transcript: str, question: str,
 
 
 def read_transcript_log(path: Path) -> str:
-    """The transcript body of a saved log, without frontmatter or the notes link."""
+    """The spoken transcript only, without metadata, raw notes, or the notes link."""
     text = Path(path).read_text(encoding="utf-8")
     if text.startswith("---\n"):
         end = text.find("\n---\n", 4)
         if end != -1:
             text = text[end + 5:]
+    text = text.split("\n## My raw notes\n", 1)[0]
     lines = [line for line in text.strip().splitlines() if not line.startswith("Notes: [[")]
     return "\n".join(lines).strip()
 
@@ -648,7 +649,8 @@ class ObsidianWriter:
             frontmatter
             + f"# {title}\n\n"
             + notes_md.strip() + "\n\n"
-            + f"Raw transcript: [[{log_path.stem}]]\n"
+            + f"Raw transcript: [[{log_path.stem}]]\n",
+            encoding="utf-8",
         )
         if has_speakers(segments):
             lines = (f"**{s.stamp}** **{s.speaker}:** {s.text}" for s in segments)
@@ -663,7 +665,8 @@ class ObsidianWriter:
             + f"# {title} — transcript\n\n"
             + (transcript_body or "(no speech captured)") + "\n\n"
             + raw_notes
-            + f"Notes: [[{notes_path.stem}]]\n"
+            + f"Notes: [[{notes_path.stem}]]\n",
+            encoding="utf-8",
         )
         log.info("wrote %s and %s", notes_path, log_path)
         return SavedNote(notes_path, log_path)

@@ -348,3 +348,14 @@ def test_open_system_audio_explains_when_nothing_found(monkeypatch):
         system_audio.open_system_audio(16000)
     with pytest.raises(system_audio.SystemAudioUnavailable, match="BlackHole"):
         system_audio.open_system_audio(16000, "BlackHole")
+
+
+def test_read_transcript_log_excludes_raw_notes(tmp_path):
+    saved = ObsidianWriter(tmp_path, "notes", "logs").write(
+        title="Sync", category="Zoom", started_at=datetime(2026, 11, 14, 9, 0),
+        duration_seconds=60, notes_md="ok", segments=[Segment(0, "we said this")],
+        user_notes="- tentative idea nobody said",
+    )
+    body = read_transcript_log(saved.log_path)
+    assert "we said this" in body
+    assert "tentative idea" not in body

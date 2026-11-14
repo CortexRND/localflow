@@ -221,3 +221,26 @@ def test_chat_surfaces_llm_errors(client):
     resp = client.post("/meeting/chat", json={"question": "q"})
     assert resp.status_code == 502
     assert "ollama not running" in resp.json()["detail"]
+
+
+def test_meeting_routes_require_token_off_loopback(client, monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    with TestClient(
+        server.app, base_url="http://10.0.0.5:8756", client=("10.0.0.5", 1234)
+    ) as remote:
+        assert remote.post("/meeting/chat", json={"question": "q"}).status_code == 403
+        assert remote.post("/meeting/notes", json={"notes": "x"}).status_code == 403
+        assert remote.get(
+            "/meeting/status", headers={"X-Localflow-Token": "test-token"}
+        ).status_code == 200
+
+
+def test_status_reports_chat_available_from_disk_after_restart(client):
+    assert client.get("/meeting/status").json()["chat_available"] is False
+    cfg = server._config
+    ObsidianWriter(cfg.vault_path, cfg.notes_folder, cfg.logs_folder).write(
+        title="Old", category="Zoom", started_at=datetime(2026, 11, 13, 9, 0),
+        duration_seconds=60, notes_md="ok", segments=[Segment(0, "hi")],
+    )
+    assert client.get("/meeting/status").json()["chat_available"] is True
