@@ -1124,11 +1124,14 @@
 
   // Save the notepad now. Before a meeting starts there's nothing to save to:
   // the text rides along with /meeting/start instead.
+  // Resolves true once the latest text is on the server, false if a save failed.
+  // A failure is not retried here; the status poll retries it.
   async function saveNotes() {
     clearTimeout(notesTimer);
     notesTimer = null;
-    if (!meetingActive || !notesDirty) return;
-    if (notesInFlight) await notesInFlight;
+    if (!meetingActive) return true;
+    while (notesInFlight) await notesInFlight;
+    if (!notesDirty) return true;
     const text = meetingNotes.value;
     notesDirty = false;
     setNotesStatus('Saving…');
@@ -1143,16 +1146,17 @@
         if (!notesDirty) {
           setNotesStatus('Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
         }
+        return true;
       } catch (err) {
         notesDirty = true;
         setNotesStatus('Not saved — ' + err.message, true);
+        return false;
       } finally {
         notesInFlight = null;
       }
     })();
-    await notesInFlight;
-    if (notesDirty) return saveNotes();
-    return true;
+    if (!(await notesInFlight)) return false;
+    return notesDirty ? saveNotes() : true;  // typed while the request was on the wire
   }
 
   meetingNotes.addEventListener('input', () => {
