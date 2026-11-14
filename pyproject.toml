@@ -30,6 +30,10 @@ dependencies = [
 mlx = ["mlx-whisper"]
 parakeet = ["parakeet-mlx"]
 menubar = ["rumps"]
+system-audio = [
+    "pyobjc-framework-ScreenCaptureKit>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreMedia>=10; sys_platform == 'darwin'",
+]
 macos-permissions = [
     "pyobjc-framework-AVFoundation>=10; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices>=10; sys_platform == 'darwin'",

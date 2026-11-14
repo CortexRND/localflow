@@ -48,5 +48,9 @@ jobs:
           tests/test_platform.py
           tests/test_config.py
           tests/test_providers.py
+          localflow/meeting_templates.py
+          localflow/system_audio.py
+          tests/test_meetings.py
+          tests/test_meeting_api.py
       - name: Test
         run: pytest -q

@@ -188,6 +188,57 @@ The repo selector accepts `path:/abs/repo`, `name:<name>`, or `id:<repoId>`;
 `path:` is the easiest to write by hand. List registered repos with
 `orca repo list --json`.
 
+### Meeting notes: notepad, templates, chat
+
+The web UI's Meeting panel works like Granola's notepad (see
+[docs/granola-parity.md](docs/granola-parity.md)):
+
+- **Your notes** — jot rough notes before or during the meeting; they autosave to
+  `POST /meeting/notes`. On stop the LLM *enhances* them from the transcript, keeping
+  your headings, order and emphasis, then adds any template sections you didn't cover.
+  Your raw notes are also kept at the bottom of the transcript log.
+- **Templates** — pick General, Standup or 1:1 before starting (`template` on
+  `POST /meeting/start`; default `[meetings] default_template`). Add your own by dropping
+  Markdown files into `templates_dir` (`~/.localflow/meeting_templates/`); a file with the
+  same name as a built-in replaces it:
+
+  ```markdown
+  ---
+  name: Customer call
+  description: Discovery call with a prospect.
+  ---
+  Focus on what the customer said, not what I said. Quote numbers exactly.
+
+  ## Pain Points
+  Bulleted list of problems the customer described, in their words.
+
+  ## Next Steps
+  Bulleted list with owner and date.
+  ```
+
+  Text before the first `## ` header is general guidance; each `## ` header is a section
+  and the text under it tells the LLM what goes there.
+- **Ask the transcript** — after a meeting is saved, ask questions about it
+  (`POST /meeting/chat {"question": ...}`). Answers come from the last saved transcript
+  log (or the newest one in the vault after a restart) via the configured LLM provider.
+
+**Remote participants (system audio).** By default only the mic is recorded, so the
+transcript is mostly you. Set `[meetings] capture_system_audio = true` to also
+transcribe what the machine plays; segments are then tagged **Me** (mic) or **Others**
+(system audio) in the live log, the transcript log and the LLM prompts.
+
+- **macOS 13+ (ScreenCaptureKit):** `pip install -e '.[system-audio]'`, then grant
+  *Screen Recording* to the Python binary running LocalFlow (System Settings → Privacy &
+  Security). No virtual device needed.
+- **Fallback (BlackHole):** `brew install blackhole-2ch`, create a *Multi-Output Device*
+  in Audio MIDI Setup with your speakers/headphones + BlackHole, make it the system
+  output, and set `system_audio_device = "BlackHole 2ch"`. On Linux use a PulseAudio /
+  PipeWire `.monitor` source; on Windows "Stereo Mix".
+
+If system audio can't be opened the meeting still records the mic and the panel shows
+"mic only — system audio unavailable" (hover for the reason). Wear headphones: on
+speakers the mic also hears the remote side, which then appears twice.
+
 ### Hot phrases
 
 Hot phrases let you paste a saved long prompt by speaking a short trigger
@@ -399,6 +450,10 @@ notes_folder = "notes/meetings"
 logs_folder = "notes/transcripts"
 orca_repo = "path:/Users/you/projs/myrepo"
 orca_agent = "claude"
+capture_system_audio = false       # also transcribe remote participants (see below)
+system_audio_device = ""           # loopback input, e.g. "BlackHole 2ch"; empty = auto
+default_template = "general"       # general | standup | one-on-one | your own
+templates_dir = "~/.localflow/meeting_templates"
 ```
 
 All keys are optional; defaults shown above apply.

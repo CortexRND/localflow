@@ -37,17 +37,23 @@ from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.log import setup_logging
+from localflow.meeting_templates import load_templates, resolve_template
 from localflow.meetings import (
     MeetingSession,
     MeetingSummarizer,
     MeetingWatcher,
     ObsidianWriter,
+    answer_question,
+    format_transcript,
+    latest_transcript_log,
+    read_transcript_log,
 )
 from localflow.platform import current
 from localflow.providers.factory import build_llm, build_stt, build_workprompts_llm
 from localflow.secrets import SecretsUnavailable
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
+from localflow.system_audio import open_system_audio
 from localflow.workprompts import WorkPromptGenerator
 
 app = FastAPI()
@@ -410,9 +416,43 @@ async def transcribe(file: UploadFile, clean: int = 0) -> dict:
     return {"text": text, "ms": elapsed_ms}
 
 
+MAX_USER_NOTES_CHARS = 100_000
+MAX_CHAT_QUESTION_CHARS = 2_000
+
+
 class MeetingStart(BaseModel):
     title: str = "Meeting"
     category: str = ""
+    template: str = ""     # template id; empty = [meetings] default_template
+    user_notes: str = ""   # notes typed before pressing start
+
+
+class MeetingNotes(BaseModel):
+    notes: str
+
+
+class MeetingChat(BaseModel):
+    question: str
+
+
+def _templates() -> dict:
+    return load_templates(_config.meeting_templates_dir)
+
+
+@app.get("/meeting/templates")
+def meeting_templates() -> dict:
+    templates = _templates()
+    default = _config.meeting_default_template
+    if default not in templates:
+        default = resolve_template(None, _config.meeting_templates_dir).id
+    return {
+        "default": default,
+        "templates": [
+            {"id": t.id, "name": t.name, "description": t.description,
+             "sections": t.section_names()}
+            for t in templates.values()
+        ],
+    }
 
 
 @app.get("/meeting/status")
@@ -424,9 +464,14 @@ def meeting_status() -> dict:
         live = {
             "title": meta.get("title", "Meeting"),
             "category": meta.get("category", "Other"),
+            "template": meta.get("template", ""),
+            "user_notes": meta.get("user_notes", ""),
+            "system_audio": session.system_audio_status,
+            "system_audio_error": session.system_audio_error,
             "seconds": int(session.elapsed_seconds()),
             "segments": [
-                {"stamp": s.stamp, "text": s.text} for s in session.segments[-8:]
+                {"stamp": s.stamp, "text": s.text, "source": s.source}
+                for s in session.segments[-8:]
             ],
             "segment_count": len(session.segments),
         }
@@ -441,14 +486,32 @@ def meeting_status() -> dict:
         "detected": _watcher.detected,
         "platform": _watcher.platform,
         "auto_start": _config.meeting_auto_start,
+        "capture_system_audio": _config.capture_system_audio,
         "session": live,
         "last_saved": last_saved,
     }
 
 
-def _start_session(title: str, category: str) -> dict:
+def _open_system_audio():
+    """System audio source per config, or (None, reason). Never raises."""
+    if not _config.capture_system_audio:
+        return None, ""
+    try:
+        return open_system_audio(_config.sample_rate, _config.system_audio_device), ""
+    except Exception as exc:  # noqa: BLE001 - a missing source means mic-only
+        log.warning("system audio unavailable; mic only: %s", exc)
+        return None, str(exc) or type(exc).__name__
+
+
+def _start_session(title: str, category: str, template: str = "",
+                   user_notes: str = "") -> dict:
     """Claim the session slot, then open the mic. Shared by HTTP and the watcher."""
     global _session, _session_meta, _last_saved, _session_state
+    template_id = template or _config.meeting_default_template
+    if template and template not in _templates():
+        raise HTTPException(status_code=400, detail=f"unknown template {template!r}")
+    if len(user_notes) > MAX_USER_NOTES_CHARS:
+        raise HTTPException(status_code=413, detail="notes too long")
     with _session_lock:
         if _session_state != "idle":
             raise HTTPException(
@@ -461,12 +524,15 @@ def _start_session(title: str, category: str) -> dict:
     category = category or _watcher.platform or "Other"
     _watcher.pause()  # we hold the mic now; don't self-detect
     try:
+        system_audio, system_error = _open_system_audio()
         session = MeetingSession(
             _get_transcriber(),
             _transcribe_lock,
             sample_rate=_config.sample_rate,
             chunk_seconds=_config.meeting_chunk_seconds,
+            system_audio=system_audio,
         )
+        session.system_audio_error = system_error
         session.start()
     except Exception as exc:
         _watcher.resume()
@@ -476,12 +542,23 @@ def _start_session(title: str, category: str) -> dict:
 
     with _session_lock:
         _session = session
-        _session_meta = {"title": title or "Meeting", "category": category}
+        _session_meta = {
+            "title": title or "Meeting",
+            "category": category,
+            "template": template_id,
+            "user_notes": user_notes,
+        }
         _last_saved = None
         _session_state = "running"
     if _config.sounds_enabled:
         sounds.play("start")
-    return {"ok": True, "category": category}
+    return {
+        "ok": True,
+        "category": category,
+        "template": template_id,
+        "system_audio": session.system_audio_status,
+        "system_audio_error": session.system_audio_error,
+    }
 
 
 def _on_meeting_detected(platform: str) -> None:
@@ -501,7 +578,54 @@ def _on_meeting_detected(platform: str) -> None:
 
 @app.post("/meeting/start")
 def meeting_start(body: MeetingStart) -> dict:
-    return _start_session(body.title, body.category)
+    return _start_session(body.title, body.category, body.template, body.user_notes)
+
+
+@app.post("/meeting/notes")
+def meeting_notes(body: MeetingNotes) -> dict:
+    """Save the in-meeting notepad; the latest save is what gets enhanced on stop."""
+    if len(body.notes) > MAX_USER_NOTES_CHARS:
+        raise HTTPException(status_code=413, detail="notes too long")
+    with _session_lock:
+        if _session_state != "running":
+            raise HTTPException(status_code=409, detail="no meeting session running")
+        _session_meta["user_notes"] = body.notes
+    return {"ok": True, "chars": len(body.notes)}
+
+
+def _chat_transcript_path() -> Path | None:
+    with _session_lock:
+        last_saved = _last_saved
+    if last_saved and last_saved.get("log_path"):
+        path = Path(last_saved["log_path"])
+        if path.is_file():
+            return path
+    # After a restart _last_saved is gone; fall back to the newest log on disk.
+    return latest_transcript_log(Path(_config.vault_path).expanduser() / _config.logs_folder)
+
+
+@app.post("/meeting/chat")
+async def meeting_chat(body: MeetingChat) -> dict:
+    """Answer a question about the last saved meeting from its transcript."""
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is empty")
+    if len(question) > MAX_CHAT_QUESTION_CHARS:
+        raise HTTPException(status_code=413, detail="question too long")
+    path = _chat_transcript_path()
+    if path is None:
+        raise HTTPException(status_code=404, detail="no saved meeting transcript yet")
+    transcript = read_transcript_log(path)
+
+    def _answer() -> str:
+        return answer_question(_summarizer.llm, transcript, question)
+
+    try:
+        answer = await run_in_threadpool(_answer)
+    except Exception as exc:
+        log.exception("meeting chat failed")
+        raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
+    return {"answer": answer, "log_path": str(path)}
 
 
 def _write_prompt_files(prompts_md: str, title: str, started_at: datetime) -> dict:
@@ -534,8 +658,10 @@ async def meeting_stop() -> dict:
         if _config.sounds_enabled:
             sounds.play("stop")
         _watcher.resume()
-        transcript = " ".join(s.text for s in segments)
-        notes_md = _summarizer.summarize(transcript)
+        transcript = format_transcript(segments)
+        template = resolve_template(meta.get("template"), _config.meeting_templates_dir)
+        user_notes = meta.get("user_notes", "")
+        notes_md = _summarizer.summarize(transcript, user_notes=user_notes, template=template)
         title = meta.get("title", "Meeting")
         extra: dict = {}
         if _config.work_prompts:
@@ -553,11 +679,15 @@ async def meeting_stop() -> dict:
             duration_seconds=session.elapsed_seconds(),
             notes_md=notes_md,
             segments=segments,
+            user_notes=user_notes,
+            template=template.id,
         )
         payload = {
             "notes_path": str(saved.notes_path),
             "log_path": str(saved.log_path),
             "segments": len(segments),
+            "template": template.id,
+            "enhanced": bool(user_notes.strip()),
             **extra,
         }
         with _session_lock:
