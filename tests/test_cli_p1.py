@@ -63,3 +63,34 @@ def test_stt_mlx_alias_saves_canonical_provider_id(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert config.load_config().stt_backend == "mlx-whisper"
+
+
+def test_cli_requests_send_the_existing_token(monkeypatch):
+    sent = []
+
+    class Resp:
+        ok = True
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {}
+
+    def fake(url, headers=None, **kwargs):
+        sent.append(headers)
+        return Resp()
+
+    monkeypatch.setattr(cli_module, "read_api_token", lambda: "tok")
+    monkeypatch.setattr(cli_module.requests, "get", fake)
+    monkeypatch.setattr(cli_module.requests, "post", fake)
+    cli_module._get("/meeting/status")
+    cli_module._post("/meeting/stop")
+    assert sent == [{"X-Localflow-Token": "tok"}, {"X-Localflow-Token": "tok"}]
+
+
+def test_token_command_prints_the_token(monkeypatch):
+    monkeypatch.setattr(cli_module, "read_api_token", lambda: "tok")
+    result = CliRunner().invoke(cli_module.cli, ["token"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "tok"

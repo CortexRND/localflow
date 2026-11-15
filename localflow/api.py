@@ -96,9 +96,22 @@ def llm_providers() -> list[dict]:
     ]
 
 
+_UNSAVED_URL_HINT = (
+    " (the stored API key is only sent to the saved base URL; save it first)"
+)
+
+
+def _is_saved_url(config: Config, base_url: str | None) -> bool:
+    """The stored llm_api_key may only go to the URL the user saved."""
+    if not base_url:
+        return True
+    return base_url.strip().rstrip("/") == (config.llm_base_url or "").strip().rstrip("/")
+
+
 def models(
     config: Config, kind: str, provider: str, base_url: str | None = None
 ) -> dict:
+    with_key = _is_saved_url(config, base_url)
     try:
         if kind == "stt":
             values = registry.stt_provider_class(
@@ -110,12 +123,15 @@ def models(
                 llm_provider=provider,
                 llm_base_url=base_url or config.llm_base_url,
             )
-            values = build_llm(provider_config, timeout=10).list_models()
+            values = build_llm(
+                provider_config, timeout=10, with_api_key=with_key
+            ).list_models()
         else:
             raise ValueError(f"unknown model kind: {kind!r}")
         return {"models": [asdict(value) for value in values], "error": None}
     except Exception as exc:  # noqa: BLE001
-        return {"models": [], "error": str(exc)}
+        hint = "" if with_key or kind != "llm" else _UNSAVED_URL_HINT
+        return {"models": [], "error": f"{exc}{hint}"}
 
 
 def test_llm(
@@ -124,6 +140,7 @@ def test_llm(
     base_url: str | None = None,
     model: str | None = None,
 ) -> dict:
+    with_key = _is_saved_url(config, base_url)
     try:
         provider_config = replace(
             config,
@@ -131,10 +148,16 @@ def test_llm(
             llm_base_url=base_url or config.llm_base_url,
             llm_model=model or config.llm_model,
         )
-        result = build_llm(provider_config, timeout=10).healthcheck()
-        return {"ok": result.ok, "detail": result.detail}
+        result = build_llm(
+            provider_config, timeout=10, with_api_key=with_key
+        ).healthcheck()
+        detail = result.detail
+        if not result.ok and not with_key:
+            detail = f"{detail or ''}{_UNSAVED_URL_HINT}"
+        return {"ok": result.ok, "detail": detail}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "detail": str(exc)}
+        hint = "" if with_key else _UNSAVED_URL_HINT
+        return {"ok": False, "detail": f"{exc}{hint}"}
 
 
 def secrets_status() -> dict[str, bool]:

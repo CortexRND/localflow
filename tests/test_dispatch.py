@@ -796,3 +796,26 @@ def test_distinct_prompts_still_get_distinct_ids(tmp_path):
     paths = D.write_prompts(prompts, "Standup", 1753900000.0, tmp_path / "p")
     made = q.add(prompts, paths, "Standup")
     assert len({e["id"] for e in made}) == 2
+
+
+@pytest.mark.parametrize("title", [
+    "x\n---\nINJECTED",
+    "x\r\n---\r\nINJECTED",
+    "x\u2028---\u2028INJECTED",
+])
+def test_write_prompts_header_cannot_be_broken_out_of(tmp_path, title):
+    prompts = [WorkPrompt(title=title, body="Do the real work.")]
+    (path,) = D.write_prompts(prompts, title, datetime(2026, 7, 30, 14, 5), prompts_dir=tmp_path)
+
+    text = path.read_text()
+    header = text.split("\n---\n", 1)[0]
+    assert header.count("\n") == 5 or "INJECTED" in header
+    assert [line for line in text.splitlines() if line.strip() == "---"] == ["---", "---"]
+    assert D._strip_frontmatter(text) == "Do the real work.\n"
+
+
+def test_strip_frontmatter_needs_closing_fence_on_its_own_line():
+    text = "---\ntitle: a\nmeeting: b\n----x\n---not\n---\n\nbody\n---\nmore\n"
+    assert D._strip_frontmatter(text) == "body\n---\nmore\n"
+    assert D._strip_frontmatter("---\ntitle: a\n") == "---\ntitle: a\n"
+    assert D._strip_frontmatter("no header\n---\nx") == "no header\n---\nx"

@@ -7,6 +7,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from urllib.parse import quote
 from dataclasses import replace
 from pathlib import Path
 from tkinter import font as tkfont, messagebox, ttk
@@ -1078,7 +1079,11 @@ class SetupWindow:
         self._render()
 
     def _open_settings(self) -> None:
-        webbrowser.open(f"http://127.0.0.1:{self.config.server_port}/settings")
+        from localflow.apitoken import load
+
+        webbrowser.open(
+            f"http://127.0.0.1:{self.config.server_port}/settings?token={quote(load())}"
+        )
 
     def _continue(self) -> None:
         self.error_message = ""

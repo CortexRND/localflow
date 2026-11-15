@@ -13,6 +13,7 @@ def build_llm(
     timeout: int | None = None,
     num_ctx: int | None = None,
     temperature: float | None = None,
+    with_api_key: bool = True,
 ) -> LLMProvider:
     """Build the configured provider.
 
@@ -32,7 +33,7 @@ def build_llm(
         return OpenAICompatLLM(
             config.llm_base_url,
             config.llm_model,
-            api_key=get_secret("llm_api_key"),
+            api_key=get_secret("llm_api_key") if with_api_key else None,
             timeout=actual_timeout,
             temperature=temperature,
         )

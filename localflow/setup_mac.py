@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 import webbrowser
+from urllib.parse import quote
 from dataclasses import replace
 
 from localflow import setup_flow
@@ -1256,7 +1257,11 @@ class SetupWindowController(NSObject):
             self._render()
 
     def settingsAction_(self, sender):
-        webbrowser.open(f"http://127.0.0.1:{self.config.server_port}/settings")
+        from localflow.apitoken import load
+
+        webbrowser.open(
+            f"http://127.0.0.1:{self.config.server_port}/settings?token={quote(load())}"
+        )
 
     def fixAction_(self, sender):
         self._fix_check(sender.tag())

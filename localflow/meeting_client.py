@@ -40,10 +40,14 @@ class MeetingClient:
         if base_url is None:
             base_url = f"http://127.0.0.1:{load_config().server_port}"
         self.base_url = base_url.rstrip("/")
+        self._fixed_token = token
         self.token = token if token is not None else load()
         self.http = http
 
     def _request(self, method: str, path: str, *, timeout=3, json=None) -> dict:
+        if self._fixed_token is None:
+            # The server issues a new token at every start; read the current one.
+            self.token = load()
         options = {"timeout": timeout}
         if self.token:
             options["headers"] = {"X-Localflow-Token": self.token}
