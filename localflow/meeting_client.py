@@ -1,9 +1,29 @@
 """HTTP client for the local meeting endpoints."""
 
+from pathlib import Path
+
 import requests
 
 from localflow.apitoken import load
 from localflow.config import load_config
+
+
+def vault_notes_path(notes_path, vault_path) -> str | None:
+    """Return the resolved notes file if it is an existing ``.md`` file inside
+    the vault, else None. The path comes from whatever answers on the local
+    port, so it must never reach the OS opener unchecked."""
+    if not isinstance(notes_path, str) or not notes_path.strip() or not vault_path:
+        return None
+    try:
+        vault = Path(vault_path).expanduser().resolve(strict=True)
+        target = Path(notes_path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if target.suffix.lower() != ".md" or not target.is_file():
+        return None
+    if not target.is_relative_to(vault):
+        return None
+    return str(target)
 
 
 class MeetingClientError(RuntimeError):

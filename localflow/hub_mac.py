@@ -26,7 +26,7 @@ from Foundation import NSObject, NSTimer
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
-from localflow.meeting_client import MeetingClient
+from localflow.meeting_client import MeetingClient, vault_notes_path
 from localflow.platform import current
 from localflow.mac_style import (
     FlippedView,
@@ -1442,8 +1442,10 @@ class HubWindowController(NSObject):
             self.meeting_template_value = self.meeting_templates[selected]["id"]
 
     def meetingOpenNotes_(self, _sender):
-        if self.meeting_last_saved and self.meeting_last_saved.get("notes_path"):
-            current().open_path(self.meeting_last_saved["notes_path"])
+        saved = self.meeting_last_saved or {}
+        path = vault_notes_path(saved.get("notes_path"), load_config().vault_path)
+        if path:
+            current().open_path(path)
 
     def meetingAsk_(self, _sender):
         question = self.meeting_question.stringValue().strip()

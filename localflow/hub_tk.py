@@ -11,7 +11,7 @@ from tkinter import filedialog, font as tkfont, messagebox
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
-from localflow.meeting_client import MeetingClient
+from localflow.meeting_client import MeetingClient, vault_notes_path
 from localflow.ui_tokens import (
     CARD_GAP,
     CARD_PADDING,
@@ -1366,10 +1366,12 @@ class HubWindow:
         self.meeting_action.configure(state="normal")
 
     def _meeting_open_notes(self):
-        if self._meeting_last_saved and self._meeting_last_saved.get("notes_path"):
+        saved = self._meeting_last_saved or {}
+        path = vault_notes_path(saved.get("notes_path"), load_config().vault_path)
+        if path:
             from localflow.platform import current
 
-            current().open_path(self._meeting_last_saved["notes_path"])
+            current().open_path(path)
 
     def _meeting_ask(self):
         question = self.meeting_question.get().strip()
