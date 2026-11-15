@@ -50,7 +50,10 @@ SHADOW_OFFSET = 3
 
 # Setup checkup cards (AppKit).
 CARD_BORDER_WIDTH = 2
-LINE_HEIGHT = {"heading": 22, "body": 18, "caption": 16}
+LINE_HEIGHT = {"display": 38, "heading": 22, "body": 18, "caption": 16}
+# Page titles (setup steps and every Hub page) share the display style; the
+# label is exactly one display line tall so the Hub header offset clears it.
+PAGE_TITLE_HEIGHT = LINE_HEIGHT["display"]
 CHECK_CARD_HEIGHT = 2 * CARD_PADDING + LINE_HEIGHT["heading"] + LINE_HEIGHT["body"]
 PILL_HEIGHT = 24
 PILL_PADDING = SPACING[2]
@@ -74,7 +77,26 @@ HUB_CONTENT_X = HUB_SIDEBAR_WIDTH + PAGE_MARGIN
 HUB_CONTENT_TOP = 24
 HUB_CONTENT_GUTTER = 16
 HUB_PAGE_BOTTOM = 24
-HUB_HEADER_OFFSET = 48
+HUB_HEADER_OFFSET = 48  # PAGE_TITLE_HEIGHT plus a small gap
+# Ask (AppKit): one compact controls row, a scrolling conversation, then the
+# composer and the privacy note pinned to the bottom of the Hub viewport.
+ASK_TOOLBAR_HEIGHT = 28
+ASK_SECTION_GAP = 12
+ASK_COMPOSER_HEIGHT = 32
+ASK_CONVERSATION_MIN_HEIGHT = 120
+ASK_CONTROL_FONT = 12
+ASK_BUBBLE_PADDING = 12
+ASK_BUBBLE_MAX_FRACTION = 0.8
+ASK_TURN_GAP = 12
+ASK_CHIP_HEIGHT = 26
+ASK_CHIP_PADDING = 12
+ASK_CHIP_GAP = 8
+ASK_ANSWER_LINE = 18
+# Models & keys (AppKit): compact provider list rows and the inline editor.
+MODELS_ROW_HEIGHT = 48
+MODELS_FIELD_HEIGHT = 28
+MODELS_LABEL_HEIGHT = 16
+MODELS_ROW_GAP = 8
 # Status pill: (label, tint token, text token). Text on the sun tint is ink so
 # it stays readable in both appearances.
 CHECK_STATUS = {

@@ -631,7 +631,7 @@ def test_prompt_and_empty_copy_wrap_instead_of_truncating():
     sources = _controller_sources()
     assert "wrap=True" in sources["_page_prompts"]
     assert "wrap=True" in sources["_empty_state"]
-    assert "wrap=True" in sources["_page_models"]
+    assert "wrap=True" in sources["_models_editor"]
     assert "wrap=True" in sources["_page_hot_phrases"]
     # The teaser label stops before its button rather than spanning the card.
     page = sources["_page_prompts"]

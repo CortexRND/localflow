@@ -32,6 +32,7 @@ from localflow.history import HistoryStore
 from localflow.hot_phrases_editor import (
     EMPTY_MESSAGE,
     HotPhrasesEditor,
+    empty_layout,
     hot_phrases_layout,
 )
 from localflow.hotphrases import HotPhraseStore
@@ -53,6 +54,7 @@ from localflow.mac_style import (
     FlippedView,
     HalftoneView,
     make_pill,
+    page_title,
     style_button,
     style_surface,
     tokens_for_window,
@@ -70,6 +72,21 @@ from localflow.mac_style import (
     style_flat_button as _style_button,
 )
 from localflow.meeting_client import MeetingClient, vault_notes_path
+from localflow.models_layout import (
+    IMPORT_HEADER_H,
+    IMPORT_ROW_H,
+    action_frames,
+    editor_layout,
+    import_height,
+    import_states,
+    is_active,
+    list_layout,
+    provider_status,
+    row_columns,
+    summary_layout,
+    summary_values,
+    use_button_visible,
+)
 from localflow.phrases_model import PhrasesModel
 from localflow.platform import current
 from localflow.ui_tokens import (
@@ -85,6 +102,8 @@ from localflow.ui_tokens import (
     HUB_PAGE_BOTTOM,
     HUB_SIDEBAR_WIDTH,
     LIGHT,
+    MODELS_ROW_HEIGHT,
+    PILL_HEIGHT,
     SUN_TEXT,
     surface_tint,
 )
@@ -291,10 +310,10 @@ class HubWindowController(NSObject):
     @objc.python_method
     def _button(
         self, title, action, x, y, tag=0, width=150, parent=None,
-        kind="secondary",
+        kind="secondary", height=36,
     ):
         button = NSButton.buttonWithTitle_target_action_(title, self, action)
-        button.setFrame_(NSMakeRect(x, y, width, 36))
+        button.setFrame_(NSMakeRect(x, y, width, height))
         button.setTag_(tag)
         style_button(button, kind, self.tokens)
         container = parent if parent is not None else self.body
@@ -373,6 +392,7 @@ class HubWindowController(NSObject):
             # holds a secret and a later capture cannot read stale views.
             self.provider_controls = {}
             self.provider_checks = []
+            self.provider_action_views = None
         self.tokens = tokens_for_window(self.window)
         self.page = page
         self.root_view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
@@ -390,8 +410,10 @@ class HubWindowController(NSObject):
         width = self._content_width()
         self.body.setFrame_(NSMakeRect(0, 0, width, self._viewport_height()))
         self.cursor_y = 0
+        # Every page shares the setup display title; History leaves room for
+        # its right-aligned action so the two frames never overlap.
         self.body.addSubview_(
-            _label(page, 0, self.cursor_y, width, 20, "ink", palette=self.tokens, height=28)
+            page_title(page, width - 140 if page == "History" else width, self.tokens)
         )
         if page == "History":
             self._button(
@@ -1843,6 +1865,9 @@ class HubWindowController(NSObject):
     def controlTextDidChange_(self, notification):
         # NSTextField delegate (search, trigger, test phrase): dispatch by page
         # and by control. Meetings fields do not use this delegate.
+        if self.page == "Models":
+            self._models_live_update(notification.object())
+            return
         if self.page != "Hot Phrases":
             return
         source = notification.object()
@@ -1852,6 +1877,12 @@ class HubWindowController(NSObject):
             self._phrases_edited()
         elif source is getattr(self, "phrase_test", None):
             self._phrases_test_changed()
+
+    def comboBoxSelectionDidChange_(self, notification):
+        # NSComboBox delegate: the picked item is not in stringValue yet.
+        if self.page == "Models":
+            combo = notification.object()
+            self._models_live_update(combo, picked=combo.objectValueOfSelectedItem())
 
     def meetingAction_(self, _sender):
         if self.meeting_busy:
@@ -1911,8 +1942,6 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _page_models(self):
-        from Foundation import NSAttributedString
-
         from localflow import provider_keys
 
         self.config = load_config()
@@ -1921,110 +1950,310 @@ class HubWindowController(NSObject):
             self.provider_state = {}
             self.provider_message = ("", False)
             self.provider_candidates = []
+        if not hasattr(self, "provider_expanded"):
+            self.provider_expanded = None  # one provider's inline editor at a time
+            self.provider_checked = {}
         self.provider_controls = {}
         self.provider_checks = []
-        self.body.addSubview_(
-            _label(
-                f"Speech model: {self.config.stt_backend} / {self.config.model_size}\n"
-                f"Cleanup model: {self.config.llm_provider} / {self.config.llm_model or 'not selected'}",
-                0, self.cursor_y, self.body.frame().size.width, 13, "ink",
-                palette=self.tokens, height=54, wrap=True,
-            )
-        )
-        self._button(
-            "Change models…", "openSetup:", 0, self.cursor_y + 72,
-            width=180, kind="primary",
-        )
-        self._button("Import keys…", "providerImport:", 192, self.cursor_y + 72, width=150)
-        self.cursor_y += 124
+        self.provider_action_views = None
+        width = self.body.frame().size.width
+        statuses = {p.id: provider_keys.key_status(p.id) for p in provider_keys.PRESETS}
+        self._models_summary(width)
         message, ok = self.provider_message
         if message:
-            self._add_text(message, color="success" if ok else "red", height=40)
+            self._add_text(message, color="success" if ok else "red", height=20, gap=8)
         if self.provider_candidates:
-            card = self._dictionary_card(
-                "Keys found — select keys to import", "Only checked keys will be saved.",
-                110 + 32 * len(self.provider_candidates),
-            )
-            for index, candidate in enumerate(self.provider_candidates):
-                check = NSButton.checkboxWithTitle_target_action_(
-                    f"{provider_keys.get_preset(candidate.provider_id).label}: "
-                    f"{candidate.masked_value} — {candidate.source}", None, None,
+            self._models_import_card(width, statuses)
+        self._models_provider_list(width, statuses)
+
+    @objc.python_method
+    def _models_summary(self, width):
+        """Top card: the speech model and the cleanup & Ask model in use."""
+        geometry = summary_layout(width)
+        card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, self.cursor_y, width, geometry["height"])
+        )
+        style_surface(card, self.tokens)
+        self.body.addSubview_(card)
+        speech, cleanup = summary_values(self.config)
+        for row, caption, value in zip(
+            geometry["rows"], ("Speech model", "Cleanup & Ask model"), (speech, cleanup)
+        ):
+            for text, key, size, token, weight in (
+                (caption, "caption", 11, "muted", "semibold"),
+                (value, "value", 13, "ink", "regular"),
+            ):
+                x, y, w, h = row[key]
+                card.addSubview_(
+                    _label(
+                        text, x, y, w, size, token, palette=self.tokens, height=h,
+                        weight=weight,
+                    )
                 )
-                check.setFrame_(NSMakeRect(CARD_PADDING, 62 + index * 32,
-                                          card.frame().size.width - 2 * CARD_PADDING, 28))
-                check.setContentTintColor_(_color("ink", self.tokens))
-                check.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
-                    check.title(), {AppKit.NSForegroundColorAttributeName: _color("ink", self.tokens)},
-                ))
-                check.setState_(getattr(self, "provider_checked", {}).get(
-                    (candidate.provider_id, candidate.source), AppKit.NSControlStateValueOff,
-                ))
-                card.addSubview_(check)
-                self.provider_checks.append(check)
-            self._button("Save selected keys", "providerConfirmImport:", CARD_PADDING,
-                         66 + 32 * len(self.provider_candidates), width=180, parent=card)
-        for index, preset in enumerate(provider_keys.PRESETS):
-            initial_url = preset.base_url
-            if (preset.id == "custom" and self.config.llm_provider == "openai-compatible"
-                    and not any(p.base_url == self.config.llm_base_url.rstrip("/")
-                                for p in provider_keys.PRESETS if p.id != "custom")):
-                initial_url = self.config.llm_base_url
-            state = self.provider_state.setdefault(preset.id, {
-                "url": initial_url, "model": preset.default_model, "models": [],
-            })
-            active = (
-                self.config.llm_provider == preset.llm_provider
-                and self.config.llm_base_url.rstrip("/") == state["url"].rstrip("/")
+        for title, action, key in (
+            ("Change speech model…", "openSetup:", "change"),
+            ("Import keys…", "providerImport:", "import"),
+        ):
+            x, y, w, h = geometry[key]
+            self._button(title, action, x, y, width=w, parent=card, height=h)
+        self.cursor_y += geometry["height"] + 12
+
+    @objc.python_method
+    def _models_import_card(self, width, statuses):
+        """Keys found by Import: ON by default only where no key is saved yet."""
+        from localflow import provider_keys
+
+        candidates = self.provider_candidates
+        card = self._dictionary_card(
+            "Keys found — select keys to import", "Only checked keys will be saved.",
+            import_height(len(candidates)),
+        )
+        ticks = import_states(
+            candidates, lambda pid: statuses[pid]["has_key"], self.provider_checked,
+        )
+        for index, candidate in enumerate(candidates):
+            check = NSButton.checkboxWithTitle_target_action_(
+                f"{provider_keys.get_preset(candidate.provider_id).label}: "
+                f"{candidate.masked_value} — {candidate.source}", None, None,
             )
-            if active and not state["model"]:
-                state["model"] = self.config.llm_model
-            status = provider_keys.key_status(preset.id)
-            title = preset.label + (" · Active" if active else "")
-            card = self._dictionary_card(title, preset.base_url or "Your inference endpoint", 300)
-            inner = card.frame().size.width - 2 * CARD_PADDING
-            url_field = None
+            check.setFrame_(NSMakeRect(
+                CARD_PADDING, CARD_PADDING + IMPORT_HEADER_H + index * IMPORT_ROW_H,
+                width - 2 * CARD_PADDING, 24,
+            ))
+            check.setContentTintColor_(_color("ink", self.tokens))
+            check.setAttributedTitle_(AppKit.NSAttributedString.alloc().initWithString_attributes_(
+                check.title(), {AppKit.NSForegroundColorAttributeName: _color("ink", self.tokens)},
+            ))
+            check.setState_(
+                AppKit.NSControlStateValueOn
+                if ticks[(candidate.provider_id, candidate.source)]
+                else AppKit.NSControlStateValueOff
+            )
+            card.addSubview_(check)
+            self.provider_checks.append(check)
+        self._button(
+            "Save selected keys", "providerConfirmImport:", CARD_PADDING,
+            CARD_PADDING + IMPORT_HEADER_H + len(candidates) * IMPORT_ROW_H + 8,
+            width=180, parent=card, height=28,
+        )
+
+    @objc.python_method
+    def _models_state(self, preset):
+        initial_url, initial_model = preset.base_url, preset.default_model
+        if is_active(preset, self.config):
+            # The configured model seeds a new state; later drafts are kept.
+            initial_model = self.config.llm_model or initial_model
             if preset.id == "custom":
-                url_field = self._field(state["url"], CARD_PADDING, 62, inner, parent=card)
-                url_field.setTextColor_(_color("ink", self.tokens))
-                url_field.setBackgroundColor_(_color("paper", self.tokens))
-                url_field.setPlaceholderString_("https://your-provider.example/v1")
-            else:
-                self._card_label(card, "Key: " + (status["masked_value"] or "No key")
-                                 if preset.needs_key else "Local inference · No key needed", 62)
-            secure = None
-            if preset.needs_key:
-                if preset.id == "custom":
-                    self._card_label(card, "Key: " + (status["masked_value"] or "No key"), 94)
-                secure = AppKit.NSSecureTextField.alloc().initWithFrame_(
-                    NSMakeRect(CARD_PADDING, 122, inner - 164, 28)
+                initial_url = self.config.llm_base_url
+        state = self.provider_state.setdefault(preset.id, {
+            "url": initial_url, "model": initial_model, "models": [],
+        })
+        if is_active(preset, self.config) and not state["model"]:
+            state["model"] = self.config.llm_model
+        return state
+
+    @objc.python_method
+    def _models_live_update(self, source, picked=None):
+        """Typing / picking in the open editor's URL or model control: update
+        the state and the Use / Test buttons in place. Never rebuilds, never
+        reads or clears the key field, never moves focus."""
+        from localflow import provider_keys
+
+        for provider_id, (url, combo, _secure) in getattr(
+            self, "provider_controls", {}
+        ).items():
+            if source is not url and source is not combo:
+                continue
+            state = self.provider_state[provider_id]
+            if url is not None:
+                state["url"] = url.stringValue().strip()
+            state["model"] = str(
+                picked if picked is not None else combo.stringValue()
+            ).strip()
+            self._models_apply_use(use_button_visible(
+                provider_keys.get_preset(provider_id), self.config,
+                url=state["url"], model=state["model"],
+            ))
+
+    @objc.python_method
+    def _models_apply_use(self, show):
+        views = getattr(self, "provider_action_views", None)
+        if not views:
+            return
+        _use_frame, test_frame = action_frames(views["rows"], show)
+        views["use"].setHidden_(not show)
+        views["test"].setFrame_(NSMakeRect(*test_frame))
+
+    @objc.python_method
+    def _models_provider_list(self, width, statuses):
+        """One compact row per preset; only the clicked provider expands."""
+        from localflow import provider_keys
+
+        presets = provider_keys.PRESETS
+        states = {p.id: self._models_state(p) for p in presets}
+        expanded = self.provider_expanded
+        if expanded not in states:
+            expanded = self.provider_expanded = None
+        inner = width - 2 * CARD_PADDING
+        editor_rows, editor_height = {}, 0
+        if expanded is not None:
+            preset = provider_keys.get_preset(expanded)
+            state = states[expanded]
+            message = state.get("message", ("", False))[0]
+            editor_rows, editor_height = editor_layout(
+                inner, custom=preset.id == "custom", needs_key=preset.needs_key,
+                # The Use slot always exists in the action row; the renderer
+                # hides it (and slides Test left) while the editor is active.
+                show_use=True,
+                message_lines=-(-len(message) // 85),
+            )
+        geometry = list_layout(
+            width, len(presets),
+            [p.id for p in presets].index(expanded) if expanded else None,
+            editor_height,
+        )
+        card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, self.cursor_y, width, geometry["height"])
+        )
+        style_surface(card, self.tokens)
+        card.layer().setMasksToBounds_(True)
+        self.body.addSubview_(card)
+        for index, preset in enumerate(presets):
+            top = geometry["rows"][index]
+            status = statuses[preset.id]
+            state = states[preset.id]
+            label, kind = provider_status(preset, self.config, status["has_key"])
+            pill = make_pill(label, kind, self.tokens)
+            columns = row_columns(width, pill.frame().size.width)
+            if index:
+                rule = NSView.alloc().initWithFrame_(
+                    NSMakeRect(CARD_PADDING, top, width - 2 * CARD_PADDING, 1)
                 )
-                secure.setPlaceholderString_("Paste API key")
-                secure.setTextColor_(_color("ink", self.tokens))
-                secure.setBackgroundColor_(_color("paper", self.tokens))
-                card.addSubview_(secure)
-                self._button("Save", "providerSave:", CARD_PADDING + inner - 156, 118,
-                             tag=index, width=72, parent=card)
-                self._button("Remove", "providerRemove:", CARD_PADDING + inner - 80, 118,
-                             tag=index, width=80, parent=card)
-            combo = NSComboBox.alloc().initWithFrame_(NSMakeRect(CARD_PADDING, 164, inner, 28))
-            combo.setEditable_(True)
-            combo.addItemsWithObjectValues_(state["models"])
-            combo.setStringValue_(state["model"])
-            combo.setPlaceholderString_("Choose or enter a model ID")
-            combo.setTextColor_(_color("ink", self.tokens))
-            combo.setBackgroundColor_(_color("paper", self.tokens))
-            card.addSubview_(combo)
-            self.provider_controls[preset.id] = (url_field, combo, secure)
-            self._button("Use for cleanup & Ask", "providerActivate:", CARD_PADDING, 204,
-                         tag=index, width=192, parent=card, kind="primary")
-            self._button("Test connection", "providerTest:", CARD_PADDING + 200, 204,
-                         tag=index, width=140, parent=card)
-            message, ok = state.get("message", ("", False))
-            self._card_label(card, message, 252, color="success" if ok else "red", height=36, wrap=True)
-            cache_key = (state["url"], status["masked_value"])
-            if state.get("loaded") != cache_key and (status["has_key"] or not preset.needs_key):
-                state["loaded"] = cache_key
-                self._models_worker(preset.id, "models")
+                rule.setWantsLayer_(True)
+                rule.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
+                card.addSubview_(rule)
+            text_x, text_w = columns["text"]
+            shown_url = (state["url"] if preset.id == "custom" else preset.base_url)
+            card.addSubview_(_label(
+                preset.label, text_x, top + 6, text_w, 13, "ink", palette=self.tokens,
+                height=18, weight="semibold",
+            ))
+            card.addSubview_(_label(
+                shown_url or "Your inference endpoint", text_x, top + 26, text_w, 11,
+                "muted", palette=self.tokens, height=16,
+            ))
+            pill.setFrameOrigin_(NSMakePoint(
+                columns["pill"], top + (MODELS_ROW_HEIGHT - PILL_HEIGHT) / 2,
+            ))
+            card.addSubview_(pill)
+            configured = (
+                status["has_key"] or not preset.needs_key
+                or is_active(preset, self.config)
+            )
+            title = "Close" if preset.id == expanded else ("Edit" if configured else "Set up")
+            button_x, button_w = columns["button"]
+            self._button(
+                title, "providerToggle:", button_x, top + 10, tag=index,
+                width=button_w, parent=card, height=28,
+            )
+        if expanded is not None:
+            self._models_editor(
+                card, expanded, states[expanded], statuses[expanded],
+                editor_rows, geometry["editor_y"], width, editor_height,
+            )
+        self.cursor_y += geometry["height"] + 12
+
+    @objc.python_method
+    def _models_editor(self, card, provider_id, state, status, rows, top, width, height):
+        """The inline editor of the expanded provider; the only one with controls,
+        and the only provider whose models are fetched."""
+        from localflow import provider_keys
+
+        preset = provider_keys.get_preset(provider_id)
+        index = [p.id for p in provider_keys.PRESETS].index(provider_id)
+        editor = FlippedView.alloc().initWithFrame_(NSMakeRect(0, top, width, height))
+        editor.setWantsLayer_(True)
+        editor.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
+        card.addSubview_(editor)
+
+        def frame(key):
+            x, y, w, h = rows[key]
+            return NSMakeRect(x, y, w, h)
+
+        def caption(key, text):
+            x, y, w, h = rows[key]
+            editor.addSubview_(_label(
+                text, x, y, w, 11, "muted", palette=self.tokens, height=h,
+                weight="semibold",
+            ))
+
+        def style_input(control):
+            control.setTextColor_(_color("ink", self.tokens))
+            control.setBackgroundColor_(_color("paper", self.tokens))
+
+        url_field = secure = None
+        if "url_label" in rows:
+            caption("url_label", "Base URL")
+            url_field = self._field(state["url"], 0, 0, 100, parent=editor)
+            url_field.setFrame_(frame("url_field"))
+            style_input(url_field)
+            url_field.setPlaceholderString_("https://your-provider.example/v1")
+        if "key_label" in rows:
+            caption("key_label", "API key · " + (status["masked_value"] or "none saved"))
+            secure = AppKit.NSSecureTextField.alloc().initWithFrame_(frame("key_field"))
+            secure.setPlaceholderString_("Paste API key")
+            style_input(secure)
+            editor.addSubview_(secure)
+            for title, action, key in (
+                ("Save", "providerSave:", "key_save"),
+                ("Remove", "providerRemove:", "key_remove"),
+            ):
+                x, y, w, h = rows[key]
+                button = self._button(
+                    title, action, x, y, tag=index, width=w, parent=editor, height=h,
+                )
+                if key == "key_remove":
+                    button.setEnabled_(status["has_key"])
+        caption("model_label", "Model")
+        combo = NSComboBox.alloc().initWithFrame_(frame("model_field"))
+        combo.setEditable_(True)
+        combo.addItemsWithObjectValues_(state["models"])
+        combo.setStringValue_(state["model"])
+        combo.setPlaceholderString_("Choose or enter a model ID")
+        style_input(combo)
+        editor.addSubview_(combo)
+        self.provider_controls[provider_id] = (url_field, combo, secure)
+        # The one primary action, always built at the shared action-row slot and
+        # toggled live (see `_models_live_update`).
+        x, y, w, h = rows["use"]
+        use = self._button(
+            "Use for cleanup & Ask", "providerActivate:", x, y, tag=index,
+            width=w, parent=editor, kind="primary", height=h,
+        )
+        # Activation needs a saved key: Save first, then Use.
+        use.setEnabled_(status["has_key"] or not preset.needs_key)
+        x, y, w, h = rows["test"]
+        test = self._button(
+            "Test connection", "providerTest:", x, y, tag=index, width=w,
+            parent=editor, height=h,
+        )
+        self.provider_action_views = {"use": use, "test": test, "rows": rows}
+        self._models_apply_use(use_button_visible(
+            preset, self.config, url=state["url"], model=state["model"]))
+        for control in (url_field, combo):
+            if control is not None:
+                control.setDelegate_(self)
+        message, ok = state.get("message", ("", False))
+        if "message" in rows:
+            x, y, w, h = rows["message"]
+            editor.addSubview_(_label(
+                message, x, y, w, 12, "success" if ok else "red", palette=self.tokens,
+                height=h, wrap=True,
+            ))
+        cache_key = (state["url"], status["masked_value"])
+        if state.get("loaded") != cache_key and (status["has_key"] or not preset.needs_key):
+            state["loaded"] = cache_key
+            self._models_worker(preset.id, "models")
 
     @objc.python_method
     def _models_capture(self):
@@ -2057,9 +2286,19 @@ class HubWindowController(NSObject):
                 return
             if operation == "models":
                 state["models"] = [item["id"] for item in result]
-            else:
-                ok, message = result
-                state["message"] = (message, ok)
+                # Fill the open picker in place: a rebuild would drop a key the
+                # user is typing. A collapsed or off-page provider just keeps
+                # the list for next time.
+                controls = getattr(self, "provider_controls", {}).get(provider_id)
+                if self.page == "Models" and controls is not None:
+                    combo = controls[1]
+                    typed = combo.stringValue()
+                    combo.removeAllItems()
+                    combo.addItemsWithObjectValues_(state["models"])
+                    combo.setStringValue_(typed)
+                return
+            ok, message = result
+            state["message"] = (message, ok)
             if self.page == "Models":
                 self.show_page("Models")
 
@@ -2099,6 +2338,19 @@ class HubWindowController(NSObject):
             state["message"] = ("Provider settings saved", True)
         except Exception:  # noqa: BLE001
             state["message"] = ("Unable to save; check the key, URL, and Keychain access", False)
+        self.show_page("Models")
+
+    def providerToggle_(self, sender):
+        """Set up / Edit / Close on a row: expand only that provider inline."""
+        from localflow import provider_keys
+
+        self._models_capture()  # URL and model of the open editor are kept
+        picked = provider_keys.PRESETS[sender.tag()].id
+        # An unsaved key is dropped with its field, never held anywhere hidden.
+        for _url, _combo, secure in getattr(self, "provider_controls", {}).values():
+            if secure is not None:
+                secure.setStringValue_("")
+        self.provider_expanded = None if self.provider_expanded == picked else picked
         self.show_page("Models")
 
     def providerSave_(self, sender):
@@ -2235,11 +2487,18 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _phrases_build_empty(self, width):
+        # Error and Undo take room only while visible, so the card stays
+        # compact; `_phrases_relayout_empty` resizes it in place when they change.
+        self._phrases_vis = self.phrases.notice_visibility
+        rows, height = empty_layout(
+            width, error_visible=self._phrases_vis[0], undo_visible=self._phrases_vis[1],
+        )
         card = FlippedView.alloc().initWithFrame_(
-            NSMakeRect(0, self.cursor_y, width, 258)
+            NSMakeRect(0, self.cursor_y, width, height)
         )
         style_surface(card, self.tokens)
         self.body.addSubview_(card)
+        self.phrase_empty_card = card
         inner = width - 2 * CARD_PADDING
         card.addSubview_(
             _label(
@@ -2281,9 +2540,37 @@ class HubWindowController(NSObject):
             parent=self.phrase_empty_undo_bar,
         )
         card.addSubview_(self.phrase_empty_undo_bar)
-        self.cursor_y += 270
+        self._phrases_apply_empty_layout(rows, height)
+        self.cursor_y += height + 12
         self._phrases_empty_shown = True
         self._phrases_render_empty()
+
+    @objc.python_method
+    def _phrases_apply_empty_layout(self, rows, height):
+        card = self.phrase_empty_card
+        frame = card.frame()
+        card.setFrame_(NSMakeRect(frame.origin.x, frame.origin.y, frame.size.width, height))
+        for key, view in (
+            ("error", self.phrase_empty_error), ("undo", self.phrase_empty_undo_bar),
+        ):
+            if key in rows:
+                x, y, w, h = rows[key]
+                view.setFrame_(NSMakeRect(x, y, w, h))
+            view.setHidden_(key not in rows)
+
+    @objc.python_method
+    def _phrases_relayout_empty(self):
+        """Resize the empty card only when its notices appeared or went away."""
+        vis = self.phrases.notice_visibility
+        if vis == self._phrases_vis:
+            return
+        self._phrases_vis = vis
+        rows, height = empty_layout(
+            self.phrase_empty_card.frame().size.width,
+            error_visible=vis[0], undo_visible=vis[1],
+        )
+        self._phrases_apply_empty_layout(rows, height)
+        self._fit_body_height()
 
     @objc.python_method
     def _page_hot_phrases(self):
@@ -2302,8 +2589,11 @@ class HubWindowController(NSObject):
             return
         self._phrases_empty_shown = False
         top = self.cursor_y
+        self._phrases_vis = editor.notice_visibility
+        self.phrase_top, self.phrase_width = top, width
         frames = hot_phrases_layout(
-            width, self._viewport_height() - top - HUB_PAGE_BOTTOM
+            width, self._viewport_height() - top - HUB_PAGE_BOTTOM,
+            error_visible=self._phrases_vis[0], undo_visible=self._phrases_vis[1],
         )
 
         def rect(frame, dx=0, dy=0):
@@ -2347,7 +2637,11 @@ class HubWindowController(NSObject):
         card = FlippedView.alloc().initWithFrame_(rect(card_frame, 0, top))
         style_surface(card, self.tokens)
         self.body.addSubview_(card)
-        rows = frames["card_rows"]
+        rows = dict(frames["card_rows"])
+        # A hidden notice has no slot in the layout; it still needs a frame so
+        # it can be shown in place later (see `_phrases_relayout`).
+        for key, height in (("error_label", 34), ("undo_bar", 36)):
+            rows.setdefault(key, (CARD_PADDING, 0, rows["trigger_field"][2], height))
 
         def add_label(text, key, size=12, color="ink", weight="semibold", wrap=False):
             frame = rows[key]
@@ -2356,13 +2650,17 @@ class HubWindowController(NSObject):
                 palette=self.tokens, height=frame[3], weight=weight, wrap=wrap,
             )
             card.addSubview_(label)
+            self.phrase_views[key] = label
             return label
 
-        add_label("When I say", "trigger_label")
+        self.phrase_views = {}
+        self.phrase_card = card
+        self.phrase_trigger_label = add_label("When I say", "trigger_label")
         self.phrase_trigger = self._field(
             "", rows["trigger_field"][0], rows["trigger_field"][1],
             rows["trigger_field"][2], parent=card,
         )
+        self.phrase_views["trigger_field"] = self.phrase_trigger
         self.phrase_trigger.setDelegate_(self)
         self.phrase_trigger.setPlaceholderString_("e.g. review checklist")
         self.phrase_trigger_hint = add_label(
@@ -2374,18 +2672,25 @@ class HubWindowController(NSObject):
         )
         self.phrase_text.setAccessibilityLabel_("Text to type")
         card.addSubview_(self.phrase_text_scroll)
+        self.phrase_views["text_scroll"] = self.phrase_text_scroll
         self.phrase_text_hint = add_label("", "text_hint", 11, "muted", "regular")
         self.phrase_switch = NSSwitch.alloc().initWithFrame_(rect(rows["enabled_switch"]))
+        self.phrase_views["enabled_switch"] = self.phrase_switch
         self.phrase_switch.setTarget_(self)
         self.phrase_switch.setAction_("phrasesToggle:")
         self.phrase_switch.setAccessibilityLabel_("Enabled")
         card.addSubview_(self.phrase_switch)
-        add_label("Enabled", "enabled_label", 13, "ink", "regular")
+        self.phrase_enabled_label = add_label(
+            "Enabled", "enabled_label", 13, "ink", "regular"
+        )
+        # Short status ("Saved ✓") sits inline here and never moves the page.
+        self.phrase_notice = add_label("", "enabled_notice", 12, "success", "regular")
         self.phrase_delete = self._button(
             "Delete", "phrasesDelete:", rows["delete_button"][0],
             rows["delete_button"][1], width=rows["delete_button"][2],
             parent=card, kind="destructive_ghost",
         )
+        self.phrase_views["delete_button"] = self.phrase_delete
         self.phrase_error_label = add_label(
             "", "error_label", 12, "red", "regular", wrap=True
         )
@@ -2402,11 +2707,13 @@ class HubWindowController(NSObject):
             parent=self.phrase_undo_bar,
         )
         card.addSubview_(self.phrase_undo_bar)
+        self.phrase_views["undo_bar"] = self.phrase_undo_bar
         add_label("Try it: say a phrase", "preview_label")
         self.phrase_test = self._field(
             editor.test_input, rows["test_field"][0], rows["test_field"][1],
             rows["test_field"][2], parent=card,
         )
+        self.phrase_views["test_field"] = self.phrase_test
         self.phrase_test.setDelegate_(self)
         self.phrase_test.setPlaceholderString_("e.g. please review checklist now")
         self.phrase_preview_scroll, self.phrase_preview = self._phrases_text_area(
@@ -2414,9 +2721,13 @@ class HubWindowController(NSObject):
         )
         self.phrase_preview.setAccessibilityLabel_("Dictation preview")
         card.addSubview_(self.phrase_preview_scroll)
+        self.phrase_views["preview_output"] = self.phrase_preview_scroll
         self.phrase_status_label = add_label(
             "", "preview_status", 11, "muted", "regular"
         )
+        self.phrase_views["error_label"] = self.phrase_error_label
+        self.phrase_error_label.setHidden_(not self._phrases_vis[0])
+        self.phrase_undo_bar.setHidden_(not self._phrases_vis[1])
         self.cursor_y = top + frames["height"]
         self._phrases_push_fields()
         self._phrases_sync()
@@ -2455,10 +2766,8 @@ class HubWindowController(NSObject):
         """Error and Undo on the empty surface (e.g. after deleting the last
         phrase, or a failed load / add-example)."""
         editor = self.phrases
-        self.phrase_empty_error.setStringValue_(editor.error or editor.notice)
-        self.phrase_empty_error.setTextColor_(
-            _color("red" if editor.error else "success", self.tokens)
-        )
+        self._phrases_relayout_empty()
+        self.phrase_empty_error.setStringValue_(editor.error)
         self.phrase_empty_undo_bar.setHidden_(editor.undo_token is None)
         self.phrase_empty_undo_label.setStringValue_(editor.undo_label)
 
@@ -2537,16 +2846,52 @@ class HubWindowController(NSObject):
         self.phrase_text_hint.setTextColor_(
             _color("red" if is_error else "muted", self.tokens)
         )
-        self.phrase_error_label.setStringValue_(editor.error or editor.notice)
-        self.phrase_error_label.setTextColor_(
-            _color("red" if editor.error else "success", self.tokens)
-        )
+        self._phrases_relayout()
+        self.phrase_error_label.setStringValue_(editor.error)
+        self.phrase_notice.setStringValue_("" if editor.error else editor.notice)
         self.phrase_undo_bar.setHidden_(editor.undo_token is None)
         self.phrase_undo_label.setStringValue_(editor.undo_label)
         self.phrase_delete.setEnabled_(
             editor.current_id is not None or not editor.blank()
         )
         self._phrases_render_preview()
+
+    @objc.python_method
+    def _phrases_relayout(self):
+        """Move the editor's controls in place when the error or Undo notice
+        appeared or went away. Nothing is rebuilt, so typing, the selection and
+        the focus carry on untouched."""
+        vis = self.phrases.notice_visibility
+        if vis == self._phrases_vis:
+            return
+        self._phrases_vis = vis
+        frames = hot_phrases_layout(
+            self.phrase_width,
+            self._viewport_height() - self.phrase_top - HUB_PAGE_BOTTOM,
+            error_visible=vis[0], undo_visible=vis[1],
+        )
+        card_x, _card_y, card_w, card_h = frames["card"]
+        self.phrase_card.setFrame_(NSMakeRect(card_x, self.phrase_top, card_w, card_h))
+        list_x, list_y, list_w, list_h = frames["list"]
+        self.phrase_list_scroll.setFrame_(
+            NSMakeRect(list_x, self.phrase_top + list_y, list_w, list_h)
+        )
+        rows = frames["card_rows"]
+        for key, view in self.phrase_views.items():
+            if key in rows:
+                x, y, w, h = rows[key]
+                view.setFrame_(NSMakeRect(x, y, w, h))
+            if key in ("error_label", "undo_bar"):
+                view.setHidden_(key not in rows)
+        for scroll, text_view in (
+            (self.phrase_text_scroll, self.phrase_text),
+            (self.phrase_preview_scroll, self.phrase_preview),
+        ):
+            # The text view must stay at least as tall as its scroll view.
+            text_view.setMinSize_(NSMakeSize(0, scroll.contentSize().height))
+        self._phrases_render_list()
+        self._fit_body_height()
+        self.cursor_y = self.phrase_top + frames["height"]
 
     @objc.python_method
     def _phrases_render_preview(self):

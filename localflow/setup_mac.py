@@ -63,6 +63,7 @@ from localflow.ui_tokens import (
     CONTROL_GAP,
     LIGHT,
     LINE_HEIGHT,
+    PAGE_TITLE_HEIGHT,
     SHADOW_OFFSET,
     SUN_TEXT,
     TYPE,
@@ -205,7 +206,9 @@ class SetupWindowController(NSObject):
             segment.setWantsLayer_(True)
             self.root.addSubview_(segment)
             self.progress_segments.append(segment)
-        self.title = self._label("", 32, 86, 736, 28, True, height=38)
+        self.title = self._label(
+            "", 32, 86, 736, TYPE["display"][0], True, height=PAGE_TITLE_HEIGHT,
+        )
         self.subtitle = self._label("", 32, 130, 736, 13, height=24)
         self.page = FlippedView.alloc().initWithFrame_(NSMakeRect(32, 174, 736, 456))
         # Flipped root: MinYMargin keeps the bottom distance fixed.

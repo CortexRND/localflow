@@ -10,6 +10,7 @@ from localflow.ui_tokens import (
     ACTION_HEIGHT,
     ACTION_PADDING,
     LIGHT,
+    PAGE_TITLE_HEIGHT,
     PILL_BORDER_WIDTH,
     PILL_HEIGHT,
     PILL_PADDING,
@@ -226,6 +227,58 @@ def make_pill(text, kind, palette=None):
     layer.setBorderWidth_(PILL_BORDER_WIDTH)
     layer.setCornerRadius_(min(RADIUS["pill"], PILL_HEIGHT / 2))
     return pill
+
+
+def page_title(text, width, palette=None):
+    """The shared page title: display type, one display line tall.
+
+    Setup steps and every Hub page use this style, so a title is the same size
+    and weight everywhere and never reaches into what the Hub header offset
+    (PAGE_TITLE_HEIGHT plus a gap) leaves free below it.
+    """
+    label = AppKit.NSTextField.labelWithString_(text)
+    label.setFrame_(NSMakeRect(0, 0, width, PAGE_TITLE_HEIGHT))
+    label.setFont_(font(*TYPE["display"]))
+    label.setTextColor_(color("ink", palette))
+    label.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
+    return label
+
+
+def style_chip(button, palette=None, *, size=12):
+    """A compact pill-shaped button (example questions, citations)."""
+    palette = palette or LIGHT
+    button.setBordered_(False)
+    button.setFocusRingType_(AppKit.NSFocusRingTypeExterior)
+    button.setFont_(font(size, "semibold"))
+    # Truncation is a cell property, not an NSButton one.
+    button.cell().setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
+    button.setWantsLayer_(True)
+    layer = button.layer()
+    layer.setBackgroundColor_(color(palette["surface"], palette).CGColor())
+    layer.setBorderColor_(color(palette["line"], palette).CGColor())
+    layer.setBorderWidth_(1)
+    layer.setCornerRadius_(button.frame().size.height / 2)
+    layer.setShadowOpacity_(0)
+    button.setContentTintColor_(color(palette["ink"], palette))
+    return button
+
+
+def style_bubble(view, palette=None, *, role="assistant"):
+    """Conversation bubble: a cobalt-tinted one for the user, a card otherwise."""
+    palette = palette or LIGHT
+    if role == "assistant":
+        style_surface(view, palette)
+        return view
+    view.setWantsLayer_(True)
+    layer = view.layer()
+    layer.setBackgroundColor_(
+        color(surface_tint("cobalt", palette, 0.16), {}).CGColor()
+    )
+    layer.setBorderColor_(color(palette["cobalt"], palette).CGColor())
+    layer.setBorderWidth_(1)
+    layer.setCornerRadius_(RADIUS["card"])
+    layer.setShadowOpacity_(0)
+    return view
 
 
 def style_surface(

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-from Foundation import NSMakePoint, NSMakeSize
+from Foundation import NSMakeSize
 
 from localflow import provider_keys
 from localflow.config import Config
@@ -293,6 +293,26 @@ def _hub_hot_phrases_snapshots(base):
     controller._phrases_sync()
     _hub_sized_shots(controller, "hub-hot-phrases-invalid-draft")
 
+    # The Undo bar after a delete, and both notices at once. Only visible
+    # notices take room, so "Try it" stays right below the enabled row in the
+    # normal shots above and moves down only for these.
+    controller = hub("undo", entries)
+    editor = controller.phrases
+    editor.select(next(e["id"] for e in editor.entries if e["trigger"] == "sign off"))
+    editor.delete()
+    controller._phrases_sync()
+    _hub_sized_shots(controller, "hub-hot-phrases-undo")
+
+    controller = hub("error-undo", entries)
+    editor = controller.phrases
+    editor.select(next(e["id"] for e in editor.entries if e["trigger"] == "sign off"))
+    editor.delete()
+    editor.new_phrase()
+    editor.fill("Review, checklist", "y")
+    editor.flush()
+    controller._phrases_sync()
+    _hub_sized_shots(controller, "hub-hot-phrases-error-and-undo")
+
 
 def _hub_responsive_snapshots(base):
     """Home, Dictionary, Hot Phrases and Prompts at min and wide sizes.
@@ -339,21 +359,56 @@ def _hub_responsive_snapshots(base):
 
     controller.show_page("Ask")
     ask_page = controller.ask_page
-    for state in ("empty", "conversation", "thinking", "error"):
+    def citation(number, source, title):
+        return {
+            "n": number, "source": source, "when": "2026-04-15T12:00", "title": title,
+            "ref": str(base / "meeting.md") + "#01:20" if source == "meeting" else "1",
+        }
+
+    long_answer = (
+        "We agreed to launch on Friday and finish the checklist first [1]. "
+        "Marketing owns the announcement and engineering owns the rollout plan [2]. "
+    ) * 4
+    for state in (
+        "empty", "conversation", "thinking", "error", "long-conversation", "citations",
+    ):
+        # Leave Ask first: show_page captures the previous state's views (draft,
+        # scroll) on the way out, so the resets below are not overwritten.
+        controller.show_page("Home")
         ask_page.model.clear()
+        # Each state starts like a first visit: no remembered scroll offset.
+        ask_page.scroll_y, ask_page.was_at_bottom, ask_page.draft = None, True, ""
         ask_page.busy = state == "thinking"
-        ask_page.pending = "What did we decide about the launch?" if ask_page.busy else ""
+        ask_page.pending = (
+            "And who owns the rollout checklist?" if ask_page.busy else ""
+        )
         if state == "conversation":
             ask_page.model.turns.append(Turn(
                 "What did we decide about the launch?",
                 "We agreed to launch on Friday and finish the checklist first [1].",
-                [{"n": 1, "source": "meeting", "when": "2026-04-15T12:00",
-                  "title": "Launch planning", "ref": str(base / "meeting.md") + "#01:20"}],
+                [citation(1, "meeting", "Launch planning")],
             ))
         elif state == "error":
             ask_page.model.turns.append(Turn(
                 "What did we decide about the launch?",
                 error="Couldn't reach the model or local sources. Check the Models page and try again.",
+            ))
+        elif state == "long-conversation":
+            for number in range(1, 5):
+                ask_page.model.turns.append(Turn(
+                    f"Question {number}: what did we decide about the launch?",
+                    long_answer, [citation(1, "meeting", "Launch planning")],
+                ))
+        elif state == "citations":
+            ask_page.model.turns.append(Turn(
+                "Where did we talk about the launch?", long_answer,
+                [
+                    citation(1, "meeting", "Launch planning"),
+                    citation(2, "dictation", "A long dictation title about launch marketing"),
+                    citation(3, "notes", "Launch checklist"),
+                    citation(4, "meeting", "Rollout retrospective with engineering"),
+                    citation(5, "notes", "Marketing announcement plan"),
+                ],
             ))
         controller.show_page("Ask")
         _hub_sized_shots(controller, f"hub-ask-{state}")
@@ -401,14 +456,45 @@ def _hub_provider_snapshots(base):
         controller = build_hub_window(history, dictionary, config)
         controller.provider_snapshot_mode = True
         controller.show_page("Models")
-        for state in ("no-keys", "saved-active", "import-results", "test-success", "test-failure"):
+        # state: (keys saved + Fireworks active, expanded provider, import results)
+        # Collapsed list; a single expanded active / inactive / keyless / custom
+        # provider; import results with defaults ON (no saved key) and OFF
+        # (already saved). Everything is the mocked store above: no Keychain,
+        # no network.
+        specs = {
+            "no-keys": (False, None, False),
+            "saved-active": (True, None, False),
+            "import-results": (True, None, True),
+            "import-defaults": (False, None, True),
+            "test-success": (True, "ollama", False),
+            "test-failure": (True, "ollama", False),
+            "expanded-active": (True, "fireworks", False),
+            "expanded-inactive": (True, "openai", False),
+            "expanded-no-key": (False, "groq", False),
+            "expanded-custom": (False, "custom", False),
+        }
+        for state, (saved, expanded, imports) in specs.items():
+            # Leave Models first so show_page captures and tears down the
+            # previous state's views before anything below is reset.
+            controller.show_page("Home")
+            store.clear()
+            config = Config()
             controller.provider_candidates = []
+            controller.provider_checked = {}
             controller.provider_message = ("", False)
-            if state != "no-keys":
+            controller.provider_expanded = expanded
+            if saved:
                 provider_keys.save_imports(candidates)
                 config = provider_keys.activate("fireworks", model="example-model", config=config)
-            if state == "import-results":
+            controller.config = config
+            # Fresh per-provider state seeded from this state's config, so an
+            # active provider really is active/unchanged (no stale drafts).
+            controller.provider_state = {}
+            for preset in provider_keys.PRESETS:
+                controller._models_state(preset)
+            if imports:
                 controller.provider_candidates = provider_keys.detect_imports()
+                controller.provider_message = ("Select the keys to save", True)
             if state in ("test-success", "test-failure"):
                 result = (True, "Provider connection successful") if state == "test-success" else (
                     False, "Provider connection failed; check the key, base URL, and network"
@@ -416,8 +502,8 @@ def _hub_provider_snapshots(base):
                 with patch("localflow.provider_keys.test_llm", return_value=result):
                     ok, message = provider_keys.test_llm("ollama")
                     controller.provider_state["ollama"]["message"] = (message, ok)
-            else:
-                controller.provider_state["ollama"].pop("message", None)
+            if expanded == "custom":
+                controller.provider_state["custom"]["url"] = "https://llm.example.com/v1"
             for preset in provider_keys.PRESETS:
                 controller.provider_state[preset.id]["models"] = [
                     item["id"] for item in provider_keys.fetch_models(preset.id)
@@ -425,8 +511,6 @@ def _hub_provider_snapshots(base):
             controller.show_page("Models")
             for label, width, height in HUB_SIZES:
                 controller.resize_content(width, height)
-                if state in ("no-keys", "saved-active"):
-                    controller.body.scrollPoint_(NSMakePoint(0, 488))
                 _shot(controller, f"hub-models-keys-{state}-{label}")
 
 
@@ -437,6 +521,10 @@ def main():
         patch("localflow.secrets.get_secret", return_value=""),
         patch("localflow.secrets.set_secret"),
         patch("localflow.secrets.delete_secret"),
+        # The Models page reads (and Use writes) the config: keep both off the
+        # real ~/.localflow.
+        patch("localflow.hub_mac.load_config", return_value=Config()),
+        patch("localflow.provider_keys.save_config"),
         patch("localflow.provider_keys.fetch_models", return_value=[]),
         patch("localflow.provider_keys.test_llm", return_value=(False, "Snapshot: offline")),
     ):

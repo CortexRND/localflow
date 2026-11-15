@@ -43,7 +43,8 @@ def test_ask_page_wiring_and_background_work():
     assert '"Home", "Ask", "Hot Phrases"' in (ROOT / "localflow/hub_route.py").read_text()
     ask_source = (ROOT / "localflow/ask_mac.py").read_text()
     assert 'threading.Thread(target=run, name="localflow-ask", daemon=True).start()' in ask_source
-    assert 'self.text("Thinking..."' in ask_source
+    assert 'THINKING = "Thinking..."' in ask_source
+    assert '("assistant", THINKING, False)' in ask_source
     assert "self.events.get_nowait()" in ask_source
     assert "self.hub.history.get(target)" in ask_source
     assert "current().open_path(target)" in ask_source

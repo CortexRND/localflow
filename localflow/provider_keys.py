@@ -144,6 +144,20 @@ def remove_key(provider_id: str) -> None:
         secrets.delete_secret("fireworks_api_key")
 
 
+def key_needs_activation(provider_id: str) -> bool:
+    """True when a saved key for this provider differs from the generic key
+    Ask and cleanup actually use (`llm_api_key`), i.e. Save/Import happened
+    after the last activation. Boolean only: the values stay in locals and are
+    never returned, stored or logged. A missing saved key is never offered."""
+    preset = get_preset(provider_id)
+    if not preset.needs_key:
+        return False
+    saved = secrets.get_secret(f"provider_key_{preset.id}")
+    if not saved:
+        return False
+    return saved != secrets.get_secret("llm_api_key")
+
+
 def key_status(provider_id: str) -> dict:
     preset = get_preset(provider_id)
     value = secrets.get_secret(f"provider_key_{preset.id}") if preset.needs_key else ""

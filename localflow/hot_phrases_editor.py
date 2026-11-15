@@ -446,6 +446,11 @@ class HotPhrasesEditor:
             return ""
         return f"Deleted “{self.undo_token['trigger']}”"
 
+    @property
+    def notice_visibility(self):
+        """(error shown, Undo shown): the view re-lays out only when this changes."""
+        return (bool(self.error), self.undo_token is not None)
+
     # ---------------------------------------------------- external changes ---
 
     def on_show(self):
@@ -533,8 +538,19 @@ LIST_MAX_W = 300
 TEXT_MIN_H = 110
 
 
-def _editor_rows(inner, text_h):
-    """Card-relative frames (x, y, w, h) for the editor controls, top down."""
+ENABLED_LABEL_W = 64
+ENABLED_NOTICE_X = PAD + 48 + ENABLED_LABEL_W
+NOTICE_GAP = 8  # between the enabled row and an error / Undo notice below it
+
+
+def _editor_rows(inner, text_h, error_visible=False, undo_visible=False):
+    """Card-relative frames (x, y, w, h) for the editor controls, top down.
+
+    The error and Undo notices take room only while they are visible; hidden
+    ones are absent from the result, so "Try it" sits directly below the
+    enabled row. A short status ("Saved ✓") is shown inline in the enabled row
+    and never moves anything.
+    """
     rows = {}
     y = PAD
     rows["trigger_label"] = (PAD, y, inner, 18)
@@ -550,13 +566,18 @@ def _editor_rows(inner, text_h):
     rows["text_hint"] = (PAD, y, inner, 16)
     y += 28
     rows["enabled_switch"] = (PAD, y + 5, 40, 22)
-    rows["enabled_label"] = (PAD + 48, y + 7, max(inner - 48 - 96, 40), 18)
+    rows["enabled_label"] = (PAD + 48, y + 7, ENABLED_LABEL_W, 18)
+    rows["enabled_notice"] = (
+        ENABLED_NOTICE_X, y + 7, max(inner - 48 - ENABLED_LABEL_W - 96, 40), 18,
+    )
     rows["delete_button"] = (PAD + inner - 88, y, 88, 32)
     y += 40
-    rows["error_label"] = (PAD, y, inner, 34)
-    y += 38
-    rows["undo_bar"] = (PAD, y, inner, 36)
-    y += 48
+    if error_visible:
+        rows["error_label"] = (PAD, y, inner, 34)
+        y += 34 + NOTICE_GAP
+    if undo_visible:
+        rows["undo_bar"] = (PAD, y, inner, 36)
+        y += 36 + NOTICE_GAP
     rows["preview_label"] = (PAD, y, inner, 18)
     y += 20
     rows["test_field"] = (PAD, y, inner, 32)
@@ -568,23 +589,27 @@ def _editor_rows(inner, text_h):
     return rows, y
 
 
-def hot_phrases_layout(width, available_height):
+def hot_phrases_layout(
+    width, available_height, *, error_visible=False, undo_visible=False,
+):
     """Frames for the two-column page, relative to the page origin.
 
     Width-aware: the list column is 30% of the page (190-300). The editor
     takes the rest. Height-aware: the text box grows into spare height; when
     even the minimum does not fit, the page grows and the Hub scrolls it, so
-    controls are never squeezed, overlapped or clipped.
+    controls are never squeezed, overlapped or clipped. Error and Undo notices
+    reserve height only while visible (the text box gives it up and takes it
+    back), so "Try it" stays right below the enabled row.
     """
     width = max(int(width), LIST_MIN_W + GAP + 300)
     list_w = min(LIST_MAX_W, max(LIST_MIN_W, round(width * 0.3)))
     editor_x = list_w + GAP
     editor_w = width - editor_x
     inner = editor_w - 2 * PAD
-    _, needed = _editor_rows(inner, TEXT_MIN_H)
+    _, needed = _editor_rows(inner, TEXT_MIN_H, error_visible, undo_visible)
     height = max(int(available_height), needed, LIST_TOP + 120)
     text_h = TEXT_MIN_H + (height - needed)
-    card, _ = _editor_rows(inner, text_h)
+    card, _ = _editor_rows(inner, text_h, error_visible, undo_visible)
     return {
         "height": height,
         "search": (0, 0, list_w, SEARCH_H),
@@ -593,3 +618,22 @@ def hot_phrases_layout(width, available_height):
         "card": (editor_x, 0, editor_w, height),
         "card_rows": card,
     }
+
+
+def empty_layout(width, *, error_visible=False, undo_visible=False):
+    """(frames, card height) for the empty-state card; notices only when shown."""
+    inner = width - 2 * PAD
+    rows = {
+        "message": (PAD, PAD + 8, inner, 48),
+        "detail": (PAD, PAD + 62, inner, 36),
+        "new": (PAD, 124, 150, BUTTON_H),
+        "example": (PAD + 162, 124, 160, BUTTON_H),
+    }
+    y = 124 + BUTTON_H
+    if error_visible:
+        rows["error"] = (PAD, y + NOTICE_GAP, inner, 34)
+        y += NOTICE_GAP + 34
+    if undo_visible:
+        rows["undo"] = (PAD, y + NOTICE_GAP, inner, 36)
+        y += NOTICE_GAP + 36
+    return rows, y + PAD

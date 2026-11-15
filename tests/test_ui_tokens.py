@@ -52,3 +52,29 @@ def test_theme_and_tk_font_resolution():
     assert resolve_tk_font(["Helvetica", "DejaVu Sans", "SF Pro Text"]) == "SF Pro Text"
     assert resolve_tk_font(["Helvetica Neue", "DejaVu Sans"]) == "Helvetica Neue"
     assert resolve_tk_font(["Helvetica"]) == "DejaVu Sans"
+
+
+def test_page_titles_share_one_display_style_that_clears_the_header_offset():
+    import ast
+    from pathlib import Path
+
+    from localflow import ui_tokens
+
+    root = Path(__file__).resolve().parents[1] / "localflow"
+    assert ui_tokens.TYPE["display"] == (28, "bold")  # the setup Quick checkup title
+    assert ui_tokens.PAGE_TITLE_HEIGHT == ui_tokens.LINE_HEIGHT["display"] == 38
+    assert ui_tokens.PAGE_TITLE_HEIGHT <= ui_tokens.HUB_HEADER_OFFSET
+    style = (root / "mac_style.py").read_text(encoding="utf-8")
+    title = next(
+        node for node in ast.parse(style).body
+        if isinstance(node, ast.FunctionDef) and node.name == "page_title"
+    )
+    body = ast.get_source_segment(style, title)
+    assert 'TYPE["display"]' in body and "PAGE_TITLE_HEIGHT" in body
+    # Hub: every page title goes through the shared helper (no per-page 20pt label).
+    hub = (root / "hub_mac.py").read_text(encoding="utf-8")
+    assert "page_title(page," in hub
+    assert '_label(page, 0' not in hub
+    # Setup keeps the same size and line height through the tokens.
+    setup = (root / "setup_mac.py").read_text(encoding="utf-8")
+    assert 'TYPE["display"][0], True, height=PAGE_TITLE_HEIGHT' in setup
