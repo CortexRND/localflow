@@ -4,24 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>localflow</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Anton&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #6438d8;
-    --fg: #f2e8d0;
-    --accent: #edff45;
-    --paper: #faf5e8;
+    /* mirrors localflow/ui_tokens.py LIGHT so web and native Hub match */
+    --bg: #FBF6EC;        /* paper */
+    --fg: #141414;        /* ink */
+    --accent: #2346D8;    /* cobalt */
+    --paper: #FFFFFF;     /* surface */
+    --sun: #FFD23F;
+    --muted: #5C5C5C;
+    --line: #E6DFD0;
+    --danger: #E5484D;
+    --radius-card: 12px;
+    --radius-button: 10px;
+    --shadow: 3px 3px 0 var(--fg);
     --frame: 10px;
     --edge: clamp(1.25rem, 5vw, 3rem);
     --measure: 42rem;
-    --font-display: "Anton", "Arial Narrow", Impact, sans-serif;
+    --font-display: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
-    --font-sans: ui-sans-serif, system-ui, sans-serif;
+    --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
     --noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-    /* opaque rule colours - never opacity, so contrast stays measurable */
-    --rule-on-purple: color-mix(in srgb, var(--fg) 70%, var(--bg));  /* computes opaque, 3.49:1 on purple */
+    --rule-on-purple: #8A8273;  /* control borders, 3.4:1 on paper */
   }
 
   * { box-sizing: border-box; }
@@ -40,13 +44,13 @@
   button, input, select {
     font-family: inherit;
     color: inherit;
-    border-radius: 0;
+    border-radius: var(--radius-button);
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
   }
 
   :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-  .band--paper :focus-visible { outline-color: var(--bg); }
+  .band--paper :focus-visible { outline-color: var(--fg); }
 
   /* fixed frame around the viewport, like the reference */
   .frame {
@@ -72,7 +76,7 @@
   }
   .band--paper {
     background: var(--paper);
-    color: var(--bg);
+    color: var(--fg);
     /* inset on top of the fixed frame, so purple runs down both sides and the
        paper reads as a card laid on the field, not a stripe across it */
     margin-inline: var(--frame);
@@ -121,9 +125,9 @@
   .masthead h1 {
     font-family: var(--font-display);
     font-weight: 400;
-    text-transform: uppercase;
-    font-size: clamp(3.4rem, 21vw, 8rem);
-    line-height: 0.82;
+    text-transform: none;
+    font-size: clamp(2.4rem, 11vw, 4.5rem);
+    line-height: 1;
     letter-spacing: 0.005em;
     margin: 0;
   }
@@ -162,14 +166,14 @@
     color: var(--fg);
     margin: 0 auto 2rem;
   }
-  .band--paper .eyebrow { color: var(--bg); }
+  .band--paper .eyebrow { color: var(--fg); }
 
   .title {
     font-family: var(--font-display);
     font-weight: 400;
-    text-transform: uppercase;
-    font-size: clamp(2.6rem, 15vw, 5rem);
-    line-height: 0.86;
+    text-transform: none;
+    font-size: clamp(1.9rem, 8vw, 3rem);
+    line-height: 1.05;
     letter-spacing: 0.005em;
     margin: 0 0 1.75rem;
   }
@@ -212,9 +216,9 @@
     cursor: pointer;
     font-family: var(--font-display);
     font-weight: 400;
-    text-transform: uppercase;
-    font-size: clamp(3.2rem, 28vw, 9rem);
-    line-height: 0.88;
+    text-transform: none;
+    font-size: clamp(2.2rem, 12vw, 4.5rem);
+    line-height: 1;
     letter-spacing: 0.005em;
     overflow-wrap: break-word;
   }
@@ -254,9 +258,7 @@
     content: "Tap to stop — recording";
     color: var(--accent);
   }
-  /* busy: purple field, cream outline, no blink, JS text "Transcribing…".
-     Drops to the mono face on purpose - Anton ships no U+2026 glyph and the
-     Google Fonts latin subset claims that range, so Anton renders it as tofu. */
+  /* busy: paper field, ink outline, no blink, JS text "Transcribing…" in the mono face. */
   #recordBtn.busy, #recordBtn:disabled {
     background: var(--bg);
     border-color: var(--fg);
@@ -358,7 +360,7 @@
     display: block;
     font-family: var(--font-display);
     font-weight: 400;
-    text-transform: uppercase;
+    text-transform: none;
     font-size: 2rem;
     line-height: 1;
     letter-spacing: 0.01em;
@@ -369,7 +371,7 @@
   /* ---------- Meeting (paper band) ---------- */
   /* the controls live in a bordered card — the .terminal exception again */
   #meetingPanel {
-    border: 1px solid var(--bg);
+    border: 1px solid var(--fg);
     padding: 1.4rem var(--edge) 1.6rem;
     text-align: left;
   }
@@ -379,14 +381,14 @@
     text-transform: uppercase;
     letter-spacing: 0.12em;
     font-size: 0.7rem;
-    color: var(--bg);
+    color: var(--fg);
     margin: 0 0 1.25rem;
   }
   #meetingWatchState:empty { display: none; margin: 0; }
 
   #meetingBanner {
     display: none;   /* JS sets style.display='block' - must stay a block */
-    border: 1px solid var(--bg);
+    border: 1px solid var(--fg);
     padding: 1rem 1.15rem;
     margin-bottom: 1.25rem;
     font-family: var(--font-mono);
@@ -395,7 +397,7 @@
     letter-spacing: 0.06em;
     font-size: 0.85rem;
     line-height: 1.5;
-    color: var(--bg);
+    color: var(--fg);
   }
   .banner-inner {
     display: flex;
@@ -413,9 +415,9 @@
     min-width: 96px;
     padding: 0 1.25rem;
     background: transparent;
-    border: 1px solid var(--bg);
+    border: 1px solid var(--fg);
     border-radius: 999px;
-    color: var(--bg);
+    color: var(--fg);
     font-family: var(--font-mono);
     font-weight: 800;
     text-transform: uppercase;
@@ -425,7 +427,7 @@
     flex: 0 0 auto;
   }
   .dismissBtn:hover, .dismissBtn:active {
-    background: var(--bg);
+    background: var(--fg);
     color: var(--paper);
   }
 
@@ -445,13 +447,13 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     background: transparent;
-    border: 1px solid var(--bg);
-    color: var(--bg);
+    border: 1px solid var(--fg);
+    color: var(--fg);
     cursor: pointer;
   }
   .meetingRow input { flex: 1 1 12rem; min-width: 0; cursor: text; }
   .meetingRow select { flex: 0 1 auto; min-width: 8.5rem; }
-  .meetingRow input::placeholder { color: var(--bg); opacity: 1; }
+  .meetingRow input::placeholder { color: var(--fg); opacity: 1; }
 
   /* hugs its text, like the reference CTA — not a full-bleed app slab */
   #meetingBtn {
@@ -461,9 +463,9 @@
     min-height: 56px;
     margin-top: 0.5rem;
     padding: 1.05rem 2.25rem;
-    background: var(--bg);
-    color: var(--paper);
-    border: 1px solid var(--bg);
+    background: var(--accent);
+    color: #FFFFFF;
+    border: 1px solid var(--accent);
     font-family: var(--font-mono);
     font-weight: 800;
     text-transform: uppercase;
@@ -474,13 +476,13 @@
   }
   #meetingBtn:hover, #meetingBtn:active {
     background: transparent;
-    color: var(--bg);
+    color: var(--accent);
   }
   /* live: acid field + blinking square, plus JS text "Stop meeting transcription" */
   #meetingBtn.live {
-    background: var(--accent);
-    border-color: var(--bg);
-    color: var(--bg);
+    background: var(--sun);
+    border-color: var(--fg);
+    color: var(--fg);
   }
   #meetingBtn.live::before {
     content: "";
@@ -488,13 +490,13 @@
     width: 0.7em;
     height: 0.7em;
     margin-right: 0.55em;
-    background: var(--bg);
+    background: var(--fg);
     animation: blink 1.2s ease-in-out infinite;
   }
   #meetingBtn:disabled {
     background: transparent;
     border-style: dashed;
-    color: var(--bg);
+    color: var(--fg);
     cursor: not-allowed;
   }
   #meetingBtn:disabled::before { content: none; }
@@ -502,13 +504,13 @@
   /* live log: a purple window sunk into the paper band */
   #meetingLive {
     display: none;   /* JS sets style.display='block' - must stay a block */
-    background: var(--bg);
-    border: 1px solid var(--bg);
+    background: var(--fg);
+    border: 1px solid var(--fg);
     padding: 1rem 1.15rem 1.15rem;
     font-family: var(--font-mono);
     font-size: 0.85rem;
     line-height: 1.7;
-    color: var(--accent);
+    color: var(--sun);
     max-height: 280px;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -523,7 +525,7 @@
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.14em;
-    color: var(--fg);
+    color: var(--bg);
     margin-bottom: 0.75rem;
   }
 
@@ -534,7 +536,7 @@
     font-weight: 800;
     font-size: 0.85rem;
     letter-spacing: 0.04em;
-    color: var(--bg);
+    color: var(--fg);
     line-height: 1.6;
     word-break: break-word;
     overflow-wrap: anywhere;
@@ -544,11 +546,11 @@
     display: block;
     font-family: var(--font-display);
     font-weight: 400;
-    text-transform: uppercase;
+    text-transform: none;
     font-size: 1.6rem;
     line-height: 1;
     letter-spacing: 0.01em;
-    color: var(--bg);
+    color: var(--fg);
     margin-bottom: 0.4rem;
   }
 
@@ -569,9 +571,9 @@
     text-transform: uppercase;
     letter-spacing: 0.12em;
     font-size: 0.7rem;
-    color: var(--bg);
+    color: var(--fg);
   }
-  .fieldHead label, .fieldHead span { color: var(--bg); }
+  .fieldHead label, .fieldHead span { color: var(--fg); }
   .fieldStatus { letter-spacing: 0.08em; }
   .fieldStatus.err { text-decoration: underline wavy; }
   #meetingNotes {
@@ -584,17 +586,17 @@
     font-size: 16px;
     line-height: 1.55;
     background: transparent;
-    color: var(--bg);
-    border: 1px solid var(--bg);
-    border-radius: 0;
+    color: var(--fg);
+    border: 1px solid var(--fg);
+    border-radius: var(--radius-button);
   }
-  #meetingNotes::placeholder { color: var(--bg); opacity: 0.7; }
+  #meetingNotes::placeholder { color: var(--fg); opacity: 0.7; }
   .fieldHint {
     margin: 0.4rem 0 0;
     font-family: var(--font-mono);
     font-size: 0.72rem;
     letter-spacing: 0.03em;
-    color: var(--bg);
+    color: var(--fg);
   }
 
   #meetingChat { display: none; margin-top: 1.25rem; }  /* JS shows it once a meeting is saved */
@@ -607,20 +609,20 @@
     font-size: 16px;
     font-family: var(--font-sans);
     background: transparent;
-    border: 1px solid var(--bg);
-    border-radius: 0;
-    color: var(--bg);
+    border: 1px solid var(--fg);
+    border-radius: var(--radius-button);
+    color: var(--fg);
   }
-  .chatRow input::placeholder { color: var(--bg); opacity: 0.7; }
+  .chatRow input::placeholder { color: var(--fg); opacity: 0.7; }
   .chatRow .dismissBtn { min-height: 54px; }
-  .chatRow .dismissBtn:disabled { border-style: dashed; cursor: not-allowed; background: transparent; color: var(--bg); }
+  .chatRow .dismissBtn:disabled { border-style: dashed; cursor: not-allowed; background: transparent; color: var(--fg); }
   #chatLog { margin: 0.75rem 0 0; padding: 0; list-style: none; }
   #chatLog:empty { display: none; }
   #chatLog li {
-    border: 1px solid var(--bg);
+    border: 1px solid var(--fg);
     border-top-width: 0;
     padding: 0.8rem 1rem;
-    color: var(--bg);
+    color: var(--fg);
     line-height: 1.55;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -633,9 +635,9 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
-  #chatLog li.a { background: var(--bg); color: var(--fg); border-color: var(--bg); }
-  #chatLog li.a.pending { color: var(--accent); }
-  #chatLog li.a.err { background: transparent; color: var(--bg); border-style: dashed; }
+  #chatLog li.a { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  #chatLog li.a.pending { color: var(--sun); }
+  #chatLog li.a.err { background: transparent; color: var(--fg); border-style: dashed; }
 
   /* ---------- Transcripts ---------- */
   /* a built, bordered card so the purple field never reads as empty */
@@ -769,9 +771,20 @@
       animation: none;
     }
   }
+
+  /* native Hub card language: surface cards, 12px radius, offset ink shadow */
+  #meetingPanel, .archive-frame, .colophon {
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow);
+  }
+  .band--paper { border-radius: var(--radius-card); }
+  .masthead h1, .title, #recordBtn, #error::before, #meetingSaved::before {
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
 </style>
 </head>
-<body class="noise">
+<body>
 
   <div class="frame" aria-hidden="true"></div>
 
@@ -781,7 +794,7 @@
       <span>Local only · No cloud</span>
     </div>
     <div class="inner">
-      <h1>localflow</h1>
+      <h1>LocalFlow</h1>
       <p class="strap">Voice &amp; meeting transcription · <b>runs on this machine</b></p>
     </div>
   </header>
