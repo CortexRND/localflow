@@ -60,6 +60,11 @@ class FakeLLM:
         "![x](HTTPS:\\\\evil.example/x.png)",
         "![b](https://evil.example/x.png\n\n[b]: https://evil.example/b.png",
         "![outer ![in][b] text][b]\n\n[b]: https://evil.example/b.png",
+        "a ![ unmatched\n\n![x](https://evil.example/x.png)",
+        "![a](chart.png ![x](https://evil.example/x.png))",
+        "![[x]](https://evil.example/x.png)",
+        "!<img src=x>[x](https://evil.example/x.png)",
+        "<![img src=https://evil.example/x](https://a.example)>",
     ],
 )
 def test_strip_remote_media_leaves_no_rendered_remote_image(md):
@@ -68,12 +73,20 @@ def test_strip_remote_media_leaves_no_rendered_remote_image(md):
     out = strip_remote_media(md)
     body = out.split("[b]:")[0]
     assert "![" not in body, out
+    assert "<img" not in out.lower()
+    assert strip_remote_media(out) == out
 
 
-def test_strip_remote_media_keeps_local_images_with_nested_alt():
+def test_strip_remote_media_unmatched_opener_keeps_text_once():
     from localflow.meetings import strip_remote_media
 
-    md = "![a [b] c](chart.png) ![[diagram.png]] ![<x>](<my chart.png>)"
+    assert strip_remote_media("Notes: ![ half\nrest") == "Notes: [ half\nrest"
+
+
+def test_strip_remote_media_keeps_local_images():
+    from localflow.meetings import strip_remote_media
+
+    md = "![chart](img/chart.png) ![[diagram.png]] ![[Board.canvas|300]]"
     assert strip_remote_media(md) == md
 
 

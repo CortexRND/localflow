@@ -394,65 +394,35 @@ def _as_data(text: str) -> str:
     return f"<<<\n{_neutralize(text.strip())}\n>>>\n"
 
 
-# A relative vault path: no scheme, no `//` host, no entities or backslashes.
-_LOCAL_IMAGE_DEST = re.compile(r"(?!//)[\w\-./%~ ]+")
+# The only image forms kept: Obsidian `![[embed]]` and `![alt](relative/path.png)`.
+_LOCAL_DEST = r"(?:(?!//)[\w\-./%~])+"
+_SAFE_IMAGE = re.compile(
+    r"!\[\[(?:(?!//)[^\[\]\n:\\])+\]\](?![(\[])|!\[[^\[\]\n]*\]\(" + _LOCAL_DEST + r"\)"
+)
+_INLINE_IMAGE = re.compile(r"!\[([^\[\]\n]*)\]\([^()\n]*\)")
 _HTML_MEDIA = re.compile(
     r"</?(?:img|image|iframe|video|audio|source|embed|object|picture|svg|link|meta)\b[^>]*>",
     re.IGNORECASE,
 )
 
 
-def _closing(text: str, i: int, open_ch: str, close_ch: str) -> int:
-    depth = 0
-    while i < len(text):
-        c = text[i]
-        if c == "\\":
-            i += 2
-            continue
-        if c == open_ch:
-            depth += 1
-        elif c == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
-
-
-def _is_local_dest(dest: str) -> bool:
-    dest = dest.strip()
-    if dest.startswith("<"):
-        dest = dest[1:].split(">", 1)[0]
-    else:
-        dest = dest.split(None, 1)[0] if dest else ""
-    return bool(_LOCAL_IMAGE_DEST.fullmatch(dest))
-
-
 def _strip_md_images(md: str) -> str:
+    # Inline images with a non-local destination become their alt text.
+    md = _INLINE_IMAGE.sub(
+        lambda m: m.group() if _SAFE_IMAGE.fullmatch(m.group()) else m.group(1), md
+    )
+    # Any other `!` + `[` could still render as an image (reference-style,
+    # nested or malformed syntax); drop the `!` so at worst it is a link.
     out: list[str] = []
     i = 0
     while (j := md.find("![", i)) >= 0:
         out.append(md[i:j])
-        if md.startswith("![[", j):  # Obsidian embed of a vault file
-            out.append("![[")
-            i = j + 3
-            continue
-        close = _closing(md, j + 1, "[", "]")
-        if close < 0:
-            break
-        if md.startswith("(", close + 1):
-            end = _closing(md, close + 1, "(", ")")
-            if end > 0:
-                if _is_local_dest(md[close + 2:end]):
-                    out.append(md[j:close + 1])
-                    i = close + 1
-                else:
-                    out.append(_strip_md_images(md[j + 2:close]))
-                    i = end + 1
-                continue
-        # Reference-style image: drop the `!` so it renders as a plain link.
-        out.append("[")
-        i = j + 2
+        if m := _SAFE_IMAGE.match(md, j):
+            out.append(m.group())
+            i = m.end()
+        else:
+            out.append("[")
+            i = j + 2
     out.append(md[i:])
     return "".join(out)
 
@@ -460,7 +430,11 @@ def _strip_md_images(md: str) -> str:
 def strip_remote_media(markdown: str) -> str:
     """Drop remote images/embeds from LLM output so opening the note can't
     beacon transcript content to another host."""
-    return _HTML_MEDIA.sub("", _strip_md_images(markdown))
+    while True:
+        cleaned = _strip_md_images(_HTML_MEDIA.sub("", markdown))
+        if cleaned == markdown:
+            return cleaned
+        markdown = cleaned
 
 
 _NOTES_PROMPT = """You are a meeting-notes writer. From the transcript below, write concise meeting notes in Markdown with exactly these sections:
