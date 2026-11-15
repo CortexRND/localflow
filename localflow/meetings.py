@@ -402,10 +402,21 @@ _SAFE_IMAGE = re.compile(
     r"!\[\[(?:(?!//)[^\[\]\n:\\`<])+\]\](?![(\[])|!\[" + _PLAIN_ALT + r"\]\(" + _LOCAL_DEST + r"\)"
 )
 _INLINE_IMAGE = re.compile(r"!\[(" + _PLAIN_ALT + r")\]\([^()\n]*\)")
-_HTML_MEDIA = re.compile(
-    r"</?(?:img|image|iframe|video|audio|source|embed|object|picture|svg|link|meta)\b[^>]*>",
-    re.IGNORECASE,
+# Notes are Markdown, not HTML: raw HTML in model output is dropped (style and
+# script bodies included), then any leftover `<` is escaped so no tag survives.
+_HTML_RAW_TEXT = re.compile(r"<(style|script)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_AUTOLINK = re.compile(
+    r"<((?:https?|mailto):[^\s<>]*|[\w.+-]+@[\w-]+(?:\.[\w-]+)+)>", re.IGNORECASE
 )
+_ANGLE_DEST = re.compile(r"\]\(<([^<>\n]*)>")
+_HTML_TAG = re.compile(r"<[A-Za-z!?/][^<>]*>")
+
+
+def _strip_html(md: str) -> str:
+    md = _HTML_RAW_TEXT.sub("", md)
+    md = _AUTOLINK.sub(r"\1", md)
+    md = _ANGLE_DEST.sub(lambda m: "](" + m.group(1).replace(" ", "%20"), md)
+    return _HTML_TAG.sub("", md)
 
 
 def _strip_md_images(md: str) -> str:
@@ -430,12 +441,13 @@ def _strip_md_images(md: str) -> str:
 
 
 def strip_remote_media(markdown: str) -> str:
-    """Drop remote images/embeds from LLM output so opening the note can't
-    beacon transcript content to another host."""
+    """Drop remote images and all raw HTML from LLM output so opening the note
+    can't beacon transcript content to another host. Only the local image
+    forms in `_SAFE_IMAGE` are kept."""
     while True:
-        cleaned = _strip_md_images(_HTML_MEDIA.sub("", markdown))
+        cleaned = _strip_md_images(_strip_html(markdown))
         if cleaned == markdown:
-            return cleaned
+            return cleaned.replace("<", "&lt;")
         markdown = cleaned
 
 
