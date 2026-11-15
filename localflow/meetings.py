@@ -9,6 +9,7 @@ import bisect
 import ctypes
 import ctypes.util
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -394,14 +395,57 @@ ENHANCE_INSTRUCTION = (
     "them using the transcript, keeping the user's structure and emphasis."
 )
 
+_USER_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+
+
+def _user_heading_lines(md: str) -> list[str]:
+    return [
+        line for line in (md or "").splitlines()
+        if _USER_HEADING_RE.match(line)
+    ]
+
+
+def user_headings(md: str) -> list[str]:
+    headings = []
+    for line in (md or "").splitlines():
+        match = _USER_HEADING_RE.match(line)
+        if match:
+            headings.append(match.group(1))
+    return headings
+
+
+def _norm_heading(heading: str) -> str:
+    normalized = re.sub(
+        r"[^a-z0-9 ]", "", heading.lower().replace("**", "")
+    )
+    return " ".join(normalized.split()).strip()
+
+
+def missing_user_headings(output: str, user_notes: str) -> list[str]:
+    output_headings = [
+        _norm_heading(heading) for heading in user_headings(output)
+    ]
+    missing = []
+    next_index = 0
+    for heading in user_headings(user_notes):
+        try:
+            next_index = output_headings.index(
+                _norm_heading(heading), next_index
+            ) + 1
+        except ValueError:
+            missing.append(heading)
+    return missing
+
+
 _ENHANCE_PROMPT = """You are a meeting-notes writer. {enhance}
 
 - Keep every point the user wrote, in their order and under their headings. Flesh each one out with specifics from the transcript (names, numbers, owners, dates).
 - What the user wrote down mattered to them: give those points the most space.
 - Correct a detail only when the transcript clearly contradicts it.
+- Do not add a title heading for the meeting; the title is added separately.
 - After the user's notes, add only those of these sections that the user's notes don't already cover:
 
-{sections}
+{heading_skeleton}{sections}
 
 {instructions}Only use information present in the transcript or the user's notes. No preamble, no commentary — output Markdown only.
 {speaker_note}
@@ -412,6 +456,20 @@ User's notes:
 >>>
 
 Transcript:
+"""
+
+_ENHANCE_RETRY_PROMPT = """The previous draft dropped or reordered the user's headings. These headings were missing or out of order:
+{missing_headings}
+
+Your output MUST start with the user's headings, written exactly as below and in this order, each followed by its expanded points:
+{skeleton}
+
+Rewrite the notes starting with exactly those headings in order, each followed by its expanded points. Keep all facts from the previous draft and keep the template sections after the user headings. Output Markdown only.
+
+Previous draft:
+<<<
+{draft}
+>>>
 """
 
 _ENHANCE_MERGE_PROMPT = """The following are enhanced meeting notes from consecutive parts of one meeting, each built on the same rough notes from the user. Merge them into one set of notes. {enhance} Keep the user's headings and order; then any of these sections that are not already covered: {section_list}. Deduplicate. Output Markdown only.
@@ -445,7 +503,20 @@ def build_notes_prompt(template: MeetingTemplate | None = None) -> str:
 def build_enhance_prompt(user_notes: str, template: MeetingTemplate | None = None) -> str:
     """Prompt prefix for AI-enhanced notes; the transcript chunk is appended."""
     fields = _template_fields(template or resolve_template(None))
-    return _ENHANCE_PROMPT.format(user_notes=user_notes.strip(), **fields)
+    heading_lines = _user_heading_lines(user_notes)
+    heading_skeleton = ""
+    if heading_lines:
+        heading_skeleton = (
+            "Your output MUST start with the user's headings, written exactly "
+            "as below and in this order, each followed by its expanded points:\n"
+            + "\n".join(heading_lines)
+            + "\n\n"
+        )
+    return _ENHANCE_PROMPT.format(
+        user_notes=user_notes.strip(),
+        heading_skeleton=heading_skeleton,
+        **fields,
+    )
 
 
 class MeetingSummarizer:
@@ -488,14 +559,40 @@ class MeetingSummarizer:
                 merge = _MERGE_PROMPT.format(**fields)
             parts = [self._generate(prefix + chunk) for chunk in chunks]
             if len(parts) == 1:
-                return parts[0]
-            return self._generate(merge + "\n\n---\n\n".join(parts))
+                result = parts[0]
+            else:
+                result = self._generate(merge + "\n\n---\n\n".join(parts))
         except Exception:
             log.exception("summarization failed; notes will hold raw transcript pointer")
             failed = "## Summary\n(LLM summarization failed — see the linked transcript log.)\n"
             if user_notes:
                 failed += f"\n## My Notes\n\n{user_notes}\n"
             return failed
+
+        if user_notes:
+            missing = missing_user_headings(result, user_notes)
+            if missing:
+                retry_prompt = _ENHANCE_RETRY_PROMPT.format(
+                    missing_headings="\n".join(
+                        f"- {heading}" for heading in missing
+                    ),
+                    skeleton="\n".join(_user_heading_lines(user_notes)),
+                    draft=result,
+                )
+                try:
+                    retry = self._generate(retry_prompt)
+                except Exception:
+                    log.exception("heading repair failed; keeping original draft")
+                else:
+                    if len(missing_user_headings(retry, user_notes)) < len(missing):
+                        result = retry
+                remaining = missing_user_headings(result, user_notes)
+                if remaining:
+                    log.warning(
+                        "enhanced notes are still missing user headings: %s",
+                        remaining,
+                    )
+        return result
 
 
 # ------------------------------------------------------------- transcript Q&A ---

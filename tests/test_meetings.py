@@ -1,3 +1,4 @@
+import logging
 import threading
 from datetime import datetime
 
@@ -24,7 +25,9 @@ from localflow.meetings import (
     build_notes_prompt,
     format_transcript,
     latest_transcript_log,
+    missing_user_headings,
     read_transcript_log,
+    user_headings,
 )
 
 
@@ -32,14 +35,15 @@ class FakeLLM:
     id = "fake"
     offline = True
 
-    def __init__(self, replies=None, fail=False):
+    def __init__(self, replies=None, fail=False, fail_on_call=None):
         self.prompts: list[str] = []
         self.replies = list(replies or [])
         self.fail = fail
+        self.fail_on_call = fail_on_call
 
     def complete(self, system, user, *, max_tokens=None):
         self.prompts.append(user)
-        if self.fail:
+        if self.fail or len(self.prompts) == self.fail_on_call:
             raise RuntimeError("llm down")
         return self.replies.pop(0) if self.replies else f"reply {len(self.prompts)}"
 
@@ -104,7 +108,10 @@ def test_notes_prompt_is_built_from_the_chosen_template():
 
 
 def test_enhance_prompt_carries_user_notes_and_the_verbatim_instruction():
-    notes = "## Pricing\n- **raise to $20?**\n- ask Dana re: churn"
+    notes = (
+        "## Pricing\n- **raise to $20?**\n- ask Dana re: churn\n"
+        "### Customer impact"
+    )
     prompt = build_enhance_prompt(notes, resolve_template("one-on-one"))
     assert (
         "The user wrote these rough notes during the meeting — expand and enhance "
@@ -112,10 +119,32 @@ def test_enhance_prompt_carries_user_notes_and_the_verbatim_instruction():
     ) in prompt
     assert notes in prompt
     assert "## Commitments" in prompt
+    skeleton = (
+        "Your output MUST start with the user's headings, written exactly as "
+        "below and in this order, each followed by its expanded points:\n"
+        "## Pricing\n### Customer impact\n"
+    )
+    assert skeleton in prompt
+    assert prompt.index("- Do not add a title heading") < prompt.index(skeleton)
+    assert prompt.index("- After the user's notes") < prompt.index(skeleton)
+    assert prompt.index(skeleton) < prompt.index("## Commitments")
     assert prompt.rstrip().endswith("Transcript:")
 
 
 # ------------------------------------------------------------ summarizer ---
+
+def test_missing_user_headings_normalizes_text_and_ignores_heading_level():
+    notes = "## **Pricing & Roadmap!**\n### Customer's status?"
+    output = "# pricing roadmap\n## customers status"
+    assert user_headings(notes) == ["**Pricing & Roadmap!**", "Customer's status?"]
+    assert missing_user_headings(output, notes) == []
+
+
+def test_missing_user_headings_requires_the_same_relative_order():
+    notes = "## First\n## Second"
+    output = "## Second\n## First"
+    assert missing_user_headings(output, notes) == ["Second"]
+
 
 def test_summarize_without_notes_uses_template_prompt():
     llm = FakeLLM(["## Summary\nok"])
@@ -130,9 +159,80 @@ def test_summarize_with_notes_uses_enhance_prompt():
     llm = FakeLLM(["## Pricing\n- enhanced"])
     out = MeetingSummarizer(llm).summarize("price goes to twenty", user_notes="## Pricing\n- $20?")
     assert out == "## Pricing\n- enhanced"
+    assert len(llm.prompts) == 1
     assert ENHANCE_INSTRUCTION in llm.prompts[0]
+    assert "## Pricing\n" in llm.prompts[0]
+    assert "Your output MUST start with the user's headings" in llm.prompts[0]
     assert "## Pricing\n- $20?" in llm.prompts[0]
     assert llm.prompts[0].endswith("price goes to twenty")
+
+
+def test_summarize_retries_when_a_user_heading_is_missing():
+    notes = "## Pricing\n- $20?\n### Risks\n- churn"
+    draft = "## Pricing\n- The price will be $20."
+    retry = "## Pricing\n- The price will be $20.\n### Risks\n- Monitor churn."
+    llm = FakeLLM([draft, retry])
+
+    out = MeetingSummarizer(llm).summarize("price and churn", user_notes=notes)
+
+    assert out == retry
+    assert len(llm.prompts) == 2
+    assert "- Risks" in llm.prompts[1]
+    assert "## Pricing\n### Risks" in llm.prompts[1]
+    assert f"<<<\n{draft}\n>>>" in llm.prompts[1]
+
+
+def test_summarize_uses_retry_with_fewer_missing_headings(caplog):
+    notes = "## Alpha\n## Beta\n## Gamma"
+    draft = "## Alpha\nFirst fact."
+    retry = "## Alpha\nFirst fact.\n## Beta\nSecond fact."
+    llm = FakeLLM([draft, retry])
+
+    with caplog.at_level(logging.WARNING, logger="localflow.meetings"):
+        out = MeetingSummarizer(llm).summarize("facts", user_notes=notes)
+
+    assert out == retry
+    assert len(llm.prompts) == 2
+    assert "Gamma" in caplog.text
+
+
+def test_summarize_keeps_original_when_retry_has_the_same_missing_count():
+    notes = "## Alpha\n## Beta"
+    draft = "## Alpha\nOriginal fact."
+    retry = "## Alpha\nRetry fact."
+    llm = FakeLLM([draft, retry])
+
+    out = MeetingSummarizer(llm).summarize("facts", user_notes=notes)
+
+    assert out == draft
+    assert len(llm.prompts) == 2
+
+
+def test_summarize_without_note_headings_does_not_add_skeleton_or_retry():
+    llm = FakeLLM(["## Summary\nThe launch is in May."])
+
+    out = MeetingSummarizer(llm).summarize(
+        "launch is in May", user_notes="- Ask Dana to confirm."
+    )
+
+    assert out == "## Summary\nThe launch is in May."
+    assert len(llm.prompts) == 1
+    assert (
+        "Your output MUST start with the user's headings" not in llm.prompts[0]
+    )
+    assert "- Do not add a title heading for the meeting" in llm.prompts[0]
+
+
+def test_summarize_retry_failure_keeps_the_first_draft():
+    draft = "## Alpha\nOriginal fact."
+    llm = FakeLLM([draft], fail_on_call=2)
+
+    out = MeetingSummarizer(llm).summarize(
+        "facts", user_notes="## Alpha\n## Beta"
+    )
+
+    assert out == draft
+    assert len(llm.prompts) == 2
 
 
 @pytest.mark.parametrize("notes", ["", "- my point"])
