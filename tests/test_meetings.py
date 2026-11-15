@@ -50,6 +50,33 @@ class FakeLLM:
 
 # ------------------------------------------------------------- templates ---
 
+@pytest.mark.parametrize(
+    "md",
+    [
+        "![multi\nline alt][b]\n\n[b]: https://evil.example/b.png",
+        "![a [b] c](https://evil.example/x.png)",
+        "![x](https&#58;//evil.example/x.png)",
+        "![x](//evil.example/x.png)",
+        "![x](HTTPS:\\\\evil.example/x.png)",
+        "![b](https://evil.example/x.png\n\n[b]: https://evil.example/b.png",
+        "![outer ![in][b] text][b]\n\n[b]: https://evil.example/b.png",
+    ],
+)
+def test_strip_remote_media_leaves_no_rendered_remote_image(md):
+    from localflow.meetings import strip_remote_media
+
+    out = strip_remote_media(md)
+    body = out.split("[b]:")[0]
+    assert "![" not in body, out
+
+
+def test_strip_remote_media_keeps_local_images_with_nested_alt():
+    from localflow.meetings import strip_remote_media
+
+    md = "![a [b] c](chart.png) ![[diagram.png]] ![<x>](<my chart.png>)"
+    assert strip_remote_media(md) == md
+
+
 def test_builtin_templates_ship_general_standup_and_one_on_one():
     templates = load_templates()
     assert {"general", "standup", "one-on-one"} <= set(templates)
