@@ -48,6 +48,30 @@ CARD_PADDING = 16
 CARD_GAP = 12
 SHADOW_OFFSET = 3
 
+# Setup checkup cards (AppKit).
+CARD_BORDER_WIDTH = 2
+LINE_HEIGHT = {"heading": 22, "body": 18, "caption": 16}
+CHECK_CARD_HEIGHT = 2 * CARD_PADDING + LINE_HEIGHT["heading"] + LINE_HEIGHT["body"]
+PILL_HEIGHT = 24
+PILL_PADDING = SPACING[2]
+PILL_BORDER_WIDTH = 1
+PILL_TINT = 0.18
+ACTION_HEIGHT = 28
+ACTION_PADDING = SPACING[2]
+CONTROL_GAP = SPACING[1]
+CALLOUT_HEIGHT = 2 * SPACING[2] + LINE_HEIGHT["body"]
+# Smallest content size the setup window supports without overlapping controls.
+WINDOW_MIN_WIDTH = 800
+WINDOW_MIN_HEIGHT = 700
+# Status pill: (label, tint token, text token). Text on the sun tint is ink so
+# it stays readable in both appearances.
+CHECK_STATUS = {
+    "ready": ("Ready", "success", "success"),
+    "needs": ("Needs you", "red", "red"),
+    "unknown": ("Unknown", "sun", "ink"),
+    "checking": ("Checking…", "sun", "ink"),
+}
+
 
 def tokens_for(theme: str = "light") -> dict[str, str]:
     """Return the semantic palette for a native window appearance."""

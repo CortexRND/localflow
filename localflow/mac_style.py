@@ -1,10 +1,26 @@
 """AppKit components using LocalFlow's shared semantic tokens."""
 
+import math
+
 import AppKit
 from AppKit import NSColor
 from Foundation import NSMakeRect, NSMakeSize
 
-from localflow.ui_tokens import LIGHT, RADIUS, SHADOW_OFFSET, SUN_TEXT, tokens_for
+from localflow.ui_tokens import (
+    ACTION_HEIGHT,
+    ACTION_PADDING,
+    LIGHT,
+    PILL_BORDER_WIDTH,
+    PILL_HEIGHT,
+    PILL_PADDING,
+    PILL_TINT,
+    RADIUS,
+    SHADOW_OFFSET,
+    SUN_TEXT,
+    TYPE,
+    surface_tint,
+    tokens_for,
+)
 
 
 class FlippedView(AppKit.NSView):
@@ -80,6 +96,7 @@ def style_button(button, kind="secondary", palette=None):
         "destructive": "#FFFFFF",
     }
     button.setBordered_(False)
+    button.setFocusRingType_(AppKit.NSFocusRingTypeExterior)
     button.setFont_(font(13, "bold" if kind == "primary" else "semibold"))
     button.setWantsLayer_(True)
     layer = button.layer()
@@ -164,13 +181,62 @@ def segmented(group, buttons, selected, palette=None):
     return buttons
 
 
-def style_surface(view, palette=None, *, fill="surface", border="line", shadow=False):
+def measure_text(text, text_font):
+    """Width in points of `text` drawn on one line in `text_font`."""
+    attributed = AppKit.NSAttributedString.alloc().initWithString_attributes_(
+        text, {AppKit.NSFontAttributeName: text_font}
+    )
+    return math.ceil(attributed.size().width)
+
+
+def fit_button(button, *, x=0, y=0):
+    """Size `button` to its title plus token padding; returns the button."""
+    width = measure_text(button.title(), button.font()) + 2 * ACTION_PADDING
+    button.setFrame_(NSMakeRect(x, y, width, ACTION_HEIGHT))
+    return button
+
+
+def make_pill(text, kind, palette=None):
+    """A status pill measured to fit `text`. `kind` is a CHECK_STATUS tint pair."""
+    palette = palette or LIGHT
+    tint, text_token = kind
+    label = AppKit.NSTextField.labelWithString_(text)
+    label.setFont_(font(*TYPE["caption"]))
+    label.setTextColor_(color(text_token, palette))
+    label.setLineBreakMode_(AppKit.NSLineBreakByClipping)
+    # sizeToFit measures the text cell, including its horizontal insets, so
+    # the label is never narrower than the text it draws.
+    label.sizeToFit()
+    label_size = label.frame().size
+    label_width = math.ceil(label_size.width)
+    label_height = math.ceil(label_size.height)
+    width = label_width + 2 * PILL_PADDING
+    pill = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, width, PILL_HEIGHT))
+    label.setFrame_(
+        NSMakeRect(PILL_PADDING, (PILL_HEIGHT - label_height) / 2,
+                   label_width, label_height)
+    )
+    pill.addSubview_(label)
+    pill.setWantsLayer_(True)
+    layer = pill.layer()
+    layer.setBackgroundColor_(
+        color(surface_tint(tint, palette, PILL_TINT), {}).CGColor()
+    )
+    layer.setBorderColor_(color(palette[text_token], {}).CGColor())
+    layer.setBorderWidth_(PILL_BORDER_WIDTH)
+    layer.setCornerRadius_(min(RADIUS["pill"], PILL_HEIGHT / 2))
+    return pill
+
+
+def style_surface(
+    view, palette=None, *, fill="surface", border="line", shadow=False, width=None,
+):
     palette = palette or LIGHT
     view.setWantsLayer_(True)
     layer = view.layer()
     layer.setBackgroundColor_(color(palette[fill], {"fill": palette[fill]}).CGColor())
     layer.setBorderColor_(color(palette[border], {"fill": palette[border]}).CGColor())
-    layer.setBorderWidth_(1.5 if shadow else 1)
+    layer.setBorderWidth_(width if width is not None else (1.5 if shadow else 1))
     layer.setCornerRadius_(RADIUS["card"])
     if shadow:
         layer.setShadowColor_(color(palette["shadow"]).CGColor())

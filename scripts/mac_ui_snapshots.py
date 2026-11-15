@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from Foundation import NSMakeSize
 
 from localflow.config import Config
 from localflow.dictionary import DictionaryStore
@@ -20,6 +21,7 @@ from localflow.setup_flow import Check
 from localflow.setup_mac import SetupWindowController
 
 OUT = Path("artifacts/mac-ui")
+WIDE_WIDTH = 1100
 
 
 def _config(hot_phrases=True):
@@ -44,6 +46,62 @@ def _controller(store_dir, hot_phrases=True):
 def _shot(c, name):
     for dark in (False, True):
         snapshot_png(c, OUT / f"{name}-{'dark' if dark else 'light'}.png", dark=dark)
+
+
+# (key, label, detail, fix_label, fix_url): the real checks run_checks reports on
+# macOS. Fix labels are kept on every check, ready or not, so a regression that
+# shows actions on ready rows is visible in the all-ready snapshot.
+_CHECK_SPECS = (
+    ("ffmpeg", "ffmpeg", "Installed", "Install ffmpeg",
+     "https://formulae.brew.sh/formula/ffmpeg"),
+    ("ollama-installed", "Ollama installed", "Installed", "Get Ollama",
+     "https://ollama.com/download"),
+    ("ollama-running", "Ollama running", "Ready", "Start Ollama",
+     "https://ollama.com/download"),
+    ("microphone-device", "Input device", "1 input device(s) found",
+     "Check microphone", ""),
+    ("microphone", "Microphone permission", "Unknown", "Open settings",
+     "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"),
+    ("accessibility", "Accessibility permission", "Not granted", "Open settings",
+     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+    ("input-monitoring", "Input Monitoring permission", "Not granted",
+     "Open settings",
+     "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"),
+)
+_NEEDS_ACTION = {"microphone": None, "accessibility": False, "input-monitoring": False}
+
+
+def _seven_checks(all_ready=False):
+    checks = []
+    for key, label, detail, fix_label, fix_url in _CHECK_SPECS:
+        ok = True if all_ready else _NEEDS_ACTION.get(key, True)
+        if ok is True and key in _NEEDS_ACTION:
+            detail = "Granted"
+        checks.append(Check(key, label, ok, detail, fix_label, fix_url))
+    return checks
+
+
+def _setup_check_snapshots(setup):
+    """Quick checkup states, including a wide window. Restores state after."""
+    saved = (setup.step, setup.checks, setup.status_message, setup.error_message)
+    window = setup.window
+    size = window.contentView().frame().size
+    setup.step = 1
+    setup.status_message = setup.error_message = ""
+    for name, all_ready in (
+        ("setup-checks-needs-action", False),
+        ("setup-checks-all-ready", True),
+    ):
+        setup.checks = _seven_checks(all_ready)
+        setup._render()
+        _shot(setup, name)
+    setup.checks = _seven_checks()
+    window.setContentSize_(NSMakeSize(WIDE_WIDTH, size.height))
+    setup._render()  # rebuild at the current width; snapshot mode starts no workers
+    _shot(setup, "setup-checks-needs-action-wide")
+    window.setContentSize_(size)
+    setup.step, setup.checks, setup.status_message, setup.error_message = saved
+    setup._render()
 
 
 def _hub_snapshots(base):
@@ -231,6 +289,8 @@ def main():
             setup.step = step
             setup._render()
             _shot(setup, f"setup-step-{step + 1}")
+        _setup_check_snapshots(setup)
+        setup.step = 6
         setup.saved = True
         setup._render()
         _shot(setup, "setup-complete")
