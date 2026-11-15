@@ -55,7 +55,7 @@ _HTML_FETCH_VECTORS = [
     "<style>@import url(https://evil.example/s.css)</style>",
     '<input type="image" src="https://evil.example/i">',
     '<table background="https://evil.example/b">',
-    "<STYLE>@import url(https://evil.example/s.css)",
+    "<STYLE>@import url(https://evil.example/s.css)</style >",
     '<<b>img src="https://evil.example/x">',
 ]
 
@@ -99,6 +99,21 @@ def test_strip_remote_media_escapes_leftover_angle_brackets():
     md = "- Latency < 200ms, see <https://docs.example/x>\n- <b>Ship</b> it"
     out = strip_remote_media(md)
     assert out == "- Latency &lt; 200ms, see https://docs.example/x\n- Ship it"
+    assert strip_remote_media(out) == out
+
+
+def test_strip_remote_media_keeps_text_after_unclosed_style_and_links():
+    from localflow.meetings import strip_remote_media
+
+    md = (
+        "```css\n<style>\n```\n- Follow up with <alice@example.com>\n"
+        "- [Plan](<plans/road map.md>) ![c](<img/c.png>) ![x](<https://evil.example/x>)"
+    )
+    out = strip_remote_media(md)
+    assert out == (
+        "```css\n\n```\n- Follow up with alice@example.com\n"
+        "- [Plan](plans/road%20map.md) ![c](img/c.png) x"
+    )
     assert strip_remote_media(out) == out
 
 

@@ -404,16 +404,18 @@ _SAFE_IMAGE = re.compile(
 _INLINE_IMAGE = re.compile(r"!\[(" + _PLAIN_ALT + r")\]\([^()\n]*\)")
 # Notes are Markdown, not HTML: raw HTML in model output is dropped (style and
 # script bodies included), then any leftover `<` is escaped so no tag survives.
-_HTML_RAW_TEXT = re.compile(
-    r"<(style|script)\b.*?(?:</\1\s*>|\Z)", re.IGNORECASE | re.DOTALL
+_HTML_RAW_TEXT = re.compile(r"<(style|script)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_AUTOLINK = re.compile(
+    r"<((?:https?|mailto):[^\s<>]*|[\w.+-]+@[\w-]+(?:\.[\w-]+)+)>", re.IGNORECASE
 )
-_AUTOLINK = re.compile(r"<((?:https?|mailto):[^\s<>]*)>", re.IGNORECASE)
+_ANGLE_DEST = re.compile(r"\]\(<([^<>\n]*)>")
 _HTML_TAG = re.compile(r"<[A-Za-z!?/][^<>]*>")
 
 
 def _strip_html(md: str) -> str:
     md = _HTML_RAW_TEXT.sub("", md)
     md = _AUTOLINK.sub(r"\1", md)
+    md = _ANGLE_DEST.sub(lambda m: "](" + m.group(1).replace(" ", "%20"), md)
     return _HTML_TAG.sub("", md)
 
 
