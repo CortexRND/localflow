@@ -28,6 +28,7 @@ from rich.table import Table
 from rich.text import Text
 
 from localflow import api as api_logic
+from localflow import provider_keys
 from localflow import recall as recall_module
 from localflow.apitoken import read as read_api_token
 from localflow.config import (
@@ -102,6 +103,45 @@ def _post(path: str, json: dict | None = None) -> dict:
 @click.group()
 def cli() -> None:
     """localflow: local dictation + meeting transcription to Obsidian."""
+
+
+@cli.group("keys")
+def keys_group() -> None:
+    """Import and inspect inference provider keys in Keychain."""
+
+
+@keys_group.command("list")
+def keys_list() -> None:
+    """Show masked provider key status."""
+    for preset in provider_keys.PRESETS:
+        status = provider_keys.key_status(preset.id)
+        value = status["masked_value"] or ("No key" if preset.needs_key else "No key needed")
+        click.echo(f"{preset.label}: {value}")
+
+
+@keys_group.command("import")
+@click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--yes", is_flag=True, help="Save all discovered keys without prompting.")
+def keys_import(file_path: Path | None, yes: bool) -> None:
+    """Scan environment and an optional .env or shell profile; confirm before saving."""
+    try:
+        candidates = provider_keys.detect_imports(file_path)
+    except (OSError, UnicodeError):
+        raise click.ClickException("Unable to read the selected key file") from None
+    if not candidates:
+        click.echo("No keys found")
+        return
+    confirmed = []
+    for candidate in candidates:
+        preset = provider_keys.get_preset(candidate.provider_id)
+        click.echo(f"{preset.label}: {candidate.masked_value} ({candidate.source})")
+        if yes or click.confirm("Save this key?", default=False):
+            confirmed.append(candidate)
+    try:
+        provider_keys.save_imports(confirmed)
+    except SecretsUnavailable:
+        raise click.ClickException("Unable to save keys; check Keychain access") from None
+    click.echo(f"Saved {len(confirmed)} key(s)")
 
 
 @cli.group()
