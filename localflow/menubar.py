@@ -7,7 +7,6 @@ stays up regardless and shows server state.
 
 import subprocess
 import sys
-import webbrowser
 
 import requests
 import rumps
@@ -18,6 +17,7 @@ from localflow.history import HistoryStore
 from localflow.inject import paste_text
 from localflow.platform import current
 from localflow.status import live_state, read_last_text, title_prefix
+from localflow.weblaunch import open_web_ui
 
 _config = load_config()
 _history = HistoryStore(enabled=_config.history_enabled)
@@ -155,8 +155,7 @@ class LocalflowMenuBar(rumps.App):
         self.refresh()
 
     def open_ui(self, _item) -> None:
-        token = load()
-        webbrowser.open(f"{BASE}?token={token}" if token else BASE)
+        open_web_ui(BASE, "/")
 
     def open_phrases(self, _item) -> None:
         # A separate process: rumps owns this process's AppKit main loop, so
