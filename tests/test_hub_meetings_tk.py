@@ -161,11 +161,10 @@ def _window(tmp_path, client):
 def _pump(root, condition=lambda: True, timeout=2):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        root.update()
+        root.tk.dooneevent(tk._tkinter.DONT_WAIT)
         if condition():
             return
         time.sleep(0.01)
-    root.update()
 
 
 def test_meetings_idle_and_running_render(tmp_path):
@@ -214,7 +213,7 @@ def test_pre_start_notes_and_template_are_sent_when_starting(tmp_path):
         window.meeting_title_entry.insert(0, "Planning")
         window.meeting_template_var.set("standup")
         window.meeting_notes.insert("1.0", "Bring the launch date")
-        root.update()
+        _pump(root, lambda: window._meeting_notes_text == "Bring the launch date")
         window._meeting_toggle()
         _pump(root, lambda: any(call[0] == "start" for call in client.calls))
         assert (
