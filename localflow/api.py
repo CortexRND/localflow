@@ -3,6 +3,7 @@ from dataclasses import asdict, replace
 from localflow.config import Config, ConfigError, config_path
 from localflow.providers import registry
 from localflow.providers.factory import build_llm
+from localflow.provider_keys import PROVIDER_SECRET_NAMES
 from localflow.secrets import (
     SecretsUnavailable,
     delete_secret,
@@ -10,7 +11,7 @@ from localflow.secrets import (
     set_secret,
 )
 
-SECRET_NAMES = ("llm_api_key", "fireworks_api_key")
+SECRET_NAMES = ("llm_api_key", "fireworks_api_key", *PROVIDER_SECRET_NAMES)
 _STT_ALIASES = {"auto": "faster-whisper", "mlx": "mlx-whisper"}
 
 
