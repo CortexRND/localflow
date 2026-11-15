@@ -35,6 +35,29 @@ def test_appkit_hub_has_valid_selector_names():
     assert not invalid
 
 
+def test_ask_page_wiring_and_background_work():
+    source = SOURCE.read_text()
+    assert '"Home", "Ask", "Hot Phrases"' in source
+    assert "def _page_ask(self):" in source
+    assert "self.ask_page.render()" in source
+    assert '"Home", "Ask", "Hot Phrases"' in (ROOT / "localflow/hub_window.py").read_text()
+    ask_source = (ROOT / "localflow/ask_mac.py").read_text()
+    assert 'threading.Thread(target=run, name="localflow-ask", daemon=True).start()' in ask_source
+    assert 'self.text("Thinking..."' in ask_source
+    assert "self.events.get_nowait()" in ask_source
+    assert "self.hub.history.get(target)" in ask_source
+    assert "current().open_path(target)" in ask_source
+    tree = ast.parse(ask_source)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+    for method in cls.body:
+        if isinstance(method, ast.FunctionDef) and not _python_method(method):
+            assert method.name.count("_") == len(method.args.args) - 1
+    snapshots = (ROOT / "scripts/mac_ui_snapshots.py").read_text()
+    for state in ("empty", "conversation", "thinking", "error"):
+        assert f'"{state}"' in snapshots
+    assert '_hub_sized_shots(controller, f"hub-ask-{state}")' in snapshots
+
+
 def test_appkit_hub_imports_foundation_timer():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     assert any(

@@ -9,7 +9,7 @@ def main():
     parser.add_argument(
         "--page",
         choices=(
-            "Home", "Hot Phrases", "Dictionary", "Prompts",
+            "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
             "Meetings", "History", "Style", "Models",
         ),
         default="Home",

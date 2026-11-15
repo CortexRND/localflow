@@ -83,7 +83,7 @@ from localflow.ui_tokens import (
 )
 
 PAGES = (
-    "Home", "Hot Phrases", "Dictionary", "Prompts",
+    "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
     "Meetings", "History", "Style", "Models",
 )
 
@@ -447,6 +447,13 @@ class HubWindowController(NSObject):
 
     def showHotPhrases_(self, _sender):
         self.show_page("Hot Phrases")
+
+    @objc.python_method
+    def _page_ask(self):
+        from localflow.ask_mac import AskPageController
+        if not hasattr(self, "ask_page"):
+            self.ask_page = AskPageController.alloc().initWithHub_(self)
+        self.ask_page.render()
 
     @objc.python_method
     def _page_home(self):

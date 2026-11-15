@@ -27,7 +27,7 @@ from localflow.ui_tokens import HUB_CONTENT_X, HUB_MIN_HEIGHT, HUB_MIN_WIDTH
 ROOT = Path(__file__).parent.parent
 HUB_MAC = ROOT / "localflow" / "hub_mac.py"
 EXPECTED_PAGES = (
-    "Home", "Hot Phrases", "Dictionary", "Prompts",
+    "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
     "Meetings", "History", "Style", "Models",
 )
 
