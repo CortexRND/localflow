@@ -65,6 +65,9 @@ class FakeLLM:
         "![[x]](https://evil.example/x.png)",
         "!<img src=x>[x](https://evil.example/x.png)",
         "<![img src=https://evil.example/x](https://a.example)>",
+        "![x\\](local.png)](https://evil.example/private-data.png)",
+        "![x`](local.png)`](https://evil.example/x.png)",
+        '![x<a title="](local.png)">](https://evil.example/x.png)',
     ],
 )
 def test_strip_remote_media_leaves_no_rendered_remote_image(md):

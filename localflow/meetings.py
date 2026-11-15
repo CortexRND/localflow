@@ -395,11 +395,13 @@ def _as_data(text: str) -> str:
 
 
 # The only image forms kept: Obsidian `![[embed]]` and `![alt](relative/path.png)`.
+# No escapes, code spans, autolinks or HTML, which can hide the closing bracket.
+_PLAIN_ALT = r"[^\[\]\n\\`<]*"
 _LOCAL_DEST = r"(?:(?!//)[\w\-./%~])+"
 _SAFE_IMAGE = re.compile(
-    r"!\[\[(?:(?!//)[^\[\]\n:\\])+\]\](?![(\[])|!\[[^\[\]\n]*\]\(" + _LOCAL_DEST + r"\)"
+    r"!\[\[(?:(?!//)[^\[\]\n:\\`<])+\]\](?![(\[])|!\[" + _PLAIN_ALT + r"\]\(" + _LOCAL_DEST + r"\)"
 )
-_INLINE_IMAGE = re.compile(r"!\[([^\[\]\n]*)\]\([^()\n]*\)")
+_INLINE_IMAGE = re.compile(r"!\[(" + _PLAIN_ALT + r")\]\([^()\n]*\)")
 _HTML_MEDIA = re.compile(
     r"</?(?:img|image|iframe|video|audio|source|embed|object|picture|svg|link|meta)\b[^>]*>",
     re.IGNORECASE,
