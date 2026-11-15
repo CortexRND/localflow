@@ -333,6 +333,29 @@ def _hub_responsive_snapshots(base):
     )
     controller.show_page("Home")
     _hub_sized_shots(controller, "hub-home-populated")
+    from localflow.ask_model import Turn
+
+    controller.show_page("Ask")
+    ask_page = controller.ask_page
+    for state in ("empty", "conversation", "thinking", "error"):
+        ask_page.model.clear()
+        ask_page.busy = state == "thinking"
+        ask_page.pending = "What did we decide about the launch?" if ask_page.busy else ""
+        if state == "conversation":
+            ask_page.model.turns.append(Turn(
+                "What did we decide about the launch?",
+                "We agreed to launch on Friday and finish the checklist first [1].",
+                [{"n": 1, "source": "meeting", "when": "2026-04-15T12:00",
+                  "title": "Launch planning", "ref": str(base / "meeting.md") + "#01:20"}],
+            ))
+        elif state == "error":
+            ask_page.model.turns.append(Turn(
+                "What did we decide about the launch?",
+                error="Couldn't reach the model or local sources. Check the Models page and try again.",
+            ))
+        controller.show_page("Ask")
+        _hub_sized_shots(controller, f"hub-ask-{state}")
+    ask_page.busy = False
     controller.show_page("Hot Phrases")
     _hub_sized_shots(controller, "hub-hot-phrases")
     controller.show_page("Prompts")

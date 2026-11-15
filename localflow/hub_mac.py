@@ -93,7 +93,7 @@ from localflow.ui_tokens import (
 )
 
 PAGES = (
-    "Home", "Hot Phrases", "Dictionary", "Prompts",
+    "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
     "Meetings", "History", "Style", "Models",
 )
 
@@ -358,6 +358,11 @@ class HubWindowController(NSObject):
         entering_phrases = page == "Hot Phrases" and self.page != "Hot Phrases"
         if self.page == "Meetings" and hasattr(self, "meeting_notes"):
             self._meeting_capture_state()
+        # Every rebuild (resize, appearance, navigation) funnels through here,
+        # so the Ask draft is read from its field before the views are torn
+        # down. The controller and model themselves are never recreated.
+        if self.page == "Ask" and hasattr(self, "ask_page"):
+            self.ask_page.capture()
         self.tokens = tokens_for_window(self.window)
         self.page = page
         self.root_view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
@@ -429,6 +434,8 @@ class HubWindowController(NSObject):
 
     def windowWillClose_(self, _notification):
         self._closed = True
+        if hasattr(self, "ask_page"):
+            self.ask_page.shutdown()
         if self.phrases is not None:
             self.phrases.cancel()
 
@@ -508,6 +515,13 @@ class HubWindowController(NSObject):
 
     def showHotPhrases_(self, _sender):
         self.show_page("Hot Phrases")
+
+    @objc.python_method
+    def _page_ask(self):
+        from localflow.ask_mac import AskPageController
+        if not hasattr(self, "ask_page"):
+            self.ask_page = AskPageController.alloc().initWithHub_(self)
+        self.ask_page.render()
 
     @objc.python_method
     def _page_home(self):

@@ -21,7 +21,7 @@ from pathlib import Path
 from localflow.singleinstance import lock_dir
 
 HUB_PAGES = (
-    "Home", "Hot Phrases", "Dictionary", "Prompts",
+    "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
     "Meetings", "History", "Style", "Models",
 )
 DEFAULT_PAGE = "Home"

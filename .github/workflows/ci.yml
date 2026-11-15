@@ -58,5 +58,8 @@ jobs:
           tests/test_hub_meetings_tk.py
           localflow/recall.py
           tests/test_recall.py
+          localflow/ask_model.py
+          localflow/ask_mac.py
+          tests/test_ask_model.py
       - name: Test
         run: pytest -q
