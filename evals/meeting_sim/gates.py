@@ -76,7 +76,8 @@ def repeat_gates(files):
             tally("M5", any(k.lower() in low for k in p["keywords"]), f"{sid}:{p['keywords'][0]}")
         for fact in s["facts"]:
             tally("M6", any(k.lower() in low for k in fact["any"]), f"{sid}:{fact['id']}")
-        llm_in = r["log_text"] + "\n" + (r["llm_calls"][0]["prompt"] if r["llm_calls"] else "")
+        # First summarize prompt only: it holds transcript, notes and template; a retry prompt embeds the model draft.
+        llm_in = r["llm_calls"][0]["prompt"] if r["llm_calls"] else ""
         support = nums(llm_in) | word_nums(llm_in)
         for n in sorted(nums(md)):
             ok = n in support
