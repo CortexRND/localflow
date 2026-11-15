@@ -136,8 +136,8 @@ def write_prompts(
         path = folder / f"{i:02d}-{slugify(prompt.title)}.md"
         path.write_text(
             "---\n"
-            f"title: {prompt.title}\n"
-            f"meeting: {meeting_title}\n"
+            f"title: {_header_value(prompt.title)}\n"
+            f"meeting: {_header_value(meeting_title)}\n"
             f"created: {stamp.isoformat()}\n"
             "status: pending\n"
             "---\n\n"
@@ -148,11 +148,24 @@ def write_prompts(
     return written
 
 
+_HEADER_BREAKS = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")
+_MAX_HEADER_VALUE = 200
+
+
+def _header_value(value: str) -> str:
+    """One frontmatter line: no line breaks or control characters, bounded."""
+    flat = " ".join(_HEADER_BREAKS.sub(" ", value or "").split())
+    return flat[:_MAX_HEADER_VALUE]
+
+
 def _strip_frontmatter(text: str) -> str:
-    if text.startswith("---"):
-        parts = text.split("\n---", 1)
-        if len(parts) == 2:
-            return parts[1].lstrip("-").lstrip("\n")
+    """Body after a `---` header; the closing `---` must be a line of its own."""
+    lines = text.split("\n")
+    if lines[0].rstrip("\r") != "---":
+        return text
+    for i in range(1, len(lines)):
+        if lines[i].rstrip("\r") == "---":
+            return "\n".join(lines[i + 1:]).lstrip("\n")
     return text
 
 

@@ -903,6 +903,31 @@
   </section>
 
 <script>
+  // Every route except this page needs the API token. It arrives once as
+  // ?token=… (lf ui, the menu bar, or a phone bookmark), is remembered on this
+  // device, and is dropped from the address bar so it isn't shared by accident.
+  const apiToken = (() => {
+    const params = new URLSearchParams(location.search);
+    const fromUrl = params.get('token');
+    let token = fromUrl || '';
+    try {
+      if (fromUrl) localStorage.setItem('localflow-token', fromUrl);
+      else token = localStorage.getItem('localflow-token') || '';
+    } catch (e) { /* storage disabled: keep the URL token for this page */ }
+    if (fromUrl) {
+      params.delete('token');
+      const query = params.toString();
+      history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
+    }
+    return token;
+  })();
+
+  function authFetch(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    if (apiToken) headers.set('X-Localflow-Token', apiToken);
+    return fetch(path, { ...options, headers });
+  }
+
   const recordBtn = document.getElementById('recordBtn');
   const statusEl = document.getElementById('status');
   const errorEl = document.getElementById('error');
@@ -1006,7 +1031,7 @@
       const form = new FormData();
       form.append('file', blob, 'recording.' + ext);
       const clean = cleanCheckbox.checked ? 1 : 0;
-      const resp = await fetch('/transcribe?clean=' + clean, {
+      const resp = await authFetch('/transcribe?clean=' + clean, {
         method: 'POST',
         body: form,
       });
@@ -1100,13 +1125,7 @@
   let notesTimer = null;
   let notesInFlight = null;    // promise of the save currently on the wire
   let notesLoadedFor = null;   // session we've synced the textarea from
-  const meetingToken = new URLSearchParams(location.search).get('token') || '';
-
-  function meetingFetch(path, options = {}) {
-    const headers = new Headers(options.headers || {});
-    if (meetingToken) headers.set('X-Localflow-Token', meetingToken);
-    return fetch(path, { ...options, headers });
-  }
+  const meetingFetch = authFetch;
 
   function fmtSeconds(s) {
     const m = Math.floor(s / 60);

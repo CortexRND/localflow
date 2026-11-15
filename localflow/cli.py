@@ -66,9 +66,14 @@ def _history_store() -> HistoryStore:
     return HistoryStore(enabled=load_config().history_enabled)
 
 
+def _auth_headers() -> dict[str, str]:
+    token = read_api_token()
+    return {"X-Localflow-Token": token} if token else {}
+
+
 def _get(path: str, timeout: float = 5) -> dict:
     try:
-        resp = requests.get(BASE + path, timeout=timeout)
+        resp = requests.get(BASE + path, headers=_auth_headers(), timeout=timeout)
         resp.raise_for_status()
         return resp.json()
     except requests.ConnectionError:
@@ -78,7 +83,7 @@ def _get(path: str, timeout: float = 5) -> dict:
 
 def _post(path: str, json: dict | None = None) -> dict:
     try:
-        resp = requests.post(BASE + path, json=json, timeout=600)
+        resp = requests.post(BASE + path, json=json, headers=_auth_headers(), timeout=600)
     except requests.ConnectionError:
         console.print("[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
         sys.exit(1)

@@ -1,3 +1,4 @@
+import hmac
 import logging
 import subprocess
 import threading
@@ -9,7 +10,7 @@ from urllib.parse import urlparse
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from localflow import api as api_logic
@@ -113,33 +114,45 @@ def _start_watcher() -> None:
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+# Only the static shell is public: it holds no secrets and reads the token
+# from its own URL. Everything else needs the token, whatever the client IP:
+# a local reverse proxy (tailscale serve) makes every peer look like loopback.
+_PUBLIC_PATHS = frozenset({"/", "/healthz", "/favicon.ico"})
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+FFMPEG_TIMEOUT_SECONDS = 120
+
+
+def _token_ok(supplied: str | None) -> bool:
+    return bool(supplied) and bool(_api_token) and hmac.compare_digest(
+        supplied.encode(), _api_token.encode()
+    )
+
+
+def _host_is_loopback(host_header: str) -> bool:
+    try:
+        host = urlparse(f"//{host_header}").hostname
+    except ValueError:
+        return False
+    return (host or "").lower() in _LOOPBACK_HOSTS
+
+
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
-    is_api = request.url.path.startswith("/api/") or request.url.path == "/settings"
-    is_meeting = request.url.path.startswith("/meeting/")
-    if is_api or is_meeting:
-        client_host = request.client.host if request.client else ""
-        loopback = client_host in ("127.0.0.1", "::1", "localhost")
-        supplied_token = request.headers.get("X-Localflow-Token") or request.query_params.get(
-            "token"
-        )
-        if supplied_token != _api_token:
-            host_header = request.headers.get("Host", "")
-            try:
-                host = urlparse(f"//{host_header}").hostname
-            except ValueError:
-                host = None
-            if (host or "").lower() not in ("127.0.0.1", "localhost", "::1"):
-                return JSONResponse({"detail": "invalid host"}, status_code=403)
-        if loopback and (is_meeting or request.method in ("GET", "HEAD", "OPTIONS")):
-            origin = request.headers.get("Origin")
-            if origin:
-                origin_host = urlparse(origin).netloc
-                request_host = request.headers.get("Host", "")
-                if origin_host and origin_host.lower() != request_host.lower():
-                    return JSONResponse({"detail": "invalid request origin"}, status_code=403)
-        elif supplied_token != _api_token:
-            return JSONResponse({"detail": "invalid API token"}, status_code=401)
+    if request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    supplied = request.headers.get("X-Localflow-Token") or request.query_params.get("token")
+    if not _token_ok(supplied):
+        if not _host_is_loopback(request.headers.get("Host", "")):
+            return JSONResponse({"detail": "invalid host"}, status_code=403)
+        return JSONResponse({"detail": "invalid API token"}, status_code=401)
+    if request.url.path == "/transcribe":
+        try:
+            length = int(request.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > MAX_UPLOAD_BYTES:
+            return JSONResponse({"detail": "upload too large"}, status_code=413)
     return await call_next(request)
 
 
@@ -187,11 +200,13 @@ def _record_phone_history(
 
 def _decode_audio(data: bytes) -> np.ndarray:
     try:
-        proc = _run_ffmpeg(data)
+        proc = _run_ffmpeg(data, max_seconds=_config.max_recording_seconds)
     except FileNotFoundError:
         raise HTTPException(
             status_code=500, detail="ffmpeg not installed (brew install ffmpeg)"
         )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=400, detail="audio decode timed out")
     if proc.returncode != 0 or not proc.stdout:
         stderr = proc.stderr.decode(errors="replace").strip()
         message = stderr.splitlines()[-1] if stderr else "ffmpeg failed to decode audio"
@@ -199,11 +214,20 @@ def _decode_audio(data: bytes) -> np.ndarray:
     return np.frombuffer(proc.stdout, dtype=np.float32)
 
 
-def _run_ffmpeg(data: bytes) -> subprocess.CompletedProcess:
+# Demuxers for what browsers' MediaRecorder and iOS Shortcuts produce. Keeps
+# playlist/concat demuxers (which open other URLs or files) out of reach.
+_FFMPEG_INPUT_FORMATS = "matroska,webm,ogg,mov,mp4,m4a,wav,mp3,aac,flac,caf"
+
+
+def _run_ffmpeg(data: bytes, max_seconds: int = 1200) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             "ffmpeg",
+            "-nostdin",
+            "-protocol_whitelist", "pipe",
+            "-format_whitelist", _FFMPEG_INPUT_FORMATS,
             "-i", "pipe:0",
+            "-t", str(max(1, int(max_seconds))),
             "-f", "f32le",
             "-ac", "1",
             "-ar", "16000",
@@ -212,6 +236,7 @@ def _run_ffmpeg(data: bytes) -> subprocess.CompletedProcess:
         input=data,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        timeout=FFMPEG_TIMEOUT_SECONDS,
     )
 
 
@@ -409,7 +434,9 @@ def api_autostart_update(body: dict) -> dict[str, str]:
 @app.post("/transcribe")
 async def transcribe(file: UploadFile, clean: int = 0) -> dict:
     start = time.monotonic()
-    data = await file.read()
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="upload too large")
     audio = await run_in_threadpool(_decode_audio, data)
     if audio.size == 0:
         raise HTTPException(status_code=400, detail="decoded audio is empty")
@@ -422,8 +449,11 @@ MAX_USER_NOTES_CHARS = 100_000
 MAX_CHAT_QUESTION_CHARS = 2_000
 
 
+MAX_TITLE_CHARS = 200
+
+
 class MeetingStart(BaseModel):
-    title: str = "Meeting"
+    title: str = Field("Meeting", max_length=MAX_TITLE_CHARS)
     category: str = ""
     template: str = ""     # template id; empty = [meetings] default_template
     user_notes: str = ""   # notes typed before pressing start

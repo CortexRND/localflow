@@ -23,6 +23,11 @@ _config = load_config()
 _history = HistoryStore(enabled=_config.history_enabled)
 BASE = f"http://127.0.0.1:{_config.server_port}"
 
+
+def _auth_headers() -> dict[str, str]:
+    token = load()
+    return {"X-Localflow-Token": token} if token else {}
+
 IDLE_ICON = "🎙"
 DETECTED_ICON = "🎙❗"
 LIVE_ICON = "🔴"
@@ -76,7 +81,7 @@ class LocalflowMenuBar(rumps.App):
 
     def refresh(self, _timer=None) -> None:
         try:
-            st = requests.get(BASE + "/meeting/status", timeout=3).json()
+            st = requests.get(BASE + "/meeting/status", headers=_auth_headers(), timeout=3).json()
         except Exception:
             self._base_icon = DOWN_ICON
             self.refresh_dictation_status()
@@ -122,7 +127,9 @@ class LocalflowMenuBar(rumps.App):
             if self._session_active:
                 self.title = IDLE_ICON
                 self.status_item.title = "summarizing & saving…"
-                resp = requests.post(BASE + "/meeting/stop", timeout=600)
+                resp = requests.post(
+                    BASE + "/meeting/stop", headers=_auth_headers(), timeout=600
+                )
                 resp.raise_for_status()
                 saved = resp.json()
                 rumps.notification(
@@ -132,6 +139,7 @@ class LocalflowMenuBar(rumps.App):
                 resp = requests.post(
                     BASE + "/meeting/start",
                     json={"title": "Meeting", "category": ""},
+                    headers=_auth_headers(),
                     timeout=10,
                 )
                 resp.raise_for_status()
@@ -141,7 +149,7 @@ class LocalflowMenuBar(rumps.App):
 
     def dismiss(self, _item) -> None:
         try:
-            requests.post(BASE + "/meeting/dismiss", timeout=3)
+            requests.post(BASE + "/meeting/dismiss", headers=_auth_headers(), timeout=3)
         except Exception:
             pass
         self.refresh()

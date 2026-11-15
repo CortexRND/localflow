@@ -84,8 +84,11 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_session_state", "idle")
     monkeypatch.setattr(server, "_last_saved", None)
     FakeSession.instances = []
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
     with TestClient(
-        server.app, base_url="http://127.0.0.1:8756", client=("127.0.0.1", 1234)
+        server.app, base_url="http://127.0.0.1:8756", client=("127.0.0.1", 1234),
+        headers={"X-Localflow-Token": "test-token"},
     ) as c:
         c.llm = llm
         c.tmp = tmp_path
@@ -234,6 +237,27 @@ def test_meeting_routes_require_token_off_loopback(client, monkeypatch):
         assert remote.get(
             "/meeting/status", headers={"X-Localflow-Token": "test-token"}
         ).status_code == 200
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/meeting/status"),
+    ("GET", "/meeting/templates"),
+    ("POST", "/meeting/start"),
+    ("POST", "/meeting/stop"),
+    ("POST", "/meeting/dismiss"),
+])
+@pytest.mark.parametrize("origin", [None, "null", "http://127.0.0.1:8756"])
+def test_loopback_meeting_routes_require_token(client, method, path, origin):
+    headers = {"X-Localflow-Token": ""}
+    if origin is not None:
+        headers["Origin"] = origin
+    resp = client.request(method, path, headers=headers, json={})
+    assert resp.status_code == 401
+    assert FakeSession.instances == []
+
+
+def test_meeting_title_is_bounded(client):
+    assert client.post("/meeting/start", json={"title": "x" * 201}).status_code == 422
 
 
 def test_status_reports_chat_available_from_disk_after_restart(client):
