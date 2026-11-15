@@ -431,77 +431,129 @@ def _launch_client():
     return TestClient(server.app, base_url="http://127.0.0.1:8756", client=("127.0.0.1", 1234))
 
 
-def test_launch_code_opens_settings_once(monkeypatch):
+def _issue(client):
+    return client.post("/api/launch-code", headers={"X-Localflow-Token": "test-token"}).json()[
+        "code"
+    ]
+
+
+def test_launch_code_opens_settings_once_via_post(monkeypatch):
     monkeypatch.setattr(server, "_api_token", "test-token")
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
     monkeypatch.setattr(server, "_launch_codes", {})
+    monkeypatch.setattr(server, "_used_launch_codes", {})
 
     with _launch_client() as client:
+        monkeypatch.setattr(server, "load_or_create", lambda: "rotated-token")
         assert client.post("/api/launch-code").status_code == 401
-        code = client.post(
-            "/api/launch-code", headers={"X-Localflow-Token": "test-token"}
-        ).json()["code"]
+        code = _issue(client)
         assert "test-token" not in code
 
-        page = client.get(f"/settings?launch={code}")
+        page = client.post("/settings", data={"launch": code})
         assert page.status_code == 200
         assert "test-token" in page.text
         assert page.headers["cache-control"] == "no-store"
 
-        reused = client.get(f"/settings?launch={code}")
-        assert reused.status_code == 401
-        assert client.get("/settings?launch=made-up").status_code == 401
-        assert client.get(f"/api/status?launch={code}").status_code == 401
+        assert client.post("/settings", data={"launch": "made-up"}).status_code == 401
+        assert client.post("/settings").status_code == 401
+        assert server._api_token == "test-token"
+
+
+def test_launch_code_is_not_redeemed_from_a_get(monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    monkeypatch.setattr(server, "_launch_codes", {})
+    monkeypatch.setattr(server, "_used_launch_codes", {})
+
+    with _launch_client() as client:
+        code = server._issue_launch_code()
+        assert client.get(f"/settings?launch={code}").status_code == 401
+        index = client.get(f"/?launch={code}")
+        assert index.status_code == 200
+        assert "test-token" not in index.text
+        assert code in server._launch_codes
+
+
+def test_reused_launch_code_rotates_the_token(monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    monkeypatch.setattr(server, "_launch_codes", {})
+    monkeypatch.setattr(server, "_used_launch_codes", {})
+
+    with _launch_client() as client:
+        monkeypatch.setattr(server, "load_or_create", lambda: "rotated-token")
+        code = _issue(client)
+        first = client.post("/settings", data={"launch": code})
+        assert first.status_code == 200
+        assert "test-token" in first.text
+        pending = server._issue_launch_code()
+
+        second = client.post("/settings", data={"launch": code})
+        assert second.status_code == 401
+        assert "test-token" not in second.text
+        assert "rotated-token" not in second.text
+
+        stolen = client.get("/api/config", headers={"X-Localflow-Token": "test-token"})
+        assert stolen.status_code == 401
+        fresh = client.get("/api/config", headers={"X-Localflow-Token": "rotated-token"})
+        assert fresh.status_code == 200
+        assert client.post("/settings", data={"launch": pending}).status_code == 401
 
 
 def test_launch_code_expires(monkeypatch):
     monkeypatch.setattr(server, "_api_token", "test-token")
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
     monkeypatch.setattr(server, "_launch_codes", {})
+    monkeypatch.setattr(server, "_used_launch_codes", {})
     now = [1000.0]
     monkeypatch.setattr(server.time, "monotonic", lambda: now[0])
 
     with _launch_client() as client:
-        code = client.post(
-            "/api/launch-code", headers={"X-Localflow-Token": "test-token"}
-        ).json()["code"]
+        code = _issue(client)
         now[0] += server.LAUNCH_CODE_TTL_SECONDS + 1
-        assert client.get(f"/settings?launch={code}").status_code == 401
+        assert client.post("/settings", data={"launch": code}).status_code == 401
 
 
 def test_launch_code_only_works_for_the_ui_pages(monkeypatch):
     monkeypatch.setattr(server, "_api_token", "test-token")
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
     monkeypatch.setattr(server, "_launch_codes", {})
+    monkeypatch.setattr(server, "_used_launch_codes", {})
 
     with _launch_client() as client:
         code = server._issue_launch_code()
+        assert client.post("/api/config", data={"launch": code}).status_code == 401
         assert client.get(f"/api/config?launch={code}").status_code == 401
-        assert client.post(f"/settings?launch={code}").status_code == 401
+        assert client.post("/settings", json={"launch": code}).status_code == 401
+        assert client.post(
+            "/settings", content="launch=" + code + "&pad=" + "x" * 2048,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ).status_code == 401
 
 
 def test_launch_code_injects_token_into_index_once(monkeypatch):
     monkeypatch.setattr(server, "_api_token", "test-token")
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
     monkeypatch.setattr(server, "_launch_codes", {})
+    monkeypatch.setattr(server, "_used_launch_codes", {})
 
     with _launch_client() as client:
         code = server._issue_launch_code()
-        page = client.get(f"/?launch={code}")
+        page = client.post("/", data={"launch": code})
         assert page.status_code == 200
         assert 'content="test-token"' in page.text
         assert page.headers["cache-control"] == "no-store"
-        again = client.get(f"/?launch={code}")
-        assert again.status_code == 200
-        assert "test-token" not in again.text
+        plain = client.get("/")
+        assert plain.status_code == 200
+        assert "test-token" not in plain.text
 
 
 def test_outstanding_launch_codes_are_capped(monkeypatch):
     monkeypatch.setattr(server, "_launch_codes", {})
     codes = [server._issue_launch_code() for _ in range(server._MAX_LAUNCH_CODES + 5)]
     assert len(server._launch_codes) == server._MAX_LAUNCH_CODES
-    assert not server._redeem_launch_code(codes[0])
-    assert server._redeem_launch_code(codes[-1])
+    assert server._redeem_launch_code(codes[0]) == "invalid"
+    assert server._redeem_launch_code(codes[-1]) == "ok"
 
 
 @pytest.mark.parametrize("path", ["/settings", "/api/config"])

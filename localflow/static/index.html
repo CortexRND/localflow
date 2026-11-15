@@ -954,7 +954,7 @@
 
 <script>
   // Every route except this page needs the API token. It arrives once, either
-  // injected by the server for a single-use ?launch= code (the menu bar) or as
+  // injected by the server for a single-use POSTed launch code (the menu bar) or as
   // ?token=… (a phone bookmark), is remembered on this device, and is dropped
   // from the address bar so it isn't shared by accident.
   const apiToken = (() => {
@@ -966,7 +966,9 @@
       if (fromUrl) localStorage.setItem('localflow-token', fromUrl);
       else token = localStorage.getItem('localflow-token') || '';
     } catch (e) { /* storage disabled: keep the URL token for this page */ }
-    if (params.has('token') || params.has('launch')) {
+    // A launched page came from a POST; replacing the entry keeps a reload
+    // from resubmitting the used code.
+    if (launched || params.has('token') || params.has('launch')) {
       params.delete('token');
       params.delete('launch');
       const query = params.toString();
