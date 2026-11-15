@@ -8,8 +8,6 @@ from Foundation import NSMakePoint, NSMakeRect, NSObject, NSTimer, NSURL
 import queue
 import threading
 import time
-import webbrowser
-from urllib.parse import quote
 from dataclasses import replace
 
 from localflow import setup_flow
@@ -1257,11 +1255,9 @@ class SetupWindowController(NSObject):
             self._render()
 
     def settingsAction_(self, sender):
-        from localflow.apitoken import load
+        from localflow.weblaunch import open_web_ui
 
-        webbrowser.open(
-            f"http://127.0.0.1:{self.config.server_port}/settings?token={quote(load())}"
-        )
+        open_web_ui(f"http://127.0.0.1:{self.config.server_port}", "/settings")
 
     def fixAction_(self, sender):
         self._fix_check(sender.tag())

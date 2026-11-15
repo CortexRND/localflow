@@ -11,7 +11,6 @@ import time
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
 
 import click
 import requests
@@ -57,6 +56,7 @@ from localflow.platform.base import PASTE_METHODS
 from localflow.providers import registry
 from localflow.providers.factory import build_llm
 from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set_secret
+from localflow.weblaunch import open_web_ui
 
 console = Console()
 _config = load_config()
@@ -996,8 +996,7 @@ def dictate() -> None:
 @cli.command()
 def ui() -> None:
     """Open the web UI in the default browser."""
-    token = read_api_token() or ""
-    current().open_path(f"{BASE}/settings?token={quote(token)}")
+    open_web_ui(BASE, "/settings", opener=current().open_path)
 
 
 @cli.command("token")
