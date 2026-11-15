@@ -140,14 +140,15 @@ def _host_is_loopback(host_header: str) -> bool:
 
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
-    if request.url.path in _PUBLIC_PATHS:
+    path = request.scope["path"]
+    if path in _PUBLIC_PATHS:
         return await call_next(request)
     supplied = request.headers.get("X-Localflow-Token") or request.query_params.get("token")
     if not _token_ok(supplied):
         if not _host_is_loopback(request.headers.get("Host", "")):
             return JSONResponse({"detail": "invalid host"}, status_code=403)
         return JSONResponse({"detail": "invalid API token"}, status_code=401)
-    if request.url.path == "/transcribe":
+    if path == "/transcribe":
         try:
             length = int(request.headers.get("Content-Length") or 0)
         except ValueError:
