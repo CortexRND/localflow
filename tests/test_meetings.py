@@ -50,6 +50,15 @@ class FakeLLM:
 
 # ------------------------------------------------------------- templates ---
 
+_HTML_FETCH_VECTORS = [
+    '<span style="background-image:url(https://evil.example/p)">x</span>',
+    "<style>@import url(https://evil.example/s.css)</style>",
+    '<input type="image" src="https://evil.example/i">',
+    '<table background="https://evil.example/b">',
+    "<STYLE>@import url(https://evil.example/s.css)",
+    '<<b>img src="https://evil.example/x">',
+]
+
 @pytest.mark.parametrize(
     "md",
     [
@@ -68,6 +77,7 @@ class FakeLLM:
         "![x\\](local.png)](https://evil.example/private-data.png)",
         "![x`](local.png)`](https://evil.example/x.png)",
         '![x<a title="](local.png)">](https://evil.example/x.png)',
+        *_HTML_FETCH_VECTORS,
     ],
 )
 def test_strip_remote_media_leaves_no_rendered_remote_image(md):
@@ -76,7 +86,19 @@ def test_strip_remote_media_leaves_no_rendered_remote_image(md):
     out = strip_remote_media(md)
     body = out.split("[b]:")[0]
     assert "![" not in body, out
-    assert "<img" not in out.lower()
+    assert "<" not in out
+    assert "url(" not in out.lower()
+    assert strip_remote_media(out) == out
+    if md in _HTML_FETCH_VECTORS:
+        assert "evil.example" not in out, out
+
+
+def test_strip_remote_media_escapes_leftover_angle_brackets():
+    from localflow.meetings import strip_remote_media
+
+    md = "- Latency < 200ms, see <https://docs.example/x>\n- <b>Ship</b> it"
+    out = strip_remote_media(md)
+    assert out == "- Latency &lt; 200ms, see https://docs.example/x\n- Ship it"
     assert strip_remote_media(out) == out
 
 
