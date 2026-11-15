@@ -13,21 +13,54 @@ import sys
 from pathlib import Path
 
 from localflow.appbundle import MAIN_BUNDLE_ID
-from localflow.config import config_path, legacy_config_path, load_config
+from localflow.config import (
+    ConfigError,
+    _config_from_v2,
+    _parse,
+    config_path,
+    legacy_config_path,
+)
+from localflow.config_migrate import migrate_v1
 from localflow.singleinstance import acquire, read_holder
 
 LOCK_NAME = "main-app"
 REOPEN_FLAG = "--reopened"
 
 
+def _explicit(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def is_configured() -> bool:
-    """True once the setup wizard has saved a config with chosen models."""
-    if not (config_path().exists() or legacy_config_path().exists()):
-        return False
+    """True when the saved config shows the user already chose their setup.
+
+    That is the wizard marker (`[setup] version > 0`) or an explicit STT
+    `provider` or `model` in the file itself. The raw TOML is inspected, so
+    dataclass defaults never imply "configured". The file consulted follows
+    `load_config`: the active config path, else the legacy flat file. A
+    missing, empty, unreadable, malformed or unsupported config is not
+    configured.
+    """
     try:
-        return load_config().setup_version > 0
-    except Exception:  # noqa: BLE001 - a broken config means "not configured"
+        target = config_path()
+        if target.exists():
+            data = _parse(target)
+            _config_from_v2(data)  # same validation load_config applies
+        else:
+            legacy = legacy_config_path()
+            if not legacy.exists():
+                return False
+            data, _ = migrate_v1(_parse(legacy))
+    except (ConfigError, OSError, TypeError, ValueError):
         return False
+    setup = data.get("setup")
+    version = setup.get("version") if isinstance(setup, dict) else None
+    if isinstance(version, int) and not isinstance(version, bool) and version > 0:
+        return True
+    stt = data.get("stt")
+    return isinstance(stt, dict) and (
+        _explicit(stt.get("provider")) or _explicit(stt.get("model"))
+    )
 
 
 def _held(name: str) -> bool:

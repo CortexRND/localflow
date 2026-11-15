@@ -83,13 +83,145 @@ def test_unconfigured_opens_setup_only(monkeypatch, rec):
     assert rec.popen == [] and rec.run == []
 
 
-def test_config_without_chosen_models_is_unconfigured(monkeypatch, rec):
-    save_config(Config(setup_version=0))
+def _write_config(tmp_path, text, legacy=False):
+    path = tmp_path / (".localflow.toml" if legacy else "config.toml")
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+LEGACY_DAILY_USER = """\
+config_version = 2
+
+[stt]
+provider = "parakeet"
+model = "base"
+
+[llm]
+provider = "ollama"
+model = "llama3.2"
+
+[setup]
+version = 0
+"""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "config_version = 2\n",
+        "config_version = 2\n[setup]\nversion = 0\n",
+        'config_version = 2\n[stt]\nlanguage = "en"\n[setup]\nversion = 0\n',
+        'config_version = 2\n[llm]\nmodel = "x"\n',
+        'config_version = 2\n[stt]\nprovider = ""\nmodel = ""\n',
+        "config_version = 2\n[stt]\nprovider = 3\n",
+        "this is = = not toml [",
+        "config_version = 99\n[stt]\nprovider = \"parakeet\"\n",
+    ],
+)
+def test_config_without_chosen_models_is_unconfigured(monkeypatch, rec, tmp_path, text):
+    _write_config(tmp_path, text)
     calls = _fake_windows(monkeypatch)
 
+    assert main_app.is_configured() is False
     main_app.main()
 
     assert calls == ["setup"]
+    assert rec.popen == []
+
+
+@pytest.mark.parametrize("version", ['"bad"', "[2]", '{ a = 1 }'])
+def test_wrongly_typed_config_version_is_unconfigured(monkeypatch, rec, tmp_path, version):
+    _write_config(
+        tmp_path,
+        f'config_version = {version}\n[stt]\nprovider = "parakeet"\n[setup]\nversion = 1\n',
+    )
+    calls = _fake_windows(monkeypatch)
+
+    assert main_app.is_configured() is False
+    main_app.main()
+
+    assert calls == ["setup"]
+    assert rec.popen == []
+
+
+def test_missing_config_is_unconfigured():
+    assert main_app.is_configured() is False
+
+
+def test_unreadable_config_is_unconfigured(monkeypatch, tmp_path):
+    _write_config(tmp_path, LEGACY_DAILY_USER)
+
+    def denied(path):
+        raise PermissionError(path)
+
+    monkeypatch.setattr(main_app, "_parse", denied)
+
+    assert main_app.is_configured() is False
+
+
+def test_non_utf8_config_is_unconfigured(tmp_path):
+    (tmp_path / "config.toml").write_bytes(b"\xff\xfe\x00bad")
+
+    assert main_app.is_configured() is False
+
+
+def test_saved_default_config_counts_because_stt_keys_are_written(tmp_path):
+    # save_config materializes [stt] provider/model, so the saved file is an
+    # explicit choice even at setup_version 0; dataclass defaults alone are not.
+    save_config(Config(setup_version=0))
+
+    assert main_app.is_configured() is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'config_version = 2\n[stt]\nprovider = "parakeet"\n',
+        'config_version = 2\n[stt]\nmodel = "small"\n',
+        "config_version = 2\n[setup]\nversion = 1\n",
+        LEGACY_DAILY_USER,
+    ],
+)
+def test_explicit_provider_model_or_wizard_marker_is_configured(tmp_path, text):
+    _write_config(tmp_path, text)
+
+    assert main_app.is_configured() is True
+
+
+def test_legacy_daily_user_routes_to_runtime_and_hub(monkeypatch, rec, tmp_path):
+    _write_config(tmp_path, LEGACY_DAILY_USER)
+    calls = _fake_windows(monkeypatch)
+    monkeypatch.setattr(launchagent, "status", lambda: "not installed")
+
+    main_app.main()
+
+    assert calls == ["hub"]
+    assert [a for a in rec.popen if a[0].endswith("/localflow")]
+    assert [sys.executable, "-m", "localflow.menubar"] in rec.popen
+
+
+def test_legacy_flat_file_is_used_when_active_config_is_missing(tmp_path):
+    _write_config(tmp_path, 'stt_backend = "mlx"\nmodel_size = "small"\n', legacy=True)
+    assert main_app.is_configured() is True
+    _write_config(tmp_path, "ollama_model = \"x\"\n", legacy=True)
+    assert main_app.is_configured() is False
+    _write_config(tmp_path, "setup_version = 1\n", legacy=True)
+    assert main_app.is_configured() is True
+
+
+def test_active_config_takes_precedence_over_legacy_file(tmp_path):
+    _write_config(tmp_path, 'stt_backend = "mlx"\n', legacy=True)
+    _write_config(tmp_path, "config_version = 2\n")
+
+    assert main_app.is_configured() is False
+
+
+def test_malformed_active_config_does_not_fall_back_to_legacy(tmp_path):
+    _write_config(tmp_path, 'stt_backend = "mlx"\n', legacy=True)
+    _write_config(tmp_path, "not = = toml")
+
+    assert main_app.is_configured() is False
 
 
 def test_configured_starts_runtime_then_hub(monkeypatch, rec):
