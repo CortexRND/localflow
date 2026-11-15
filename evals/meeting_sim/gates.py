@@ -1,5 +1,5 @@
 """Deterministic gates M1-M13 over ~/sim-runs/<run>/rK/results/*.json (thresholds frozen in PLAN.md)."""
-import json, math, re, sys
+import json, math, os, re, sys
 from pathlib import Path
 sys.path.insert(0, os.environ.get("SIM_SUT", str(Path.home() / "work/sim-sut")))
 from localflow.meetings import _safe_title  # noqa: E402
@@ -17,7 +17,7 @@ def headings(md): return [norm_head(m) for m in re.findall(r"^#{1,6}\s+(.+?)\s*$
 def notes_md(text, title):
     body = text.split("\n---\n", 1)[1] if text.startswith("---\n") else text
     body = body.split("\nRaw transcript: [[", 1)[0]
-    return re.sub(rf"^\s*# {re.escape(title)}\s*\n", "", body, count=1)
+    return re.sub(rf"^\s*# {re.escape(_safe_title(title))}\s*\n", "", body, count=1)
 def nums(text):
     out = set()
     for tok in re.findall(r"\d[\d,]*(?:\.\d+)?", text):
@@ -62,6 +62,8 @@ def repeat_gates(files):
             exp = [("Me" if a == "me" else "Others", t) for a, t in s["lines"]]
             for i, e in enumerate(exp):
                 tally("M2", i < len(got) and got[i] == e, f"{sid}#{i}")
+            for i in range(len(exp), len(got)):
+                tally("M2", False, f"{sid}#extra{i}")
         if nf:
             tally("M3", f"## My raw notes\n\n{nf}\n" in r["log_text"], sid)
             uh, nh, pos, ok = headings(nf), headings(md), -1, True
@@ -74,7 +76,7 @@ def repeat_gates(files):
             tally("M5", any(k.lower() in low for k in p["keywords"]), f"{sid}:{p['keywords'][0]}")
         for fact in s["facts"]:
             tally("M6", any(k.lower() in low for k in fact["any"]), f"{sid}:{fact['id']}")
-        llm_in = "\n".join(c["prompt"] for c in r["llm_calls"][: r["summarize_calls"]])
+        llm_in = r["log_text"] + "\n" + (r["llm_calls"][0]["prompt"] if r["llm_calls"] else "")
         support = nums(llm_in) | word_nums(llm_in)
         for n in sorted(nums(md)):
             ok = n in support
