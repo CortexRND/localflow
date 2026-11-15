@@ -7,11 +7,13 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
-from Foundation import NSMakeSize
+from Foundation import NSMakePoint, NSMakeSize
 
 from localflow.config import Config
+from localflow import provider_keys
 from localflow.dictionary import DictionaryStore
 from localflow.dispatch import PromptQueue, WorkPrompt
 from localflow.history import HistoryStore
@@ -300,9 +302,67 @@ def _hub_responsive_snapshots(base):
     _hub_sized_shots(controller, "hub-dictionary-replacement-error")
 
 
+def _hub_provider_snapshots(base):
+    history = HistoryStore(base / "provider-history.sqlite", base / "provider-clips")
+    dictionary = DictionaryStore(base / "provider-dictionary.json")
+    config = Config()
+    store = {}
+    candidates = [
+        provider_keys.ImportCandidate("fireworks", "environment: FIREWORKS_API_KEY", "fake-key-1234"),
+        provider_keys.ImportCandidate("openai", "~/.zshrc: OPENAI_API_KEY", "fake-key-5678"),
+    ]
+    with (
+        patch("localflow.secrets.get_secret", side_effect=lambda name: store.get(name, "")),
+        patch("localflow.secrets.set_secret", side_effect=lambda name, value: store.__setitem__(name, value)),
+        patch("localflow.secrets.delete_secret", side_effect=lambda name: store.pop(name, None)),
+        patch("localflow.hub_mac.load_config", side_effect=lambda: config),
+        patch("localflow.provider_keys.save_config"),
+        patch("localflow.provider_keys.detect_imports", return_value=candidates),
+        patch("localflow.provider_keys.fetch_models", return_value=[{"id": "example-model"}]),
+        patch("localflow.provider_keys.test_llm", return_value=(True, "Provider connection successful")),
+    ):
+        controller = build_hub_window(history, dictionary, config)
+        controller.provider_snapshot_mode = True
+        controller.show_page("Models")
+        for state in ("no-keys", "saved-active", "import-results", "test-success", "test-failure"):
+            controller.provider_candidates = []
+            controller.provider_message = ("", False)
+            if state != "no-keys":
+                provider_keys.save_imports(candidates)
+                config = provider_keys.activate("fireworks", model="example-model", config=config)
+            if state == "import-results":
+                controller.provider_candidates = provider_keys.detect_imports()
+            if state in ("test-success", "test-failure"):
+                result = (True, "Provider connection successful") if state == "test-success" else (
+                    False, "Provider connection failed; check the key, base URL, and network"
+                )
+                with patch("localflow.provider_keys.test_llm", return_value=result):
+                    ok, message = provider_keys.test_llm("ollama")
+                    controller.provider_state["ollama"]["message"] = (message, ok)
+            else:
+                controller.provider_state["ollama"].pop("message", None)
+            for preset in provider_keys.PRESETS:
+                controller.provider_state[preset.id]["models"] = [
+                    item["id"] for item in provider_keys.fetch_models(preset.id)
+                ]
+            controller.show_page("Models")
+            for label, width, height in HUB_SIZES:
+                controller.resize_content(width, height)
+                if state in ("no-keys", "saved-active"):
+                    controller.body.scrollPoint_(NSMakePoint(0, 488))
+                _shot(controller, f"hub-models-keys-{state}-{label}")
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        patch("localflow.secrets.get_secret", return_value=""),
+        patch("localflow.secrets.set_secret"),
+        patch("localflow.secrets.delete_secret"),
+        patch("localflow.provider_keys.fetch_models", return_value=[]),
+        patch("localflow.provider_keys.test_llm", return_value=(False, "Snapshot: offline")),
+    ):
         tmp = Path(tmp)
 
         c, _ = _controller(tmp / "empty")
@@ -407,6 +467,7 @@ def main():
         _shot(setup, "setup-download-error")
         _hub_snapshots(tmp)
         _hub_responsive_snapshots(tmp)
+        _hub_provider_snapshots(tmp)
 
     print(f"wrote snapshots to {OUT}")
 

@@ -1800,7 +1800,18 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _page_models(self):
+        from Foundation import NSAttributedString
+        from localflow import provider_keys
+
         self.config = load_config()
+        self.body.subviews()[0].setStringValue_("Models & keys")
+        self._models_capture()
+        if not hasattr(self, "provider_state"):
+            self.provider_state = {}
+            self.provider_message = ("", False)
+            self.provider_candidates = []
+        self.provider_controls = {}
+        self.provider_checks = []
         self.body.addSubview_(
             _label(
                 f"Speech model: {self.config.stt_backend} / {self.config.model_size}\n"
@@ -1813,6 +1824,211 @@ class HubWindowController(NSObject):
             "Change models…", "openSetup:", 0, self.cursor_y + 72,
             width=180, kind="primary",
         )
+        self._button("Import keys…", "providerImport:", 192, self.cursor_y + 72, width=150)
+        self.cursor_y += 124
+        message, ok = self.provider_message
+        if message:
+            self._add_text(message, color="success" if ok else "red", height=40)
+        if self.provider_candidates:
+            card = self._dictionary_card(
+                "Keys found — select keys to import", "Only checked keys will be saved.",
+                110 + 32 * len(self.provider_candidates),
+            )
+            for index, candidate in enumerate(self.provider_candidates):
+                check = NSButton.checkboxWithTitle_target_action_(
+                    f"{provider_keys.get_preset(candidate.provider_id).label}: "
+                    f"{candidate.masked_value} — {candidate.source}", None, None,
+                )
+                check.setFrame_(NSMakeRect(CARD_PADDING, 62 + index * 32,
+                                          card.frame().size.width - 2 * CARD_PADDING, 28))
+                check.setContentTintColor_(_color("ink", self.tokens))
+                check.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+                    check.title(), {AppKit.NSForegroundColorAttributeName: _color("ink", self.tokens)},
+                ))
+                check.setState_(getattr(self, "provider_checked", {}).get(
+                    (candidate.provider_id, candidate.source), AppKit.NSControlStateValueOff,
+                ))
+                card.addSubview_(check)
+                self.provider_checks.append(check)
+            self._button("Save selected keys", "providerConfirmImport:", CARD_PADDING,
+                         66 + 32 * len(self.provider_candidates), width=180, parent=card)
+        for index, preset in enumerate(provider_keys.PRESETS):
+            initial_url = preset.base_url
+            if (preset.id == "custom" and self.config.llm_provider == "openai-compatible"
+                    and not any(p.base_url == self.config.llm_base_url.rstrip("/")
+                                for p in provider_keys.PRESETS if p.id != "custom")):
+                initial_url = self.config.llm_base_url
+            state = self.provider_state.setdefault(preset.id, {
+                "url": initial_url, "model": preset.default_model, "models": [],
+            })
+            active = (
+                self.config.llm_provider == preset.llm_provider
+                and self.config.llm_base_url.rstrip("/") == state["url"].rstrip("/")
+            )
+            if active and not state["model"]:
+                state["model"] = self.config.llm_model
+            status = provider_keys.key_status(preset.id)
+            title = preset.label + (" · Active" if active else "")
+            card = self._dictionary_card(title, preset.base_url or "Your inference endpoint", 300)
+            inner = card.frame().size.width - 2 * CARD_PADDING
+            url_field = None
+            if preset.id == "custom":
+                url_field = self._field(state["url"], CARD_PADDING, 62, inner, parent=card)
+                url_field.setTextColor_(_color("ink", self.tokens))
+                url_field.setBackgroundColor_(_color("paper", self.tokens))
+                url_field.setPlaceholderString_("https://your-provider.example/v1")
+            else:
+                self._card_label(card, "Key: " + (status["masked_value"] or "No key")
+                                 if preset.needs_key else "Local inference · No key needed", 62)
+            secure = None
+            if preset.needs_key:
+                if preset.id == "custom":
+                    self._card_label(card, "Key: " + (status["masked_value"] or "No key"), 94)
+                secure = AppKit.NSSecureTextField.alloc().initWithFrame_(
+                    NSMakeRect(CARD_PADDING, 122, inner - 164, 28)
+                )
+                secure.setPlaceholderString_("Paste API key")
+                secure.setTextColor_(_color("ink", self.tokens))
+                secure.setBackgroundColor_(_color("paper", self.tokens))
+                card.addSubview_(secure)
+                self._button("Save", "providerSave:", CARD_PADDING + inner - 156, 118,
+                             tag=index, width=72, parent=card)
+                self._button("Remove", "providerRemove:", CARD_PADDING + inner - 80, 118,
+                             tag=index, width=80, parent=card)
+            combo = NSComboBox.alloc().initWithFrame_(NSMakeRect(CARD_PADDING, 164, inner, 28))
+            combo.setEditable_(True)
+            combo.addItemsWithObjectValues_(state["models"])
+            combo.setStringValue_(state["model"])
+            combo.setPlaceholderString_("Choose or enter a model ID")
+            combo.setTextColor_(_color("ink", self.tokens))
+            combo.setBackgroundColor_(_color("paper", self.tokens))
+            card.addSubview_(combo)
+            self.provider_controls[preset.id] = (url_field, combo, secure)
+            self._button("Use for cleanup & Ask", "providerActivate:", CARD_PADDING, 204,
+                         tag=index, width=192, parent=card, kind="primary")
+            self._button("Test connection", "providerTest:", CARD_PADDING + 200, 204,
+                         tag=index, width=140, parent=card)
+            message, ok = state.get("message", ("", False))
+            self._card_label(card, message, 252, color="success" if ok else "red", height=36, wrap=True)
+            cache_key = (state["url"], status["masked_value"])
+            if state.get("loaded") != cache_key and (status["has_key"] or not preset.needs_key):
+                state["loaded"] = cache_key
+                self._models_worker(preset.id, "models")
+
+    @objc.python_method
+    def _models_capture(self):
+        if hasattr(self, "provider_checks"):
+            self.provider_checked = {
+                (candidate.provider_id, candidate.source): check.state()
+                for candidate, check in zip(self.provider_candidates, self.provider_checks)
+            }
+        for provider_id, (url, combo, _secure) in getattr(self, "provider_controls", {}).items():
+            state = self.provider_state[provider_id]
+            if url is not None:
+                state["url"] = url.stringValue().strip()
+            state["model"] = combo.stringValue().strip()
+
+    @objc.python_method
+    def _models_worker(self, provider_id, operation):
+        from Foundation import NSOperationQueue
+        from localflow import provider_keys
+
+        state = self.provider_state[provider_id]
+        url, model = state["url"], state["model"]
+
+        def finish(result):
+            if operation == "models":
+                state["models"] = [item["id"] for item in result]
+            else:
+                ok, message = result
+                state["message"] = (message, ok)
+            if self.page == "Models":
+                self.show_page("Models")
+
+        def run():
+            result = (provider_keys.fetch_models(provider_id, base_url=url)
+                      if operation == "models" else
+                      provider_keys.test_llm(provider_id, base_url=url, model=model))
+            NSOperationQueue.mainQueue().addOperationWithBlock_(lambda: finish(result))
+
+        if not getattr(self, "provider_snapshot_mode", False):
+            threading.Thread(target=run, daemon=True, name="localflow-provider").start()
+
+    @objc.python_method
+    def _models_action(self, sender, operation):
+        from localflow import provider_keys
+
+        self._models_capture()
+        preset = provider_keys.PRESETS[sender.tag()]
+        state = self.provider_state[preset.id]
+        try:
+            if operation == "save":
+                secure = self.provider_controls[preset.id][2]
+                try:
+                    provider_keys.save_key(preset.id, secure.stringValue())
+                finally:
+                    secure.setStringValue_("")
+            elif operation == "remove":
+                provider_keys.remove_key(preset.id)
+            elif operation == "activate":
+                self.config = provider_keys.activate(preset.id, base_url=state["url"],
+                                                     model=state["model"], config=self.config)
+            else:
+                state["message"] = ("Testing connection…", True)
+                self._models_worker(preset.id, "test")
+                self.show_page("Models")
+                return
+            state["message"] = ("Provider settings saved", True)
+        except Exception:  # noqa: BLE001
+            state["message"] = ("Unable to save; check the key, URL, and Keychain access", False)
+        self.show_page("Models")
+
+    def providerSave_(self, sender):
+        self._models_action(sender, "save")
+
+    def providerRemove_(self, sender):
+        self._models_action(sender, "remove")
+
+    def providerActivate_(self, sender):
+        self._models_action(sender, "activate")
+
+    def providerTest_(self, sender):
+        self._models_action(sender, "test")
+
+    def providerImport_(self, _sender):
+        from localflow import provider_keys
+
+        self._models_capture()
+        found = provider_keys.detect_imports()
+        self.provider_checked = {}
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setTitle_("Import provider keys from a .env or shell profile (Cancel: environment only)")
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setShowsHiddenFiles_(True)
+        try:
+            if panel.runModal() == AppKit.NSModalResponseOK:
+                found += provider_keys.detect_imports(panel.URL().path(), environ={})
+            self.provider_candidates = found
+            self.provider_message = ("Select the keys to save" if found else "No keys found", bool(found))
+        except (OSError, UnicodeError):
+            self.provider_candidates = found
+            self.provider_message = ("Unable to read that file; environment results shown", False)
+        self.show_page("Models")
+
+    def providerConfirmImport_(self, _sender):
+        from localflow import provider_keys
+
+        try:
+            provider_keys.save_imports([
+                candidate for candidate, check in zip(self.provider_candidates, self.provider_checks)
+                if check.state() == AppKit.NSControlStateValueOn
+            ])
+            self.provider_candidates = []
+            self.provider_message = ("Selected keys saved", True)
+        except Exception:  # noqa: BLE001
+            self.provider_message = ("Unable to save keys; check Keychain access", False)
+        self.show_page("Models")
 
     @objc.python_method
     def _page_hot_phrases(self):

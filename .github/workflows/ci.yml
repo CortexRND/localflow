@@ -42,6 +42,8 @@ jobs:
           localflow/config.py
           localflow/provider_keys.py
           tests/test_provider_keys.py
+          tests/test_cli_keys.py
+          tests/test_hub_provider_keys.py
           localflow/config_migrate.py
           localflow/audio.py
           localflow/context.py
