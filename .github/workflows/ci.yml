@@ -56,5 +56,7 @@ jobs:
           tests/test_meeting_api.py
           tests/test_meeting_client.py
           tests/test_hub_meetings_tk.py
+          localflow/recall.py
+          tests/test_recall.py
       - name: Test
         run: pytest -q

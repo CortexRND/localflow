@@ -29,6 +29,7 @@ from rich.table import Table
 from rich.text import Text
 
 from localflow import api as api_logic
+from localflow import recall as recall_module
 from localflow.apitoken import read as read_api_token
 from localflow.config import (
     apply_config_update,
@@ -594,6 +595,59 @@ def llm_test(
 def llm_pull(tag: str) -> None:
     """Pull an Ollama model tag."""
     _pull_ollama_model(tag)
+
+
+@cli.command("recall")
+@click.argument("question")
+@click.option("--since", default=None, help="today, yesterday, 7d, 30d or YYYY-MM-DD.")
+@click.option("--k", type=click.IntRange(min=1, max=20), default=8, show_default=True,
+              help="Passages to retrieve.")
+@click.option("--no-llm", is_flag=True, help="Only show the ranked matching passages.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def recall_cmd(question: str, since: str | None, k: int, no_llm: bool, as_json: bool) -> None:
+    """Ask a question across your dictations, meeting transcripts and notes."""
+    if not question.strip():
+        raise click.UsageError("question is empty")
+    try:
+        recall_module.parse_since(since)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--since") from exc
+    config = load_config()
+    kwargs = {
+        "store": _history_store() if config.history_enabled else None,
+        "vault_path": config.vault_path,
+        "notes_folder": config.notes_folder,
+        "logs_folder": config.logs_folder,
+        "k": k,
+        "since": since,
+    }
+    if no_llm:
+        result = recall_module.search(question, **kwargs)
+    else:
+        with console.status("searching your history…"):
+            result = recall_module.recall(question, llm=build_llm(config), **kwargs)
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        return
+    if result.answer:
+        console.print(Text(result.answer))
+    elif not no_llm:
+        console.print("[yellow]LLM unavailable — showing matching passages only.[/yellow]")
+    if not result.citations:
+        if not result.answer:
+            console.print(recall_module.NO_ANSWER)
+        return
+    console.print("\n[bold]Sources[/bold]")
+    for c in result.citations:
+        console.print(Text(_format_recall_source(c)))
+
+
+def _format_recall_source(c: dict) -> str:
+    when = ""
+    if c["when"]:
+        when = datetime.fromisoformat(c["when"]).strftime("%a %b %d %H:%M") + " · "
+    label = c["source"] + (f" · {c['title']}" if c["title"] else "")
+    return f"[{c['n']}] {when}{label} — \"{c['snippet']}\""
 
 
 @cli.group()
