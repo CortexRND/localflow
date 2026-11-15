@@ -51,7 +51,7 @@ def test_api_auth_requires_tokens_for_loopback_writes(monkeypatch):
     monkeypatch.setattr(server, "_api_token", "test-token")
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
     monkeypatch.setattr(server, "save_config", lambda config: None)
-    monkeypatch.setattr(server, "build_llm", lambda config: object())
+    monkeypatch.setattr(server, "build_llm", lambda config, **kwargs: object())
     monkeypatch.setattr(server.api_logic, "validate_runtime", lambda config: object())
 
     with TestClient(
@@ -112,7 +112,7 @@ def test_static_shell_and_health_stay_public(monkeypatch):
 def test_config_api_applies_partial_updates(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_config", Config(meetings_enabled=False))
     monkeypatch.setattr(server, "save_config", lambda config: tmp_path / "config.toml")
-    monkeypatch.setattr(server, "build_llm", lambda config: object())
+    monkeypatch.setattr(server, "build_llm", lambda config, **kwargs: object())
     monkeypatch.setattr(server, "_api_token", "test-token")
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
 

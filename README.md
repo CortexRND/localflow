@@ -241,6 +241,30 @@ speakers the mic also hears the remote side, which then appears twice.
 
 The Hub's Meetings page offers the same features (`lf hub` or menu bar → Meeting notes…).
 
+### Recall: ask across everything you've said
+
+Ask "what did I tell Sarah about the budget?" or "when did we decide to drop the Windows
+beta?" and get a short answer with numbered citations, drawn from your own dictation
+history, meeting transcript logs and meeting notes:
+
+```bash
+lf recall "when did we decide to drop the Windows beta?" --since 30d
+lf recall '"budget review"' --no-llm      # ranked passages only, no LLM call
+lf recall "what did I tell Sarah?" --json --k 5
+```
+
+- `--since` takes `today`, `yesterday`, `7d`, `30d` or `YYYY-MM-DD`; `--k` (1–20) sets how
+  many passages are retrieved. Put a phrase in quotes to rank exact matches higher.
+- Retrieval is a built-in BM25 search (no extra dependencies) rebuilt on each query; the
+  index never leaves your machine. Only the top passages go to your configured LLM, which
+  is told to answer from them alone and to say "I couldn't find that in your history."
+  otherwise. If the LLM is down you still get the matching passages. With a cloud LLM
+  provider those passages are sent to it, so use a local one if that matters.
+- With `[history] enabled = false` dictations are skipped; meetings and notes still count.
+- HTTP: `POST /api/recall {"question": ..., "since"?, "k"?, "llm"?}` returns
+  `{answer, citations}`. It requires the API token (`X-Localflow-Token`), even from
+  loopback. The web UI has a Recall panel; open the page with `?token=…` to use it.
+
 ### Hot phrases
 
 Hot phrases let you paste a saved long prompt by speaking a short trigger

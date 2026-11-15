@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from localflow import api as api_logic
+from localflow import recall as recall_logic
 from localflow import sounds
 from localflow.apitoken import load_or_create
 from localflow.audio import rms_dbfs
@@ -324,7 +325,7 @@ def api_config() -> dict:
 
 @app.put("/api/config")
 def api_config_update(body: dict) -> dict:
-    global _config, _transcriber, _cleaner, _ollama, _commands, _history
+    global _config, _transcriber, _cleaner, _ollama, _commands, _history, _summarizer
     with _config_lock:
         try:
             updated = apply_config_update(_config, body)
@@ -342,6 +343,7 @@ def api_config_update(body: dict) -> dict:
         _transcriber = None
         _cleaner = None
         _ollama = new_llm
+        _summarizer = MeetingSummarizer(build_llm(_config, timeout=300, num_ctx=8192))
         _history = None
         result = config_to_dict(_config)
     return {**result, "restart_required": api_logic.restart_required(body)}
@@ -384,7 +386,7 @@ def api_secrets() -> dict[str, bool]:
 
 @app.put("/api/secrets/{name}")
 def api_secret_update(name: str, body: dict) -> dict[str, bool]:
-    global _ollama, _cleaner, _prompt_gen
+    global _ollama, _cleaner, _prompt_gen, _summarizer
     if name not in api_logic.SECRET_NAMES:
         raise HTTPException(status_code=404, detail="unknown secret")
     value = body.get("value", "")
@@ -395,6 +397,7 @@ def api_secret_update(name: str, body: dict) -> dict[str, bool]:
             api_logic.update_secret(name, value)
             if name == "llm_api_key":
                 _ollama = build_llm(_config)
+                _summarizer = MeetingSummarizer(build_llm(_config, timeout=300, num_ctx=8192))
                 _cleaner = None
             elif name == "fireworks_api_key":
                 _prompt_gen = WorkPromptGenerator(build_workprompts_llm(_config))
@@ -659,6 +662,56 @@ async def meeting_chat(body: MeetingChat) -> dict:
         log.exception("meeting chat failed")
         raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
     return {"answer": answer, "log_path": str(path)}
+
+
+MAX_RECALL_QUESTION_CHARS = 1_000
+
+
+class RecallRequest(BaseModel):
+    question: str
+    since: str | None = None
+    k: int = 8
+    llm: bool = True
+
+
+@app.post("/api/recall")
+async def api_recall(body: RecallRequest) -> dict:
+    """Search dictation history, transcripts and notes; optionally answer with the LLM.
+
+    Lives under /api/ so the token middleware applies even to loopback POSTs: this
+    exposes everything the user has said.
+    """
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is empty")
+    if len(question) > MAX_RECALL_QUESTION_CHARS:
+        raise HTTPException(status_code=413, detail="question too long")
+    if not 1 <= body.k <= 20:
+        raise HTTPException(status_code=400, detail="k must be between 1 and 20")
+    try:
+        recall_logic.parse_since(body.since)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    kwargs = {
+        "store": _get_history() if _config.history_enabled else None,
+        "vault_path": _config.vault_path,
+        "notes_folder": _config.notes_folder,
+        "logs_folder": _config.logs_folder,
+        "k": body.k,
+        "since": body.since,
+    }
+
+    def _run():
+        if not body.llm:
+            return recall_logic.search(question, **kwargs)
+        return recall_logic.recall(question, llm=_summarizer.llm, **kwargs)
+
+    try:
+        result = await run_in_threadpool(_run)
+    except Exception as exc:
+        log.exception("recall failed")
+        raise HTTPException(status_code=500, detail=f"recall failed: {exc}")
+    return result.to_dict()
 
 
 def _write_prompt_files(prompts_md: str, title: str, started_at: datetime) -> dict:

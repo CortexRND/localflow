@@ -639,6 +639,34 @@
   #chatLog li.a.pending { color: var(--sun); }
   #chatLog li.a.err { background: transparent; color: var(--fg); border-style: dashed; }
 
+  /* recall: reuses the chat row; sources are a numbered list under the answer */
+  #recallLog { margin: 0.75rem 0 0; padding: 0; list-style: none; }
+  #recallLog:empty { display: none; }
+  #recallLog li {
+    border: 1px solid var(--fg);
+    border-top-width: 0;
+    padding: 0.8rem 1rem;
+    color: var(--fg);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  #recallLog li:first-child { border-top-width: 1px; }
+  #recallLog li.a { background: var(--fg); color: var(--bg); }
+  #recallLog li.a.pending { color: var(--sun); }
+  #recallLog li.a.err { background: transparent; color: var(--fg); border-style: dashed; }
+  #recallLog li.src { font-size: 0.85rem; }
+  #recallLog li.src.hit { outline: 3px solid var(--sun); outline-offset: -3px; }
+  #recallLog li.src .meta {
+    display: block;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  #recallLog a.cite { color: inherit; font-weight: 800; text-decoration: underline; cursor: pointer; }
+
   /* ---------- Transcripts ---------- */
   /* a built, bordered card so the purple field never reads as empty */
   /* the reference's one left-aligned object is the .terminal data card;
@@ -886,9 +914,30 @@
     </div>
   </section>
 
+  <section class="band band--paper" aria-labelledby="sec-recall">
+    <div class="inner">
+      <p class="eyebrow">No.03 — Memory</p>
+      <h2 class="title" id="sec-recall">Recall</h2>
+
+      <form id="recallForm" autocomplete="off">
+        <div class="fieldHead">
+          <label for="recallQuestion">Ask everything you've said</label>
+          <span id="recallStatus" class="fieldStatus"></span>
+        </div>
+        <div class="chatRow">
+          <input id="recallQuestion" type="text" maxlength="1000"
+                 placeholder="What did I tell Sarah about the budget?">
+          <button class="dismissBtn" id="recallAsk" type="submit">Ask</button>
+        </div>
+        <p class="fieldHint">Searches your dictations, meeting transcripts and notes on this machine.</p>
+        <ul id="recallLog" aria-live="polite"></ul>
+      </form>
+    </div>
+  </section>
+
   <section class="band band--last" aria-labelledby="sec-transcripts">
     <div class="inner">
-      <p class="eyebrow">No.03 — The archive</p>
+      <p class="eyebrow">No.04 — The archive</p>
       <h2 class="title" id="sec-transcripts">Transcripts</h2>
 
       <div class="archive-frame">
@@ -1353,6 +1402,93 @@
     } finally {
       chatAsk.disabled = false;
       chatQuestion.focus();
+    }
+  });
+
+  const recallForm = document.getElementById('recallForm');
+  const recallQuestion = document.getElementById('recallQuestion');
+  const recallAsk = document.getElementById('recallAsk');
+  const recallLog = document.getElementById('recallLog');
+  const recallStatus = document.getElementById('recallStatus');
+  const CITE_RE = /(\[\d{1,2}(?:\s*[,;]\s*\d{1,2})*\])/;
+
+  function recallItem(cls, text) {
+    const li = document.createElement('li');
+    li.className = cls;
+    li.textContent = text;
+    recallLog.appendChild(li);
+    return li;
+  }
+
+  // Render the answer with [n] markers as links that highlight the matching source.
+  function recallAnswer(li, text, sources) {
+    li.textContent = '';
+    text.split(CITE_RE).forEach((part) => {
+      if (!CITE_RE.test(part)) { li.appendChild(document.createTextNode(part)); return; }
+      part.slice(1, -1).split(/\s*[,;]\s*/).forEach((n, i) => {
+        const a = document.createElement('a');
+        a.className = 'cite';
+        a.textContent = (i ? ' ' : '') + '[' + n + ']';
+        a.addEventListener('click', () => {
+          sources.forEach((el, k) => el.classList.toggle('hit', String(k + 1) === n));
+          const el = sources[Number(n) - 1];
+          if (el) el.scrollIntoView({ block: 'nearest' });
+        });
+        li.appendChild(a);
+      });
+    });
+  }
+
+  function recallSource(c) {
+    const li = document.createElement('li');
+    li.className = 'src';
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    const when = c.when ? new Date(c.when).toLocaleString([], {
+      weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    }) + ' · ' : '';
+    meta.textContent = '[' + c.n + '] ' + when + c.source + (c.title ? ' · ' + c.title : '');
+    li.appendChild(meta);
+    li.appendChild(document.createTextNode('“' + c.snippet + '”'));
+    return li;
+  }
+
+  recallForm.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const question = recallQuestion.value.trim();
+    if (!question || recallAsk.disabled) return;
+    recallAsk.disabled = true;
+    recallLog.textContent = '';
+    recallStatus.textContent = 'searching…';
+    const answer = recallItem('a pending', 'Searching your history…');
+    try {
+      const resp = await meetingFetch('/api/recall', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question }),
+      });
+      if (resp.status === 401) {
+        throw new Error('open this page with ?token=… (the api-token file in the LocalFlow config folder)');
+      }
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || resp.statusText);
+      const sources = (data.citations || []).map(recallSource);
+      answer.className = 'a';
+      if (data.answer) {
+        recallAnswer(answer, data.answer, sources);
+      } else if (sources.length) {
+        answer.textContent = 'LLM unavailable — matching passages:';
+      } else {
+        answer.textContent = 'I couldn’t find that in your history.';
+      }
+      sources.forEach((li) => recallLog.appendChild(li));
+    } catch (err) {
+      answer.className = 'a err';
+      answer.textContent = 'Couldn’t recall — ' + err.message;
+    } finally {
+      recallStatus.textContent = '';
+      recallAsk.disabled = false;
+      recallQuestion.focus();
     }
   });
 
