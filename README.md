@@ -511,7 +511,12 @@ Meeting transcripts are never touched.
    ```
    Tailscale prints an HTTPS URL (e.g., `https://myhost.example.ts.net`).
 
-4. On **phone**, open that URL in browser:
+4. Every route except the page itself needs the API token, including from
+   the phone. Print it on the Mac with `lf token` (it changes each time the
+   server starts), then on the **phone** open the URL once with the token:
+   `https://myhost.example.ts.net/?token=<token>`. The page remembers the token
+   on that device and drops it from the address bar; open it again with the
+   new token after a server restart.
    - Large record/stop button
    - Speak, hit stop
    - Transcript appears
@@ -524,9 +529,15 @@ Create a Shortcut that POSTs audio to `/transcribe`:
 ```
 1. Ask for audio
 2. POST [HTTPS URL]/transcribe (multipart form: file parameter)
+   with header  X-Localflow-Token: <output of `lf token`>
 3. Parse JSON response: {"text": ..., "ms": ...}
 4. Show text
 ```
+
+Uploads are capped at 25 MB and decoded audio at `max_recording_seconds`
+(default 20 minutes). The token rotates on every server start, so update the
+Shortcut's header after restarting `localflow-server`. Requests without a valid
+token get `401`.
 
 ## Troubleshooting
 

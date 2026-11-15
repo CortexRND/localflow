@@ -946,6 +946,16 @@ def ui() -> None:
     current().open_path(f"{BASE}/settings?token={quote(token)}")
 
 
+@cli.command("token")
+def token_command() -> None:
+    """Print the API token (for a phone bookmark or an iOS Shortcut)."""
+    token = read_api_token()
+    if not token:
+        console.print("[red]no API token yet[/red] — start the server once: [bold]lf serve[/bold]")
+        sys.exit(1)
+    click.echo(token)
+
+
 @cli.group(invoke_without_command=True)
 def phrases() -> None:
     """Manage hot phrases in the native window (no subcommand = open it)."""
