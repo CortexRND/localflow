@@ -81,6 +81,81 @@ def _hub_snapshots(base):
             controller.show_page(page)
             _shot(controller, f"hub-{page.lower()}-{state}")
 
+    class SnapshotMeetingClient:
+        state = "idle"
+
+        def templates(self):
+            return {
+                "default": "general",
+                "templates": [
+                    {"id": "general", "name": "General"},
+                    {"id": "standup", "name": "Standup"},
+                ],
+            }
+
+        def status(self):
+            if self.state == "running":
+                return {
+                    "session": {
+                        "title": "Planning", "template": "standup",
+                        "user_notes": "Check launch date",
+                        "system_audio": "error",
+                        "system_audio_error": "System audio permission unavailable",
+                        "seconds": 185, "segment_count": 2,
+                        "segments": [
+                            {"stamp": "00:04", "source": "me", "text": "I can take this"},
+                            {"stamp": "01:12", "source": "others", "text": "Sounds good"},
+                        ],
+                    },
+                    "last_saved": None, "chat_available": False,
+                }
+            if self.state == "saved":
+                return {
+                    "session": None,
+                    "last_saved": {
+                        "notes_path": "/Users/runner/Meeting notes/Planning.md",
+                        "enhanced": True,
+                    },
+                    "chat_available": True,
+                }
+            return {
+                "session": None, "last_saved": None, "chat_available": False,
+            }
+
+        def start(self, *_args):
+            return {"ok": True}
+
+        def save_notes(self, _notes):
+            return {"ok": True}
+
+        def stop(self):
+            return {"notes_path": "/Users/runner/Meeting notes/Planning.md"}
+
+        def chat(self, _question):
+            return {"answer": "The launch date is March 3."}
+
+        def dismiss(self):
+            return None
+
+    client = SnapshotMeetingClient()
+    history = HistoryStore(base / "hub-meetings.sqlite", base / "hub-meetings-clips")
+    dictionary = DictionaryStore(base / "hub-meetings-dictionary.json")
+    controller = build_hub_window(
+        history, dictionary, Config(), meeting_client=client
+    )
+    for state in ("idle", "running", "saved"):
+        client.state = state
+        if state == "saved":
+            controller.meeting_notes_text = ""
+            controller.meeting_notes_dirty = False
+            controller._meeting_adopting_notes = True
+            controller.meeting_notes.setString_("")
+            controller._meeting_adopting_notes = False
+        controller.show_page("Meetings")
+        controller._meeting_event("templates", client.templates(), None)
+        controller._meeting_event("status", client.status(), None)
+        _shot(controller, f"hub-meetings-{state}")
+
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)

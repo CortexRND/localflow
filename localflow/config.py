@@ -81,6 +81,10 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "prompts_dir": "prompts_dir",
         "orca_repo": "orca_repo",
         "orca_agent": "orca_agent",
+        "capture_system_audio": "capture_system_audio",
+        "system_audio_device": "system_audio_device",
+        "default_template": "meeting_default_template",
+        "templates_dir": "meeting_templates_dir",
     },
     "setup": {"version": "setup_version"},
 }
@@ -151,6 +155,12 @@ class Config:
     prompts_dir: str = "~/projs/prompts/meetings"
     orca_repo: str = ""                # Orca dispatch target, e.g. "id:<repoId>"; empty = not configured
     orca_agent: str = "claude"
+    # Also capture what the machine plays (remote participants) and tag
+    # segments "me"/"others". macOS: ScreenCaptureKit, else a loopback device.
+    capture_system_audio: bool = False
+    system_audio_device: str = ""      # e.g. "BlackHole 2ch"; empty = auto
+    meeting_default_template: str = "general"
+    meeting_templates_dir: str = "~/.localflow/meeting_templates"
     input_device: str = ""
     setup_version: int = 0
     history_enabled: bool = True
@@ -369,6 +379,10 @@ _FIELD_TYPES = {
     "max_recording_seconds": int,
     "history_enabled": bool,
     "keep_audio_clips": int,
+    "capture_system_audio": bool,
+    "system_audio_device": str,
+    "meeting_default_template": str,
+    "meeting_templates_dir": str,
 }
 
 

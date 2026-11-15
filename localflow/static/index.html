@@ -552,6 +552,91 @@
     margin-bottom: 0.4rem;
   }
 
+  /* template picker sits on its own row under title/platform */
+  .meetingRow select#meetingTemplate { flex: 1 1 12rem; }
+
+  /* notepad + chat: same mono label + 1px purple frame as the rest of the card;
+     the writing itself is sentence-case sans — notes are read, not shouted */
+  .fieldHead {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin: 1.25rem 0 0.4rem;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.7rem;
+    color: var(--bg);
+  }
+  .fieldHead label, .fieldHead span { color: var(--bg); }
+  .fieldStatus { letter-spacing: 0.08em; }
+  .fieldStatus.err { text-decoration: underline wavy; }
+  #meetingNotes {
+    display: block;
+    width: 100%;
+    min-height: 9rem;
+    resize: vertical;
+    padding: 0.85rem 1rem;
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.55;
+    background: transparent;
+    color: var(--bg);
+    border: 1px solid var(--bg);
+    border-radius: 0;
+  }
+  #meetingNotes::placeholder { color: var(--bg); opacity: 0.7; }
+  .fieldHint {
+    margin: 0.4rem 0 0;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    color: var(--bg);
+  }
+
+  #meetingChat { display: none; margin-top: 1.25rem; }  /* JS shows it once a meeting is saved */
+  .chatRow { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+  .chatRow input {
+    flex: 1 1 14rem;
+    min-width: 0;
+    min-height: 54px;
+    padding: 0 1rem;
+    font-size: 16px;
+    font-family: var(--font-sans);
+    background: transparent;
+    border: 1px solid var(--bg);
+    border-radius: 0;
+    color: var(--bg);
+  }
+  .chatRow input::placeholder { color: var(--bg); opacity: 0.7; }
+  .chatRow .dismissBtn { min-height: 54px; }
+  .chatRow .dismissBtn:disabled { border-style: dashed; cursor: not-allowed; background: transparent; color: var(--bg); }
+  #chatLog { margin: 0.75rem 0 0; padding: 0; list-style: none; }
+  #chatLog:empty { display: none; }
+  #chatLog li {
+    border: 1px solid var(--bg);
+    border-top-width: 0;
+    padding: 0.8rem 1rem;
+    color: var(--bg);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  #chatLog li:first-child { border-top-width: 1px; }
+  #chatLog li.q {
+    font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  #chatLog li.a { background: var(--bg); color: var(--fg); border-color: var(--bg); }
+  #chatLog li.a.pending { color: var(--accent); }
+  #chatLog li.a.err { background: transparent; color: var(--bg); border-style: dashed; }
+
   /* ---------- Transcripts ---------- */
   /* a built, bordered card so the purple field never reads as empty */
   /* the reference's one left-aligned object is the .terminal data card;
@@ -752,10 +837,38 @@
           </select>
         </div>
 
+        <div class="meetingRow">
+          <select id="meetingTemplate" aria-label="Notes template">
+            <option value="">General</option>
+          </select>
+        </div>
+
+        <div class="fieldHead">
+          <label for="meetingNotes">Your notes</label>
+          <span class="fieldStatus" id="notesStatus" role="status" aria-live="polite"></span>
+        </div>
+        <textarea id="meetingNotes" spellcheck="true"
+                  aria-describedby="notesHint"
+                  placeholder="Jot what matters — headings, half-sentences, names. On stop, AI fills in the rest from the transcript."></textarea>
+        <p class="fieldHint" id="notesHint">Your structure is kept. Saved as you type.</p>
+
         <button id="meetingBtn" type="button">Start meeting transcription</button>
 
         <div id="meetingLive"></div>
         <div id="meetingSaved"></div>
+
+        <form id="meetingChat" autocomplete="off">
+          <div class="fieldHead">
+            <label for="chatQuestion">Ask the transcript</label>
+            <span id="chatScope"></span>
+          </div>
+          <div class="chatRow">
+            <input id="chatQuestion" type="text" maxlength="2000"
+                   placeholder="What did we decide about the launch date?">
+            <button class="dismissBtn" id="chatAsk" type="submit">Ask</button>
+          </div>
+          <ul id="chatLog" aria-live="polite"></ul>
+        </form>
       </div>
     </div>
   </section>
@@ -959,52 +1072,171 @@
   const meetingSaved = document.getElementById('meetingSaved');
   const meetingWatchState = document.getElementById('meetingWatchState');
 
+  const meetingTemplate = document.getElementById('meetingTemplate');
+  const meetingNotes = document.getElementById('meetingNotes');
+  const notesStatus = document.getElementById('notesStatus');
+  const meetingChat = document.getElementById('meetingChat');
+  const chatQuestion = document.getElementById('chatQuestion');
+  const chatAsk = document.getElementById('chatAsk');
+  const chatLog = document.getElementById('chatLog');
+  const chatScope = document.getElementById('chatScope');
+
   let meetingActive = false;
   let meetingBusy = false;
+  let notesDirty = false;      // typed since the last successful save
+  let notesTimer = null;
+  let notesInFlight = null;    // promise of the save currently on the wire
+  let notesLoadedFor = null;   // session we've synced the textarea from
+  const meetingToken = new URLSearchParams(location.search).get('token') || '';
+
+  function meetingFetch(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    if (meetingToken) headers.set('X-Localflow-Token', meetingToken);
+    return fetch(path, { ...options, headers });
+  }
 
   function fmtSeconds(s) {
     const m = Math.floor(s / 60);
     return m + 'm' + String(s % 60).padStart(2, '0') + 's';
   }
 
+  function setNotesStatus(text, isErr) {
+    notesStatus.textContent = text;
+    notesStatus.classList.toggle('err', !!isErr);
+  }
+
+  async function loadTemplates() {
+    try {
+      const resp = await meetingFetch('/meeting/templates');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      meetingTemplate.textContent = '';
+      for (const t of data.templates) {
+        const opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.name;
+        opt.title = t.description || t.sections.join(' · ');
+        if (t.id === data.default) opt.selected = true;
+        meetingTemplate.appendChild(opt);
+      }
+    } catch (_) { /* keep the static General fallback */ }
+  }
+
+  // Save the notepad now. Before a meeting starts there's nothing to save to:
+  // the text rides along with /meeting/start instead.
+  // Resolves true once the latest text is on the server, false if a save failed.
+  // A failure is not retried here; the status poll retries it.
+  async function saveNotes() {
+    clearTimeout(notesTimer);
+    notesTimer = null;
+    if (!meetingActive) return true;
+    while (notesInFlight) await notesInFlight;
+    if (!notesDirty) return true;
+    const text = meetingNotes.value;
+    notesDirty = false;
+    setNotesStatus('Saving…');
+    notesInFlight = (async () => {
+      try {
+        const resp = await meetingFetch('/meeting/notes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ notes: text }),
+        });
+        if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText);
+        if (!notesDirty) {
+          setNotesStatus('Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        }
+        return true;
+      } catch (err) {
+        notesDirty = true;
+        setNotesStatus('Not saved — ' + err.message, true);
+        return false;
+      } finally {
+        notesInFlight = null;
+      }
+    })();
+    if (!(await notesInFlight)) return false;
+    return notesDirty ? saveNotes() : true;  // typed while the request was on the wire
+  }
+
+  meetingNotes.addEventListener('input', () => {
+    notesDirty = true;
+    if (!meetingActive) { setNotesStatus('Kept for when you start'); return; }
+    setNotesStatus('Editing…');
+    clearTimeout(notesTimer);
+    notesTimer = setTimeout(saveNotes, 800);
+  });
+  meetingNotes.addEventListener('blur', () => { if (meetingActive) saveNotes(); });
+
+  function sourceLabel(s) {
+    return s.source === 'others' ? 'Others: ' : (s.source === 'me' ? 'Me: ' : '');
+  }
+
   async function pollMeeting() {
     try {
-      const resp = await fetch('/meeting/status');
+      const resp = await meetingFetch('/meeting/status');
       if (!resp.ok) return;
       const st = await resp.json();
-      meetingWatchState.textContent = st.watching
+      const live = st.session;
+      let watch = st.watching
         ? (st.mic_busy ? 'mic in use' : 'watching')
         : (st.watch_error ? 'watcher off' : '');
-      const showBanner = st.detected && !st.session;
+      if (live && live.system_audio === 'on') watch = (watch ? watch + ' · ' : '') + 'mic + system audio';
+      if (live && live.system_audio === 'error') watch = (watch ? watch + ' · ' : '') + 'mic only — system audio unavailable';
+      meetingWatchState.textContent = watch;
+      meetingWatchState.title = live ? (live.system_audio_error || '') : '';
+      const showBanner = st.detected && !live;
       meetingBanner.style.display = showBanner ? 'block' : 'none';
       if (showBanner) {
         meetingPlatform.textContent = st.platform ? ' (' + st.platform + ')' : '';
       }
-      meetingActive = !!st.session;
-      if (st.session) {
+      meetingActive = !!live;
+      if (live) {
+        // Adopt server notes once per session (e.g. an auto-started meeting, or
+        // a second tab) unless the user is mid-edit here.
+        const key = live.title + '|' + live.seconds;
+        if (notesLoadedFor === null && !notesDirty) {
+          meetingNotes.value = live.user_notes || '';
+        }
+        if (notesLoadedFor === null) notesLoadedFor = key;
+        if (live.template) meetingTemplate.value = live.template;
+        meetingTemplate.disabled = true;
         meetingBtn.textContent =
-          'Stop & save notes — ' + fmtSeconds(st.session.seconds) +
-          ' · ' + st.session.segment_count + ' segments';
+          'Stop & save notes — ' + fmtSeconds(live.seconds) +
+          ' · ' + live.segment_count + ' segments';
         meetingBtn.classList.add('live');
         meetingLive.style.display = 'block';
-        meetingLive.textContent = st.session.segments.length
-          ? st.session.segments.map(s => '[' + s.stamp + '] ' + s.text).join('\n\n')
+        meetingLive.textContent = live.segments.length
+          ? live.segments.map(s => '[' + s.stamp + '] ' + sourceLabel(s) + s.text).join('\n\n')
           : '(listening — first transcript segment lands after ~30s)';
         meetingLive.scrollTop = meetingLive.scrollHeight;
+        if (notesDirty && !notesTimer && !notesInFlight) saveNotes();  // retry after an error
       } else if (!meetingBusy) {
+        notesLoadedFor = null;
+        meetingTemplate.disabled = false;
         meetingBtn.textContent = 'Start meeting transcription';
         meetingBtn.classList.remove('live');
       }
-      if (st.last_saved && !st.session) {
-        meetingSaved.style.display = 'block';
-        meetingSaved.textContent =
-          'Saved: ' + st.last_saved.notes_path + ' (+ transcript log)';
+      if (st.last_saved && !live) showSaved(st.last_saved);
+      else if (st.chat_available && !live) {
+        meetingChat.style.display = 'block';
+        chatScope.textContent = 'most recent saved meeting';
       }
     } catch (_) { /* server briefly away; next poll recovers */ }
   }
 
+  function showSaved(saved) {
+    meetingSaved.style.display = 'block';
+    meetingSaved.textContent =
+      (saved.enhanced ? 'Enhanced notes: ' : 'Saved: ') + saved.notes_path + ' (+ transcript log)';
+    if (meetingChat.style.display !== 'block') {
+      meetingChat.style.display = 'block';
+      chatScope.textContent = 'last saved meeting';
+    }
+  }
+
   meetingDismiss.addEventListener('click', async () => {
-    await fetch('/meeting/dismiss', { method: 'POST' });
+    await meetingFetch('/meeting/dismiss', { method: 'POST' });
     meetingBanner.style.display = 'none';
   });
 
@@ -1015,23 +1247,37 @@
     try {
       if (!meetingActive) {
         meetingSaved.style.display = 'none';
-        const resp = await fetch('/meeting/start', {
+        meetingChat.style.display = 'none';
+        chatLog.textContent = '';
+        const resp = await meetingFetch('/meeting/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             title: meetingTitle.value || 'Meeting',
             category: meetingCategory.value,
+            template: meetingTemplate.value,
+            user_notes: meetingNotes.value,
           }),
         });
         if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText);
+        notesDirty = false;
+        notesLoadedFor = 'local';
+        setNotesStatus(meetingNotes.value ? 'Saved' : '');
       } else {
-        meetingBtn.textContent = 'Summarizing & saving…';
-        const resp = await fetch('/meeting/stop', { method: 'POST' });
+        const notesSaved = await saveNotes();
+        if (!notesSaved || notesDirty) {
+          throw new Error('notes could not be saved; the meeting is still running');
+        }
+        meetingBtn.textContent = meetingNotes.value.trim()
+          ? 'Enhancing your notes…' : 'Summarizing & saving…';
+        const resp = await meetingFetch('/meeting/stop', { method: 'POST' });
         if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText);
         const saved = await resp.json();
-        meetingSaved.style.display = 'block';
-        meetingSaved.textContent = 'Saved: ' + saved.notes_path + ' (+ transcript log)';
+        showSaved(saved);
         meetingLive.style.display = 'none';
+        meetingNotes.value = '';
+        notesDirty = false;
+        setNotesStatus('');
       }
       clearError();
     } catch (err) {
@@ -1043,6 +1289,42 @@
     }
   });
 
+  function chatItem(cls, text) {
+    const li = document.createElement('li');
+    li.className = cls;
+    li.textContent = text;
+    chatLog.appendChild(li);
+    return li;
+  }
+
+  meetingChat.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const question = chatQuestion.value.trim();
+    if (!question || chatAsk.disabled) return;
+    chatAsk.disabled = true;
+    chatQuestion.value = '';
+    chatItem('q', question);
+    const answer = chatItem('a pending', 'Reading the transcript…');
+    try {
+      const resp = await meetingFetch('/meeting/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || resp.statusText);
+      answer.className = 'a';
+      answer.textContent = data.answer;
+    } catch (err) {
+      answer.className = 'a err';
+      answer.textContent = 'Couldn’t answer — ' + err.message;
+    } finally {
+      chatAsk.disabled = false;
+      chatQuestion.focus();
+    }
+  });
+
+  loadTemplates();
   setInterval(pollMeeting, 3000);
   pollMeeting();
 </script>

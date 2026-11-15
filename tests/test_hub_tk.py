@@ -8,6 +8,14 @@ from localflow.history import HistoryStore
 from localflow.hub_tk import PAGES, HubWindow
 
 
+class FakeMeetingClient:
+    def templates(self):
+        return {"default": "general", "templates": []}
+
+    def status(self):
+        return {"session": None, "last_saved": None, "chat_available": False}
+
+
 def _window(tmp_path, theme="light"):
     try:
         root = tk.Tk()
@@ -15,7 +23,10 @@ def _window(tmp_path, theme="light"):
         pytest.skip(f"Tk unavailable: {exc}")
     history = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
     dictionary = DictionaryStore(tmp_path / "dictionary.json")
-    window = HubWindow(root, history, dictionary, Config(), theme=theme)
+    window = HubWindow(
+        root, history, dictionary, Config(), theme=theme,
+        meeting_client=FakeMeetingClient(),
+    )
     return root, window, history, dictionary
 
 
