@@ -171,25 +171,22 @@ def _host_is_loopback(host_header: str) -> bool:
 
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
+    path = request.scope["path"]
     request.state.launched = False
-    if (
-        request.method == "GET"
-        and request.url.path in _LAUNCH_PATHS
-        and "launch" in request.query_params
-    ):
+    if request.method == "GET" and path in _LAUNCH_PATHS and "launch" in request.query_params:
         if _redeem_launch_code(request.query_params.get("launch")):
             request.state.launched = True
             return await call_next(request)
-        if request.url.path == "/settings":
+        if path == "/settings":
             return JSONResponse({"detail": "launch link expired or already used"}, status_code=401)
-    if request.url.path in _PUBLIC_PATHS:
+    if path in _PUBLIC_PATHS:
         return await call_next(request)
     supplied = request.headers.get("X-Localflow-Token") or request.query_params.get("token")
     if not _token_ok(supplied):
         if not _host_is_loopback(request.headers.get("Host", "")):
             return JSONResponse({"detail": "invalid host"}, status_code=403)
         return JSONResponse({"detail": "invalid API token"}, status_code=401)
-    if request.url.path == "/transcribe":
+    if path == "/transcribe":
         try:
             length = int(request.headers.get("Content-Length") or 0)
         except ValueError:

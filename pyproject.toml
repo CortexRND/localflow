@@ -17,6 +17,7 @@ dependencies = [
     "pyperclip",
     "requests",
     "fastapi",
+    "starlette>=1.1",
     "uvicorn",
     "python-multipart",
     "click",
