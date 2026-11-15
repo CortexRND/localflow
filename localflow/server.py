@@ -32,9 +32,12 @@ from localflow.config import (
 from localflow.context import category_for
 from localflow.dictionary import DictionaryStore, apply_replacements, stt_prompt
 from localflow.dispatch import (
+    APPROVE_FROM,
+    REJECT_FROM,
     PromptQueue,
-    StatusConflict,
+    PromptTransitionError,
     parse_work_prompts,
+    transition_prompt,
     write_prompts,
 )
 from localflow.formatting import apply_spoken_formatting, apply_style
@@ -323,9 +326,9 @@ def _run_ffmpeg(data: bytes, max_seconds: int = 1200) -> subprocess.CompletedPro
             "pipe:1",
         ],
         input=data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=FFMPEG_TIMEOUT_SECONDS,
+        check=False,
     )
 
 
@@ -670,7 +673,7 @@ def _start_session(title: str, category: str, template: str = "",
         )
         session.system_audio_error = system_error
         session.start()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - cleanup boundary: always release the slot
         _watcher.resume()
         with _session_lock:
             _session_state = "idle"
@@ -827,7 +830,7 @@ def _write_prompt_files(prompts_md: str, title: str, started_at: datetime) -> di
 
 @app.post("/meeting/stop")
 async def meeting_stop() -> dict:
-    global _session, _last_saved, _session_state
+    global _session, _session_state
     with _session_lock:
         if _session_state != "running" or _session is None:
             raise HTTPException(status_code=409, detail="no meeting session running")
@@ -894,10 +897,8 @@ def meeting_dismiss() -> dict:
 
 
 # Prompts are reviewed here but dispatched from the CLI only — no run endpoint.
-# Approve doubles as retry: a `failed` entry is a dispatch that errored, and
-# stranding it would let one transient Orca hiccup kill the prompt for good.
-_APPROVE_FROM = ("pending", "failed")
-_REJECT_FROM = ("pending",)
+# The approve/reject rules live in localflow.dispatch so the native hub applies
+# exactly the same guards and compare-and-set.
 
 
 @app.get("/prompts")
@@ -906,32 +907,21 @@ def prompts_list(status: str | None = None) -> dict:
 
 
 def _transition(entry_id: str, verb: str, status: str, allowed: tuple[str, ...]) -> dict:
-    """Guarded status change. 404 if the entry is gone, 409 if the move is invalid.
-
-    Compare-and-set inside the queue rather than get-then-set here: the CLI
-    dispatches in a separate process, so it can flip an entry to `dispatched`
-    between our check and our write, and we would silently undo it.
-    """
+    """Guarded status change. 404 if the entry is gone, 409 if the move is invalid."""
     try:
-        updated = _queue.set_status(entry_id, status, expect=allowed)
-    except StatusConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot {verb} a {exc.current} prompt (allowed from: {', '.join(allowed)})",
-        )
-    if updated is None:
-        raise HTTPException(status_code=404, detail=f"unknown prompt: {entry_id}")
-    return updated
+        return transition_prompt(_queue, entry_id, verb, status, allowed)
+    except PromptTransitionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 @app.post("/prompts/{entry_id}/approve")
 def prompts_approve(entry_id: str) -> dict:
-    return _transition(entry_id, "approve", "approved", _APPROVE_FROM)
+    return _transition(entry_id, "approve", "approved", APPROVE_FROM)
 
 
 @app.post("/prompts/{entry_id}/reject")
 def prompts_reject(entry_id: str) -> dict:
-    return _transition(entry_id, "reject", "rejected", _REJECT_FROM)
+    return _transition(entry_id, "reject", "rejected", REJECT_FROM)
 
 
 def main() -> None:

@@ -63,6 +63,18 @@ CALLOUT_HEIGHT = 2 * SPACING[2] + LINE_HEIGHT["body"]
 # Smallest content size the setup window supports without overlapping controls.
 WINDOW_MIN_WIDTH = 800
 WINDOW_MIN_HEIGHT = 700
+# Hub shell (AppKit). Smallest content size at which every page fits its width;
+# taller pages scroll.
+HUB_MIN_WIDTH = 860
+HUB_MIN_HEIGHT = 600
+HUB_DEFAULT_WIDTH = 1040
+HUB_DEFAULT_HEIGHT = 700
+HUB_SIDEBAR_WIDTH = 200
+HUB_CONTENT_X = HUB_SIDEBAR_WIDTH + PAGE_MARGIN
+HUB_CONTENT_TOP = 24
+HUB_CONTENT_GUTTER = 16
+HUB_PAGE_BOTTOM = 24
+HUB_HEADER_OFFSET = 48
 # Status pill: (label, tint token, text token). Text on the sun tint is ink so
 # it stays readable in both appearances.
 CHECK_STATUS = {

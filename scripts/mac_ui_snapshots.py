@@ -13,15 +13,27 @@ from Foundation import NSMakeSize
 
 from localflow.config import Config
 from localflow.dictionary import DictionaryStore
+from localflow.dispatch import PromptQueue, WorkPrompt
 from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore
 from localflow.hub_mac import build_window as build_hub_window
 from localflow.phrases_mac import build_window, snapshot_png
 from localflow.setup_flow import Check
 from localflow.setup_mac import SetupWindowController
+from localflow.ui_tokens import (
+    HUB_DEFAULT_HEIGHT,
+    HUB_DEFAULT_WIDTH,
+    HUB_MIN_HEIGHT,
+    HUB_MIN_WIDTH,
+)
 
 OUT = Path("artifacts/mac-ui")
 WIDE_WIDTH = 1100
+# Hub content sizes: the supported minimum and a wide window.
+HUB_SIZES = (
+    ("min", HUB_MIN_WIDTH, HUB_MIN_HEIGHT),
+    ("wide", 1280, 820),
+)
 
 
 def _config(hot_phrases=True):
@@ -213,6 +225,79 @@ def _hub_snapshots(base):
         controller._meeting_event("templates", client.templates(), None)
         controller._meeting_event("status", client.status(), None)
         _shot(controller, f"hub-meetings-{state}")
+        _hub_sized_shots(controller, f"hub-meetings-{state}")
+
+
+def _hub_sized_shots(controller, name):
+    """Snapshot the current page at the minimum and a wide window size.
+
+    Each resize rebuilds the page at its new width, the same path a live
+    resize takes. The window is put back afterwards.
+    """
+    for label, width, height in HUB_SIZES:
+        controller.resize_content(width, height)
+        _shot(controller, f"{name}-{label}")
+    controller.resize_content(HUB_DEFAULT_WIDTH, HUB_DEFAULT_HEIGHT)
+
+
+def _hub_responsive_snapshots(base):
+    """Home, Dictionary, Hot Phrases and Prompts at min and wide sizes.
+
+    Everything uses temp stores and a temp queue: nothing touches the real
+    dictionary, history, queue or config, and no network is involved.
+    """
+    history = HistoryStore(base / "resp-history.sqlite", base / "resp-clips")
+    dictionary = DictionaryStore(base / "resp-dictionary.json")
+    for index in range(4):
+        history.add(
+            kind="dictate", status="ok", app_name="Editor",
+            raw_text=f"Raw item {index}", final_text=f"Dictation number {index}.",
+            duration_s=20,
+        )
+    for word in ("LocalFlow", "Kubernetes", "Fireworks", "Orca", "PyObjC", "Obsidian",
+                 "Whisper", "Ollama"):
+        dictionary.add_word(word)
+    for source, target in (("teh", "the"), ("my email", "me@example.com"),
+                           ("lf", "LocalFlow"), ("k8s", "Kubernetes")):
+        dictionary.add_replacement(source, target)
+    empty_queue = PromptQueue(base / "queue-empty.json")
+    queue = PromptQueue(base / "queue-two.json")
+    _pending, failed = queue.add(
+        [
+            WorkPrompt("Migrate session storage to Redis", "Replace local files."),
+            WorkPrompt("Update deploy docs for Redis", "Document the new dependency."),
+        ],
+        [base / "prompts" / "01.md", base / "prompts" / "02.md"],
+        "Weekly planning",
+    )
+    queue.set_status(
+        failed["id"], "failed", repo="localflow", error="Orca is not running",
+    )
+
+    controller = build_hub_window(
+        history, dictionary, Config(), prompt_queue=empty_queue
+    )
+    controller.show_page("Home")
+    _hub_sized_shots(controller, "hub-home-populated")
+    controller.show_page("Hot Phrases")
+    _hub_sized_shots(controller, "hub-hot-phrases")
+    controller.show_page("Prompts")
+    _hub_sized_shots(controller, "hub-prompts-empty")
+    controller.prompt_queue = queue
+    controller.show_page("Prompts")
+    _hub_sized_shots(controller, "hub-prompts-two")
+
+    controller.show_page("Dictionary")
+    _hub_sized_shots(controller, "hub-dictionary-entries")
+    # Real handlers: an empty word, then a half-filled replacement. The typed
+    # text must survive and the error must sit inside the card it belongs to.
+    controller.word_field.setStringValue_("")
+    controller.addWord_(None)
+    _hub_sized_shots(controller, "hub-dictionary-word-error")
+    controller.from_field.setStringValue_("brb")
+    controller.to_field.setStringValue_("")
+    controller.addReplacement_(None)
+    _hub_sized_shots(controller, "hub-dictionary-replacement-error")
 
 
 def main():
@@ -321,6 +406,7 @@ def main():
         setup._render()
         _shot(setup, "setup-download-error")
         _hub_snapshots(tmp)
+        _hub_responsive_snapshots(tmp)
 
     print(f"wrote snapshots to {OUT}")
 

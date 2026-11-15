@@ -63,7 +63,7 @@ def test_appkit_meeting_completions_drain_while_page_is_hidden():
     timer_source = ast.get_source_segment(source, timer)
     assert "self._meeting_event(operation, result, error)" in timer_source
     assert timer_source.index("self._meeting_event(operation, result, error)") < (
-        timer_source.index('if self.page == "Meetings":')
+        timer_source.index('if self.page == "Meetings"')
     )
 
 
@@ -164,9 +164,10 @@ def test_appkit_history_uses_a_cleared_paged_results_container():
 def test_history_search_and_clear_history_use_the_header_layout():
     source = SOURCE.read_text(encoding="utf-8")
     assert 'self.search_field.setPlaceholderString_("Search transcripts")' in source
-    assert '"Clear history", "clearHistory:", 610, 0' in source
+    # Pinned to the right edge of the current page width, on the title row.
+    assert '"Clear history", "clearHistory:", width - 130, 0' in source
     assert 'kind="destructive_ghost"' in source
-    assert '"Clear history", "clearHistory:", 610, self.cursor_y' not in source
+    assert '"Clear history", "clearHistory:", width - 130, self.cursor_y' not in source
 
 
 def test_window_appearance_callback_is_registered_on_a_retained_controller():
@@ -191,8 +192,12 @@ def test_hub_settings_use_segmented_controls_and_reload_models_config():
     assert '"strict"' not in source
     assert '("formal", "casual", "very_casual", "excited")' in source
     assert "self.config = load_config()" in source
-    assert "self.dictionary.update_word(" in source
-    assert "self.dictionary.update_replacement(" in source
+    # Edit-in-place still goes through the store's update APIs, via hub_model.
+    model = (ROOT / "localflow" / "hub_model.py").read_text(encoding="utf-8")
+    assert "store.update_word(" in model
+    assert "store.update_replacement(" in model
+    assert "submit_word(" in source
+    assert "submit_replacement(" in source
     assert '"selectCleanupLevel_"' in source
     assert '"selectStyle_"' in source
 
@@ -245,7 +250,8 @@ def test_hub_style_rows_use_the_shared_segmented_helper():
     )
     style_page_source = ast.get_source_segment(hub_source, style_page)
     assert "segmented as _segmented" in hub_source
-    assert "self._segment_group(y, 180, 540)" in style_page_source
+    assert "self._segment_group(y, 180, group_width)" in style_page_source
+    assert "group_width = min(560, self.body.frame().size.width - 180)" in style_page_source
     assert "self.style_groups[category] = group" in style_page_source
     assert "_segmented(" in style_page_source
     assert "segmented as _segmented" in setup_source

@@ -278,7 +278,14 @@ class DictionaryStore:
             self._write(data)
         return True
 
-    def remove(self, value: str) -> bool:
+    def remove(self, value: str, kind: str | None = None) -> bool:
+        """Remove entries matching `value`.
+
+        `kind` ("word" or "replacement") limits removal to that list; the
+        default None keeps the original behaviour of removing from both.
+        """
+        if kind not in (None, "word", "replacement"):
+            raise ValueError(f"unknown dictionary entry kind: {kind!r}")
         normalized = _word(value)
         if normalized is None:
             return False
@@ -286,12 +293,13 @@ class DictionaryStore:
         with self._exclusive():
             data = self._read()
             words = [
-                item for item in data["words"] if item.casefold() != folded
+                item for item in data["words"]
+                if kind == "replacement" or item.casefold() != folded
             ]
             replacements = [
                 item
                 for item in data["replacements"]
-                if item["from"].casefold() != folded
+                if kind == "word" or item["from"].casefold() != folded
             ]
             removed = len(words) != len(data["words"]) or len(replacements) != len(
                 data["replacements"]

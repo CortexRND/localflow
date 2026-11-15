@@ -8,7 +8,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--page",
-        choices=("Home", "Meetings", "History", "Dictionary", "Style", "Models"),
+        choices=(
+            "Home", "Hot Phrases", "Dictionary", "Prompts",
+            "Meetings", "History", "Style", "Models",
+        ),
         default="Home",
     )
     args = parser.parse_args()
@@ -19,9 +22,11 @@ def main():
             pass
         else:
             return mac_main(initial_page=args.page)
+    from localflow.hub_tk import PAGES as TK_PAGES
     from localflow.hub_tk import main as tk_main
 
-    return tk_main(initial_page=args.page)
+    # The Tk fallback has no Hot Phrases / Prompts pages yet.
+    return tk_main(initial_page=args.page if args.page in TK_PAGES else "Home")
 
 
 if __name__ == "__main__":
