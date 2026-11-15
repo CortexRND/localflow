@@ -104,6 +104,28 @@ def test_client_defaults_to_existing_token_and_omits_empty_header(monkeypatch):
     assert "headers" not in http.calls[1][2]
 
 
+def test_client_picks_up_the_token_issued_after_it_was_created(monkeypatch):
+    http = FakeHTTP()
+    tokens = iter(["", "pre-start", "after-restart"])
+    monkeypatch.setattr("localflow.meeting_client.load", lambda: next(tokens))
+
+    client = MeetingClient("http://localhost:9876", http=http)
+    client.status()
+    client.status()
+    assert [c[2]["headers"] for c in http.calls] == [
+        {"X-Localflow-Token": "pre-start"},
+        {"X-Localflow-Token": "after-restart"},
+    ]
+
+
+def test_client_keeps_an_explicit_token(monkeypatch):
+    http = FakeHTTP()
+    monkeypatch.setattr("localflow.meeting_client.load", lambda: "file-token")
+    client = MeetingClient("http://localhost:9876", token="given", http=http)
+    client.status()
+    assert http.calls[0][2]["headers"] == {"X-Localflow-Token": "given"}
+
+
 def _vault_with_note(tmp_path):
     vault = tmp_path / "vault"
     note = vault / "Meetings" / "2026-11-14 Daily.md"
