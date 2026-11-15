@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -500,6 +501,28 @@ def test_reused_launch_code_rotates_the_token(monkeypatch):
         assert client.post("/settings", data={"launch": pending}).status_code == 401
 
 
+def test_redeemer_never_sees_a_token_rotated_mid_request(monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    monkeypatch.setattr(server, "_launch_codes", {})
+    monkeypatch.setattr(server, "_used_launch_codes", {})
+    real_read_text = Path.read_text
+
+    def rotate_while_rendering(self, *args, **kwargs):
+        if self.name == "settings.html" and server._api_token == "test-token":
+            server._rotate_api_token()
+        return real_read_text(self, *args, **kwargs)
+
+    with _launch_client() as client:
+        monkeypatch.setattr(server, "load_or_create", lambda: "rotated-token")
+        monkeypatch.setattr(Path, "read_text", rotate_while_rendering)
+        code = server._issue_launch_code()
+        page = client.post("/settings", data={"launch": code})
+        assert page.status_code == 200
+        assert "rotated-token" not in page.text
+        assert "test-token" in page.text
+
+
 def test_launch_code_expires(monkeypatch):
     monkeypatch.setattr(server, "_api_token", "test-token")
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
@@ -552,8 +575,8 @@ def test_outstanding_launch_codes_are_capped(monkeypatch):
     monkeypatch.setattr(server, "_launch_codes", {})
     codes = [server._issue_launch_code() for _ in range(server._MAX_LAUNCH_CODES + 5)]
     assert len(server._launch_codes) == server._MAX_LAUNCH_CODES
-    assert server._redeem_launch_code(codes[0]) == "invalid"
-    assert server._redeem_launch_code(codes[-1]) == "ok"
+    assert server._redeem_launch_code(codes[0]) == ("invalid", "")
+    assert server._redeem_launch_code(codes[-1])[0] == "ok"
 
 
 @pytest.mark.parametrize("path", ["/settings", "/api/config"])

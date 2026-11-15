@@ -157,20 +157,25 @@ def _issue_launch_code() -> str:
     return code
 
 
-def _redeem_launch_code(code: str | None) -> str:
-    """Return "ok", "reused" (already redeemed: treat as theft) or "invalid"."""
+def _redeem_launch_code(code: str | None) -> tuple[str, str]:
+    """Return ("ok", token at redemption), ("reused", "") or ("invalid", "").
+
+    "reused" means the code was already redeemed: treat it as theft. The token
+    is read under the same lock rotation takes, so a redeemer never sees the
+    replacement token.
+    """
     if not code:
-        return "invalid"
+        return "invalid", ""
     now = time.monotonic()
     with _launch_lock:
         expiry = _launch_codes.pop(code, None)
         if expiry is not None and expiry > now:
             _prune(_used_launch_codes, now)
             _used_launch_codes[code] = now + LAUNCH_CODE_TTL_SECONDS
-            return "ok"
+            return "ok", _api_token
         if _used_launch_codes.pop(code, 0.0) > now:
-            return "reused"
-    return "invalid"
+            return "reused", ""
+    return "invalid", ""
 
 
 def _rotate_api_token() -> None:
@@ -178,7 +183,7 @@ def _rotate_api_token() -> None:
     with _launch_lock:
         _launch_codes.clear()
         _used_launch_codes.clear()
-    _api_token = load_or_create()
+        _api_token = load_or_create()
     log.warning("launch code presented twice; API token rotated")
 
 
@@ -212,11 +217,12 @@ def _host_is_loopback(host_header: str) -> bool:
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
     path = request.scope["path"]
-    request.state.launched = False
+    # Pages embed the token this request proved, never a later (rotated) one.
+    request.state.page_token = ""
     if request.method == "POST" and path in _LAUNCH_PATHS:
-        result = _redeem_launch_code(await _launch_code_from_form(request))
+        result, token = _redeem_launch_code(await _launch_code_from_form(request))
         if result == "ok":
-            request.state.launched = True
+            request.state.page_token = token
             return await call_next(request)
         if result == "reused":
             _rotate_api_token()
@@ -228,6 +234,7 @@ async def _api_auth(request: Request, call_next):
         if not _host_is_loopback(request.headers.get("Host", "")):
             return JSONResponse({"detail": "invalid host"}, status_code=403)
         return JSONResponse({"detail": "invalid API token"}, status_code=401)
+    request.state.page_token = supplied
     if path == "/transcribe":
         try:
             length = int(request.headers.get("Content-Length") or 0)
@@ -386,17 +393,18 @@ def healthz() -> dict:
 @app.api_route("/", methods=["GET", "POST"])
 def index(request: Request) -> HTMLResponse:
     page = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    token = _api_token if request.state.launched else ""
     return HTMLResponse(
-        page.replace("__LOCALFLOW_LAUNCH_TOKEN__", html.escape(token)), headers=_NO_STORE
+        page.replace("__LOCALFLOW_LAUNCH_TOKEN__", html.escape(request.state.page_token)),
+        headers=_NO_STORE,
     )
 
 
 @app.api_route("/settings", methods=["GET", "POST"])
-def settings() -> HTMLResponse:
+def settings(request: Request) -> HTMLResponse:
     page = (_STATIC_DIR / "settings.html").read_text(encoding="utf-8")
     return HTMLResponse(
-        page.replace("__LOCALFLOW_TOKEN__", html.escape(_api_token)), headers=_NO_STORE
+        page.replace("__LOCALFLOW_TOKEN__", html.escape(request.state.page_token)),
+        headers=_NO_STORE,
     )
 
 
