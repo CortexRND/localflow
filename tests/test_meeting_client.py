@@ -1,7 +1,11 @@
 import pytest
 import requests
 
-from localflow.meeting_client import MeetingClient, MeetingClientError
+from localflow.meeting_client import (
+    MeetingClient,
+    MeetingClientError,
+    vault_notes_path,
+)
 
 
 class FakeResponse:
@@ -98,3 +102,73 @@ def test_client_defaults_to_existing_token_and_omits_empty_header(monkeypatch):
     client = MeetingClient("http://localhost:9876", http=http)
     client.status()
     assert "headers" not in http.calls[1][2]
+
+
+def _vault_with_note(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "Meetings" / "2026-11-14 Daily.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Daily\n")
+    return vault, note
+
+
+def test_vault_notes_path_allows_existing_markdown_inside_vault(tmp_path):
+    vault, note = _vault_with_note(tmp_path)
+
+    assert vault_notes_path(str(note), str(vault)) == str(note.resolve())
+    upper = note.with_name("Upper.MD")
+    upper.write_text("x")
+    assert vault_notes_path(str(upper), str(vault)) == str(upper.resolve())
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        None,
+        "",
+        42,
+        "/usr/bin/xterm",
+        "C:\\Windows\\System32\\calc.exe",
+        "https://example.com/notes.md",
+    ],
+)
+def test_vault_notes_path_rejects_non_vault_targets(tmp_path, candidate):
+    vault, _ = _vault_with_note(tmp_path)
+
+    assert vault_notes_path(candidate, str(vault)) is None
+
+
+def test_vault_notes_path_rejects_wrong_type_missing_and_escaping_paths(tmp_path):
+    vault, note = _vault_with_note(tmp_path)
+    program = vault / "run.exe"
+    program.write_text("x")
+    folder = vault / "folder.md"
+    folder.mkdir()
+    outside = tmp_path / "shared" / "evil.md"
+    outside.parent.mkdir()
+    outside.write_text("x")
+
+    assert vault_notes_path(str(program), str(vault)) is None
+    assert vault_notes_path(str(folder), str(vault)) is None
+    assert vault_notes_path(str(vault / "missing.md"), str(vault)) is None
+    assert vault_notes_path(str(outside), str(vault)) is None
+    assert vault_notes_path(str(vault / ".." / "shared" / "evil.md"), str(vault)) is None
+    assert vault_notes_path(str(note), str(tmp_path / "no-vault")) is None
+    assert vault_notes_path(str(note), "") is None
+
+
+def test_vault_notes_path_rejects_symlink_that_leaves_the_vault(tmp_path):
+    vault, _ = _vault_with_note(tmp_path)
+    program = tmp_path / "shared" / "payload.app"
+    program.parent.mkdir()
+    program.write_text("x")
+    outside_md = tmp_path / "shared" / "evil.md"
+    outside_md.write_text("x")
+    try:
+        (vault / "link-to-program.md").symlink_to(program)
+        (vault / "link-to-outside.md").symlink_to(outside_md)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert vault_notes_path(str(vault / "link-to-program.md"), str(vault)) is None
+    assert vault_notes_path(str(vault / "link-to-outside.md"), str(vault)) is None

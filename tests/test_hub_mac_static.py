@@ -253,3 +253,22 @@ def test_hub_style_rows_use_the_shared_segmented_helper():
         "_segmented(group, self.cleanup_level_buttons, selected, self.tokens)"
         in setup_source
     )
+
+
+def test_appkit_open_notes_only_opens_vault_markdown():
+    method = next(
+        node for node in _controller_methods() if node.name == "meetingOpenNotes_"
+    )
+    body = ast.unparse(method)
+    assert "vault_notes_path(" in body
+    assert "self.config.vault_path" in body
+    calls = [
+        node for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "open_path"
+    ]
+    assert calls and all(
+        isinstance(call.args[0], ast.Name) and call.args[0].id == "path"
+        for call in calls
+    )

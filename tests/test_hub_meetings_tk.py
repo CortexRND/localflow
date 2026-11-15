@@ -397,3 +397,44 @@ def test_stop_flush_completion_after_navigating_away_still_stops(tmp_path):
         assert ("stop",) in client.calls
     finally:
         root.destroy()
+
+
+def _opened_paths(monkeypatch):
+    opened = []
+
+    class FakePlatform:
+        def open_path(self, target):
+            opened.append(target)
+
+    monkeypatch.setattr("localflow.platform.current", lambda: FakePlatform())
+    return opened
+
+
+@pytest.mark.parametrize(
+    "notes_path", ["/usr/bin/xterm", "C:\\Windows\\System32\\calc.exe"]
+)
+def test_open_notes_ignores_paths_outside_the_vault(tmp_path, monkeypatch, notes_path):
+    opened = _opened_paths(monkeypatch)
+    root, window = _window(tmp_path, FakeMeetingClient("idle"))
+    try:
+        window.config.vault_path = str(tmp_path)
+        window._meeting_last_saved = {"notes_path": notes_path}
+        window._meeting_open_notes()
+        assert opened == []
+    finally:
+        root.destroy()
+
+
+def test_open_notes_opens_markdown_inside_the_vault(tmp_path, monkeypatch):
+    opened = _opened_paths(monkeypatch)
+    note = tmp_path / "vault" / "Meetings" / "Daily.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Daily\n")
+    root, window = _window(tmp_path, FakeMeetingClient("idle"))
+    try:
+        window.config.vault_path = str(tmp_path / "vault")
+        window._meeting_last_saved = {"notes_path": str(note)}
+        window._meeting_open_notes()
+        assert opened == [str(note.resolve())]
+    finally:
+        root.destroy()
