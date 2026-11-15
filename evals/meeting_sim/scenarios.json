@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "pricing-review", "template": "general", "title": "Pricing review", "system_audio": "ok",
+      "lines": [
+        ["me", "Okay, let's settle pricing for the Pro plan today."],
+        ["others", "We looked at three options: ten, twelve and fifteen dollars per seat."],
+        ["others", "Fifteen dollars tested badly. Churn in the survey group roughly doubled above twelve dollars."],
+        ["me", "So twelve dollars per seat per month it is. Everyone agree?"],
+        ["others", "Agreed. Priya here, I'd also like a fourteen day free trial instead of seven."],
+        ["me", "Fine, fourteen day trial. Decision made."],
+        ["others", "Marcus will update the pricing page by Friday the 14th."],
+        ["me", "And I'll get legal to review the trial terms before we publish."],
+        ["others", "We should revisit annual discounts on March 3rd, not now."]
+      ],
+      "notes_initial": "# Pricing\n- options?\n",
+      "notes_final": "# Pricing\n- **decide Pro price**\n- trial length?\n\n# Next steps\n- legal review\n",
+      "user_points": [
+        {"heading": "Pricing", "keywords": ["$12", "12 dollars", "twelve dollars", "twelve", "12"]},
+        {"heading": "Pricing", "keywords": ["14-day", "14 day", "fourteen", "14"]},
+        {"heading": "Next steps", "keywords": ["legal"]}
+      ],
+      "facts": [
+        {"id": "owner-pricing-page", "any": ["Marcus"]},
+        {"id": "page-deadline", "any": ["Friday", "14th"]},
+        {"id": "churn-reason", "any": ["churn"]},
+        {"id": "annual-revisit", "any": ["March 3", "annual"]}
+      ],
+      "chat": [
+        {"q": "What price per seat did we decide on?", "kind": "answerable", "any": ["12", "twelve"], "truth": "The Pro plan price was set at $12 per seat per month."},
+        {"q": "Who is updating the pricing page, and by when?", "kind": "answerable", "any": ["Marcus"], "truth": "Marcus will update the pricing page by Friday the 14th."},
+        {"q": "What was the annual contract discount we agreed?", "kind": "unanswerable", "truth": "No annual discount was agreed; it was deferred to March 3rd."},
+        {"q": "Which competitor did we benchmark against?", "kind": "unanswerable", "truth": "No competitor was mentioned."}
+      ]
+    },
+    {
+      "id": "eng-standup", "template": "standup", "title": "Platform standup", "system_audio": "ok",
+      "lines": [
+        ["others", "Ana here. Yesterday I finished the queue migration; job latency dropped from 900 milliseconds to 120."],
+        ["others", "Today I'm writing the runbook for it."],
+        ["others", "Ben. I'm blocked on staging credentials, still can't deploy the billing service."],
+        ["me", "Omar is rotating those credentials, he said this afternoon."],
+        ["me", "For me, yesterday I reviewed the auth pull request, today I'm on the rate limiter."],
+        ["others", "Ben again, can we talk about the flaky integration tests after standup?"],
+        ["me", "Yes, let's take that offline, you and me."]
+      ],
+      "notes_initial": "",
+      "notes_final": "# Blockers\n- Ben: staging creds (**Omar**)\n\n# Wins\n- queue migration\n",
+      "user_points": [
+        {"heading": "Blockers", "keywords": ["credential", "creds", "staging"]},
+        {"heading": "Wins", "keywords": ["120", "latency", "queue"]}
+      ],
+      "facts": [
+        {"id": "latency-numbers", "any": ["120"]},
+        {"id": "runbook", "any": ["runbook"]},
+        {"id": "rate-limiter", "any": ["rate limiter", "rate-limiter"]},
+        {"id": "flaky-followup", "any": ["flaky"]}
+      ],
+      "chat": [
+        {"q": "Who is blocked and on what?", "kind": "answerable", "any": ["Ben"], "truth": "Ben is blocked on staging credentials and cannot deploy the billing service."},
+        {"q": "What did job latency drop to after the queue migration?", "kind": "answerable", "any": ["120"], "truth": "Job latency dropped from 900 ms to 120 ms."},
+        {"q": "When is the billing service launch date?", "kind": "unanswerable", "truth": "No launch date for the billing service was mentioned."},
+        {"q": "Who is on call this week?", "kind": "unanswerable", "truth": "On-call was not discussed."}
+      ]
+    },
+    {
+      "id": "one-on-one", "template": "one-on-one", "title": "1:1 with Jordan", "system_audio": "ok",
+      "lines": [
+        ["me", "How's the onboarding work going, Jordan?"],
+        ["others", "Really well. The new checklist cut ramp-up time from three weeks to ten days."],
+        ["others", "But I'm stretched across two teams and I'd like to drop the analytics rotation."],
+        ["me", "That's fair. I'll talk to Sam about taking you off the rotation by the end of the month."],
+        ["me", "One piece of feedback: in design reviews, share the doc a day ahead so people can read it."],
+        ["others", "Makes sense, I'll do that."],
+        ["me", "I'd like you to present the onboarding results at the June all-hands."],
+        ["others", "Happy to. I'll send you a draft by the 20th."]
+      ],
+      "notes_initial": "## Jordan\n- onboarding\n",
+      "notes_final": "## Jordan\n- onboarding **win**\n- workload — too much?\n\n## Me\n- feedback: design reviews\n",
+      "notes_only_fact": {"q": "When is Jordan's work anniversary?", "token": "August"},
+      "notes_final_extra": "- remember: anniversary 12 August\n",
+      "user_points": [
+        {"heading": "Jordan", "keywords": ["ten days", "10 days", "checklist", "ramp"]},
+        {"heading": "Jordan", "keywords": ["analytics", "rotation", "two teams"]},
+        {"heading": "Me", "keywords": ["a day ahead", "ahead", "doc"]}
+      ],
+      "facts": [
+        {"id": "sam-owner", "any": ["Sam"]},
+        {"id": "all-hands", "any": ["all-hands", "all hands", "June"]},
+        {"id": "draft-date", "any": ["20th", "20"]}
+      ],
+      "chat": [
+        {"q": "What did onboarding ramp-up time drop to?", "kind": "answerable", "any": ["ten days", "10 days"], "truth": "Ramp-up time dropped from three weeks to ten days."},
+        {"q": "What did I commit to do about Jordan's workload?", "kind": "answerable", "any": ["Sam"], "truth": "The user will talk to Sam about taking Jordan off the analytics rotation by the end of the month."},
+        {"q": "Did we discuss Jordan's salary or a raise?", "kind": "unanswerable", "truth": "Salary or a raise was not discussed."},
+        {"q": "When is Jordan's work anniversary?", "kind": "notes_only", "token": "August", "truth": "The anniversary appears only in the user's private notes, never in the conversation."}
+      ]
+    },
+    {
+      "id": "incident-retro", "template": "general", "title": "API outage retro", "system_audio": "ok",
+      "lines": [
+        ["others", "Quick recap: the API was down for 47 minutes on Tuesday starting at 2:10 pm."],
+        ["others", "Root cause was an expired TLS certificate on the internal load balancer."],
+        ["me", "Why didn't we get alerted before it expired?"],
+        ["others", "The expiry alert went to an email list nobody reads anymore."],
+        ["me", "Decision: certificate expiry alerts move to PagerDuty, starting this week."],
+        ["others", "Kim will automate renewal with cert-manager."],
+        ["me", "I'll write the public postmortem by Friday."],
+        ["others", "We should also audit the other 12 certificates this week."]
+      ],
+      "notes_initial": "",
+      "notes_final": "# What happened\n- outage, **cert expired**\n\n# Fixes\n- alerting\n- renewal\n",
+      "user_points": [
+        {"heading": "What happened", "keywords": ["47", "TLS", "certificate", "load balancer"]},
+        {"heading": "Fixes", "keywords": ["PagerDuty"]},
+        {"heading": "Fixes", "keywords": ["Kim", "cert-manager", "automate"]}
+      ],
+      "facts": [
+        {"id": "duration", "any": ["47"]},
+        {"id": "postmortem", "any": ["postmortem", "post-mortem"]},
+        {"id": "audit-12", "any": ["12 certificates", "12 other", "other 12", "audit"]}
+      ],
+      "chat": [
+        {"q": "How long was the API down?", "kind": "answerable", "any": ["47"], "truth": "The API was down for 47 minutes."},
+        {"q": "What was the root cause?", "kind": "answerable", "any": ["certificate", "TLS", "cert"], "truth": "An expired TLS certificate on the internal load balancer."},
+        {"q": "How many customers filed support tickets?", "kind": "unanswerable", "truth": "Support tickets were not mentioned."},
+        {"q": "Which cloud region was affected?", "kind": "unanswerable", "truth": "No cloud region was mentioned."}
+      ]
+    },
+    {
+      "id": "design-standup-nonotes", "template": "standup", "title": "Design standup", "system_audio": "ok",
+      "lines": [
+        ["others", "Lee here. Yesterday I shipped the dark mode toggle."],
+        ["others", "Today I'm fixing the font loading flicker on the settings page."],
+        ["others", "Mia. I'm waiting on marketing for the onboarding screen copy."],
+        ["me", "I'll ping marketing for Mia after this."],
+        ["me", "I'm reviewing Lee's settings pull request today."],
+        ["others", "Mia again, let's argue about the icon set later."],
+        ["me", "Sure, offline with Mia and me."]
+      ],
+      "notes_initial": "",
+      "notes_final": "",
+      "user_points": [],
+      "facts": [
+        {"id": "dark-mode", "any": ["dark mode"]},
+        {"id": "marketing-copy", "any": ["marketing"]},
+        {"id": "icon-followup", "any": ["icon"]}
+      ],
+      "chat": [
+        {"q": "What is Mia waiting on?", "kind": "answerable", "any": ["marketing", "copy"], "truth": "Mia is waiting on marketing for the onboarding screen copy."},
+        {"q": "What color was chosen for the new brand palette?", "kind": "unanswerable", "truth": "No brand palette color was discussed."}
+      ]
+    },
+    {
+      "id": "vendor-call-micfallback", "template": "general", "title": "Vendor call", "system_audio": "fail",
+      "lines": [
+        ["me", "Thanks for joining. Our main requirement is single sign-on through Okta."],
+        ["others", "We support Okta SAML out of the box on the enterprise tier."],
+        ["me", "Budget-wise we're looking at about forty thousand dollars a year for 200 seats."],
+        ["others", "Enterprise list price is 250 dollars per seat, we can discount."],
+        ["me", "I'll send over our security questionnaire by Thursday."],
+        ["me", "Let's reconvene once legal has looked at the data processing agreement."]
+      ],
+      "notes_initial": "# Vendor\n",
+      "notes_final": "# Vendor\n- SSO (Okta) **must have**\n- budget\n\n# Todo\n- questionnaire\n",
+      "user_points": [
+        {"heading": "Vendor", "keywords": ["Okta", "SSO", "single sign-on"]},
+        {"heading": "Vendor", "keywords": ["40,000", "40000", "forty thousand", "$40k", "40k", "200 seats", "200"]},
+        {"heading": "Todo", "keywords": ["Thursday", "questionnaire"]}
+      ],
+      "facts": [
+        {"id": "dpa", "any": ["data processing", "DPA", "legal"]}
+      ],
+      "chat": [
+        {"q": "What budget did I mention?", "kind": "answerable", "any": ["40", "forty"], "truth": "About forty thousand dollars a year for 200 seats."},
+        {"q": "When will I send the security questionnaire?", "kind": "answerable", "any": ["Thursday"], "truth": "By Thursday."},
+        {"q": "What did the vendor say their list price was?", "kind": "unanswerable", "truth": "The vendor's side was not captured (system audio unavailable, mic only), so the transcript does not contain the list price."}
+      ]
+    }
+  ]
+}
