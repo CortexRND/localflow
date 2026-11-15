@@ -425,3 +425,18 @@ def test_test_llm_never_sends_stored_key_to_unsaved_base_url(monkeypatch):
         ("https://saved.example/v1", "stored-secret"),
     ]
     assert "save it first" in result["detail"]
+
+
+@pytest.mark.parametrize("path", ["/settings", "/api/config"])
+@pytest.mark.parametrize("host", ["127.0.0.1:8756/?", "127.0.0.1:8756/#"])
+def test_host_with_path_chars_cannot_make_route_look_public(monkeypatch, path, host):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+
+    with TestClient(
+        server.app, base_url="http://127.0.0.1:8756", client=("127.0.0.1", 1234)
+    ) as client:
+        response = client.get(path, headers={"Host": host})
+
+    assert response.status_code == 401
+    assert "test-token" not in response.text
