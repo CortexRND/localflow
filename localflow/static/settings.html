@@ -314,11 +314,11 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const token = document.querySelector('meta[name="localflow-token"]').content;
-  // The page was opened with ?launch=<single-use code> or ?token=…; drop both
-  // from the address bar so the token never lands in history or a shared link.
+  // Drop ?token=/?launch= from the address bar so the token never lands in
+  // history or a shared link. Always replace the entry: the page usually comes
+  // from a POSTed launch code, and a reload must not resubmit a used code.
   (() => {
     const params = new URLSearchParams(location.search);
-    if (!params.has('token') && !params.has('launch')) return;
     params.delete('token');
     params.delete('launch');
     const query = params.toString();

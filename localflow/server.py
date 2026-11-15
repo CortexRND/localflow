@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, UploadFile
@@ -127,34 +127,77 @@ FFMPEG_TIMEOUT_SECONDS = 120
 
 
 # Single-use codes that let a browser open /settings or / without the API
-# token ever appearing in a URL (process lists, browser history).
+# token ever appearing in a URL (process lists, browser history). The
+# launcher POSTs the code from a private file; a code presented twice means
+# someone else saw it, so the token is rotated.
 LAUNCH_CODE_TTL_SECONDS = 60
 _MAX_LAUNCH_CODES = 32
+_MAX_LAUNCH_BODY_BYTES = 1024
 _launch_codes: dict[str, float] = {}
+_used_launch_codes: dict[str, float] = {}
 _launch_lock = threading.Lock()
 _LAUNCH_PATHS = frozenset({"/", "/settings"})
 # Pages that may embed the token must not outlive the request in any cache.
 _NO_STORE = {"Cache-Control": "no-store"}
 
 
+def _prune(codes: dict[str, float], now: float) -> None:
+    for stale in [c for c, expiry in codes.items() if expiry <= now]:
+        del codes[stale]
+    while len(codes) >= _MAX_LAUNCH_CODES:
+        del codes[next(iter(codes))]
+
+
 def _issue_launch_code() -> str:
     code = secrets.token_urlsafe(32)
     now = time.monotonic()
     with _launch_lock:
-        for stale in [c for c, expiry in _launch_codes.items() if expiry <= now]:
-            del _launch_codes[stale]
-        while len(_launch_codes) >= _MAX_LAUNCH_CODES:
-            del _launch_codes[next(iter(_launch_codes))]
+        _prune(_launch_codes, now)
         _launch_codes[code] = now + LAUNCH_CODE_TTL_SECONDS
     return code
 
 
-def _redeem_launch_code(code: str | None) -> bool:
+def _redeem_launch_code(code: str | None) -> tuple[str, str]:
+    """Return ("ok", token at redemption), ("reused", "") or ("invalid", "").
+
+    "reused" means the code was already redeemed: treat it as theft. The token
+    is read under the same lock rotation takes, so a redeemer never sees the
+    replacement token.
+    """
     if not code:
-        return False
+        return "invalid", ""
+    now = time.monotonic()
     with _launch_lock:
         expiry = _launch_codes.pop(code, None)
-    return expiry is not None and expiry > time.monotonic()
+        if expiry is not None and expiry > now:
+            _prune(_used_launch_codes, now)
+            _used_launch_codes[code] = now + LAUNCH_CODE_TTL_SECONDS
+            return "ok", _api_token
+        if _used_launch_codes.pop(code, 0.0) > now:
+            return "reused", ""
+    return "invalid", ""
+
+
+def _rotate_api_token() -> None:
+    global _api_token
+    with _launch_lock:
+        _launch_codes.clear()
+        _used_launch_codes.clear()
+        _api_token = load_or_create()
+    log.warning("launch code presented twice; API token rotated")
+
+
+async def _launch_code_from_form(request: Request) -> str | None:
+    content_type = request.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if content_type != "application/x-www-form-urlencoded":
+        return None
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > _MAX_LAUNCH_BODY_BYTES:
+            return None
+    values = parse_qs(body.decode("utf-8", "replace")).get("launch") or [None]
+    return values[0]
 
 
 def _token_ok(supplied: str | None) -> bool:
@@ -174,13 +217,16 @@ def _host_is_loopback(host_header: str) -> bool:
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
     path = request.scope["path"]
-    request.state.launched = False
-    if request.method == "GET" and path in _LAUNCH_PATHS and "launch" in request.query_params:
-        if _redeem_launch_code(request.query_params.get("launch")):
-            request.state.launched = True
+    # Pages embed the token this request proved, never a later (rotated) one.
+    request.state.page_token = ""
+    if request.method == "POST" and path in _LAUNCH_PATHS:
+        result, token = _redeem_launch_code(await _launch_code_from_form(request))
+        if result == "ok":
+            request.state.page_token = token
             return await call_next(request)
-        if path == "/settings":
-            return JSONResponse({"detail": "launch link expired or already used"}, status_code=401)
+        if result == "reused":
+            _rotate_api_token()
+        return JSONResponse({"detail": "launch link expired or already used"}, status_code=401)
     if path in _PUBLIC_PATHS:
         return await call_next(request)
     supplied = request.headers.get("X-Localflow-Token") or request.query_params.get("token")
@@ -188,6 +234,7 @@ async def _api_auth(request: Request, call_next):
         if not _host_is_loopback(request.headers.get("Host", "")):
             return JSONResponse({"detail": "invalid host"}, status_code=403)
         return JSONResponse({"detail": "invalid API token"}, status_code=401)
+    request.state.page_token = supplied
     if path == "/transcribe":
         try:
             length = int(request.headers.get("Content-Length") or 0)
@@ -343,20 +390,21 @@ def healthz() -> dict:
     return {"ok": True}
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "POST"])
 def index(request: Request) -> HTMLResponse:
     page = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    token = _api_token if request.state.launched else ""
     return HTMLResponse(
-        page.replace("__LOCALFLOW_LAUNCH_TOKEN__", html.escape(token)), headers=_NO_STORE
+        page.replace("__LOCALFLOW_LAUNCH_TOKEN__", html.escape(request.state.page_token)),
+        headers=_NO_STORE,
     )
 
 
-@app.get("/settings")
-def settings() -> HTMLResponse:
+@app.api_route("/settings", methods=["GET", "POST"])
+def settings(request: Request) -> HTMLResponse:
     page = (_STATIC_DIR / "settings.html").read_text(encoding="utf-8")
     return HTMLResponse(
-        page.replace("__LOCALFLOW_TOKEN__", html.escape(_api_token)), headers=_NO_STORE
+        page.replace("__LOCALFLOW_TOKEN__", html.escape(request.state.page_token)),
+        headers=_NO_STORE,
     )
 
 
