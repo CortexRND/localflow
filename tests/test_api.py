@@ -425,3 +425,78 @@ def test_test_llm_never_sends_stored_key_to_unsaved_base_url(monkeypatch):
         ("https://saved.example/v1", "stored-secret"),
     ]
     assert "save it first" in result["detail"]
+
+
+def _launch_client():
+    return TestClient(server.app, base_url="http://127.0.0.1:8756", client=("127.0.0.1", 1234))
+
+
+def test_launch_code_opens_settings_once(monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    monkeypatch.setattr(server, "_launch_codes", {})
+
+    with _launch_client() as client:
+        assert client.post("/api/launch-code").status_code == 401
+        code = client.post(
+            "/api/launch-code", headers={"X-Localflow-Token": "test-token"}
+        ).json()["code"]
+        assert "test-token" not in code
+
+        page = client.get(f"/settings?launch={code}")
+        assert page.status_code == 200
+        assert "test-token" in page.text
+
+        reused = client.get(f"/settings?launch={code}")
+        assert reused.status_code == 401
+        assert client.get("/settings?launch=made-up").status_code == 401
+        assert client.get(f"/api/status?launch={code}").status_code == 401
+
+
+def test_launch_code_expires(monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    monkeypatch.setattr(server, "_launch_codes", {})
+    now = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: now[0])
+
+    with _launch_client() as client:
+        code = client.post(
+            "/api/launch-code", headers={"X-Localflow-Token": "test-token"}
+        ).json()["code"]
+        now[0] += server.LAUNCH_CODE_TTL_SECONDS + 1
+        assert client.get(f"/settings?launch={code}").status_code == 401
+
+
+def test_launch_code_only_works_for_the_ui_pages(monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    monkeypatch.setattr(server, "_launch_codes", {})
+
+    with _launch_client() as client:
+        code = server._issue_launch_code()
+        assert client.get(f"/api/config?launch={code}").status_code == 401
+        assert client.post(f"/settings?launch={code}").status_code == 401
+
+
+def test_launch_code_injects_token_into_index_once(monkeypatch):
+    monkeypatch.setattr(server, "_api_token", "test-token")
+    monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
+    monkeypatch.setattr(server, "_launch_codes", {})
+
+    with _launch_client() as client:
+        code = server._issue_launch_code()
+        page = client.get(f"/?launch={code}")
+        assert page.status_code == 200
+        assert 'content="test-token"' in page.text
+        again = client.get(f"/?launch={code}")
+        assert again.status_code == 200
+        assert "test-token" not in again.text
+
+
+def test_outstanding_launch_codes_are_capped(monkeypatch):
+    monkeypatch.setattr(server, "_launch_codes", {})
+    codes = [server._issue_launch_code() for _ in range(server._MAX_LAUNCH_CODES + 5)]
+    assert len(server._launch_codes) == server._MAX_LAUNCH_CODES
+    assert not server._redeem_launch_code(codes[0])
+    assert server._redeem_launch_code(codes[-1])

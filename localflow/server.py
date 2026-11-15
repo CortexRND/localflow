@@ -1,5 +1,7 @@
 import hmac
+import html
 import logging
+import secrets
 import subprocess
 import threading
 import time
@@ -9,7 +11,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -124,6 +126,35 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FFMPEG_TIMEOUT_SECONDS = 120
 
 
+# Single-use codes that let a browser open /settings or / without the API
+# token ever appearing in a URL (process lists, browser history).
+LAUNCH_CODE_TTL_SECONDS = 60
+_MAX_LAUNCH_CODES = 32
+_launch_codes: dict[str, float] = {}
+_launch_lock = threading.Lock()
+_LAUNCH_PATHS = frozenset({"/", "/settings"})
+
+
+def _issue_launch_code() -> str:
+    code = secrets.token_urlsafe(32)
+    now = time.monotonic()
+    with _launch_lock:
+        for stale in [c for c, expiry in _launch_codes.items() if expiry <= now]:
+            del _launch_codes[stale]
+        while len(_launch_codes) >= _MAX_LAUNCH_CODES:
+            del _launch_codes[next(iter(_launch_codes))]
+        _launch_codes[code] = now + LAUNCH_CODE_TTL_SECONDS
+    return code
+
+
+def _redeem_launch_code(code: str | None) -> bool:
+    if not code:
+        return False
+    with _launch_lock:
+        expiry = _launch_codes.pop(code, None)
+    return expiry is not None and expiry > time.monotonic()
+
+
 def _token_ok(supplied: str | None) -> bool:
     return bool(supplied) and bool(_api_token) and hmac.compare_digest(
         supplied.encode(), _api_token.encode()
@@ -140,6 +171,17 @@ def _host_is_loopback(host_header: str) -> bool:
 
 @app.middleware("http")
 async def _api_auth(request: Request, call_next):
+    request.state.launched = False
+    if (
+        request.method == "GET"
+        and request.url.path in _LAUNCH_PATHS
+        and "launch" in request.query_params
+    ):
+        if _redeem_launch_code(request.query_params.get("launch")):
+            request.state.launched = True
+            return await call_next(request)
+        if request.url.path == "/settings":
+            return JSONResponse({"detail": "launch link expired or already used"}, status_code=401)
     if request.url.path in _PUBLIC_PATHS:
         return await call_next(request)
     supplied = request.headers.get("X-Localflow-Token") or request.query_params.get("token")
@@ -303,14 +345,21 @@ def healthz() -> dict:
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(_STATIC_DIR / "index.html")
+def index(request: Request) -> HTMLResponse:
+    page = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    token = _api_token if request.state.launched else ""
+    return HTMLResponse(page.replace("__LOCALFLOW_LAUNCH_TOKEN__", html.escape(token)))
 
 
 @app.get("/settings")
 def settings() -> HTMLResponse:
-    html = (_STATIC_DIR / "settings.html").read_text(encoding="utf-8")
-    return HTMLResponse(html.replace("__LOCALFLOW_TOKEN__", _api_token))
+    page = (_STATIC_DIR / "settings.html").read_text(encoding="utf-8")
+    return HTMLResponse(page.replace("__LOCALFLOW_TOKEN__", html.escape(_api_token)))
+
+
+@app.post("/api/launch-code")
+def api_launch_code() -> dict:
+    return {"code": _issue_launch_code(), "expires_in": LAUNCH_CODE_TTL_SECONDS}
 
 
 @app.get("/api/status")
