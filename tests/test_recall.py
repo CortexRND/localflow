@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
 from localflow import cli as cli_module
+from localflow import recall as recall_mod
 from localflow import server
 from localflow.config import Config
 from localflow.history import HistoryStore
@@ -348,3 +349,22 @@ def test_api_recall_requires_token_even_on_loopback(api):
         assert remote.post(
             "/api/recall", json=payload, headers={"X-Localflow-Token": "test-token"}
         ).status_code == 200
+
+
+def test_tokenize_non_latin_scripts():
+    assert recall_mod.tokenize("Привет мир") == recall_mod.tokenize("привет мир")
+    assert recall_mod.tokenize("Привет мир")
+
+
+def test_long_dictation_is_chunked_so_late_facts_reach_prompt():
+    filler = " ".join(f"filler{i}" for i in range(400))
+    text = filler + " the gate code is 4417"
+    chunks = recall_mod.chunk_lines(text)
+    assert len(chunks) > 1
+    assert any("4417" in c and len(c.split()) <= recall_mod.PROMPT_PASSAGE_MAX_WORDS for c in chunks)
+
+
+def test_transcript_with_bad_encoding_is_skipped(tmp_path):
+    bad = tmp_path / "2026-11-12 1400 Sync (transcript).md"
+    bad.write_bytes(b"**00:01** **Me:** caf\xe9 \xff\xfe")
+    assert recall_mod.transcript_passages(bad) == []

@@ -53,7 +53,7 @@ _STOPWORD_TEXT = (
     "you your about into over said say tell told"
 )
 _STOPWORDS = frozenset(_STOPWORD_TEXT.split())
-_WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)*")
+_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 _PHRASE_RE = re.compile(r'"([^"]+)"')
 _STAMP_RE = re.compile(r"^\*\*\[?(\d+:\d{2}(?::\d{2})?)\]?\*\*")
 _FILE_STAMP_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:\s+(.*))?$")
@@ -236,7 +236,7 @@ def _stamp_seconds(stamp: str) -> int:
 def transcript_passages(path: Path) -> list[Passage]:
     try:
         text = read_transcript_log(path)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         log.warning("recall: cannot read %s: %s", path, exc)
         return []
     started, title = parse_file_stamp(path)
@@ -290,10 +290,11 @@ def build_corpus(
             if row.get("status") != "ok" or not text:
                 continue
             app = row.get("app_name") or ""
-            passages.append(Passage(
-                text=text, source=SOURCE_DICTATION, title=app, app=app,
-                ts=float(row["ts"]), ref=str(row["id"]),
-            ))
+            for chunk in chunk_lines(text):
+                passages.append(Passage(
+                    text=chunk, source=SOURCE_DICTATION, title=app, app=app,
+                    ts=float(row["ts"]), ref=str(row["id"]),
+                ))
     if vault_path:
         vault = Path(vault_path).expanduser()
         logs_root = vault / logs_folder if logs_folder else None
