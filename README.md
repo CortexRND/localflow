@@ -4,6 +4,28 @@ Local push-to-talk dictation for macOS. Fully offline STT using Whisper (faster-
 
 See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a feature-by-feature overview.
 
+## Easiest install (no Terminal needed)
+
+**macOS:** download `LocalFlow-Installer.dmg` from the
+[latest release](https://github.com/CortexRND/localflow/releases/latest) (or from
+the artifacts of a "Mac installer" run on the Actions tab), open it, and
+double-click **Install LocalFlow**. A window installs everything, which takes a
+few minutes, and LocalFlow opens when it is done. Homebrew, git and Python
+are not required.
+
+The installer puts **LocalFlow** in `~/Applications` (Applications → LocalFlow).
+Double-click it: the first time it opens the native setup window; after setup
+it starts dictation and the menu bar in the background (reusing the login agent
+if installed, never twice) and opens the native Hub. Opening it again just
+brings the Hub to the front.
+
+The app is unsigned, so macOS may block it the first time. Right-click it and
+choose **Open**, then **Open** again; or go to System Settings > Privacy &
+Security and click **Open Anyway**.
+
+**Windows:** download `Install LocalFlow.cmd` from the same release (or the
+Actions artifact) and double-click it.
+
 ## What it is
 
 An open-source WisprFlow-style dictation app:
@@ -49,8 +71,10 @@ cd localflow
 ./install.sh
 ```
 
-The installer creates a Python environment and installs LocalFlow. macOS
-requires Homebrew; its setup app is placed in `~/Applications`. Linux installs
+The installer creates a Python environment and installs LocalFlow. On macOS,
+Homebrew, git and a supported Python are optional (the installer falls back to
+a uv-managed Python 3.12 and a source tarball); its setup app is placed in
+`~/Applications`. Linux installs
 system dependencies and creates `~/.local/bin/lf` plus desktop launchers. When
 piped, the app checkout defaults to `~/.localflow/app`; override it with
 `LOCALFLOW_HOME`.

@@ -1431,7 +1431,12 @@ def setup(
 @setup.command("install-app")
 def setup_install_app() -> None:
     """Install the setup window as a LocalFlow Setup.app bundle."""
-    from localflow.appbundle import install_app
+    from localflow.appbundle import (
+        MAIN_APP_NAME,
+        MAIN_BUNDLE_ID,
+        MAIN_MODULE,
+        install_app,
+    )
 
     path = install_app(
         name="LocalFlow Setup.app",
@@ -1439,14 +1444,26 @@ def setup_install_app() -> None:
         module="localflow.setup_window",
     )
     console.print(f"[green]installed[/green] {path}")
+    main_path = install_app(
+        name=MAIN_APP_NAME,
+        bundle_id=MAIN_BUNDLE_ID,
+        module=MAIN_MODULE,
+        icon=True,
+        full_plist=True,
+    )
+    console.print(f"[green]installed[/green] {main_path}")
 
 
 @setup.command("uninstall-app")
 def setup_uninstall_app() -> None:
-    """Remove the LocalFlow Setup.app bundle."""
-    from localflow.appbundle import uninstall_app
+    """Remove the LocalFlow Setup.app and LocalFlow.app bundles."""
+    from localflow.appbundle import MAIN_APP_NAME, uninstall_app
 
-    if uninstall_app(name="LocalFlow Setup.app"):
+    removed = [
+        uninstall_app(name="LocalFlow Setup.app"),
+        uninstall_app(name=MAIN_APP_NAME),
+    ]
+    if any(removed):
         console.print("[green]uninstalled[/green]")
     else:
         console.print("[dim]not installed[/dim]")

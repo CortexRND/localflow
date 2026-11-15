@@ -38,7 +38,6 @@ system-audio = [
 macos-permissions = [
     "pyobjc-framework-AVFoundation>=10; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices>=10; sys_platform == 'darwin'",
-    "pyobjc-framework-IOKit>=10; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

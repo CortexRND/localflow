@@ -184,6 +184,11 @@ class LocalflowMenuBar(rumps.App):
 
 
 def main() -> None:
+    from localflow.singleinstance import acquire
+
+    lock = acquire("menubar")
+    if lock is None:
+        raise SystemExit(0)
     LocalflowMenuBar().run()
 
 
