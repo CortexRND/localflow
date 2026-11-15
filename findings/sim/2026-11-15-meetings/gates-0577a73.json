@@ -52,13 +52,11 @@
     ]
    },
    "M7": {
-    "value": 0.067,
+    "value": 0.0,
     "k": 14,
-    "n": 15,
-    "pass": false,
-    "fail": [
-     "one-on-one:11"
-    ]
+    "n": 14,
+    "pass": true,
+    "fail": []
    },
    "M8": {
     "value": 1.0,
@@ -152,13 +150,11 @@
     ]
    },
    "M7": {
-    "value": 0.059,
+    "value": 0.0,
     "k": 16,
-    "n": 17,
-    "pass": false,
-    "fail": [
-     "one-on-one:11"
-    ]
+    "n": 16,
+    "pass": true,
+    "fail": []
    },
    "M8": {
     "value": 1.0,
@@ -252,13 +248,11 @@
     ]
    },
    "M7": {
-    "value": 0.077,
+    "value": 0.0,
     "k": 12,
-    "n": 13,
-    "pass": false,
-    "fail": [
-     "one-on-one:11"
-    ]
+    "n": 12,
+    "pass": true,
+    "fail": []
    },
    "M8": {
     "value": 1.0,
@@ -390,16 +384,16 @@
    "low_power": false
   },
   "M7": {
-   "status": "fail",
-   "pass_count": "0/3",
-   "min": 0.059,
-   "max": 0.077,
-   "spread": 0.018,
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 0.0,
+   "max": 0.0,
+   "spread": 0.0,
    "pooled_k": 42,
-   "pooled_n": 45,
+   "pooled_n": 42,
    "wilson95_pooled": [
-    0.821,
-    0.977
+    0.916,
+    1.0
    ],
    "low_power": false
   },
