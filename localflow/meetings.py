@@ -417,21 +417,26 @@ def user_headings(md: str) -> list[str]:
 
 def _norm_heading(heading: str) -> str:
     normalized = re.sub(
-        r"[^a-z0-9 ]", "", heading.lower().replace("**", "")
+        r"[^\w\s]", "", heading.casefold().replace("**", "")
     )
+    normalized = normalized.replace("_", " ")
     return " ".join(normalized.split()).strip()
+
+
+def _heading_match_key(heading: str) -> str:
+    return _norm_heading(heading) or heading.strip()
 
 
 def missing_user_headings(output: str, user_notes: str) -> list[str]:
     output_headings = [
-        _norm_heading(heading) for heading in user_headings(output)
+        _heading_match_key(heading) for heading in user_headings(output)
     ]
     missing = []
     next_index = 0
     for heading in user_headings(user_notes):
         try:
             next_index = output_headings.index(
-                _norm_heading(heading), next_index
+                _heading_match_key(heading), next_index
             ) + 1
         except ValueError:
             missing.append(heading)

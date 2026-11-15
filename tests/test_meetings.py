@@ -138,12 +138,29 @@ def test_missing_user_headings_normalizes_text_and_ignores_heading_level():
     output = "# pricing roadmap\n## customers status"
     assert user_headings(notes) == ["**Pricing & Roadmap!**", "Customer's status?"]
     assert missing_user_headings(output, notes) == []
+    assert missing_user_headings("# launch date", "## Launch_Date") == []
 
 
 def test_missing_user_headings_requires_the_same_relative_order():
     notes = "## First\n## Second"
     output = "## Second\n## First"
     assert missing_user_headings(output, notes) == ["Second"]
+
+
+@pytest.mark.parametrize(
+    ("notes", "output", "missing"),
+    [
+        ("# 価格", "# 次のステップ", ["価格"]),
+        ("# Цены", "## цены", []),
+    ],
+)
+def test_missing_user_headings_preserves_non_latin_text(notes, output, missing):
+    assert missing_user_headings(output, notes) == missing
+
+
+def test_missing_user_headings_uses_raw_text_when_normalization_is_empty():
+    assert missing_user_headings("# ???", "# !!!") == ["!!!"]
+    assert missing_user_headings("# !!!", "# !!!") == []
 
 
 def test_summarize_without_notes_uses_template_prompt():
