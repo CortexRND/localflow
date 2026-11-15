@@ -1,8 +1,8 @@
 """Deterministic gates M1-M13 over ~/sim-runs/<run>/rK/results/*.json (thresholds frozen in PLAN.md)."""
 import json, math, re, sys
 from pathlib import Path
-sys.path.insert(0, str(Path.home() / "work/sim-sut"))
-from localflow.meetings import read_transcript_log  # noqa: E402
+sys.path.insert(0, os.environ.get("SIM_SUT", str(Path.home() / "work/sim-sut")))
+from localflow.meetings import _safe_title  # noqa: E402
 from localflow.meeting_templates import resolve_template  # noqa: E402
 
 RUN = Path(sys.argv[1])
@@ -47,6 +47,9 @@ def repeat_gates(files):
         g[key]["n"] += 1; g[key]["k"] += int(bool(ok))
         if not ok: g[key]["fail"].append(item)
     unsupported = []
+    present = {json.loads(f.read_text())["scenario"] for f in files}
+    for sid in sorted(set(SC) - present):
+        tally("M1", False, f"{sid}:missing")
     for f in files:
         r = json.loads(f.read_text()); s = SC[r["scenario"]]; sid = s["id"]
         stop = r["stop"][1] if isinstance(r["stop"][1], dict) else {}
