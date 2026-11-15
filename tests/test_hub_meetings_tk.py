@@ -410,6 +410,12 @@ def _opened_paths(monkeypatch):
     return opened
 
 
+def _use_vault(monkeypatch, vault):
+    monkeypatch.setattr(
+        "localflow.hub_tk.load_config", lambda: Config(vault_path=str(vault))
+    )
+
+
 @pytest.mark.parametrize(
     "notes_path", ["/usr/bin/xterm", "C:\\Windows\\System32\\calc.exe"]
 )
@@ -417,7 +423,7 @@ def test_open_notes_ignores_paths_outside_the_vault(tmp_path, monkeypatch, notes
     opened = _opened_paths(monkeypatch)
     root, window = _window(tmp_path, FakeMeetingClient("idle"))
     try:
-        window.config.vault_path = str(tmp_path)
+        _use_vault(monkeypatch, tmp_path)
         window._meeting_last_saved = {"notes_path": notes_path}
         window._meeting_open_notes()
         assert opened == []
@@ -432,7 +438,7 @@ def test_open_notes_opens_markdown_inside_the_vault(tmp_path, monkeypatch):
     note.write_text("# Daily\n")
     root, window = _window(tmp_path, FakeMeetingClient("idle"))
     try:
-        window.config.vault_path = str(tmp_path / "vault")
+        _use_vault(monkeypatch, tmp_path / "vault")
         window._meeting_last_saved = {"notes_path": str(note)}
         window._meeting_open_notes()
         assert opened == [str(note.resolve())]

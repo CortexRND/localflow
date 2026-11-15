@@ -1443,7 +1443,7 @@ class HubWindowController(NSObject):
 
     def meetingOpenNotes_(self, _sender):
         saved = self.meeting_last_saved or {}
-        path = vault_notes_path(saved.get("notes_path"), self.config.vault_path)
+        path = vault_notes_path(saved.get("notes_path"), load_config().vault_path)
         if path:
             current().open_path(path)
 

@@ -261,7 +261,7 @@ def test_appkit_open_notes_only_opens_vault_markdown():
     )
     body = ast.unparse(method)
     assert "vault_notes_path(" in body
-    assert "self.config.vault_path" in body
+    assert "load_config().vault_path" in body
     calls = [
         node for node in ast.walk(method)
         if isinstance(node, ast.Call)
