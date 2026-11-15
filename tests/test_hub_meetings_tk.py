@@ -1,9 +1,17 @@
+import sys
 import threading
 import time
 
 import pytest
 
 tk = pytest.importorskip("tkinter")
+pytestmark = pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "macOS uses the AppKit Hub, covered by test_hub_mac_static and the "
+        "mac UI snapshots."
+    ),
+)
 
 from localflow.config import Config
 from localflow.dictionary import DictionaryStore
