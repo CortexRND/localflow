@@ -71,6 +71,7 @@ class HubWindow:
         self._meeting_error_message = ""
         self._meeting_results = queue.Queue()
         self._meeting_dispatch_after = None
+        self._meeting_requests_in_flight = 0
         self.page = "Home"
         self.page_errors: dict[str, str] = {}
         root.title("LocalFlow Hub")
@@ -78,9 +79,6 @@ class HubWindow:
         root.minsize(820, 560)
         root.configure(bg=self.tokens["paper"])
         self._build_shell()
-        self._meeting_dispatch_after = root.after(
-            25, self._meeting_dispatch_results
-        )
         self.show_page(initial_page)
 
     def _build_shell(self):
@@ -814,6 +812,12 @@ class HubWindow:
             self._meeting_template = self.meeting_template_var.get()
 
     def _meeting_request(self, operation, callback, *args):
+        self._meeting_requests_in_flight += 1
+        if self._meeting_dispatch_after is None:
+            self._meeting_dispatch_after = self.root.after(
+                25, self._meeting_dispatch_results
+            )
+
         def run():
             try:
                 result = getattr(self.meeting_client, operation)(*args)
@@ -833,12 +837,16 @@ class HubWindow:
                 callback, result, error = self._meeting_results.get_nowait()
             except queue.Empty:
                 break
+            self._meeting_requests_in_flight -= 1
             try:
                 callback(result, error)
             except tk.TclError:
                 pass
         try:
-            if self.root.winfo_exists():
+            if (
+                self._meeting_requests_in_flight
+                and self.root.winfo_exists()
+            ):
                 self._meeting_dispatch_after = self.root.after(
                     25, self._meeting_dispatch_results
                 )

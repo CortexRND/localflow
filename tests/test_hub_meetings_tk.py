@@ -190,6 +190,21 @@ def test_meetings_idle_and_running_render(tmp_path):
         root.destroy()
 
 
+def test_meeting_result_dispatch_stops_when_requests_finish(tmp_path):
+    client = FakeMeetingClient("idle")
+    root, window = _window(tmp_path, client)
+    try:
+        _pump(
+            root,
+            lambda: bool(window._meeting_status_data)
+            and bool(window._meeting_templates),
+        )
+        assert window._meeting_requests_in_flight == 0
+        assert window._meeting_dispatch_after is None
+    finally:
+        root.destroy()
+
+
 def test_pre_start_notes_and_template_are_sent_when_starting(tmp_path):
     client = FakeMeetingClient("idle")
     root, window = _window(tmp_path, client)
