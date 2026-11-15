@@ -508,13 +508,18 @@ def test_summaries_drop_remote_images():
     reply = (
         "## Summary\n- shipped ![beacon](https://evil.example/p.png?d=x) "
         '<img src="http://evil.example/a.gif"> ![ref][b]\n'
+        "- shortcut ![b] and a [ref link][r]\n"
+        "- local ![[diagram.png]] ![chart](chart.png) and [docs](https://example.com/docs)\n\n"
         "[b]: https://evil.example/b.png\n"
-        "- local ![[diagram.png]] and [docs](https://example.com/docs)"
+        "[r]: https://example.com/ref\n"
     )
     out = MeetingSummarizer(FakeLLM([reply])).summarize("we shipped it")
 
-    assert "evil.example" not in out
+    assert "](https://evil.example" not in out and "http://evil.example" not in out
     assert "<img" not in out
+    assert "![" not in out.replace("![[diagram.png]]", "").replace("![chart](chart.png)", "")
+    assert "[ref link][r]" in out and "[r]: https://example.com/ref" in out
+    assert "![chart](chart.png)" in out
     assert "beacon" in out
     assert "![[diagram.png]]" in out
     assert "[docs](https://example.com/docs)" in out

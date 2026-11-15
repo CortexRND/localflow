@@ -396,10 +396,9 @@ def _as_data(text: str) -> str:
 
 _REMOTE_TARGET = r"\s*<?\s*(?:[a-zA-Z][a-zA-Z0-9+.-]*:)?//"
 _MD_REMOTE_IMAGE = re.compile(r"!\[([^\]\n]*)\]\(" + _REMOTE_TARGET + r"[^)\n]*\)")
-_MD_REF_IMAGE = re.compile(r"!\[([^\]\n]*)\]\[[^\]\n]*\]")
-_MD_REMOTE_REF_DEF = re.compile(
-    r"^[ \t]{0,3}\[[^\]\n]+\]:" + _REMOTE_TARGET + r"\S*.*$", re.MULTILINE
-)
+# Reference-style images (`![alt][ref]`, `![alt][]`, `![ref]`); not inline
+# `![alt](local.png)` or Obsidian `![[embed]]`.
+_MD_REF_IMAGE = re.compile(r"!\[(?!\[)([^\]\n]*)\](?:\[[^\]\n]*\])?(?!\()")
 _HTML_MEDIA = re.compile(
     r"</?(?:img|image|iframe|video|audio|source|embed|object|picture|svg|link|meta)\b[^>]*>",
     re.IGNORECASE,
@@ -411,7 +410,6 @@ def strip_remote_media(markdown: str) -> str:
     beacon transcript content to another host."""
     markdown = _MD_REMOTE_IMAGE.sub(lambda m: m.group(1), markdown)
     markdown = _MD_REF_IMAGE.sub(lambda m: m.group(1), markdown)
-    markdown = _MD_REMOTE_REF_DEF.sub("", markdown)
     return _HTML_MEDIA.sub("", markdown)
 
 
