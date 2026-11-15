@@ -296,21 +296,25 @@ mid-dictation: say "review checklist" and the saved review prompt is pasted
 instead. Entries live in `~/.localflow/hot_phrases.json`; the desktop app
 re-reads the file when it changes, so edits apply without a restart.
 
-Manage them in the hot phrases window:
+Manage them on the Hot Phrases page of the LocalFlow Hub:
 
 ```bash
-lf phrases                  # open the window
-lf phrases install-app      # also available from the menu bar ("Hot Phrases…")
-lf phrases uninstall-app
+lf phrases                  # open the Hub on Hot Phrases (also the menu bar's "Hot Phrases…")
+lf hub --page "Hot Phrases" # the same, through the Hub command
 ```
 
-On macOS this is a native AppKit window: a sidebar lists your phrases
-(searchable, one row each with an on/off state), edits autosave as you
-type, the switch toggles a phrase without deleting it, Delete shows an
-Undo bar, and a "Test a phrase" section previews what dictation would
-paste — including which triggers matched. `install-app` writes
-`~/Applications/LocalFlow Hot Phrases.app` so the window can be opened
-from Spotlight/Launchpad too.
+On macOS the Hub is one native window owned by the main LocalFlow app, so
+all of these reach the same window (and bring it forward if it is already
+open). The Hot Phrases page has a searchable list on the left (one row per
+phrase with an on/off dot) and an editor on the right: "When I say", "Type
+this", an Enabled switch, Delete with Undo, and a "Try it" preview that shows
+what dictation would paste and which triggers matched. Edits autosave as you
+type; an invalid edit stays in the editor with an inline message and is
+never lost when you navigate.
+
+`lf phrases install-app` is optional: it writes a `LocalFlow Hot Phrases.app`
+compatibility alias in `~/Applications` that simply opens the Hub on that
+page (`lf phrases uninstall-app` removes it). The installer does not create it.
 
 Elsewhere (or if PyObjC is missing on macOS) a simpler Tk window opens
 as a fallback. It keeps the classic layout — an entry list plus explicit

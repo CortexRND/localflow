@@ -82,7 +82,7 @@ class LocalflowMenuBar(rumps.App):
     def refresh(self, _timer=None) -> None:
         try:
             st = requests.get(BASE + "/meeting/status", headers=_auth_headers(), timeout=3).json()
-        except Exception:
+        except Exception:  # noqa: BLE001 - server unreachable shows the down icon
             self._base_icon = DOWN_ICON
             self.refresh_dictation_status()
             self.status_item.title = "server: down (lf serve)"
@@ -143,14 +143,14 @@ class LocalflowMenuBar(rumps.App):
                     timeout=10,
                 )
                 resp.raise_for_status()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - surfaced as a notification
             rumps.notification("localflow", "Error", str(exc)[:120])
         self.refresh()
 
     def dismiss(self, _item) -> None:
         try:
             requests.post(BASE + "/meeting/dismiss", headers=_auth_headers(), timeout=3)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort dismiss
             pass
         self.refresh()
 
@@ -158,9 +158,11 @@ class LocalflowMenuBar(rumps.App):
         open_web_ui(BASE, "/")
 
     def open_phrases(self, _item) -> None:
-        # A separate process: rumps owns this process's AppKit main loop, so
-        # the Tk window can't run in-process.
-        subprocess.Popen([sys.executable, "-m", "localflow.phrases_window"])
+        # A separate process: rumps owns this process's AppKit main loop. The
+        # hub dispatcher hands the page to the single main-app Hub window.
+        subprocess.Popen([
+            sys.executable, "-m", "localflow.hub_window", "--page", "Hot Phrases"
+        ])
 
     def open_hub(self, _item) -> None:
         subprocess.Popen([sys.executable, "-m", "localflow.hub_window"])

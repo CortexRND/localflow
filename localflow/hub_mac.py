@@ -16,6 +16,8 @@ from AppKit import (
     NSComboBox,
     NSMakeRect,
     NSScrollView,
+    NSSearchField,
+    NSSwitch,
     NSTextField,
     NSTextView,
     NSView,
@@ -27,6 +29,12 @@ from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryStore
 from localflow.dispatch import PromptQueue
 from localflow.history import HistoryStore
+from localflow.hot_phrases_editor import (
+    EMPTY_MESSAGE,
+    HotPhrasesEditor,
+    hot_phrases_layout,
+)
+from localflow.hotphrases import HotPhraseStore
 from localflow.hub_model import (
     PROMPT_STATUS_PILLS,
     PROMPTS_EMPTY,
@@ -62,6 +70,7 @@ from localflow.mac_style import (
     style_flat_button as _style_button,
 )
 from localflow.meeting_client import MeetingClient, vault_notes_path
+from localflow.phrases_model import PhrasesModel
 from localflow.platform import current
 from localflow.ui_tokens import (
     CARD_PADDING,
@@ -77,6 +86,7 @@ from localflow.ui_tokens import (
     HUB_SIDEBAR_WIDTH,
     LIGHT,
     SUN_TEXT,
+    surface_tint,
 )
 from localflow.ui_tokens import (
     TOKENS as TOKENS,  # noqa: PLC0414 - kept as a public re-export
@@ -123,9 +133,25 @@ class HubWindowController(NSObject):
     def initWithHistory_dictionary_config_meetingClient_promptQueue_initialPage_(
         self, history, dictionary, config, meeting_client, prompt_queue, initial_page
     ):
+        return self.initWithHistory_dictionary_config_meetingClient_promptQueue_phrasesModel_initialPage_(
+            history, dictionary, config, meeting_client, prompt_queue, None,
+            initial_page,
+        )
+
+    def initWithHistory_dictionary_config_meetingClient_promptQueue_phrasesModel_initialPage_(
+        self, history, dictionary, config, meeting_client, prompt_queue,
+        phrases_model, initial_page,
+    ):
         self = super().init()  # noqa: PLW0642
         if self is None:
             return None
+        # The Hot Phrases state is built on first use, so opening the Hub never
+        # touches the hot-phrase store unless that page is visited. A model
+        # may be injected (snapshots, tests); the default uses the user store.
+        self._phrases_model = phrases_model
+        self.phrases = None
+        self._phrases_empty_shown = False
+        self._closed = False
         self.history = history
         self.dictionary = dictionary
         self.config = config
@@ -319,6 +345,17 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def show_page(self, page):
+        # The one navigation entry point (sidebar, menu bar, CLI, page
+        # requests). Leaving Hot Phrases commits a valid draft; an invalid one
+        # keeps the user there with the error inline. Re-showing the current
+        # page (resize, appearance) is a rebuild, never a navigation commit.
+        if (
+            self.page == "Hot Phrases"
+            and page != "Hot Phrases"
+            and not self._phrases_leave()
+        ):
+            page = "Hot Phrases"
+        entering_phrases = page == "Hot Phrases" and self.page != "Hot Phrases"
         if self.page == "Meetings" and hasattr(self, "meeting_notes"):
             self._meeting_capture_state()
         self.tokens = tokens_for_window(self.window)
@@ -351,6 +388,8 @@ class HubWindowController(NSObject):
         # Dictionary and Prompts show friendly errors inline, beside what failed.
         if error and page not in ("Dictionary", "Prompts"):
             self._callout(error)
+        if entering_phrases:
+            self._phrases().on_show()
         getattr(self, f'_page_{page.lower().replace(" ", "_")}')()
         self._fit_body_height()
 
@@ -380,11 +419,30 @@ class HubWindowController(NSObject):
     def windowDidChangeEffectiveAppearance_(self, _notification):
         self._rebuild_current_page()
 
+    def windowShouldClose_(self, _sender):
+        # A valid draft is saved; an invalid one keeps the window open so the
+        # user sees why instead of silently losing it.
+        if self._phrases_leave():
+            return True
+        self._phrases_sync()
+        return False
+
+    def windowWillClose_(self, _notification):
+        self._closed = True
+        if self.phrases is not None:
+            self.phrases.cancel()
+
     def windowDidEndLiveResize_(self, _notification):
         self._rebuild_current_page()
 
     @objc.python_method
     def _preserve_page_state(self):
+        if self.page == "Hot Phrases" and hasattr(self, "phrase_trigger"):
+            self._phrases_pull()
+            return (
+                "hot_phrases", self._phrases_responder_key(),
+                self._phrases_list_scroll_y(),
+            )
         if self.page == "History" and hasattr(self, "search_field"):
             return ("history", self.search_field.stringValue(), self.history_offset)
         if self.page == "Style" and hasattr(self, "style_selections"):
@@ -403,7 +461,10 @@ class HubWindowController(NSObject):
     def _restore_page_state(self, state):
         if not state:
             return
-        if state[0] == "history":
+        if state[0] == "hot_phrases":
+            _kind, responder, scroll_y = state
+            self._phrases_restore_view(responder, scroll_y)
+        elif state[0] == "history":
             _kind, query, offset = state
             self.search_field.setStringValue_(query)
             self.history_query = query
@@ -1715,6 +1776,9 @@ class HubWindowController(NSObject):
             self.meeting_answer_content.addSubview_(label)
 
     def meetingTimerTick_(self, _timer):
+        # The Hub's one timer also drives Hot Phrases autosave, undo expiry and
+        # the external-change poll; it does nothing off that page.
+        self._phrases_tick()
         while True:
             try:
                 operation, result, error = self.meeting_events.get_nowait()
@@ -1730,8 +1794,18 @@ class HubWindowController(NSObject):
         if self.page == "Meetings" and time.monotonic() >= self.meeting_next_poll:
             self._meeting_poll()
 
-    def textDidChange_(self, _notification):
+    def textDidChange_(self, notification):
+        # NSTextView delegate shared by pages: dispatch by page and by view so
+        # a Hot Phrases edit is never taken for a meeting note (or the reverse).
+        source = notification.object()
+        if self.page == "Hot Phrases":
+            if source is getattr(self, "phrase_text", None):
+                self._phrases_edited()
+            return
         if self.page != "Meetings" or getattr(self, "_meeting_adopting_notes", False):
+            return
+        notes = getattr(self, "meeting_notes", None)
+        if notes is not None and source is not notes:
             return
         self.meeting_notes_dirty = True
         self.meeting_notes_text = self.meeting_notes.string()
@@ -1741,6 +1815,19 @@ class HubWindowController(NSObject):
             self.meeting_notes_due = time.monotonic() + 0.8
         else:
             self.meeting_notes_status.setStringValue_("Kept for when you start")
+
+    def controlTextDidChange_(self, notification):
+        # NSTextField delegate (search, trigger, test phrase): dispatch by page
+        # and by control. Meetings fields do not use this delegate.
+        if self.page != "Hot Phrases":
+            return
+        source = notification.object()
+        if source is getattr(self, "phrase_search", None):
+            self._phrases_search_changed()
+        elif source is getattr(self, "phrase_trigger", None):
+            self._phrases_edited()
+        elif source is getattr(self, "phrase_test", None):
+            self._phrases_test_changed()
 
     def meetingAction_(self, _sender):
         if self.meeting_busy:
@@ -1814,33 +1901,508 @@ class HubWindowController(NSObject):
             width=180, kind="primary",
         )
 
+    # ------------------------------------------------------ Hot Phrases page ---
+    # Rendering only: HotPhrasesEditor (hot_phrases_editor) owns every rule.
+
     @objc.python_method
-    def _page_hot_phrases(self):
-        # Temporary working placeholder until Hot Phrases moves into the Hub.
-        width = self.body.frame().size.width
+    def _phrases(self):
+        if self.phrases is None:
+            model = self._phrases_model or PhrasesModel(HotPhraseStore(), self.config)
+            self.phrases = HotPhrasesEditor(model)
+        return self.phrases
+
+    @objc.python_method
+    def _phrases_active(self):
+        # Page and model only: the empty surface has no editor controls, yet
+        # it must still poll, expire Undo and show errors.
+        return self.page == "Hot Phrases" and self.phrases is not None
+
+    @objc.python_method
+    def _phrases_leave(self):
+        """Navigation guard: True when the editor may be left."""
+        if self.phrases is None or self.page != "Hot Phrases":
+            return True
+        self._phrases_pull()
+        return self.phrases.leave()
+
+    @objc.python_method
+    def _phrases_tick(self):
+        if self._closed or not self._phrases_active():
+            return
+        if self.phrases.tick():
+            self._phrases_sync()
+
+    @objc.python_method
+    def _phrases_pull(self):
+        """Copy typed values from the controls into the editor state."""
+        editor = self.phrases
+        if (
+            editor is None
+            or editor.fields_stale
+            or self._phrases_empty_shown
+            or not hasattr(self, "phrase_trigger")
+        ):
+            return
+        trigger = str(self.phrase_trigger.stringValue())
+        text = str(self.phrase_text.string())
+        enabled = self.phrase_switch.state() == AppKit.NSControlStateValueOn
+        if (trigger, text, enabled) != (editor.trigger, editor.text, editor.enabled):
+            editor.edit(trigger, text, enabled)
+
+    @objc.python_method
+    def _phrases_text_area(self, frame, *, editable):
+        scroll = NSScrollView.alloc().initWithFrame_(frame)
+        scroll.setHasVerticalScroller_(True)
+        scroll.setAutohidesScrollers_(False)
+        scroll.setBorderType_(AppKit.NSBezelBorder)
+        scroll.setDrawsBackground_(True)
+        scroll.setBackgroundColor_(_color("surface", self.tokens))
+        size = scroll.contentSize()
+        view = NSTextView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, size.width, size.height)
+        )
+        view.setMinSize_(NSMakeSize(0, size.height))
+        view.setMaxSize_(NSMakeSize(10000000, 10000000))
+        view.setVerticallyResizable_(True)
+        view.setHorizontallyResizable_(False)
+        view.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        view.textContainer().setContainerSize_(NSMakeSize(size.width, 10000000))
+        view.textContainer().setWidthTracksTextView_(True)
+        view.setFont_(_font(13))
+        view.setTextColor_(_color("ink", self.tokens))
+        view.setBackgroundColor_(_color("surface", self.tokens))
+        view.setInsertionPointColor_(_color("ink", self.tokens))
+        view.setRichText_(False)
+        view.setEditable_(editable)
+        view.setSelectable_(True)
+        # Saved text is pasted verbatim: no smart quotes, dashes or rewrites.
+        view.setAutomaticQuoteSubstitutionEnabled_(False)
+        view.setAutomaticDashSubstitutionEnabled_(False)
+        view.setAutomaticTextReplacementEnabled_(False)
+        view.setAutomaticSpellingCorrectionEnabled_(False)
+        if editable:
+            view.setAllowsUndo_(True)
+            view.setDelegate_(self)
+        scroll.setDocumentView_(view)
+        return scroll, view
+
+    @objc.python_method
+    def _phrases_build_empty(self, width):
         card = FlippedView.alloc().initWithFrame_(
-            NSMakeRect(0, self.cursor_y, width, 150)
+            NSMakeRect(0, self.cursor_y, width, 258)
         )
         style_surface(card, self.tokens)
         self.body.addSubview_(card)
-        self._card_label(
-            card, "Say a word, get a saved prompt", CARD_PADDING + 8,
-            size=15, weight="semibold",
+        inner = width - 2 * CARD_PADDING
+        card.addSubview_(
+            _label(
+                EMPTY_MESSAGE, CARD_PADDING, CARD_PADDING + 8, inner, 15, "ink",
+                palette=self.tokens, height=48, weight="semibold", wrap=True,
+            )
         )
-        self._card_label(
-            card,
-            "Hot phrases swap a short spoken trigger for text you saved, "
-            "right as you dictate.",
-            CARD_PADDING + 36, size=12, color="muted", height=36, wrap=True,
+        card.addSubview_(
+            _label(
+                "Hot phrases swap a short spoken trigger for text you saved, "
+                "right as you dictate.",
+                CARD_PADDING, CARD_PADDING + 62, inner, 12, "muted",
+                palette=self.tokens, height=36, wrap=True,
+            )
         )
         self._button(
-            "Open Hot Phrases", "openHotPhrases:", CARD_PADDING, 92,
-            width=180, parent=card, kind="primary",
+            "+ New phrase", "phrasesNew:", CARD_PADDING, 124, width=150,
+            parent=card, kind="primary",
         )
-        self.cursor_y += 162
+        self._button(
+            "Add an example", "phrasesAddExample:", CARD_PADDING + 162, 124,
+            width=160, parent=card,
+        )
+        self.phrase_empty_error = _label(
+            "", CARD_PADDING, 168, inner, 12, "red", palette=self.tokens,
+            height=34, wrap=True,
+        )
+        card.addSubview_(self.phrase_empty_error)
+        self.phrase_empty_undo_bar = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(CARD_PADDING, 208, inner, 36)
+        )
+        style_surface(self.phrase_empty_undo_bar, self.tokens, fill="paper")
+        self.phrase_empty_undo_label = _label(
+            "", 12, 9, max(inner - 96, 40), 12, "ink", palette=self.tokens, height=18,
+        )
+        self.phrase_empty_undo_bar.addSubview_(self.phrase_empty_undo_label)
+        self._button(
+            "Undo", "phrasesUndo:", max(inner - 84, 0), 0, width=76,
+            parent=self.phrase_empty_undo_bar,
+        )
+        card.addSubview_(self.phrase_empty_undo_bar)
+        self.cursor_y += 270
+        self._phrases_empty_shown = True
+        self._phrases_render_empty()
 
-    def openHotPhrases_(self, _sender):
-        subprocess.Popen([sys.executable, "-m", "localflow.phrases_window"])
+    @objc.python_method
+    def _page_hot_phrases(self):
+        editor = self._phrases()
+        width = self.body.frame().size.width
+        if editor.banner:
+            self.body.addSubview_(
+                _label(
+                    editor.banner, 0, self.cursor_y, width, 12, "muted",
+                    palette=self.tokens, height=20,
+                )
+            )
+            self.cursor_y += 28
+        if editor.empty_state_visible:
+            self._phrases_build_empty(width)
+            return
+        self._phrases_empty_shown = False
+        top = self.cursor_y
+        frames = hot_phrases_layout(
+            width, self._viewport_height() - top - HUB_PAGE_BOTTOM
+        )
+
+        def rect(frame, dx=0, dy=0):
+            x, y, w, h = frame
+            return NSMakeRect(x + dx, y + dy, w, h)
+
+        # Left column: search, new phrase, scrollable list.
+        self.phrase_search = NSSearchField.alloc().initWithFrame_(
+            rect(frames["search"], 0, top)
+        )
+        self.phrase_search.setPlaceholderString_("Search phrases")
+        self.phrase_search.setStringValue_(editor.query)
+        self.phrase_search.setFont_(_font(13))
+        self.phrase_search.setSendsSearchStringImmediately_(True)
+        self.phrase_search.setTarget_(self)
+        self.phrase_search.setAction_("phrasesSearch:")
+        self.phrase_search.setDelegate_(self)
+        self.phrase_search.setAccessibilityLabel_("Search hot phrases")
+        self.body.addSubview_(self.phrase_search)
+        new_frame = frames["new"]
+        self._button(
+            "+ New phrase", "phrasesNew:", new_frame[0], top + new_frame[1],
+            width=new_frame[2], kind="primary",
+        )
+        self.phrase_list_scroll = NSScrollView.alloc().initWithFrame_(
+            rect(frames["list"], 0, top)
+        )
+        self.phrase_list_scroll.setHasVerticalScroller_(True)
+        self.phrase_list_scroll.setAutohidesScrollers_(False)
+        self.phrase_list_scroll.setBorderType_(AppKit.NSNoBorder)
+        self.phrase_list_scroll.setDrawsBackground_(False)
+        self.phrase_list_scroll.setAccessibilityLabel_("Hot phrases")
+        self.phrase_list = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, frames["list"][2], frames["list"][3])
+        )
+        self.phrase_list_scroll.setDocumentView_(self.phrase_list)
+        self.body.addSubview_(self.phrase_list_scroll)
+
+        # Right: the editor card.
+        card_frame = frames["card"]
+        card = FlippedView.alloc().initWithFrame_(rect(card_frame, 0, top))
+        style_surface(card, self.tokens)
+        self.body.addSubview_(card)
+        rows = frames["card_rows"]
+
+        def add_label(text, key, size=12, color="ink", weight="semibold", wrap=False):
+            frame = rows[key]
+            label = _label(
+                text, frame[0], frame[1], frame[2], size, color,
+                palette=self.tokens, height=frame[3], weight=weight, wrap=wrap,
+            )
+            card.addSubview_(label)
+            return label
+
+        add_label("When I say", "trigger_label")
+        self.phrase_trigger = self._field(
+            "", rows["trigger_field"][0], rows["trigger_field"][1],
+            rows["trigger_field"][2], parent=card,
+        )
+        self.phrase_trigger.setDelegate_(self)
+        self.phrase_trigger.setPlaceholderString_("e.g. review checklist")
+        self.phrase_trigger_hint = add_label(
+            "", "trigger_hint", 11, "muted", "regular"
+        )
+        add_label("Type this", "text_label")
+        self.phrase_text_scroll, self.phrase_text = self._phrases_text_area(
+            rect(rows["text_scroll"]), editable=True
+        )
+        self.phrase_text.setAccessibilityLabel_("Text to type")
+        card.addSubview_(self.phrase_text_scroll)
+        self.phrase_text_hint = add_label("", "text_hint", 11, "muted", "regular")
+        self.phrase_switch = NSSwitch.alloc().initWithFrame_(rect(rows["enabled_switch"]))
+        self.phrase_switch.setTarget_(self)
+        self.phrase_switch.setAction_("phrasesToggle:")
+        self.phrase_switch.setAccessibilityLabel_("Enabled")
+        card.addSubview_(self.phrase_switch)
+        add_label("Enabled", "enabled_label", 13, "ink", "regular")
+        self.phrase_delete = self._button(
+            "Delete", "phrasesDelete:", rows["delete_button"][0],
+            rows["delete_button"][1], width=rows["delete_button"][2],
+            parent=card, kind="destructive_ghost",
+        )
+        self.phrase_error_label = add_label(
+            "", "error_label", 12, "red", "regular", wrap=True
+        )
+        undo_frame = rows["undo_bar"]
+        self.phrase_undo_bar = FlippedView.alloc().initWithFrame_(rect(undo_frame))
+        style_surface(self.phrase_undo_bar, self.tokens, fill="paper")
+        self.phrase_undo_label = _label(
+            "", 12, 9, undo_frame[2] - 96, 12, "ink",
+            palette=self.tokens, height=18,
+        )
+        self.phrase_undo_bar.addSubview_(self.phrase_undo_label)
+        self._button(
+            "Undo", "phrasesUndo:", undo_frame[2] - 84, 0, width=76,
+            parent=self.phrase_undo_bar,
+        )
+        card.addSubview_(self.phrase_undo_bar)
+        add_label("Try it: say a phrase", "preview_label")
+        self.phrase_test = self._field(
+            editor.test_input, rows["test_field"][0], rows["test_field"][1],
+            rows["test_field"][2], parent=card,
+        )
+        self.phrase_test.setDelegate_(self)
+        self.phrase_test.setPlaceholderString_("e.g. please review checklist now")
+        self.phrase_preview_scroll, self.phrase_preview = self._phrases_text_area(
+            rect(rows["preview_output"]), editable=False
+        )
+        self.phrase_preview.setAccessibilityLabel_("Dictation preview")
+        card.addSubview_(self.phrase_preview_scroll)
+        self.phrase_status_label = add_label(
+            "", "preview_status", 11, "muted", "regular"
+        )
+        self.cursor_y = top + frames["height"]
+        self._phrases_push_fields()
+        self._phrases_sync()
+
+    @objc.python_method
+    def _phrases_push_fields(self):
+        """Programmatic load of the editor values into the controls."""
+        editor = self.phrases
+        self.phrase_trigger.setStringValue_(editor.trigger)
+        self.phrase_text.setString_(editor.text)
+        self.phrase_switch.setState_(
+            AppKit.NSControlStateValueOn if editor.enabled
+            else AppKit.NSControlStateValueOff
+        )
+        editor.ack_fields()
+
+    @objc.python_method
+    def _phrases_sync(self):
+        """Bring every control in line with the editor state."""
+        if not self._phrases_active():
+            return
+        editor = self.phrases
+        if editor.empty_state_visible != self._phrases_empty_shown:
+            self._rebuild_current_page()
+            return
+        if editor.empty_state_visible:
+            self._phrases_render_empty()
+            return
+        if editor.fields_stale:
+            self._phrases_push_fields()
+        self._phrases_render_list()
+        self._phrases_render_status()
+
+    @objc.python_method
+    def _phrases_render_empty(self):
+        """Error and Undo on the empty surface (e.g. after deleting the last
+        phrase, or a failed load / add-example)."""
+        editor = self.phrases
+        self.phrase_empty_error.setStringValue_(editor.error or editor.notice)
+        self.phrase_empty_error.setTextColor_(
+            _color("red" if editor.error else "success", self.tokens)
+        )
+        self.phrase_empty_undo_bar.setHidden_(editor.undo_token is None)
+        self.phrase_empty_undo_label.setStringValue_(editor.undo_label)
+
+    @objc.python_method
+    def _phrases_render_list(self):
+        editor = self.phrases
+        for view in list(self.phrase_list.subviews()):
+            view.removeFromSuperview()
+        width = self.phrase_list_scroll.contentSize().width
+        rows = editor.rows()
+        row_height, gap = 54, 4
+        if not rows:
+            message = "No matches" if editor.no_matches else "No phrases yet"
+            self.phrase_list.addSubview_(
+                _label(
+                    message, 8, 8, max(width - 16, 40), 12, "muted",
+                    palette=self.tokens, height=20,
+                )
+            )
+        for index, row in enumerate(rows):
+            holder = FlippedView.alloc().initWithFrame_(
+                NSMakeRect(0, index * (row_height + gap), width, row_height)
+            )
+            holder.setWantsLayer_(True)
+            holder.layer().setCornerRadius_(8)
+            if row["selected"]:
+                holder.layer().setBackgroundColor_(
+                    _color(surface_tint("cobalt", self.tokens, 0.16)).CGColor()
+                )
+            dot = NSView.alloc().initWithFrame_(NSMakeRect(10, 21, 10, 10))
+            dot.setWantsLayer_(True)
+            dot.layer().setCornerRadius_(5)
+            if row["enabled"]:
+                dot.layer().setBackgroundColor_(_color("success", self.tokens).CGColor())
+            else:
+                dot.layer().setBorderWidth_(1.5)
+                dot.layer().setBorderColor_(_color("muted", self.tokens).CGColor())
+            holder.addSubview_(dot)
+            text_width = max(width - 38, 40)
+            holder.addSubview_(
+                _label(
+                    row["title"], 28, 8, text_width, 13, "ink",
+                    palette=self.tokens, height=18, weight="semibold",
+                )
+            )
+            holder.addSubview_(
+                _label(
+                    row["subtitle"], 28, 28, text_width, 11, "muted",
+                    palette=self.tokens, height=16,
+                )
+            )
+            hit = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, width, row_height))
+            hit.setTitle_("")
+            hit.setBordered_(False)
+            hit.setTag_(index)
+            hit.setTarget_(self)
+            hit.setAction_("phrasesSelect:")
+            hit.setAccessibilityLabel_(row["accessibility"])
+            holder.addSubview_(hit)
+            self.phrase_list.addSubview_(holder)
+        total = max(
+            len(rows) * (row_height + gap), self.phrase_list_scroll.contentSize().height
+        )
+        self.phrase_list.setFrame_(NSMakeRect(0, 0, width, total))
+
+    @objc.python_method
+    def _phrases_render_status(self):
+        editor = self.phrases
+        message, is_error = editor.trigger_hint()
+        self.phrase_trigger_hint.setStringValue_(message)
+        self.phrase_trigger_hint.setTextColor_(
+            _color("red" if is_error else "muted", self.tokens)
+        )
+        message, is_error = editor.text_hint()
+        self.phrase_text_hint.setStringValue_(message)
+        self.phrase_text_hint.setTextColor_(
+            _color("red" if is_error else "muted", self.tokens)
+        )
+        self.phrase_error_label.setStringValue_(editor.error or editor.notice)
+        self.phrase_error_label.setTextColor_(
+            _color("red" if editor.error else "success", self.tokens)
+        )
+        self.phrase_undo_bar.setHidden_(editor.undo_token is None)
+        self.phrase_undo_label.setStringValue_(editor.undo_label)
+        self.phrase_delete.setEnabled_(
+            editor.current_id is not None or not editor.blank()
+        )
+        self._phrases_render_preview()
+
+    @objc.python_method
+    def _phrases_render_preview(self):
+        output, status = self.phrases.preview()
+        self.phrase_preview.setString_(output)
+        self.phrase_status_label.setStringValue_(status)
+
+    @objc.python_method
+    def _phrases_edited(self):
+        """The trigger field or the text view changed (user typing)."""
+        if not self._phrases_active():
+            return
+        self.phrases.edit(
+            trigger=str(self.phrase_trigger.stringValue()),
+            text=str(self.phrase_text.string()),
+        )
+        self._phrases_render_status()
+
+    @objc.python_method
+    def _phrases_search_changed(self):
+        if not self._phrases_active():
+            return
+        self.phrases.set_query(str(self.phrase_search.stringValue()))
+        self._phrases_render_list()
+
+    @objc.python_method
+    def _phrases_test_changed(self):
+        if not self._phrases_active():
+            return
+        self.phrases.set_test_input(str(self.phrase_test.stringValue()))
+        self._phrases_render_preview()
+
+    @objc.python_method
+    def _phrases_responder_key(self):
+        responder = self.window.firstResponder()
+        if isinstance(responder, NSTextView) and responder.isFieldEditor():
+            responder = responder.delegate()
+        for key, name in (
+            ("search", "phrase_search"), ("trigger", "phrase_trigger"),
+            ("text", "phrase_text"), ("test", "phrase_test"),
+        ):
+            if responder is getattr(self, name, None):
+                return key
+        return None
+
+    @objc.python_method
+    def _phrases_list_scroll_y(self):
+        scroll = getattr(self, "phrase_list_scroll", None)
+        return scroll.contentView().bounds().origin.y if scroll is not None else 0
+
+    @objc.python_method
+    def _phrases_restore_view(self, responder, scroll_y):
+        if not hasattr(self, "phrase_list_scroll"):
+            return
+        limit = max(
+            0, self.phrase_list.frame().size.height
+            - self.phrase_list_scroll.contentSize().height,
+        )
+        self.phrase_list.scrollPoint_(NSMakePoint(0, min(scroll_y, limit)))
+        target = {
+            "search": "phrase_search", "trigger": "phrase_trigger",
+            "text": "phrase_text", "test": "phrase_test",
+        }.get(responder)
+        if target and hasattr(self, target):
+            self.window.makeFirstResponder_(getattr(self, target))
+
+    def phrasesSearch_(self, _sender):
+        self._phrases_search_changed()
+
+    def phrasesNew_(self, _sender):
+        editor = self._phrases()
+        self._phrases_pull()
+        editor.new_phrase()
+        self._phrases_sync()
+        if hasattr(self, "phrase_trigger"):
+            self.window.makeFirstResponder_(self.phrase_trigger)
+
+    def phrasesAddExample_(self, _sender):
+        self._phrases().add_example()
+        self._phrases_sync()
+
+    def phrasesSelect_(self, sender):
+        rows = self.phrases.entries
+        index = sender.tag()
+        if 0 <= index < len(rows):
+            self._phrases_pull()
+            self.phrases.select(rows[index]["id"])
+        self._phrases_sync()
+
+    def phrasesToggle_(self, _sender):
+        self._phrases_pull()
+        self.phrases.set_enabled(
+            self.phrase_switch.state() == AppKit.NSControlStateValueOn
+        )
+        self._phrases_sync()
+
+    def phrasesDelete_(self, _sender):
+        self.phrases.delete()
+        self._phrases_sync()
+
+    def phrasesUndo_(self, _sender):
+        self.phrases.undo_delete()
+        self._phrases_sync()
 
     @objc.python_method
     def _prompt_entries(self):
@@ -2026,15 +2588,19 @@ class HubWindowController(NSObject):
 
 def build_window(
     history=None, dictionary=None, config=None, meeting_client=None,
-    initial_page="Home", prompt_queue=None,
+    initial_page="Home", prompt_queue=None, phrase_store=None,
+    phrases_model=None,
 ):
     config = config or load_config()
-    return HubWindowController.alloc().initWithHistory_dictionary_config_meetingClient_promptQueue_initialPage_(
+    if phrases_model is None and phrase_store is not None:
+        phrases_model = PhrasesModel(phrase_store, config)
+    return HubWindowController.alloc().initWithHistory_dictionary_config_meetingClient_promptQueue_phrasesModel_initialPage_(
         history or HistoryStore(enabled=config.history_enabled),
         dictionary or DictionaryStore(),
         config,
         meeting_client,
         prompt_queue,
+        phrases_model,
         initial_page,
     )
 

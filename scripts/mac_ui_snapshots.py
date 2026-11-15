@@ -18,6 +18,7 @@ from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore
 from localflow.hub_mac import build_window as build_hub_window
 from localflow.phrases_mac import build_window, snapshot_png
+from localflow.phrases_model import PhrasesModel
 from localflow.setup_flow import Check
 from localflow.setup_mac import SetupWindowController
 from localflow.ui_tokens import (
@@ -240,6 +241,57 @@ def _hub_sized_shots(controller, name):
     controller.resize_content(HUB_DEFAULT_WIDTH, HUB_DEFAULT_HEIGHT)
 
 
+def _phrases_model(path):
+    """A model over a temp store and a fixed config (no real skills dirs)."""
+    return PhrasesModel(HotPhraseStore(path), _config())
+
+
+def _hub_hot_phrases_snapshots(base):
+    """The embedded Hot Phrases page: empty, populated + selected, invalid draft.
+
+    Each state is built through the editor's own methods and shot at the
+    minimum and a wide window size, light and dark. Stores and config are
+    temp/injected, no runtime or main-app singleton is started, and no
+    preview is typed (the preview would read the dictionary store).
+    """
+    history = HistoryStore(base / "hp-history.sqlite", base / "hp-clips")
+    dictionary = DictionaryStore(base / "hp-dictionary.json")
+
+    def hub(name, entries=()):
+        model = _phrases_model(base / f"hp-{name}.json")
+        for trigger, text, enabled in entries:
+            model.store.add(trigger, text, enabled)
+        return build_hub_window(
+            history, dictionary, Config(), initial_page="Hot Phrases",
+            phrases_model=model,
+        )
+
+    controller = hub("empty")
+    _hub_sized_shots(controller, "hub-hot-phrases-empty")
+
+    entries = (
+        ("review checklist", "Review this PR:\n- tests\n- types\n- no churn", True),
+        ("sign off", "Thanks — talk tomorrow.", False),
+        ("standup", "yesterday:\ntoday:\nblockers:", True),
+    )
+    controller = hub("populated3", entries)
+    editor = controller.phrases
+    editor.select(next(e["id"] for e in editor.entries if e["trigger"] == "sign off"))
+    controller._phrases_sync()
+    _hub_sized_shots(controller, "hub-hot-phrases-populated3-selected")
+
+    controller = hub("invalid", entries)
+    editor = controller.phrases
+    editor.new_phrase()
+    # A trigger that collides with "review checklist" once normalised. fill()
+    # types it for real; flush() validates through the model, writes nothing
+    # and sets the inline error (so the settle loop cannot autosave it away).
+    editor.fill("Review, checklist", "y")
+    editor.flush()
+    controller._phrases_sync()
+    _hub_sized_shots(controller, "hub-hot-phrases-invalid-draft")
+
+
 def _hub_responsive_snapshots(base):
     """Home, Dictionary, Hot Phrases and Prompts at min and wide sizes.
 
@@ -274,8 +326,10 @@ def _hub_responsive_snapshots(base):
         failed["id"], "failed", repo="localflow", error="Orca is not running",
     )
 
+    # Hot Phrases reads the injected temp store, never ~/.localflow.
     controller = build_hub_window(
-        history, dictionary, Config(), prompt_queue=empty_queue
+        history, dictionary, Config(), prompt_queue=empty_queue,
+        phrases_model=_phrases_model(base / "resp-hot-phrases.json"),
     )
     controller.show_page("Home")
     _hub_sized_shots(controller, "hub-home-populated")
@@ -407,6 +461,7 @@ def main():
         _shot(setup, "setup-download-error")
         _hub_snapshots(tmp)
         _hub_responsive_snapshots(tmp)
+        _hub_hot_phrases_snapshots(tmp)
 
     print(f"wrote snapshots to {OUT}")
 

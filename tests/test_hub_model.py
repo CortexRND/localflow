@@ -65,6 +65,9 @@ def test_sidebar_pages_have_the_exact_order():
 
 
 def test_hub_window_cli_whitelist_matches_the_sidebar_order():
+    from localflow import hub_route
+
+    assert hub_route.HUB_PAGES == EXPECTED_PAGES
     tree = _tree(ROOT / "localflow" / "hub_window.py")
     choices = next(
         keyword.value
@@ -73,12 +76,12 @@ def test_hub_window_cli_whitelist_matches_the_sidebar_order():
         and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
         for keyword in node.keywords if keyword.arg == "choices"
     )
-    assert ast.literal_eval(choices) == EXPECTED_PAGES
+    assert isinstance(choices, ast.Name) and choices.id == "HUB_PAGES"
 
 
 def test_tk_fallback_never_receives_a_page_it_does_not_have():
     source = (ROOT / "localflow" / "hub_window.py").read_text(encoding="utf-8")
-    assert "args.page if args.page in TK_PAGES else \"Home\"" in source
+    assert "page if page in TK_PAGES else \"Home\"" in source
 
 
 def test_every_page_has_a_builder():
@@ -88,13 +91,86 @@ def test_every_page_has_a_builder():
     assert "_page_{page.lower().replace(\" \", \"_\")}" in sources["show_page"]
 
 
-def test_hot_phrases_placeholder_launches_the_existing_window():
+def test_hot_phrases_page_is_the_embedded_editor_not_a_launcher():
+    """Handoff A's placeholder opened the standalone window; B embeds it."""
+    from localflow import hot_phrases_editor
+
     sources = _controller_sources()
     page = sources["_page_hot_phrases"]
-    assert "Say a word, get a saved prompt" in page
-    assert '"Open Hot Phrases", "openHotPhrases:"' in page
-    assert "localflow.phrases_window" in sources["openHotPhrases_"]
-    assert (ROOT / "localflow" / "phrases_window.py").exists()
+    empty = sources["_phrases_build_empty"]
+    assert "EMPTY_MESSAGE" in empty and "phrasesNew:" in empty
+    assert hot_phrases_editor.EMPTY_MESSAGE == (
+        "Say a word, get a saved prompt. Add your first hot phrase."
+    )
+    # The editor surface named in the brief.
+    for text in ('"When I say"', '"Type this"', '"+ New phrase"', "NSSwitch", "NSSearchField"):
+        assert text in HUB_MAC.read_text(encoding="utf-8")
+    assert "hot_phrases_layout(" in page and "self.body.frame().size.width" in page
+    assert "NSTextView" in sources["_phrases_text_area"]
+    # No launcher left behind: nothing spawns the standalone editor window.
+    assert "openHotPhrases_" not in sources
+    assert "localflow.phrases_window" not in HUB_MAC.read_text(encoding="utf-8")
+    assert "phrases_mac" not in HUB_MAC.read_text(encoding="utf-8")
+    # Preview goes through the model, with a typed test phrase.
+    assert "self.phrases.preview()" in sources["_phrases_render_preview"]
+    assert "PhrasesModel(HotPhraseStore(), self.config)" in sources["_phrases"]
+
+
+def test_hot_phrases_page_follows_the_hub_navigation_and_timer():
+    sources = _controller_sources()
+    show = sources["show_page"]
+    # The guard lives in the one navigation entry point, before the rebuild.
+    assert '"Hot Phrases"' in show and "self._phrases_leave()" in show
+    assert show.index("_phrases_leave()") < show.index("self.page = page")
+    assert "entering_phrases" in show and ".on_show()" in show
+    assert "_phrases_tick()" in sources["meetingTimerTick_"]  # reuses the one timer
+    assert "_phrases_leave()" in sources["windowShouldClose_"]
+    assert "cancel()" in sources["windowWillClose_"]
+    # Rebuilds preserve the editor, they never run the guard.
+    assert "_phrases_leave" not in sources["_rebuild_current_page"]
+    assert '"hot_phrases"' in sources["_preserve_page_state"]
+    assert '"hot_phrases"' in sources["_restore_page_state"]
+
+
+def test_text_delegates_dispatch_by_page_and_control():
+    sources = _controller_sources()
+    text = sources["textDidChange_"]
+    assert text.index('self.page == "Hot Phrases"') < text.index('self.page != "Meetings"')
+    assert "self._phrases_edited()" in text
+    assert "source is not notes" in text  # meeting notes only for the notes view
+    control = sources["controlTextDidChange_"]
+    for name in ("phrase_search", "phrase_trigger", "phrase_test"):
+        assert f'getattr(self, "{name}", None)' in control
+    assert 'self.page != "Hot Phrases"' in control
+
+
+def test_hot_phrases_page_reuses_the_shared_phrases_model():
+    sources = _controller_sources()
+    assert "PhrasesModel" in HUB_MAC.read_text(encoding="utf-8")
+    assert "HotPhrasesEditor(model)" in sources["_phrases"]
+    editor = (ROOT / "localflow" / "hot_phrases_editor.py").read_text(encoding="utf-8")
+    for call in ("model.trigger_hint", "model.text_hint", "model.commit",
+                 "model.delete", "model.undo_delete", "model.changed_on_disk",
+                 "model.preview", "model.set_enabled"):
+        assert call in editor
+
+
+def test_empty_surface_polls_shows_errors_and_keeps_undo_reachable():
+    sources = _controller_sources()
+    # Activity depends on page and model, not on editor-only controls.
+    active = sources["_phrases_active"]
+    assert "phrase_status_label" not in active and "hasattr" not in active
+    assert "_phrases_active()" in sources["_phrases_tick"]
+    # Sync renders the empty surface instead of returning early.
+    sync = sources["_phrases_sync"]
+    assert "self._phrases_render_empty()" in sync
+    empty = sources["_phrases_build_empty"]
+    assert '"Undo", "phrasesUndo:"' in empty
+    assert "phrase_empty_error" in empty and "phrase_empty_undo_bar" in empty
+    assert "self._phrases_render_empty()" in empty
+    render = sources["_phrases_render_empty"]
+    assert "editor.error" in render and "editor.undo_label" in render
+    assert "editor.undo_token is None" in render
 
 
 # ------------------------------------------------------------- responsive ---
@@ -374,13 +450,20 @@ def test_prompts_page_sections_and_copy():
 
 def test_hub_builds_with_an_injectable_queue_and_keeps_the_old_initialiser():
     sources = _controller_sources()
+    newest = (
+        "initWithHistory_dictionary_config_meetingClient_promptQueue_"
+        "phrasesModel_initialPage_"
+    )
     new = "initWithHistory_dictionary_config_meetingClient_promptQueue_initialPage_"
     old = "initWithHistory_dictionary_config_meetingClient_initialPage_"
-    assert "prompt_queue" in sources[new]
-    assert "PromptQueue()" in sources[new]
+    assert "prompt_queue" in sources[newest]
+    assert "PromptQueue()" in sources[newest]
+    assert "phrases_model" in sources[newest]
+    assert newest in sources[new]  # backwards compatible, model defaults
     assert new in sources[old]  # backwards compatible, queue defaults
     source = HUB_MAC.read_text(encoding="utf-8")
     assert 'initial_page="Home", prompt_queue=None' in source
+    assert "phrase_store=None" in source and "phrases_model=None" in source
 
 
 def test_hub_never_imports_the_server():

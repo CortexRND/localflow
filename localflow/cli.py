@@ -51,6 +51,7 @@ from localflow.dispatch import (
     orca_available,
 )
 from localflow.history import HistoryStore
+from localflow.hub_route import DEFAULT_PAGE, HUB_PAGES
 from localflow.platform import current
 from localflow.platform.base import PASTE_METHODS
 from localflow.providers import registry
@@ -91,7 +92,7 @@ def _post(path: str, json: dict | None = None) -> dict:
     if not resp.ok:
         try:
             detail = resp.json().get("detail", resp.reason)
-        except Exception:
+        except Exception:  # noqa: BLE001 - non-JSON error body; fall back to the reason
             detail = resp.reason
         console.print(f"[red]error:[/red] {detail}")
         sys.exit(1)
@@ -332,9 +333,16 @@ def stats_command() -> None:
 
 
 @cli.command("hub")
-def hub_command() -> None:
+@click.option(
+    "--page",
+    type=click.Choice(HUB_PAGES),
+    default=DEFAULT_PAGE,
+    show_default=True,
+    help="Hub page to open.",
+)
+def hub_command(page: str) -> None:
     """Open the native history and settings hub."""
-    subprocess.Popen([sys.executable, "-m", "localflow.hub_window"])
+    subprocess.Popen([sys.executable, "-m", "localflow.hub_window", "--page", page])
 
 
 @dictionary.command("list")
@@ -721,7 +729,7 @@ def watch() -> None:
                 live.update(_render(_get("/meeting/status")))
             except SystemExit:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort, must not abort the command
                 pass
 
 
@@ -1011,7 +1019,7 @@ def token_command() -> None:
 
 @cli.group(invoke_without_command=True)
 def phrases() -> None:
-    """Manage hot phrases in the native window (no subcommand = open it)."""
+    """Manage hot phrases (no subcommand = open the Hub's Hot Phrases page)."""
     ctx = click.get_current_context()
     if ctx.invoked_subcommand is not None:
         return
@@ -1033,7 +1041,7 @@ def phrases() -> None:
 
 @phrases.command("install-app")
 def phrases_install_app() -> None:
-    """Install a .app bundle so the window opens from Spotlight/Launchpad."""
+    """Optional alias: a .app that opens the Hub on Hot Phrases."""
     from localflow.appbundle import install_app
     path = install_app()
     console.print(f"[green]installed[/green] {path}")

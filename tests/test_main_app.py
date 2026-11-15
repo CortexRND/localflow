@@ -58,12 +58,29 @@ def rec(monkeypatch):
     return Recorder(monkeypatch)
 
 
+pages = []  # pages handed to the faked platform hub backend / hub builder
+polls = []  # poll callbacks handed to the faked run_app
+
+
+@pytest.fixture(autouse=True)
+def _reset_pages():
+    pages.clear()
+    polls.clear()
+
+
 def _fake_windows(monkeypatch):
     calls = []
-    for module, label in (("localflow.setup_window", "setup"), ("localflow.hub_window", "hub")):
-        fake = types.ModuleType(module)
-        fake.main = lambda label=label: calls.append(label)
-        monkeypatch.setitem(sys.modules, module, fake)
+    setup = types.ModuleType("localflow.setup_window")
+    setup.main = lambda: calls.append("setup")
+    monkeypatch.setitem(sys.modules, "localflow.setup_window", setup)
+    hub = types.ModuleType("localflow.hub_window")
+    # main_app's portable path must use the backend, never the dispatcher
+    # (which routes back into main_app on macOS and would recurse).
+    hub.run_backend = lambda page="Home": (
+        calls.append("hub"), pages.append(page)
+    )[0]
+    hub.main = lambda *a, **k: calls.append("dispatcher")
+    monkeypatch.setitem(sys.modules, "localflow.hub_window", hub)
     return calls
 
 
@@ -400,17 +417,27 @@ class FakeWindow:
 
 
 class FakeController:
-    def __init__(self, label):
-        self.label, self.window = label, FakeWindow()
+    def __init__(self, label, page="Home"):
+        self.label, self.window, self.page = label, FakeWindow(), page
+        self.shown_pages = []
+
+    def show_page(self, page):
+        # Stands in for HubWindowController.show_page, the guarded entry point.
+        self.shown_pages.append(page)
+        self.page = page
 
 
 def _native(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     built, shown = [], []
     mac = types.ModuleType("localflow.main_app_mac")
-    mac.run_app = lambda show: shown.append(show)
+    mac.run_app = lambda show, poll=None: (
+        shown.append(show), polls.append(poll)
+    )[0]
     hub = types.ModuleType("localflow.hub_mac")
-    hub.build_window = lambda initial_page="Home": built.append("hub") or FakeController("hub")
+    hub.build_window = lambda initial_page="Home": (
+        built.append("hub"), pages.append(initial_page)
+    ) and FakeController("hub", initial_page)
     setup = types.ModuleType("localflow.setup_mac")
     setup.build_window = lambda: built.append("setup") or FakeController("setup")
     for name, module in (
@@ -599,3 +626,293 @@ def test_setup_install_app_installs_both_bundles(tmp_path, monkeypatch):
     assert [kw["name"] for kw in installed] == ["LocalFlow Setup.app", "LocalFlow.app"]
     assert installed[1]["module"] == "localflow.main_app"
     assert installed[1]["icon"] is True and installed[1]["full_plist"] is True
+
+
+# --- page routing (--page, request file, single Hub instance) -----------
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], (False, None)),
+        (["--reopened"], (True, None)),
+        (["--page", "Hot Phrases"], (False, "Hot Phrases")),
+        (["--page=Meetings", "--reopened"], (True, "Meetings")),
+        (["-psn_0_12345", "--page", "History"], (False, "History")),
+        (["--page", "Home", "--page", "Models"], (False, "Models")),
+        (["--page", "Nope"], (False, None)),
+        (["--page", "Home", "--page", "Nope"], (False, "Home")),
+        (["--page"], (False, None)),
+        (["--page", "hot phrases"], (False, None)),
+        (["--page", "__import__('os')"], (False, None)),
+    ],
+)
+def test_parse_args_validates_the_page_against_the_whitelist(argv, expected):
+    assert main_app.parse_args(argv) == expected
+
+
+def test_unknown_page_is_logged_not_fatal(tmp_path):
+    main_app.parse_args(["--page", "Bogus"])
+
+    assert "ignoring unknown page 'Bogus'" in _log_text(tmp_path)
+
+
+def test_main_accepts_explicit_argv_and_still_strips_sys_argv(monkeypatch, rec):
+    save_config(Config(setup_version=1))
+    calls = _fake_windows(monkeypatch)
+    monkeypatch.setattr(launchagent, "status", lambda: "not installed")
+
+    main_app.main(["--page", "Hot Phrases"])
+
+    assert calls == ["hub"] and pages == ["Hot Phrases"]
+    assert sys.argv == ["main_app"]
+
+
+def test_portable_path_uses_the_backend_never_the_dispatcher(monkeypatch, rec):
+    save_config(Config(setup_version=1))
+    calls = _fake_windows(monkeypatch)
+    monkeypatch.setattr(launchagent, "status", lambda: "not installed")
+
+    main_app.main()
+
+    assert "dispatcher" not in calls and pages == ["Home"]
+
+
+def test_running_app_gets_a_page_request_and_a_reopen(monkeypatch, rec):
+    from localflow import hub_route
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    windows = _fake_windows(monkeypatch)
+    _hold_lock(monkeypatch)
+
+    main_app.main(["--page", "Hot Phrases"])
+
+    assert windows == []
+    assert rec.run == [["open", "-b", "com.cortexrnd.localflow.app", "--args", "--reopened"]]
+    assert hub_route.consume_request() == "Hot Phrases"
+
+
+def test_reopened_process_still_leaves_the_request_but_never_opens(monkeypatch, rec):
+    from localflow import hub_route
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _hold_lock(monkeypatch)
+
+    main_app.main(["--reopened", "--page", "Models"])
+
+    assert [cmd[0] for cmd in rec.run] == ["osascript"]
+    assert hub_route.consume_request() == "Models"
+
+
+def test_failed_request_write_is_logged_and_reopen_still_happens(
+    monkeypatch, rec, tmp_path
+):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _hold_lock(monkeypatch)
+    monkeypatch.setattr(main_app, "write_request", lambda page: False)
+
+    main_app.main(["--page", "History"])
+
+    assert rec.run[0][0] == "open"
+    assert "could not leave a request for page 'History'" in _log_text(tmp_path)
+
+
+def test_no_page_leaves_no_request(monkeypatch, rec):
+    from localflow import hub_route
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _hold_lock(monkeypatch)
+
+    main_app.main([])
+
+    assert hub_route.consume_request() is None
+
+
+def test_native_launch_with_page_opens_the_hub_there(monkeypatch, rec):
+    save_config(Config(setup_version=1))
+    built, shown = _native(monkeypatch)
+    monkeypatch.setattr(main_app, "ensure_runtime", lambda: None)
+
+    main_app.main(["--page", "Hot Phrases"])
+    shown[0]()
+
+    assert built == ["hub"] and pages == ["Hot Phrases"]
+    assert polls == [shown[0].__self__.poll]
+
+
+def test_native_launch_without_page_opens_home(monkeypatch, rec):
+    save_config(Config(setup_version=1))
+    _built, shown = _native(monkeypatch)
+    monkeypatch.setattr(main_app, "ensure_runtime", lambda: None)
+
+    main_app.main([])
+    shown[0]()
+
+    assert pages == ["Home"]
+
+
+def _running_hub(monkeypatch):
+    save_config(Config(setup_version=1))
+    built, shown = _native(monkeypatch)
+    monkeypatch.setattr(main_app, "ensure_runtime", lambda: None)
+    main_app.main([])
+    shown[0]()
+    router = shown[0].__self__
+    return built, router, polls[0]
+
+
+def test_page_request_navigates_a_visible_hub_without_a_second_one(monkeypatch, rec):
+    from localflow import hub_route
+
+    built, router, poll = _running_hub(monkeypatch)
+    hub = router.hub
+    hub.window.events.clear()  # drop the startup "front" from the initial build
+    hub_route.write_request("Hot Phrases")
+
+    assert poll() is True
+
+    assert built == ["hub"] and router.hub is hub
+    assert hub.shown_pages == ["Hot Phrases"]
+    assert hub.window.events == ["front"]
+    assert poll() is False  # consumed: the request does not fire twice
+
+
+def test_page_request_restores_a_minimized_hub_and_navigates(monkeypatch, rec):
+    from localflow import hub_route
+
+    built, router, poll = _running_hub(monkeypatch)
+    hub = router.hub
+    hub.window.events.clear()  # drop the startup "front" from the initial build
+    hub.window.mini = True
+    hub_route.write_request("Hot Phrases")
+
+    assert poll() is True
+
+    assert built == ["hub"] and router.hub is hub
+    assert hub.window.events == ["deminiaturize"]
+    assert hub.shown_pages == ["Hot Phrases"]
+
+
+def test_page_request_after_the_window_was_closed_builds_one_fresh_hub(
+    monkeypatch, rec
+):
+    from localflow import hub_route
+
+    built, router, poll = _running_hub(monkeypatch)
+    router.hub.window.visible = False
+    hub_route.write_request("Meetings")
+
+    assert poll() is True
+
+    assert built == ["hub", "hub"] and pages == ["Home", "Meetings"]
+    assert router.hub.page == "Meetings"
+
+
+def test_request_for_the_page_already_shown_does_not_rebuild_it(monkeypatch, rec):
+    from localflow import hub_route
+
+    _built, router, poll = _running_hub(monkeypatch)
+    hub_route.write_request("Home")
+
+    assert poll() is True
+
+    assert router.hub.shown_pages == []
+
+
+def test_reopen_event_consumes_a_pending_request_even_for_a_visible_window(
+    monkeypatch, rec
+):
+    from localflow import hub_route
+
+    built, router, _poll = _running_hub(monkeypatch)
+    hub_route.write_request("Prompts")
+
+    router.show()  # what the LaunchServices reopen handler calls
+
+    assert built == ["hub"] and router.hub.shown_pages == ["Prompts"]
+    assert hub_route.consume_request() is None
+
+
+def test_plain_reopen_keeps_the_current_page(monkeypatch, rec):
+    built, router, _poll = _running_hub(monkeypatch)
+
+    router.show()
+
+    assert built == ["hub"] and router.hub.shown_pages == []
+
+
+def test_unconfigured_routes_to_setup_and_keeps_the_page_until_configured(
+    monkeypatch, rec
+):
+    from localflow import hub_route
+
+    built, shown = _native(monkeypatch)
+    monkeypatch.setattr(main_app, "ensure_runtime", lambda: None)
+
+    main_app.main(["--page", "Hot Phrases"])
+    shown[0]()
+    hub_route.write_request("History")  # a later request replaces the wish
+    polls[0]()
+
+    assert built == ["setup"] and pages == []
+
+    save_config(Config(setup_version=1))
+    shown[0]()
+
+    assert built == ["setup", "hub"] and pages == ["History"]
+
+
+def test_unconfigured_launch_page_is_honoured_after_setup(monkeypatch, rec):
+    built, shown = _native(monkeypatch)
+    monkeypatch.setattr(main_app, "ensure_runtime", lambda: None)
+
+    main_app.main(["--page", "Hot Phrases"])
+    shown[0]()
+    save_config(Config(setup_version=1))
+    shown[0]()
+
+    assert built == ["setup", "hub"] and pages == ["Hot Phrases"]
+
+
+def test_stale_request_never_steers_an_unrelated_launch(monkeypatch, rec):
+    import json
+    import time
+
+    from localflow import hub_route
+
+    path = hub_route.request_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"page": "Hot Phrases", "ts": time.time() - 3600}), encoding="utf-8"
+    )
+    save_config(Config(setup_version=1))
+    _built, shown = _native(monkeypatch)
+    monkeypatch.setattr(main_app, "ensure_runtime", lambda: None)
+
+    main_app.main([])
+    shown[0]()
+
+    assert pages == ["Home"]
+    assert not path.exists()
+
+
+def test_poll_is_quiet_without_a_request(monkeypatch, rec):
+    built, router, poll = _running_hub(monkeypatch)
+
+    assert poll() is False
+    assert built == ["hub"] and router.hub.shown_pages == []
+
+
+def test_mac_poller_serves_requests_from_a_run_loop_timer():
+    source = (ROOT / "localflow" / "main_app_mac.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    run_app = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_app"
+    )
+    assert [a.arg for a in run_app.args.args] == ["show", "poll"]
+    assert "scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_" in source
+    poller = next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PageRequestPoller"
+    )
+    names = [m.name for m in poller.body if isinstance(m, ast.FunctionDef)]
+    assert names == ["initWithPoll_", "tick_"]

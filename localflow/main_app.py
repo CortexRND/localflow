@@ -5,6 +5,11 @@ runtime (dictation + menu bar) is running, then show the native Hub. The app
 keeps running after its window is closed; a later reopen (Dock click or
 double-click, delivered by LaunchServices as an Apple event) restores the
 right window through the delegate in `main_app_mac`.
+
+`--page PAGE` (also reached through `lf hub`, `lf phrases`, the menu bar and
+the optional Hot Phrases alias app) opens the Hub on that page. This is the
+single Hub instance: a caller that finds the app running leaves an atomic
+page request (see `hub_route`) that the running app serves from a timer.
 """
 
 import os
@@ -21,10 +26,41 @@ from localflow.config import (
     legacy_config_path,
 )
 from localflow.config_migrate import migrate_v1
+from localflow.hub_route import (
+    DEFAULT_PAGE,
+    consume_request,
+    validate_page,
+    write_request,
+)
 from localflow.singleinstance import acquire, read_holder
 
 LOCK_NAME = "main-app"
 REOPEN_FLAG = "--reopened"
+PAGE_FLAG = "--page"
+
+
+def parse_args(argv) -> tuple[bool, str | None]:
+    """(reopened, page) from the launch arguments.
+
+    Tolerant on purpose: LaunchServices adds its own arguments (`-psn_...`)
+    and a bad `--page` must not stop the app from opening. An unknown page is
+    logged and ignored; the last valid `--page` wins.
+    """
+    argv = list(argv)
+    page = None
+    for index, arg in enumerate(argv):
+        if arg == PAGE_FLAG and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif arg.startswith(PAGE_FLAG + "="):
+            value = arg[len(PAGE_FLAG) + 1:]
+        else:
+            continue
+        checked = validate_page(value)
+        if checked is None:
+            _log(f"ignoring unknown page {value!r}")
+        else:
+            page = checked
+    return REOPEN_FLAG in argv, page
 
 
 def _explicit(value) -> bool:
@@ -168,15 +204,20 @@ def activate_holder(name: str) -> None:
     subprocess.run(["osascript", "-e", script], capture_output=True, check=False)
 
 
-def reopen_running_app(allow_open: bool) -> None:
-    """Ask the running app to restore its window.
+def reopen_running_app(allow_open: bool, page: str | None = None) -> None:
+    """Ask the running app to restore its window, on `page` when given.
 
-    `open -b` makes LaunchServices send the running app a reopen event, which
-    its delegate answers by restoring a window. `--args --reopened` marks a
-    process launched this way: if that process again finds the lock held, it
-    must not call `open` once more (that would loop when the lock holder is
-    not registered with LaunchServices), so it only activates the holder.
+    LaunchServices never delivers new `--args` to a running app, so a page is
+    passed as an atomic request file that the app consumes from its run-loop
+    timer (see hub_route). `open -b` then makes LaunchServices send the
+    running app a reopen event, which its delegate answers by restoring a
+    window (consuming the same request). `--args --reopened` marks a process
+    launched this way: if that process again finds the lock held, it must not
+    call `open` once more (that would loop when the lock holder is not
+    registered with LaunchServices), so it only activates the holder.
     """
+    if page is not None and not write_request(page):
+        _log(f"could not leave a request for page {page!r}")
     if allow_open:
         result = subprocess.run(
             ["open", "-b", MAIN_BUNDLE_ID, "--args", REOPEN_FLAG],
@@ -188,18 +229,25 @@ def reopen_running_app(allow_open: bool) -> None:
     activate_holder(LOCK_NAME)
 
 
-def front_or_build(existing, build):
+def front_or_build(existing, build, navigate=None):
     """Bring `existing` controller's window forward, or build a new one.
 
-    A closed window is never reused (AppKit may have released it).
+    A closed window is never reused (AppKit may have released it). For a
+    reused window `navigate(existing)` runs after it is shown, so an explicit
+    page goes through the window's own navigation guard.
     """
     window = getattr(existing, "window", None)
     if window is not None:
+        reuse = False
         if window.isMiniaturized():
             window.deminiaturize_(None)
-            return existing
-        if window.isVisible():
+            reuse = True
+        elif window.isVisible():
             window.makeKeyAndOrderFront_(None)
+            reuse = True
+        if reuse:
+            if navigate is not None:
+                navigate(existing)
             return existing
     controller = build()
     controller.window.makeKeyAndOrderFront_(None)
@@ -207,7 +255,11 @@ def front_or_build(existing, build):
 
 
 class WindowRouter:
-    """Decides which window a launch or reopen should show."""
+    """Decides which window a launch, reopen or page request should show.
+
+    `desired` is the page asked for but not yet shown; it is kept while setup
+    is unfinished so first-run setup wins and the route is honoured after.
+    """
 
     def __init__(self, configured, runtime, open_hub, open_setup) -> None:
         self._configured = configured
@@ -216,19 +268,41 @@ class WindowRouter:
         self._open_setup = open_setup
         self.hub = None
         self.setup = None
+        self.desired = None
 
-    def show(self) -> None:
+    def show(self, page=None) -> None:
+        requested = validate_page(page) or consume_request()
+        if requested:
+            self.desired = requested
         if self._configured():
             self._runtime()
-            self.hub = self._open_hub(self.hub)
+            page, self.desired = self.desired, None
+            self.hub = self._open_hub(self.hub, page)
         else:
             self.setup = self._open_setup(self.setup)
 
+    def poll(self) -> bool:
+        """Run-loop timer hook: serve a pending page request. True if served."""
+        page = consume_request()
+        if page is None:
+            return False
+        self.show(page)
+        return True
 
-def _native_hub(existing):
+
+def _native_hub(existing, page=None):
     from localflow import hub_mac
 
-    return front_or_build(existing, lambda: hub_mac.build_window(initial_page="Home"))
+    def navigate(controller):
+        # Same page: nothing to do (a rebuild would only reset scrolling).
+        if page and getattr(controller, "page", None) != page:
+            controller.show_page(page)
+
+    return front_or_build(
+        existing,
+        lambda: hub_mac.build_window(initial_page=page or DEFAULT_PAGE),
+        navigate,
+    )
 
 
 def _native_setup(existing):
@@ -237,41 +311,46 @@ def _native_setup(existing):
     return front_or_build(existing, setup_mac.build_window)
 
 
-def _run_native() -> bool:
+def _run_native(page=None) -> bool:
     """Run the AppKit app with a reopen delegate. False when unavailable."""
     try:
         from localflow.main_app_mac import run_app
     except ImportError:
         return False
     router = WindowRouter(is_configured, ensure_runtime, _native_hub, _native_setup)
-    run_app(router.show)
+    router.desired = page
+    run_app(router.show, router.poll)
     return True
 
 
-def _run_portable() -> None:
+def _run_portable(page=None) -> None:
     if not is_configured():
         from localflow.setup_window import main as setup_main
 
         setup_main()
         return
     ensure_runtime()
-    from localflow.hub_window import main as hub_main
+    # The platform backend, not hub_window.main: on macOS that dispatcher
+    # routes back here, which would recurse when PyObjC is unavailable.
+    from localflow.hub_window import run_backend
 
-    hub_main()
+    run_backend(page or DEFAULT_PAGE)
 
 
-def main() -> None:
-    reopened = REOPEN_FLAG in sys.argv[1:]
-    # hub_window parses sys.argv; the app is launched without arguments.
+def main(argv=None) -> None:
+    reopened, page = parse_args(sys.argv[1:] if argv is None else argv)
+    # The windows below parse sys.argv themselves; hand them none of ours.
     sys.argv = sys.argv[:1]
     lock = acquire(LOCK_NAME)
     if lock is None:
-        reopen_running_app(allow_open=not reopened and sys.platform == "darwin")
+        reopen_running_app(
+            allow_open=not reopened and sys.platform == "darwin", page=page
+        )
         return
     try:
-        if sys.platform == "darwin" and _run_native():
+        if sys.platform == "darwin" and _run_native(page):
             return
-        _run_portable()
+        _run_portable(page)
     finally:
         lock.release()
 
