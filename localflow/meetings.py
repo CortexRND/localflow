@@ -396,6 +396,7 @@ ENHANCE_INSTRUCTION = (
 )
 
 _USER_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+_RETRY_MIN_LENGTH_RATIO = 0.6
 
 
 def _user_heading_lines(md: str) -> list[str]:
@@ -584,7 +585,14 @@ class MeetingSummarizer:
                 except Exception:
                     log.exception("heading repair failed; keeping original draft")
                 else:
-                    if len(missing_user_headings(retry, user_notes)) < len(missing):
+                    retry_missing = missing_user_headings(retry, user_notes)
+                    retry_length = len("".join(retry.split()))
+                    draft_length = len("".join(result.split()))
+                    if (
+                        len(retry_missing) < len(missing)
+                        and retry_length
+                        >= _RETRY_MIN_LENGTH_RATIO * draft_length
+                    ):
                         result = retry
                 remaining = missing_user_headings(result, user_notes)
                 if remaining:

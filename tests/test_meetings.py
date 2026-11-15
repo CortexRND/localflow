@@ -208,6 +208,19 @@ def test_summarize_keeps_original_when_retry_has_the_same_missing_count():
     assert len(llm.prompts) == 2
 
 
+def test_summarize_rejects_short_retry_that_drops_draft_facts():
+    notes = "## Alpha\n## Beta"
+    draft = "## Alpha\n" + "Important decision and owner details. " * 10
+    retry = "## Alpha\n## Beta"
+    llm = FakeLLM([draft, retry])
+
+    out = MeetingSummarizer(llm).summarize("facts", user_notes=notes)
+
+    assert missing_user_headings(retry, notes) == []
+    assert out == draft
+    assert len(llm.prompts) == 2
+
+
 def test_summarize_without_note_headings_does_not_add_skeleton_or_retry():
     llm = FakeLLM(["## Summary\nThe launch is in May."])
 
