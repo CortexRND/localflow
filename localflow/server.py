@@ -133,6 +133,8 @@ _MAX_LAUNCH_CODES = 32
 _launch_codes: dict[str, float] = {}
 _launch_lock = threading.Lock()
 _LAUNCH_PATHS = frozenset({"/", "/settings"})
+# Pages that may embed the token must not outlive the request in any cache.
+_NO_STORE = {"Cache-Control": "no-store"}
 
 
 def _issue_launch_code() -> str:
@@ -345,13 +347,17 @@ def healthz() -> dict:
 def index(request: Request) -> HTMLResponse:
     page = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
     token = _api_token if request.state.launched else ""
-    return HTMLResponse(page.replace("__LOCALFLOW_LAUNCH_TOKEN__", html.escape(token)))
+    return HTMLResponse(
+        page.replace("__LOCALFLOW_LAUNCH_TOKEN__", html.escape(token)), headers=_NO_STORE
+    )
 
 
 @app.get("/settings")
 def settings() -> HTMLResponse:
     page = (_STATIC_DIR / "settings.html").read_text(encoding="utf-8")
-    return HTMLResponse(page.replace("__LOCALFLOW_TOKEN__", html.escape(_api_token)))
+    return HTMLResponse(
+        page.replace("__LOCALFLOW_TOKEN__", html.escape(_api_token)), headers=_NO_STORE
+    )
 
 
 @app.post("/api/launch-code")

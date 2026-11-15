@@ -446,6 +446,7 @@ def test_launch_code_opens_settings_once(monkeypatch):
         page = client.get(f"/settings?launch={code}")
         assert page.status_code == 200
         assert "test-token" in page.text
+        assert page.headers["cache-control"] == "no-store"
 
         reused = client.get(f"/settings?launch={code}")
         assert reused.status_code == 401
@@ -489,6 +490,7 @@ def test_launch_code_injects_token_into_index_once(monkeypatch):
         page = client.get(f"/?launch={code}")
         assert page.status_code == 200
         assert 'content="test-token"' in page.text
+        assert page.headers["cache-control"] == "no-store"
         again = client.get(f"/?launch={code}")
         assert again.status_code == 200
         assert "test-token" not in again.text
