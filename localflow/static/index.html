@@ -960,7 +960,7 @@
   const apiToken = (() => {
     const params = new URLSearchParams(location.search);
     const launched = document.querySelector('meta[name="localflow-launch-token"]').content;
-    const fromUrl = (launched.startsWith('__') ? '' : launched) || params.get('token');
+    const fromUrl = launched || params.get('token');
     let token = fromUrl || '';
     try {
       if (fromUrl) localStorage.setItem('localflow-token', fromUrl);
