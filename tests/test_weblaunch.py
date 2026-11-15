@@ -62,6 +62,23 @@ def test_opener_gets_a_private_launch_file_not_the_code(monkeypatch, tmp_path):
         assert stat.S_IMODE(launch_file.parent.stat().st_mode) == 0o700
 
 
+def test_launch_file_submits_only_on_a_fresh_navigation(monkeypatch, tmp_path):
+    _fake_server(monkeypatch, tmp_path)
+    opened = []
+    weblaunch.open_web_ui(BASE, "/settings", opener=opened.append)
+    page = Path(url2pathname(urlparse(opened[0]).path)).read_text(encoding="utf-8")
+    script = page[page.index("<script>") : page.index("</script>")]
+
+    guard = "if ((nav && nav.type !== 'navigate') || submitted) { showUsed(); return; }"
+    assert "performance.getEntriesByType('navigation')[0]" in script
+    assert "sessionStorage.setItem(key, '1')" in script
+    assert "event.persisted" in script
+    assert script.count("submit()") == 1
+    assert script.index(guard) < script.index("sessionStorage.setItem") < script.index("submit()")
+    assert "already used" in page
+    assert "<noscript><button type=\"submit\">" in page
+
+
 def test_launch_file_escapes_the_code(monkeypatch, tmp_path):
     _fake_server(monkeypatch, tmp_path, code='"><script>x</script>')
     opened = []

@@ -30,7 +30,22 @@ _LAUNCH_PAGE = """<!doctype html>
 <input type="hidden" name="launch" value="{code}">
 <noscript><button type="submit">Open LocalFlow</button></noscript>
 </form>
-<script>document.forms[0].submit();</script>
+<p id="used" hidden>This launch link was already used — reopen LocalFlow from lf ui or Settings.</p>
+<script>
+// Submit only on a fresh open. Back, reload or session restore would resend
+// an already-used code, which the server treats as theft and rotates the token.
+(() => {{
+  const showUsed = () => {{ document.getElementById('used').hidden = false; }};
+  window.addEventListener('pageshow', (event) => {{ if (event.persisted) showUsed(); }});
+  const key = 'localflow-launch-submitted:' + location.pathname;
+  const nav = performance.getEntriesByType('navigation')[0];
+  let submitted = false;
+  try {{ submitted = sessionStorage.getItem(key) === '1'; }} catch (e) {{ /* storage off */ }}
+  if ((nav && nav.type !== 'navigate') || submitted) {{ showUsed(); return; }}
+  try {{ sessionStorage.setItem(key, '1'); }} catch (e) {{ /* storage off */ }}
+  document.forms[0].submit();
+}})();
+</script>
 </body></html>
 """
 
