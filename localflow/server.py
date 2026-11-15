@@ -300,7 +300,7 @@ def api_config() -> dict:
 
 @app.put("/api/config")
 def api_config_update(body: dict) -> dict:
-    global _config, _transcriber, _cleaner, _ollama, _commands, _history
+    global _config, _transcriber, _cleaner, _ollama, _commands, _history, _summarizer
     with _config_lock:
         try:
             updated = apply_config_update(_config, body)
@@ -318,6 +318,7 @@ def api_config_update(body: dict) -> dict:
         _transcriber = None
         _cleaner = None
         _ollama = new_llm
+        _summarizer = MeetingSummarizer(build_llm(_config, timeout=300, num_ctx=8192))
         _history = None
         result = config_to_dict(_config)
     return {**result, "restart_required": api_logic.restart_required(body)}
@@ -360,7 +361,7 @@ def api_secrets() -> dict[str, bool]:
 
 @app.put("/api/secrets/{name}")
 def api_secret_update(name: str, body: dict) -> dict[str, bool]:
-    global _ollama, _cleaner, _prompt_gen
+    global _ollama, _cleaner, _prompt_gen, _summarizer
     if name not in api_logic.SECRET_NAMES:
         raise HTTPException(status_code=404, detail="unknown secret")
     value = body.get("value", "")
@@ -371,6 +372,7 @@ def api_secret_update(name: str, body: dict) -> dict[str, bool]:
             api_logic.update_secret(name, value)
             if name == "llm_api_key":
                 _ollama = build_llm(_config)
+                _summarizer = MeetingSummarizer(build_llm(_config, timeout=300, num_ctx=8192))
                 _cleaner = None
             elif name == "fireworks_api_key":
                 _prompt_gen = WorkPromptGenerator(build_workprompts_llm(_config))
