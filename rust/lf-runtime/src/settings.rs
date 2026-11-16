@@ -94,7 +94,10 @@ pub fn set_dictation_enabled(path: &Path, enabled: bool) -> Result<()> {
         .parse()
         .map_err(|e| anyhow!("invalid config file {}: {e}", path.display()))?;
     // An inline `dictation = { ... }` table is edited in place too.
-    match doc.get_mut("dictation").and_then(|item| item.as_table_like_mut()) {
+    match doc
+        .get_mut("dictation")
+        .and_then(|item| item.as_table_like_mut())
+    {
         Some(section) => {
             section.insert("enabled", toml_edit::value(enabled));
         }
