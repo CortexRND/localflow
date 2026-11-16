@@ -160,11 +160,14 @@ def test_configuration_and_provider_contract(servers):
         {"llm": {"model": "another-model"}, "server": {"port": 9001}},
         {"features": {"meetings": True}, "hotkey": {"key": "ctrl+space"}},
         {"dictation": {"sample_rate": 22050, "pause_media": False}},
+        {"dictation": {"enabled": False}},
+        {"dictation": {"enabled": True}},
         {"nonsense": {}}, {"dictation": {"nonsense": True}},
         {"server": {"port": -1}}, {"stt": {}},
     ]:
         compare(servers, "/api/config", "PUT", update)
         compare(servers, "/api/config")
+        assert servers[0].request("/api/status")[1]["dictation_enabled"] == servers[1].request("/api/status")[1]["dictation_enabled"]
     compare(servers, "/api/config", "PUT")
     compare(servers, "/api/config", "PUT", [])
     compare(servers, "/api/autostart", "POST", {"enabled": "true"})

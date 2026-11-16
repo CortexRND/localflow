@@ -75,6 +75,7 @@ pub fn status(config: &Config, backend: &dyn crate::backend::Backend) -> Value {
         "stt": {"provider": f("stt_backend"), "model": f("model_size"), "device": f("stt_device"), "language": f("language"), "loaded": backend.transcriber_loaded()},
         "llm": {"provider": f("llm_provider"), "base_url": f("llm_base_url"), "model": f("llm_model"), "cleanup_enabled": f("cleanup_enabled")},
         "hotkey": f("hotkey"), "paste_method": f("paste_method"), "sounds_enabled": f("sounds_enabled"),
+        "dictation_enabled": f("dictation_enabled"),
         "server": {"host": f("server_host"), "port": f("server_port")},
         "meetings_enabled": f("meetings_enabled"), "autostart": backend.autostart_status()
     })
