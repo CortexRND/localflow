@@ -2220,7 +2220,10 @@ mod tests {
         let (notes, error) = recent_notes(vault.to_str().unwrap(), "notes/meetings", 5, None);
         assert_eq!(error, "");
         let paths: Vec<_> = notes.iter().map(|n| n.path.clone()).collect();
-        assert_eq!(paths, [good.to_string_lossy().into_owned()]);
+        assert_eq!(
+            paths,
+            [good.canonicalize().unwrap().to_string_lossy().into_owned()]
+        );
     }
 
     #[cfg(unix)]
