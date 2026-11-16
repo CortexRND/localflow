@@ -70,8 +70,10 @@ jobs:
           else
             shasum -a 256 -c SHA256SUMS
           fi
-          tar -tzf "localflow-$version.tar.gz" | grep -qx "localflow-$version/install.sh"
-          unzip -l "localflow-$version.zip" | grep -q " localflow-$version/install.sh$"
+          tar -tzf "localflow-$version.tar.gz" > "$RUNNER_TEMP/tar-list.txt"
+          grep -Fxq "localflow-$version/install.sh" "$RUNNER_TEMP/tar-list.txt"
+          unzip -Z1 "localflow-$version.zip" > "$RUNNER_TEMP/zip-list.txt"
+          grep -Fxq "localflow-$version/install.sh" "$RUNNER_TEMP/zip-list.txt"
 
   install:
     strategy:
