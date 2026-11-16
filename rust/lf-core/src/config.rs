@@ -457,8 +457,11 @@ fn win_is_fully_qualified(path: &str) -> bool {
     let path = path.replace('/', "\\");
     if let Some(rest) = path.strip_prefix("\\\\") {
         let unc_prefix = "?\\UNC\\";
-        let rest = if rest.len() >= unc_prefix.len()
-            && rest[..unc_prefix.len()].eq_ignore_ascii_case(unc_prefix)
+        // Compare bytes: slicing the str could split a multi-byte char.
+        let rest = if rest
+            .as_bytes()
+            .get(..unc_prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(unc_prefix.as_bytes()))
         {
             &rest[unc_prefix.len()..]
         } else {
@@ -1532,6 +1535,40 @@ mod tests {
     use super::*;
     use crate::secrets::{self, FailingKeyring, KeyringBackend, MemoryKeyring, SERVICE};
     use crate::test_support::{EnvGuard, GLOBAL_LOCK};
+
+    #[test]
+    fn win_is_fully_qualified_unicode_unc_does_not_panic() {
+        // 'é' straddles byte 6 of the post-`\\` remainder.
+        assert!(win_is_fully_qualified("\\\\abcéé\\share\\config"));
+        assert!(win_is_fully_qualified("//abcéé/share/config"));
+        assert!(win_is_fully_qualified("\\\\ééé\\ßhare"));
+        assert!(!win_is_fully_qualified("\\\\abcéé"));
+        assert!(!win_is_fully_qualified("\\\\abcéé\\"));
+    }
+
+    #[test]
+    fn win_is_fully_qualified_drive_and_unc_forms() {
+        assert!(win_is_fully_qualified("C:\\Users\\x"));
+        assert!(win_is_fully_qualified("c:/Users/x"));
+        assert!(!win_is_fully_qualified("C:"));
+        assert!(!win_is_fully_qualified("C:relative"));
+        assert!(!win_is_fully_qualified("\\Users\\x"));
+        assert!(!win_is_fully_qualified("relative\\x"));
+        assert!(!win_is_fully_qualified(""));
+        assert!(win_is_fully_qualified("\\\\server\\share"));
+        assert!(win_is_fully_qualified("\\\\server\\share\\dir"));
+        assert!(!win_is_fully_qualified("\\\\server"));
+        assert!(!win_is_fully_qualified("\\\\server\\"));
+        assert!(!win_is_fully_qualified("\\\\\\share"));
+        assert!(!win_is_fully_qualified("\\\\"));
+        // Extended UNC prefix, matched case-insensitively.
+        assert!(win_is_fully_qualified("\\\\?\\UNC\\server\\share\\x"));
+        assert!(win_is_fully_qualified("\\\\?\\unc\\server\\share"));
+        assert!(win_is_fully_qualified("//?/Unc/server/share"));
+        assert!(win_is_fully_qualified("\\\\?\\UNC\\sérvér\\shäre"));
+        assert!(!win_is_fully_qualified("\\\\?\\UNC\\server"));
+        assert!(!win_is_fully_qualified("\\\\?\\UNC\\"));
+    }
 
     const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\n\n[setup]\nversion = 0\n";
 
