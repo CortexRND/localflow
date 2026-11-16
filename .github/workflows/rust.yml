@@ -64,7 +64,9 @@ jobs:
         continue-on-error: true
         env:
           LOCALFLOW_CONFIG: ${{ runner.temp }}/python-hub-config.toml
-        run: bash scripts/ci_hub_rss.sh Python artifacts/mac-ui/idle-rss.txt python -c 'from localflow.hub_mac import main; main()'
+        # The standalone Hub has builtin super() in two PyObjC initializers.
+        # Supply objc.super for this comparison without changing Python source.
+        run: bash scripts/ci_hub_rss.sh 'Python (objc.super launch shim)' artifacts/mac-ui/idle-rss.txt python -c 'import objc; from localflow import hub_mac, mac_style; hub_mac.super = mac_style.super = objc.super; hub_mac.main()'
 
       - uses: actions/upload-artifact@v4
         if: always()

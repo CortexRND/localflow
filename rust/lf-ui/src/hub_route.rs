@@ -157,6 +157,21 @@ impl RequestFile {
     /// The file is first renamed to a per-process claim name, so when several
     /// consumers race exactly one of them gets the request.
     pub fn consume_request(&self, now: &dyn Fn() -> f64) -> Option<&'static str> {
+        // Windows renames can race through handles opened on the same source.
+        // Keep the lock file (not the lock) between calls: unlinking it would
+        // let concurrent consumers lock different file objects.
+        #[cfg(windows)]
+        let _consume_lock = {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(self.dir.join("page-request.consume.lock"))
+                .ok()?;
+            file.try_lock().ok()?;
+            file
+        };
         let claim = self.sibling("claim");
         fs::rename(self.path(), &claim).ok()?;
         let data = (|| -> Option<Value> {
@@ -354,6 +369,7 @@ mod tests {
         let mut names: Vec<String> = match fs::read_dir(requests.dir()) {
             Ok(entries) => entries
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name != "page-request.consume.lock")
                 .collect(),
             Err(_) => Vec::new(),
         };
@@ -400,6 +416,25 @@ mod tests {
         assert_eq!(leftovers(&requests), ["page-request.json"]);
         assert_eq!(requests.consume_request(&now), Some("Hot Phrases"));
         assert!(leftovers(&requests).is_empty());
+        assert_eq!(requests.consume_request(&now), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn consumer_lock_is_released_when_its_handle_drops() {
+        let (_tmp, requests) = file();
+        assert!(requests.write_request("Home", &now));
+        assert_eq!(requests.consume_request(&now), Some("Home"));
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(requests.dir().join("page-request.consume.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        assert!(requests.write_request("History", &now));
+        assert_eq!(requests.consume_request(&now), None);
+        drop(lock);
+        assert_eq!(requests.consume_request(&now), Some("History"));
         assert_eq!(requests.consume_request(&now), None);
     }
 
