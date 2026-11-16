@@ -18,8 +18,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import pytest
+import test_rust_parity as parity
 
-from test_rust_parity import LF_RS, ROOT, rust_build, sandbox  # noqa: F401
+LF_RS, ROOT = parity.LF_RS, parity.ROOT
+rust_build, sandbox = parity.rust_build, parity.sandbox
 
 
 def _free_port():
