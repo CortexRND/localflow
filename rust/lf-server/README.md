@@ -39,8 +39,11 @@ No changes to `lf-core` or `lf-providers` are needed.
 ## Runtime integration and gaps
 
 Implement `backend::Backend`, then pass it to
-`ServerState::new(config, token, Arc::new(backend))` and serve `router(state)`
-with axum. Blocking storage/provider/network operations run in Tokio's blocking
+`ServerState::load_with_backend(Arc::new(backend))` and serve `router(state)`
+with axum. This attaches replay recovery to the token file read at startup.
+`ServerState::new(config, token, backend)` instead provides an isolated in-memory
+auth scope whose replay recovery never writes the global token file.
+Blocking storage/provider/network operations run in Tokio's blocking
 pool; slow LLM calls do not hold the config lock or block health/auth requests.
 The CLI uses two async workers and at most sixteen blocking workers.
 
