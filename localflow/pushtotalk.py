@@ -5,10 +5,12 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 
 from localflow import media
 from localflow import sounds as _sounds
 from localflow.audio import Recorder
+from localflow.config import ConfigError, load_config, save_config
 from localflow.context import AppInfo, frontmost_app
 from localflow.history import HistoryStore
 from localflow.inject import (
@@ -109,6 +111,9 @@ class PushToTalkController:
     def note_paste_last(self) -> None:
         self._events.put(("paste_last", self._clock()))
 
+    def note_dictation_toggle(self) -> None:
+        self._events.put(("dictation_toggle", self._clock()))
+
     def note_job_result(
         self,
         text: str | None,
@@ -196,7 +201,7 @@ class PushToTalkController:
                 self._handle_transform(event[1])
                 continue
             if event[0] == "config":
-                self._config = event[1]
+                self._apply_config(event[1])
                 if not self._recorder.recording:
                     # A toggle that never started recording must not leave the
                     # next press of a new toggle shortcut meaning "stop".
@@ -204,6 +209,27 @@ class PushToTalkController:
                         self._toggle_intent = False
                 continue
             kind, timestamp = event
+            if kind == "dictation_toggle":
+                try:
+                    fresh = load_config()
+                    fresh = replace(
+                        fresh, dictation_enabled=not fresh.dictation_enabled
+                    )
+                    save_config(fresh)
+                    self._apply_config(
+                        replace(
+                            self._config,
+                            dictation_enabled=fresh.dictation_enabled,
+                        )
+                    )
+                except (ConfigError, OSError, ValueError):
+                    log.exception("could not toggle dictation")
+                continue
+            if (
+                not getattr(self._config, "dictation_enabled", True)
+                and kind != "paste_last"
+            ):
+                continue
             if kind == "command_cancel":
                 self._cancel_command()
                 continue
@@ -256,6 +282,17 @@ class PushToTalkController:
                 )
                 if text:
                     paste_text(text, self._config.paste_method)
+
+    def _apply_config(self, config) -> None:
+        self._config = config
+        if not getattr(config, "dictation_enabled", True):
+            self._handle_cancel()
+            self._gesture_state = "IDLE"
+            self._key_held = False
+            self._tapped_at = None
+            self._locked_at = None
+            with self._toggle_lock:
+                self._toggle_intent = False
 
     def _timer_timeout(self) -> float | None:
         """How long the consumer may block; None = until the next event.
@@ -499,6 +536,8 @@ class PushToTalkController:
         self._publish_state("idle")
 
     def _do_start(self, app_info: AppInfo | None = None, state: str = "recording") -> bool:
+        if not getattr(self._config, "dictation_enabled", True):
+            return False
         try:
             self._recording_app_info = app_info if app_info is not None else frontmost_app()
             self._recorder.start()

@@ -48,9 +48,11 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "command": "command_hotkey",
         "polish": "polish_hotkey",
         "prompt": "prompt_hotkey",
+        "dictation_toggle": "dictation_toggle_hotkey",
     },
     "paste": {"method": "paste_method"},
     "dictation": {
+        "enabled": "dictation_enabled",
         "spoken_symbols": "spoken_symbols",
         "spoken_punctuation": "spoken_punctuation",
         "silence_threshold_dbfs": "silence_threshold_dbfs",
@@ -124,6 +126,8 @@ class Config:
     paste_last_hotkey: str = (
         "<ctrl>+<cmd>+v" if sys.platform == "darwin" else "<ctrl>+<shift>+v"
     )
+    dictation_enabled: bool = True
+    dictation_toggle_hotkey: str = ""
     command_hotkey: str = "alt_r"
     polish_hotkey: str = "<ctrl>+<alt>+1"
     prompt_hotkey: str = "<ctrl>+<alt>+2"
@@ -381,6 +385,8 @@ _ENUM_VALUES = {
 }
 
 _FIELD_TYPES = {
+    "dictation_enabled": bool,
+    "dictation_toggle_hotkey": str,
     "llm_key_ref": str,
     "paste_last_hotkey": str,
     "command_hotkey": str,

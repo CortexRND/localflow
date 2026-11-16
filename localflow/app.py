@@ -68,6 +68,7 @@ def keyboard_bindings(config, controller) -> dict:
     combos = [
         (shortcut, callback)
         for shortcut, callback in (
+            (config.dictation_toggle_hotkey, controller.note_dictation_toggle),
             (config.paste_last_hotkey, controller.note_paste_last),
             (config.polish_hotkey, lambda: controller.note_transform("polish")),
             (config.prompt_hotkey, lambda: controller.note_transform("prompt")),
