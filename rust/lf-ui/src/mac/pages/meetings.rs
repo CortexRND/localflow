@@ -1153,7 +1153,11 @@ fn add_divider(ctx: &PageCtx, parent: &NSView, y: f64, width: f64) {
 }
 
 impl HubPage for MeetingsPage {
-    fn prepare_snapshot(&mut self, preparation: &str, root: &std::path::Path) -> anyhow::Result<()> {
+    fn prepare_snapshot(
+        &mut self,
+        preparation: &str,
+        root: &std::path::Path,
+    ) -> anyhow::Result<()> {
         let templates = vec![
             MeetingTemplate {
                 id: "general".into(),
@@ -1205,7 +1209,9 @@ impl HubPage for MeetingsPage {
             })
         };
         let mut snapshot = MeetingsPageSnapshot {
-            status: Some(serde_json::json!({"session": null, "last_saved": null, "chat_available": false})),
+            status: Some(
+                serde_json::json!({"session": null, "last_saved": null, "chat_available": false}),
+            ),
             templates,
             template_default: "general".into(),
             template: "general".into(),

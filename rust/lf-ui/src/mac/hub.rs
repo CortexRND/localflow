@@ -30,8 +30,8 @@ use super::actions::{ActionTarget, Timer};
 use super::page::{HubPage, HubServices, Measure, PageCtx, PageHandle};
 use super::pages::{
     ask::AskPage, dictionary::DictionaryPage, history::HistoryPage, home::HomePage,
-    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, models::ModelsPage,
-    prompts::PromptsPage, settings::SettingsPage, style::StylePage,
+    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, models::ModelsPage, prompts::PromptsPage,
+    settings::SettingsPage, style::StylePage,
 };
 use super::style::{
     boxed_measure, color, hide_from_accessibility, page_title, rect, style_flat_button,
@@ -449,7 +449,11 @@ impl Hub {
     }
 
     /// Prepare the current page through its real state API (used by snapshots).
-    pub fn prepare_snapshot(&self, preparation: &str, root: &std::path::Path) -> anyhow::Result<()> {
+    pub fn prepare_snapshot(
+        &self,
+        preparation: &str,
+        root: &std::path::Path,
+    ) -> anyhow::Result<()> {
         let page = self.current_page();
         self.with_page(&page, |page| page.prepare_snapshot(preparation, root))
             .unwrap_or_else(|| anyhow::bail!("page {page} is already borrowed"))

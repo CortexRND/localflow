@@ -121,8 +121,7 @@ pub fn is_configured() -> bool {
         parse_toml_file(&legacy).map(|data| migrate_v1(&data).0)
     };
     parsed.is_ok_and(|data| {
-        config_from_v2(&data, cfg!(target_os = "macos"))
-            .is_ok_and(|_| configuration_marker(&data))
+        config_from_v2(&data, cfg!(target_os = "macos")).is_ok_and(|_| configuration_marker(&data))
     })
 }
 
@@ -141,7 +140,9 @@ pub fn plan_initial_route(
     requested: Option<&str>,
 ) -> Result<InitialRoute, String> {
     let page = match requested {
-        Some(page) => Some(validate_page(page).ok_or_else(|| format!("unknown Hub page: {page:?}"))?),
+        Some(page) => {
+            Some(validate_page(page).ok_or_else(|| format!("unknown Hub page: {page:?}"))?)
+        }
         None => None,
     };
     Ok(if configured {

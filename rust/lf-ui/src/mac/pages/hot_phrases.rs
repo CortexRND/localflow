@@ -1510,8 +1510,12 @@ impl HubPage for HotPhrasesPage {
                 "Review this PR:\n- tests\n- types\n- no churn",
                 true,
             )?;
-            model.store.add("sign off", "Thanks — talk tomorrow.", false)?;
-            model.store.add("standup", "yesterday:\ntoday:\nblockers:", true)?;
+            model
+                .store
+                .add("sign off", "Thanks — talk tomorrow.", false)?;
+            model
+                .store
+                .add("standup", "yesterday:\ntoday:\nblockers:", true)?;
         }
         let mut editor = HotPhrasesEditor::new(model);
         editor.on_show();

@@ -2730,10 +2730,8 @@ impl HubPage for ModelsPage {
                 } else {
                     preset.base_url.into()
                 },
-                model: if matches!(
-                    preparation,
-                    "keys-saved-active" | "keys-expanded-active"
-                ) && preset.id == "fireworks"
+                model: if matches!(preparation, "keys-saved-active" | "keys-expanded-active")
+                    && preset.id == "fireworks"
                 {
                     "accounts/fireworks/models/kimi-k3".into()
                 } else {
@@ -2770,11 +2768,9 @@ impl HubPage for ModelsPage {
         seed.quick_models = match preparation {
             "change-ollama" => vec!["gemma4:e4b".into(), "llama3.2:3b".into(), "qwen3:4b".into()],
             "change-missing-model" => vec!["gemma4:e4b".into()],
-            "models-populated" => vec![
-                "gemma4:e4b".into(),
-                "llama3.2:3b".into(),
-                "qwen3:4b".into(),
-            ],
+            "models-populated" => {
+                vec!["gemma4:e4b".into(), "llama3.2:3b".into(), "qwen3:4b".into()]
+            }
             "keys-saved-active" | "keys-expanded-active" => {
                 vec!["llama3.2:3b".into()]
             }
@@ -2842,10 +2838,7 @@ impl HubPage for ModelsPage {
             let state = self.state.borrow();
             if let Some(services) = &state.services {
                 let mut config = services.config();
-                if matches!(
-                    preparation,
-                    "keys-saved-active" | "keys-expanded-active"
-                ) {
+                if matches!(preparation, "keys-saved-active" | "keys-expanded-active") {
                     config.set_field("llm_provider", serde_json::json!("openai-compatible"));
                     config.set_field(
                         "llm_base_url",

@@ -31,12 +31,16 @@ fn walk(view: &NSView, path: &str, page: &str, failures: &mut Vec<String>) {
         let child_path = format!("{path}/{index}");
         if let Ok(button) = subview.clone().downcast::<NSButton>() {
             if !nonempty(Some(button.title())) && !nonempty(button.accessibilityLabel()) {
-                failures.push(format!("{page}: button at {child_path} has no title or label"));
+                failures.push(format!(
+                    "{page}: button at {child_path} has no title or label"
+                ));
             }
         }
         if let Ok(popup) = subview.clone().downcast::<NSPopUpButton>() {
             if !nonempty(Some(popup.title())) && !nonempty(popup.accessibilityLabel()) {
-                failures.push(format!("{page}: popup at {child_path} has no title or label"));
+                failures.push(format!(
+                    "{page}: popup at {child_path} has no title or label"
+                ));
             }
         }
         if let Ok(switch) = subview.clone().downcast::<NSSwitch>() {
@@ -102,17 +106,15 @@ pub fn run() {
     hub.shutdown();
 
     let setup = snapshot_fixture(mtm);
-    let states = (0..7)
-        .map(SetupSnapshotState::Step)
-        .chain([
-            SetupSnapshotState::ChecksNeedsAction,
-            SetupSnapshotState::ChecksAllReady,
-            SetupSnapshotState::Complete,
-            SetupSnapshotState::CleanupLevelMedium,
-            SetupSnapshotState::NonOllamaProvider,
-            SetupSnapshotState::DownloadProgress,
-            SetupSnapshotState::DownloadError,
-        ]);
+    let states = (0..7).map(SetupSnapshotState::Step).chain([
+        SetupSnapshotState::ChecksNeedsAction,
+        SetupSnapshotState::ChecksAllReady,
+        SetupSnapshotState::Complete,
+        SetupSnapshotState::CleanupLevelMedium,
+        SetupSnapshotState::NonOllamaProvider,
+        SetupSnapshotState::DownloadProgress,
+        SetupSnapshotState::DownloadError,
+    ]);
     for state in states {
         setup.seed_snapshot(state);
         let page = format!("Setup ({})", state.file_stem());

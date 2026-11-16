@@ -10,6 +10,7 @@
 #![allow(deprecated)]
 
 use std::cell::{Cell, RefCell};
+use std::os::unix::fs::PermissionsExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::{Rc, Weak};
 
@@ -22,8 +23,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
-use std::sync::Arc;
 use std::process::Command;
+use std::sync::Arc;
 
 use super::actions::Timer;
 use super::hub::Hub;
@@ -32,12 +33,11 @@ use super::setup::{
     FlowApplyRunner, FlowChecksRunner, FlowModelBackend, SetupContext, SetupHooks, SetupServices,
     SetupWindow,
 };
+use super::setup_audio::{NativeSetupPlatform, RecorderMicLevelSource};
 use crate::backends::http::{HttpAskBackend, HttpMeetingClient, HttpPromptQueue, HttpTransport};
 use crate::backends::settings_agent_native::native_settings_agent;
 use crate::hub_route::{self, HubWindowState};
-use crate::setup_flow::{
-    FileConfigStore, HostPlatform, LaunchAgent, SetupPlatform,
-};
+use crate::setup_flow::{FileConfigStore, LaunchAgent, SetupPlatform};
 
 /// Seconds between page-request polls (`_POLL_SECONDS`).
 pub const POLL_SECONDS: f64 = 0.25;
@@ -156,11 +156,28 @@ impl LaunchAgent for NativeLaunchAgent {
 
     fn install(&self) -> std::result::Result<(), String> {
         let path = Self::plist_path().map_err(|error| error.to_string())?;
-        let parent = path.parent().ok_or("launch agent has no parent directory")?;
+        let parent = path
+            .parent()
+            .ok_or("launch agent has no parent directory")?;
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         let logs = lf_core::home::localflow_dir();
         std::fs::create_dir_all(&logs).map_err(|error| error.to_string())?;
-        let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+        let sibling = std::env::current_exe()
+            .map_err(|error| error.to_string())?
+            .with_file_name("localflow");
+        let exe = std::iter::once(sibling)
+            .chain(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .map(|directory| directory.join("localflow")),
+            )
+            .find(|path| {
+                path.metadata().is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .ok_or(
+                "The localflow runtime executable is not installed; cannot enable start on login.",
+            )?;
         let plist = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{AGENT_LABEL}</string><key>ProgramArguments</key><array><string>{}</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>LimitLoadToSessionType</key><string>Aqua</string><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>\n",
             Self::xml(&exe.to_string_lossy()),
@@ -390,7 +407,9 @@ impl MenuSlot {
 
     fn update(&self, enabled: bool) {
         if let Some(runtime) = self.runtime.borrow().as_ref() {
-            runtime.menu.change(|model| model.dictation_enabled = enabled);
+            runtime
+                .menu
+                .change(|model| model.dictation_enabled = enabled);
         }
     }
 }
@@ -429,7 +448,7 @@ impl WindowRouter {
 
     fn make_setup(&self) -> Result<Rc<SetupWindow>> {
         let config = load_config()?;
-        let platform = Arc::new(HostPlatform);
+        let platform = Arc::new(NativeSetupPlatform);
         let launch_agent = Arc::new(NativeLaunchAgent);
         let hardware = platform.detect_hardware().map_err(anyhow::Error::msg)?;
         let context = SetupContext::detect(
@@ -462,7 +481,7 @@ impl WindowRouter {
                     launch_agent,
                 )),
                 models: Arc::new(FlowModelBackend),
-                mic: None,
+                mic: Some(Arc::new(RecorderMicLevelSource::new())),
                 hooks,
             },
         ))
@@ -507,10 +526,10 @@ impl WindowRouter {
 
     pub fn show(&self, page: Option<&str>) -> Result<()> {
         if let Some(page) = page {
-            self.desired
-                .set(Some(hub_route::validate_page(page).ok_or_else(|| {
-                    anyhow!("unknown Hub page: {page:?}")
-                })?));
+            self.desired.set(Some(
+                hub_route::validate_page(page)
+                    .ok_or_else(|| anyhow!("unknown Hub page: {page:?}"))?,
+            ));
         }
         if self.setup_only.get() {
             self.awaiting_setup.set(false);
@@ -563,8 +582,7 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
         MainThreadMarker::new().ok_or_else(|| anyhow!("the Hub must run on the main thread"))?;
     let page = initial_page
         .map(|page| {
-            hub_route::canonical_page(page)
-                .ok_or_else(|| anyhow!("unknown Hub page: {page:?}"))
+            hub_route::canonical_page(page).ok_or_else(|| anyhow!("unknown Hub page: {page:?}"))
         })
         .transpose()?;
     let transport = Rc::new(RefCell::new(None::<HttpTransport>));

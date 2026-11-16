@@ -482,8 +482,7 @@ impl HubPage for HistoryPage {
                         if let Some(open) = opener {
                             open();
                         } else {
-                            services
-                                .set_page_error(PAGE, "Setup is not available in this window.");
+                            services.set_page_error(PAGE, "Setup is not available in this window.");
                         }
                     }
                     rebuild();

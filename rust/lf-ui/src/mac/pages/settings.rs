@@ -727,7 +727,11 @@ fn build_manual_control(
 }
 
 impl HubPage for SettingsPage {
-    fn prepare_snapshot(&mut self, preparation: &str, _root: &std::path::Path) -> anyhow::Result<()> {
+    fn prepare_snapshot(
+        &mut self,
+        preparation: &str,
+        _root: &std::path::Path,
+    ) -> anyhow::Result<()> {
         match preparation {
             "empty" => self.seed_snapshot_empty(),
             "preview" | "warning" => {

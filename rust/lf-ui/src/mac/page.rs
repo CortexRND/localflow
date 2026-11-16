@@ -210,7 +210,10 @@ pub trait HubPage {
     /// Unknown identifiers fail loudly; snapshots never fall back to a different
     /// state's screenshot. The fixture root contains only temporary data.
     fn prepare_snapshot(&mut self, preparation: &str, _root: &std::path::Path) -> Result<()> {
-        anyhow::ensure!(preparation.is_empty(), "unknown snapshot state {preparation:?}");
+        anyhow::ensure!(
+            preparation.is_empty(),
+            "unknown snapshot state {preparation:?}"
+        );
         Ok(())
     }
 

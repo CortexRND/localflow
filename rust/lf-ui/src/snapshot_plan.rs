@@ -272,15 +272,7 @@ pub const SCENARIOS: [Scenario; 67] = [
         S::SaveError,
         None,
     ),
-    scenario(
-        "Style",
-        "empty",
-        H::None,
-        D::None,
-        Q::Empty,
-        S::Empty,
-        None,
-    ),
+    scenario("Style", "empty", H::None, D::None, Q::Empty, S::Empty, None),
     scenario(
         "Style",
         "populated",
@@ -343,7 +335,11 @@ pub const SCENARIOS: [Scenario; 67] = [
     native_scenario("Hot Phrases", "error-and-undo", "error-and-undo"),
     native_scenario("Meetings", "idle", "idle"),
     native_scenario("Meetings", "running", "running"),
-    native_scenario("Meetings", "running-no-system-audio", "running-no-system-audio"),
+    native_scenario(
+        "Meetings",
+        "running-no-system-audio",
+        "running-no-system-audio",
+    ),
     native_scenario("Meetings", "saved", "saved"),
     native_scenario("Meetings", "running-auto", "running-auto"),
     native_scenario("Meetings", "saved-generated", "saved-generated"),
@@ -381,8 +377,7 @@ pub const SCENARIOS: [Scenario; 67] = [
     native_scenario("Settings", "manual-error", "manual-error"),
 ];
 
-/// Setup window snapshots use Python's unsized default-window names except for
-/// the explicit `checks-needs-action-wide` wide case.
+/// Setup keeps Python's default-window names and adds wide counterparts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SetupScenario {
     pub state: &'static str,
@@ -390,20 +385,62 @@ pub struct SetupScenario {
 }
 
 pub const SETUP_SCENARIOS: [SetupScenario; 14] = [
-    SetupScenario { state: "step-1", wide: false },
-    SetupScenario { state: "step-2", wide: false },
-    SetupScenario { state: "step-3", wide: false },
-    SetupScenario { state: "step-4", wide: false },
-    SetupScenario { state: "step-5", wide: false },
-    SetupScenario { state: "step-6", wide: false },
-    SetupScenario { state: "step-7", wide: false },
-    SetupScenario { state: "checks-needs-action", wide: false },
-    SetupScenario { state: "checks-all-ready", wide: false },
-    SetupScenario { state: "checks-needs-action", wide: true },
-    SetupScenario { state: "complete", wide: false },
-    SetupScenario { state: "cleanup-level-medium", wide: false },
-    SetupScenario { state: "non-ollama-provider", wide: false },
-    SetupScenario { state: "download-progress", wide: false },
+    SetupScenario {
+        state: "step-1",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-2",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-3",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-4",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-5",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-6",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-7",
+        wide: false,
+    },
+    SetupScenario {
+        state: "checks-needs-action",
+        wide: false,
+    },
+    SetupScenario {
+        state: "checks-all-ready",
+        wide: false,
+    },
+    SetupScenario {
+        state: "checks-needs-action",
+        wide: true,
+    },
+    SetupScenario {
+        state: "complete",
+        wide: false,
+    },
+    SetupScenario {
+        state: "cleanup-level-medium",
+        wide: false,
+    },
+    SetupScenario {
+        state: "non-ollama-provider",
+        wide: false,
+    },
+    SetupScenario {
+        state: "download-progress",
+        wide: false,
+    },
     // Error is included separately below so normal/empty/error coverage can be
     // counted without dropping the 14 fixture entries above.
 ];
@@ -420,10 +457,21 @@ impl SetupScenario {
     }
 }
 
-pub fn setup_scenarios() -> impl Iterator<Item = &'static SetupScenario> {
+pub fn setup_scenarios() -> impl Iterator<Item = SetupScenario> {
     SETUP_SCENARIOS
         .iter()
         .chain(std::iter::once(&SETUP_ERROR_SCENARIO))
+        .filter(|scenario| !scenario.wide)
+        .copied()
+        .flat_map(|scenario| {
+            [
+                scenario,
+                SetupScenario {
+                    wide: true,
+                    ..scenario
+                },
+            ]
+        })
 }
 
 pub fn total_setup_snapshots() -> usize {
@@ -610,7 +658,7 @@ mod tests {
         assert_eq!(SCENARIOS.len(), 67);
         assert_eq!(total_snapshots(), 268);
         assert!(total_snapshots() >= 64);
-        assert_eq!(total_setup_snapshots(), 30);
+        assert_eq!(total_setup_snapshots(), 56);
     }
 
     #[test]
@@ -618,7 +666,10 @@ mod tests {
         let required = [
             ("Home", &["empty", "populated"][..]),
             ("Ask", &["empty", "conversation", "error"][..]),
-            ("Hot Phrases", &["empty", "populated3-selected", "invalid-draft"][..]),
+            (
+                "Hot Phrases",
+                &["empty", "populated3-selected", "invalid-draft"][..],
+            ),
             ("Dictionary", &["empty", "populated"][..]),
             ("Prompts", &["empty", "two", "failures"][..]),
             ("Meetings", &["recent-empty", "running", "saved"][..]),
@@ -742,7 +793,7 @@ mod tests {
     }
 
     #[cfg(test)]
-    fn find_setup(state: &str, wide: bool) -> &'static SetupScenario {
+    fn find_setup(state: &str, wide: bool) -> SetupScenario {
         setup_scenarios()
             .find(|scenario| scenario.state == state && scenario.wide == wide)
             .unwrap()

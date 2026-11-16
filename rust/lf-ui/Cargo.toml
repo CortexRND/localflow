@@ -35,6 +35,7 @@ libc = "0.2"
 # The AppKit layer (`lf_ui::mac`). macOS only: nothing here is built or linked
 # on other platforms.
 [target.'cfg(target_os = "macos")'.dependencies]
+lf-audio = { path = "../lf-audio" }
 lf-input = { path = "../lf-input" }
 objc2 = "0.6"
 objc2-foundation = "0.3"

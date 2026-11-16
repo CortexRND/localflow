@@ -3,7 +3,7 @@
 //! `cargo run -p lf-ui --example snapshots [OUT_DIR]` writes Python-compatible
 //! filenames (default `artifacts/rust-ui`) for every scenario of
 //! [`lf_ui::snapshot_plan`]. Hub pages use the minimum and 1280x820 sizes;
-//! setup adds its Python-named wide checks case. Everything runs against a
+//! setup keeps Python's default names and adds wide counterparts. Everything runs against a
 //! temporary directory and isolated fakes: no real config, history, dictionary,
 //! keychain, network or microphone is read or written by fixture preparation.
 //!
@@ -193,13 +193,13 @@ mod native {
         }
         Ok(match (scenario.state, scenario.wide) {
             ("checks-needs-action", false) => SetupSnapshotState::ChecksNeedsAction,
-            ("checks-all-ready", false) => SetupSnapshotState::ChecksAllReady,
+            ("checks-all-ready", _) => SetupSnapshotState::ChecksAllReady,
             ("checks-needs-action", true) => SetupSnapshotState::ChecksNeedsActionWide,
-            ("complete", false) => SetupSnapshotState::Complete,
-            ("cleanup-level-medium", false) => SetupSnapshotState::CleanupLevelMedium,
-            ("non-ollama-provider", false) => SetupSnapshotState::NonOllamaProvider,
-            ("download-progress", false) => SetupSnapshotState::DownloadProgress,
-            ("download-error", false) => SetupSnapshotState::DownloadError,
+            ("complete", _) => SetupSnapshotState::Complete,
+            ("cleanup-level-medium", _) => SetupSnapshotState::CleanupLevelMedium,
+            ("non-ollama-provider", _) => SetupSnapshotState::NonOllamaProvider,
+            ("download-progress", _) => SetupSnapshotState::DownloadProgress,
+            ("download-error", _) => SetupSnapshotState::DownloadError,
             other => bail!("unknown setup snapshot route {other:?}"),
         })
     }
@@ -247,7 +247,15 @@ mod native {
         }
         let setup = snapshot_fixture(mtm);
         for scenario in setup_scenarios() {
-            setup.seed_snapshot(setup_state(scenario)?);
+            setup.seed_snapshot(setup_state(&scenario)?);
+            setup.resize_content(
+                if scenario.wide {
+                    1100.0
+                } else {
+                    f64::from(lf_ui::setup_flow::WINDOW_MIN_WIDTH)
+                },
+                f64::from(lf_ui::setup_flow::WINDOW_MIN_HEIGHT),
+            );
             for (theme, dark) in SNAPSHOT_THEMES {
                 set_appearance(SnapshotTarget::Window(setup.window()), dark)?;
                 setup.rebuild();

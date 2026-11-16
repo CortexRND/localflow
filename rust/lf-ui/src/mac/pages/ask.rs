@@ -77,7 +77,6 @@ struct Views {
     scroll: Option<Retained<NSScrollView>>,
 }
 
-
 struct Work {
     generation: u64,
     backend: Box<dyn AskBackend>,
@@ -714,7 +713,11 @@ fn restore_focus(state: &Shared) {
 }
 
 impl HubPage for AskPage {
-    fn prepare_snapshot(&mut self, preparation: &str, _root: &std::path::Path) -> anyhow::Result<()> {
+    fn prepare_snapshot(
+        &mut self,
+        preparation: &str,
+        _root: &std::path::Path,
+    ) -> anyhow::Result<()> {
         let snapshot = match preparation {
             "empty" => AskSnapshot::Empty,
             "conversation" => AskSnapshot::Conversation,
