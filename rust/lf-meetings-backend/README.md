@@ -45,3 +45,24 @@ This is an opt-in library, not automatically installed into `lf-rs serve` or
 the Python server. FastAPI validation envelopes/statuses are mirrored; malformed
 JSON parser wording/offsets and native I/O errors can differ. Hardware is never
 opened by tests, and no speech-to-text implementation is bundled.
+
+## Runtime menu and dictation composition
+
+`MeetingStatusPoller` accepts a fetch closure, not an HTTP client. Call
+`backend.start_status_poller(config_snapshot, menu_state)` on an
+`Arc<MeetingsBackend>` to poll the exact same status builder as
+`GET /meeting/status`, without HTTP, tokens or a second server. The config
+closure returns `Result<Config, String>` and is called on every poll; errors
+map to the menu's server-down state. Successful results update only the
+meeting fields of the shared `lf_runtime::menubar::MenuState`, preserving
+pushed dictation state. Keep the returned poller alive; `poke()` refreshes
+after a meeting action, and dropping it stops polling.
+
+For a shared server, construct `DictationBackend` with the application's
+injected `SpeechEngine`, then wrap it with
+`MeetingsBackend::new()?.with_inner(Arc::new(dictation))`. Pass that outer
+backend to `ServerState::load_with_backend`. Meeting routes stay in the
+outer backend; `/transcribe` and STT/autostart metadata delegate to the
+dictation backend (and its fallback). Supply capture separately with
+`with_capture`; no speech engine is created by this crate. The application
+owns starting the menu, retaining the poller, and serving the router.

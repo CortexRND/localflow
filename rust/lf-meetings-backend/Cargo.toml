@@ -8,6 +8,7 @@ description = "Injectable meeting, Ask and prompt routes for lf-server"
 
 [dependencies]
 lf-server = { path = "../lf-server" }
+lf-runtime = { path = "../lf-runtime" }
 lf-meetings = { path = "../lf-meetings" }
 lf-ask = { path = "../lf-ask" }
 lf-core = { path = "../lf-core" }

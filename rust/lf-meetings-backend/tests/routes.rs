@@ -1015,6 +1015,147 @@ async fn recall_storage_failure_and_failed_prompt_retry_are_reported() {
     }
 }
 
+struct ChannelMenu(mpsc::Sender<lf_runtime::menubar::MenuModel>);
+impl lf_runtime::menubar::MenuBar for ChannelMenu {
+    fn update(&self, model: &lf_runtime::menubar::MenuModel) {
+        let _ = self.0.send(model.clone());
+    }
+}
+
+#[tokio::test]
+async fn menu_poller_reads_live_meeting_state_and_recovers_from_config_errors() {
+    use lf_runtime::menubar::{MenuState, DOWN_ICON, IDLE_ICON, LIVE_ICON};
+    let f = Fixture::new();
+    let (tx, rx) = mpsc::channel();
+    let menu = MenuState::new(Some(Arc::new(ChannelMenu(tx))), false);
+    let failed = Arc::new(AtomicBool::new(true));
+    let fail_config = failed.clone();
+    let config = f.config.clone();
+    let poller = f.backend.start_status_poller(
+        Arc::new(move || {
+            if fail_config.load(Ordering::SeqCst) {
+                Err("config unavailable".into())
+            } else {
+                Ok(config.clone())
+            }
+        }),
+        menu.clone(),
+    );
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().base_icon,
+        DOWN_ICON
+    );
+    failed.store(false, Ordering::SeqCst);
+    poller.poke();
+    let idle = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(idle.base_icon, IDLE_ICON);
+    assert!(!idle.session_active);
+    assert_eq!(
+        request(
+            app(f.config.clone(), f.backend.clone()),
+            "POST",
+            "/meeting/start",
+            Some(json!({"title":"Menu meeting"}))
+        )
+        .await
+        .0,
+        200
+    );
+    poller.poke();
+    let live = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(live.base_icon, LIVE_ICON);
+    assert!(live.session_active);
+    assert!(live.status_line.starts_with("recording: Menu meeting — "));
+    assert!(!live.dictation_enabled);
+    assert_eq!(
+        request(
+            app(f.config.clone(), f.backend.clone()),
+            "POST",
+            "/meeting/stop",
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    poller.poke();
+    assert!(
+        !rx.recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .session_active
+    );
+    drop(poller);
+    assert!(!menu.snapshot().dictation_enabled);
+}
+
+struct MockSpeech;
+impl lf_runtime::engine::SpeechEngine for MockSpeech {
+    fn load(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+        Ok("Dictated words".into())
+    }
+    fn unload(&self) {}
+}
+
+#[tokio::test]
+async fn dictation_backend_composes_as_inner_through_server_router() {
+    let f = Fixture::new();
+    let dictation = lf_runtime::server::DictationBackend {
+        speech: Arc::new(MockSpeech),
+        vocabulary: Arc::new(|_| Default::default()),
+        build_llm: Arc::new(|_| None),
+        history: Arc::new(|_| None),
+        decode: Arc::new(|_, _| Ok(vec![0.5; 16000])),
+        fallback: Arc::new(Inner),
+    };
+    let backend = Arc::new(
+        MeetingsBackend::new()
+            .unwrap()
+            .with_inner(Arc::new(dictation))
+            .with_queue(PromptQueue::new(
+                f.dir.path().join("composition-queue.json"),
+            )),
+    );
+    assert!(backend.transcriber_loaded());
+    assert!(backend.stt_available("mock"));
+    assert_eq!(backend.autostart_status(), "enabled");
+    assert_eq!(
+        request(
+            app(f.config.clone(), backend.clone()),
+            "GET",
+            "/meeting/status",
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    let response = app(f.config.clone(), backend.clone())
+        .oneshot(Request::post("/transcribe")
+            .header("host", "localhost")
+            .header("x-localflow-token", "test-token")
+            .header("content-type", "multipart/form-data; boundary=mock")
+            .body(Body::from("--mock\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\nmock\r\n--mock--\r\n")).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["text"], "Dictated words");
+    assert_eq!(
+        request(
+            app(f.config.clone(), backend),
+            "GET",
+            "/api/autostart",
+            None
+        )
+        .await
+        .0,
+        200
+    );
+}
+
 struct FailedSetup;
 impl ProviderFactory for FailedSetup {
     fn llm(&self, _: &Config) -> Result<Box<dyn LlmProvider>> {

@@ -18,6 +18,7 @@ use lf_meetings::{
     titles::{is_default_title, TITLE_TIMEOUT_SECONDS},
     MeetingSummarizer, MeetingWatcher, ObsidianWriter, WriteNote,
 };
+use lf_runtime::menubar::{MeetingStatusPoller, MenuState};
 use lf_server::backend::{Backend, BackendRequest, BackendResponse, UnavailableBackend};
 use serde_json::{json, Value};
 use session::SessionActor;
@@ -63,6 +64,19 @@ pub struct MeetingsBackend {
     state: Mutex<State>,
 }
 impl MeetingsBackend {
+    /// Poll the same in-process status as GET /meeting/status using live config snapshots.
+    pub fn start_status_poller(
+        self: &Arc<Self>,
+        config: Arc<dyn Fn() -> Result<Config, String> + Send + Sync>,
+        menu: MenuState,
+    ) -> MeetingStatusPoller {
+        let backend = self.clone();
+        MeetingStatusPoller::start(
+            Arc::new(move || config().map(|config| backend.status(&config))),
+            Arc::new(move |result| menu.change(|model| model.apply_status(&result))),
+        )
+    }
+
     pub fn new() -> Result<Self> {
         Ok(Self {
             inner: Arc::new(UnavailableBackend),
