@@ -4,6 +4,8 @@ Activation never rewrites a key some running reader may already use: it
 writes a new endpoint-bound snapshot (see `llm_activation`) and then saves
 the config that points at it in one atomic replace. A failed save deletes
 only that new snapshot. The generic `llm_api_key` is left to legacy configs.
+Activation never modifies an existing snapshot; only an explicit web Settings
+key rotation rewrites the active one, for its same bound endpoint.
 """
 
 import logging

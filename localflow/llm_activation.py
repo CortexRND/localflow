@@ -1,11 +1,14 @@
 """Activation snapshots: the LLM key Ask and cleanup use, bound to one endpoint.
 
-Activating a provider on Models & keys never rewrites a shared key. It
-stores a new, never-modified secret `llm_activation_<provider>_<32 hex>`
+Activating a provider on Models & keys never rewrites a shared key or an
+existing snapshot. It stores a new secret `llm_activation_<provider>_<32 hex>`
 holding `{"base_url": ..., "key": ...}` and then atomically saves a config
-whose `[llm] api_key_ref` names it. A reader that loaded the old config keeps
-the old key (or the legacy `llm_api_key`); one that loaded the new config
-finds the snapshot already written. The key is only ever used for the
+whose `[llm] api_key_ref` names it. The only in-place change is an explicit
+key rotation in web Settings (`api.update_secret`), which rewrites (or, on
+clear, deletes) the active config's own slot for the same bound endpoint. A
+reader that loaded the old config keeps the old key (or the legacy
+`llm_api_key`); one that loaded the new config finds the snapshot already
+written. The key is only ever used for the
 endpoint it was activated for, so no reader can pair A's endpoint with B's
 key or B's endpoint with A's key.
 

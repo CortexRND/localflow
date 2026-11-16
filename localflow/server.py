@@ -490,7 +490,7 @@ def api_test_llm(body: dict | None = None) -> dict:
 
 @app.get("/api/secrets")
 def api_secrets() -> dict[str, bool]:
-    return api_logic.secrets_status()
+    return api_logic.secrets_status(_config)
 
 
 @app.put("/api/secrets/{name}")
@@ -503,16 +503,20 @@ def api_secret_update(name: str, body: dict) -> dict[str, bool]:
         raise HTTPException(status_code=400, detail="value must be a string")
     with _config_lock:
         try:
-            api_logic.update_secret(name, value)
+            # An activated config's key is rotated in its own endpoint-bound
+            # slot; the generic llm_api_key stays with legacy configs.
+            api_logic.update_secret(name, value, _config)
             if name == "llm_api_key":
                 _ollama = build_llm(_config)
                 _summarizer = MeetingSummarizer(build_llm(_config, timeout=300, num_ctx=8192))
                 _cleaner = None
             elif name == "fireworks_api_key":
                 _prompt_gen = WorkPromptGenerator(build_workprompts_llm(_config))
+        except api_logic.InvalidKeyRef as exc:  # raised before any write
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except SecretsUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return api_logic.secrets_status()
+    return api_logic.secrets_status(_config)
 
 
 @app.get("/api/autostart")
