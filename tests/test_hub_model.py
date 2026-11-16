@@ -763,12 +763,22 @@ def test_prompts_page_rows_use_the_wrapping_layout_and_both_actions():
 
 def test_shortcut_rows_follow_the_config_and_invent_no_enable_flag():
     config = SimpleNamespace(
-        prompt_hotkey="<ctrl>+<alt>+2", polish_hotkey="", command_hotkey="alt_r",
+        prompt_hotkey="<ctrl>+<alt>+2",
+        polish_hotkey="",
+        command_hotkey="alt_r",
     )
     rows = hub_model.shortcut_rows(config)
-    assert [row["name"] for row in rows] == ["Prompt Engineer", "Polish", "Command Mode"]
+    assert [row["name"] for row in rows] == [
+        "Prompt Engineer",
+        "Polish",
+        "Command Mode",
+        "Toggle Dictation",
+    ]
     assert [row["hotkey"] for row in rows] == [
-        "Control + Option + 2", "Off", "Right Option",
+        "Control + Option + 2",
+        "Off",
+        "Right Option",
+        "Off",
     ]
     assert all(set(row) == {"name", "detail", "hotkey"} for row in rows)
     assert "toggle" not in _controller_sources()["_page_prompts"].lower()

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 
 import AppKit
@@ -52,6 +53,7 @@ from localflow.hub_model import (
     RECENT_ROW_H,
     STYLE_AUTOSAVE_HINT,
     STYLE_SAVE_FAILED,
+    dictation_state,
     dictionary_entries,
     home_decoration_frame,
     meeting_capture_status,
@@ -72,6 +74,7 @@ from localflow.hub_model import (
     submit_replacement,
     submit_word,
 )
+from localflow.live_config import LazyConfig
 from localflow.mac_style import (
     FlippedView,
     HalftoneView,
@@ -248,6 +251,7 @@ class HubWindowController(NSObject):
         self.history = history
         self.dictionary = dictionary
         self.config = config
+        self._live_config = LazyConfig(config)
         self.meeting_client = meeting_client or MeetingClient()
         # Constructing a PromptQueue touches no disk; it is only read on Prompts.
         self.prompt_queue = prompt_queue if prompt_queue is not None else PromptQueue()
@@ -727,6 +731,50 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _page_home(self):
+        self.config = replace(
+            self.config,
+            dictation_enabled=self._live_config.get().dictation_enabled,
+        )
+        state = dictation_state(self.config)
+        width = self.body.frame().size.width
+        self.dictation_switch = NSSwitch.alloc().initWithFrame_(
+            NSMakeRect(width - 54, self.cursor_y + 4, 54, 32)
+        )
+        self.dictation_switch.setTarget_(self)
+        self.dictation_switch.setAction_("toggleDictation:")
+        self.dictation_switch.setAccessibilityLabel_("Dictation")
+        self.dictation_switch.setState_(
+            AppKit.NSControlStateValueOn
+            if state["enabled"]
+            else AppKit.NSControlStateValueOff
+        )
+        self.body.addSubview_(self.dictation_switch)
+        self.body.addSubview_(
+            _label(
+                state["label"],
+                0,
+                self.cursor_y,
+                width - 68,
+                17,
+                "ink",
+                palette=self.tokens,
+                height=26,
+                weight="semibold",
+            )
+        )
+        self.body.addSubview_(
+            _label(
+                state["detail"],
+                0,
+                self.cursor_y + 30,
+                width,
+                12,
+                "muted",
+                palette=self.tokens,
+                height=22,
+            )
+        )
+        self.cursor_y += 76
         stats = self.history.stats()
         width = self.body.frame().size.width
         # The decoration lives in the header band only (it ends above the stat
@@ -812,6 +860,19 @@ class HubWindowController(NSObject):
                 divider.setWantsLayer_(True)
                 divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
                 listing.addSubview_(divider)
+
+    def toggleDictation_(self, sender):
+        try:
+            updated = replace(
+                load_config(),
+                dictation_enabled=bool(sender.state()),
+            )
+            save_config(updated)
+            self.config = updated
+            self.page_errors.pop("Home", None)
+        except Exception as exc:  # noqa: BLE001 - shown inline
+            self.page_errors["Home"] = f"Couldn't change dictation: {exc}"
+        self.show_page("Home")
 
     @objc.python_method
     def _empty_state(self, parent, x, y, width, height, title, detail, action, selector):
@@ -2225,6 +2286,10 @@ class HubWindowController(NSObject):
         if self._closed:  # a tick queued before close: leave the closed UI alone
             return
         self._phrases_tick()
+        if self.page == "Home" and (
+            self._live_config.get().dictation_enabled != self.config.dictation_enabled
+        ):
+            self.show_page("Home")
         while True:
             try:
                 operation, result, error = self.meeting_events.get_nowait()

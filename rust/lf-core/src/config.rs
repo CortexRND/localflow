@@ -457,8 +457,11 @@ fn win_is_fully_qualified(path: &str) -> bool {
     let path = path.replace('/', "\\");
     if let Some(rest) = path.strip_prefix("\\\\") {
         let unc_prefix = "?\\UNC\\";
-        let rest = if rest.len() >= unc_prefix.len()
-            && rest[..unc_prefix.len()].eq_ignore_ascii_case(unc_prefix)
+        // Compare bytes: slicing the str could split a multi-byte char.
+        let rest = if rest
+            .as_bytes()
+            .get(..unc_prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(unc_prefix.as_bytes()))
         {
             &rest[unc_prefix.len()..]
         } else {
@@ -1004,17 +1007,52 @@ fn env_truthy(name: &str) -> bool {
 /// fireworks key is in the environment, the key is exported as
 /// `FIREWORKS_API_KEY` for this process (if unset), nothing is written and the
 /// migrated config is returned; rerunning `lf config migrate` finishes the job.
+///
+/// Compatibility wrapper over [`migrate_legacy_outcome`], which tells a
+/// written migration apart from a deferred one.
 pub fn migrate_legacy(path: Option<&Path>) -> Result<Option<Config>> {
+    Ok(migrate_legacy_outcome(path)?.into_config())
+}
+
+/// What [`migrate_legacy_outcome`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MigrationOutcome {
+    /// There is no legacy file at the source path; nothing was done.
+    MissingSource,
+    /// The migrated config was written to `target`.
+    Migrated { config: Config, target: PathBuf },
+    /// Nothing was written: the legacy fireworks API key could not be stored
+    /// in the keyring and no fireworks key is in the environment. The legacy
+    /// file and any existing v2 config are unchanged; the key is exported as
+    /// `FIREWORKS_API_KEY` for this process (if unset). `reason` is the
+    /// logged warning.
+    Deferred { config: Config, reason: String },
+}
+
+impl MigrationOutcome {
+    /// The migrated config (written or not), as [`migrate_legacy`] returns it.
+    pub fn into_config(self) -> Option<Config> {
+        match self {
+            MigrationOutcome::MissingSource => None,
+            MigrationOutcome::Migrated { config, .. }
+            | MigrationOutcome::Deferred { config, .. } => Some(config),
+        }
+    }
+}
+
+/// [`migrate_legacy`] with a typed result: missing source, written, or
+/// deferred (see [`MigrationOutcome`]).
+pub fn migrate_legacy_outcome(path: Option<&Path>) -> Result<MigrationOutcome> {
     let source = match path {
         Some(path) => path.to_path_buf(),
         None => try_legacy_config_path()?,
     };
     if !py_exists(&source)? {
-        return Ok(None);
+        return Ok(MigrationOutcome::MissingSource);
     }
     let target = try_config_path()?;
     let mut warnings = Vec::new();
-    migrate_legacy_at(&source, &target, is_darwin(), &mut warnings)
+    migrate_legacy_outcome_at(&source, &target, is_darwin(), &mut warnings)
 }
 
 fn migrate_legacy_at(
@@ -1023,8 +1061,17 @@ fn migrate_legacy_at(
     darwin: bool,
     warnings: &mut Vec<String>,
 ) -> Result<Option<Config>> {
+    Ok(migrate_legacy_outcome_at(source, target, darwin, warnings)?.into_config())
+}
+
+fn migrate_legacy_outcome_at(
+    source: &Path,
+    target: &Path,
+    darwin: bool,
+    warnings: &mut Vec<String>,
+) -> Result<MigrationOutcome> {
     if !py_exists(source)? {
-        return Ok(None);
+        return Ok(MigrationOutcome::MissingSource);
     }
     let (data, fireworks_key) = migrate_v1_inner(&parse_toml_file(source)?, warnings);
     let config = config_from_v2_inner(&data, darwin, warnings)?;
@@ -1046,14 +1093,12 @@ fn migrate_legacy_at(
                         other => bail!("str expected, not {}", py_type_name(other)),
                     }
                 }
-                warn(
-                    warnings,
-                    "not migrating ~/.localflow.toml: fireworks_api_key could not be stored in \
-                     the keyring; set FIREWORKS_API_KEY in the environment (or fix the keyring) \
-                     and rerun `lf config migrate`"
-                        .to_string(),
-                );
-                return Ok(Some(config));
+                let reason = "not migrating ~/.localflow.toml: fireworks_api_key could not be \
+                              stored in the keyring; set FIREWORKS_API_KEY in the environment \
+                              (or fix the keyring) and rerun `lf config migrate`"
+                    .to_string();
+                warn(warnings, reason.clone());
+                return Ok(MigrationOutcome::Deferred { config, reason });
             }
             warn(
                 warnings,
@@ -1068,7 +1113,10 @@ fn migrate_legacy_at(
         "migrated ~/.localflow.toml to {}; the old file was left in place",
         target.display()
     );
-    Ok(Some(config))
+    Ok(MigrationOutcome::Migrated {
+        config,
+        target: target.to_path_buf(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1532,6 +1580,40 @@ mod tests {
     use super::*;
     use crate::secrets::{self, FailingKeyring, KeyringBackend, MemoryKeyring, SERVICE};
     use crate::test_support::{EnvGuard, GLOBAL_LOCK};
+
+    #[test]
+    fn win_is_fully_qualified_unicode_unc_does_not_panic() {
+        // 'é' straddles byte 6 of the post-`\\` remainder.
+        assert!(win_is_fully_qualified("\\\\abcéé\\share\\config"));
+        assert!(win_is_fully_qualified("//abcéé/share/config"));
+        assert!(win_is_fully_qualified("\\\\ééé\\ßhare"));
+        assert!(!win_is_fully_qualified("\\\\abcéé"));
+        assert!(!win_is_fully_qualified("\\\\abcéé\\"));
+    }
+
+    #[test]
+    fn win_is_fully_qualified_drive_and_unc_forms() {
+        assert!(win_is_fully_qualified("C:\\Users\\x"));
+        assert!(win_is_fully_qualified("c:/Users/x"));
+        assert!(!win_is_fully_qualified("C:"));
+        assert!(!win_is_fully_qualified("C:relative"));
+        assert!(!win_is_fully_qualified("\\Users\\x"));
+        assert!(!win_is_fully_qualified("relative\\x"));
+        assert!(!win_is_fully_qualified(""));
+        assert!(win_is_fully_qualified("\\\\server\\share"));
+        assert!(win_is_fully_qualified("\\\\server\\share\\dir"));
+        assert!(!win_is_fully_qualified("\\\\server"));
+        assert!(!win_is_fully_qualified("\\\\server\\"));
+        assert!(!win_is_fully_qualified("\\\\\\share"));
+        assert!(!win_is_fully_qualified("\\\\"));
+        // Extended UNC prefix, matched case-insensitively.
+        assert!(win_is_fully_qualified("\\\\?\\UNC\\server\\share\\x"));
+        assert!(win_is_fully_qualified("\\\\?\\unc\\server\\share"));
+        assert!(win_is_fully_qualified("//?/Unc/server/share"));
+        assert!(win_is_fully_qualified("\\\\?\\UNC\\sérvér\\shäre"));
+        assert!(!win_is_fully_qualified("\\\\?\\UNC\\server"));
+        assert!(!win_is_fully_qualified("\\\\?\\UNC\\"));
+    }
 
     const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\n\n[setup]\nversion = 0\n";
 
@@ -2597,6 +2679,71 @@ orca_agent = "agent"
                 .is_none()
         );
         assert!(!iso.target.exists());
+    }
+
+    #[test]
+    fn migrate_legacy_outcome_is_deferred_when_keyring_fails() {
+        let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _keyring = BackendGuard::install(Arc::new(FailingKeyring("no backend".into())));
+        let mut env = EnvGuard::new();
+        env.remove("FIREWORKS_API_KEY");
+        env.remove("LOCALFLOW_FIREWORKS_API_KEY");
+        let iso = Isolated::new();
+        env.set("LOCALFLOW_CONFIG", &iso.target);
+        let legacy_text = "fireworks_api_key = \"secret\"\nmodel_size = \"tiny\"\n";
+        fs::write(&iso.legacy, legacy_text).unwrap();
+
+        // No v2 target.
+        let outcome = migrate_legacy_outcome(Some(&iso.legacy)).unwrap();
+        let MigrationOutcome::Deferred { config, reason } = &outcome else {
+            panic!("not deferred: {outcome:?}");
+        };
+        assert_eq!(config.field_str("model_size"), Some("tiny"));
+        assert!(reason.starts_with("not migrating ~/.localflow.toml"));
+        assert!(!iso.target.exists());
+        assert_eq!(fs::read_to_string(&iso.legacy).unwrap(), legacy_text);
+        // The env fallback is unchanged: the key is exported for this process.
+        assert_eq!(std::env::var("FIREWORKS_API_KEY").unwrap(), "secret");
+
+        // An older v2 target exists: still deferred, target untouched.
+        env.remove("FIREWORKS_API_KEY");
+        let existing = "config_version = 2\n\n[stt]\nmodel = \"small\"\n";
+        iso.write(existing);
+        let outcome = migrate_legacy_outcome(Some(&iso.legacy)).unwrap();
+        assert!(
+            matches!(outcome, MigrationOutcome::Deferred { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read_to_string(&iso.target).unwrap(), existing);
+        assert_eq!(fs::read_to_string(&iso.legacy).unwrap(), legacy_text);
+
+        // The compatibility wrapper still returns the (unwritten) config.
+        env.remove("FIREWORKS_API_KEY");
+        let compat = migrate_legacy(Some(&iso.legacy)).unwrap().unwrap();
+        assert_eq!(compat.field_str("model_size"), Some("tiny"));
+        assert_eq!(fs::read_to_string(&iso.target).unwrap(), existing);
+        secrets::reset_keyring_warning();
+    }
+
+    #[test]
+    fn migrate_legacy_outcome_missing_and_migrated() {
+        let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let iso = Isolated::new();
+        let mut env = EnvGuard::new();
+        env.set("LOCALFLOW_CONFIG", &iso.target);
+        assert_eq!(
+            migrate_legacy_outcome(Some(&iso.legacy)).unwrap(),
+            MigrationOutcome::MissingSource
+        );
+        fs::write(&iso.legacy, "server_port = 1234\n").unwrap();
+        match migrate_legacy_outcome(Some(&iso.legacy)).unwrap() {
+            MigrationOutcome::Migrated { config, target } => {
+                assert_eq!(target, iso.target);
+                assert_eq!(config.field_i64("server_port"), Some(1234));
+                assert_eq!(load_from(&iso.target).unwrap(), config);
+            }
+            other => panic!("not migrated: {other:?}"),
+        }
     }
 
     #[test]

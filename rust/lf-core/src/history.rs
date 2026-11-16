@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Local, NaiveDate, TimeZone};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::Serialize;
 
 use crate::symbols::pycompat::{casefold, repr_str, split_ws};
@@ -289,9 +289,30 @@ impl HistoryStore {
         self.lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Read-only work: a DEFERRED transaction, so concurrent readers never
+    /// take the writer (RESERVED) lock.
+    fn with_connection<T>(&self, f: impl FnOnce(&rusqlite::Transaction) -> Result<T>) -> Result<T> {
+        self.with_connection_behavior(TransactionBehavior::Deferred, f)
+    }
+
+    /// Writing work: an IMMEDIATE transaction takes the RESERVED lock up
+    /// front, so a concurrent writer is waited out via the busy timeout. A
+    /// DEFERRED read-then-write would instead hold SHARED and fail its lock
+    /// upgrade with an immediate SQLITE_BUSY (no busy-handler retry).
+    fn with_write_connection<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction) -> Result<T>,
+    ) -> Result<T> {
+        self.with_connection_behavior(TransactionBehavior::Immediate, f)
+    }
+
     /// Open a connection like Python's `_connect` (30 s busy timeout,
     /// 0600 permissions), run `f` in a transaction, commit or roll back.
-    fn with_connection<T>(&self, f: impl FnOnce(&rusqlite::Transaction) -> Result<T>) -> Result<T> {
+    fn with_connection_behavior<T>(
+        &self,
+        behavior: TransactionBehavior,
+        f: impl FnOnce(&rusqlite::Transaction) -> Result<T>,
+    ) -> Result<T> {
         let parent = self.path.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         let mut connection = Connection::open(&self.path)
@@ -307,7 +328,7 @@ impl HistoryStore {
                 );
             }
         }
-        let tx = connection.transaction()?;
+        let tx = connection.transaction_with_behavior(behavior)?;
         let result = f(&tx)?;
         tx.commit()?;
         Ok(result)
@@ -315,7 +336,7 @@ impl HistoryStore {
 
     fn initialize(&self) -> Result<()> {
         let _held = self.guard();
-        self.with_connection(|c| {
+        self.with_write_connection(|c| {
             let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             if version > SCHEMA_VERSION {
                 bail!("history schema {version} is newer than supported ({SCHEMA_VERSION})");
@@ -363,7 +384,7 @@ impl HistoryStore {
         let words = split_ws(&entry.final_text).len() as i64;
         let ts = entry.ts.unwrap_or_else(now_ts);
         let _held = self.guard();
-        self.with_connection(|c| {
+        self.with_write_connection(|c| {
             c.execute(
                 "
                 INSERT INTO dictations
@@ -431,7 +452,7 @@ impl HistoryStore {
             assignments.join(", ")
         );
         let _held = self.guard();
-        self.with_connection(|c| {
+        self.with_write_connection(|c| {
             let changed = c.execute(&sql, rusqlite::params_from_iter(values.iter()))?;
             Ok(changed > 0)
         })
@@ -528,7 +549,7 @@ impl HistoryStore {
         }
         let audio = {
             let _held = self.guard();
-            self.with_connection(|c| {
+            self.with_write_connection(|c| {
                 let row: Option<Option<String>> = c
                     .query_row(
                         "SELECT audio_path FROM dictations WHERE id = ?",
@@ -559,7 +580,7 @@ impl HistoryStore {
         }
         let (count, paths) = {
             let _held = self.guard();
-            self.with_connection(|c| {
+            self.with_write_connection(|c| {
                 let count: i64 =
                     c.query_row("SELECT count(*) FROM dictations", [], |r| r.get(0))?;
                 let mut statement =
@@ -683,7 +704,7 @@ impl HistoryStore {
             None => Local::now().date_naive().format("%Y-%m-%d").to_string(),
         };
         let _held = self.guard();
-        self.with_connection(|c| {
+        self.with_write_connection(|c| {
             let inserted = c.execute(
                 "
                 INSERT OR IGNORE INTO achievements (milestone, day) VALUES (?, ?)
@@ -776,7 +797,7 @@ impl HistoryStore {
         let keep = keep.max(0) as usize;
         let expired = {
             let _held = self.guard();
-            self.with_connection(|c| {
+            self.with_write_connection(|c| {
                 let mut statement = c.prepare(
                     "
                 SELECT id, audio_path FROM dictations
@@ -1567,5 +1588,153 @@ mod tests {
             vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]
         );
         assert_eq!(resample(&[0.0, 1.0, 0.0, 1.0], 64000), vec![0.0]);
+    }
+
+    /// An uncommitted external write (RESERVED lock) on `db`, as another
+    /// LocalFlow process would hold mid-transaction.
+    fn external_writer(db: &Path) -> Connection {
+        let writer = Connection::open(db).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute(
+                "INSERT INTO achievements (milestone, day) VALUES (99, 'writer')",
+                [],
+            )
+            .unwrap();
+        writer
+    }
+
+    /// Run `op` on another thread while an external writer holds the
+    /// RESERVED lock. `op` must still be waiting (busy timeout) when the
+    /// writer commits, then succeed. A DEFERRED read-then-write would
+    /// instead fail its SHARED -> RESERVED upgrade with an immediate
+    /// SQLITE_BUSY that the busy handler never retries.
+    fn waits_for_external_writer<T: Send + std::fmt::Debug + 'static>(
+        db: &Path,
+        op: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> T {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        let writer = external_writer(db);
+        let (started_tx, started_rx) = channel();
+        let (done_tx, done_rx) = channel();
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(op()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        // The window only bounds how quickly a fast-failing (buggy) op is
+        // caught; a correct op blocks until commit however long this is.
+        match done_rx.recv_timeout(Duration::from_millis(500)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("finished while an external writer held the lock: {other:?}"),
+        }
+        writer.execute_batch("COMMIT").unwrap();
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(25))
+            .expect("operation did not finish after the writer committed");
+        handle.join().unwrap();
+        result.expect("operation should succeed once the writer commits")
+    }
+
+    #[test]
+    fn busy_timeout_is_thirty_seconds_for_reads_and_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let timeout = |c: &rusqlite::Transaction| -> Result<i64> {
+            Ok(c.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?)
+        };
+        assert_eq!(s.with_connection(timeout).unwrap(), 30_000);
+        assert_eq!(s.with_write_connection(timeout).unwrap(), 30_000);
+    }
+
+    #[test]
+    fn initialize_waits_for_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("history.sqlite");
+        drop(store(&dir));
+        let path = db.clone();
+        waits_for_external_writer(&db, move || {
+            HistoryStore::open(Some(path), None, true).map(|_| ())
+        });
+        let version: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn delete_waits_for_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = std::sync::Arc::new(store(&dir));
+        let id = s.add(&entry("dictate", "ok", "bye")).unwrap().unwrap();
+        let db = s.path.clone();
+        let shared = s.clone();
+        assert!(waits_for_external_writer(&db, move || shared.delete(id)));
+        assert!(s.get(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_waits_for_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = std::sync::Arc::new(store(&dir));
+        s.add(&entry("dictate", "ok", "one")).unwrap();
+        s.add(&entry("dictate", "ok", "two")).unwrap();
+        let db = s.path.clone();
+        let shared = s.clone();
+        assert_eq!(waits_for_external_writer(&db, move || shared.clear()), 2);
+        assert!(s.recent(10, None, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_waits_for_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = std::sync::Arc::new(store(&dir));
+        for name in ["a.wav", "b.wav"] {
+            s.add(&NewEntry {
+                audio_path: Some(s.clip_dir.join(name).to_string_lossy().into_owned()),
+                ..entry("dictate", "ok", name)
+            })
+            .unwrap();
+        }
+        let db = s.path.clone();
+        let shared = s.clone();
+        assert_eq!(
+            waits_for_external_writer(&db, move || shared.prune_audio_clips(1)),
+            1
+        );
+    }
+
+    #[test]
+    fn reads_do_not_wait_for_concurrent_writer() {
+        use std::sync::mpsc::channel;
+        let dir = tempfile::tempdir().unwrap();
+        let s = std::sync::Arc::new(store(&dir));
+        let id = s
+            .add(&entry("dictate", "ok", "hello there"))
+            .unwrap()
+            .unwrap();
+        let writer = external_writer(&s.path);
+        let (done_tx, done_rx) = channel();
+        let shared = s.clone();
+        std::thread::spawn(move || {
+            let reads = (|| -> Result<_> {
+                Ok((
+                    shared.recent(10, None, 0)?.len(),
+                    shared.get(id)?.is_some(),
+                    shared.last_ok()?.is_some(),
+                    shared.stats(None)?.total_dictations,
+                ))
+            })();
+            done_tx.send(reads).unwrap();
+        });
+        // Readers share the database with a RESERVED writer; a reader that
+        // took a write lock would block here for the 30 s busy timeout.
+        let reads = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("pure reads blocked behind an uncommitted writer")
+            .unwrap();
+        assert_eq!(reads, (1, true, true, 1));
+        writer.execute_batch("COMMIT").unwrap();
     }
 }

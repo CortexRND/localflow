@@ -21,6 +21,8 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+# Facade for lf-core's warnings; `run_main` installs a small stderr logger.
+log = { workspace = true }
 # `status` only talks plain HTTP to the loopback server.
 reqwest = { workspace = true }
 # Clipboard for `history copy`/`history raw`; image support is not needed.

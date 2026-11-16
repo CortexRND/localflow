@@ -57,6 +57,20 @@ HOME_DECORATION_WIDTH = 150
 HOME_DECORATION_GAP = 8  # between the decoration and the stat cards below it
 
 
+def dictation_state(config) -> dict:
+    enabled = config.dictation_enabled
+    return {
+        "enabled": enabled,
+        "label": f"Dictation: {'On' if enabled else 'Off'}",
+        "action": "Turn Dictation Off" if enabled else "Turn Dictation On",
+        "detail": (
+            "Dictation is on — push-to-talk is ready"
+            if enabled
+            else "Dictation is off — push-to-talk is paused"
+        ),
+    }
+
+
 def home_decoration_frame(width: int) -> tuple[int, int, int, int]:
     """The halftone's (x, y, w, h): the right end of the header band only,
     ending above the stat cards (which start at HUB_HEADER_OFFSET)."""
@@ -391,7 +405,7 @@ def format_hotkey(value: str | None) -> str:
 
 
 def shortcut_rows(config) -> list[dict]:
-    """The three prompt shortcuts, read from the config's current hotkeys.
+    """The dictation shortcuts, read from the config's current hotkeys.
 
     None of them has an enable flag of its own: an empty hotkey disables it.
     """
@@ -410,6 +424,11 @@ def shortcut_rows(config) -> list[dict]:
             "name": "Command Mode",
             "detail": "Hold the key and speak an instruction to rewrite your selection.",
             "hotkey": format_hotkey(getattr(config, "command_hotkey", "")),
+        },
+        {
+            "name": "Toggle Dictation",
+            "detail": "Turn push-to-talk on or off without quitting LocalFlow.",
+            "hotkey": format_hotkey(getattr(config, "dictation_toggle_hotkey", "")),
         },
     ]
 

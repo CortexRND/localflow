@@ -1,7 +1,7 @@
 //! `config path|show|get|set|migrate` (localflow/cli.py `config` group).
 
 use anyhow::Result;
-use lf_core::config;
+use lf_core::config::{self, MigrationOutcome};
 use serde_json::{json, Value};
 
 use crate::args::ConfigCommand;
@@ -228,19 +228,148 @@ fn set(section_key: &str, raw_value: &str, io: &mut Io<'_>) -> Result<()> {
 }
 
 fn migrate(io: &mut Io<'_>) -> Result<()> {
-    match config::migrate_legacy(None)? {
-        None => outln!(io.out, "no legacy config found"),
-        Some(_) => outln!(
-            io.out,
-            "migrated legacy config to {}",
+    match config::migrate_legacy_outcome(None)? {
+        MigrationOutcome::MissingSource => outln!(io.out, "no legacy config found"),
+        MigrationOutcome::Migrated { target, .. } => {
+            outln!(io.out, "migrated legacy config to {}", target.display())
+        }
+        MigrationOutcome::Deferred { .. } => fail(format!(
+            "legacy config not migrated: fireworks_api_key could not be stored in the keyring; \
+             {} and {} were left unchanged. Set FIREWORKS_API_KEY in the environment (or fix \
+             the keyring) and rerun `lf-rs config migrate`",
+            config::try_legacy_config_path()?.display(),
             config::try_config_path()?.display()
-        ),
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Arc, Mutex};
+
+    use lf_core::secrets::{self, FailingKeyring, KeyringBackend};
+
+    use crate::testing::run_cli;
+
+    /// The only lf unit test that touches the environment and the
+    /// process-wide keyring backend; serialize anyway in case more appear.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Sets/removes variables and the keyring override; restores both on drop.
+    struct Sandbox {
+        saved: Vec<(&'static str, Option<OsString>)>,
+        keyring: Option<Option<Arc<dyn KeyringBackend>>>,
+        dir: tempfile::TempDir,
+    }
+
+    impl Sandbox {
+        fn new(keyring: Arc<dyn KeyringBackend>) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let names = [
+                "HOME",
+                "USERPROFILE",
+                "LOCALFLOW_CONFIG",
+                "FIREWORKS_API_KEY",
+                "LOCALFLOW_FIREWORKS_API_KEY",
+            ];
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect();
+            std::fs::create_dir_all(dir.path().join("home")).unwrap();
+            std::env::set_var("HOME", dir.path().join("home"));
+            std::env::set_var("USERPROFILE", dir.path().join("home"));
+            std::env::set_var("LOCALFLOW_CONFIG", dir.path().join("config.toml"));
+            std::env::remove_var("FIREWORKS_API_KEY");
+            std::env::remove_var("LOCALFLOW_FIREWORKS_API_KEY");
+            let previous = secrets::set_keyring_backend(Some(keyring));
+            Sandbox {
+                saved,
+                keyring: Some(previous),
+                dir,
+            }
+        }
+
+        fn legacy(&self) -> std::path::PathBuf {
+            self.dir.path().join("home").join(".localflow.toml")
+        }
+
+        fn target(&self) -> std::path::PathBuf {
+            self.dir.path().join("config.toml")
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            if let Some(previous) = self.keyring.take() {
+                secrets::set_keyring_backend(previous);
+            }
+            secrets::reset_keyring_warning();
+            for (name, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn migrate_reports_deferral_when_keyring_is_unavailable() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new(Arc::new(FailingKeyring("no backend".into())));
+        let legacy_text = "fireworks_api_key = \"secret\"\nmodel_size = \"tiny\"\n";
+        std::fs::write(sandbox.legacy(), legacy_text).unwrap();
+
+        // No v2 target yet.
+        let outcome = run_cli(&["config", "migrate"]);
+        assert_eq!(outcome.code, 1, "{}", outcome.err);
+        assert!(!outcome.out.contains("migrated"), "{}", outcome.out);
+        assert!(outcome.err.starts_with("Error: legacy config not migrated"));
+        assert!(outcome.err.contains("rerun"), "{}", outcome.err);
+        assert!(!sandbox.target().exists());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.legacy()).unwrap(),
+            legacy_text
+        );
+
+        // An older v2 target already exists: still deferred, left unchanged.
+        std::env::remove_var("FIREWORKS_API_KEY");
+        let existing = "config_version = 2\n\n[stt]\nmodel = \"small\"\n";
+        std::fs::write(sandbox.target(), existing).unwrap();
+        let outcome = run_cli(&["config", "migrate"]);
+        assert_eq!(outcome.code, 1, "{}", outcome.err);
+        assert!(!outcome.out.contains("migrated"), "{}", outcome.out);
+        assert!(outcome.err.starts_with("Error: legacy config not migrated"));
+        assert_eq!(std::fs::read_to_string(sandbox.target()).unwrap(), existing);
+        assert_eq!(
+            std::fs::read_to_string(sandbox.legacy()).unwrap(),
+            legacy_text
+        );
+    }
+
+    #[test]
+    fn migrate_success_and_missing_source_are_unchanged() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new(Arc::new(FailingKeyring("must not be used".into())));
+        let missing = run_cli(&["config", "migrate"]);
+        assert_eq!(
+            (missing.code, missing.out.as_str()),
+            (0, "no legacy config found\n")
+        );
+        assert!(missing.err.is_empty());
+        std::fs::write(sandbox.legacy(), "model_size = \"tiny\"\n").unwrap();
+        let migrated = run_cli(&["config", "migrate"]);
+        assert_eq!(migrated.code, 0, "{}", migrated.err);
+        assert_eq!(
+            migrated.out,
+            format!("migrated legacy config to {}\n", sandbox.target().display())
+        );
+        assert!(sandbox.target().exists());
+        assert!(sandbox.legacy().exists());
+    }
 
     #[test]
     fn coerce_follows_the_current_type() {

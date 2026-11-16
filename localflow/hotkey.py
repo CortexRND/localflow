@@ -16,8 +16,9 @@ _LISTEN_EVENT = 1
 _DEAD_TAP_SECONDS = 15.0
 _INPUT_MONITORING_HELP = (
     "hold-to-talk and global hotkeys cannot see keystrokes until Input Monitoring "
-    "is enabled for the app that launched LocalFlow — 'LocalFlow' when started "
-    "from the app, or your terminal app / 'Python' when run from a terminal — in "
+    "is enabled for the process macOS blames — 'Python' when LocalFlow is started "
+    "by the app or a script (the launcher execs the interpreter, so Settings lists "
+    "Python, not 'LocalFlow'), or your terminal app when run by hand — in "
     "System Settings → Privacy & Security → Input Monitoring. Restart LocalFlow "
     "after granting; macOS does not re-arm a running event tap."
 )
