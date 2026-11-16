@@ -10,6 +10,7 @@ pub mod home;
 pub mod hotphrases;
 pub mod phrases_model;
 pub mod secrets;
+pub mod shortcuts;
 pub mod symbols;
 
 /// Shared helpers for unit tests that touch process-global state.
