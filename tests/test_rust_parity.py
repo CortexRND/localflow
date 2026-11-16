@@ -1305,3 +1305,143 @@ def test_cli_status(rust_build, sandbox, py_env):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ------------------------------------------------------------- lf-runtime ---
+# The runtime crate has its own driver (rust/lf-runtime/examples/
+# runtime_parity.rs, same request protocol) so lf's parity driver is untouched.
+
+RUNTIME_PARITY = TARGET / "debug" / "examples" / f"runtime_parity{EXE}"
+
+
+@pytest.fixture(scope="session")
+def runtime_build():
+    result = subprocess.run(
+        [CARGO, "build", "-p", "lf-runtime", "--example", "runtime_parity"],
+        check=False,
+        cwd=RUST,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"cargo build failed:\n{result.stderr[-6000:]}")
+    assert RUNTIME_PARITY.exists()
+    return None, RUNTIME_PARITY
+
+
+def test_runtime_category_for(runtime_build, sandbox):
+    from localflow.context import AppInfo, category_for
+
+    cases = [
+        (None, []),
+        (("Slack", "com.tinyspeck.slackmacgap"), []),
+        (("Mail", ""), []),
+        (("Microsoft Outlook", "com.microsoft.Outlook"), []),
+        (("Xcode", "com.apple.dt.Xcode"), []),
+        (("Xcode", "com.apple.dt.Xcode"), [" xcode = Personal "]),
+        (("Notes", "com.apple.Notes"), ["com.apple.notes=email", "notes=work"]),
+        (("Slack", ""), ["slack=bogus", "no equals", "=work"]),
+        (("ÉDITEUR", ""), ["éditeur=work"]),
+    ]
+    requests = [
+        {
+            "op": "category_for",
+            "app": None if app is None else {"name": app[0], "bundle_id": app[1]},
+            "overrides": overrides,
+        }
+        for app, overrides in cases
+    ]
+    expected = [
+        category_for(None if app is None else AppInfo(*app), overrides)
+        for app, overrides in cases
+    ]
+    assert drive(runtime_build, sandbox, requests) == expected
+
+
+def test_runtime_title_prefix(runtime_build, sandbox):
+    from localflow.status import title_prefix
+
+    states = ["idle", "recording", "locked", "command", "processing", "other"]
+    requests = [{"op": "title_prefix", "state": s} for s in states]
+    assert drive(runtime_build, sandbox, requests) == [title_prefix(s) for s in states]
+
+
+def test_runtime_transform_prompts_and_cleanup(runtime_build, sandbox):
+    from localflow import transform
+
+    requests, expected = [], []
+    for instruction, selection in [(" make it shorter ", "Long text\n\nhere"), ("write a haiku", "")]:
+        requests.append({"op": "command_prompt", "instruction": instruction, "selection": selection})
+        expected.append(transform.command_prompt(instruction, selection))
+    for preset in ("polish", "prompt"):
+        requests.append({"op": "transform_prompt", "preset": preset, "text": "a {b} c"})
+        expected.append(transform.transform_prompt(preset, "a {b} c"))
+
+    class Canned:
+        def __init__(self, reply):
+            self.reply = reply
+
+        def complete(self, system, user):
+            return self.reply
+
+    prompt = transform.transform_prompt("polish", "draft")
+    for reply in ['"Text: polished"', "  'Prompt:  x' ", "text:", "", "plain", "PROMPT: \"q\""]:
+        requests.append({"op": "transform_run", "prompt": prompt, "reply": reply})
+        expected.append(transform.Transformer(Canned(reply)).run(prompt))
+    assert drive(runtime_build, sandbox, requests) == expected
+
+
+def test_runtime_merge_live(runtime_build, sandbox):
+    from dataclasses import replace
+
+    from localflow.live_config import RUNTIME_FIELDS, merge_live, runtime_changes
+
+    cases = [
+        {},
+        {"sounds_enabled": False, "sample_rate": 48000},
+        {"dictation_enabled": False, "dictation_toggle_hotkey": "<ctrl>+<alt>+d"},
+        {"hotkey": "f19", "llm_model": "other", "model_size": "small"},
+        {"llm_provider": "openai-compatible", "llm_key_ref": "openai", "server_port": 9000},
+    ]
+    for reloaded in (False, True):
+        for fields in cases:
+            running = Config()
+            fresh = replace(running, **fields)
+            merged, changed = merge_live(
+                running, fresh, reloaded=RUNTIME_FIELDS if reloaded else frozenset()
+            )
+            rust = drive1(runtime_build, sandbox, {
+                "op": "merge_live", "running": {}, "fresh": fields, "reloaded": reloaded,
+            })
+            assert rust["changed"] == sorted(changed)
+            assert rust["groups"] == sorted(runtime_changes(running, fresh))
+            assert_same(rust["merged"], config_to_dict(merged))
+
+
+def test_runtime_single_instance_lock_interoperates(runtime_build, sandbox, monkeypatch):
+    from localflow import singleinstance
+
+    monkeypatch.setenv("HOME", str(sandbox["home"]))
+    monkeypatch.setenv("USERPROFILE", str(sandbox["home"]))
+    path = singleinstance.lock_file_path("localflow")
+    held = singleinstance.acquire("localflow")
+    assert held is not None
+    try:
+        # Python holds it: the Rust runtime must refuse to start.
+        assert drive1(runtime_build, sandbox, {"op": "lock_try", "path": str(path)}) is False
+        assert drive1(runtime_build, sandbox, {"op": "lock_holder", "path": str(path)}) == [
+            *singleinstance.read_holder("localflow")
+        ]
+    finally:
+        held.release()
+    # Released: Rust takes it (and drops it on exit), leaving its pid/stamp.
+    assert drive1(runtime_build, sandbox, {"op": "lock_try", "path": str(path)}) is True
+    pid, stamp = singleinstance.read_holder("localflow")
+    assert isinstance(pid, int) and pid != os.getpid()
+    assert datetime.fromisoformat(stamp).utcoffset().total_seconds() == 0
+    again = singleinstance.acquire("localflow")
+    assert again is not None
+    again.release()
