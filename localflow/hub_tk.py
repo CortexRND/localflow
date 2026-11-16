@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from dataclasses import replace
 from datetime import datetime
 from tkinter import filedialog, messagebox
 from tkinter import font as tkfont
@@ -12,6 +13,8 @@ from tkinter import font as tkfont
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
+from localflow.hub_model import dictation_state
+from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, vault_notes_path
 from localflow.ui_tokens import (
     CARD_GAP,
@@ -48,6 +51,7 @@ class HubWindow:
         self.tokens = tokens_for(theme)
         self.font_family = resolve_tk_font(tkfont.families(root))
         self.config = config or load_config()
+        self._live_config = LazyConfig(self.config)
         self.history = (
             history_store
             if history_store is not None
@@ -85,6 +89,7 @@ class HubWindow:
         root.configure(bg=self.tokens["paper"])
         self._build_shell()
         self.show_page(initial_page)
+        self._dictation_after = root.after(500, self._poll_dictation)
 
     def _build_shell(self):
         self.shell = tk.Frame(self.root, bg=self.tokens["paper"])
@@ -275,6 +280,37 @@ class HubWindow:
         return card
 
     def _page_home(self):
+        self.config = replace(
+            self.config,
+            dictation_enabled=self._live_config.get().dictation_enabled,
+        )
+        state = dictation_state(self.config)
+        control = tk.Frame(self.body, bg=self.tokens["paper"])
+        control.pack(fill="x", pady=(0, 20))
+        self.dictation_button = self._button(
+            control,
+            state["action"],
+            self._toggle_dictation,
+            kind="primary" if state["enabled"] else "secondary",
+        )
+        self.dictation_button.pack(side="right", padx=(16, 0))
+        tk.Label(
+            control,
+            text=state["label"],
+            bg=self.tokens["paper"],
+            fg=self.tokens["ink"],
+            font=(self.font_family, 16, "bold"),
+        ).pack(anchor="w")
+        self.dictation_status = tk.Label(
+            control,
+            text=state["detail"],
+            bg=self.tokens["paper"],
+            fg=self.tokens["muted"],
+            font=(self.font_family, 12),
+            wraplength=340,
+            justify="left",
+        )
+        self.dictation_status.pack(anchor="w", pady=(6, 0))
         stats = self.history.stats()
         streak = stats["current_streak_days"]
         longest_streak = stats["longest_streak_days"]
@@ -323,6 +359,24 @@ class HubWindow:
             self._history_line(listing, row, actions=False)
             if index < len(rows) - 1:
                 tk.Frame(listing, bg=self.tokens["line"], height=1).pack(fill="x")
+
+    def _toggle_dictation(self):
+        try:
+            fresh = load_config()
+            updated = replace(fresh, dictation_enabled=not fresh.dictation_enabled)
+            save_config(updated)
+            self.config = updated
+            self.page_errors.pop("Home", None)
+        except Exception as exc:  # noqa: BLE001 - shown inline
+            self.page_errors["Home"] = f"Couldn't change dictation: {exc}"
+        self.show_page("Home")
+
+    def _poll_dictation(self):
+        if self.page == "Home" and (
+            self._live_config.get().dictation_enabled != self.config.dictation_enabled
+        ):
+            self.show_page("Home")
+        self._dictation_after = self.root.after(500, self._poll_dictation)
 
     def _empty_state(self, parent, title, detail, action, callback):
         state = tk.Frame(parent, bg=self.tokens["paper"])

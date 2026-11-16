@@ -114,6 +114,17 @@ def cli() -> None:
     """
 
 
+@cli.command("dictation")
+@click.argument("action", type=click.Choice(["on", "off", "status"]))
+def dictation_command(action: str) -> None:
+    """Enable, disable or inspect dictation without quitting LocalFlow."""
+    config = load_config()
+    if action != "status":
+        config = replace(config, dictation_enabled=action == "on")
+        save_config(config)
+    click.echo(f"Dictation: {'on' if config.dictation_enabled else 'off'}")
+
+
 @cli.group("keys")
 def keys_group() -> None:
     """Import and inspect inference provider keys in Keychain."""
