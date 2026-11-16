@@ -1341,6 +1341,8 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             title: meetingTitle.value || 'Meeting',
+            // Empty field (placeholder only) = name it on save; typed = kept.
+            auto_title: !meetingTitle.value.trim(),
             category: meetingCategory.value,
             template: meetingTemplate.value,
             user_notes: meetingNotes.value,

@@ -156,7 +156,8 @@ class Config:
     meeting_min_busy_seconds: int = 12
     meeting_auto_start: bool = True
     work_prompts: bool = True
-    fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
+    # Must be a model Fireworks serves on its shared serverless tier.
+    fireworks_model: str = "accounts/fireworks/models/kimi-k3"
     prompts_dir: str = "~/projs/prompts/meetings"
     orca_repo: str = ""                # Orca dispatch target, e.g. "id:<repoId>"; empty = not configured
     orca_agent: str = "claude"

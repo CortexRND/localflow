@@ -414,7 +414,7 @@ def tweak(request: str | None, yes: bool, undo_last: bool) -> None:
     Shows a preview first; nothing changes until you confirm (or pass --yes).
     Runs on this computer through Ollama, whatever cloud provider is active.
     """
-    from localflow.settings_agent import SettingsAgentError
+    from localflow.settings_agent import SettingsAgentError, safe_text
 
     if undo_last:
         if request is not None:
@@ -424,10 +424,10 @@ def tweak(request: str | None, yes: bool, undo_last: bool) -> None:
         try:
             result = _tweak_agent().undo()
         except SettingsAgentError as exc:
-            raise click.ClickException(str(exc)) from None
+            raise click.ClickException(safe_text(str(exc))) from None
         for line in result.reverted:
-            click.echo(f"  {line}")
-        click.echo(result.message)
+            click.echo(f"  {safe_text(line)}")
+        click.echo(safe_text(result.message))
         return
     if request is None or not request.strip():
         raise click.UsageError('say what to change, e.g. lf tweak "turn off sounds"')
@@ -435,20 +435,24 @@ def tweak(request: str | None, yes: bool, undo_last: bool) -> None:
     try:
         proposal = agent.propose(request)
     except SettingsAgentError as exc:
-        raise click.ClickException(str(exc)) from None
-    click.echo(f"Preview (runs on your computer with {proposal.model}):")
+        raise click.ClickException(safe_text(str(exc))) from None
+    # The complete preview is printed even with --yes; every line is rebuilt
+    # from validated data and escaped (settings_agent.safe_text).
+    click.echo(f"Preview (runs on your computer with {safe_text(proposal.model, 120)}):")
     for change in proposal.changes:
         click.echo(f"  {change.line()}")
+    for warning in proposal.warnings:
+        click.echo(f"  WARNING: {warning}")
     for note in proposal.rejected:
-        click.echo(f"  skipped: {note}")
+        click.echo(f"  skipped: {safe_text(note)}")
     if not yes and not click.confirm("Apply these changes?", default=False):
         click.echo("Nothing changed.")
         return
     try:
         result = agent.apply(proposal.changes)
     except SettingsAgentError as exc:
-        raise click.ClickException(str(exc)) from None
-    click.echo(result.message)
+        raise click.ClickException(safe_text(str(exc))) from None
+    click.echo(safe_text(result.message))
     if result.applied:
         click.echo("Undo with: lf tweak --undo")
 
@@ -780,8 +784,13 @@ def meeting() -> None:
 @click.option("--title", "-t", default="Meeting", help="Note title.")
 @click.option("--category", "-c", default="", help="Zoom/Teams/... (default: auto-detected).")
 def meeting_start(title: str, category: str) -> None:
-    """Start transcribing a meeting."""
-    out = _post("/meeting/start", {"title": title, "category": category})
+    """Start transcribing a meeting. Without --title the notes are named from
+    the meeting when it stops; a given --title (even "Meeting") is kept."""
+    source = click.get_current_context().get_parameter_source("title")
+    explicit = source is not None and source != click.core.ParameterSource.DEFAULT
+    out = _post("/meeting/start", {
+        "title": title, "category": category, "auto_title": not explicit,
+    })
     console.print(f"[green]●[/green] transcribing — category [bold]{out['category']}[/bold]. "
                   f"Stop with: [bold]lf meeting stop[/bold]")
 

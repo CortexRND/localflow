@@ -5,6 +5,7 @@ import secrets
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -44,7 +45,13 @@ from localflow.dispatch import (
 from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore, render_dictation
-from localflow.live_config import ConfigWatcher, merge_live
+from localflow.live_config import (
+    RUNTIME_FIELDS,
+    ConfigWatcher,
+    adopt_groups,
+    merge_live,
+    runtime_changes,
+)
 from localflow.log import SERVER_LOG_PATH, setup_logging
 from localflow.logfiles import prepare_process_logs
 from localflow.meeting_templates import load_templates, resolve_template
@@ -55,8 +62,11 @@ from localflow.meetings import (
     ObsidianWriter,
     answer_question,
     format_transcript,
+    generate_title,
+    is_default_title,
     latest_transcript_log,
     read_transcript_log,
+    title_client,
 )
 from localflow.platform import current
 from localflow.providers.factory import build_llm, build_stt, build_workprompts_llm
@@ -75,7 +85,8 @@ _api_token = load_or_create()
 _commands = discover_commands(_config.command_names, _config.skills_dirs)
 _transcriber: Transcriber | None = None
 _cleaner: Cleaner | None = None
-_lock = threading.Lock()
+# Re-entrant: _borrowed_transcriber holds it while _get_transcriber loads.
+_lock = threading.RLock()
 _config_lock = threading.Lock()
 _transcribe_lock = threading.Lock()
 
@@ -252,15 +263,60 @@ async def _api_auth(request: Request, call_next):
 
 
 def _get_transcriber() -> Transcriber:
+    current = _transcriber
+    if current is not None:
+        return current
+    with _lock:
+        return _load_transcriber_locked()
+
+
+def _load_transcriber_locked() -> Transcriber:
+    """The current speech model, loading it if needed. Caller holds _lock."""
     global _transcriber
     if _transcriber is None:
-        with _lock:
-            if _transcriber is None:
-                _transcriber = build_stt(_config)
-                # What actually loaded (auto may have fallen back): Free up
-                # space must never delete it while this process runs.
-                stt_lease.record(_transcriber.backend, _config.model_size)
+        # One config for lease, build and final lease: a reload may replace
+        # _config while a slow load runs, and the lease must name what loaded.
+        config = _config
+        # Protect the selected model while it downloads/loads (an unknown or
+        # automatic engine protects every cached model), until the real
+        # lease below names what actually loaded.
+        selection = stt_lease.record(
+            stt_lease.selection_backend(config.stt_backend), config.model_size,
+            scoped=True,
+        )
+        try:
+            _transcriber = build_stt(config)
+            loaded_size = getattr(_transcriber, "model_size", None) or config.model_size
+            # What actually loaded (auto may have fallen back): Free up
+            # space must never delete it while this process runs.
+            stt_lease.record(_transcriber.backend, loaded_size)
+        finally:
+            if selection is not None:
+                stt_lease.release(selection)
     return _transcriber
+
+
+@contextmanager
+def _borrowed_transcriber():
+    """The current speech model for one transcription, leased until it ends.
+
+    Taking the model and its scoped lease happen together under _lock, the
+    lock a speech-model reload takes to drop the old model, so a reload can
+    never retire (and Free up space never delete) a model that an in-flight
+    phone /transcribe call is still using.
+    """
+    lease = None
+    with _lock:
+        transcriber = _get_transcriber()
+        if isinstance(transcriber, Transcriber):
+            lease = stt_lease.record(
+                str(transcriber.backend), str(transcriber.model_size), scoped=True,
+            )
+    try:
+        yield transcriber
+    finally:
+        if lease is not None:
+            stt_lease.release(lease)
 
 
 def _get_cleaner() -> Cleaner:
@@ -347,7 +403,8 @@ def _transcribe_sync(audio: np.ndarray, clean: bool) -> str:
     replacements = _dictionary.replacements()
     raw_text = ""
     try:
-        raw_text = _get_transcriber().transcribe(audio, prompt=stt_prompt(words))
+        with _borrowed_transcriber() as transcriber:
+            raw_text = transcriber.transcribe(audio, prompt=stt_prompt(words))
         if not raw_text:
             _record_phone_history(audio, raw_text, "", "silent")
             return raw_text
@@ -573,6 +630,10 @@ class MeetingStart(BaseModel):
     category: str = ""
     template: str = ""     # template id; empty = [meetings] default_template
     user_notes: str = ""   # notes typed before pressing start
+    # True: name the notes automatically on save; False: the user typed the
+    # title (kept as is, even "Meeting"); omitted: decided from the title
+    # (empty or "Meeting" = automatic), as for older callers.
+    auto_title: bool | None = None
 
 
 class MeetingNotes(BaseModel):
@@ -653,9 +714,19 @@ def _open_system_audio():
 
 
 def _start_session(title: str, category: str, template: str = "",
-                   user_notes: str = "") -> dict:
-    """Claim the session slot, then open the mic. Shared by HTTP and the watcher."""
+                   user_notes: str = "", *, auto_title: bool | None = None) -> dict:
+    """Claim the session slot, then open the mic. Shared by HTTP and the watcher.
+
+    `auto_title`: the title is a placeholder to be replaced by a generated one
+    when the notes are saved. By default that is decided from the title itself
+    (empty or the "Meeting" the Hub and web page fill in); the watcher passes
+    True for its "<Platform> meeting". A title the user typed is kept as is.
+    """
     global _session, _session_meta, _last_saved, _session_state
+    if not (title or "").strip():
+        auto_title, title = True, ""  # nothing typed: always name it on save
+    elif auto_title is None:
+        auto_title = is_default_title(title)
     template_id = template or _config.meeting_default_template
     if template and template not in _templates():
         raise HTTPException(status_code=400, detail=f"unknown template {template!r}")
@@ -693,6 +764,7 @@ def _start_session(title: str, category: str, template: str = "",
         _session = session
         _session_meta = {
             "title": title or "Meeting",
+            "title_auto": bool(auto_title),
             "category": category,
             "template": template_id,
             "user_notes": user_notes,
@@ -719,7 +791,7 @@ def _on_meeting_detected(platform: str) -> None:
             return  # cheap pre-check; _start_session re-checks atomically
     title = f"{platform} meeting" if platform and platform != "Other" else "Meeting"
     try:
-        _start_session(title, "")
+        _start_session(title, "", auto_title=True)
         log.info("auto-started meeting session (platform=%s)", platform)
     except HTTPException as exc:
         log.warning("auto-start skipped: %s", exc.detail)
@@ -727,7 +799,10 @@ def _on_meeting_detected(platform: str) -> None:
 
 @app.post("/meeting/start")
 def meeting_start(body: MeetingStart) -> dict:
-    return _start_session(body.title, body.category, body.template, body.user_notes)
+    return _start_session(
+        body.title, body.category, body.template, body.user_notes,
+        auto_title=body.auto_title,
+    )
 
 
 @app.post("/meeting/notes")
@@ -857,13 +932,27 @@ async def meeting_stop() -> dict:
         if _config.sounds_enabled:
             sounds.play("stop")
         _watcher.resume()
+        # The current cleanup model (rebuilt on every config reload) and the
+        # config it was built from, taken together under the lock a reload
+        # holds, so summary and title use one coherent, up-to-date snapshot.
+        with _config_lock:
+            summarizer = _summarizer
+            config = _config
         transcript = format_transcript(segments)
-        template = resolve_template(meta.get("template"), _config.meeting_templates_dir)
+        template = resolve_template(meta.get("template"), config.meeting_templates_dir)
         user_notes = meta.get("user_notes", "")
-        notes_md = _summarizer.summarize(transcript, user_notes=user_notes, template=template)
+        notes_md = summarizer.summarize(transcript, user_notes=user_notes, template=template)
         title = meta.get("title", "Meeting")
+        title_from_model = False
+        auto_title = bool(meta.get("title_auto"))
+        if auto_title:
+            # Never fails the save: any problem gives "Meeting Nov 16, 10:30 AM".
+            # Its own client (same provider/model/key) with a short timeout.
+            title, title_from_model = generate_title(
+                title_client(summarizer.llm), transcript, user_notes, session.started_at,
+            )
         extra: dict = {}
-        if _config.work_prompts:
+        if config.work_prompts:
             prompts_md = _prompt_gen.generate(notes_md)
             if prompts_md:
                 notes_md += f"\n\n## Suggested Work Prompts\n\n{prompts_md}"
@@ -880,8 +969,11 @@ async def meeting_stop() -> dict:
             segments=segments,
             user_notes=user_notes,
             template=template.id,
+            generated_title=auto_title,
         )
         payload = {
+            "title": saved.title,
+            "title_generated": title_from_model,
             "notes_path": str(saved.notes_path),
             "log_path": str(saved.log_path),
             "segments": len(segments),
@@ -898,6 +990,7 @@ async def meeting_stop() -> dict:
     finally:
         with _session_lock:
             _session_state = "idle"
+        _release_stale_transcriber()  # a speech model change waited for this meeting
 
 
 @app.post("/meeting/dismiss")
@@ -942,19 +1035,65 @@ def _sync_meeting_watcher() -> None:
         _watcher.stop()
 
 
+_stt_reload_pending = False
+
+
+def _release_stale_transcriber() -> bool:
+    """Drop the old speech model once no meeting is using it.
+
+    A meeting keeps the model it started with (its audio is never handed to
+    a new one mid-meeting); the next transcription or meeting loads the new
+    choice lazily through _get_transcriber, which also renews the STT lease.
+    Until then the old lease stays, so Free up space keeps both protected.
+    """
+    global _transcriber, _stt_reload_pending
+    with _session_lock:
+        if _session_state != "idle":
+            return False
+        with _lock:
+            if not _stt_reload_pending:
+                return False
+            _transcriber = None
+            _stt_reload_pending = False
+    log.info("speech model change picked up; the new model loads on next use")
+    return True
+
+
 def _apply_live_config(fresh: Config) -> None:
     """ConfigWatcher callback: adopt live settings edited by another process
-    (Hub Settings, `lf tweak`, `lf config set`). Host, port, providers and
-    paths stay as started; merge_live logs those as restart-only."""
-    global _config
+    (Hub Settings, Models & keys, `lf tweak`, `lf config set`).
+
+    The allowlisted settings are copied (merge_live). The model groups are
+    copied whole, never field by field (live_config.adopt_groups): a new
+    cleanup provider/model/key ref rebuilds the LLM clients (Ask, cleanup,
+    summaries and meeting titles), and a new speech model replaces the
+    loaded one once no meeting is running. Host, port and paths stay as
+    started; merge_live logs those as restart-only."""
+    global _config, _ollama, _cleaner, _summarizer, _stt_reload_pending
     with _config_lock:
-        merged, changed = merge_live(_config, fresh)
-        if not changed:
+        merged, changed = merge_live(_config, fresh, reloaded=RUNTIME_FIELDS)
+        groups = runtime_changes(merged, fresh)
+        if not changed and not groups:
             return
+        if groups:
+            merged = adopt_groups(merged, fresh, groups)
         _config = merged
+        if "llm" in groups:
+            try:
+                _ollama = build_llm(_config)
+                _summarizer = MeetingSummarizer(build_llm(_config, timeout=300, num_ctx=8192))
+                _cleaner = None
+            except Exception:
+                log.exception("could not rebuild the cleanup model client")
+        if "stt" in groups:
+            with _lock:
+                _stt_reload_pending = True
+    if "stt" in groups:
+        _release_stale_transcriber()
     if "meeting_watch" in changed:
         _sync_meeting_watcher()
-    log.info("settings updated without restart: %s", ", ".join(sorted(changed)))
+    names = sorted(changed) + [f"{group} model" for group in sorted(groups)]
+    log.info("settings updated without restart: %s", ", ".join(names))
 
 
 def main() -> None:
@@ -963,7 +1102,7 @@ def main() -> None:
     prepare_process_logs()
     # Started here, not in the startup hook, so tests driving the app through
     # TestClient never watch the real config file.
-    ConfigWatcher(_apply_live_config).start()
+    ConfigWatcher(_apply_live_config, on_tick=_release_stale_transcriber).start()
     uvicorn.run(app, host=_config.server_host, port=_config.server_port)
 
 

@@ -4,7 +4,11 @@ Status, "which provider is active", import-tick defaults and every frame live
 here so they can be tested without macOS; `hub_mac` only renders them.
 """
 
+import re
+from dataclasses import replace
+
 from localflow import provider_keys
+from localflow.config import save_config
 from localflow.ui_tokens import (
     CARD_PADDING,
     CONTROL_GAP,
@@ -243,3 +247,224 @@ def import_height(count):
         CARD_PADDING + IMPORT_HEADER_H + count * IMPORT_ROW_H
         + MODELS_ROW_GAP + ACTION_H + CARD_PADDING
     )
+
+
+# ---------------------------------------------------- change models directly ---
+#
+# The "Change models" card picks the cleanup & Ask model of the *active*
+# provider and the speech provider/model in place. Rules live here (no
+# AppKit); hub_mac renders them and runs the Ollama listing off the main
+# thread. Saving only writes the config: the running app and server reload
+# their clients from it (live_config RUNTIME_GROUPS) without a restart.
+
+MAX_MODEL_ID_CHARS = 200
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]*")
+OLLAMA_LIST_TIMEOUT = 5
+
+# Speech providers LocalFlow ships, in menu order. Only those that can run
+# on this machine are offered (providers.registry.stt_available); `auto`
+# always can.
+SPEECH_PROVIDER_IDS = ("auto", "mlx-whisper", "faster-whisper", "parakeet")
+
+
+class ModelChoiceError(ValueError):
+    """A refused model choice; the message is user-facing."""
+
+
+def validate_model_id(text):
+    """A cloud or Ollama model id as typed/picked: one plain token."""
+    model = text.strip() if isinstance(text, str) else ""
+    if not model:
+        raise ModelChoiceError("Enter a model ID.")
+    if len(model) > MAX_MODEL_ID_CHARS or not _MODEL_ID.fullmatch(model):
+        raise ModelChoiceError(
+            "Use the provider's model ID: letters, numbers and . _ - : / @ + only."
+        )
+    return model
+
+
+def set_active_model(model, config, *, expected=None, save=save_config):
+    """Change only the active provider's model and save; returns the config.
+
+    Provider, endpoint and the endpoint-bound key reference are left exactly
+    as they are, so a stored key never has to be entered again and no key is
+    re-paired with another endpoint (switching providers still needs that
+    provider's explicit "Use"). `expected` is the (provider, base_url) the
+    control was drawn for: if the saved config moved to another provider
+    since, nothing is written.
+    """
+    chosen = validate_model_id(model)
+    if expected is not None and (config.llm_provider, _norm(config.llm_base_url)) != (
+        expected[0], _norm(expected[1])
+    ):
+        raise ModelChoiceError("Your cleanup provider changed meanwhile; pick the model again.")
+    if chosen == config.llm_model:
+        return config
+    updated = replace(config, llm_model=chosen)
+    save(updated)
+    return updated
+
+
+def _norm(url):
+    return (url or "").strip().rstrip("/")
+
+
+def _stt_available(provider_id):
+    from localflow.providers import registry
+
+    return registry.stt_available(provider_id)
+
+
+def current_speech_provider(config):
+    """The configured speech provider id (`mlx` is the same as `mlx-whisper`)."""
+    current = (getattr(config, "stt_backend", "") or "auto").strip()
+    return "mlx-whisper" if current == "mlx" else current
+
+
+def speech_provider_choices(config, available=None):
+    """[(id, label)] the speech popup offers. The configured provider is
+    listed even when unavailable here, so the popup never shows a lie."""
+    available = available or _stt_available
+    current = current_speech_provider(config)
+    choices = [
+        (pid, STT_LABELS[pid]) for pid in SPEECH_PROVIDER_IDS
+        if pid == "auto" or pid == current or available(pid)
+    ]
+    if current not in [pid for pid, _label in choices]:
+        choices.append((current, f"{STT_LABELS.get(current.lower(), current)} (not offered)"))
+    return choices
+
+
+def speech_model_choices(provider):
+    """[(size, label)] for a speech provider; () for Parakeet (fixed model)."""
+    from localflow.model_storage import _FW_CATALOG, _MLX_CATALOG, _SIZE_LABELS
+
+    if provider in STT_FIXED_MODEL:
+        return ()
+    sizes = _MLX_CATALOG if provider in ("mlx-whisper", "mlx") else _FW_CATALOG
+    return tuple((size, _SIZE_LABELS[size]) for size in sizes)
+
+
+def set_speech(provider, model, config, *, available=None, save=save_config):
+    """Save the speech provider and model together; returns the config.
+
+    Only providers this machine can run (plus the configured one) and only
+    their catalog sizes are accepted. Parakeet runs one fixed model, so its
+    `model` is ignored and the saved size is left alone. Providers that only
+    run on the default device get `stt_device = "auto"` so the pair can load.
+    Nothing is loaded here: the app and server load it in the background.
+    """
+    offered = [pid for pid, _label in speech_provider_choices(config, available)]
+    if provider not in offered or provider not in SPEECH_PROVIDER_IDS:
+        raise ModelChoiceError("That speech engine isn't available on this computer.")
+    if provider in STT_FIXED_MODEL:
+        size = config.model_size
+    else:
+        sizes = [size for size, _label in speech_model_choices(provider)]
+        size = model if model in sizes else (
+            config.model_size if config.model_size in sizes else "base"
+        )
+    device = config.stt_device
+    if provider in ("mlx-whisper", "parakeet"):
+        device = "auto"
+    updated = replace(config, stt_backend=provider, model_size=size, stt_device=device)
+    if (updated.stt_backend, updated.model_size, updated.stt_device) == (
+        config.stt_backend, config.model_size, config.stt_device
+    ):
+        return config
+    save(updated)
+    return updated
+
+
+def ollama_models(base_url, *, client=None):
+    """(installed model names, state) for the cleanup picker; never raises.
+
+    state: "ready" (some installed), "empty" (Ollama answered, nothing
+    installed) or "unavailable" (no answer). Blocking network call: run it
+    off the main thread.
+    """
+    from localflow.providers.llm_ollama import OllamaLLM
+
+    try:
+        llm = client or OllamaLLM(base_url, "", timeout=OLLAMA_LIST_TIMEOUT)
+        names = [
+            info.id for info in llm.list_models()
+            if isinstance(info.id, str) and _MODEL_ID.fullmatch(info.id)
+            and len(info.id) <= MAX_MODEL_ID_CHARS
+        ]
+    except Exception:  # noqa: BLE001 - any failure is "unavailable"
+        return [], "unavailable"
+    return names, ("ready" if names else "empty")
+
+
+def cleanup_picker(config, state, models):
+    """What the cleanup model control shows: (items, selected, note).
+
+    Ollama lists only installed models; a configured one that is not
+    installed is still shown (marked) with what to do, because Ollama answers
+    404 for a model it does not have.
+    """
+    configured = (config.llm_model or "").strip()
+    if state == "loading":
+        return [configured] if configured else [], configured, "Loading installed models…"
+    if state == "unavailable":
+        note = "Ollama isn't answering. Start Ollama, then Refresh."
+        return [configured] if configured else [], configured, note
+    if state == "empty":
+        return [configured] if configured else [], configured, (
+            "No models installed. Run `ollama pull gemma4`, then Refresh."
+        )
+    items = list(models)
+    note = ""
+    if configured and configured not in items:
+        items.insert(0, configured)
+        note = (
+            f"{configured} isn't installed in Ollama (it would fail). Pick an "
+            f"installed model, or run `ollama pull {configured}` and Refresh."
+        )
+    return items, configured, note
+
+
+QUICK_LABEL_W = 150
+QUICK_CONTROL_H = 26
+QUICK_ROW_H = 34
+REFRESH_W = 96
+
+
+def quick_layout(width, *, ollama, fixed_speech, message_lines=0):
+    """Frames (x, y, w, h) of the "Change models" card; nothing overlaps.
+
+    Row 1: speech engine popup and model popup (or the fixed-model label).
+    Row 2: cleanup & Ask model: an Ollama popup plus Refresh, or a model-ID
+    field for a cloud provider. Then an optional wrapped message.
+    """
+    inner = width - 2 * CARD_PADDING
+    x = CARD_PADDING
+    controls_x = x + QUICK_LABEL_W + CONTROL_GAP
+    controls_w = inner - QUICK_LABEL_W - CONTROL_GAP
+    half = (controls_w - CONTROL_GAP) // 2
+    y = CARD_PADDING
+    frames = {"title": (x, y, inner, 20)}
+    y += 20 + 2
+    frames["detail"] = (x, y, inner, 16)
+    y += 16 + MODELS_ROW_GAP
+    frames["speech_label"] = (x, y + 5, QUICK_LABEL_W, 16)
+    frames["speech_provider"] = (controls_x, y, half, QUICK_CONTROL_H)
+    key = "speech_fixed" if fixed_speech else "speech_model"
+    frames[key] = (controls_x + half + CONTROL_GAP, y + (5 if fixed_speech else 0),
+                   controls_w - half - CONTROL_GAP, 16 if fixed_speech else QUICK_CONTROL_H)
+    y += QUICK_ROW_H
+    frames["cleanup_label"] = (x, y + 5, QUICK_LABEL_W, 16)
+    if ollama:
+        frames["cleanup_model"] = (
+            controls_x, y, controls_w - REFRESH_W - CONTROL_GAP, QUICK_CONTROL_H,
+        )
+        frames["refresh"] = (x + inner - REFRESH_W, y, REFRESH_W, QUICK_CONTROL_H)
+    else:
+        frames["cleanup_model"] = (controls_x, y, controls_w, QUICK_CONTROL_H)
+    y += QUICK_ROW_H
+    if message_lines:
+        frames["message"] = (x, y, inner, message_lines * MESSAGE_LINE)
+        y += message_lines * MESSAGE_LINE + MODELS_ROW_GAP
+    frames["height"] = y + CARD_PADDING - MODELS_ROW_GAP
+    return frames

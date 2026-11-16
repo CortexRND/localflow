@@ -129,7 +129,9 @@ def test_preview_turns_tool_calls_into_changes_without_writing(paths):
     agent = make_agent(paths, ollama)
     before = tree(paths["root"])
 
-    proposal = agent.propose("turn off sounds and learn Kubernetes")
+    proposal = agent.propose(
+        "turn off sounds, learn Kubernetes and always write local flow as LocalFlow"
+    )
 
     assert tree(paths["root"]) == before  # preview writes nothing at all
     assert [c.line() for c in proposal.changes] == [
@@ -267,8 +269,10 @@ def test_configured_model_is_used_when_installed(paths):
         ),
         (FakeOllama(calls="nope"), "malformed tool calls"),
         (
-            FakeOllama([call("set_setting", key="sounds_enabled", value="off")] * 13),
-            "more than 12",
+            # The cap is MAX_TOOL_CALLS (10): one more is refused outright.
+            FakeOllama([call("set_setting", key="sounds_enabled", value="off")]
+                       * (sa.MAX_TOOL_CALLS + 1)),
+            f"more than {sa.MAX_TOOL_CALLS}",
         ),
     ],
 )
@@ -309,7 +313,8 @@ def test_request_is_bounded_and_required(paths, request_text):
 
 
 def test_disallowed_and_invalid_calls_are_rejected_with_reasons(paths):
-    ollama = FakeOllama([
+    # Two batches: one request may carry at most MAX_TOOL_CALLS (10) calls.
+    first = FakeOllama([
         call("set_setting", key="sounds_enabled", value="off"),
         call("set_setting", key="server_port", value="80"),
         call("set_setting", key="cleanup_level", value="maximum"),
@@ -317,16 +322,23 @@ def test_disallowed_and_invalid_calls_are_rejected_with_reasons(paths):
         call("set_setting", key="polish_hotkey", value="<shift>+a"),
         call("set_setting", key="paste_method", value="wtype"),  # not on macOS
         call("set_setting", key="sounds_enabled", value="maybe"),
+    ])
+    second = FakeOllama([
+        call("set_setting", key="sounds_enabled", value="off"),
         call("run_shell", command="rm -rf ~"),
         call("add_dictionary_word", word="ok", extra="x"),
         call("add_dictionary_word", word="bad\nword"),
         {"function": {"name": "set_setting", "arguments": "{not json"}},
         "garbage",
     ])
-    proposal = make_agent(paths, ollama).propose("do lots")
+    # The requests name the change that should survive (unnamed ones are
+    # refused now, see test_settings_security).
+    proposal = make_agent(paths, first).propose("turn off sounds and do lots more")
+    other = make_agent(paths, second).propose("turn off sounds and do lots more")
 
     assert [c.key for c in proposal.changes] == ["sounds_enabled"]
-    reasons = " | ".join(proposal.rejected)
+    assert [c.key for c in other.changes] == ["sounds_enabled"]
+    reasons = " | ".join(proposal.rejected + other.rejected)
     for expected in (
         "'server_port' is not a setting",
         "Cleanup level: choose one of", "Dictation shortcut:", "Polish shortcut:",
@@ -353,7 +365,10 @@ def test_string_arguments_and_value_normalisation(paths):
         call("set_setting", key="command_hotkey", value="off"),
         call("set_setting", key="meeting_default_template", value="Standup"),
     ])
-    changes = {c.key: c for c in make_agent(paths, ollama).propose("x").changes}
+    changes = {c.key: c for c in make_agent(paths, ollama).propose(
+        "make the work style very casual, dictate with Right Option, set the prompt "
+        "shortcut to ctrl+option+5, turn the command key off, use the Standup template"
+    ).changes}
 
     assert changes["style_work"].value == "very_casual"
     assert changes["hotkey"].value == "alt_r"
@@ -369,7 +384,9 @@ def test_shortcut_clash_is_refused(paths):
         call("set_setting", key="prompt_hotkey", value="<ctrl>+<alt>+1"),  # = polish
         call("set_setting", key="sounds_enabled", value="off"),
     ])
-    proposal = make_agent(paths, ollama).propose("x")
+    proposal = make_agent(paths, ollama).propose(
+        "set the prompt shortcut to ctrl+option+1 and turn off sounds"
+    )
     assert [c.key for c in proposal.changes] == ["sounds_enabled"]
     assert any("already the Polish shortcut" in r for r in proposal.rejected)
 
@@ -384,7 +401,9 @@ def test_unchanged_values_and_existing_entries_are_not_previewed(paths):
         call("add_replacement", spoken="TEH", written="the"),
         call("add_dictionary_word", word="Terraform"),
     ])
-    proposal = make_agent(paths, ollama).propose("x")
+    proposal = make_agent(paths, ollama).propose(
+        "turn on sounds, learn kubernetes and Terraform, replace teh with the"
+    )
     assert [c.value for c in proposal.changes] == ["Terraform"]
     assert len(proposal.rejected) == 3
 
@@ -428,9 +447,24 @@ def test_junk_hold_keys_are_refused(value):
 # ------------------------------------------------------------ apply / undo ---
 
 
+def _request_naming(calls):
+    """A request that names exactly the calls' changes (unnamed ones are
+    refused), so these apply/undo tests keep previewing the same batch."""
+    parts = []
+    for item in calls:
+        name, args = item["function"]["name"], item["function"]["arguments"]
+        if name == "set_setting":
+            parts.append(f"set {sa.LABELS[args['key']]} to {args['value']}")
+        elif name == "add_dictionary_word":
+            parts.append(f"learn {args['word']}")
+        else:
+            parts.append(f"replace {args['spoken']} with {args['written']}")
+    return "; ".join(parts)
+
+
 def _preview(paths, calls, **overrides):
     agent = make_agent(paths, FakeOllama(calls), **overrides)
-    return agent, agent.propose("x")
+    return agent, agent.propose(_request_naming(calls))
 
 
 def test_apply_and_undo_round_trip_across_a_restart(paths):

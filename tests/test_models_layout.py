@@ -550,7 +550,9 @@ def test_live_edits_survive_a_resize_rebuild():
 
 def test_page_summary_and_import_wiring():
     summary = source_of("_models_summary")
-    assert "Change speech model…" in summary and '"openSetup:"' in summary
+    # The legacy button now leads to the direct speech picker, not setup.
+    assert "Change speech model…" in summary and '"focusSpeechModel:"' in summary
+    assert '"openSetup:"' not in summary
     assert "Import keys…" in summary and '"providerImport:"' in summary
     assert "Cleanup & Ask model" in summary and "Speech model" in summary
     assert 'kind="primary"' not in summary  # both are compact secondary actions

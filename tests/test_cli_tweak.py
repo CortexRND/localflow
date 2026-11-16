@@ -48,7 +48,7 @@ def run(*args, input=None):
 
 
 def test_preview_then_cancel_changes_nothing(tweak_env):
-    result = run("turn off sounds", input="n\n")
+    result = run("turn off sounds and learn Kubernetes", input="n\n")
 
     assert result.exit_code == 0, result.output
     assert "Preview (runs on your computer with gemma4:e4b):" in result.output
@@ -61,7 +61,8 @@ def test_preview_then_cancel_changes_nothing(tweak_env):
 
 
 def test_confirm_applies_and_undo_reverts(tweak_env):
-    result = run("turn off sounds", input="y\n")
+    # Both changes are named: unnamed ones are refused (test_settings_security).
+    result = run("turn off sounds and learn Kubernetes", input="y\n")
     assert result.exit_code == 0, result.output
     assert "Applied 2 changes." in result.output
     assert "lf tweak --undo" in result.output

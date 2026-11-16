@@ -6,7 +6,8 @@ import sys
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, font as tkfont, messagebox
+from tkinter import filedialog, messagebox
+from tkinter import font as tkfont
 
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
@@ -17,9 +18,11 @@ from localflow.ui_tokens import (
     CARD_PADDING,
     PAGE_MARGIN,
     SUN_TEXT,
-    TOKENS as TOKENS,
     resolve_tk_font,
     tokens_for,
+)
+from localflow.ui_tokens import (
+    TOKENS as TOKENS,  # noqa: PLC0414 - public palette re-export
 )
 
 PAGES = ("Home", "Meetings", "History", "Dictionary", "Style", "Models")
@@ -56,7 +59,9 @@ class HubWindow:
         self._meeting_notes_after = None
         self._meeting_notes_dirty = False
         self._meeting_notes_text = ""
-        self._meeting_title = "Meeting"
+        # Blank = name the notes automatically on save; anything typed (even
+        # "Meeting") is the user's title and is kept.
+        self._meeting_title = ""
         self._meeting_templates = []
         self._meeting_template = ""
         self._meeting_status_data = {}
@@ -1289,7 +1294,9 @@ class HubWindow:
         self.meeting_error.pack_forget()
         self.meeting_action.configure(state="disabled")
         if not session:
-            title = self.meeting_title_entry.get().strip() or "Meeting"
+            typed = self.meeting_title_entry.get().strip()
+            title = typed or "Meeting"
+            auto_title = not typed
             template = self.meeting_template_var.get()
             notes = self.meeting_notes.get("1.0", "end-1c")
 
@@ -1308,7 +1315,7 @@ class HubWindow:
                 self._meeting_poll()
 
             self._meeting_request(
-                "start", started, title, "", template, notes
+                "start", started, title, "", template, notes, auto_title
             )
             return
 

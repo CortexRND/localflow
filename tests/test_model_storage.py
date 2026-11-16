@@ -299,7 +299,8 @@ def test_runtime_paths_record_leases():
     root = Path(ms.__file__).parent
     assert "stt_lease.record(transcriber.backend, config.model_size)" in (
         root / "app.py").read_text(encoding="utf-8")
-    assert "stt_lease.record(_transcriber.backend, _config.model_size)" in (
+    # The server leases the size it actually loaded, from one config snapshot.
+    assert "stt_lease.record(_transcriber.backend, loaded_size)" in (
         root / "server.py").read_text(encoding="utf-8")
 
 

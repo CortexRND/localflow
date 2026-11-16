@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from localflow.settings_agent import safe_text, warnings_for
 from localflow.text_wrap import wrap_lines
 
 HEADING = "Tell LocalFlow what to change"
@@ -31,10 +32,18 @@ APPLIED_TITLE = "Saved"
 ERROR_TITLE = "Couldn't preview that"
 UNDO_TITLE = "Undo last change"
 MAX_DRAFT_CHARS = 500
+MANUAL_TITLE = "Settings"
+MANUAL_INTRO = "Changes save as you make them. Undo works for these too."
+WARNINGS_TITLE = "Check before applying"
+STALE_PREVIEW = "Your settings changed, so that preview is out of date. Preview again."
+STALE_PENDING = (
+    "Your settings changed while the local model was thinking, so its answer "
+    "was dropped. Preview again."
+)
 
 
 def model_note(model: str | None) -> str:
-    return f"Runs on your Mac with {model}" if model else NOTE_UNKNOWN
+    return f"Runs on your Mac with {safe_text(model, 120)}" if model else NOTE_UNKNOWN
 
 
 @dataclass
@@ -51,10 +60,59 @@ class SettingsPageState:
     token: int = 0
     pending: str | None = None     # the request in flight, if any
     undo_lines: list[str] | None = None
+    warnings: list[str] = field(default_factory=list)  # preview cautions
+    # Manual controls: an invalid typed value is kept (per key) with its
+    # friendly error until it is fixed or another value is committed.
+    manual_drafts: dict[str, str] = field(default_factory=dict)
+    manual_errors: dict[str, str] = field(default_factory=dict)
+    manual_notice: str = ""
 
     @property
     def busy(self) -> bool:
         return self.status == "busy"
+
+    # ------------------------------------------------------------ manual ---
+
+    def manual_saved(self, key: str, message: str) -> None:
+        """A manual change was written: clear that control's draft/error and
+        retire any preview computed against the old settings, so neither a
+        stale Apply nor a late model answer can overwrite what was just set."""
+        self.manual_drafts.pop(key, None)
+        self.manual_errors.pop(key, None)
+        # Built by the controller from Change.line() (already validated and
+        # escaped), so LocalFlow's own "→" survives; only bounded here.
+        self.manual_notice = message[:MAX_DRAFT_CHARS]
+        self.settings_changed()
+
+    def manual_failed(self, key: str, typed: str | None, message: str) -> None:
+        if typed is not None:
+            self.manual_drafts[key] = typed[:MAX_DRAFT_CHARS]
+        self.manual_errors[key] = safe_text(message)
+        self.manual_notice = ""
+
+    def manual_draft(self, key: str, typed: str) -> None:
+        """Keep a shortcut field's text across a rebuild (resize, navigation)."""
+        self.manual_drafts[key] = typed[:MAX_DRAFT_CHARS]
+
+    def settings_changed(self) -> None:
+        """Settings moved under the page: drop a now-stale preview or request."""
+        if self.status == "preview":
+            self.token += 1
+            self.proposal = None
+            self.lines, self.notes, self.warnings = [], [], []
+            self.status, self.message = "error", STALE_PREVIEW
+        elif self.status == "busy":
+            self.token += 1  # the in-flight answer is ignored when it lands
+            self.pending = None
+            self.proposal = None
+            self.lines, self.notes, self.warnings = [], [], []
+            self.status, self.message = "error", STALE_PENDING
+
+    def clear_manual(self) -> None:
+        """After an agent Apply/Undo the controls show the fresh config."""
+        self.manual_drafts.clear()
+        self.manual_errors.clear()
+        self.manual_notice = ""
 
     def begin_preview(self, request: str) -> int | None:
         """Start a preview; returns its token, or None when there's nothing to ask."""
@@ -66,24 +124,33 @@ class SettingsPageState:
         self.pending = text
         self.status = "busy"
         self.proposal = None
-        self.lines, self.notes, self.message = [], [], ""
+        self.lines, self.notes, self.warnings, self.message = [], [], [], ""
         return self.token
 
     def finish_preview(self, token: int, proposal=None, error: str | None = None,
                        model: str | None = None) -> bool:
-        """Accept a worker result; False (ignored) when it is stale."""
+        """Accept a worker result; False (ignored) when it is stale.
+
+        Everything shown is rebuilt or escaped here (Change.line(),
+        safe_text): nothing the model or Ollama sent is displayed verbatim.
+        """
         if token != self.token or self.status != "busy":
             return False
+        request = self.pending or ""
         self.pending = None
         if model:
-            self.model = model
+            self.model = safe_text(model, 120)
         if error is not None:
-            self.status, self.message = "error", error
+            self.status, self.message = "error", safe_text(error)
             return True
         self.proposal = proposal
-        self.model = getattr(proposal, "model", None) or self.model
+        shown_model = getattr(proposal, "model", None)
+        self.model = safe_text(shown_model, 120) if shown_model else self.model
         self.lines = [change.line() for change in proposal.changes]
-        self.notes = list(proposal.rejected)
+        self.warnings = warnings_for(
+            proposal.changes, getattr(proposal, "request", "") or request
+        )
+        self.notes = [safe_text(note) for note in proposal.rejected]
         self.status = "preview"
         return True
 
@@ -92,28 +159,32 @@ class SettingsPageState:
         self.token += 1
         self.pending = None
         self.proposal = None
-        self.lines, self.notes, self.message = [], [], ""
+        self.lines, self.notes, self.warnings, self.message = [], [], [], ""
         self.status = "empty"
 
     def applied(self, result) -> None:
         self.proposal = None
         self.lines = [change.line() for change in result.applied]
-        self.notes = []
-        self.message = result.message
+        self.notes, self.warnings = [], []
+        self.message = safe_text(result.message)
         self.status = "applied"
         self.draft = ""
+        self.clear_manual()
 
     def undone(self, result) -> None:
         self.proposal = None
-        self.lines = list(result.reverted)
-        self.notes = list(result.skipped)
-        self.message = result.message
+        # Undo lines are built by the agent from a validated record.
+        self.lines = [safe_text(line) for line in result.reverted]
+        self.notes = [safe_text(note) for note in result.skipped]
+        self.warnings = []
+        self.message = safe_text(result.message)
         self.status = "applied"
+        self.clear_manual()
 
     def failed(self, message: str) -> None:
-        self.status, self.message = "error", message
+        self.status, self.message = "error", safe_text(message)
         self.proposal = None
-        self.lines, self.notes = [], []
+        self.lines, self.notes, self.warnings = [], [], []
 
 
 # ------------------------------------------------------------------ layout ---
@@ -124,10 +195,79 @@ ROW_H = 24
 LINE_H = 18
 CARD_PAD = 16
 GAP = 16
-SIDE_WIDTH = 280
-WIDE_MIN = 840          # content width at which the current settings move right
+SIDE_WIDTH = 300
+WIDE_MIN = 840          # content width at which the manual settings move right
 CURRENT_ROW_H = 22
 TITLE_H = 22
+# Manual controls.
+GROUP_H = 26            # a group heading
+CONTROL_H = 26          # popup / shortcut field
+SWITCH_H = 22
+MANUAL_ROW_GAP = 8
+SIDE_BY_SIDE_MIN = 440  # inner width at which label and control share a row
+LABEL_FRACTION = 0.48
+
+
+def manual_panel_width(width) -> float:
+    """Width of the manual panel: its own column when wide, else full width."""
+    return SIDE_WIDTH if width >= WIDE_MIN else width
+
+
+def manual_layout(width, rows, state: SettingsPageState, measure):
+    """Frames for the manual panel, relative to its own top-left.
+
+    `rows` are settings_agent.ManualSetting in page order (grouped). Every
+    row gets a label and a control; a row with an error gets a wrapped error
+    line under it (sized by `measure`), so nothing is clipped at any width.
+    Returns {"height", "title", "intro", "groups": [(name, frame)],
+    "rows": {key: {"label", "control", "error"?}}, "notice"?}.
+    """
+    inner = width - 2 * CARD_PAD
+    side = inner >= SIDE_BY_SIDE_MIN
+    layout = {"side_by_side": side, "groups": [], "rows": {}}
+    y = CARD_PAD
+    layout["title"] = (CARD_PAD, y, inner, TITLE_H)
+    y += TITLE_H + 2
+    intro_h = _wrapped_height(MANUAL_INTRO, inner, measure)
+    layout["intro"] = (CARD_PAD, y, inner, intro_h)
+    y += intro_h + 6
+    if state.manual_notice:
+        notice_h = _wrapped_height(state.manual_notice, inner, measure)
+        layout["notice"] = (CARD_PAD, y, inner, notice_h)
+        y += notice_h + 6
+    group = None
+    for row in rows:
+        if row.group != group:
+            group = row.group
+            y += 6
+            layout["groups"].append((group, (CARD_PAD, y, inner, GROUP_H - 6)))
+            y += GROUP_H
+        control_h = SWITCH_H if row.kind == "switch" else CONTROL_H
+        frames = {}
+        if side:
+            label_w = int(inner * LABEL_FRACTION)
+            control_w = inner - label_w - 8
+            line_h = max(control_h, LINE_H)
+            frames["label"] = (CARD_PAD, y + (line_h - LINE_H) / 2, label_w, LINE_H)
+            control_w = min(control_w, 60) if row.kind == "switch" else control_w
+            frames["control"] = (CARD_PAD + label_w + 8, y + (line_h - control_h) / 2,
+                                 control_w, control_h)
+            y += line_h
+        else:
+            frames["label"] = (CARD_PAD, y, inner, LINE_H)
+            y += LINE_H + 2
+            control_w = 60 if row.kind == "switch" else inner
+            frames["control"] = (CARD_PAD, y, control_w, control_h)
+            y += control_h
+        error = state.manual_errors.get(row.key)
+        if error:
+            error_h = _wrapped_height(error, inner, measure)
+            frames["error"] = (CARD_PAD, y + 4, inner, error_h)
+            y += error_h + 4
+        layout["rows"][row.key] = frames
+        y += MANUAL_ROW_GAP
+    layout["height"] = y + CARD_PAD
+    return layout
 
 
 def _wrapped_height(text: str, width: float, measure) -> int:
@@ -138,11 +278,15 @@ def _wrapped_height(text: str, width: float, measure) -> int:
 
 def settings_layout(
     width, top, state: SettingsPageState, current_count: int, measure, measure_change=None,
+    *, manual_height=None,
 ):
     """Frames (x, y, w, h) for every element; `measure(text) -> points` (13pt).
 
     `measure_change` measures the change lines (13pt semibold); defaults to
-    `measure`.
+    `measure`. `manual_height` is the manual panel's height (manual_layout at
+    manual_panel_width(width)); `layout["current"]` is that panel's frame,
+    beside the agent when wide and stacked under it otherwise. Without it the
+    panel is sized for `current_count` plain rows.
     """
     wide = width >= WIDE_MIN
     main_w = width - SIDE_WIDTH - GAP if wide else width
@@ -187,6 +331,17 @@ def settings_layout(
             h = ROW_H if h <= LINE_H else h + (ROW_H - LINE_H)
             rows.append((CARD_PAD, cy, inner_w, h))
             cy += h
+        if state.warnings:
+            cy += 6
+            layout["warnings_title"] = (CARD_PAD, cy, inner_w, LINE_H)
+            cy += LINE_H + 2
+            warning_rows = []
+            for warning in state.warnings:
+                h = max(_wrapped_height(warning, inner_w, measure), LINE_H)
+                warning_rows.append((CARD_PAD, cy, inner_w, h))
+                cy += h
+            layout["warning_rows"] = warning_rows
+            cy += 4
         for note in state.notes:
             h = max(_wrapped_height(note, inner_w, measure), LINE_H)
             rows.append((CARD_PAD, cy, inner_w, h))
@@ -208,7 +363,10 @@ def settings_layout(
     layout["undo_detail"] = undo_text
     y += max(BUTTON_H, undo_h) + GAP
 
-    current_h = CARD_PAD * 2 + TITLE_H + 6 + current_count * CURRENT_ROW_H
+    if manual_height is not None:
+        current_h = manual_height
+    else:
+        current_h = CARD_PAD * 2 + TITLE_H + 6 + current_count * CURRENT_ROW_H
     if wide:
         cx, cyy, cw = main_w + GAP, top, SIDE_WIDTH
     else:

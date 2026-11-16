@@ -6,6 +6,15 @@ interval on a background thread that sleeps on an Event; no busy polling)
 and hands the reloaded config to a callback. `merge_live` copies over only
 the settings that are safe to change at runtime (the Settings agent's
 ALLOWLIST); anything else still needs a restart and is only logged.
+
+The model choices are reloaded too, but never field by field: `RUNTIME_GROUPS`
+names the fields that only make sense together (the LLM provider, endpoint,
+model and endpoint-bound key reference; the speech provider, model, language
+and device). `runtime_changes` says which groups moved and `adopt_groups`
+copies each moved group whole, so a reader can never pair one provider's
+endpoint with another's key or model. Rebuilding the clients is the caller's
+job (app.RuntimeModels, server._apply_live_config): they swap them between
+jobs and never under a running recording or meeting.
 """
 
 from __future__ import annotations
@@ -26,22 +35,53 @@ HOTKEY_FIELDS = frozenset({
     "hotkey", "command_hotkey", "polish_hotkey", "prompt_hotkey", "paste_last_hotkey",
 })
 DEFAULT_INTERVAL = 2.0
+LLM_FIELDS = (
+    "llm_provider", "llm_base_url", "llm_model", "llm_key_ref",
+    "cleanup_timeout", "cleanup_num_ctx",
+)
+STT_FIELDS = ("stt_backend", "model_size", "language", "stt_device")
+RUNTIME_GROUPS = {"llm": LLM_FIELDS, "stt": STT_FIELDS}
+RUNTIME_FIELDS = frozenset(LLM_FIELDS) | frozenset(STT_FIELDS)
 
 
-def merge_live(running: Config, fresh: Config) -> tuple[Config, frozenset[str]]:
-    """`running` with the live fields taken from `fresh`; also the changed names."""
+def merge_live(
+    running: Config, fresh: Config, *, reloaded: frozenset[str] = frozenset(),
+) -> tuple[Config, frozenset[str]]:
+    """`running` with the live fields taken from `fresh`; also the changed names.
+
+    `reloaded`: fields the caller adopts itself (RUNTIME_FIELDS for the app
+    and server), left out of the restart-only log line.
+    """
     changed = frozenset(
         name for name in LIVE_FIELDS if getattr(running, name) != getattr(fresh, name)
     )
     others = [
         name for name in running.__dataclass_fields__
-        if name not in LIVE_FIELDS and getattr(running, name) != getattr(fresh, name)
+        if name not in LIVE_FIELDS and name not in reloaded
+        and getattr(running, name) != getattr(fresh, name)
     ]
     if others:
         log.info("config changed; restart LocalFlow to apply: %s", ", ".join(sorted(others)))
     if not changed:
         return running, changed
     return replace(running, **{name: getattr(fresh, name) for name in changed}), changed
+
+
+def runtime_changes(running: Config, fresh: Config) -> frozenset[str]:
+    """Names of the RUNTIME_GROUPS whose fields differ between the configs."""
+    return frozenset(
+        group for group, fields in RUNTIME_GROUPS.items()
+        if any(getattr(running, name) != getattr(fresh, name) for name in fields)
+    )
+
+
+def adopt_groups(running: Config, fresh: Config, groups) -> Config:
+    """`running` with every field of each named group taken from `fresh`,
+    always as a whole group (never a model without its provider/key ref)."""
+    values = {
+        name: getattr(fresh, name) for group in groups for name in RUNTIME_GROUPS[group]
+    }
+    return replace(running, **values) if values else running
 
 
 def file_signature(path: Path) -> tuple[int, int, int] | None:
