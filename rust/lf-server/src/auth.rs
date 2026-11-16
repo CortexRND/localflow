@@ -8,6 +8,7 @@ use axum::{
 };
 use std::{
     collections::{HashMap, VecDeque},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,6 +20,7 @@ const MAX_CODES: usize = 32;
 /// Intentionally has no Debug implementation: these values are credentials.
 pub(crate) struct Auth {
     pub token: String,
+    token_file: Option<PathBuf>,
     pending: VecDeque<(String, Instant)>,
     used: VecDeque<(String, Instant)>,
 }
@@ -27,9 +29,16 @@ impl Auth {
     pub fn new(token: String) -> Self {
         Self {
             token,
+            token_file: None,
             pending: VecDeque::new(),
             used: VecDeque::new(),
         }
+    }
+
+    pub fn load() -> anyhow::Result<Self> {
+        let mut auth = Self::new(lf_core::apitoken::load()?);
+        auth.token_file = Some(lf_core::apitoken::try_token_path()?);
+        Ok(auth)
     }
 
     pub fn issue(&mut self) -> anyhow::Result<String> {
@@ -78,7 +87,11 @@ impl Auth {
         self.used.clear();
         // Rotation is explicit theft recovery, never a startup/read side effect.
         // Fail closed even if obtaining replacement randomness fails.
-        self.token = lf_core::apitoken::load_or_create().unwrap_or_default();
+        self.token = match self.token_file.as_deref() {
+            Some(path) => lf_core::apitoken::load_or_create_at(path),
+            None => lf_core::apitoken::generate_token(),
+        }
+        .unwrap_or_default();
     }
 }
 
@@ -221,6 +234,21 @@ pub(crate) async fn authenticate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replay_rotation_only_updates_the_owned_token_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let unrelated = directory.path().join("unrelated-token");
+        std::fs::write(&unrelated, "other-server").unwrap();
+        let owned = directory.path().join("owned-token");
+        let mut auth = Auth::new("original".into());
+        auth.rotate();
+        assert!(!auth.token.is_empty() && auth.token != "original");
+        assert!(!owned.exists());
+        auth.token_file = Some(owned.clone());
+        auth.rotate();
+        assert!(std::fs::read_to_string(owned).unwrap().trim() == auth.token);
+        assert!(std::fs::read_to_string(unrelated).unwrap() == "other-server");
+    }
     #[test]
     fn codes_expire_are_single_use_and_bounded() {
         let now = Instant::now();

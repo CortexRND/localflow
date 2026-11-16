@@ -38,8 +38,8 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    /// `token` must come from `lf_core::apitoken::load()`, never rotate-on-read.
-    /// This constructor also permits isolated tests without process-wide env edits.
+    /// In-memory auth scope: replay rotates only this instance's token. For the
+    /// standard on-disk token and persistent replay recovery, use `load_with_backend`.
     pub fn new(config: Config, token: String, backend: Arc<dyn Backend>) -> Self {
         Self {
             config: Mutex::new(config),
@@ -49,11 +49,17 @@ impl ServerState {
     }
 
     pub fn load() -> anyhow::Result<Self> {
-        Ok(Self::new(
-            config::load_config()?,
-            lf_core::apitoken::load()?,
-            Arc::new(UnavailableBackend),
-        ))
+        Self::load_with_backend(Arc::new(UnavailableBackend))
+    }
+
+    /// Reads the existing token (no startup rotation) and attaches replay
+    /// recovery to that exact file, independent of future environment changes.
+    pub fn load_with_backend(backend: Arc<dyn Backend>) -> anyhow::Result<Self> {
+        Ok(Self {
+            config: Mutex::new(config::load_config()?),
+            auth: Mutex::new(auth::Auth::load()?),
+            backend,
+        })
     }
 }
 
