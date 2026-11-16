@@ -109,14 +109,14 @@ fn respond(status: u16, value: Value) -> Response {
         .into_response()
 }
 
-fn validation(location: Value, kind: &str, message: &str, input: Value) -> Response {
-    respond(
+fn validation(location: Value, kind: &str, message: &str, input: Value) -> Box<Response> {
+    Box::new(respond(
         422,
         json!({"detail": [{"type": kind, "loc": location, "msg": message, "input": input}]}),
-    )
+    ))
 }
 
-fn json_body(body: &[u8], optional: bool) -> Result<Value, Response> {
+fn json_body(body: &[u8], optional: bool) -> Result<Value, Box<Response>> {
     if body.is_empty() {
         return if optional {
             Ok(json!({}))
@@ -286,7 +286,7 @@ fn dispatch(
     if path == "/api/config" && method == Method::PUT {
         let update = match json_body(&body, false) {
             Ok(v) => v,
-            Err(r) => return r,
+            Err(r) => return *r,
         };
         let mut config = state.config.lock().unwrap();
         let updated = match config::apply_config_update(&config, &update) {
@@ -339,7 +339,7 @@ fn dispatch(
         "/api/test/llm" => {
             let body = match json_body(&body, true) {
                 Ok(v) => v,
-                Err(r) => return r,
+                Err(r) => return *r,
             };
             Json(providers::test_llm(
                 &config,
@@ -357,7 +357,7 @@ fn dispatch(
         p if p.starts_with("/api/secrets/") => {
             let body = match json_body(&body, false) {
                 Ok(v) => v,
-                Err(r) => return r,
+                Err(r) => return *r,
             };
             let name = p.trim_start_matches("/api/secrets/");
             if !providers::secret_names().iter().any(|n| n == name) {
@@ -383,7 +383,7 @@ fn dispatch(
             if path == "/api/autostart" {
                 let body = match json_body(&body, false) {
                     Ok(v) => v,
-                    Err(r) => return r,
+                    Err(r) => return *r,
                 };
                 if !body["enabled"].is_boolean() {
                     return error(400, "enabled must be a boolean");
