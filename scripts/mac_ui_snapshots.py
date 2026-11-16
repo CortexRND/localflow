@@ -629,6 +629,13 @@ def _hub_responsive_snapshots(base):
     )
     controller.show_page("Home")
     _hub_sized_shots(controller, "hub-home-populated")
+    with patch.object(
+        controller._live_config,
+        "get",
+        return_value=replace(controller.config, dictation_enabled=False),
+    ):
+        controller.show_page("Home")
+        _hub_sized_shots(controller, "hub-home-dictation-off")
     from localflow.ask_model import Turn
 
     controller.show_page("Ask")

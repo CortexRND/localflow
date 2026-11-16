@@ -7,13 +7,15 @@ stays up regardless and shows server state.
 
 import subprocess
 import sys
+from dataclasses import replace
 
 import requests
 import rumps
 
 from localflow.apitoken import load
-from localflow.config import load_config
+from localflow.config import load_config, save_config
 from localflow.history import HistoryStore
+from localflow.hub_model import dictation_state
 from localflow.inject import paste_text
 from localflow.live_config import LazyConfig
 from localflow.menubar_poll import REQUEST_TIMEOUT, MeetingStatusPoller
@@ -53,6 +55,9 @@ class LocalflowMenuBar(rumps.App):
     def __init__(self):
         super().__init__(IDLE_ICON, quit_button="Quit localflow menu bar")
         self.status_item = rumps.MenuItem("server: …")
+        self.dictation_item = rumps.MenuItem(
+            "Dictation: On", callback=self.toggle_dictation
+        )
         self.toggle_item = rumps.MenuItem(
             "Start meeting transcription", callback=self.toggle_meeting
         )
@@ -73,6 +78,7 @@ class LocalflowMenuBar(rumps.App):
         )
         self.menu = [
             self.status_item,
+            self.dictation_item,
             None,
             self.toggle_item,
             self.dismiss_item,
@@ -150,9 +156,24 @@ class LocalflowMenuBar(rumps.App):
         self._was_detected = bool(st.get("detected"))
 
     def refresh_dictation_status(self, _timer=None) -> None:
-        self._show("title", self, f"{title_prefix(self._live_state.state())}{self._base_icon}")
+        state = dictation_state(_live_config.get())
+        self._show("dictation", self.dictation_item, state["label"])
+        suffix = " (off)" if not state["enabled"] else ""
+        self._show(
+            "title",
+            self,
+            f"{title_prefix(self._live_state.state())}{self._base_icon}{suffix}",
+        )
 
     # ------------------------------------------------------------- actions ---
+
+    def toggle_dictation(self, _item) -> None:
+        try:
+            config = load_config()
+            save_config(replace(config, dictation_enabled=not config.dictation_enabled))
+        except Exception as exc:  # noqa: BLE001 - surfaced as a notification
+            rumps.notification("localflow", "Couldn't change dictation", str(exc)[:120])
+        self.refresh_dictation_status()
 
     def toggle_meeting(self, _item) -> None:
         try:

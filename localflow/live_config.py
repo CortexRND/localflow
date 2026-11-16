@@ -31,10 +31,16 @@ from localflow.settings_agent import ALLOWLIST
 log = logging.getLogger("localflow.live_config")
 
 LIVE_FIELDS = frozenset(ALLOWLIST)
-HOTKEY_FIELDS = frozenset({
-    "dictation_toggle_hotkey",
-    "hotkey", "command_hotkey", "polish_hotkey", "prompt_hotkey", "paste_last_hotkey",
-})
+HOTKEY_FIELDS = frozenset(
+    {
+        "dictation_toggle_hotkey",
+        "hotkey",
+        "command_hotkey",
+        "polish_hotkey",
+        "prompt_hotkey",
+        "paste_last_hotkey",
+    }
+)
 DEFAULT_INTERVAL = 2.0
 LLM_FIELDS = (
     "llm_provider", "llm_base_url", "llm_model", "llm_key_ref",

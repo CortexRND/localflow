@@ -212,15 +212,23 @@ class PushToTalkController:
             if kind == "dictation_toggle":
                 try:
                     fresh = load_config()
-                    fresh = replace(fresh, dictation_enabled=not fresh.dictation_enabled)
+                    fresh = replace(
+                        fresh, dictation_enabled=not fresh.dictation_enabled
+                    )
                     save_config(fresh)
-                    self._apply_config(replace(
-                        self._config, dictation_enabled=fresh.dictation_enabled,
-                    ))
+                    self._apply_config(
+                        replace(
+                            self._config,
+                            dictation_enabled=fresh.dictation_enabled,
+                        )
+                    )
                 except (ConfigError, OSError, ValueError):
                     log.exception("could not toggle dictation")
                 continue
-            if not getattr(self._config, "dictation_enabled", True) and kind != "paste_last":
+            if (
+                not getattr(self._config, "dictation_enabled", True)
+                and kind != "paste_last"
+            ):
                 continue
             if kind == "command_cancel":
                 self._cancel_command()

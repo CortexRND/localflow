@@ -174,32 +174,67 @@ CURRENT_KEYS = (
 # The manual controls on the Settings page: every ALLOWLIST key exactly
 # once, grouped as the page shows them (a test keeps this exhaustive).
 MANUAL_GROUPS = (
-    ("Dictation", (
-        "dictation_enabled",
-        "sounds_enabled", "paste_method", "spoken_symbols", "spoken_punctuation",
-        "hot_phrases",
-    )),
-    ("Cleanup & style", (
-        "cleanup_enabled", "cleanup_level", "styles_enabled", "style_work",
-        "style_email", "style_personal", "style_other",
-    )),
-    ("Shortcuts", (
-        "dictation_toggle_hotkey",
-        "hotkey", "command_hotkey", "polish_hotkey", "prompt_hotkey",
-        "paste_last_hotkey",
-    )),
-    ("Meetings", (
-        "meeting_watch", "meeting_auto_start", "capture_system_audio",
-        "meeting_default_template", "work_prompts",
-    )),
+    (
+        "Dictation",
+        (
+            "dictation_enabled",
+            "sounds_enabled",
+            "paste_method",
+            "spoken_symbols",
+            "spoken_punctuation",
+            "hot_phrases",
+        ),
+    ),
+    (
+        "Cleanup & style",
+        (
+            "cleanup_enabled",
+            "cleanup_level",
+            "styles_enabled",
+            "style_work",
+            "style_email",
+            "style_personal",
+            "style_other",
+        ),
+    ),
+    (
+        "Shortcuts",
+        (
+            "dictation_toggle_hotkey",
+            "hotkey",
+            "command_hotkey",
+            "polish_hotkey",
+            "prompt_hotkey",
+            "paste_last_hotkey",
+        ),
+    ),
+    (
+        "Meetings",
+        (
+            "meeting_watch",
+            "meeting_auto_start",
+            "capture_system_audio",
+            "meeting_default_template",
+            "work_prompts",
+        ),
+    ),
 )
 
-_BOOL_KEYS = frozenset({
-    "dictation_enabled",
-    "sounds_enabled", "cleanup_enabled", "styles_enabled", "spoken_symbols",
-    "spoken_punctuation", "hot_phrases", "meeting_watch", "meeting_auto_start",
-    "capture_system_audio", "work_prompts",
-})
+_BOOL_KEYS = frozenset(
+    {
+        "dictation_enabled",
+        "sounds_enabled",
+        "cleanup_enabled",
+        "styles_enabled",
+        "spoken_symbols",
+        "spoken_punctuation",
+        "hot_phrases",
+        "meeting_watch",
+        "meeting_auto_start",
+        "capture_system_audio",
+        "work_prompts",
+    }
+)
 _STYLES = ("formal", "casual", "very_casual", "excited")
 _ENUMS = {
     "cleanup_level": ("none", "light", "medium"),
@@ -210,7 +245,11 @@ _ENUMS = {
 }
 _SHORTCUT_KEYS = (
     "dictation_toggle_hotkey",
-    "hotkey", "command_hotkey", "polish_hotkey", "prompt_hotkey", "paste_last_hotkey",
+    "hotkey",
+    "command_hotkey",
+    "polish_hotkey",
+    "prompt_hotkey",
+    "paste_last_hotkey",
 )
 # What each platform's paste backend really accepts (others fail silently).
 PASTE_METHODS_BY_PLATFORM = {
