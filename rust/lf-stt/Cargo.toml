@@ -12,9 +12,17 @@ path = "lib.rs"
 default = ["whisper", "parakeet"]
 whisper = ["dep:whisper-rs"]
 parakeet = ["dep:sherpa-onnx"]
+server = ["dep:lf-server", "dep:lf-providers", "dep:lf-audio", "dep:multer", "dep:futures-util", "dep:futures-executor", "dep:wait-timeout"]
 
 [dependencies]
 lf-core = { path = "../lf-core" }
+lf-server = { path = "../lf-server", optional = true }
+lf-providers = { path = "../lf-providers", optional = true }
+lf-audio = { path = "../lf-audio", optional = true }
+multer = { version = "3", optional = true }
+futures-util = { version = "0.3", optional = true }
+futures-executor = { version = "0.3", optional = true }
+wait-timeout = { version = "0.2", optional = true }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -200,10 +200,11 @@ Transcripts/timing need not be bit-identical across models/backends. See the
 
 This is not a full port and does not imply a Rust runtime or UI:
 
-* no dictation runtime, integrated speech-to-text, hotkeys, paste
+* no desktop dictation runtime, hotkeys, paste
   injection, meetings, menu bar, Hub, setup or native settings windows;
-  `serve` hosts the web UI and core APIs; runtime routes return explicit
-  unavailable-backend errors until their Rust crates are linked;
+  `serve` hosts the web UI and core APIs; `lf-stt`'s optional `server` feature
+  provides an opt-in transcription backend adapter ([integration](lf-stt/README.md#http-backend-optional));
+  other runtime routes return explicit unavailable-backend errors until linked;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
   Python `wave`'s header), `load_clip` (PCM / extensible-PCM WAV inside the

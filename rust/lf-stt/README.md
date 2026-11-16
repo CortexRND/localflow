@@ -1,5 +1,42 @@
 # lf-stt
 
+## HTTP backend (optional)
+
+Enable `server` and pass `SttBackend::new(inner_backend)` from `lf_stt::server`
+to `lf_server::ServerState::load_with_backend(Arc::new(backend))`. This is an
+opt-in library integration, not a change to the `lf-rs serve` default backend.
+Every other route and autostart status delegates unchanged to `inner_backend`.
+Provider availability follows compiled engine features; loaded state comes
+from a mutex-protected `SttSlot`. Requests sharing that slot serialize model
+selection/inference so a switch cannot unload an in-flight model.
+
+`POST /transcribe` accepts multipart `file` and integer query `clean`, uses
+the Python server's 25 MiB ceiling and ffmpeg input-format/protocol whitelist,
+120 s decode timeout, maximum configured duration, mono mixing and 16 kHz
+f32 decoding. **ffmpeg must be installed** (same dependency as Python); no
+request body, recording or transcript is logged. The request's coherent config
+snapshot controls the silence gate, native model selection, dictionary prompt
+and replacements, hot phrases, spoken punctuation/symbols, optional configured
+LLM cleanup, and local style. The `other` category is faithful to Python's
+`category_for(None)`. History records phone/dictate entries (silent/ok/failed),
+best-effort; phone requests do not save audio clips, matching Python.
+
+Success is `{"text": ..., "ms": ...}`; silent input returns empty text
+without loading an engine. Upload/decode errors use Python's status/detail
+messages and ffmpeg's truncated last diagnostic. Unhandled inference/pipeline
+failures use the host's JSON `500 {"detail":"Internal Server Error"}` envelope
+(Python's unhandled 500 has a plain-text body). Multipart-parser-specific
+diagnostics and unusual integer-validation inputs can differ from FastAPI;
+there is no Starlette/Pydantic dependency in Rust. Speech engines retain the
+decoding parity gaps documented below; no missing runtime is simulated.
+
+Tests use fake engines, isolated storage and real ffmpeg WAV decoding:
+`cargo test -p lf-stt --all-features server::tests`. Workspace CI builds/tests
+all features, including this default-off adapter. No change to `lf-server`
+is required.
+
+## Engines and lifecycle
+
 `SpeechEngine` defines the download, load,
 transcribe, unload and timing contract. `SttSlot::select(EngineSpec)` keeps
 one unloaded engine, loads lazily on transcribe, and releases the previous
