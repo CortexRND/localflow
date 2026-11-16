@@ -1313,6 +1313,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lf-meetings-backend"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "lf-ask",
+ "lf-core",
+ "lf-meetings",
+ "lf-providers",
+ "lf-server",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "lf-providers"
 version = "0.1.0"
 dependencies = [

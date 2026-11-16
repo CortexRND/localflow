@@ -13,6 +13,7 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf-agent` | local Ollama settings proposals, validation, preview/apply/undo and dictionary tools |
 | `lf-ask` | history/vault retrieval, ranking, citations and Ask prompts |
 | `lf-meetings` | meeting capture/session abstractions, notes, titles, transcript Q&A and prompt dispatch |
+| `lf-meetings-backend` | optional composable meeting/Ask/prompt-review backend for `lf-server` |
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-server` | optional axum HTTP server, embedded web UI, auth, config/provider/key APIs and runtime backend interface (see `lf-server/README.md`) |
 
@@ -139,7 +140,9 @@ meeting formatting/writer bytes and Python/Rust prompt-queue round trips.
 
 ## Meetings / Ask / Settings agent
 
-These three crates are libraries: there is no CLI/server/UI integration yet.
+These three crates are libraries: there is no CLI/UI integration yet. Optional
+HTTP integration is provided by `lf-meetings-backend`, explicitly injected into
+`lf-server`; it is not installed in the default `lf-rs serve` backend.
 They preserve Python prompts and on-disk formats (including history SQLite,
 meeting Markdown, `queue.json` and `settings-undo.json`). Providers,
 transcription, audio sources and watcher notifications are injectable;
