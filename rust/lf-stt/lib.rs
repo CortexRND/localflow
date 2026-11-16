@@ -1,4 +1,4 @@
-//! Optional speech model storage and lifecycle; inference engines are not yet implemented.
+//! Native speech engines, shared model storage and Python-compatible lease lifecycle.
 pub mod downloads;
 pub mod engine;
 pub mod engines;
