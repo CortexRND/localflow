@@ -1234,7 +1234,7 @@ mod tests {
         let error = page.snapshot_state();
         assert_eq!(error.status, Status::Error);
         assert_eq!(error.message, "bad\\u000aconnection");
-        assert_eq!(error.draft, "Dictate with Right Command");
+        assert_eq!(error.draft, "Make it purple");
 
         page.seed_snapshot_error("   ");
         assert!(!page.snapshot_state().message.is_empty());

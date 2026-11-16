@@ -3757,6 +3757,8 @@ mod tests {
             .delete_model("Systran/faster-whisper-small", &config)
             .is_err());
         let real = cache.join(repo_folder_name("Systran/faster-whisper-small"));
+        assert!(real.symlink_metadata().unwrap().file_type().is_symlink());
+        std::fs::remove_file(&real).unwrap();
         std::fs::create_dir(&real).unwrap();
         std::fs::write(
             leases.join(format!("{}.json", std::process::id())),
