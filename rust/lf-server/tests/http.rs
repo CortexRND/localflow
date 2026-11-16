@@ -140,6 +140,25 @@ async fn unavailable_runtime_is_explicit_and_methods_remain_compatible() {
 }
 
 #[tokio::test]
+async fn encoded_trailing_slashes_redirect_once_and_preserve_query() {
+    for path in ["/api/config/", "/api/config%2F", "/api/config%2f/%2F"] {
+        let request = Request::builder()
+            .uri(format!("{path}?keep=%2F"))
+            .header("X-Localflow-Token", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 307);
+        let target = response.headers()["Location"].to_str().unwrap();
+        assert_eq!(target, "/api/config?keep=%2F");
+        assert_eq!(
+            get(app(), target, "localhost", Some("test-token")).await.0,
+            200
+        );
+    }
+}
+
+#[tokio::test]
 async fn pages_embed_only_proven_token_and_never_cache() {
     let app = app();
     for (path, token, expected) in [("/", None, false), ("/settings", Some("test-token"), true)] {

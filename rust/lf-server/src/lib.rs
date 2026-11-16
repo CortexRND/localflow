@@ -211,9 +211,19 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
     let Some(methods) = route_methods(&path) else {
         let trimmed = path.trim_end_matches('/');
         if trimmed != path && route_methods(trimmed).is_some() {
+            // The URI is still percent-encoded while `path` is decoded. Strip
+            // both representations, preserving escapes in the rest of the URI.
+            let mut redirect_path = request.uri().path();
+            while let Some(trimmed) = redirect_path
+                .strip_suffix('/')
+                .or_else(|| redirect_path.strip_suffix("%2F"))
+                .or_else(|| redirect_path.strip_suffix("%2f"))
+            {
+                redirect_path = trimmed;
+            }
             let location = format!(
                 "{}{}",
-                request.uri().path().trim_end_matches('/'),
+                redirect_path,
                 request
                     .uri()
                     .query()
