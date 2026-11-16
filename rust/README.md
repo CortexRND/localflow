@@ -12,7 +12,7 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf-providers` | Ollama / OpenAI-compatible LLM clients, provider presets and keys, endpoint-bound key activation |
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
-| `lf-stt` | model catalog/cache protection, Python-compatible leases and lazy engine slot; [gaps and API](lf-stt/README.md) |
+| `lf-stt` | Whisper/Parakeet inference, downloads, model cache protection, Python-compatible leases and lazy engine slot; [API and gaps](lf-stt/README.md) |
 
 ## Build
 
@@ -24,7 +24,9 @@ cargo build --bin lf-rs          # target/debug/lf-rs
 cargo build --release --bin lf-rs
 ```
 
-On Linux, install `pkg-config` and `libasound2-dev` for `lf-audio`/cpal. The Secret Service
+On Linux, install `pkg-config` and `libasound2-dev` for `lf-audio`/cpal, plus
+`cmake`, a C/C++ compiler and `libclang-dev` for `lf-stt`/whisper-rs. CMake and
+libclang are also needed on macOS/Windows (included on GitHub runners). The Secret Service
 client vendors libdbus, the clipboard uses pure-Rust X11, and HTTPS uses
 rustls.
 
@@ -132,11 +134,64 @@ overrides, so real config, history and keychain entries are not touched.
 The `rust` GitHub Actions workflow (`.github/workflows/rust.yml`) runs all of
 the above on Ubuntu, macOS and Windows.
 
+## Standalone audio and STT
+
+`lf-audio` ports microphone capture (native sample formats/rates, channel 0,
+16 kHz f32 output), RMS metering and the Python silence/minimum-clip gates.
+The stream lives and is dropped on its capture thread; stop/drop joins it.
+The hardware test is opt-in: `cargo test -p lf-audio -- --ignored`.
+
+`lf-stt` ports cache inventory/deletion protections and lease formats, and adds
+native `whisper-cpp` and `parakeet-onnx` engines. Both features are **on by
+default**; `--no-default-features` builds storage/lifecycle only. Whisper uses
+`whisper-rs` (Metal on macOS only); Parakeet uses the first-party `sherpa-onnx`
+offline transducer API and downloaded prebuilt libraries, not a local
+sherpa build. HF downloads use the standard shared blobs/snapshots cache and
+the same `HF_HUB_CACHE`/`HUGGINGFACE_HUB_CACHE`/`HF_HOME`/`XDG_CACHE_HOME`
+precedence as Python. The factory maps Python provider IDs to the native
+counterparts without changing model size; the engines are not yet wired into
+`lf-rs` or the Python app.
+
+Benchmark (downloads models and the fixed Parakeet `test_wavs/0.wav`):
+
+```sh
+cd rust
+cargo run --release -p lf-stt --example stt_bench -- \
+  --engines whisper-cpp,parakeet-onnx --model base.en --provider cpu --runs 10 \
+  --json bench.json --table bench.md
+# macOS defaults: Whisper Metal, Parakeet CoreML (falls back to CPU on init error)
+cargo run --release -p lf-stt --example stt_bench -- --engines parakeet-onnx --provider coreml
+# Optional local PCM/float WAV, language/prompt, alternate Whisper model:
+cargo run --release -p lf-stt --example stt_bench -- \
+  --engines whisper-cpp --model small --clip speech.wav --language en --runs 10
+# Real-model tests download weights; ordinary workspace tests stay offline:
+cargo test -p lf-stt --test real_models -- --ignored
+```
+
+JSON is printed on stdout; the Markdown table and transcript on stderr.
+Downloads/cache lookup are measured separately from load; Parakeet load
+includes its one-second-silence warm-up. RSS is process-wide before/after
+load; first/median/p95 cover N full transcription calls, with median RTF.
+The benchmark rejects empty transcripts and reports clip path, duration and
+original rate (channel 0 and FFT resampling to 16 kHz when needed). Provider
+names indicate initialization, not verified accelerator utilization: ONNX
+Runtime can place unsupported operators on CPU. Separate benchmark processes
+avoid retained allocator memory skew between engines. `rust-bench.yml` records
+macOS base.en/small/Parakeet CoreML/CPU results and uploads JSON/tables.
+
+Parity gaps: Whisper uses fast deterministic greedy best-of-1, temperature 0
+without beam/temperature fallback or Python faster-whisper's VAD; independent
+clips don't carry context. Optional language and initial prompts are supported.
+Parakeet is the int8 ONNX TDT v2 model, not MLX, and ignores prompts like Python;
+it skips clips below the verified 512-sample FFT frame and warms up on load.
+Transcripts/timing need not be bit-identical across models/backends. See the
+[STT README](lf-stt/README.md) for storage parity and lifecycle details.
+
 ## Known gaps (Stage 1)
 
 This is not a full port and does not imply a Rust runtime or UI:
 
-* no dictation runtime, speech-to-text, hotkeys, paste
+* no dictation runtime, integrated speech-to-text, hotkeys, paste
   injection, meetings, server, menu bar, Hub, setup or settings windows;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with

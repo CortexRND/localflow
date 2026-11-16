@@ -18,12 +18,18 @@ pub struct Transcript {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LoadInfo {
     pub load_ms: f64,
+    pub download_ms: f64,
+    pub provider: String,
 }
 
 /// Constructors must not load weights. `load` reports success only when ready;
 /// `unload` must release resources even following a failed/partial load.
 pub trait SpeechEngine: Send {
     fn id(&self) -> &str;
+    /// Resolve/download assets without loading weights; milliseconds include cache lookup.
+    fn download(&mut self) -> Result<f64> {
+        Ok(0.0)
+    }
     fn load(&mut self) -> Result<LoadInfo>;
     fn transcribe(&mut self, pcm: &[f32], prompt: Option<&str>) -> Result<Transcript>;
     fn unload(&mut self);

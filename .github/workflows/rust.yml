@@ -34,11 +34,11 @@ jobs:
         with:
           workspaces: rust
 
-      # lf-audio/cpal needs ALSA headers. lf-core vendors libdbus, arboard
-      # uses pure-Rust X11, and reqwest uses rustls.
+      # cpal needs ALSA headers; whisper-rs needs CMake and libclang.
+      # lf-core vendors libdbus; arboard uses X11 and HTTPS uses rustls.
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev cmake libclang-dev
 
       - name: cargo fmt
         working-directory: rust

@@ -1,6 +1,6 @@
-# lf-stt (non-engine foundation)
+# lf-stt
 
-No inference engines or downloads yet. `SpeechEngine` defines the load,
+`SpeechEngine` defines the download, load,
 transcribe, unload and timing contract. `SttSlot::select(EngineSpec)` keeps
 one unloaded engine, loads lazily on transcribe, and releases the previous
 engine and lease immediately when the selection changes. The spec's key must
@@ -9,6 +9,60 @@ Use one long-lived slot per process, matching Python's process lease. A scoped
 selection lease protects loading/downloading; after successful load it is
 replaced by a long-lived runtime lease. Lease-write failure refuses loading
 or unloads the engine, rather than leaving unprotected weights in use.
+
+Default features `whisper` and `parakeet` add `engines::{WhisperEngine,
+ParakeetEngine}`. `factory::from_config(&Config, provider_override)` creates an
+unloaded `EngineSpec`: `auto`/`faster-whisper`/`mlx`/`whisper-cpp` → whisper.cpp;
+`parakeet`/`parakeet-onnx` → Parakeet ONNX. Unknown providers or disabled features
+error. Keys include model, language and device; leases use the native backend,
+not the aliased Python backend. CPU is the non-macOS default; macOS defaults to
+Metal for Whisper and CoreML for Parakeet. Device overrides are auto/cpu/metal
+for Whisper and auto/cpu/coreml for Parakeet (accelerators require macOS).
+
+Whisper uses `whisper-rs 0.16` with `log_backend` and once-installed whisper/GGML
+logging hooks; print/progress/timestamp output is off. Decode defaults are
+greedy best-of-1, temperature 0, no temperature fallback, up to 4 threads, no
+cross-clip context: fast repeatable dictation, not Python's beam/VAD behavior.
+Language None is auto (English-only `.en` weights use English, matching Python
+and avoiding meaningless language detection), initial prompts are passed through, and trimmed segments
+join with a space then trim, including Python's interior empty-segment behavior.
+Non-finite PCM, invalid language/model/provider and NUL prompts return errors.
+
+Parakeet uses **first-party `sherpa-onnx 2.0.1`**, whose offline API documents
+Parakeet and ships matching prebuilt C libraries for Linux/macOS/Windows. This
+keeps the wrapper and runtime versioned together under the actively maintained,
+widely used sherpa-onnx project, rather than the independent `sherpa-rs` wrapper
+with separately pinned binary releases. This is a maintenance/API choice, not
+a claim that the new Rust wrapper itself has more production usage. No local
+sherpa build is needed. It uses 128-bin features, greedy transducer decoding,
+up to 4 CPU threads, and a 1 s silence warm-up inside load. The source MLX model
+config's `preprocessor.n_fft` is 512; shorter inputs return empty without even
+requiring a loaded recognizer. Prompts are ignored. CoreML creation failure
+logs and retries CPU; native ONNX Runtime may also fall back at operator level.
+Reported initialized providers are not hardware-utilization measurements.
+
+Linux uses the **shared** sherpa/ONNX prebuilt libraries: linking its static
+ORT with whisper.cpp produced a native regex/allocator abort, while the same
+Parakeet run without Whisper linked succeeded. Shared libraries isolate those
+C++ dependencies. The upstream build copies `.so` files beside Cargo outputs;
+this package sets relative rpaths for its benchmark/tests. Downstream Linux
+executables must likewise ship the `.so` files and set an appropriate rpath
+or `LD_LIBRARY_PATH`. macOS/Windows retain upstream's default static linking.
+
+`download()` resolves HF assets separately so benchmark load excludes download
+and cache-lookup time; `load()` also calls it if needed and reports that time
+separately in `LoadInfo`. `hf-hub 0.4.3`'s established synchronous API writes
+standard HF cache layout using `model_storage::hf_hub_cache(None)` explicitly.
+Keep a lease during download/load/use (automatic with `SttSlot`, scoped in the
+benchmark). Models and audio are never logged by these adapters; benchmark
+output intentionally includes transcript text.
+
+For benchmark commands, metrics and parity gaps see the workspace
+[README](../README.md#standalone-audio-and-stt). Real-model integration tests
+are ignored by default: `cargo test -p lf-stt --test real_models -- --ignored`
+downloads the models and fixed speech WAV, verifies nonempty inference and
+unload. `cargo test -p lf-stt --all-targets` covers factory/short-input/segment
+joining, lifecycle failures, storage, WAV/resampling and benchmark statistics.
 
 `stt_lease::{record, live_leases, runtime_repo, selection_backend}` use the
 unchanged Python JSON schema in `~/.localflow/stt-leases`. Keep the returned
