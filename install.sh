@@ -1,8 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+# The release a default install downloads and verifies. Bump this, and only
+# this, when cutting a release.
+LOCALFLOW_RELEASE="v0.1.0"
+LOCALFLOW_VERSION="${LOCALFLOW_RELEASE#v}"
+# LOCALFLOW_RELEASE_BASE_URL is for testing only: it points the verified
+# download at another copy of the release assets (e.g. a file:// directory).
+RELEASE_BASE_URL="${LOCALFLOW_RELEASE_BASE_URL:-https://github.com/CortexRND/localflow/releases/download/$LOCALFLOW_RELEASE}"
+
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 Usage: install.sh [--with-ollama] [--no-launch] [--no-system-deps] [--help]
 
 Install LocalFlow on macOS or Linux. Piped installs use ~/.localflow/app.
@@ -18,7 +26,16 @@ Environment:
   LOCALFLOW_NO_LAUNCH=1    Same as --no-launch
   LOCALFLOW_HOME           Install checkout location
   LOCALFLOW_REPO_URL       Git repository URL or local path (git installs only)
-  LOCALFLOW_REF            Git ref to check out, or tarball ref (default: main)
+  LOCALFLOW_REF            Git ref to check out, or tarball ref, instead of the
+                           pinned release $LOCALFLOW_RELEASE. A custom ref is NOT
+                           checksum-verified.
+  LOCALFLOW_RELEASE_BASE_URL
+                           Testing only: alternative location of the release
+                           assets (localflow-$LOCALFLOW_VERSION.tar.gz and SHA256SUMS)
+
+By default the installer checks out tag $LOCALFLOW_RELEASE (git installs) or
+downloads localflow-$LOCALFLOW_VERSION.tar.gz from that GitHub release and
+verifies it against the release's SHA256SUMS before unpacking.
 
 On macOS, Homebrew, git and Python are optional: without them the installer
 uses a uv-managed Python 3.12 and a downloaded source tarball.
@@ -44,6 +61,10 @@ for arg in "$@"; do
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+if [[ -n "${LOCALFLOW_REF:-}" ]]; then
+    echo "Warning: LOCALFLOW_REF=$LOCALFLOW_REF is a custom ref; its source is not checksum-verified." >&2
+fi
 
 OS="$(uname -s)"
 PYTHON=""
@@ -155,17 +176,79 @@ ensure_uv() {
     USE_UV=1
 }
 
+# Print the lowercase SHA-256 of file $1 (sha256sum, or shasum on macOS).
+sha256_of() {
+    local digest
+    if command -v sha256sum >/dev/null 2>&1; then
+        read -r digest _ < <(sha256sum "$1") || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        read -r digest _ < <(shasum -a 256 "$1") || return 1
+    else
+        echo "Neither sha256sum nor shasum is available to verify the download." >&2
+        return 1
+    fi
+    printf '%s\n' "$digest" | tr '[:upper:]' '[:lower:]'
+}
+
+# Succeed only when file $1 matches the SHA-256 listed for name $3 in the
+# sha256sum-format checksum file $2.
+verify_sha256() {
+    local file="$1" sums="$2" name="$3" hash entry expected="" actual
+    while read -r hash entry || [[ -n "$hash" ]]; do
+        entry="${entry%$'\r'}"
+        entry="${entry#\*}"
+        if [[ "$entry" == "$name" ]]; then
+            expected="$(printf '%s\n' "$hash" | tr '[:upper:]' '[:lower:]')"
+            break
+        fi
+    done <"$sums"
+    if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "SHA256SUMS has no valid entry for $name." >&2
+        return 1
+    fi
+    actual="$(sha256_of "$file")" || return 1
+    if [[ "$actual" != "$expected" ]]; then
+        echo "SHA-256 mismatch for $name: expected $expected, got $actual." >&2
+        return 1
+    fi
+    echo "Verified SHA-256 of $name."
+}
+
 # Download the source tarball into $REPO, replacing older source but keeping .venv.
+# Without LOCALFLOW_REF this is the pinned release asset, verified against the
+# release's SHA256SUMS; a custom LOCALFLOW_REF uses GitHub's unverified codeload.
 install_tarball() {
-    local parent tmp url
+    local parent tmp url asset=""
     parent="$(dirname "$REPO")"
     mkdir -p "$parent"
     tmp="$(mktemp -d "$parent/.localflow-download.XXXXXX")"
-    url="https://codeload.github.com/CortexRND/localflow/tar.gz/${LOCALFLOW_REF:-main}"
-    echo "Downloading LocalFlow source (${LOCALFLOW_REF:-main})..."
+    if [[ -n "${LOCALFLOW_REF:-}" ]]; then
+        url="https://codeload.github.com/CortexRND/localflow/tar.gz/$LOCALFLOW_REF"
+        echo "Downloading LocalFlow source ($LOCALFLOW_REF, not checksum-verified)..."
+    else
+        asset="localflow-$LOCALFLOW_VERSION.tar.gz"
+        url="$RELEASE_BASE_URL/$asset"
+        echo "Downloading LocalFlow $LOCALFLOW_RELEASE..."
+    fi
     mkdir "$tmp/src"
-    if ! curl -fsSL "$url" -o "$tmp/source.tar.gz" \
-        || ! tar -xzf "$tmp/source.tar.gz" -C "$tmp/src" --strip-components=1 \
+    if ! curl -fsSL "$url" -o "$tmp/source.tar.gz"; then
+        rm -rf "$tmp"
+        echo "Could not download LocalFlow from $url" >&2
+        exit 1
+    fi
+    if [[ -n "$asset" ]]; then
+        if ! curl -fsSL "$RELEASE_BASE_URL/SHA256SUMS" -o "$tmp/SHA256SUMS"; then
+            rm -rf "$tmp"
+            echo "Could not download LocalFlow from $RELEASE_BASE_URL/SHA256SUMS" >&2
+            exit 1
+        fi
+        if ! verify_sha256 "$tmp/source.tar.gz" "$tmp/SHA256SUMS" "$asset"; then
+            rm -rf "$tmp"
+            echo "Refusing to install: $url failed checksum verification; the download was removed." >&2
+            exit 1
+        fi
+    fi
+    if ! tar -xzf "$tmp/source.tar.gz" -C "$tmp/src" --strip-components=1 \
         || [[ ! -f "$tmp/src/pyproject.toml" ]]; then
         rm -rf "$tmp"
         echo "Could not download LocalFlow from $url" >&2
@@ -247,17 +330,18 @@ fi
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR=""
-EXISTING_INSTALL=0
+FROM_CHECKOUT=0
 if [[ -n "$SCRIPT_SOURCE" && -f "$SCRIPT_SOURCE" ]]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" && pwd)"
 fi
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/pyproject.toml" \
     && -e "$SCRIPT_DIR/.git" ]]; then
     REPO="$SCRIPT_DIR"
+    FROM_CHECKOUT=1
 else
     REPO="${LOCALFLOW_HOME:-$HOME/.localflow/app}"
     if [[ -e "$REPO/.git" ]]; then
-        EXISTING_INSTALL=1
+        : # Existing git install; pinned to the release below.
     elif [[ -f "$REPO/.localflow-tarball" ]]; then
         install_tarball
     elif [[ -e "$REPO" ]]; then
@@ -273,7 +357,7 @@ else
 fi
 
 if [[ ! -e "$REPO/.git" ]]; then
-    : # Tarball install: already at the requested ref.
+    : # Tarball install: already at the requested (and, by default, verified) release.
 elif ! find_git; then
     echo "Note: no usable git found; keeping the existing checkout at $REPO as is."
 elif [[ -n "${LOCALFLOW_REF:-}" ]]; then
@@ -283,8 +367,11 @@ elif [[ -n "${LOCALFLOW_REF:-}" ]]; then
         git -C "$REPO" fetch origin "$LOCALFLOW_REF"
     fi
     git -C "$REPO" checkout "$LOCALFLOW_REF"
-elif [[ "$EXISTING_INSTALL" -eq 1 ]]; then
-    git -C "$REPO" pull --ff-only
+elif [[ "$FROM_CHECKOUT" -eq 0 ]]; then
+    # Fresh clone or existing install: pin to the release tag. Fetching the
+    # tag without '+' refuses to move a local tag that changed upstream.
+    git -C "$REPO" fetch origin "refs/tags/$LOCALFLOW_RELEASE:refs/tags/$LOCALFLOW_RELEASE"
+    git -C "$REPO" -c advice.detachedHead=false checkout "refs/tags/$LOCALFLOW_RELEASE"
 fi
 
 cd "$REPO"

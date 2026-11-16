@@ -3,11 +3,23 @@ param([switch]$WithOllama, [switch]$NoLaunch, [switch]$Help)
 
 $ErrorActionPreference = 'Stop'
 
+# The release a default install downloads and verifies. Bump this, and only
+# this, when cutting a release.
+$LocalflowRelease = 'v0.1.0'
+$LocalflowVersion = $LocalflowRelease -replace '^v', ''
+# LOCALFLOW_RELEASE_BASE_URL is for testing only: it points the verified
+# download at another copy of the release assets (e.g. a local HTTP server).
+$releaseBaseUrl = $env:LOCALFLOW_RELEASE_BASE_URL
+if ([string]::IsNullOrWhiteSpace($releaseBaseUrl)) {
+    $releaseBaseUrl = "https://github.com/CortexRND/localflow/releases/download/$LocalflowRelease"
+}
+$releaseBaseUrl = $releaseBaseUrl.TrimEnd('/')
+
 function Show-Help {
-    @'
+    @"
 Usage: install.ps1 [-WithOllama] [-NoLaunch] [-Help]
 
-Install LocalFlow on Windows. Piped installs use $HOME\.localflow\app.
+Install LocalFlow on Windows. Piped installs use `$HOME\.localflow\app.
 
 Options:
   -WithOllama  Install and start Ollama
@@ -19,8 +31,17 @@ Environment:
   LOCALFLOW_NO_LAUNCH=1    Same as -NoLaunch
   LOCALFLOW_HOME           Install checkout location
   LOCALFLOW_REPO_URL       Git repository URL or local path
-  LOCALFLOW_REF            Git ref to check out after cloning or pulling
-'@ | Write-Host
+  LOCALFLOW_REF            Git ref (or archive ref without git) to install
+                           instead of the pinned release $LocalflowRelease.
+                           A custom ref is NOT checksum-verified.
+  LOCALFLOW_RELEASE_BASE_URL
+                           Testing only: alternative location of the release
+                           assets (localflow-$LocalflowVersion.zip and SHA256SUMS)
+
+By default the installer checks out tag $LocalflowRelease (git installs) or
+downloads localflow-$LocalflowVersion.zip from that GitHub release and verifies
+it against the release's SHA256SUMS before unpacking.
+"@ | Write-Host
 }
 
 if ($Help) {
@@ -65,6 +86,48 @@ function Set-GitRef {
     Invoke-Checked -FilePath $GitPath -ArgumentList @(
         '-C', $RepositoryPath, 'checkout', $RequestedRef
     )
+}
+
+function Set-ReleaseTag {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryPath
+    )
+
+    # Fetching the tag without '+' refuses to move a local tag that changed upstream.
+    $tagRef = "refs/tags/$LocalflowRelease"
+    Invoke-Checked -FilePath $GitPath -ArgumentList @(
+        '-C', $RepositoryPath, 'fetch', 'origin', "${tagRef}:${tagRef}"
+    )
+    Invoke-Checked -FilePath $GitPath -ArgumentList @(
+        '-C', $RepositoryPath, '-c', 'advice.detachedHead=false', 'checkout', $tagRef
+    )
+}
+
+# Throw unless $Path matches the SHA-256 listed for $Name in the
+# sha256sum-format checksum file $SumsPath.
+function Assert-Sha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$SumsPath,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $expected = $null
+    foreach ($line in Get-Content -LiteralPath $SumsPath) {
+        if ($line -match '^\s*([0-9A-Fa-f]{64})\s+\*?(.+?)\s*$' -and $Matches[2] -eq $Name) {
+            $expected = $Matches[1]
+            break
+        }
+    }
+    if (-not $expected) {
+        throw "SHA256SUMS has no valid entry for $Name."
+    }
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    if (-not [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "SHA-256 mismatch for ${Name}: expected $($expected.ToLowerInvariant()), got $($actual.ToLowerInvariant())."
+    }
+    Write-Host "Verified SHA-256 of $Name."
 }
 
 function Replace-RepositoryFiles {
@@ -113,6 +176,9 @@ if ([string]::IsNullOrWhiteSpace($repoUrl)) {
     $repoUrl = 'https://github.com/CortexRND/localflow.git'
 }
 $ref = $env:LOCALFLOW_REF
+if (-not [string]::IsNullOrWhiteSpace($ref)) {
+    Write-Warning "LOCALFLOW_REF=$ref is a custom ref; its source is not checksum-verified."
+}
 
 if ($scriptRepo) {
     $repo = $scriptRepo
@@ -131,7 +197,7 @@ if ($scriptRepo) {
     if ($gitCommand) {
         if (Test-Path -LiteralPath (Join-Path $repo '.git')) {
             if ([string]::IsNullOrWhiteSpace($ref)) {
-                Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('-C', $repo, 'pull', '--ff-only')
+                Set-ReleaseTag -GitPath $gitCommand.Source -RepositoryPath $repo
             } else {
                 Set-GitRef -GitPath $gitCommand.Source -RepositoryPath $repo -RequestedRef $ref
             }
@@ -145,7 +211,9 @@ if ($scriptRepo) {
             try {
                 $clonePath = Join-Path $temporaryRoot 'checkout'
                 Invoke-Checked -FilePath $gitCommand.Source -ArgumentList @('clone', $repoUrl, $clonePath)
-                if (-not [string]::IsNullOrWhiteSpace($ref)) {
+                if ([string]::IsNullOrWhiteSpace($ref)) {
+                    Set-ReleaseTag -GitPath $gitCommand.Source -RepositoryPath $clonePath
+                } else {
                     Set-GitRef -GitPath $gitCommand.Source -RepositoryPath $clonePath -RequestedRef $ref
                 }
                 Replace-RepositoryFiles -Source $clonePath -Destination $repo
@@ -155,18 +223,30 @@ if ($scriptRepo) {
         }
 
     } else {
-        $archiveRef = $ref
-        if ([string]::IsNullOrWhiteSpace($archiveRef)) {
-            $archiveRef = 'main'
+        $assetName = $null
+        if ([string]::IsNullOrWhiteSpace($ref)) {
+            $assetName = "localflow-$LocalflowVersion.zip"
+            $archiveUrl = "$releaseBaseUrl/$assetName"
+        } else {
+            $encodedRef = [Uri]::EscapeDataString($ref)
+            $archiveUrl = "https://github.com/CortexRND/localflow/archive/$encodedRef.zip"
         }
-        $encodedRef = [Uri]::EscapeDataString($archiveRef)
-        $archiveUrl = "https://github.com/CortexRND/localflow/archive/$encodedRef.zip"
         $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("localflow-" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
         try {
             $archivePath = Join-Path $temporaryRoot 'localflow.zip'
             $extractPath = Join-Path $temporaryRoot 'extract'
             Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
+            if ($assetName) {
+                $sumsPath = Join-Path $temporaryRoot 'SHA256SUMS'
+                Invoke-WebRequest -Uri "$releaseBaseUrl/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+                try {
+                    Assert-Sha256 -Path $archivePath -SumsPath $sumsPath -Name $assetName
+                } catch {
+                    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+                    throw "Refusing to install: $archiveUrl failed checksum verification; the download was removed. $($_.Exception.Message)"
+                }
+            }
             Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath
             $sourceRepo = Get-ChildItem -LiteralPath $extractPath -Directory |
                 Select-Object -First 1

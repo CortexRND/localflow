@@ -6,12 +6,16 @@ on:
       - install.sh
       - install.ps1
       - pyproject.toml
+      - scripts/release-assets.sh
+      - tests/test_installer_stubs.py
       - .github/workflows/installers.yml
   pull_request:
     paths:
       - install.sh
       - install.ps1
       - pyproject.toml
+      - scripts/release-assets.sh
+      - tests/test_installer_stubs.py
       - .github/workflows/installers.yml
   workflow_dispatch:
 
@@ -23,8 +27,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check install.sh
-        run: shellcheck install.sh
+      - name: Check install.sh and release-assets.sh
+        run: shellcheck install.sh scripts/release-assets.sh
+
+  # The pinned release tag and its assets only exist after merge, so these
+  # checks serve release-shaped assets from a local directory instead
+  # (LOCALFLOW_RELEASE_BASE_URL, testing only) and never touch the real release.
+  checksum:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Checksum verifier (good hash passes, tampered fails)
+        run: python -m pytest -q tests/test_installer_stubs.py
+      - name: Release assets are reproducible and pass sha256sum -c
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' pyproject.toml | head -n 1)"
+          work="$RUNNER_TEMP/release-check"
+          git clone -q . "$work"
+          cd "$work"
+          git tag -f "v$version" HEAD
+          scripts/release-assets.sh "v$version"
+          cp dist/release/SHA256SUMS "$RUNNER_TEMP/first.sums"
+          scripts/release-assets.sh "v$version"
+          cmp "$RUNNER_TEMP/first.sums" dist/release/SHA256SUMS
+          cd dist/release
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c SHA256SUMS
+          else
+            shasum -a 256 -c SHA256SUMS
+          fi
+          tar -tzf "localflow-$version.tar.gz" | grep -qx "localflow-$version/install.sh"
+          unzip -l "localflow-$version.zip" | grep -q " localflow-$version/install.sh$"
 
   install:
     strategy:
@@ -79,6 +126,85 @@ jobs:
           & .\.venv\Scripts\lf.exe --help
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
+          }
+      - name: Checksum verifier on Windows (good hash passes, tampered fails)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = [regex]::Match((Get-Content install.ps1 -Raw), "\`$LocalflowRelease = '(v[^']+)'").Groups[1].Value
+          if (-not $release) { throw 'Could not read $LocalflowRelease from install.ps1.' }
+          $version = $release.Substring(1)
+          $asset = "localflow-$version.zip"
+          $work = Join-Path $env:RUNNER_TEMP 'checksum'
+          $assets = Join-Path $work 'release'
+          $source = Join-Path $work "src\localflow-$version"
+          $runner = Join-Path $work 'runner'
+          New-Item -ItemType Directory -Force -Path $assets, $source, $runner | Out-Null
+          # Run a copy outside the checkout so install.ps1 takes the piped path.
+          Copy-Item install.ps1 $runner
+          @(
+            '[build-system]'
+            'requires = ["setuptools>=61"]'
+            'build-backend = "setuptools.build_meta"'
+            '[project]'
+            'name = "localflow"'
+            'version = "0.0.0"'
+            '[tool.setuptools]'
+            'packages = []'
+          ) | Set-Content (Join-Path $source 'pyproject.toml')
+          $zip = Join-Path $assets $asset
+          Compress-Archive -Path $source -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          "$hash  $asset" | Set-Content (Join-Path $assets 'SHA256SUMS')
+
+          $pwshPath = (Get-Command pwsh).Source
+          $server = Start-Process python -PassThru -WindowStyle Hidden -ArgumentList @(
+            '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $assets
+          )
+          try {
+            $ready = $false
+            foreach ($attempt in 1..30) {
+              try {
+                $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8765/SHA256SUMS'
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw 'Local release server did not start.' }
+
+            # Hide git so the installer downloads the release zip.
+            $env:PATH = ($env:PATH -split ';' | Where-Object {
+              $_ -and -not (Test-Path (Join-Path $_ 'git.exe'))
+            }) -join ';'
+            if (Get-Command git -ErrorAction SilentlyContinue) { throw 'git is still on PATH.' }
+            $env:LOCALFLOW_RELEASE_BASE_URL = 'http://127.0.0.1:8765'
+            Remove-Item Env:LOCALFLOW_REF -ErrorAction SilentlyContinue
+
+            # Tampered archive: must fail closed and create nothing.
+            $env:LOCALFLOW_HOME = Join-Path $work 'tampered-home'
+            $original = [IO.File]::ReadAllBytes($zip)
+            [IO.File]::WriteAllBytes($zip, $original + [byte[]](0x74, 0x61, 0x6d, 0x70))
+            & $pwshPath -NoProfile -File (Join-Path $runner 'install.ps1') -NoLaunch
+            if ($LASTEXITCODE -eq 0) { throw 'install.ps1 accepted a tampered archive.' }
+            if (Test-Path $env:LOCALFLOW_HOME) { throw 'Tampered install created LOCALFLOW_HOME.' }
+
+            # Good archive: must verify and install.
+            [IO.File]::WriteAllBytes($zip, $original)
+            $env:LOCALFLOW_HOME = Join-Path $work 'good-home'
+            $output = & $pwshPath -NoProfile -File (Join-Path $runner 'install.ps1') -NoLaunch *>&1 | Out-String
+            Write-Host $output
+            if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed on a good archive ($LASTEXITCODE)." }
+            if ($output -notmatch [regex]::Escape("Verified SHA-256 of $asset.")) {
+              throw 'install.ps1 did not report a verified archive.'
+            }
+            if (-not (Test-Path (Join-Path $env:LOCALFLOW_HOME 'pyproject.toml'))) {
+              throw 'Good install did not populate LOCALFLOW_HOME.'
+            }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
 
   piped:
