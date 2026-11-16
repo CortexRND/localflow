@@ -147,6 +147,29 @@ where
 
 fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
     match command {
+        Command::Serve { host, port } => {
+            let config = lf_core::config::load_config()?;
+            let host = host.unwrap_or_else(|| {
+                config
+                    .field_str("server_host")
+                    .unwrap_or("127.0.0.1")
+                    .into()
+            });
+            let port =
+                port.unwrap_or_else(|| config.field_i64("server_port").unwrap_or(8756) as u16);
+            outln!(
+                io.out,
+                "LocalFlow Rust server listening on {}",
+                lf_server::server_url::base_url(&host, port)
+            )?;
+            io.out.flush()?;
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(16)
+                .enable_all()
+                .build()?
+                .block_on(lf_server::serve(&host, port))
+        }
         Command::Config(command) => cmd_config::run(command, io),
         Command::Dict(command) => cmd_dict::run(command, io),
         Command::History(args) => cmd_history::run(args, io),
