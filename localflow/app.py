@@ -81,6 +81,11 @@ def keyboard_bindings(config, controller) -> dict:
     }
 
 
+def _speech_selection(config) -> tuple:
+    """The speech-group fields that pick which speech model loads."""
+    return tuple(getattr(config, name) for name in RUNTIME_GROUPS["stt"])
+
+
 class RuntimeModels:
     """The speech model and LLM clients the dictation worker uses, swappable.
 
@@ -92,7 +97,9 @@ class RuntimeModels:
     queued or running), else on a later `retry()`. Until the swap the old model
     keeps working and keeps its long-lived STT lease; the loaded one holds a
     scoped lease, so Free up space can delete neither. A failed load keeps the
-    old model.
+    old model and is remembered (unless a newer choice superseded it) so that
+    `retry_failed_stt` - the user picking the same model again - loads it once
+    more; nothing retries it on its own.
     """
 
     def __init__(
@@ -115,6 +122,7 @@ class RuntimeModels:
         self._wanted = None      # newest config whose speech model should load
         self._loading = False
         self._ready = None       # (transcriber, config, scoped lease) awaiting a swap
+        self._failed = None      # speech selection of the newest choice, if its load failed
 
     @property
     def stt_pending(self) -> bool:
@@ -133,12 +141,25 @@ class RuntimeModels:
         log.info("cleanup and command model now %s / %s", config.llm_provider, config.llm_model)
 
     def reload_stt(self, config) -> None:
+        self._request_stt(config, only_if_failed=False)
+
+    def retry_failed_stt(self, config) -> bool:
+        """Load `config`'s speech model again if it is the newest choice and
+        its load failed; True when a load was requested. A model that is
+        serving, loading or loaded and waiting for a swap is left alone."""
+        return self._request_stt(config, only_if_failed=True)
+
+    def _request_stt(self, config, *, only_if_failed) -> bool:
         with self._lock:
+            if only_if_failed and self._failed != _speech_selection(config):
+                return False
+            self._failed = None
             self._wanted = config
             if self._loading:
-                return  # the running loader picks up the newest choice next
+                return True  # the running loader picks up the newest choice next
             self._loading = True
         self._start_thread(self._load_loop)
+        return True
 
     def _load_loop(self) -> None:
         while True:
@@ -159,6 +180,9 @@ class RuntimeModels:
                 log.exception("could not load the new speech model; keeping the current one")
                 if selection is not None:
                     self._lease.release(selection)
+                with self._lock:
+                    if self._wanted is None:  # not superseded by a newer choice
+                        self._failed = _speech_selection(config)
                 continue
             scoped = self._lease.record(
                 str(getattr(transcriber, "backend", "unknown")), config.model_size,
@@ -216,6 +240,11 @@ class LiveSettings:
             merged, changed = merge_live(self.config, fresh, reloaded=RUNTIME_FIELDS)
             groups = runtime_changes(merged, fresh)
             if not changed and not groups:
+                # The file was saved with nothing different, as when the Hub
+                # re-saves a re-picked speech model: the one signal to retry
+                # that model if its load failed (never on watcher ticks).
+                if self.models is not None and self.models.retry_failed_stt(merged):
+                    log.info("retrying the speech model that failed to load")
                 return changed
             if groups:
                 runtime = frozenset(

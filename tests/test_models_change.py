@@ -174,7 +174,9 @@ def test_whisper_sizes_and_refusals():
         ml.set_speech("whisper-cloud", None, config, available=lambda _p: True,
                       save=saved.append)
     same = ml.set_speech("auto", "base", config, available=available(), save=saved.append)
-    assert same is config and len(saved) == 2
+    # An unchanged choice is still saved: re-picking is the retry signal after a
+    # failed load (the running app reloads nothing for a healthy model).
+    assert same == config and len(saved) == 3 and saved[-1] == config
 
 
 # -------------------------------------------------------------- layout ---

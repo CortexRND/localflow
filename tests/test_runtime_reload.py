@@ -143,6 +143,37 @@ def test_failed_speech_load_keeps_the_old_model_and_releases_its_lease():
     assert lease.held() == [] and not runtime.stt_pending
 
 
+def test_only_the_newest_failed_speech_choice_is_retried_and_only_once():
+    built = []
+
+    def build(config):
+        built.append(config.model_size)
+        if config.model_size == "small":
+            runtime.reload_stt(Config(model_size="medium"))  # changed while loading
+            raise RuntimeError("download failed")
+        if config.model_size == "tiny" and built.count("tiny") == 1:
+            raise RuntimeError("download failed")
+        return FakeTranscriber(config.model_size)
+
+    runtime, lease = models(build_stt_fn=build)
+    runtime.reload_stt(Config(model_size="small"))
+    assert built == ["small", "medium"] and runtime.snapshot()[0].name == "medium"
+    # A superseded failure, or a model that is serving, is not retried.
+    assert not runtime.retry_failed_stt(Config(model_size="small"))
+    assert not runtime.retry_failed_stt(Config(model_size="medium"))
+    assert built == ["small", "medium"]
+
+    runtime.reload_stt(Config(model_size="tiny"))
+    assert runtime.snapshot()[0].name == "medium"
+    assert not runtime.retry_failed_stt(Config(model_size="tiny", language="de"))
+    assert runtime.retry_failed_stt(Config(model_size="tiny"))
+    assert built == ["small", "medium", "tiny", "tiny"]
+    assert runtime.snapshot()[0].name == "tiny"
+    assert not runtime.retry_failed_stt(Config(model_size="tiny"))  # healthy now
+    assert built.count("tiny") == 2
+    assert lease.held() == [] and not runtime.stt_pending
+
+
 def test_a_superseded_ready_model_keeps_protection_until_replaced():
     busy = [True]
     runtime, lease = models(can_swap=lambda: not busy[0])
@@ -177,6 +208,7 @@ def test_live_settings_adopts_the_group_and_reloads_off_the_watcher():
     fake = SimpleNamespace(
         reload_llm=lambda config: calls.append(("llm", config.llm_model, config.llm_key_ref)),
         reload_stt=lambda config: calls.append(("stt", config.stt_backend, config.model_size)),
+        retry_failed_stt=lambda config: calls.append(("retry_failed", config.model_size)) or False,
         retry=lambda: calls.append(("retry",)),
     )
     controller = Recorder()
@@ -191,7 +223,8 @@ def test_live_settings_adopts_the_group_and_reloads_off_the_watcher():
     assert calls[-1] == ("stt", "parakeet", "base")
     live.retry()
     assert calls[-1] == ("retry",)
-    assert live.apply(live.config) == frozenset()  # nothing moved: nothing reloads
+    assert live.apply(live.config) == frozenset()  # nothing moved: nothing reloads...
+    assert calls[-1] == ("retry_failed", "base")  # ...unless that speech model had failed
 
 
 def test_worker_takes_one_model_snapshot_per_job():

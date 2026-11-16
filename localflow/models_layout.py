@@ -334,6 +334,9 @@ def set_speech(provider, model, config, *, available=None, save=save_config):
     `model` is ignored and the saved size is left alone. Providers that only
     run on the default device get `stt_device = "auto"` so the pair can load.
     Nothing is loaded here: the app and server load it in the background.
+    An unchanged choice is saved too: re-saving is how picking the same model
+    again asks the running app to retry it after a failed load (a healthy
+    model is not reloaded).
     """
     offered = [pid for pid, _label in speech_provider_choices(config, available)]
     if provider not in offered or provider not in SPEECH_PROVIDER_IDS:
@@ -349,10 +352,6 @@ def set_speech(provider, model, config, *, available=None, save=save_config):
     if provider in ("mlx-whisper", "parakeet"):
         device = "auto"
     updated = replace(config, stt_backend=provider, model_size=size, stt_device=device)
-    if (updated.stt_backend, updated.model_size, updated.stt_device) == (
-        config.stt_backend, config.model_size, config.stt_device
-    ):
-        return config
     save(updated)
     return updated
 
