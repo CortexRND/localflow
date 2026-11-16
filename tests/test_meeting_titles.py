@@ -553,6 +553,187 @@ def test_hub_sends_auto_only_for_the_untouched_prefilled_title():
     assert workers[-1] == ("start", "Q3 sync", "", "", "", False)
 
 
+def test_status_says_whether_the_running_title_is_automatic(api):
+    assert api.post("/meeting/start", json={"title": "Meeting", "auto_title": True}
+                    ).status_code == 200
+    session = api.get("/meeting/status").json()["session"]
+    assert session["title"] == "Meeting" and session["title_auto"] is True
+    api.post("/meeting/stop")
+    assert api.post("/meeting/start", json={"title": "Meeting", "auto_title": False}
+                    ).status_code == 200
+    session = api.get("/meeting/status").json()["session"]
+    assert session["title"] == "Meeting" and session["title_auto"] is False
+    api.post("/meeting/stop")
+
+
+def test_hub_title_field_starts_blank_with_the_automatic_placeholder():
+    import ast
+
+    from localflow import hub_model
+
+    assert hub_model.MEETING_TITLE_PLACEHOLDER == "Named automatically when saved"
+    path = Path(server.__file__).with_name("hub_mac.py")
+    source = path.read_text(encoding="utf-8")
+    cls = next(n for n in ast.parse(source).body
+               if isinstance(n, ast.ClassDef) and n.name == "HubWindowController")
+    methods = {n.name: ast.get_source_segment(source, n) for n in cls.body
+               if isinstance(n, ast.FunctionDef)}
+    init = next(body for name, body in methods.items()
+                if 'self.meeting_title_value = ""' in body)
+    assert 'self.meeting_title_value = "Meeting"' not in source
+    assert "self.meeting_title_edited = False" in init
+    page = methods["_page_meetings"]
+    # The real field: its delegate is the hub (typing marks it explicit) and
+    # the placeholder is drawn by the field, never inserted as its text.
+    assert "self.meeting_title.setDelegate_(self)" in page
+    assert "self.meeting_title.setPlaceholderString_(MEETING_TITLE_PLACEHOLDER)" in page
+    assert "setStringValue_(MEETING_TITLE_PLACEHOLDER" not in source
+
+
+def test_hub_blank_title_starts_automatic_and_keeps_the_blank_draft():
+    methods = _hub_methods("meetingAction_")
+    hub, workers = _hub_meeting("")  # the default: never touched, blank
+    methods["meetingAction_"](hub, None)
+    # "Meeting" is only the wire stand-in; auto_title says to name it.
+    assert workers[-1] == ("start", "Meeting", "", "", "", True)
+    assert hub.meeting_title_value == ""  # shown again after the meeting, blank
+    hub, workers = _hub_meeting("Q3 sync ")
+    methods["meetingAction_"](hub, None)
+    assert workers[-1] == ("start", "Q3 sync", "", "", "", False)
+    assert hub.meeting_title_value == "Q3 sync "  # the typed draft, as typed
+
+
+class _TitleField:
+    """An NSTextField that, pessimistically, reports every programmatic
+    change to its delegate as if it had been typed."""
+
+    def __init__(self, hub, text=""):
+        self.hub, self.text, self.editable = hub, text, True
+
+    def stringValue(self):
+        return self.text
+
+    def setStringValue_(self, text):
+        from types import SimpleNamespace
+
+        self.text = text
+        self.hub.controlTextDidChange_(SimpleNamespace(object=lambda: self))
+
+    def setEditable_(self, flag):
+        self.editable = flag
+
+    def __getattr__(self, name):
+        return lambda *args: None
+
+
+def _title_hub(text=""):
+    from types import SimpleNamespace
+
+    methods = _hub_methods("_meeting_show_title", "controlTextDidChange_", "meetingAction_")
+    hub = SimpleNamespace(
+        page="Meetings", meeting_title_value=text, meeting_title_edited=False,
+        meeting_title_shows_session=False, tokens={}, meeting_title_box=None,
+        meeting_template_box=None, meeting_busy=False, meeting_status={},
+        meeting_templates=[], meeting_template=SimpleNamespace(indexOfSelectedItem=lambda: -1),
+        meeting_notes=SimpleNamespace(string=lambda: ""), workers=[],
+        _meeting_render=lambda: None,
+    )
+    hub._meeting_worker = lambda *args: hub.workers.append(args)
+    hub._models_live_update = lambda *_a: None
+    for name, function in methods.items():
+        setattr(hub, name, function.__get__(hub))
+    hub.meeting_title = _TitleField(hub, text)
+    return hub
+
+
+def _with_appkit_free_globals(hub):
+    """_meeting_show_title calls the module's _color/style_input_box."""
+    function = hub._meeting_show_title.__func__
+    function.__globals__.update(_color=lambda *a: None, style_input_box=lambda *a, **k: None)
+
+
+@pytest.mark.parametrize("session", [
+    {"title": "Meeting", "title_auto": True},
+    {"title": "Q3 sync", "title_auto": False},
+    {"title": "Planning"},  # an older server: no title_auto
+])
+def test_showing_a_session_title_is_never_taken_for_typing(session):
+    hub = _title_hub("")
+    _with_appkit_free_globals(hub)
+    hub._meeting_show_title(session)
+    shown = hub.meeting_title.stringValue()
+    assert shown == ("" if session.get("title_auto") else session["title"])
+    assert hub.meeting_title_edited is False and hub.meeting_title.editable is False
+    hub._meeting_show_title(session)  # every poll while recording
+    hub._meeting_show_title(None)  # stopped: the blank draft comes back
+    assert hub.meeting_title.stringValue() == "" and hub.meeting_title.editable is True
+    assert hub.meeting_title_edited is False
+    # So the next fresh start is still automatic.
+    hub.meeting_status = {}
+    hub.meetingAction_(None)
+    assert hub.workers[-1][-1] is True
+
+
+def test_typing_after_a_session_is_explicit_even_meeting():
+    hub = _title_hub("")
+    _with_appkit_free_globals(hub)
+    hub._meeting_show_title({"title": "Meeting", "title_auto": True})
+    hub._meeting_show_title(None)
+    hub.meeting_title.text = "Meeting"  # typed by the user
+    from types import SimpleNamespace
+
+    hub.controlTextDidChange_(SimpleNamespace(object=lambda: hub.meeting_title))
+    assert hub.meeting_title_edited is True
+    hub.meetingAction_(None)
+    assert hub.workers[-1] == ("start", "Meeting", "", "", "", False)
+
+
+def _stop_hub(previous_session):
+    from types import SimpleNamespace
+
+    hub = SimpleNamespace(
+        page="Home", meeting_busy=True, meeting_error="",
+        meeting_status={"session": previous_session}, meeting_last_saved=None,
+        meeting_notes_text="x", meeting_notes_dirty=True, meeting_session_active=True,
+        recent_loads=0, polls=0,
+    )
+
+    def load_recent():
+        hub.recent_loads += 1
+
+    def poll():
+        hub.polls += 1
+
+    hub._meeting_load_recent, hub._meeting_poll = load_recent, poll
+    hub._meeting_render = lambda: None
+    event = _hub_methods("_meeting_event")["_meeting_event"]
+    return hub, lambda result: event(hub, "stop", result, None)
+
+
+def test_saved_line_uses_the_generated_title_not_the_stand_in():
+    from localflow.hub_model import saved_notes_message
+
+    hub, stop = _stop_hub({"title": "Meeting", "title_auto": True})
+    stop({"title": "Launch date review", "title_generated": True,
+          "notes_path": "/v/notes/Zoom/2026-11-16 1000 Launch date review.md"})
+    assert saved_notes_message(hub.meeting_last_saved) == "Notes saved: Launch date review"
+    assert hub.recent_loads == 1  # Recent meetings re-read (named from the file)
+    assert hub.meeting_status["last_saved"]["title"] == "Launch date review"
+
+
+def test_older_payload_never_shows_the_automatic_stand_in():
+    from localflow.hub_model import saved_notes_message
+
+    hub, stop = _stop_hub({"title": "Meeting", "title_auto": True})
+    stop({"notes_path": "/v/notes/Zoom/2026-11-16 1000 Launch date review.md"})
+    assert "title" not in hub.meeting_last_saved
+    assert saved_notes_message(hub.meeting_last_saved) == "Notes saved: Launch date review"
+    # An explicit session's own title still fills in for an older payload.
+    hub, stop = _stop_hub({"title": "Q3 sync"})
+    stop({"notes_path": "/v/notes/Other/2026-11-16 1000 Q3 sync.md"})
+    assert hub.meeting_last_saved["title"] == "Q3 sync"
+
+
 def test_two_default_meetings_in_the_same_minute_keep_both_notes(api):
     api.llm.title = RuntimeError("offline")
     first = _meeting(api)

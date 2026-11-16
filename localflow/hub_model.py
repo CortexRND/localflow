@@ -84,6 +84,8 @@ def meeting_notes_height(viewport_height: int, top: int) -> int:
 MEETING_SUBTITLE = (
     "Transcribe a meeting, jot notes alongside, and save both to your vault."
 )
+# The title field starts blank; this is drawn, never inserted as text.
+MEETING_TITLE_PLACEHOLDER = "Named automatically when saved"
 MEETING_NOTES_PLACEHOLDER = (
     "Type notes while you talk: headings and bullets work. When you stop, "
     "LocalFlow fills them in from the transcript."

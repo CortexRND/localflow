@@ -672,6 +672,8 @@ def meeting_status() -> dict:
     if session is not None and session.active:
         live = {
             "title": meta.get("title", "Meeting"),
+            # True while the title is a stand-in that is named on save.
+            "title_auto": bool(meta.get("title_auto")),
             "category": meta.get("category", "Other"),
             "template": meta.get("template", ""),
             "user_notes": meta.get("user_notes", ""),

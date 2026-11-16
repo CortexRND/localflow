@@ -55,6 +55,7 @@ from localflow.hub_settings import (
     settings_layout,
 )
 from localflow.mac_style import (
+    CobaltSwitch,
     FlippedView,
     PlaceholderTextView,
     color,
@@ -286,7 +287,8 @@ class SettingsPageController(NSObject):
             frames = manual["rows"].get(row.key)
             if frames is None:
                 continue
-            self._label(card, row.label, frames["label"], 12, "ink")
+            # Label left (wrapping in its column), control right-aligned.
+            self._label(card, row.label, frames["label"], 12, "ink", wrap=True)
             control = self._manual_control(card, row, frames["control"])
             self.manual_controls[row.key] = (row.kind, control)
             if "error" in frames:
@@ -299,9 +301,9 @@ class SettingsPageController(NSObject):
         """One explicit-target control, enabled and wired to its action."""
         tokens = self.hub.tokens
         if row.kind == "switch":
-            control = AppKit.NSSwitch.alloc().initWithFrame_(NSMakeRect(*frame))
-            control.setState_(
-                AppKit.NSControlStateValueOn if row.value else AppKit.NSControlStateValueOff
+            # House switch: token colours in every appearance and window state.
+            control = CobaltSwitch.alloc().initWithFrame_(NSMakeRect(*frame)).configure(
+                tokens, bool(row.value), row.label,
             )
             action = "manualToggle:"
         elif row.kind == "choice":

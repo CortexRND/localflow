@@ -212,7 +212,13 @@ def test_window_appearance_callback_is_registered_on_a_retained_controller():
 
 def test_hub_settings_use_segmented_controls_and_reload_models_config():
     source = SOURCE.read_text(encoding="utf-8")
-    assert "NSPopUpButton" not in source
+    methods = {
+        method.name: ast.get_source_segment(source, method)
+        for method in _controller_methods()
+    }
+    assert "NSPopUpButton" not in methods["_page_style"]
+    assert "NSPopUpButton.alloc()" in methods["_quick_picker"]
+    assert "NSComboBox" not in methods["_quick_picker"]
     assert '"strict"' not in source
     assert '("formal", "casual", "very_casual", "excited")' in source
     assert "self.config = load_config()" in source

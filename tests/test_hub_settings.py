@@ -112,17 +112,19 @@ def test_layout_fits_and_never_overlaps(width, status):
     state.undo_lines = ["Sounds: Off → On"]
     layout = hub_settings.settings_layout(width, HUB_HEADER_OFFSET, state, 8, measure)
 
-    assert layout["wide"] is (width >= hub_settings.WIDE_MIN)
+    # Full width at every supported width: the agent, then the manual panel
+    # under it (never a narrow side column).
+    assert layout["main_w"] == width and "wide" not in layout
     stack = [layout[k] for k in ("box_label", "intro", "box", "preview", "card", "undo")]
     for upper, lower in itertools.pairwise(stack):
         assert upper[1] + upper[3] <= lower[1], (upper, lower)
     for frame in stack + [layout["current"]]:
         x, y, w, h = frame
         assert x >= 0 and x + w <= width and y >= HUB_HEADER_OFFSET and h >= 0
-    if layout["wide"]:
-        assert layout["current"][0] >= layout["main_w"]  # its own column
-    else:
-        assert layout["current"][1] >= layout["undo"][1] + layout["undo"][3]
+    assert layout["card"][2] == width
+    x, y, w, _h = layout["current"]
+    assert (x, w) == (0, width)
+    assert y >= layout["undo"][1] + layout["undo"][3]
     assert layout["bottom"] >= layout["current"][1] + layout["current"][3]
     assert ("apply" in layout) is (status == "preview")
     card_h = layout["card"][3]
@@ -150,7 +152,8 @@ def test_long_change_lines_wrap_in_full_and_short_rows_keep_their_size(width, st
     inner = layout["main_w"] - 2 * hub_settings.CARD_PAD
     assert sh == hub_settings.ROW_H and sw == lw == inner  # short row unchanged
     lines = wrap_lines(long_change.line(), inner, measure)
-    assert len(lines) > 1 and "".join(lines).replace(" ", "") == (
+    assert (len(lines) > 1) == (measure(long_change.line()) > inner)
+    assert "".join(lines).replace(" ", "") == (
         long_change.line().replace(" ", "")
     )  # every character is shown somewhere
     assert lh >= len(lines) * hub_settings.LINE_H
@@ -361,6 +364,7 @@ def settings_mac(monkeypatch):
     objc.autorelease_pool = contextlib.nullcontext
     style = types.ModuleType("localflow.mac_style")
     style.FlippedView = Stub
+    style.CobaltSwitch = Stub
     style.PlaceholderTextView = types.SimpleNamespace(alloc=lambda: types.SimpleNamespace(
         initWithFrame_=lambda frame: FakeTextView()))
     for name in ("color", "font", "style_button", "style_input_box", "style_surface"):

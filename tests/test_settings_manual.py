@@ -103,6 +103,12 @@ class Control(Stub):
     def state(self):
         return self.state_
 
+    def configure(self, palette, on, label):
+        """mac_style.CobaltSwitch.configure: state and label of a new switch."""
+        self.palette, self.label = palette, label
+        self.state_ = ON if on else OFF
+        return self
+
     def addItemsWithTitles_(self, titles):
         self.items = list(titles)
 
@@ -161,7 +167,8 @@ def settings_mac(monkeypatch):
     appkit.NSButton = types.SimpleNamespace(
         buttonWithTitle_target_action_=lambda title, target, action: FakeButton(title, action)
     )
-    appkit.NSSwitch = _factory("switch")
+    # The house switch replaced NSSwitch: a stray NSSwitch would fail here.
+    appkit.NSSwitch = None
     appkit.NSPopUpButton = _factory("popup")
     appkit.NSScrollView = Stub
     foundation = types.ModuleType("Foundation")
@@ -182,6 +189,7 @@ def settings_mac(monkeypatch):
     objc.autorelease_pool = contextlib.nullcontext
     style = types.ModuleType("localflow.mac_style")
     style.FlippedView = Stub
+    style.CobaltSwitch = _factory("switch")
 
     class _TextView(Stub):
         def __init__(self):
@@ -496,22 +504,82 @@ def test_manual_panel_fits_its_column_and_nothing_overlaps(content, with_error):
         assert x >= 0 and x + w <= width and y >= 0 and y + h <= manual["height"]
     for first, second in itertools.combinations(frames, 2):
         assert not overlap(first, second), (first, second)
+    inner = width - 2 * hub_settings.CARD_PAD
+    right = hub_settings.CARD_PAD + inner
+    for row in rows:
+        frames = manual["rows"][row.key]
+        lx, ly, lw, lh = frames["label"]
+        cx, cy, cw, ch = frames["control"]
+        # Label left, control right-aligned on the same line, every kind
+        # (switches too), at the minimum and wide widths alike.
+        assert lx == hub_settings.CARD_PAD and cx + cw == right, row.key
+        assert lx + lw + hub_settings.LABEL_GAP <= cx, row.key
+        assert ly < cy + ch and cy < ly + lh, row.key  # one row, not stacked
+        if "error" in frames:  # wraps below the whole row, full width
+            ex, ey, ew, _eh = frames["error"]
+            assert (ex, ew) == (hub_settings.CARD_PAD, inner)
+            assert ey >= max(ly + lh, cy + ch)
+    switch = manual["rows"]["sounds_enabled"]["control"]
+    assert switch[2] == hub_settings.SWITCH_WIDTH
     if with_error:
         assert "error" in manual["rows"]["prompt_hotkey"]
-    # Side by side when stacked under the agent at the minimum, label above
-    # the control in the narrow column next to it when wide.
-    assert manual["side_by_side"] is (content < hub_settings.WIDE_MIN)
+    assert "side_by_side" not in manual
 
     layout = hub_settings.settings_layout(
         content, HUB_HEADER_OFFSET, state, 22, measure, manual_height=manual["height"],
     )
     x, y, w, h = layout["current"]
-    assert h == manual["height"] and w == width and x + w <= content
+    # The manual panel is full width under the agent and its Undo row.
+    assert h == manual["height"] and (x, w) == (0, content) and width == content
     assert layout["bottom"] >= y + h
-    if layout["wide"]:
-        assert x >= layout["main_w"]
-    else:
-        assert y >= layout["undo"][1] + layout["undo"][3]
+    assert y >= layout["undo"][1] + layout["undo"][3]
+    assert layout["main_w"] == content
+
+
+@pytest.mark.parametrize("content", [MIN_CONTENT, WIDE_CONTENT])
+def test_long_labels_wrap_in_their_column_and_keep_the_control_right(content):
+    long_row = types.SimpleNamespace(
+        key="sounds_enabled", label="Play a sound when dictation starts and stops " * 4,
+        kind="switch", group="Dictation",
+    )
+    state = hub_settings.SettingsPageState()
+    manual = hub_settings.manual_layout(content, [long_row], state, measure)
+    lx, ly, lw, lh = manual["rows"]["sounds_enabled"]["label"]
+    cx, _cy, cw, _ch = manual["rows"]["sounds_enabled"]["control"]
+    assert lh > hub_settings.LINE_H  # wrapped, not truncated or overlapping
+    assert lx + lw < cx and cx + cw == content - hub_settings.CARD_PAD
+    assert manual["height"] >= ly + lh
+
+
+def test_shortcut_draft_and_error_survive_resizing_between_widths(env):
+    """A failed shortcut keeps its typed text and inline error when the page
+    is rebuilt at another width (the frames move, the draft does not)."""
+    control(env, "prompt_hotkey").setStringValue_("ctrl+option+1")  # the Polish shortcut
+    env.controller.manualShortcut_(control(env, "prompt_hotkey"))
+    assert "prompt_hotkey" in env.controller.state.manual_errors
+    for width in (WIDE_CONTENT, MIN_CONTENT, WIDE_CONTENT):
+        env.hub._content_width = lambda width=width: width
+        env.hub._rebuild_current_page()  # capture, tear down, render
+        field = control(env, "prompt_hotkey")
+        assert field.stringValue() == "ctrl+option+1"
+        x, _y, w, _h = field.frame_
+        assert w <= hub_settings.CONTROL_W
+        assert x + w == width - hub_settings.CARD_PAD  # right-aligned at this width
+        assert "prompt_hotkey" in env.controller.state.manual_errors
+    assert env.controller.state.manual_drafts["prompt_hotkey"] == "ctrl+option+1"
+    assert env.config().prompt_hotkey == "<ctrl>+<alt>+2"  # nothing was saved
+
+
+def test_switches_are_the_house_switch_with_tokens_label_and_state(env):
+    switches = {key: view for key, (kind, view) in env.controller.manual_controls.items()
+                if kind == "switch"}
+    assert switches and set(switches) == set(sa._BOOL_KEYS)
+    labels = {row.key: row.label for row in env.controller.manual_rows}
+    for key, view in switches.items():
+        assert view.kind == "switch" and view.palette is env.hub.tokens, key
+        assert view.label == labels[key], key
+        assert view.target is env.controller and view.action == "manualToggle:", key
+    assert switches["sounds_enabled"].state() == ON
 
 
 def test_preview_warnings_get_their_own_rows_inside_the_card():

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from localflow.settings_agent import safe_text, warnings_for
 from localflow.text_wrap import wrap_lines
+from localflow.ui_tokens import SWITCH_WIDTH
 
 HEADING = "Tell LocalFlow what to change"
 PLACEHOLDER = (
@@ -195,8 +196,6 @@ ROW_H = 24
 LINE_H = 18
 CARD_PAD = 16
 GAP = 16
-SIDE_WIDTH = 300
-WIDE_MIN = 840          # content width at which the manual settings move right
 CURRENT_ROW_H = 22
 TITLE_H = 22
 # Manual controls.
@@ -204,27 +203,37 @@ GROUP_H = 26            # a group heading
 CONTROL_H = 26          # popup / shortcut field
 SWITCH_H = 22
 MANUAL_ROW_GAP = 8
-SIDE_BY_SIDE_MIN = 440  # inner width at which label and control share a row
-LABEL_FRACTION = 0.48
+CONTROL_W = 240         # popup / shortcut field, right-aligned
+LABEL_GAP = 16          # least room between a label and its control
 
 
 def manual_panel_width(width) -> float:
-    """Width of the manual panel: its own column when wide, else full width."""
-    return SIDE_WIDTH if width >= WIDE_MIN else width
+    """Width of the manual panel: always the full content width, under the
+    agent (a narrow side column stacked every label over its control)."""
+    return width
+
+
+def manual_control_width(kind, inner) -> float:
+    """A row's control width: the switch's own, else CONTROL_W, never more
+    than half the row so its label keeps the left side."""
+    if kind == "switch":
+        return SWITCH_WIDTH
+    return min(CONTROL_W, max(inner / 2, 120))
 
 
 def manual_layout(width, rows, state: SettingsPageState, measure):
     """Frames for the manual panel, relative to its own top-left.
 
     `rows` are settings_agent.ManualSetting in page order (grouped). Every
-    row gets a label and a control; a row with an error gets a wrapped error
-    line under it (sized by `measure`), so nothing is clipped at any width.
+    row has its label on the left and its control right-aligned on the same
+    line, at every supported width; a long label wraps in its column. A row
+    with an error gets a wrapped error line under it, across the full width
+    (sized by `measure`), so nothing is clipped at any width.
     Returns {"height", "title", "intro", "groups": [(name, frame)],
     "rows": {key: {"label", "control", "error"?}}, "notice"?}.
     """
     inner = width - 2 * CARD_PAD
-    side = inner >= SIDE_BY_SIDE_MIN
-    layout = {"side_by_side": side, "groups": [], "rows": {}}
+    layout = {"groups": [], "rows": {}}
     y = CARD_PAD
     layout["title"] = (CARD_PAD, y, inner, TITLE_H)
     y += TITLE_H + 2
@@ -243,22 +252,16 @@ def manual_layout(width, rows, state: SettingsPageState, measure):
             layout["groups"].append((group, (CARD_PAD, y, inner, GROUP_H - 6)))
             y += GROUP_H
         control_h = SWITCH_H if row.kind == "switch" else CONTROL_H
-        frames = {}
-        if side:
-            label_w = int(inner * LABEL_FRACTION)
-            control_w = inner - label_w - 8
-            line_h = max(control_h, LINE_H)
-            frames["label"] = (CARD_PAD, y + (line_h - LINE_H) / 2, label_w, LINE_H)
-            control_w = min(control_w, 60) if row.kind == "switch" else control_w
-            frames["control"] = (CARD_PAD + label_w + 8, y + (line_h - control_h) / 2,
-                                 control_w, control_h)
-            y += line_h
-        else:
-            frames["label"] = (CARD_PAD, y, inner, LINE_H)
-            y += LINE_H + 2
-            control_w = 60 if row.kind == "switch" else inner
-            frames["control"] = (CARD_PAD, y, control_w, control_h)
-            y += control_h
+        control_w = manual_control_width(row.kind, inner)
+        label_w = inner - control_w - LABEL_GAP
+        label_h = max(_wrapped_height(row.label, label_w, measure), LINE_H)
+        line_h = max(control_h, label_h)
+        frames = {
+            "label": (CARD_PAD, y + (line_h - label_h) / 2, label_w, label_h),
+            "control": (CARD_PAD + inner - control_w, y + (line_h - control_h) / 2,
+                        control_w, control_h),
+        }
+        y += line_h
         error = state.manual_errors.get(row.key)
         if error:
             error_h = _wrapped_height(error, inner, measure)
@@ -284,13 +287,12 @@ def settings_layout(
 
     `measure_change` measures the change lines (13pt semibold); defaults to
     `measure`. `manual_height` is the manual panel's height (manual_layout at
-    manual_panel_width(width)); `layout["current"]` is that panel's frame,
-    beside the agent when wide and stacked under it otherwise. Without it the
-    panel is sized for `current_count` plain rows.
+    manual_panel_width(width)); `layout["current"]` is that panel's frame:
+    full width, under the agent and its Undo row, at every width. Without it
+    the panel is sized for `current_count` plain rows.
     """
-    wide = width >= WIDE_MIN
-    main_w = width - SIDE_WIDTH - GAP if wide else width
-    layout = {"wide": wide, "main_w": main_w}
+    main_w = width
+    layout = {"main_w": main_w}
     y = top
     layout["box_label"] = (0, y, main_w, TITLE_H)
     y += TITLE_H + 2
@@ -367,15 +369,12 @@ def settings_layout(
         current_h = manual_height
     else:
         current_h = CARD_PAD * 2 + TITLE_H + 6 + current_count * CURRENT_ROW_H
-    if wide:
-        cx, cyy, cw = main_w + GAP, top, SIDE_WIDTH
-    else:
-        cx, cyy, cw = 0, y, width
-        y += current_h + GAP
-    layout["current"] = (cx, cyy, cw, current_h)
+    layout["current"] = (0, y, width, current_h)
     layout["current_rows"] = [
-        (CARD_PAD, CARD_PAD + TITLE_H + 6 + i * CURRENT_ROW_H, cw - 2 * CARD_PAD, CURRENT_ROW_H)
+        (CARD_PAD, CARD_PAD + TITLE_H + 6 + i * CURRENT_ROW_H, width - 2 * CARD_PAD,
+         CURRENT_ROW_H)
         for i in range(current_count)
     ]
-    layout["bottom"] = max(y, cyy + current_h + GAP)
+    y += current_h + GAP
+    layout["bottom"] = y
     return layout

@@ -171,6 +171,7 @@ def mac_style(monkeypatch):
     fonts = []
     appkit = types.ModuleType("AppKit")
     appkit.NSView = View
+    appkit.NSButton = View  # base of mac_style.CobaltSwitch
     appkit.NSTextField = Label
     appkit.NSTextView = TextView
     appkit.NSAttributedString = AttributedString
@@ -193,6 +194,7 @@ def mac_style(monkeypatch):
     foundation.NSMakeSize = lambda w, h: (w, h)
     fake_objc = types.ModuleType("objc")
     fake_objc.super = objc_super
+    fake_objc.python_method = lambda function: function
     AttributedString.drawn = []
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
     monkeypatch.setitem(sys.modules, "Foundation", foundation)

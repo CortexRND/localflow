@@ -9,6 +9,7 @@ from dataclasses import replace
 
 from localflow import provider_keys
 from localflow.config import save_config
+from localflow.text_wrap import wrap_lines
 from localflow.ui_tokens import (
     CARD_PADDING,
     CONTROL_GAP,
@@ -24,9 +25,6 @@ REMOVE_W = 80
 USE_W = 190
 TEST_W = 140
 ROW_BUTTON_W = 72
-SUMMARY_BUTTON_W = 188
-SUMMARY_ROW_H = 38  # caption line + value line + gap
-SUMMARY_HEIGHT = 2 * CARD_PADDING + 2 * SUMMARY_ROW_H
 EDITOR_TOP = 8
 EDITOR_BOTTOM = 12
 MESSAGE_LINE = 16
@@ -134,7 +132,8 @@ def speech_summary(config):
 
 
 def summary_values(config):
-    """(speech text, cleanup & Ask text) for the summary card."""
+    """(speech text, cleanup & Ask text): plain-text names of the models in
+    use (the Models card shows them in its pickers and status line)."""
     speech = speech_summary(config)
     preset = active_preset(config)
     provider = preset.label if preset else config.llm_provider
@@ -153,24 +152,6 @@ def import_states(candidates, has_key, overrides=None):
             else not has_key(candidate.provider_id)
         )
     return states
-
-
-def summary_layout(width):
-    inner = width - 2 * CARD_PADDING
-    text_w = inner - SUMMARY_BUTTON_W - CONTROL_GAP
-    button_x = width - CARD_PADDING - SUMMARY_BUTTON_W
-    stack = 2 * ACTION_H + MODELS_ROW_GAP
-    top = (SUMMARY_HEIGHT - stack) // 2
-    return {
-        "height": SUMMARY_HEIGHT,
-        "rows": [
-            {"caption": (CARD_PADDING, CARD_PADDING + i * SUMMARY_ROW_H, text_w, 16),
-             "value": (CARD_PADDING, CARD_PADDING + i * SUMMARY_ROW_H + 16, text_w, 18)}
-            for i in range(2)
-        ],
-        "change": (button_x, top, SUMMARY_BUTTON_W, ACTION_H),
-        "import": (button_x, top + ACTION_H + MODELS_ROW_GAP, SUMMARY_BUTTON_W, ACTION_H),
-    }
 
 
 def row_columns(width, pill_w):
@@ -429,14 +410,33 @@ QUICK_LABEL_W = 150
 QUICK_CONTROL_H = 26
 QUICK_ROW_H = 34
 REFRESH_W = 96
+IMPORT_W = 120
+STATUS_H = 16
+CLEANUP_LABEL = "Cleanup & Ask"  # the row label; the provider has its own status line
+
+
+def provider_status_text(config):
+    """The active cleanup provider, shown under the model control."""
+    preset = active_preset(config)
+    return f"Active provider: {preset.label if preset else config.llm_provider}"
+
+
+def note_lines(texts, width, measure):
+    """Most lines any of `texts` wraps to at `width` (0 when all are empty)."""
+    return max(
+        (len(wrap_lines(text, max(width, 40), measure)) for text in texts if text),
+        default=0,
+    )
 
 
 def quick_layout(width, *, ollama, fixed_speech, message_lines=0):
-    """Frames (x, y, w, h) of the "Change models" card; nothing overlaps.
+    """Frames (x, y, w, h) of the one Models card; nothing overlaps.
 
-    Row 1: speech engine popup and model popup (or the fixed-model label).
-    Row 2: cleanup & Ask model: an Ollama popup plus Refresh, or a model-ID
-    field for a cloud provider. Then an optional wrapped message.
+    Title row: "Change models" and Import keys…. Row 1: speech engine popup
+    and model popup (or the fixed-model label). Row 2: "Cleanup & Ask": an
+    Ollama popup plus Refresh, or a model-ID field for a cloud provider, with
+    the active provider on a status line under it. Then a wrapped note sized
+    by the caller (`message_lines`); none is reserved when there is none.
     """
     inner = width - 2 * CARD_PADDING
     x = CARD_PADDING
@@ -444,8 +444,11 @@ def quick_layout(width, *, ollama, fixed_speech, message_lines=0):
     controls_w = inner - QUICK_LABEL_W - CONTROL_GAP
     half = (controls_w - CONTROL_GAP) // 2
     y = CARD_PADDING
-    frames = {"title": (x, y, inner, 20)}
-    y += 20 + 2
+    frames = {
+        "title": (x, y + (ACTION_H - 20) // 2, inner - IMPORT_W - CONTROL_GAP, 20),
+        "import": (x + inner - IMPORT_W, y, IMPORT_W, ACTION_H),
+    }
+    y += ACTION_H + 2
     frames["detail"] = (x, y, inner, 16)
     y += 16 + MODELS_ROW_GAP
     frames["speech_label"] = (x, y + 5, QUICK_LABEL_W, 16)
@@ -462,9 +465,12 @@ def quick_layout(width, *, ollama, fixed_speech, message_lines=0):
         frames["refresh"] = (x + inner - REFRESH_W, y, REFRESH_W, QUICK_CONTROL_H)
     else:
         frames["cleanup_model"] = (controls_x, y, controls_w, QUICK_CONTROL_H)
-    y += QUICK_ROW_H
+    y += QUICK_CONTROL_H + 4
+    frames["provider_status"] = (controls_x, y, controls_w, STATUS_H)
+    y += STATUS_H
     if message_lines:
+        y += MODELS_ROW_GAP
         frames["message"] = (x, y, inner, message_lines * MESSAGE_LINE)
-        y += message_lines * MESSAGE_LINE + MODELS_ROW_GAP
-    frames["height"] = y + CARD_PADDING - MODELS_ROW_GAP
+        y += message_lines * MESSAGE_LINE
+    frames["height"] = y + CARD_PADDING
     return frames
