@@ -252,9 +252,9 @@ mod native {
                 if scenario.wide {
                     1100.0
                 } else {
-                    f64::from(lf_ui::setup_flow::WINDOW_MIN_WIDTH)
+                    f64::from(lf_ui::tokens::WINDOW_MIN_WIDTH)
                 },
-                f64::from(lf_ui::setup_flow::WINDOW_MIN_HEIGHT),
+                f64::from(lf_ui::tokens::WINDOW_MIN_HEIGHT),
             );
             for (theme, dark) in SNAPSHOT_THEMES {
                 set_appearance(SnapshotTarget::Window(setup.window()), dark)?;
