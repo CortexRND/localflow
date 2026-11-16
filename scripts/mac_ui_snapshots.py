@@ -3,6 +3,9 @@
 Used by the macOS UI workflow; writes artifacts/mac-ui/<state>-<light|dark>.png.
 """
 
+import faulthandler
+import signal
+import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -58,9 +61,31 @@ def _controller(store_dir, hot_phrases=True):
     return c, store
 
 
+def _progress(message):
+    """One flushed line per step, so a native crash shows where it happened."""
+    print(f"[snapshots] {message}", flush=True)
+
+
+def _install_crash_diagnostics():
+    """Python stacks (all threads) for native crashes, e.g. a SIGTRAP from an
+    AppKit assertion, which otherwise end the run with no traceback."""
+    faulthandler.enable(all_threads=True)
+    if sys.platform == "darwin" and hasattr(signal, "SIGTRAP"):
+        faulthandler.register(signal.SIGTRAP, all_threads=True, chain=True)
+    import objc
+
+    # Log Python exceptions raised inside Objective-C callbacks.
+    options = getattr(objc, "options", None)
+    if options is not None and hasattr(options, "verbose"):
+        options.verbose = True
+
+
 def _shot(c, name):
     for dark in (False, True):
-        snapshot_png(c, OUT / f"{name}-{'dark' if dark else 'light'}.png", dark=dark)
+        path = OUT / f"{name}-{'dark' if dark else 'light'}.png"
+        _progress(f"render {path.name}")
+        snapshot_png(c, path, dark=dark)
+        _progress(f"wrote {path.name}")
 
 
 # (key, label, detail, fix_label, fix_url): the real checks run_checks reports on
@@ -322,13 +347,17 @@ def _hub_snapshots(base):
             controller._meeting_adopting_notes = True
             controller.meeting_notes.setString_("")
             controller._meeting_adopting_notes = False
+        _progress(f"meetings {state}: show_page")
         controller.show_page("Meetings")
+        _progress(f"meetings {state}: templates event")
         controller._meeting_event("templates", client.templates(), None)
+        _progress(f"meetings {state}: status event")
         controller._meeting_event("status", client.status(), None)
         _shot(controller, f"hub-meetings-{state}")
         _hub_sized_shots(controller, f"hub-meetings-{state}")
 
     # No saved notes yet: the Recent meetings card says so (empty temp vault).
+    _progress("meetings recent-empty: build")
     controller = build_hub_window(
         HistoryStore(base / "hub-meetings-empty.sqlite", base / "hub-meetings-empty-clips"),
         DictionaryStore(base / "hub-meetings-empty-dictionary.json"),
@@ -347,6 +376,7 @@ def _hub_sized_shots(controller, name):
     resize takes. The window is put back afterwards.
     """
     for label, width, height in HUB_SIZES:
+        _progress(f"resize {name} to {label} {width}x{height}")
         controller.resize_content(width, height)
         _shot(controller, f"{name}-{label}")
     controller.resize_content(HUB_DEFAULT_WIDTH, HUB_DEFAULT_HEIGHT)
@@ -666,6 +696,7 @@ def _hub_provider_snapshots(base):
 
 
 def main():
+    _install_crash_diagnostics()
     OUT.mkdir(parents=True, exist_ok=True)
     with (
         tempfile.TemporaryDirectory() as tmp,
@@ -787,10 +818,15 @@ def main():
         setup.error_message = "Network connection interrupted."
         setup._render()
         _shot(setup, "setup-download-error")
+        _progress("section hub")
         _hub_snapshots(tmp)
+        _progress("section style")
         _style_snapshots(tmp)
+        _progress("section responsive")
         _hub_responsive_snapshots(tmp)
+        _progress("section hot phrases")
         _hub_hot_phrases_snapshots(tmp)
+        _progress("section providers")
         _hub_provider_snapshots(tmp)
 
     print(f"wrote snapshots to {OUT}")
