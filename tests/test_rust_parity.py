@@ -36,6 +36,7 @@ from localflow import config as py_config
 from localflow import dictionary as py_dictionary
 from localflow import formatting as py_formatting
 from localflow import hotphrases as py_hotphrases
+from localflow import settings_agent as py_settings
 from localflow import symbols as py_symbols
 from localflow.config import (
     Config,
@@ -305,6 +306,67 @@ def test_config_defaults_match(rust_build, sandbox):
     assert_same(drive1(rust_build, sandbox, {"op": "config_defaults"}), config_to_dict(Config()))
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("shortcut", ["", "<ctrl>+<alt>+d"])
+def test_dictation_config_fields_roundtrip(rust_build, sandbox, tmp_path, enabled, shortcut):
+    update = {"dictation": {"enabled": enabled}, "hotkey": {"dictation_toggle": shortcut}}
+    expected = config_to_dict(apply_config_update(Config(), update))
+    path = tmp_path / "dictation.toml"
+    saved, loaded = drive(rust_build, sandbox, [
+        {"op": "config_save", "update": update, "path": str(path)},
+        {"op": "config_load", "path": str(path)},
+    ])
+    assert Path(saved) == path
+    assert_same(loaded, expected)
+    assert_same(config_to_dict(py_config._config_from_v2(py_config._parse(path))), expected)
+    assert "dictation.enabled" in valid_config_keys()
+    assert "hotkey.dictation_toggle" in valid_config_keys()
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize("value", [
+    "", "off", "None", "disabled", "Control+Option+D", "<alt>+<ctrl>+d",
+    "right command+shift+F13", "ctrl+insert", "ctrl+ctrl+d", "ctrl++d",
+    "not a shortcut", "shift+d", "ctrl+left+right", "ctrl+unknown", "ctrl+\u200b",
+    "ctrl+d\n", "off\u00a0", "ctrl+" + "d" * 65,
+])
+def test_dictation_toggle_shortcut_validation(rust_build, sandbox, platform, value):
+    validator = py_settings.Validator(platform=platform)
+    try:
+        expected = validator.value("dictation_toggle_hotkey", value, Config())
+    except py_settings.SettingError:
+        expected = None
+    result = drive1(rust_build, sandbox, {
+        "op": "shortcut_normalize", "value": value, "platform": platform,
+    })
+    if expected is None:
+        assert isinstance(result, dict) and "error" in result
+    else:
+        assert result == expected
+        update = {"hotkey": {"dictation_toggle": result}}
+        assert_same(drive1(rust_build, sandbox, {"op": "config_update", "update": update}),
+                    config_to_dict(apply_config_update(Config(), update)))
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize("toggle,other", [
+    ("<alt>+<ctrl>+1", "<ctrl>+<alt>+1"),
+    ("<CTRL>+<ALT>+K", "<alt_l>+<ctrl_r>+k"),
+    ("<alt_gr>+d", "<alt_r>+d"),
+    ("<ctrl>+<alt>+d", "<ctrl>+<alt>+<shift>+d"),
+    ("<ctrl>+d", "<cmd>+d"),
+    ("", ""),
+])
+def test_dictation_toggle_duplicate_checks(rust_build, sandbox, platform, toggle, other):
+    update = {"hotkey": {"dictation_toggle": toggle, "polish": other}}
+    changed = ["dictation_toggle_hotkey", "polish_hotkey"]
+    config = apply_config_update(Config(), update)
+    expected = [key for key, _ in py_settings.Validator(platform=platform).conflicts(config, changed)]
+    assert drive1(rust_build, sandbox, {
+        "op": "shortcut_conflicts", "platform": platform, "update": update, "changed": changed,
+    }) == expected
+
+
 def test_config_all_fields_update_toml_and_roundtrip(rust_build, sandbox, tmp_path):
     update = _all_fields_update()
     expected = config_to_dict(apply_config_update(Config(), update))
@@ -348,9 +410,9 @@ LOAD_CASES = {
     ),
     "invalid enum and types": (
         "config_version = 2\n[cleanup]\nlevel = \"loud\"\nstyle_work = 3\n"
-        "[dictation]\nmax_recording_seconds = -1\npause_media = \"yes\"\n"
+        "[dictation]\nenabled = \"false\"\nmax_recording_seconds = -1\npause_media = \"yes\"\n"
         "[history]\nkeep_audio_clips = 2.5\nenabled = 1\n"
-        "[hotkey]\npaste_last = 5\ncommand = \"<ctrl>+x\"\n"
+        "[hotkey]\ndictation_toggle = 5\npaste_last = 5\ncommand = \"<ctrl>+x\"\n"
     ),
     "empty language and bad key ref": (
         "config_version = 2\n[stt]\nlanguage = \"\"\n[llm]\napi_key_ref = \"other_secret\"\n"
@@ -391,6 +453,11 @@ def test_config_load_errors(rust_build, sandbox, tmp_path, text):
 
 
 UPDATE_CASES = [
+    {"dictation": {"enabled": False}},
+    {"dictation": {"enabled": 1}},
+    {"dictation": {"enabled": "false"}},
+    {"hotkey": {"dictation_toggle": "<ctrl>+d"}},
+    {"hotkey": {"dictation_toggle": False}},
     {"llm": {"model": "x"}},
     {"stt": {"language": None}},
     {"stt": {"language": 3}},

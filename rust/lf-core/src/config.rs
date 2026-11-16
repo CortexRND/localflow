@@ -73,12 +73,14 @@ pub const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("command", "command_hotkey"),
             ("polish", "polish_hotkey"),
             ("prompt", "prompt_hotkey"),
+            ("dictation_toggle", "dictation_toggle_hotkey"),
         ],
     ),
     ("paste", &[("method", "paste_method")]),
     (
         "dictation",
         &[
+            ("enabled", "dictation_enabled"),
             ("spoken_symbols", "spoken_symbols"),
             ("spoken_punctuation", "spoken_punctuation"),
             ("silence_threshold_dbfs", "silence_threshold_dbfs"),
@@ -162,6 +164,8 @@ enum FieldType {
 
 /// Python `_FIELD_TYPES` (exact-type checks, `bool` is not an `int`).
 const FIELD_TYPES: &[(&str, FieldType)] = &[
+    ("dictation_enabled", FieldType::Bool),
+    ("dictation_toggle_hotkey", FieldType::Str),
     ("llm_key_ref", FieldType::Str),
     ("paste_last_hotkey", FieldType::Str),
     ("command_hotkey", FieldType::Str),
@@ -220,7 +224,7 @@ impl Config {
         } else {
             "<ctrl>+<shift>+v"
         };
-        let entries: [(&str, Value); 57] = [
+        let entries: [(&str, Value); 59] = [
             ("model_size", json!("base")),
             ("stt_backend", json!("auto")),
             ("language", Value::Null),
@@ -246,6 +250,8 @@ impl Config {
             ("prompt_hotkey", json!("<ctrl>+<alt>+2")),
             ("sounds_enabled", json!(true)),
             ("paste_method", json!("auto")),
+            ("dictation_enabled", json!(true)),
+            ("dictation_toggle_hotkey", json!("")),
             ("spoken_symbols", json!(true)),
             ("spoken_punctuation", json!(true)),
             ("silence_threshold_dbfs", json!(-50.0)),
@@ -1615,7 +1621,7 @@ mod tests {
         assert!(!win_is_fully_qualified("\\\\?\\UNC\\"));
     }
 
-    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\n\n[setup]\nversion = 0\n";
+    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\n\n[setup]\nversion = 0\n";
 
     const VALID_REF: &str = "llm_activation_openai_0123456789abcdef0123456789abcdef";
 
@@ -1711,7 +1717,7 @@ mod tests {
         let names = field_names();
         let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len());
-        assert_eq!(names.len(), 57);
+        assert_eq!(names.len(), 59);
         let default_names: std::collections::BTreeSet<&str> =
             defaults.fields.keys().map(String::as_str).collect();
         assert_eq!(unique, default_names);
@@ -2205,6 +2211,9 @@ mod tests {
     fn invalid_new_config_fields_default_when_loaded() {
         let iso = Isolated::new();
         for contents in [
+            "[dictation]\nenabled = 1\n",
+            "[dictation]\nenabled = \"false\"\n",
+            "[hotkey]\ndictation_toggle = 7\n",
             "[hotkey]\ncommand = 7\n",
             "[dictation]\npause_media = \"yes\"\n",
             "[dictation]\nmax_recording_seconds = -1\n",
@@ -2233,6 +2242,8 @@ mod tests {
             &Config::defaults_for(false),
             &[
                 ("paste_last_hotkey", json!("<ctrl>+<cmd>+v")),
+                ("dictation_enabled", json!(false)),
+                ("dictation_toggle_hotkey", json!("<ctrl>+<alt>+d")),
                 ("command_hotkey", json!("")),
                 ("pause_media_while_dictating", json!(true)),
                 ("max_recording_seconds", json!(0)),
@@ -2403,7 +2414,7 @@ mod tests {
         assert_eq!(config_field("server.port.extra"), None);
         assert_eq!(config_field(""), None);
         let keys = valid_config_keys();
-        assert_eq!(keys.len(), 57);
+        assert_eq!(keys.len(), 59);
         assert_eq!(keys[0], "stt.provider");
         assert_eq!(keys.last().unwrap(), "setup.version");
         assert_eq!(
