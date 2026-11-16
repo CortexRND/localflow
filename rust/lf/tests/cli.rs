@@ -247,13 +247,43 @@ fn config_path_and_migrate() {
     )
     .unwrap();
     let migrated = sandbox.run(&["config", "migrate"]);
+    assert_eq!(code(&migrated), 0, "{}", stderr(&migrated));
     assert_eq!(
         stdout(&migrated),
         format!("migrated legacy config to {}\n", sandbox.config().display())
     );
+    // Core warnings reach stderr; INFO (the "migrated ..." log) does not.
+    assert!(
+        stderr(&migrated).contains("ignoring unknown v1 config key 'mystery'"),
+        "{}",
+        stderr(&migrated)
+    );
+    assert!(
+        !stderr(&migrated).contains("the old file was left in place"),
+        "{}",
+        stderr(&migrated)
+    );
     assert_eq!(
         stdout(&sandbox.run(&["config", "get", "llm.model"])),
         "legacy\n"
+    );
+}
+
+#[test]
+fn invalid_config_value_warns_on_stderr_and_uses_default() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.config().parent().unwrap()).unwrap();
+    std::fs::write(
+        sandbox.config(),
+        "config_version = 2\n\n[cleanup]\nlevel = \"loud\"\n",
+    )
+    .unwrap();
+    let result = sandbox.run(&["config", "get", "cleanup.level"]);
+    assert_eq!(code(&result), 0, "{}", stderr(&result));
+    assert_eq!(stdout(&result), "light\n");
+    assert_eq!(
+        stderr(&result),
+        "WARNING: invalid config value for cleanup.level: 'loud'; using default\n"
     );
 }
 

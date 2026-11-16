@@ -78,17 +78,56 @@ macro_rules! outln {
 }
 pub(crate) use outln;
 
+/// Writes WARN and ERROR records from the `log` facade (lf-core's warnings)
+/// to stderr as `WARNING: …`/`ERROR: …`; INFO and below are dropped.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let level = match record.level() {
+            log::Level::Error => "ERROR",
+            _ => "WARNING",
+        };
+        // Lock per record so concurrent records don't interleave; a failed
+        // write (closed stderr) is ignored.
+        let _ = writeln!(io::stderr().lock(), "{level}: {}", record.args());
+    }
+
+    fn flush(&self) {
+        let _ = io::stderr().flush();
+    }
+}
+
+static STDERR_LOGGER: StderrLogger = StderrLogger;
+
+/// Install [`StderrLogger`] unless a logger is already installed (then that
+/// one and its level filter are kept).
+fn init_stderr_logger() {
+    if log::set_logger(&STDERR_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+}
+
 /// Run the CLI against the process stdio. Returns the exit status.
 pub fn run_main<I, T>(args: I) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    init_stderr_logger();
     let stdout = io::stdout();
-    let stderr = io::stderr();
     let stdin = io::stdin();
     let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked (stderr is unbuffered): holding the lock for the whole run
+    // would block log records from other threads until exit.
+    let mut err = io::stderr();
     let mut input = stdin.lock();
     let mut clipboard = SystemClipboard;
     let mut io = Io {
@@ -248,5 +287,20 @@ mod tests {
         let outcome = run_cli(&["config", "set", "nope.key", "-5"]);
         assert_eq!(outcome.code, 1);
         assert!(outcome.err.starts_with("Error: unknown config key"));
+    }
+
+    #[test]
+    fn stderr_logger_filters_below_warn_and_init_is_idempotent() {
+        use log::Log as _;
+        let enabled =
+            |level| super::STDERR_LOGGER.enabled(&log::Metadata::builder().level(level).build());
+        assert!(enabled(log::Level::Error));
+        assert!(enabled(log::Level::Warn));
+        assert!(!enabled(log::Level::Info));
+        assert!(!enabled(log::Level::Debug));
+        // A second install (or one after another logger) must not panic.
+        super::init_stderr_logger();
+        super::init_stderr_logger();
+        assert!(log::max_level() >= log::LevelFilter::Warn);
     }
 }
