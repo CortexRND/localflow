@@ -1,0 +1,18 @@
+[package]
+name = "lf-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lf-core = { path = "../lf-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+regex.workspace = true
+caseless.workspace = true
+unicode-normalization = "0.1"
+unicode-general-category = "1"

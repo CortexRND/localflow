@@ -1,0 +1,18 @@
+[package]
+name = "lf-ask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lf-core = { path = "../lf-core" }
+lf-providers = { path = "../lf-providers" }
+anyhow.workspace = true
+chrono.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
