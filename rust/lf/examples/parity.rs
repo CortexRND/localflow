@@ -138,6 +138,23 @@ fn handle(request: &Value) -> Result<Value> {
     match op {
         "config_defaults" => Ok(config::config_to_dict(&Config::default())),
         "config_update" => Ok(config::config_to_dict(&updated_config(request)?)),
+        "shortcut_normalize" => Ok(json!(lf_core::shortcuts::normalize_optional_combo(
+            text(request, "value")?,
+            text(request, "platform")?
+        )?)),
+        "shortcut_conflicts" => {
+            let cfg = updated_config(request)?;
+            let changed = strings(request.get("changed"));
+            let changed: Vec<&str> = changed.iter().map(String::as_str).collect();
+            Ok(json!(lf_core::shortcuts::shortcut_conflicts(
+                &cfg,
+                &changed,
+                text(request, "platform")?
+            )
+            .iter()
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>()))
+        }
         "config_toml" => Ok(Value::String(config::config_toml(&updated_config(
             request,
         )?)?)),
