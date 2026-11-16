@@ -78,6 +78,21 @@ def runtime_repo(backend: str, model_size: str) -> tuple[str | None, bool]:
     return None, False
 
 
+def selection_backend(stt_backend: object) -> str:
+    """The lease backend for a speech model that is *about to* load.
+
+    Used before loading, while a model may still be downloading: a named
+    engine maps to the runtime backend it will use; `auto` (it may fall back
+    at load time) and plug-in engines map to "unknown", whose lease is
+    known=False, so Free up space conservatively deletes nothing meanwhile.
+    """
+    name = (stt_backend or "auto").strip() if isinstance(stt_backend, str) else ""
+    return {
+        "parakeet": "parakeet", "faster-whisper": "faster-whisper",
+        "mlx": "mlx", "mlx-whisper": "mlx",
+    }.get(name, "unknown")
+
+
 def record(
     backend: str, model_size: str, root: Path | None = None, *, scoped: bool = False,
 ) -> Path | None:

@@ -21,10 +21,13 @@ from localflow.ui_tokens import (
     RADIUS,
     SHADOW_OFFSET,
     SUN_TEXT,
+    SWITCH_BORDER_WIDTH,
     TYPE,
     halftone_dots,
     input_inner_frame,
     surface_tint,
+    switch_colors,
+    switch_parts,
     tokens_for,
 )
 
@@ -119,6 +122,88 @@ class PlaceholderTextView(AppKit.NSTextView):
                 self.bounds().size.height - 2 * inset.height,
             )
         )
+
+
+class CobaltSwitch(AppKit.NSButton):
+    """Settings switch: a switch-type NSButton (native toggle, keyboard,
+    target/action, state and accessibility) that draws only its own track,
+    knob and On/Off word from palette tokens (ui_tokens.switch_parts /
+    switch_colors); the button's own drawing never runs."""
+
+    palette = None
+
+    @objc.python_method
+    def configure(self, palette, on, label):
+        """Set up a freshly allocated switch; returns it."""
+        self.palette = palette
+        self.setButtonType_(AppKit.NSButtonTypeSwitch)
+        self.setBordered_(False)
+        self.setTitle_("")
+        self.setState_(AppKit.NSControlStateValueOn if on else AppKit.NSControlStateValueOff)
+        self.setAccessibilityLabel_(label)
+        return self
+
+    @objc.python_method
+    def is_on(self):
+        return self.state() == AppKit.NSControlStateValueOn
+
+    def wantsUpdateLayer(self):
+        return False  # always drawRect_, never the cell's layer drawing
+
+    def accessibilityValueDescription(self):
+        return "On" if self.is_on() else "Off"
+
+    def drawRect_(self, _dirty_rect):
+        bounds = self.bounds()
+        parts = switch_parts(bounds.size.width, bounds.size.height, self.is_on())
+        colors = switch_colors(self.palette or LIGHT, self.is_on(), self.isEnabled())
+
+        def paint(hex_color):
+            return color(hex_color).colorWithAlphaComponent_(colors["alpha"])
+
+        AppKit.NSGraphicsContext.saveGraphicsState()
+        try:
+            x, y, w, h = parts["track"]
+            half = SWITCH_BORDER_WIDTH / 2  # keep the stroke inside the bounds
+            radius = max(parts["radius"] - half, 0)
+            track = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(x + half, y + half, w - 2 * half, h - 2 * half), radius, radius,
+            )
+            paint(colors["track"]).set()
+            track.fill()
+            paint(colors["outline"]).set()
+            track.setLineWidth_(SWITCH_BORDER_WIDTH)
+            track.stroke()
+            knob = AppKit.NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(*parts["knob"]))
+            paint(colors["knob"]).set()
+            knob.fill()
+            paint(colors["outline"]).set()
+            knob.setLineWidth_(1)
+            knob.stroke()
+            style = AppKit.NSMutableParagraphStyle.alloc().init()
+            style.setAlignment_(AppKit.NSTextAlignmentRight)
+            AppKit.NSAttributedString.alloc().initWithString_attributes_(
+                parts["label"],
+                {
+                    AppKit.NSFontAttributeName: font(12, "semibold"),
+                    AppKit.NSForegroundColorAttributeName: paint(colors["text"]),
+                    AppKit.NSParagraphStyleAttributeName: style,
+                },
+            ).drawInRect_(NSMakeRect(*parts["text"]))
+        finally:
+            AppKit.NSGraphicsContext.restoreGraphicsState()
+
+    def drawFocusRingMask(self):
+        bounds = self.bounds()
+        parts = switch_parts(bounds.size.width, bounds.size.height, self.is_on())
+        radius = parts["radius"]
+        AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(*parts["track"]), radius, radius,
+        ).fill()
+
+    def focusRingMaskBounds(self):
+        bounds = self.bounds()
+        return NSMakeRect(*switch_parts(bounds.size.width, bounds.size.height, False)["track"])
 
 
 def tokens_for_window(window):

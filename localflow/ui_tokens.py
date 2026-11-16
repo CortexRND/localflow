@@ -178,6 +178,86 @@ def halftone_dots(
     return dots
 
 
+# Settings switch (mac_style.CobaltSwitch): an "On"/"Off" word, then the
+# track at the right edge; palette tokens only (no system accent).
+SWITCH_TRACK_W = 40
+SWITCH_TRACK_H = 22
+SWITCH_KNOB_INSET = 3
+SWITCH_STATE_W = 28
+SWITCH_STATE_GAP = 8
+SWITCH_TEXT_H = 16
+SWITCH_BORDER_WIDTH = 2
+SWITCH_WIDTH = SWITCH_STATE_W + SWITCH_STATE_GAP + SWITCH_TRACK_W
+SWITCH_DISABLED_ALPHA = 0.45
+
+
+def switch_parts(width: float, height: float, on: bool) -> dict:
+    """Frames (x, y, w, h) of a switch drawn in a `width` x `height` box.
+
+    The track is right-aligned and vertically centred (the same in flipped
+    and unflipped views); the knob sits inside it, right when on and left
+    when off; the state word fills the room left of the track.
+    """
+    track_w = min(SWITCH_TRACK_W, width)
+    track_h = min(SWITCH_TRACK_H, height)
+    track_x = width - track_w
+    track_y = (height - track_h) / 2
+    knob = max(track_h - 2 * SWITCH_KNOB_INSET, 0)
+    knob_x = (
+        track_x + track_w - SWITCH_KNOB_INSET - knob if on else track_x + SWITCH_KNOB_INSET
+    )
+    text_h = min(SWITCH_TEXT_H, height)
+    return {
+        "track": (track_x, track_y, track_w, track_h),
+        "knob": (knob_x, track_y + SWITCH_KNOB_INSET, knob, knob),
+        "radius": track_h / 2,
+        "text": (0, (height - text_h) / 2, max(track_x - SWITCH_STATE_GAP, 0), text_h),
+        "label": "On" if on else "Off",
+    }
+
+
+def relative_luminance(hex_color: str) -> float:
+    value = hex_color.lstrip("#")
+    channels = []
+    for index in (0, 2, 4):
+        c = int(value[index:index + 2], 16) / 255
+        channels.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+    red, green, blue = channels
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast_ratio(first: str, second: str) -> float:
+    lighter, darker = sorted(
+        (relative_luminance(first), relative_luminance(second)), reverse=True
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def switch_colors(palette: dict[str, str], on: bool, enabled: bool = True) -> dict:
+    """Hex colours of a switch from the palette's own tokens.
+
+    On: a cobalt track with the paper/ink knob that contrasts most with it.
+    Off: a paper track with an ink knob. Both keep the house ink outline, and
+    the state word is cobalt (on) or muted (off), so On/Off never relies on
+    colour alone. Disabled only lowers the alpha.
+    """
+    if on:
+        track = palette["cobalt"]
+        knob = max(
+            (palette["paper"], palette["ink"]), key=lambda hex_: contrast_ratio(hex_, track)
+        )
+        text = palette["cobalt"]
+    else:
+        track, knob, text = palette["paper"], palette["ink"], palette["muted"]
+    return {
+        "track": track,
+        "knob": knob,
+        "outline": palette["ink"],
+        "text": text,
+        "alpha": 1.0 if enabled else SWITCH_DISABLED_ALPHA,
+    }
+
+
 def resolve_tk_font(available_families) -> str:
     families = {family.casefold(): family for family in available_families}
     for preferred in ("SF Pro Text", "Helvetica Neue", "DejaVu Sans"):

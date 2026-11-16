@@ -177,18 +177,13 @@ def overlap(a, b):
 
 
 @pytest.mark.parametrize("width", [BODY_MIN, 800, 1016])
-def test_summary_card_buttons_clear_the_text(width):
-    geo = ml.summary_layout(width)
-    boxes = [geo["change"], geo["import"]]
-    for row in geo["rows"]:
-        boxes += [row["caption"], row["value"]]
-        assert row["value"][0] + row["value"][2] <= geo["change"][0]
-    for index, first in enumerate(boxes):
-        assert first[0] >= 0 and first[0] + first[2] <= width
-        assert first[1] >= 0 and first[1] + first[3] <= geo["height"]
-        for second in boxes[index + 1:]:
-            assert not overlap(first, second)
-    assert geo["change"][2] == geo["import"][2]
+def test_models_card_import_button_clears_the_title(width):
+    """Import keys… lives in the one Models card's title row, right-aligned."""
+    geo = ml.quick_layout(width, ollama=True, fixed_speech=False)
+    title, button = geo["title"], geo["import"]
+    assert not overlap(title, button) and title[0] + title[2] <= button[0]
+    assert button[0] + button[2] == width - ml.CARD_PADDING
+    assert button[1] + button[3] <= geo["detail"][1]
 
 
 @pytest.mark.parametrize("pill_width", [70, 90, 120])
@@ -210,8 +205,15 @@ def test_collapsed_list_is_compact_and_the_page_fits_the_minimum_window():
     geo = ml.list_layout(BODY_MIN, len(keys.PRESETS))
     assert geo["height"] == len(keys.PRESETS) * MODELS_ROW_HEIGHT
     assert geo["editor_y"] is None
-    page = HUB_HEADER_OFFSET + ml.SUMMARY_HEIGHT + 12 + geo["height"]
-    assert page <= VIEWPORT - HUB_PAGE_BOTTOM  # no outer scrolling when collapsed
+    # The one Models card (no separate summary card above it) leaves room
+    # for most of the collapsed provider list in the minimum window.
+    card = ml.quick_layout(BODY_MIN, ollama=True, fixed_speech=False)["height"]
+    top = HUB_HEADER_OFFSET + card + 12
+    assert top + 5 * MODELS_ROW_HEIGHT <= VIEWPORT - HUB_PAGE_BOTTOM
+    # Shorter than the old summary card (108) + "Change models" card with
+    # its two always-reserved note lines (178), even while listing.
+    loading = ml.quick_layout(BODY_MIN, ollama=True, fixed_speech=False, message_lines=1)
+    assert card < loading["height"] < 108 + 12 + 178
 
 
 def test_only_the_expanded_row_adds_height():
@@ -548,12 +550,15 @@ def test_live_edits_survive_a_resize_rebuild():
     assert "secure" not in live.replace("_secure", "")
 
 
-def test_page_summary_and_import_wiring():
-    summary = source_of("_models_summary")
-    assert "Change speech model…" in summary and '"openSetup:"' in summary
-    assert "Import keys…" in summary and '"providerImport:"' in summary
-    assert "Cleanup & Ask model" in summary and "Speech model" in summary
-    assert 'kind="primary"' not in summary  # both are compact secondary actions
+def test_page_models_card_and_import_wiring():
+    card = source_of("_models_quick_card")
+    # One card: Import keys… is in it (a compact secondary action), the
+    # speech and cleanup models are its pickers, the provider its status.
+    assert '"Import keys…", "providerImport:"' in card
+    assert '"openSetup:"' not in card and "focusSpeechModel" not in card
+    assert 'kind="primary"' not in card
+    assert '"Speech model"' in card and "CLEANUP_LABEL" in card
+    assert "provider_status_text(config)" in card
     card = source_of("_models_import_card")
     assert "import_states(" in card and "self.provider_checked" in card
     assert "get_secret" not in card and "candidate._value" not in card

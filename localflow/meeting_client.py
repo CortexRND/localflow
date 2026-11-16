@@ -88,18 +88,19 @@ class MeetingClient:
     def templates(self) -> dict:
         return self._request("get", "/meeting/templates")
 
-    def start(self, title, category, template, user_notes) -> dict:
-        return self._request(
-            "post",
-            "/meeting/start",
-            timeout=10,
-            json={
-                "title": title,
-                "category": category,
-                "template": template,
-                "user_notes": user_notes,
-            },
-        )
+    def start(self, title, category, template, user_notes, auto_title=None) -> dict:
+        """`auto_title`: True = the title is a placeholder to name on save,
+        False = the user typed it (kept, even "Meeting"), None = let the
+        server decide from the title (older callers)."""
+        body = {
+            "title": title,
+            "category": category,
+            "template": template,
+            "user_notes": user_notes,
+        }
+        if auto_title is not None:
+            body["auto_title"] = bool(auto_title)
+        return self._request("post", "/meeting/start", timeout=10, json=body)
 
     def save_notes(self, notes: str) -> dict:
         return self._request("post", "/meeting/notes", json={"notes": notes})

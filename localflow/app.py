@@ -11,7 +11,7 @@ from localflow import sounds, stt_lease
 from localflow.audio import Recorder, rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
-from localflow.config import load_config
+from localflow.config import config_path, load_config
 from localflow.context import AppInfo, category_for
 from localflow.dictionary import (
     DictionaryStore,
@@ -24,12 +24,21 @@ from localflow.hotkey import KeyboardHub, is_hold_key
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.inject import paste_text
 from localflow.jobs import Job
-from localflow.live_config import HOTKEY_FIELDS, ConfigWatcher, merge_live
+from localflow.live_config import (
+    HOTKEY_FIELDS,
+    RUNTIME_FIELDS,
+    RUNTIME_GROUPS,
+    ConfigWatcher,
+    adopt_groups,
+    merge_live,
+    runtime_changes,
+)
 from localflow.log import setup_logging
 from localflow.logfiles import prepare_process_logs
 from localflow.providers.factory import build_llm, build_stt
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
+from localflow.speech_retry import RetryRequests
 from localflow.status import write_last_text, write_state
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
@@ -73,33 +82,192 @@ def keyboard_bindings(config, controller) -> dict:
     }
 
 
+def _speech_selection(config) -> tuple:
+    """The speech-group fields that pick which speech model loads."""
+    return tuple(getattr(config, name) for name in RUNTIME_GROUPS["stt"])
+
+
+class RuntimeModels:
+    """The speech model and LLM clients the dictation worker uses, swappable.
+
+    Each job takes one `snapshot()` and keeps it to the end, so a reload never
+    changes a model under a job in progress. LLM clients cost nothing to build
+    (no network) and are swapped at once. A new speech model loads (and may
+    download) on its own background thread, never the UI, hotkey or watcher
+    thread; it is swapped in only when `can_swap()` (nothing recording, no job
+    queued or running), else on a later `retry()`. Until the swap the old model
+    keeps working and keeps its long-lived STT lease; the loaded one holds a
+    scoped lease, so Free up space can delete neither. A failed load keeps the
+    old model and is remembered (unless a newer choice superseded it) so that
+    `retry_failed_stt` - the user picking the same model again - loads it once
+    more; nothing retries it on its own.
+    """
+
+    def __init__(
+        self, transcriber, cleaner, transformer, *, can_swap=lambda: True,
+        build_stt_fn=None, build_llm_fn=None, lease=stt_lease, start_thread=None,
+    ):
+        self._lock = threading.Lock()
+        self.transcriber = transcriber
+        self.cleaner = cleaner
+        self.transformer = transformer
+        self.can_swap = can_swap
+        self._build_stt = build_stt_fn or build_stt
+        self._build_llm = build_llm_fn or build_llm
+        self._lease = lease
+        self._start_thread = start_thread or (
+            lambda target: threading.Thread(
+                target=target, name="localflow-stt-reload", daemon=True
+            ).start()
+        )
+        self._wanted = None      # newest config whose speech model should load
+        self._loading = False
+        self._ready = None       # (transcriber, config, scoped lease) awaiting a swap
+        self._failed = None      # speech selection of the newest choice, if its load failed
+
+    @property
+    def stt_pending(self) -> bool:
+        with self._lock:
+            return self._loading or self._ready is not None
+
+    def snapshot(self):
+        with self._lock:
+            return self.transcriber, self.cleaner, self.transformer
+
+    def reload_llm(self, config) -> None:
+        llm = self._build_llm(config)
+        cleaner, transformer = Cleaner(llm), Transformer(llm)
+        with self._lock:
+            self.cleaner, self.transformer = cleaner, transformer
+        log.info("cleanup and command model now %s / %s", config.llm_provider, config.llm_model)
+
+    def reload_stt(self, config) -> None:
+        self._request_stt(config, only_if_failed=False)
+
+    def retry_failed_stt(self, config) -> bool:
+        """Load `config`'s speech model again if it is the newest choice and
+        its load failed; True when a load was requested. A model that is
+        serving, loading or loaded and waiting for a swap is left alone."""
+        return self._request_stt(config, only_if_failed=True)
+
+    def _request_stt(self, config, *, only_if_failed) -> bool:
+        with self._lock:
+            if only_if_failed and self._failed != _speech_selection(config):
+                return False
+            self._failed = None
+            self._wanted = config
+            if self._loading:
+                return True  # the running loader picks up the newest choice next
+            self._loading = True
+        self._start_thread(self._load_loop)
+        return True
+
+    def _load_loop(self) -> None:
+        while True:
+            with self._lock:
+                config, self._wanted = self._wanted, None
+                if config is None:
+                    self._loading = False
+                    return
+            # Protect the chosen model before it downloads/loads, even if the
+            # saved choice changes meanwhile (auto/plug-in: every cached model).
+            selection = self._lease.record(
+                stt_lease.selection_backend(config.stt_backend), config.model_size,
+                scoped=True,
+            )
+            try:
+                transcriber = self._build_stt(config)
+            except Exception:
+                log.exception("could not load the new speech model; keeping the current one")
+                if selection is not None:
+                    self._lease.release(selection)
+                with self._lock:
+                    if self._wanted is None:  # not superseded by a newer choice
+                        self._failed = _speech_selection(config)
+                continue
+            scoped = self._lease.record(
+                str(getattr(transcriber, "backend", "unknown")), config.model_size,
+                scoped=True,
+            )
+            # Handed over to the lease naming what actually loaded.
+            if selection is not None:
+                self._lease.release(selection)
+            with self._lock:
+                superseded, self._ready = self._ready, (transcriber, config, scoped)
+            if superseded is not None and superseded[2] is not None:
+                self._lease.release(superseded[2])
+            self.retry()
+
+    def retry(self) -> bool:
+        """Swap in a loaded speech model if nothing is in progress."""
+        with self._lock:
+            ready = self._ready
+        if ready is None or not self.can_swap():
+            return False
+        transcriber, config, scoped = ready
+        with self._lock:
+            if self._ready is not ready:
+                return False
+            self._ready = None
+            self.transcriber = transcriber
+        self._lease.record(str(getattr(transcriber, "backend", "unknown")), config.model_size)
+        if scoped is not None:
+            self._lease.release(scoped)
+        log.info("speech model now %s / %s", config.stt_backend, config.model_size)
+        return True
+
+
 class LiveSettings:
     """The running dictation app's config, refreshed when the file changes.
 
     Jobs read `config` per item; the controller gets the new config on its
     own consumer thread; shortcut changes are rebound in place on the one
-    KeyboardHub (deferred while a recording or key is in progress). The STT
-    model, recorder, LLM and listener are never rebuilt here: only the
-    allowlisted live fields change (see live_config.merge_live).
+    KeyboardHub (deferred while a recording or key is in progress). The
+    allowlisted live fields change via live_config.merge_live; the model
+    groups (LLM provider/endpoint/model/key ref, speech provider/model) are
+    adopted whole and their clients rebuilt by `models` (RuntimeModels). The
+    recorder and listener are never rebuilt here. A failed speech model is
+    loaded again only on an explicit request read from `retry_requests`
+    (speech_retry.RetryRequests) on watcher ticks, never from a config save.
     """
 
-    def __init__(self, config, controller, hub=None):
+    def __init__(self, config, controller, hub=None, models=None, retry_requests=None):
         self.config = config
         self.controller = controller
         self.hub = hub
+        self.models = models
+        self.retry_requests = retry_requests
         self._lock = threading.Lock()
 
     def apply(self, fresh) -> frozenset:
         with self._lock:
-            merged, changed = merge_live(self.config, fresh)
-            if not changed:
+            merged, changed = merge_live(self.config, fresh, reloaded=RUNTIME_FIELDS)
+            groups = runtime_changes(merged, fresh)
+            if not changed and not groups:
+                # Never a speech retry: a save with nothing live in it (an
+                # unchanged file, a restart-only edit) asks for nothing.
                 return changed
+            if groups:
+                runtime = frozenset(
+                    name for group in groups for name in RUNTIME_GROUPS[group]
+                    if getattr(merged, name) != getattr(fresh, name)
+                )
+                merged = adopt_groups(merged, fresh, groups)
+                changed = changed | runtime
             self.config = merged
             self.controller.update_config(merged)
             if changed & HOTKEY_FIELDS and self.hub is not None:
                 now = self.hub.reconfigure(**keyboard_bindings(merged, self.controller))
                 if not now:
                     log.info("shortcut change waits until dictation is idle")
+            if self.models is not None:
+                if "llm" in groups:
+                    try:
+                        self.models.reload_llm(merged)
+                    except Exception:
+                        log.exception("could not rebuild the cleanup model client")
+                if "stt" in groups:
+                    self.models.reload_stt(merged)
             log.info("settings updated without restart: %s", ", ".join(sorted(changed)))
             return changed
 
@@ -107,6 +275,34 @@ class LiveSettings:
         hub = self.hub
         if hub is not None and hub.reconfigure_pending:
             hub.apply_pending()
+        if self.models is not None:
+            self._take_speech_retry()
+            self.models.retry()
+
+    def _take_speech_retry(self) -> None:
+        """Act on one explicit "load this speech model again" request, if any.
+
+        The request (the Hub re-picking the saved model; speech_retry) is taken
+        once and only honoured for the speech selection this app now wants; the
+        load itself happens only if that choice's load failed
+        (RuntimeModels.retry_failed_stt).
+        """
+        if self.retry_requests is None:
+            return
+        try:
+            requested = self.retry_requests.take()
+        except Exception:
+            log.exception("could not read the speech retry request")
+            return
+        if requested is None:
+            return
+        with self._lock:
+            config = self.config
+            if tuple(requested) != _speech_selection(config):
+                log.info("ignoring a speech retry request for another model")
+                return
+            if self.models.retry_failed_stt(config):
+                log.info("retrying the speech model that failed to load")
 
 
 def _worker_loop(work_queue, process_job, deliver_result) -> None:
@@ -175,8 +371,8 @@ def main() -> None:
 
     print("loading model…")
     transcriber = build_stt(config)
-    # Kept until exit even if the saved model changes: Free up space reads
-    # this lease so the loaded model is never deleted under us.
+    # Free up space reads this lease so the loaded model is never deleted
+    # under us; RuntimeModels rewrites it only once a reloaded model is in use.
     stt_lease.record(transcriber.backend, config.model_size)
     print(f"  stt backend:  {transcriber.backend}")
     commands = discover_commands(config.command_names, config.skills_dirs)
@@ -200,15 +396,29 @@ def main() -> None:
         recorder, config, work_queue, on_state=write_state,
         history_store=history_store,
     )
-    live = LiveSettings(config, controller)
+    models = RuntimeModels(
+        transcriber, cleaner, transformer,
+        # Swap the speech model only between dictations: nothing recording,
+        # nothing queued or being transcribed.
+        can_swap=lambda: controller.is_idle() and work_queue.unfinished_tasks == 0,
+    )
+    del transcriber
+    # Re-picking the saved speech model in the Hub (another process) asks for
+    # a retry through a request beside the config file; ones left from before
+    # this start are ignored.
+    live = LiveSettings(
+        config, controller, models=models, retry_requests=RetryRequests(config_path),
+    )
 
     def process_item(item):
+        # One consistent set of models per job, whatever a reload does meanwhile.
+        job_transcriber, job_cleaner, job_transformer = models.snapshot()
         return _process_job(
             item,
             live.config,
-            transcriber,
-            cleaner,
-            transformer,
+            job_transcriber,
+            job_cleaner,
+            job_transformer,
             commands,
             hot_phrases,
             dictionary_store,

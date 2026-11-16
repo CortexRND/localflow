@@ -1,3 +1,4 @@
+import gc
 import sys
 import threading
 import time
@@ -34,6 +35,7 @@ class FakeMeetingClient:
         self.save_error = save_error
         self.chat_error = chat_error
         self.calls = []
+        self.auto_titles = []  # the optional auto_title flag of each start
 
     def templates(self):
         self.calls.append(("templates",))
@@ -71,8 +73,9 @@ class FakeMeetingClient:
             }
         return {"session": None, "last_saved": None, "chat_available": False}
 
-    def start(self, title, category, template, user_notes):
+    def start(self, title, category, template, user_notes, auto_title=None):
         self.calls.append(("start", title, category, template, user_notes))
+        self.auto_titles.append(auto_title)
         self.state = "running"
         return {"ok": True}
 
@@ -126,11 +129,12 @@ class ManualMeetingClient(FakeMeetingClient):
         self._available_saves = [_ManualResult() for _ in range(4)]
         self._available_starts = [_ManualResult() for _ in range(2)]
 
-    def start(self, title, category, template, user_notes):
+    def start(self, title, category, template, user_notes, auto_title=None):
         with self._manual_lock:
             pending = self._available_starts.pop(0)
             self.pending_starts.append(pending)
         self.calls.append(("start", title, category, template, user_notes))
+        self.auto_titles.append(auto_title)
         result = pending.wait()
         self.state = "running"
         return result
@@ -227,8 +231,32 @@ def test_pre_start_notes_and_template_are_sent_when_starting(tmp_path):
         assert (
             "start", "Planning", "", "standup", "Bring the launch date"
         ) in client.calls
+        assert client.auto_titles == [False]  # a typed title is the user's
     finally:
         root.destroy()
+
+
+@pytest.mark.parametrize("typed,title,auto", [
+    ("", "Meeting", True),           # left blank (the new default): named on save
+    ("   ", "Meeting", True),
+    ("Meeting", "Meeting", False),   # typed "Meeting" is kept, never replaced
+    ("Zoom meeting", "Zoom meeting", False),
+])
+def test_tk_title_is_automatic_only_when_blank(tmp_path, typed, title, auto):
+    client = FakeMeetingClient("idle")
+    root, window = _window(tmp_path, client)
+    try:
+        _pump(root, lambda: bool(window._meeting_status_data))
+        assert window.meeting_title_entry.get() == ""  # no prefilled "Meeting"
+        window.meeting_title_entry.insert(0, typed)
+        window._meeting_toggle()
+        _pump(root, lambda: any(call[0] == "start" for call in client.calls))
+        start = next(call for call in client.calls if call[0] == "start")
+        assert start[1] == title and client.auto_titles == [auto]
+        _pump(root, lambda: window._meeting_requests_in_flight == 0)
+    finally:
+        root.destroy()
+        gc.collect()
 
 
 def test_meetings_saved_chat_answer_and_error(tmp_path):

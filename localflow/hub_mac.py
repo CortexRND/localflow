@@ -16,6 +16,7 @@ from AppKit import (
     NSButton,
     NSComboBox,
     NSMakeRect,
+    NSPopUpButton,
     NSScrollView,
     NSSearchField,
     NSSwitch,
@@ -43,6 +44,7 @@ from localflow.hotphrases import HotPhraseStore
 from localflow.hub_model import (
     MEETING_NOTES_PLACEHOLDER,
     MEETING_SUBTITLE,
+    MEETING_TITLE_PLACEHOLDER,
     PROMPT_STATUS_PILLS,
     PROMPTS_EMPTY,
     PROMPTS_UNREADABLE,
@@ -97,18 +99,31 @@ from localflow.mac_style import (
 )
 from localflow.meeting_client import MeetingClient, vault_notes_path
 from localflow.models_layout import (
+    CLEANUP_LABEL,
     IMPORT_HEADER_H,
     IMPORT_ROW_H,
+    STT_FIXED_MODEL,
+    ModelChoiceError,
     action_frames,
+    active_preset,
+    cleanup_picker,
+    current_speech_provider,
     editor_layout,
     import_height,
     import_states,
     is_active,
     list_layout,
+    note_lines,
+    ollama_models,
     provider_status,
+    provider_status_text,
+    quick_layout,
     row_columns,
-    summary_layout,
-    summary_values,
+    set_active_model,
+    set_speech,
+    speech_model_choices,
+    speech_provider_choices,
+    speech_summary,
     use_button_visible,
 )
 from localflow.phrases_model import PhrasesModel
@@ -242,7 +257,10 @@ class HubWindowController(NSObject):
         self.meeting_last_saved = None
         self.meeting_answers = []
         self.meeting_notes_text = ""
-        self.meeting_title_value = "Meeting"
+        # Blank: the placeholder says the notes are named when saved. Only a
+        # title the user types (see controlTextDidChange_) is kept as is.
+        self.meeting_title_value = ""
+        self.meeting_title_edited = False  # see controlTextDidChange_
         self.meeting_template_value = ""
         self.meeting_notes_dirty = False
         self.meeting_notes_due = None
@@ -470,6 +488,10 @@ class HubWindowController(NSObject):
             self.provider_controls = {}
             self.provider_checks = []
             self.provider_action_views = None
+            # The "Change models" controls go with their views; a late
+            # action from a removed one is ignored (see _quick_live).
+            self.quick_controls = {}
+            self.quick_geometry = None
         self.tokens = tokens_for_window(self.window)
         self.page = page
         self.root_view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
@@ -1520,7 +1542,11 @@ class HubWindowController(NSObject):
         # same height and the same top edge (see mac_style.input_box).
         self.meeting_title = NSTextField.alloc().initWithFrame_(rect("title_field"))
         self.meeting_title.setStringValue_(self.meeting_title_value or "")
+        self.meeting_title.setPlaceholderString_(MEETING_TITLE_PLACEHOLDER)
         self.meeting_title.setAccessibilityLabel_("Meeting title")
+        # Only to notice a real edit (controlTextDidChange_): a typed title,
+        # even "Meeting", is the user's and is never replaced on save.
+        self.meeting_title.setDelegate_(self)
         self.meeting_title_box = input_box(
             self.meeting_title, frames["title_field"], self.tokens,
         )
@@ -1945,11 +1971,14 @@ class HubWindowController(NSObject):
             if error:
                 self.meeting_error = str(error)
             else:
-                # The stop payload has paths only; remember the session's
-                # title for the "Notes saved: <title>" line.
+                # The server's stop payload carries the saved title (the
+                # generated one for an automatic session). Only an older
+                # payload without it falls back to the session's title, and
+                # never for an automatic session: its "Meeting" is a stand-in,
+                # so the note's own name (from its path) is shown instead.
                 previous = self.meeting_status.get("session") or {}
                 result = dict(result or {})
-                if previous.get("title"):
+                if previous.get("title") and not previous.get("title_auto"):
                     result.setdefault("title", previous["title"])
                 self.meeting_last_saved = result
                 # A new note exists: refresh Recent meetings (not on every poll).
@@ -2013,11 +2042,19 @@ class HubWindowController(NSObject):
         overwrites what the user typed for the next meeting.
         """
         title = self.meeting_title
+        # Every programmatic setStringValue_ below happens while
+        # meeting_title_shows_session is True, so controlTextDidChange_ can
+        # never take it for typing (AppKit doesn't post it for these anyway).
         if session:
             if not self.meeting_title_shows_session:
                 self.meeting_title_value = title.stringValue()
                 self.meeting_title_shows_session = True
-            title.setStringValue_(session.get("title") or "Meeting")
+            # An automatic session has no title yet: blank, so the
+            # placeholder ("Named automatically when saved") says so instead
+            # of the "Meeting" stand-in the server keeps until it names it.
+            title.setStringValue_(
+                "" if session.get("title_auto") else (session.get("title") or "Meeting")
+            )
             title.setEditable_(False)
             title.setSelectable_(True)
         else:
@@ -2226,10 +2263,17 @@ class HubWindowController(NSObject):
             self.meeting_notes_status.setStringValue_("Kept for when you start")
 
     def controlTextDidChange_(self, notification):
-        # NSTextField delegate (search, trigger, test phrase): dispatch by page
-        # and by control. Meetings fields do not use this delegate.
+        # NSTextField delegate (Models fields, the meeting title, Hot Phrases
+        # search/trigger/test phrase): dispatch by page and by control.
         if self.page == "Models":
             self._models_live_update(notification.object())
+            return
+        if self.page == "Meetings":
+            if (
+                notification.object() is getattr(self, "meeting_title", None)
+                and not getattr(self, "meeting_title_shows_session", False)
+            ):
+                self.meeting_title_edited = True  # typed by the user: explicit
             return
         if self.page != "Hot Phrases":
             return
@@ -2251,7 +2295,18 @@ class HubWindowController(NSObject):
         if self.meeting_busy:
             return
         if not self.meeting_status.get("session"):
-            title = self.meeting_title.stringValue() or "Meeting"
+            # Read before anything re-renders the field. Name it
+            # automatically on save when it is blank (the default: only the
+            # placeholder shows), or the untouched "Meeting" an older Hub
+            # prefilled. Anything else is kept: a typed title (even
+            # "Meeting") or a restored non-default draft.
+            raw = str(self.meeting_title.stringValue())
+            typed = raw.strip()
+            edited = getattr(self, "meeting_title_edited", False)
+            auto_title = not typed or (not edited and typed == "Meeting")
+            # "Meeting" on the wire is only the server's stand-in until it
+            # names the notes (auto_title says so).
+            title = typed or "Meeting"
             index = self.meeting_template.indexOfSelectedItem()
             template = (
                 self.meeting_templates[index]["id"]
@@ -2259,11 +2314,13 @@ class HubWindowController(NSObject):
             )
             self.meeting_busy = True
             self.meeting_error = ""
-            self.meeting_title_value = title
+            # The draft is what the field holds (blank stays blank), never the
+            # stand-in: it is what the field shows again after the meeting.
+            self.meeting_title_value = raw
             self.meeting_template_value = template
             self._meeting_render()
             self._meeting_worker(
-                "start", title, "", template, self.meeting_notes.string()
+                "start", title, "", template, self.meeting_notes.string(), auto_title,
             )
             return
         self.meeting_busy = True
@@ -2335,7 +2392,9 @@ class HubWindowController(NSObject):
         self.provider_action_views = None
         width = self.body.frame().size.width
         statuses = {p.id: provider_keys.key_status(p.id) for p in provider_keys.PRESETS}
-        self._models_summary(width)
+        # One card: the models in use are the pickers' selections, the active
+        # provider is its status line, and Import keys… sits in its title row.
+        self._models_quick_card(width)
         message, ok = self.provider_message
         if message:
             self._add_text(message, color="success" if ok else "red", height=20, gap=8)
@@ -2453,37 +2512,358 @@ class HubWindowController(NSObject):
             )
         self.show_page("Models")
 
+    # ---------------------------------------------------------- Models card ---
+    # The one card at the top of Models & keys: pick the speech engine/model
+    # and the active provider's cleanup & Ask model in place; the active
+    # provider is shown on its own status line and Import keys… sits in the
+    # title row. Every control has an explicit target and action, is enabled
+    # whenever it has something to pick, and is retained in `quick_controls`
+    # while shown (AppKit targets and delegates are weak). A pick saves at
+    # once (Return or end of editing for a typed model ID, never per
+    # keystroke); the running app and server reload the clients from the
+    # saved config without a restart. Ollama's installed models are listed on
+    # a worker thread and filled in place.
+
     @objc.python_method
-    def _models_summary(self, width):
-        """Top card: the speech model and the cleanup & Ask model in use."""
-        geometry = summary_layout(width)
-        card = FlippedView.alloc().initWithFrame_(
-            NSMakeRect(0, self.cursor_y, width, geometry["height"])
+    def _quick_state(self):
+        if not hasattr(self, "quick_state"):
+            self.quick_state = {
+                "message": ("", True), "draft": None, "state": "", "models": [],
+                "ollama_url": None, "token": 0, "drawn_for": None, "choices": {},
+            }
+        return self.quick_state
+
+    @objc.python_method
+    def _quick_fill_picker(self, picker, titles, selected):
+        """Items, selection and enabled state, via the popup item API only
+        (no string value, attributed title or overlay label)."""
+        picker.removeAllItems()
+        picker.addItemsWithTitles_(titles)
+        if 0 <= selected < len(titles):
+            picker.selectItemAtIndex_(selected)
+        picker.setEnabled_(bool(titles))
+
+    @objc.python_method
+    def _quick_picker(self, frame, parent, titles, selected, action, label):
+        """A native NSPopUpButton for a choice-only list, wired to `action`.
+
+        Choices are unique (engine labels, sizes, installed model names), so
+        an item's index is its index in the card's `choices`."""
+        picker = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(*frame), False
         )
+        picker.setFont_(_font(13))
+        self._quick_fill_picker(picker, titles, selected)
+        picker.setTarget_(self)
+        picker.setAction_(action)
+        picker.setAccessibilityLabel_(label)
+        parent.addSubview_(picker)
+        return picker
+
+    @objc.python_method
+    def _models_quick_card(self, width):
+        state = self._quick_state()
+        self.quick_controls = {}
+        config = self.config
+        ollama = config.llm_provider == "ollama"
+        if ollama:
+            self._quick_fetch()
+        provider = current_speech_provider(config)
+        fixed = provider in STT_FIXED_MODEL
+        items, selected, note = (
+            cleanup_picker(config, state["state"] or "loading", state["models"])
+            if ollama else ([], config.llm_model, "")
+        )
+        message, ok = state["message"]
+        text = message or note
+        # Sized to the note shown now; a listing result reflows it in place
+        # (_quick_reflow).
+        lines = self._quick_note_lines(text, width)
+        frames = quick_layout(width, ollama=ollama, fixed_speech=fixed, message_lines=lines)
+        card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, self.cursor_y, width, frames["height"])
+        )
+        self.quick_geometry = {"card": card, "width": width, "ollama": ollama, "fixed": fixed}
         style_surface(card, self.tokens)
         self.body.addSubview_(card)
-        speech, cleanup = summary_values(self.config)
-        for row, caption, value in zip(
-            geometry["rows"], ("Speech model", "Cleanup & Ask model"), (speech, cleanup)
+
+        def label(text, key, size=13, token="ink", weight="regular"):
+            x, y, w, h = frames[key]
+            card.addSubview_(_label(
+                text, x, y, w, size, token, palette=self.tokens, height=h, weight=weight,
+            ))
+
+        label("Change models", "title", 15, weight="semibold")
+        x, y, w, h = frames["import"]
+        self.quick_controls["import"] = self._button(
+            "Import keys…", "providerImport:", x, y, width=w, parent=card, height=h,
+        )
+        label(
+            "Saved as soon as you pick. LocalFlow switches without a restart.",
+            "detail", 12, "muted",
+        )
+        label("Speech model", "speech_label", 12, "muted", "semibold")
+        speech = speech_provider_choices(config)
+        ids = [pid for pid, _title in speech]
+        self.quick_controls["speech_provider"] = self._quick_picker(
+            frames["speech_provider"], card, [title for _pid, title in speech],
+            ids.index(provider) if provider in ids else -1, "quickSpeechProvider:",
+            "Speech engine",
+        )
+        sizes = list(speech_model_choices(provider))
+        if fixed:
+            label(f"{STT_FIXED_MODEL[provider]} (fixed model)", "speech_fixed", 13)
+        else:
+            if config.model_size not in [size for size, _title in sizes]:
+                sizes.insert(0, (config.model_size, f"{config.model_size} (current)"))
+            self.quick_controls["speech_model"] = self._quick_picker(
+                frames["speech_model"], card, [title for _size, title in sizes],
+                [size for size, _title in sizes].index(config.model_size),
+                "quickSpeechModel:", "Speech model size",
+            )
+        label(CLEANUP_LABEL, "cleanup_label", 12, "muted", "semibold")
+        label(provider_status_text(config), "provider_status", 11, "muted")
+        state["drawn_for"] = (config.llm_provider, config.llm_base_url)
+        if ollama:
+            self.quick_controls["cleanup_model"] = self._quick_picker(
+                frames["cleanup_model"], card, items,
+                items.index(selected) if selected in items else -1,
+                "quickCleanupModel:", "Cleanup and Ask model",
+            )
+            x, y, w, h = frames["refresh"]
+            refresh = self._button(
+                "Refresh", "quickRefresh:", x, y, width=w, parent=card, height=h,
+            )
+            refresh.setEnabled_(state["state"] != "loading")
+            self.quick_controls["refresh"] = refresh
+        else:
+            x, y, w, h = frames["cleanup_model"]
+            field = self._field(
+                state["draft"] if state["draft"] is not None else config.llm_model,
+                x, y, w, parent=card, action="quickCleanupField:",
+            )
+            field.setFrame_(NSMakeRect(x, y, w, h))
+            field.setPlaceholderString_("The provider's model ID")
+            field.setTextColor_(_color("ink", self.tokens))
+            field.setBackgroundColor_(_color("paper", self.tokens))
+            field.setEnabled_(True)
+            # Return and leaving the field commit; typing alone never saves.
+            field.cell().setSendsActionOnEndEditing_(True)
+            field.setAccessibilityLabel_("Cleanup and Ask model ID")
+            self.quick_controls["cleanup_field"] = field
+        state["choices"] = {"speech": ids, "sizes": [size for size, _title in sizes],
+                            "cleanup": items}
+        if "message" in frames:
+            x, y, w, h = frames["message"]
+            tone = ("success" if ok else "red") if message else "muted"
+            note_label = _label(text, x, y, w, 12, tone, palette=self.tokens, height=h,
+                                wrap=True)
+            card.addSubview_(note_label)
+            self.quick_controls["note"] = note_label
+        self.cursor_y += frames["height"] + 12
+
+    @objc.python_method
+    def _quick_fetch(self, force=False):
+        """List Ollama's installed models on a worker thread (never the UI)."""
+        state = self._quick_state()
+        url = self.config.llm_base_url
+        if not force and state["ollama_url"] == url and state["state"]:
+            return
+        state.update(ollama_url=url, state="loading", models=[])
+        state["token"] += 1
+        token = state["token"]
+        if getattr(self, "provider_snapshot_mode", False):
+            return
+
+        def run():
+            from Foundation import NSOperationQueue
+
+            models, result = ollama_models(url)
+            NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: self._quick_listed(token, models, result)
+            )
+
+        threading.Thread(target=run, daemon=True, name="localflow-ollama-models").start()
+
+    @objc.python_method
+    def _quick_listed(self, token, models, result):
+        """Main thread: fill the open picker in place (a rebuild would drop
+        a key being typed in a provider editor)."""
+        state = self._quick_state()
+        if self._closed or state["token"] != token:
+            return
+        state.update(models=models, state=result)
+        controls = getattr(self, "quick_controls", {})
+        picker = controls.get("cleanup_model")
+        if self.page != "Models" or picker is None:
+            return
+        items, selected, note = cleanup_picker(self.config, result, models)
+        # Same popup, same target/action: only its items, selection and
+        # enabled state change (the configured model stays selected).
+        self._quick_fill_picker(
+            picker, items, items.index(selected) if selected in items else -1,
+        )
+        state["choices"]["cleanup"] = items
+        if controls.get("refresh") is not None:
+            controls["refresh"].setEnabled_(True)
+        if not state["message"][0]:  # a save message stays as shown
+            self._quick_reflow(note)
+
+    @objc.python_method
+    def _quick_note_lines(self, text, width):
+        """Wrapped lines of the card's note at card `width` (0 when empty)."""
+        note_font = _font(12)
+        return note_lines(
+            [text], width - 2 * CARD_PADDING, lambda line: measure_text(line, note_font),
+        )
+
+    @objc.python_method
+    def _quick_reflow(self, text):
+        """Show `text` as the card's note and size the card to it, in place.
+
+        Same card and controls; page views below the card move by the height
+        change (no rebuild, so provider editors and typed keys are kept).
+        """
+        geometry = getattr(self, "quick_geometry", None)
+        if geometry is None:
+            return
+        card, width = geometry["card"], geometry["width"]
+        frames = quick_layout(
+            width, ollama=geometry["ollama"], fixed_speech=geometry["fixed"],
+            message_lines=self._quick_note_lines(text, width),
+        )
+        controls = self.quick_controls
+        label = controls.get("note")
+        if "message" in frames:
+            x, y, w, h = frames["message"]
+            if label is None:
+                label = _label(text, x, y, w, 12, "muted", palette=self.tokens, height=h,
+                               wrap=True)
+                card.addSubview_(label)
+                controls["note"] = label
+            else:
+                label.setFrame_(NSMakeRect(x, y, w, h))
+                label.setStringValue_(text)
+        elif label is not None:
+            label.removeFromSuperview()
+            del controls["note"]
+        old = card.frame()
+        delta = frames["height"] - old.size.height
+        if not delta:
+            return
+        bottom = old.origin.y + old.size.height
+        card.setFrame_(NSMakeRect(old.origin.x, old.origin.y, old.size.width, frames["height"]))
+        for view in self.body.subviews():
+            origin = view.frame().origin
+            if view is not card and origin.y >= bottom:
+                view.setFrameOrigin_(NSMakePoint(origin.x, origin.y + delta))
+        self.cursor_y += delta
+        self._fit_body_height()
+
+    @objc.python_method
+    def _quick_live(self, sender, key):
+        """True when `sender` is the control currently shown for `key`."""
+        return getattr(self, "quick_controls", {}).get(key) is sender
+
+    @objc.python_method
+    def _quick_save_cleanup(self, model):
+        state = self._quick_state()
+        try:
+            self.config = set_active_model(
+                model, load_config(), expected=state["drawn_for"], save=save_config,
+            )
+        except ModelChoiceError as exc:
+            state["message"] = (str(exc), False)
+            state["draft"] = model
+        except (OSError, ConfigError):
+            state["message"] = (
+                "Couldn't save the model; check that LocalFlow's settings can be written.",
+                False,
+            )
+            state["draft"] = model
+        else:
+            state["draft"] = None
+            state["message"] = (
+                f"Cleanup & Ask now use {self.config.llm_model}; no restart needed.", True,
+            )
+            preset = active_preset(self.config)
+            drafts = getattr(self, "provider_state", {})
+            if preset is not None and preset.id in drafts:
+                drafts[preset.id]["model"] = self.config.llm_model
+                # show_page captures the open editor before rebuilding, so its
+                # combo must show the saved model too or the old one wins. The
+                # URL and key fields are left alone.
+                controls = getattr(self, "provider_controls", {}).get(preset.id)
+                if controls is not None:
+                    controls[1].setStringValue_(self.config.llm_model)
+        self.show_page("Models")
+
+    @objc.python_method
+    def _quick_save_speech(self, provider, model):
+        state = self._quick_state()
+        try:
+            self.config = set_speech(provider, model, load_config(), save=save_config)
+        except ModelChoiceError as exc:
+            state["message"] = (str(exc), False)
+        except (OSError, ConfigError):
+            state["message"] = (
+                (
+                    "Couldn't save the speech model; check that LocalFlow's settings "
+                    "can be written."
+                ),
+                False,
+            )
+        else:
+            state["message"] = (
+                (
+                    f"Speech now uses {speech_summary(self.config)}. LocalFlow loads it "
+                    "in the background (it may download first) and keeps the current "
+                    "model until it is ready."
+                ),
+                True,
+            )
+        self.show_page("Models")
+
+    def quickSpeechProvider_(self, sender):
+        if not self._quick_live(sender, "speech_provider"):
+            return
+        ids = self._quick_state()["choices"].get("speech", [])
+        index = sender.indexOfSelectedItem()
+        if 0 <= index < len(ids):
+            self._quick_save_speech(ids[index], None)
+
+    def quickSpeechModel_(self, sender):
+        if not self._quick_live(sender, "speech_model"):
+            return
+        sizes = self._quick_state()["choices"].get("sizes", [])
+        index = sender.indexOfSelectedItem()
+        if 0 <= index < len(sizes):
+            self._quick_save_speech(current_speech_provider(self.config), sizes[index])
+
+    def quickCleanupModel_(self, sender):
+        if not self._quick_live(sender, "cleanup_model"):
+            return
+        items = self._quick_state()["choices"].get("cleanup", [])
+        index = sender.indexOfSelectedItem()
+        if 0 <= index < len(items) and items[index] != self.config.llm_model:
+            self._quick_save_cleanup(items[index])
+
+    def quickCleanupField_(self, sender):
+        if not self._quick_live(sender, "cleanup_field"):
+            return
+        typed = str(sender.stringValue())
+        if typed.strip() == (self.config.llm_model or "") and (
+            self._quick_state()["draft"] is None
         ):
-            for text, key, size, token, weight in (
-                (caption, "caption", 11, "muted", "semibold"),
-                (value, "value", 13, "ink", "regular"),
-            ):
-                x, y, w, h = row[key]
-                card.addSubview_(
-                    _label(
-                        text, x, y, w, size, token, palette=self.tokens, height=h,
-                        weight=weight,
-                    )
-                )
-        for title, action, key in (
-            ("Change speech model…", "openSetup:", "change"),
-            ("Import keys…", "providerImport:", "import"),
-        ):
-            x, y, w, h = geometry[key]
-            self._button(title, action, x, y, width=w, parent=card, height=h)
-        self.cursor_y += geometry["height"] + 12
+            return  # editing ended without a change
+        self._quick_save_cleanup(typed)
+
+    def quickRefresh_(self, sender):
+        if not self._quick_live(sender, "refresh"):
+            return
+        self._quick_state()["message"] = ("", True)
+        self._quick_fetch(force=True)
+        self.show_page("Models")
 
     @objc.python_method
     def _models_import_card(self, width, statuses):
@@ -2758,6 +3138,13 @@ class HubWindowController(NSObject):
             if url is not None:
                 state["url"] = url.stringValue().strip()
             state["model"] = combo.stringValue().strip()
+        # A model ID typed (not yet committed) in Change models survives the
+        # rebuild, like the provider editor's drafts.
+        quick = getattr(self, "quick_controls", {}).get("cleanup_field")
+        if quick is not None:
+            typed = str(quick.stringValue())
+            if typed.strip() != (self.config.llm_model or ""):
+                self._quick_state()["draft"] = typed
 
     @objc.python_method
     def _models_worker(self, provider_id, operation):
