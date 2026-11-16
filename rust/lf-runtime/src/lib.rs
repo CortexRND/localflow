@@ -12,6 +12,7 @@ pub mod live;
 pub mod menubar;
 pub mod pipeline;
 pub mod run;
+pub mod server;
 pub mod settings;
 pub mod singleinstance;
 pub mod status;

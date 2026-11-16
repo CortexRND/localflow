@@ -17,6 +17,7 @@ use crate::status::write_last_text;
 
 pub type LlmFactory = Arc<dyn Fn(&Config) -> Option<Box<dyn LlmProvider>> + Send + Sync>;
 pub type SttFactory = Arc<dyn Fn(&Config) -> Result<Arc<dyn SpeechEngine>, String> + Send + Sync>;
+pub type VocabularyFn = Arc<dyn Fn(&Config) -> Vocabulary + Send + Sync>;
 pub type Deliver = Arc<dyn Fn(&Job, Option<String>, bool) + Send + Sync>;
 
 pub enum WorkItem {
@@ -30,7 +31,7 @@ pub enum WorkItem {
 
 pub struct Worker {
     pub config: Arc<dyn Fn() -> Arc<Config> + Send + Sync>,
-    pub vocabulary: Arc<dyn Fn(&Config) -> Vocabulary + Send + Sync>,
+    pub vocabulary: VocabularyFn,
     pub history: Option<HistoryStore>,
     pub speech: Arc<dyn SpeechEngine>,
     pub build_llm: LlmFactory,

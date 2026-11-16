@@ -13,6 +13,7 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-input` | global hotkeys (`KeyboardHub`, pynput-compatible key names, order-insensitive chords, macOS CGEventTap with the Input Monitoring checks) and paste/clipboard (`Injector`) |
 | `lf-runtime` | the dictation controller state machine, worker and text pipeline, live config reload, the `dictation_enabled` switch, menu bar model + macOS NSStatusItem, single-instance lock; parity driver `lf-runtime/examples/runtime_parity.rs` |
+| `lf-server` | optional axum HTTP server, embedded web UI, auth, config/provider/key APIs and runtime backend interface (see `lf-server/README.md`) |
 
 ### Dictation runtime (`lf-input`, `lf-runtime`)
 
@@ -36,6 +37,13 @@ lf-runtime --example idle -- 10` reports the idle footprint on Linux.
 keys. While dictation is off, every gesture except paste-last is ignored and
 the microphone is never opened. The toggle shortcut and the menu item flip
 the key in the file in place (`toml_edit`) and reload it live.
+
+`lf_runtime::server::DictationBackend` implements `lf_server::backend::Backend`
+for `POST /transcribe` (Python's `server.transcribe`): multipart `file` and
+`clean` query, ffmpeg decode to 16 kHz mono f32, the same silence gate,
+pipeline and `phone` history row. Other backend routes go to its `fallback`
+(`UnavailableBackend` by default). Pass it to
+`ServerState::load_with_backend` together with a loaded `SpeechEngine`.
 
 ## Build
 
@@ -64,6 +72,7 @@ lf-rs history copy ID|last | raw ID|last | delete ID|last | clear [--yes] | stat
 lf-rs llm list [--provider P] [--base-url URL] [--json] | use PROVIDER [--base-url URL] [--model M] | test [...]
 lf-rs keys list
 lf-rs status [--json]
+lf-rs serve [--host HOST] [--port PORT]
 ```
 
 * `config get` without a key prints the full v2 TOML (`config show`).
@@ -159,9 +168,11 @@ the above on Ubuntu, macOS and Windows.
 
 This is not a full port and does not imply a Rust runtime or UI:
 
-* no audio capture, speech-to-text, meetings, server, Hub, setup or
-  settings windows; the dictation runtime (`lf-runtime`) is a library with
-  no `dictate` binary yet;
+* no audio capture, speech-to-text, meetings, Hub, setup or native
+  settings windows; `serve` hosts the web UI and core APIs; runtime routes
+  return explicit unavailable-backend errors until their Rust crates are
+  linked; the dictation runtime (`lf-runtime`) is a library with no
+  `dictate` binary yet;
 * hotkeys and the menu bar are implemented on macOS only: on Linux and
   Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
   tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
@@ -177,7 +188,7 @@ This is not a full port and does not imply a Rust runtime or UI:
   port records audio, `lf-rs` exposes no clip command, and there is no
   retry-from-audio (`lf history retry` needs speech-to-text); no other audio
   codecs;
-* `lf-rs` implements only the commands listed above (no `serve`, `dictate`,
+* `lf-rs` implements only the commands listed above (no `dictate`,
   `meeting`, `models`, `stt`, `setup`, `tweak`, `recall`, `prompts`,
   `history retry`, `keys import`, `secret`, `token`, …);
 * `status` without a server cannot read the autostart state (the platform

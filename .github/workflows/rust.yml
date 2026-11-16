@@ -39,7 +39,11 @@ jobs:
       # needed; pkg-config is installed only as a harmless safety net.
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libportaudio2 pulseaudio
+
+      - name: Start PulseAudio for Python HTTP contracts
+        if: runner.os == 'Linux'
+        run: pulseaudio --start --exit-idle-time=-1
 
       - name: cargo fmt
         working-directory: rust
@@ -62,15 +66,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # The parity suite only imports localflow's config, history, dictionary,
-      # symbols, formatting and hot-phrase modules: their third-party imports
-      # are numpy, platformdirs and keyring. The package itself is installed
-      # without the heavy speech/UI dependencies.
+      # Include the HTTP host dependencies for real-server contract tests.
+      # Install the package without the heavy speech/UI dependencies.
       - name: Install Python parity dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest numpy platformdirs keyring
+          python -m pip install pytest numpy platformdirs keyring requests sounddevice fastapi uvicorn python-multipart
           python -m pip install --no-deps -e .
 
       - name: Rust/Python parity tests
-        run: python -m pytest -q tests/test_rust_parity.py
+        run: python -m pytest -q -s tests/test_rust_parity.py tests/test_rust_server.py

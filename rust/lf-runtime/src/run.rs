@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use lf_core::config::Config;
 use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
 use lf_core::hotphrases::HotPhraseStore;
@@ -25,13 +26,34 @@ use crate::pipeline::Vocabulary;
 use crate::settings::{bool_field, dictation_enabled, load_runtime_config, toggle_dictation};
 use crate::singleinstance::{acquire, read_holder};
 use crate::status::{last_text_path, read_last_text, status_path, write_state};
-use crate::worker::{LlmFactory, SttFactory, Worker};
+use crate::worker::{LlmFactory, SttFactory, VocabularyFn, Worker};
 
 pub struct RunOptions {
     pub audio: Box<dyn AudioSource>,
     pub speech: Arc<dyn SpeechEngine>,
     pub build_stt: SttFactory,
     pub play_sound: Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+/// Dictionary, hot phrases and spoken commands from the user's stores. Commands
+/// are discovered once; the dictionary and phrases are read per job.
+pub fn default_vocabulary(config: &Config) -> VocabularyFn {
+    let dictionary = DictionaryStore::new(None);
+    let phrases = HotPhraseStore::default_store();
+    let commands = discover_commands(
+        &config.field_str_list("command_names").unwrap_or_default(),
+        &config.field_str_list("skills_dirs").unwrap_or_default(),
+    );
+    Arc::new(move |config| Vocabulary {
+        words: dictionary.words(),
+        replacements: dictionary.replacements(),
+        hot_phrases: if bool_field(config, "hot_phrases", true) {
+            phrases.enabled().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        commands: commands.clone(),
+    })
 }
 
 pub fn default_llm_factory() -> LlmFactory {
@@ -103,24 +125,7 @@ pub fn run(options: RunOptions) -> Result<()> {
     let deliver_controller = controller.clone();
     let worker = Worker {
         config: Arc::new(move || worker_live.config()),
-        vocabulary: {
-            let dictionary = DictionaryStore::new(None);
-            let phrases = HotPhraseStore::default_store();
-            let commands = discover_commands(
-                &config.field_str_list("command_names").unwrap_or_default(),
-                &config.field_str_list("skills_dirs").unwrap_or_default(),
-            );
-            Arc::new(move |config| Vocabulary {
-                words: dictionary.words(),
-                replacements: dictionary.replacements(),
-                hot_phrases: if bool_field(config, "hot_phrases", true) {
-                    phrases.enabled().unwrap_or_default()
-                } else {
-                    Vec::new()
-                },
-                commands: commands.clone(),
-            })
-        },
+        vocabulary: default_vocabulary(&config),
         history: HistoryStore::open(None, None, history_enabled).ok(),
         speech: options.speech,
         build_llm: default_llm_factory(),

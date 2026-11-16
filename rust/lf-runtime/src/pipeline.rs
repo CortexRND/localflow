@@ -48,12 +48,26 @@ fn style_for(config: &Config, app_info: Option<&AppInfo>) -> Option<String> {
 }
 
 /// Text after the cleanup pipeline for an already transcribed utterance.
+/// Cleanup only pays off on real sentences: fragments under five words skip it.
 pub fn render_text(
     text: &str,
     config: &Config,
     vocab: &Vocabulary,
     llm: Option<&dyn LlmProvider>,
     app_info: Option<&AppInfo>,
+) -> String {
+    render_text_with(text, config, vocab, llm, app_info, 5)
+}
+
+/// `render_text` with the minimum word count for LLM cleanup (the server's
+/// `/transcribe` cleans any length: 0).
+pub fn render_text_with(
+    text: &str,
+    config: &Config,
+    vocab: &Vocabulary,
+    llm: Option<&dyn LlmProvider>,
+    app_info: Option<&AppInfo>,
+    min_clean_words: usize,
 ) -> String {
     if text.is_empty() {
         return String::new();
@@ -78,11 +92,10 @@ pub fn render_text(
     };
     let symbols = |t: &str| apply_spoken_symbols(t, &vocab.commands);
     let style = |t: &str| apply_style(t, style_name.as_deref().unwrap_or_default(), &vocab.words);
-    // Cleanup only pays off on real sentences; short fragments have nothing to fix.
     let use_clean = level != "none"
         && !level.is_empty()
         && llm.is_some()
-        && text.split_whitespace().count() >= 5;
+        && text.split_whitespace().count() >= min_clean_words;
     let steps = RenderSteps {
         replace: Some(&replace),
         fmt: bool_field(config, "spoken_punctuation", true)
