@@ -6,7 +6,7 @@ use crate::EngineSpec;
 /// Python provider ids select their native-Rust counterpart; model size is unchanged.
 pub fn canonical_backend(provider: &str) -> Result<&'static str> {
     match provider {
-        "auto" | "faster-whisper" | "mlx" | "whisper-cpp" => Ok("whisper-cpp"),
+        "auto" | "faster-whisper" | "mlx" | "mlx-whisper" | "whisper-cpp" => Ok("whisper-cpp"),
         "parakeet" | "parakeet-onnx" => Ok("parakeet-onnx"),
         _ => bail!("unsupported speech provider: {provider}"),
     }
@@ -59,6 +59,7 @@ mod tests {
             "auto",
             "faster-whisper",
             "mlx",
+            "mlx-whisper",
             "whisper-cpp",
             "parakeet",
             "parakeet-onnx",
