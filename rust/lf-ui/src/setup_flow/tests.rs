@@ -252,7 +252,15 @@ fn host_platform_never_claims_what_it_did_not_check() {
         .unwrap();
     assert_eq!(device.ok, None);
     assert_eq!(host.ollama_running("http://localhost:11434"), None);
-    assert!(!host.runtime_available("faster-whisper"));
+    assert!(host.runtime_available("faster-whisper"));
+    assert!(!host.runtime_available("unlinked-test-runtime"));
+    #[cfg(unix)]
+    {
+        let hardware = host.detect_hardware().unwrap();
+        assert!(hardware.ram_gb > 0.0);
+        assert!(hardware.free_disk_gb > 0.0);
+    }
+    #[cfg(not(unix))]
     assert!(host.detect_hardware().is_err());
     assert_eq!(host.mic_authorization(), None);
     assert!(!host.which("definitely-not-a-real-command-xyz"));

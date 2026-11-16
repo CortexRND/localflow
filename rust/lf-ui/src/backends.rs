@@ -8,3 +8,4 @@ pub mod http;
 pub mod meeting;
 pub mod prompts;
 pub mod settings_agent;
+pub mod settings_agent_native;

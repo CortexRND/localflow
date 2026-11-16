@@ -432,9 +432,9 @@ impl LaunchAgent for UnavailableLaunchAgent {
 /// The real host, limited to what the standard library can establish:
 /// the OS/architecture, executables on `PATH` and the Ollama app bundle.
 /// Everything else is reported as unknown/unavailable — never as success:
-/// no speech runtime is linked into `lf-ui`, so [`runtime_available`] is
-/// `false`, permissions are unknown, devices cannot be listed and hardware
-/// detection fails with an explanation.
+/// permissions and devices are unknown unless a fuller platform is injected.
+/// The shipped Python faster-whisper runtime is configurable; no Rust speech
+/// engine is implied.
 ///
 /// [`runtime_available`]: SetupPlatform::runtime_available
 #[derive(Clone, Copy, Debug, Default)]
@@ -475,6 +475,50 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+#[cfg(unix)]
+fn detect_host_hardware() -> std::result::Result<HardwareInfo, String> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    // SAFETY: sysconf is a thread-safe read of static system values.
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    // SAFETY: sysconf is a thread-safe read of static system values.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if pages <= 0 || page_size <= 0 {
+        return Err("could not detect physical memory".into());
+    }
+    let ram_gb = pages as f64 * page_size as f64 / 1_000_000_000.0;
+    let home = lf_core::home::python_home().map_err(|error| error.to_string())?;
+    let path = std::ffi::CString::new(home.as_os_str().as_bytes())
+        .map_err(|_| "the home path contains a NUL byte".to_string())?;
+    // SAFETY: statvfs writes to a valid, uniquely-owned value and `path` is NUL
+    // terminated for the duration of the call.
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // SAFETY: a zero return initialized the statvfs value.
+    let stats = unsafe { stats.assume_init() };
+    let free_disk_gb = stats.f_bavail as f64 * stats.f_frsize as f64 / 1_000_000_000.0;
+    let system = match std::env::consts::OS {
+        "macos" => "Darwin",
+        "linux" => "Linux",
+        other => other,
+    };
+    let machine = std::env::consts::ARCH;
+    Ok(HardwareInfo::new(
+        system,
+        machine,
+        ram_gb,
+        system == "Darwin" && matches!(machine, "arm64" | "aarch64"),
+        free_disk_gb,
+    ))
+}
+
+#[cfg(not(unix))]
+fn detect_host_hardware() -> std::result::Result<HardwareInfo, String> {
+    Err("hardware detection is not implemented on this host".into())
+}
+
 impl SetupPlatform for HostPlatform {
     fn system(&self) -> String {
         match std::env::consts::OS {
@@ -510,8 +554,11 @@ impl SetupPlatform for HostPlatform {
     fn input_devices(&self) -> std::result::Result<Vec<String>, String> {
         Err("audio input devices are listed by the platform layer".to_string())
     }
-    fn runtime_available(&self, _backend: &str) -> bool {
-        false
+    fn runtime_available(&self, backend: &str) -> bool {
+        // The native setup configures the shipped Python runtime; it does not
+        // pretend lf-ui itself owns a SpeechEngine. Other runtimes remain
+        // unavailable until the platform layer establishes them.
+        backend == "faster-whisper"
     }
     fn mic_authorization(&self) -> Option<MicAuthorization> {
         None
@@ -523,7 +570,7 @@ impl SetupPlatform for HostPlatform {
         None
     }
     fn detect_hardware(&self) -> std::result::Result<HardwareInfo, String> {
-        Err("hardware detection is provided by the platform layer".to_string())
+        detect_host_hardware()
     }
 }
 

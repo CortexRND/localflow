@@ -1,13 +1,11 @@
-//! Renders the implemented Hub pages to PNG files (macOS only).
+//! Renders every native Hub page and setup state to PNG files (macOS only).
 //!
-//! `cargo run -p lf-ui --example snapshots [OUT_DIR]` writes
-//! `OUT_DIR/hub-<page>-<state>-<min|wide>-<light|dark>.png` (default
-//! `artifacts/rust-ui`) for every scenario of [`lf_ui::snapshot_plan`]: Home,
-//! History, Dictionary, Style and Prompts in the Python script's state names
-//! (plus the required populated/empty pair), at the Hub minimum size and at
-//! 1280x820, light and dark: 64 files. Everything runs against a temporary
-//! directory and in-memory fakes: no real config, history, dictionary or
-//! keychain is read or written.
+//! `cargo run -p lf-ui --example snapshots [OUT_DIR]` writes Python-compatible
+//! filenames (default `artifacts/rust-ui`) for every scenario of
+//! [`lf_ui::snapshot_plan`]. Hub pages use the minimum and 1280x820 sizes;
+//! setup adds its Python-named wide checks case. Everything runs against a
+//! temporary directory and isolated fakes: no real config, history, dictionary,
+//! keychain, network or microphone is read or written by fixture preparation.
 //!
 //! Seeding is driven by the scenario's seed fields (`lf_ui::snapshot_plan`),
 //! never by comparing a state name with a fixture id.
@@ -39,10 +37,12 @@ mod native {
     use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, WorkPrompt};
     use lf_ui::mac::hub::Hub;
     use lf_ui::mac::page::HubServices;
+    use lf_ui::mac::setup::{snapshot_fixture, SetupSnapshotState};
     use lf_ui::mac::snapshot::{set_appearance, snapshot_png, spin_run_loop, SnapshotTarget};
     use lf_ui::snapshot_plan::{
-        dictionary_replacements, dictionary_words, history_rows, queue_prompts, total_snapshots,
-        Scenario, StyleStep, SCENARIOS, SNAPSHOT_SIZES, SNAPSHOT_THEMES,
+        dictionary_replacements, dictionary_words, history_rows, queue_prompts, setup_scenarios,
+        total_setup_snapshots, total_snapshots, Scenario, SetupScenario, StyleStep, SCENARIOS,
+        SNAPSHOT_SIZES, SNAPSHOT_THEMES,
     };
     use objc2::rc::Retained;
     use objc2::MainThreadMarker;
@@ -163,8 +163,16 @@ mod native {
             return Ok(());
         }
         // Writes stay in memory: the real config is never touched.
+        if step == StyleStep::Empty {
+            click(hub, "Cleanup level: None")?;
+            return Ok(());
+        }
         click(hub, "Cleanup level: Medium")?;
         click(hub, "Work style: Casual")?;
+        if step == StyleStep::Populated {
+            click(hub, "Email style: Casual")?;
+            click(hub, "Personal style: Excited")?;
+        }
         if step == StyleStep::SaveError {
             // A config path below a regular file cannot be created: the write
             // fails like Python's `OSError("read-only")` patch.
@@ -176,6 +184,24 @@ mod native {
             seeded.services.memory_only_config.set(true);
         }
         Ok(())
+    }
+
+    fn setup_state(scenario: &SetupScenario) -> Result<SetupSnapshotState> {
+        if let Some(step) = scenario.state.strip_prefix("step-") {
+            let one_based: usize = step.parse().context("setup step number")?;
+            return Ok(SetupSnapshotState::Step(one_based.saturating_sub(1)));
+        }
+        Ok(match (scenario.state, scenario.wide) {
+            ("checks-needs-action", false) => SetupSnapshotState::ChecksNeedsAction,
+            ("checks-all-ready", false) => SetupSnapshotState::ChecksAllReady,
+            ("checks-needs-action", true) => SetupSnapshotState::ChecksNeedsActionWide,
+            ("complete", false) => SetupSnapshotState::Complete,
+            ("cleanup-level-medium", false) => SetupSnapshotState::CleanupLevelMedium,
+            ("non-ollama-provider", false) => SetupSnapshotState::NonOllamaProvider,
+            ("download-progress", false) => SetupSnapshotState::DownloadProgress,
+            ("download-error", false) => SetupSnapshotState::DownloadError,
+            other => bail!("unknown setup snapshot route {other:?}"),
+        })
     }
 
     pub fn run() -> Result<()> {
@@ -196,6 +222,9 @@ mod native {
             // Seed first, then build the Hub, so every page reads real data.
             let seeded = seed(temp.path(), scenario)?;
             let hub = Hub::new(mtm, seeded.services.clone(), scenario.page);
+            let fixture_root = temp.path().join(scenario.fixture_id());
+            std::fs::create_dir_all(&fixture_root)?;
+            hub.prepare_snapshot(scenario.prepare, &fixture_root)?;
             hub.show_page(scenario.page);
             spin_run_loop(0.05);
             run_style_steps(&hub, &seeded, scenario.style)?;
@@ -216,8 +245,26 @@ mod native {
             }
             hub.shutdown();
         }
-        if written != total_snapshots() {
-            bail!("wrote {written} snapshots, expected {}", total_snapshots());
+        let setup = snapshot_fixture(mtm);
+        for scenario in setup_scenarios() {
+            setup.seed_snapshot(setup_state(scenario)?);
+            for (theme, dark) in SNAPSHOT_THEMES {
+                set_appearance(SnapshotTarget::Window(setup.window()), dark)?;
+                setup.rebuild();
+                spin_run_loop(0.05);
+                let name = scenario.file_name(theme);
+                let path = out.join(&name);
+                snapshot_png(SnapshotTarget::Window(setup.window()), &path, dark)
+                    .with_context(|| format!("snapshot {name}"))?;
+                println!("wrote {}", path.display());
+                written += 1;
+            }
+        }
+        setup.close();
+
+        let expected = total_snapshots() + total_setup_snapshots();
+        if written != expected {
+            bail!("wrote {written} snapshots, expected {expected}");
         }
         println!("wrote {written} snapshots to {}", out.display());
         drop(temp);

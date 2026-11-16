@@ -27,7 +27,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::pystr::PyStr;
 
@@ -78,6 +78,79 @@ pub fn canonical_page(page: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|name| caseless::default_case_fold_str(name) == folded)
+}
+
+/// Inspect the raw v2 TOML like Python `main_app.is_configured`: defaults added
+/// by [`lf_core::config::load_config`] must not make an empty file configured.
+pub fn configuration_marker(data: &Map<String, Value>) -> bool {
+    let setup_done = data
+        .get("setup")
+        .and_then(Value::as_object)
+        .and_then(|setup| setup.get("version"))
+        .and_then(Value::as_i64)
+        .is_some_and(|version| version > 0);
+    setup_done
+        || data
+            .get("stt")
+            .and_then(Value::as_object)
+            .is_some_and(|stt| {
+                ["provider", "model"].into_iter().any(|key| {
+                    stt.get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.py_strip().is_empty())
+                })
+            })
+}
+
+/// Whether the real config contains the setup marker or an explicit speech
+/// provider/model. Missing, malformed and legacy-unreadable configs are not
+/// configured, exactly as in Python.
+pub fn is_configured() -> bool {
+    use lf_core::config::{
+        config_from_v2, config_path, legacy_config_path, migrate_v1, parse_toml_file,
+    };
+
+    let path = config_path();
+    let parsed = if path.exists() {
+        parse_toml_file(&path)
+    } else {
+        let legacy = legacy_config_path();
+        if !legacy.exists() {
+            return false;
+        }
+        parse_toml_file(&legacy).map(|data| migrate_v1(&data).0)
+    };
+    parsed.is_ok_and(|data| {
+        config_from_v2(&data, cfg!(target_os = "macos"))
+            .is_ok_and(|_| configuration_marker(&data))
+    })
+}
+
+/// The first native window to show. An explicit setup launch is handled by the
+/// AppKit router separately. Keeping this policy pure makes the three important
+/// launch paths testable on every platform: configured, first run, and a
+/// malformed/unknown requested route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitialRoute {
+    Hub { page: &'static str },
+    Setup { desired: Option<&'static str> },
+}
+
+pub fn plan_initial_route(
+    configured: bool,
+    requested: Option<&str>,
+) -> Result<InitialRoute, String> {
+    let page = match requested {
+        Some(page) => Some(validate_page(page).ok_or_else(|| format!("unknown Hub page: {page:?}"))?),
+        None => None,
+    };
+    Ok(if configured {
+        InitialRoute::Hub {
+            page: page.unwrap_or(DEFAULT_PAGE),
+        }
+    } else {
+        InitialRoute::Setup { desired: page }
+    })
 }
 
 /// Seconds since the Unix epoch (`time.time()`).
@@ -357,6 +430,50 @@ mod tests {
         assert_eq!(canonical_page("hot\u{1c}phrases"), Some("Hot Phrases"));
         assert_eq!(canonical_page(" \u{1f}SETTINGS\u{2003}"), Some("Settings"));
         assert_eq!(validate_page("\u{1c}Home\u{1f}"), Some("Home"));
+    }
+
+    #[test]
+    fn configuration_marker_uses_only_explicit_raw_values() {
+        assert!(!configuration_marker(&Map::new()));
+        assert!(!configuration_marker(
+            &serde_json::from_value(json!({"setup": {"version": 0}})).unwrap()
+        ));
+        assert!(!configuration_marker(
+            &serde_json::from_value(json!({"setup": {"version": true}})).unwrap()
+        ));
+        assert!(!configuration_marker(
+            &serde_json::from_value(json!({"stt": {"provider": "  ", "model": 2}})).unwrap()
+        ));
+        assert!(configuration_marker(
+            &serde_json::from_value(json!({"setup": {"version": 1}})).unwrap()
+        ));
+        assert!(configuration_marker(
+            &serde_json::from_value(json!({"stt": {"model": "base"}})).unwrap()
+        ));
+    }
+
+    #[test]
+    fn initial_router_covers_normal_empty_and_error_routes() {
+        assert_eq!(
+            plan_initial_route(true, None),
+            Ok(InitialRoute::Hub { page: "Home" })
+        );
+        assert_eq!(
+            plan_initial_route(true, Some("History")),
+            Ok(InitialRoute::Hub { page: "History" })
+        );
+        assert_eq!(
+            plan_initial_route(false, None),
+            Ok(InitialRoute::Setup { desired: None })
+        );
+        assert_eq!(
+            plan_initial_route(false, Some("Hot Phrases")),
+            Ok(InitialRoute::Setup {
+                desired: Some("Hot Phrases")
+            })
+        );
+        assert!(plan_initial_route(true, Some("not-a-page")).is_err());
+        assert!(plan_initial_route(false, Some("not-a-page")).is_err());
     }
 
     fn file() -> (tempfile::TempDir, RequestFile) {

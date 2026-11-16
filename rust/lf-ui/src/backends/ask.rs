@@ -154,7 +154,7 @@ pub fn citation_label(citation: &Citation) -> Result<String, CitationError> {
 }
 
 /// What the Ask page (and the Hub worker thread) needs from `AskModel`.
-pub trait AskBackend {
+pub trait AskBackend: Send {
     /// The conversation so far (`model.turns`).
     fn turns(&self) -> Vec<Turn>;
     /// Replace the conversation (`model.turns = ...` after a worker finished).

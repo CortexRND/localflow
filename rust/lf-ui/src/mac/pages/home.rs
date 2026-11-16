@@ -250,10 +250,12 @@ impl HubPage for HomePage {
                 detail,
                 action,
                 move || {
-                    // The Python opens the setup window in a separate process; this
-                    // build has no setup window, so say so instead of doing nothing.
-                    services
-                        .set_page_error(PAGE, "The setup window isn't available in this build.");
+                    let opener = services.setup_opener.borrow().clone();
+                    if let Some(open) = opener {
+                        open();
+                    } else {
+                        services.set_page_error(PAGE, "Setup is not available in this window.");
+                    }
                     rebuild();
                 },
             );

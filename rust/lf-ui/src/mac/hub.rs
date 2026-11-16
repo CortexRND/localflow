@@ -29,8 +29,9 @@ use objc2_foundation::{NSNotification, NSPoint, NSSize, NSString};
 use super::actions::{ActionTarget, Timer};
 use super::page::{HubPage, HubServices, Measure, PageCtx, PageHandle};
 use super::pages::{
-    dictionary::DictionaryPage, history::HistoryPage, home::HomePage, placeholder::PlaceholderPage,
-    prompts::PromptsPage, style::StylePage,
+    ask::AskPage, dictionary::DictionaryPage, history::HistoryPage, home::HomePage,
+    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, models::ModelsPage,
+    prompts::PromptsPage, settings::SettingsPage, style::StylePage,
 };
 use super::style::{
     boxed_measure, color, hide_from_accessibility, page_title, rect, style_flat_button,
@@ -207,11 +208,16 @@ fn make_pages() -> Vec<(&'static str, PageHandle)> {
         .map(|&name| {
             let page: PageHandle = match name {
                 "Home" => Rc::new(RefCell::new(HomePage::new())),
+                "Ask" => Rc::new(RefCell::new(AskPage::new())),
+                "Hot Phrases" => Rc::new(RefCell::new(HotPhrasesPage::new())),
                 "History" => Rc::new(RefCell::new(HistoryPage::new())),
                 "Dictionary" => Rc::new(RefCell::new(DictionaryPage::new())),
+                "Meetings" => Rc::new(RefCell::new(MeetingsPage::new())),
+                "Models" => Rc::new(RefCell::new(ModelsPage::new())),
+                "Settings" => Rc::new(RefCell::new(SettingsPage::new())),
                 "Style" => Rc::new(RefCell::new(StylePage::new())),
                 "Prompts" => Rc::new(RefCell::new(PromptsPage::new())),
-                other => Rc::new(RefCell::new(PlaceholderPage::new(other))),
+                _ => unreachable!("HUB_PAGES contains only implemented pages"),
             };
             (name, page)
         })
@@ -440,6 +446,13 @@ impl Hub {
 
     pub fn is_closed(&self) -> bool {
         self.state.borrow().closed
+    }
+
+    /// Prepare the current page through its real state API (used by snapshots).
+    pub fn prepare_snapshot(&self, preparation: &str, root: &std::path::Path) -> anyhow::Result<()> {
+        let page = self.current_page();
+        self.with_page(&page, |page| page.prepare_snapshot(preparation, root))
+            .unwrap_or_else(|| anyhow::bail!("page {page} is already borrowed"))
     }
 
     /// The window delegate object (kept alive by the Hub).

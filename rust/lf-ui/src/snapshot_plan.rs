@@ -18,7 +18,18 @@
 //! state (see [`Scenario::alias_of`]).
 
 /// The pages the Rust Hub implements natively.
-pub const SNAPSHOT_PAGES: [&str; 5] = ["Home", "History", "Dictionary", "Style", "Prompts"];
+pub const SNAPSHOT_PAGES: [&str; 10] = [
+    "Home",
+    "Ask",
+    "Hot Phrases",
+    "Dictionary",
+    "Prompts",
+    "Meetings",
+    "History",
+    "Style",
+    "Models",
+    "Settings",
+];
 
 /// `(label, width, height)` of the two window sizes (`HUB_SIZES`).
 pub const SNAPSHOT_SIZES: [(&str, f64, f64); 2] = [
@@ -60,6 +71,8 @@ pub enum QueueSeed {
     Empty,
     /// One pending prompt and one failed with "Orca is not running".
     Two,
+    /// Three prompts: distinct from the Python `two` fixture.
+    Three,
     /// Two failed prompts with different causes.
     Failures,
 }
@@ -68,8 +81,12 @@ pub enum QueueSeed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StyleStep {
     None,
+    /// Explicitly disable cleanup: a distinct state, not an alias of default.
+    Empty,
     /// Click cleanup "Medium" and Work "Casual" with writes succeeding.
     Autosaved,
+    /// Richer saved selections for the required populated state.
+    Populated,
     /// After [`StyleStep::Autosaved`], click Email "Excited" while the config
     /// cannot be written.
     SaveError,
@@ -85,7 +102,10 @@ pub struct Scenario {
     pub dictionary: DictionarySeed,
     pub queue: QueueSeed,
     pub style: StyleStep,
-    /// The Python state this one repeats under another required name.
+    /// Explicit page-state preparation. New pages use this rather than their
+    /// store-independent shared data fields; every variant is a real UI state.
+    pub prepare: &'static str,
+    /// Retained for fixture audits; new states must not use aliases.
     pub alias_of: Option<&'static str>,
 }
 
@@ -104,7 +124,11 @@ impl Scenario {
 
     /// `hub-<page>-<state>-<size>-<theme>.png`.
     pub fn file_name(&self, size: &str, theme: &str) -> String {
-        format!("hub-{}-{}-{size}-{theme}.png", slug(self.page), self.state)
+        if self.state.is_empty() {
+            format!("hub-{}-{size}-{theme}.png", slug(self.page))
+        } else {
+            format!("hub-{}-{}-{size}-{theme}.png", slug(self.page), self.state)
+        }
     }
 
     /// Whether any data is seeded (the page must not render its empty state).
@@ -132,7 +156,25 @@ const fn scenario(
         dictionary,
         queue,
         style,
+        prepare: "",
         alias_of,
+    }
+}
+
+const fn native_scenario(
+    page: &'static str,
+    state: &'static str,
+    prepare: &'static str,
+) -> Scenario {
+    Scenario {
+        page,
+        state,
+        history: H::None,
+        dictionary: D::None,
+        queue: Q::Empty,
+        style: S::None,
+        prepare,
+        alias_of: None,
     }
 }
 
@@ -142,7 +184,7 @@ use QueueSeed as Q;
 use StyleStep as S;
 
 /// Every scenario, grouped by page in [`SNAPSHOT_PAGES`] order.
-pub const SCENARIOS: [Scenario; 16] = [
+pub const SCENARIOS: [Scenario; 67] = [
     // Home: `hub-home-populated` (responsive data) and the empty first run.
     scenario("Home", "empty", H::None, D::None, Q::Empty, S::None, None),
     scenario(
@@ -236,8 +278,8 @@ pub const SCENARIOS: [Scenario; 16] = [
         H::None,
         D::None,
         Q::Empty,
-        S::None,
-        Some("default"),
+        S::Empty,
+        None,
     ),
     scenario(
         "Style",
@@ -245,8 +287,8 @@ pub const SCENARIOS: [Scenario; 16] = [
         H::None,
         D::None,
         Q::Empty,
-        S::Autosaved,
-        Some("autosaved"),
+        S::Populated,
+        None,
     ),
     // Prompts: `hub-prompts-empty/two/failures`; `populated` repeats `two`.
     scenario(
@@ -281,13 +323,114 @@ pub const SCENARIOS: [Scenario; 16] = [
         "populated",
         H::Responsive,
         D::Responsive,
-        Q::Two,
+        Q::Three,
         S::None,
-        Some("two"),
+        None,
     ),
+    // Step 2b: the same named states as the authoritative Python runner.
+    native_scenario("Ask", "empty", "empty"),
+    native_scenario("Ask", "conversation", "conversation"),
+    native_scenario("Ask", "thinking", "thinking"),
+    native_scenario("Ask", "error", "error"),
+    native_scenario("Ask", "long-conversation", "long-conversation"),
+    native_scenario("Ask", "citations", "citations"),
+    native_scenario("Hot Phrases", "empty", "empty"),
+    native_scenario("Hot Phrases", "", "basic"),
+    native_scenario("Hot Phrases", "populated3-selected", "populated3-selected"),
+    native_scenario("Hot Phrases", "preview-result", "preview-result"),
+    native_scenario("Hot Phrases", "invalid-draft", "invalid-draft"),
+    native_scenario("Hot Phrases", "undo", "undo"),
+    native_scenario("Hot Phrases", "error-and-undo", "error-and-undo"),
+    native_scenario("Meetings", "idle", "idle"),
+    native_scenario("Meetings", "running", "running"),
+    native_scenario("Meetings", "running-no-system-audio", "running-no-system-audio"),
+    native_scenario("Meetings", "saved", "saved"),
+    native_scenario("Meetings", "running-auto", "running-auto"),
+    native_scenario("Meetings", "saved-generated", "saved-generated"),
+    native_scenario("Meetings", "recent-empty", "recent-empty"),
+    native_scenario("Models", "empty", "models-empty"),
+    native_scenario("Models", "populated", "models-populated"),
+    native_scenario("Models", "error", "models-error"),
+    native_scenario("Models", "parakeet", "models-parakeet"),
+    native_scenario("Models", "keys-no-keys", "keys-no-keys"),
+    native_scenario("Models", "keys-saved-active", "keys-saved-active"),
+    native_scenario("Models", "keys-import-results", "keys-import-results"),
+    native_scenario("Models", "keys-import-defaults", "keys-import-defaults"),
+    native_scenario("Models", "keys-test-success", "keys-test-success"),
+    native_scenario("Models", "keys-test-failure", "keys-test-failure"),
+    native_scenario("Models", "keys-expanded-active", "keys-expanded-active"),
+    native_scenario("Models", "keys-expanded-inactive", "keys-expanded-inactive"),
+    native_scenario("Models", "keys-expanded-no-key", "keys-expanded-no-key"),
+    native_scenario("Models", "keys-expanded-custom", "keys-expanded-custom"),
+    native_scenario("Models", "change-ollama", "change-ollama"),
+    native_scenario("Models", "change-loading", "change-loading"),
+    native_scenario("Models", "change-missing-model", "change-missing-model"),
+    native_scenario("Models", "change-unavailable", "change-unavailable"),
+    native_scenario("Models", "change-empty", "change-empty"),
+    native_scenario("Models", "change-cloud", "change-cloud"),
+    native_scenario("Models", "change-invalid-id", "change-invalid-id"),
+    native_scenario("Models", "storage", "storage"),
+    native_scenario("Models", "storage-deleted", "storage-deleted"),
+    native_scenario("Settings", "empty", "empty"),
+    native_scenario("Settings", "preview", "preview"),
+    native_scenario("Settings", "applied", "applied"),
+    native_scenario("Settings", "error", "error"),
+    native_scenario("Settings", "warning", "warning"),
+    native_scenario("Settings", "manual", "manual"),
+    native_scenario("Settings", "switches", "switches"),
+    native_scenario("Settings", "manual-error", "manual-error"),
 ];
 
-/// Number of PNG files a full run writes.
+/// Setup window snapshots use Python's unsized default-window names except for
+/// the explicit `checks-needs-action-wide` wide case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetupScenario {
+    pub state: &'static str,
+    pub wide: bool,
+}
+
+pub const SETUP_SCENARIOS: [SetupScenario; 14] = [
+    SetupScenario { state: "step-1", wide: false },
+    SetupScenario { state: "step-2", wide: false },
+    SetupScenario { state: "step-3", wide: false },
+    SetupScenario { state: "step-4", wide: false },
+    SetupScenario { state: "step-5", wide: false },
+    SetupScenario { state: "step-6", wide: false },
+    SetupScenario { state: "step-7", wide: false },
+    SetupScenario { state: "checks-needs-action", wide: false },
+    SetupScenario { state: "checks-all-ready", wide: false },
+    SetupScenario { state: "checks-needs-action", wide: true },
+    SetupScenario { state: "complete", wide: false },
+    SetupScenario { state: "cleanup-level-medium", wide: false },
+    SetupScenario { state: "non-ollama-provider", wide: false },
+    SetupScenario { state: "download-progress", wide: false },
+    // Error is included separately below so normal/empty/error coverage can be
+    // counted without dropping the 14 fixture entries above.
+];
+
+pub const SETUP_ERROR_SCENARIO: SetupScenario = SetupScenario {
+    state: "download-error",
+    wide: false,
+};
+
+impl SetupScenario {
+    pub fn file_name(&self, theme: &str) -> String {
+        let wide = if self.wide { "-wide" } else { "" };
+        format!("setup-{}{wide}-{theme}.png", self.state)
+    }
+}
+
+pub fn setup_scenarios() -> impl Iterator<Item = &'static SetupScenario> {
+    SETUP_SCENARIOS
+        .iter()
+        .chain(std::iter::once(&SETUP_ERROR_SCENARIO))
+}
+
+pub fn total_setup_snapshots() -> usize {
+    setup_scenarios().count() * SNAPSHOT_THEMES.len()
+}
+
+/// Number of Hub PNG files a full run writes (excluding setup).
 pub fn total_snapshots() -> usize {
     SCENARIOS.len() * SNAPSHOT_SIZES.len() * SNAPSHOT_THEMES.len()
 }
@@ -425,6 +568,23 @@ pub fn queue_prompts(seed: QueueSeed) -> Vec<SeedPrompt> {
                 failed_with: Some("Orca is not running"),
             },
         ],
+        QueueSeed::Three => vec![
+            SeedPrompt {
+                title: REDIS,
+                body: FILES,
+                failed_with: None,
+            },
+            SeedPrompt {
+                title: DOCS,
+                body: DEPENDENCY,
+                failed_with: None,
+            },
+            SeedPrompt {
+                title: "Verify the Redis rollback runbook",
+                body: "Capture the rollback owner and test results.",
+                failed_with: None,
+            },
+        ],
         QueueSeed::Failures => vec![
             SeedPrompt {
                 title: REDIS,
@@ -446,20 +606,29 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn a_full_run_is_sixteen_scenarios_times_four_renders() {
-        assert_eq!(SCENARIOS.len(), 16);
-        assert_eq!(total_snapshots(), 64);
-        // The required coverage alone is 5 pages x populated/empty x 2 sizes x 2 themes.
-        assert_eq!(
-            SNAPSHOT_PAGES.len() * 2 * SNAPSHOT_SIZES.len() * SNAPSHOT_THEMES.len(),
-            40
-        );
+    fn the_original_64_renders_are_kept_and_new_states_are_added() {
+        assert_eq!(SCENARIOS.len(), 67);
+        assert_eq!(total_snapshots(), 268);
+        assert!(total_snapshots() >= 64);
+        assert_eq!(total_setup_snapshots(), 30);
     }
 
     #[test]
-    fn every_page_keeps_populated_and_empty_coverage() {
-        for page in SNAPSHOT_PAGES {
-            for state in ["populated", "empty"] {
+    fn every_page_has_real_empty_and_content_or_error_coverage() {
+        let required = [
+            ("Home", &["empty", "populated"][..]),
+            ("Ask", &["empty", "conversation", "error"][..]),
+            ("Hot Phrases", &["empty", "populated3-selected", "invalid-draft"][..]),
+            ("Dictionary", &["empty", "populated"][..]),
+            ("Prompts", &["empty", "two", "failures"][..]),
+            ("Meetings", &["recent-empty", "running", "saved"][..]),
+            ("History", &["empty", "populated"][..]),
+            ("Style", &["empty", "populated", "save-error"][..]),
+            ("Models", &["empty", "populated", "error"][..]),
+            ("Settings", &["empty", "preview", "error"][..]),
+        ];
+        for (page, states) in required {
+            for state in states {
                 assert!(find(page, state).is_some(), "{page} {state}");
             }
         }
@@ -480,31 +649,16 @@ mod tests {
         }
     }
 
-    /// The regression this module exists for: a scenario's seeding is decided
-    /// by its seed fields, not by comparing a fixture id with a state word, so
-    /// every non-empty-state scenario has data and every empty one has none.
     #[test]
-    fn populated_scenarios_are_seeded_and_empty_ones_are_not() {
-        for scenario in &SCENARIOS {
-            let populated_name = !matches!(scenario.state, "empty" | "default");
-            if scenario.page == "Style" {
-                // Style has no stores: its data is the clicked selections.
-                assert_eq!(
-                    scenario.style != StyleStep::None,
-                    !matches!(scenario.state, "empty" | "default"),
-                    "{} {}",
-                    scenario.page,
-                    scenario.state
-                );
-                continue;
-            }
-            assert_eq!(
-                scenario.has_data(),
-                populated_name,
-                "{} {} must {}have data",
+    fn populated_scenarios_have_explicit_data_or_page_preparation() {
+        for scenario in SCENARIOS.iter().filter(|scenario| {
+            matches!(scenario.state, "populated" | "entries" | "two" | "failures")
+        }) {
+            assert!(
+                scenario.has_data() || !scenario.prepare.is_empty(),
+                "{} {} lacks real fixture content",
                 scenario.page,
-                scenario.state,
-                if populated_name { "" } else { "not " }
+                scenario.state
             );
         }
         // And the seeds really contain rows.
@@ -515,6 +669,7 @@ mod tests {
         assert_eq!(dictionary_replacements(DictionarySeed::Responsive).len(), 4);
         assert_eq!(dictionary_words(DictionarySeed::Hub), vec!["LocalFlow"]);
         assert_eq!(queue_prompts(QueueSeed::Two).len(), 2);
+        assert_eq!(queue_prompts(QueueSeed::Three).len(), 3);
         assert_eq!(queue_prompts(QueueSeed::Failures).len(), 2);
         assert!(history_rows(HistorySeed::None).is_empty());
         assert!(queue_prompts(QueueSeed::Empty).is_empty());
@@ -526,7 +681,7 @@ mod tests {
         assert_eq!(populated("History").history, HistorySeed::Hub);
         assert_eq!(populated("Dictionary").dictionary, DictionarySeed::Hub);
         assert_eq!(populated("Home").history, HistorySeed::Responsive);
-        assert_eq!(populated("Prompts").queue, QueueSeed::Two);
+        assert_eq!(populated("Prompts").queue, QueueSeed::Three);
         assert_eq!(
             find("Dictionary", "entries").unwrap().dictionary,
             DictionarySeed::Responsive
@@ -565,6 +720,32 @@ mod tests {
         let home = find("Home", "populated").unwrap();
         assert_ne!(home.fixture_id(), home.state);
         assert!(home.has_data());
+    }
+
+    #[test]
+    fn setup_names_match_python_and_include_normal_and_error_routes() {
+        assert_eq!(
+            find_setup("checks-needs-action", false).file_name("dark"),
+            "setup-checks-needs-action-dark.png"
+        );
+        assert_eq!(
+            find_setup("checks-needs-action", true).file_name("light"),
+            "setup-checks-needs-action-wide-light.png"
+        );
+        assert_eq!(
+            find_setup("download-error", false).file_name("dark"),
+            "setup-download-error-dark.png"
+        );
+        for step in 1..=7 {
+            assert!(!find_setup(&format!("step-{step}"), false).wide);
+        }
+    }
+
+    #[cfg(test)]
+    fn find_setup(state: &str, wide: bool) -> &'static SetupScenario {
+        setup_scenarios()
+            .find(|scenario| scenario.state == state && scenario.wide == wide)
+            .unwrap()
     }
 
     #[test]

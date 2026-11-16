@@ -28,6 +28,7 @@ use super::style::FlippedView;
 use crate::backends::ask::{AskBackend, FakeAskBackend};
 use crate::backends::meeting::MeetingClient;
 use crate::backends::prompts::PromptQueue;
+use crate::backends::settings_agent::{FakeSettingsAgent, SettingsAgent};
 use crate::tokens::{Palette, Weight};
 
 /// The text-measure closure pages pass to the step-1 layout code.
@@ -47,6 +48,10 @@ pub struct HubServices {
     pub prompt_queue: Arc<dyn PromptQueue>,
     pub meeting_client: Arc<dyn MeetingClient>,
     pub ask_backend: RefCell<Box<dyn AskBackend>>,
+    /// Real local agent in production; scripted only in isolated tests.
+    pub settings_agent: RefCell<Box<dyn SettingsAgent>>,
+    /// Injected by the single native window router. Snapshots leave it unset.
+    pub setup_opener: RefCell<Option<Rc<dyn Fn()>>>,
     /// Per-page inline error text (`page_errors` in Python), cleared when the
     /// user navigates to the page from the sidebar.
     pub page_errors: RefCell<HashMap<String, String>>,
@@ -71,6 +76,8 @@ impl HubServices {
             prompt_queue,
             meeting_client,
             ask_backend: RefCell::new(Box::new(FakeAskBackend::default())),
+            settings_agent: RefCell::new(Box::new(FakeSettingsAgent::default())),
+            setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
         })
@@ -94,6 +101,8 @@ impl HubServices {
             prompt_queue,
             meeting_client,
             ask_backend: RefCell::new(Box::new(FakeAskBackend::default())),
+            settings_agent: RefCell::new(Box::new(FakeSettingsAgent::default())),
+            setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
         })
@@ -196,6 +205,14 @@ pub trait HubPage {
     /// Read live controls (search text, typed drafts, selections) into the page
     /// state. Called right before the views are torn down.
     fn capture(&mut self) {}
+
+    /// Prepare an isolated native snapshot by its explicit plan identifier.
+    /// Unknown identifiers fail loudly; snapshots never fall back to a different
+    /// state's screenshot. The fixture root contains only temporary data.
+    fn prepare_snapshot(&mut self, preparation: &str, _root: &std::path::Path) -> Result<()> {
+        anyhow::ensure!(preparation.is_empty(), "unknown snapshot state {preparation:?}");
+        Ok(())
+    }
 
     /// Called when the page is left or the window closes: write anything a
     /// debounced timer was still holding. Must never panic.

@@ -11,7 +11,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use anyhow::{anyhow, Result};
 use lf_core::config::load_config;
@@ -23,12 +23,21 @@ use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
 use std::sync::Arc;
+use std::process::Command;
 
 use super::actions::Timer;
 use super::hub::Hub;
 use super::page::HubServices;
+use super::setup::{
+    FlowApplyRunner, FlowChecksRunner, FlowModelBackend, SetupContext, SetupHooks, SetupServices,
+    SetupWindow,
+};
 use crate::backends::http::{HttpAskBackend, HttpMeetingClient, HttpPromptQueue, HttpTransport};
+use crate::backends::settings_agent_native::native_settings_agent;
 use crate::hub_route::{self, HubWindowState};
+use crate::setup_flow::{
+    FileConfigStore, HostPlatform, LaunchAgent, SetupPlatform,
+};
 
 /// Seconds between page-request polls (`_POLL_SECONDS`).
 pub const POLL_SECONDS: f64 = 0.25;
@@ -100,14 +109,124 @@ pub fn run_app(mtm: MainThreadMarker, show: ShowFn, poll: Option<Box<dyn Fn() ->
     drop(delegate);
 }
 
+const AGENT_LABEL: &str = "com.cortexrnd.localflow";
+
+struct NativeLaunchAgent;
+
+impl NativeLaunchAgent {
+    fn plist_path() -> Result<std::path::PathBuf> {
+        Ok(lf_core::home::python_home()?
+            .join("Library/LaunchAgents")
+            .join(format!("{AGENT_LABEL}.plist")))
+    }
+
+    fn target() -> String {
+        // SAFETY: getuid only reads the process's real user id.
+        let uid = unsafe { libc::getuid() };
+        format!("gui/{uid}/{AGENT_LABEL}")
+    }
+
+    fn xml(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+}
+
+impl LaunchAgent for NativeLaunchAgent {
+    fn status(&self) -> std::result::Result<String, String> {
+        let path = Self::plist_path().map_err(|error| error.to_string())?;
+        if !path.exists() {
+            return Ok("not installed".into());
+        }
+        let result = Command::new("launchctl")
+            .args(["print", &Self::target()])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !result.status.success() {
+            return Ok(format!("not loaded ({AGENT_LABEL})"));
+        }
+        let output = String::from_utf8_lossy(&result.stdout);
+        if output.contains("state = running") {
+            Ok(format!("running ({AGENT_LABEL})"))
+        } else {
+            Ok(format!("loaded, not running ({AGENT_LABEL})"))
+        }
+    }
+
+    fn install(&self) -> std::result::Result<(), String> {
+        let path = Self::plist_path().map_err(|error| error.to_string())?;
+        let parent = path.parent().ok_or("launch agent has no parent directory")?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let logs = lf_core::home::localflow_dir();
+        std::fs::create_dir_all(&logs).map_err(|error| error.to_string())?;
+        let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{AGENT_LABEL}</string><key>ProgramArguments</key><array><string>{}</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>LimitLoadToSessionType</key><string>Aqua</string><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>\n",
+            Self::xml(&exe.to_string_lossy()),
+            Self::xml(&logs.join("agent.out.log").to_string_lossy()),
+            Self::xml(&logs.join("agent.err.log").to_string_lossy()),
+        );
+        std::fs::write(&path, plist).map_err(|error| error.to_string())?;
+        let _ = Command::new("launchctl")
+            .args(["bootout", &Self::target()])
+            .output();
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+        let result = Command::new("launchctl")
+            .arg("bootstrap")
+            .arg(domain)
+            .arg(&path)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if result.status.success() {
+            return Ok(());
+        }
+        let bootstrap_error = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        let fallback = Command::new("launchctl")
+            .arg("load")
+            .arg("-w")
+            .arg(&path)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if fallback.status.success() {
+            Ok(())
+        } else {
+            let load_error = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
+            Err(format!(
+                "launchctl bootstrap failed: {bootstrap_error}; launchctl load fallback also failed: {load_error}"
+            ))
+        }
+    }
+
+    fn uninstall(&self) -> std::result::Result<(), String> {
+        let _ = Command::new("launchctl")
+            .args(["bootout", &Self::target()])
+            .output();
+        let path = Self::plist_path().map_err(|error| error.to_string())?;
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 /// Build the real services from lf-core: the user's config, history database
 /// and dictionary, with runtime services over the authenticated local API.
-pub fn real_services() -> Result<Rc<HubServices>> {
+pub fn real_services() -> Result<(Rc<HubServices>, HttpTransport)> {
+    real_services_using(None)
+}
+
+fn real_services_using(
+    existing_http: Option<HttpTransport>,
+) -> Result<(Rc<HubServices>, HttpTransport)> {
     let config = load_config()?;
     let enabled = config.field_bool("history_enabled").unwrap_or(true);
     let history = Rc::new(HistoryStore::open(None, None, enabled)?);
     let dictionary = Rc::new(DictionaryStore::new(None));
-    let http = HttpTransport::from_config(&config)?;
+    let http = match existing_http {
+        Some(http) => http,
+        None => HttpTransport::from_config(&config)?,
+    };
     let services = HubServices::new(
         config,
         history,
@@ -115,8 +234,10 @@ pub fn real_services() -> Result<Rc<HubServices>> {
         Arc::new(HttpPromptQueue(http.clone())),
         Arc::new(HttpMeetingClient(http.clone())),
     );
-    *services.ask_backend.borrow_mut() = Box::new(HttpAskBackend::new(http));
-    Ok(services)
+    *services.ask_backend.borrow_mut() = Box::new(HttpAskBackend::new(http.clone()));
+    *services.settings_agent.borrow_mut() =
+        native_settings_agent().map_err(|error| anyhow!(error.0))?;
+    Ok((services, http))
 }
 
 /// Owns "the" Hub of the app process and decides, on every launch, reopen and
@@ -201,74 +322,297 @@ impl HubSlot {
     }
 }
 
-/// `hub_mac.main` + `main_app`: open the Hub on `initial_page` and run until
-/// quit. Reopening (Dock click) with no visible window builds a new Hub; page
-/// requests left by other processes are served by the same slot.
-pub fn run_hub(initial_page: &str) -> Result<()> {
+struct MenuRuntime {
+    menu: MenuState,
+    _poller: MeetingStatusPoller,
+}
+
+#[derive(Default)]
+struct MenuSlot {
+    runtime: RefCell<Option<MenuRuntime>>,
+}
+
+impl MenuSlot {
+    fn ensure(
+        &self,
+        commands: &std::sync::mpsc::Sender<MenuCommand>,
+        transport: &Rc<RefCell<Option<HttpTransport>>>,
+    ) -> Result<()> {
+        if self.runtime.borrow().is_some() {
+            return Ok(());
+        }
+        let config = load_config()?;
+        let menu = MenuState::new(
+            lf_runtime::platform_menu_bar(),
+            config.field_bool("dictation_enabled").unwrap_or(true),
+        );
+        let toggle = commands.clone();
+        let paste = commands.clone();
+        let quit = commands.clone();
+        lf_runtime::macos::install_menu_bar(
+            menu.snapshot(),
+            MenuActions {
+                toggle_dictation: Arc::new(move || {
+                    let _ = toggle.send(MenuCommand::ToggleDictation);
+                }),
+                paste_last: Arc::new(move || {
+                    let _ = paste.send(MenuCommand::PasteLast);
+                }),
+                quit: Arc::new(move || {
+                    let _ = quit.send(MenuCommand::Quit);
+                }),
+            },
+        )
+        .map_err(|error| anyhow!(error))?;
+        let mut borrowed = transport.borrow_mut();
+        let http = match borrowed.as_ref() {
+            Some(http) => http.clone(),
+            None => {
+                let http = HttpTransport::from_config(&config)?;
+                *borrowed = Some(http.clone());
+                http
+            }
+        };
+        drop(borrowed);
+        let meeting = HttpMeetingClient(http);
+        let meeting_menu = menu.clone();
+        let poller = MeetingStatusPoller::start(
+            meeting.status_fetch(),
+            Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
+        );
+        eprintln!("menu meeting status poller: enabled");
+        *self.runtime.borrow_mut() = Some(MenuRuntime {
+            menu,
+            _poller: poller,
+        });
+        Ok(())
+    }
+
+    fn update(&self, enabled: bool) {
+        if let Some(runtime) = self.runtime.borrow().as_ref() {
+            runtime.menu.change(|model| model.dictation_enabled = enabled);
+        }
+    }
+}
+
+/// Own the one Hub and one setup window, including first-run completion.
+pub struct WindowRouter {
+    mtm: MainThreadMarker,
+    hub_slot: Rc<HubSlot>,
+    setup: RefCell<Option<Rc<SetupWindow>>>,
+    desired: Cell<Option<&'static str>>,
+    awaiting_setup: Cell<bool>,
+    setup_only: Cell<bool>,
+    ensure_runtime: Rc<dyn Fn() -> Result<()>>,
+    me: Weak<WindowRouter>,
+}
+
+impl WindowRouter {
+    fn new(
+        mtm: MainThreadMarker,
+        hub_slot: Rc<HubSlot>,
+        desired: Option<&'static str>,
+        setup_only: bool,
+        ensure_runtime: Rc<dyn Fn() -> Result<()>>,
+    ) -> Rc<Self> {
+        Rc::new_cyclic(|me| Self {
+            mtm,
+            hub_slot,
+            setup: RefCell::new(None),
+            desired: Cell::new(desired),
+            awaiting_setup: Cell::new(false),
+            setup_only: Cell::new(setup_only),
+            ensure_runtime,
+            me: me.clone(),
+        })
+    }
+
+    fn make_setup(&self) -> Result<Rc<SetupWindow>> {
+        let config = load_config()?;
+        let platform = Arc::new(HostPlatform);
+        let launch_agent = Arc::new(NativeLaunchAgent);
+        let hardware = platform.detect_hardware().map_err(anyhow::Error::msg)?;
+        let context = SetupContext::detect(
+            config.clone(),
+            hardware,
+            platform.as_ref(),
+            launch_agent.as_ref(),
+        )
+        .map_err(|error| anyhow!(error.0))?;
+        let weak = self.me.clone();
+        let hooks = SetupHooks {
+            open_settings: None,
+            launch_runtime: Some(Rc::new(move || {
+                if let Some(router) = weak.upgrade() {
+                    router.setup_only.set(false);
+                    if let Err(error) = router.show(None) {
+                        eprintln!("lf-hub: could not open the Hub after setup: {error:#}");
+                    }
+                }
+            })),
+        };
+        Ok(SetupWindow::new(
+            self.mtm,
+            context,
+            SetupServices {
+                checks: Arc::new(FlowChecksRunner::new(platform.clone())),
+                apply: Arc::new(FlowApplyRunner::new(
+                    Arc::new(FileConfigStore::default_location()),
+                    platform,
+                    launch_agent,
+                )),
+                models: Arc::new(FlowModelBackend),
+                mic: None,
+                hooks,
+            },
+        ))
+    }
+
+    fn open_setup(&self) -> Result<()> {
+        let existing = self.setup.borrow().clone();
+        if let Some(setup) = existing.filter(|setup| !setup.is_closed()) {
+            setup.show();
+            return Ok(());
+        }
+        let setup = self.make_setup()?;
+        setup.show();
+        *self.setup.borrow_mut() = Some(setup);
+        Ok(())
+    }
+
+    fn attach_setup_opener(&self) {
+        let Some(hub) = self.hub_slot.hub() else {
+            return;
+        };
+        if hub.services().setup_opener.borrow().is_some() {
+            return;
+        }
+        let weak = self.me.clone();
+        *hub.services().setup_opener.borrow_mut() = Some(Rc::new(move || {
+            if let Some(router) = weak.upgrade() {
+                if let Err(error) = router.open_setup() {
+                    eprintln!("lf-hub: could not open setup: {error:#}");
+                }
+            }
+        }));
+    }
+
+    pub fn hub(&self) -> Option<Rc<Hub>> {
+        self.hub_slot.hub()
+    }
+
+    pub fn setup_window(&self) -> Option<Rc<SetupWindow>> {
+        self.setup.borrow().clone()
+    }
+
+    pub fn show(&self, page: Option<&str>) -> Result<()> {
+        if let Some(page) = page {
+            self.desired
+                .set(Some(hub_route::validate_page(page).ok_or_else(|| {
+                    anyhow!("unknown Hub page: {page:?}")
+                })?));
+        }
+        if self.setup_only.get() {
+            self.awaiting_setup.set(false);
+            return self.open_setup();
+        }
+        let requested = self.desired.get();
+        match hub_route::plan_initial_route(hub_route::is_configured(), requested)
+            .map_err(anyhow::Error::msg)?
+        {
+            hub_route::InitialRoute::Setup { desired } => {
+                self.desired.set(desired);
+                self.awaiting_setup.set(true);
+                self.open_setup()
+            }
+            hub_route::InitialRoute::Hub { page } => {
+                self.awaiting_setup.set(false);
+                self.desired.set(None);
+                if let Err(error) = (self.ensure_runtime)() {
+                    eprintln!("lf-hub: could not ensure the native menu runtime: {error:#}");
+                }
+                if requested.is_some() {
+                    self.hub_slot.open(Some(page))?;
+                } else {
+                    self.hub_slot.open(None)?;
+                }
+                self.attach_setup_opener();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn poll(&self) -> Result<bool> {
+        if let Some(page) = hub_route::consume_request() {
+            self.show(Some(page))?;
+            return Ok(true);
+        }
+        if self.awaiting_setup.get() && hub_route::is_configured() {
+            self.show(None)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+/// `hub_mac.main` + `main_app`: route setup/Hub and run until quit. Reopening
+/// (Dock click) with no visible window builds a new window; page requests left
+/// by other processes are served by the same router.
+pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
     let mtm =
         MainThreadMarker::new().ok_or_else(|| anyhow!("the Hub must run on the main thread"))?;
-    let page = hub_route::canonical_page(initial_page)
-        .ok_or_else(|| anyhow!("unknown Hub page: {initial_page:?}"))?;
-    // Fail on unreadable data before any window exists, like Python's `main`.
-    let first = real_services()?;
-    let config = first.config();
-    let menu = MenuState::new(
-        lf_runtime::platform_menu_bar(),
-        config.field_bool("dictation_enabled").unwrap_or(true),
-    );
+    let page = initial_page
+        .map(|page| {
+            hub_route::canonical_page(page)
+                .ok_or_else(|| anyhow!("unknown Hub page: {page:?}"))
+        })
+        .transpose()?;
+    let transport = Rc::new(RefCell::new(None::<HttpTransport>));
     let (commands, menu_commands) = std::sync::mpsc::channel();
-    let toggle = commands.clone();
-    let paste = commands.clone();
-    lf_runtime::macos::install_menu_bar(
-        menu.snapshot(),
-        MenuActions {
-            toggle_dictation: Arc::new(move || {
-                let _ = toggle.send(MenuCommand::ToggleDictation);
-            }),
-            paste_last: Arc::new(move || {
-                let _ = paste.send(MenuCommand::PasteLast);
-            }),
-            quit: Arc::new(move || {
-                let _ = commands.send(MenuCommand::Quit);
-            }),
-        },
-    )
-    .map_err(|error| anyhow!(error))?;
-    let meeting = HttpMeetingClient(HttpTransport::from_config(&config)?);
-    let meeting_menu = menu.clone();
-    let _meeting_poller = MeetingStatusPoller::start(
-        meeting.status_fetch(),
-        Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
-    );
-    let handed_out = Cell::new(Some(first));
+    let menu = Rc::new(MenuSlot::default());
+    let ensure_runtime: Rc<dyn Fn() -> Result<()>> = {
+        let menu = menu.clone();
+        let transport = transport.clone();
+        let commands = commands.clone();
+        Rc::new(move || menu.ensure(&commands, &transport))
+    };
+    let service_transport = transport.clone();
     let slot = HubSlot::new(
         mtm,
-        move || match handed_out.take() {
-            Some(services) => Ok(services),
-            None => real_services(),
+        move || {
+            let existing = service_transport.borrow().clone();
+            let (services, http) = real_services_using(existing.clone())?;
+            if existing.is_none() {
+                *service_transport.borrow_mut() = Some(http);
+            }
+            Ok(services)
         },
-        Some(page),
+        None,
     );
+    let router = WindowRouter::new(mtm, slot, page, setup_only, ensure_runtime);
     let show: ShowFn = {
-        let slot = slot.clone();
+        let router = router.clone();
         Rc::new(move || {
-            if let Err(error) = slot.open(None) {
-                eprintln!("lf-hub: could not open the Hub: {error:#}");
+            if let Err(error) = router.show(None) {
+                eprintln!("lf-hub: could not open the native window: {error:#}");
             }
         })
     };
     let poll: Box<dyn Fn() -> bool> = {
-        let slot = slot.clone();
+        let router = router.clone();
         Box::new(move || {
             for command in menu_commands.try_iter() {
                 if let MenuCommand::Quit = command {
-                    if let Some(hub) = slot.hub() {
+                    if let Some(hub) = router.hub() {
                         hub.shutdown();
+                    }
+                    if let Some(setup) = router.setup_window() {
+                        setup.close();
                     }
                     NSApplication::sharedApplication(mtm).terminate(None);
                     continue;
                 }
-                if let Some(hub) = slot.hub() {
+                if let Some(hub) = router.hub() {
                     let services = hub.services();
                     match command {
                         MenuCommand::ToggleDictation => {
@@ -306,22 +650,20 @@ pub fn run_hub(initial_page: &str) -> Result<()> {
                     }
                 }
             }
-            if let Some(hub) = slot.hub() {
+            if let Some(hub) = router.hub() {
                 let enabled = hub
                     .services()
                     .config()
                     .field_bool("dictation_enabled")
                     .unwrap_or(true);
-                menu.change(|model| model.dictation_enabled = enabled);
+                menu.update(enabled);
             }
-            match hub_route::consume_request() {
-                Some(page) => {
-                    if let Err(error) = slot.open(Some(page)) {
-                        eprintln!("lf-hub: could not open the Hub: {error:#}");
-                    }
-                    true
+            match router.poll() {
+                Ok(served) => served,
+                Err(error) => {
+                    eprintln!("lf-hub: could not serve the native window request: {error:#}");
+                    false
                 }
-                None => false,
             }
         })
     };

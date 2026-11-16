@@ -11,6 +11,7 @@ name = "lf_ui"
 path = "src/lib.rs"
 
 [dependencies]
+lf-agent = { path = "../lf-agent" }
 lf-core = { path = "../lf-core" }
 lf-providers = { path = "../lf-providers" }
 lf-runtime = { path = "../lf-runtime" }
@@ -52,6 +53,11 @@ path = "src/bin/lf-hub.rs"
 [[example]]
 name = "snapshots"
 path = "examples/snapshots.rs"
+
+[[test]]
+name = "native_accessibility"
+path = "tests/native_accessibility.rs"
+harness = false
 
 [dev-dependencies]
 tempfile = { workspace = true }

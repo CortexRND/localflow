@@ -33,8 +33,16 @@ jobs:
         env:
           LOCALFLOW_CONFIG: ${{ runner.temp }}/rust-hub-config.toml
         run: |
+          printf 'config_version = 2\n\n[setup]\nversion = 1\n' > "$LOCALFLOW_CONFIG"
           cargo build --manifest-path rust/Cargo.toml -p lf-ui --bin lf-hub --release
-          bash scripts/ci_hub_rss.sh Rust artifacts/rust-ui/idle-rss.txt rust/target/release/lf-hub --page Home
+          LF_RSS_EXPECT_RELEASE=1 LF_RSS_REQUIRE_MENU_POLLER=1 \
+            bash scripts/ci_hub_rss.sh Rust artifacts/rust-ui/idle-rss.txt rust/target/release/lf-hub --page Home
+
+      - name: Empty AppKit window idle RSS
+        run: |
+          cargo build --manifest-path rust/Cargo.toml -p lf-ui --example empty_appkit_window --release
+          LF_RSS_EXPECT_RELEASE=1 \
+            bash scripts/ci_hub_rss.sh 'Empty AppKit window' artifacts/rust-ui/empty-window-rss.txt rust/target/release/examples/empty_appkit_window
 
       - uses: actions/upload-artifact@v4
         if: always()
