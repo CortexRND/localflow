@@ -2790,6 +2790,12 @@ class HubWindowController(NSObject):
             drafts = getattr(self, "provider_state", {})
             if preset is not None and preset.id in drafts:
                 drafts[preset.id]["model"] = self.config.llm_model
+                # show_page captures the open editor before rebuilding, so its
+                # combo must show the saved model too or the old one wins. The
+                # URL and key fields are left alone.
+                controls = getattr(self, "provider_controls", {}).get(preset.id)
+                if controls is not None:
+                    controls[1].setStringValue_(self.config.llm_model)
         self.show_page("Models")
 
     @objc.python_method
