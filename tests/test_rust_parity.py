@@ -1,0 +1,1240 @@
+"""Parity between the Python modules and the optional Rust port (rust/).
+
+Skipped unless `cargo` is on PATH and a prebuilt `lf-rs` exists in the cargo
+target dir (CARGO_TARGET_DIR is honoured); with LF_RUST_PARITY_REQUIRED=1 a
+missing toolchain or build fails instead. A session fixture rebuilds `lf-rs`
+and the `parity` example driver (rust/lf/examples/parity.rs), which answers
+JSON requests on stdin with JSON on stdout. Python is never evaluated from
+Rust: each test computes the Python result in-process and compares.
+
+Every Rust process runs with a temporary HOME/USERPROFILE/XDG/AppData,
+LOCALFLOW_CONFIG and empty LOCALFLOW_<SECRET> overrides (so the keyring is
+never consulted); Python-side environment changes go through monkeypatch.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import socket
+import sqlite3
+import subprocess
+import sys
+import threading
+import tomllib
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import ClassVar
+
+import pytest
+
+from localflow import config as py_config
+from localflow import dictionary as py_dictionary
+from localflow import formatting as py_formatting
+from localflow import hotphrases as py_hotphrases
+from localflow import symbols as py_symbols
+from localflow.config import (
+    Config,
+    ConfigError,
+    apply_config_update,
+    config_to_dict,
+    config_toml,
+    save_config,
+    valid_config_keys,
+)
+from localflow.dictionary import DictionaryError, DictionaryStore
+from localflow.history import HistoryStore
+
+ROOT = Path(__file__).resolve().parents[1]
+RUST = ROOT / "rust"
+EXE = ".exe" if os.name == "nt" else ""
+CORPUS = Path(__file__).parent / "fixtures" / "dictation_corpus.jsonl"
+SECRET_NAMES = (
+    "llm_api_key",
+    "fireworks_api_key",
+    "llm_activation_index",
+    *(f"provider_key_{name}" for name in (
+        "fireworks", "openai", "openrouter", "groq", "together", "custom",
+    )),
+)
+
+
+def _target_dir() -> Path:
+    override = os.environ.get("CARGO_TARGET_DIR")
+    if override:
+        path = Path(override)
+        # cargo resolves a relative target dir against its working directory.
+        return path if path.is_absolute() else RUST / path
+    return RUST / "target"
+
+
+CARGO = shutil.which("cargo")
+TARGET = _target_dir()
+LF_RS = TARGET / "debug" / f"lf-rs{EXE}"
+PARITY = TARGET / "debug" / "examples" / f"parity{EXE}"
+REQUIRED = os.environ.get("LF_RUST_PARITY_REQUIRED") == "1"
+
+if CARGO is None or not LF_RS.exists():
+    _reason = (
+        "cargo not on PATH" if CARGO is None
+        else f"no prebuilt lf-rs at {LF_RS} (cargo build --bin lf-rs in rust/)"
+    )
+    if REQUIRED:
+        raise RuntimeError(f"LF_RUST_PARITY_REQUIRED=1 but {_reason}")
+    pytest.skip(_reason, allow_module_level=True)
+
+
+@pytest.fixture(scope="session")
+def rust_build():
+    """Rebuild lf-rs and the parity driver so tests never run stale code."""
+    result = subprocess.run(
+        [CARGO, "build", "-p", "lf", "--bin", "lf-rs", "--example", "parity"],
+        check=False,
+        cwd=RUST,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"cargo build failed:\n{result.stderr[-6000:]}")
+    assert LF_RS.exists() and PARITY.exists()
+    return LF_RS, PARITY
+
+
+@pytest.fixture
+def sandbox(tmp_path):
+    """Isolated environment for Rust subprocesses (the test process is untouched)."""
+    root = tmp_path / "sandbox"
+    home = root / "home"
+    dirs = {
+        "HOME": home,
+        "USERPROFILE": home,
+        "XDG_CONFIG_HOME": root / "xdg-config",
+        "XDG_DATA_HOME": root / "xdg-data",
+        "XDG_CACHE_HOME": root / "xdg-cache",
+        "XDG_STATE_HOME": root / "xdg-state",
+        "APPDATA": root / "appdata-roaming",
+        "LOCALAPPDATA": root / "appdata-local",
+    }
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("LOCALFLOW_")
+        and key not in ("FIREWORKS_API_KEY", "DISPLAY", "WAYLAND_DISPLAY")
+    }
+    env.update({key: str(path) for key, path in dirs.items()})
+    if os.name == "nt":
+        env["HOMEDRIVE"], env["HOMEPATH"] = os.path.splitdrive(str(home))
+    # platformdirs (and lf-core) honour these instead of Windows known folders.
+    env["WIN_PD_OVERRIDE_LOCAL_APPDATA"] = str(dirs["LOCALAPPDATA"])
+    env["WIN_PD_OVERRIDE_ROAMING_APPDATA"] = str(dirs["APPDATA"])
+    env["LOCALFLOW_CONFIG"] = str(root / "config" / "config.toml")
+    # No session bus: a Secret Service client cannot reach a real keyring.
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + str(root / "no-bus")
+    for name in SECRET_NAMES:
+        env[f"LOCALFLOW_{name.upper()}"] = ""
+    env["NO_COLOR"] = "1"
+    env["RUST_BACKTRACE"] = "0"
+    return {"root": root, "home": home, "env": env, "config": Path(env["LOCALFLOW_CONFIG"])}
+
+
+@pytest.fixture
+def py_env(sandbox, monkeypatch):
+    """Point the in-process Python config at the sandbox (scoped by monkeypatch),
+    so `load_config()` can never see or migrate a real ~/.localflow.toml."""
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(sandbox["config"]))
+    monkeypatch.setenv("HOME", str(sandbox["home"]))
+    monkeypatch.setenv("USERPROFILE", str(sandbox["home"]))
+    return sandbox
+
+
+def _strict(value):
+    """Type-tagged view so 1 != 1.0 and True != 1 in comparisons."""
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", value)
+    if isinstance(value, (list, tuple)):
+        return [_strict(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _strict(item) for key, item in value.items()}
+    return value
+
+
+def assert_same(rust, python):
+    assert _strict(rust) == _strict(python), f"rust={rust!r}\npython={python!r}"
+
+
+def drive(rust_build, sandbox, requests: list[dict]) -> list:
+    """Send requests to the parity driver; results in order. An error result
+    is returned as {"error": message}."""
+    _, driver = rust_build
+    result = subprocess.run(
+        [str(driver)],
+        check=False,
+        input=json.dumps(requests),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=sandbox["env"],
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    responses = json.loads(result.stdout)
+    assert len(responses) == len(requests)
+    return [r["ok"] if "ok" in r else {"error": r["error"]} for r in responses]
+
+
+def drive1(rust_build, sandbox, request: dict):
+    return drive(rust_build, sandbox, [request])[0]
+
+
+def lf(rust_build, sandbox, *args, input_text: str | None = None, env=None):
+    binary, _ = rust_build
+    return subprocess.run(
+        [str(binary), *args],
+        check=False,
+        input=input_text if input_text is not None else "",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**sandbox["env"], **(env or {})},
+        timeout=120,
+    )
+
+
+def _python_error(call):
+    try:
+        return call()
+    except (ConfigError, DictionaryError, ValueError) as exc:
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+
+def _all_fields_update() -> dict:
+    """A sectioned update touching every field with a non-default value."""
+    special = {
+        ("cleanup", "level"): "medium",
+        ("cleanup", "style_work"): "casual",
+        ("cleanup", "style_email"): "very_casual",
+        ("cleanup", "style_personal"): "excited",
+        ("cleanup", "style_other"): "casual",
+        ("paste", "method"): "clipboard",
+        ("llm", "api_key_ref"): "",
+        ("stt", "language"): "de",
+        ("hotkey", "key"): '<ctrl>+"q"\\ü',
+        ("meetings", "vault_path"): "~/Vault 🗂/notes\ttab\nline",
+        ("meetings", "orca_repo"): "id:'quoted'",
+    }
+    update: dict = {}
+    for section, values in config_to_dict(Config()).items():
+        if section == "config_version":
+            continue
+        for key, value in values.items():
+            if (section, key) in special:
+                new = special[(section, key)]
+            elif isinstance(value, bool):
+                new = not value
+            elif isinstance(value, int):
+                new = value + 7
+            elif isinstance(value, float):
+                new = value - 1.25
+            elif isinstance(value, list):
+                new = ["alpha", "Ünïcode", 'q"uote']
+            else:
+                new = f"{value}-changed ✓"
+            update.setdefault(section, {})[key] = new
+    return update
+
+
+def test_config_defaults_match(rust_build, sandbox):
+    assert_same(drive1(rust_build, sandbox, {"op": "config_defaults"}), config_to_dict(Config()))
+
+
+def test_config_all_fields_update_toml_and_roundtrip(rust_build, sandbox, tmp_path):
+    update = _all_fields_update()
+    expected = config_to_dict(apply_config_update(Config(), update))
+    rust_dict = drive1(rust_build, sandbox, {"op": "config_update", "update": update})
+    assert_same(rust_dict, expected)
+
+    rust_toml = drive1(rust_build, sandbox, {"op": "config_toml", "update": update})
+    python_toml = config_toml(apply_config_update(Config(), update))
+    assert tomllib.loads(rust_toml) == tomllib.loads(python_toml)
+
+    # Python writes, Rust loads; Rust writes, Python loads.
+    py_file = save_config(apply_config_update(Config(), update), tmp_path / "py.toml")
+    rust_file = tmp_path / "rust.toml"
+    loaded, saved = drive(rust_build, sandbox, [
+        {"op": "config_load", "path": str(py_file)},
+        {"op": "config_save", "update": update, "path": str(rust_file)},
+    ])
+    python_loaded = config_to_dict(py_config._config_from_v2(py_config._parse(py_file)))
+    assert_same(loaded, python_loaded)
+    assert Path(saved) == rust_file
+    assert_same(
+        config_to_dict(py_config._config_from_v2(py_config._parse(rust_file))),
+        python_loaded,
+    )
+
+
+def test_config_default_toml_and_empty_file(rust_build, sandbox, tmp_path):
+    empty = tmp_path / "empty.toml"
+    empty.write_text("", encoding="utf-8")
+    rust_toml, rust_empty = drive(rust_build, sandbox, [
+        {"op": "config_toml", "update": {}},
+        {"op": "config_load", "path": str(empty)},
+    ])
+    assert tomllib.loads(rust_toml) == tomllib.loads(config_toml(Config()))
+    assert_same(rust_empty, config_to_dict(py_config._config_from_v2({})))
+
+
+LOAD_CASES = {
+    "unknown section and keys": (
+        "config_version = 2\n[bogus]\nx = 1\n[llm]\nnope = 2\nmodel = \"m\"\n"
+    ),
+    "invalid enum and types": (
+        "config_version = 2\n[cleanup]\nlevel = \"loud\"\nstyle_work = 3\n"
+        "[dictation]\nmax_recording_seconds = -1\npause_media = \"yes\"\n"
+        "[history]\nkeep_audio_clips = 2.5\nenabled = 1\n"
+        "[hotkey]\npaste_last = 5\ncommand = \"<ctrl>+x\"\n"
+    ),
+    "empty language and bad key ref": (
+        "config_version = 2\n[stt]\nlanguage = \"\"\n[llm]\napi_key_ref = \"other_secret\"\n"
+    ),
+    "valid key ref": (
+        "config_version = 2\n[llm]\napi_key_ref = "
+        "\"llm_activation_openai_0123456789abcdef0123456789abcdef\"\n"
+    ),
+    "section not a table": "config_version = 2\nllm = 5\n",
+    "missing version, meetings on": "[features]\nmeetings = true\n[server]\nport = 9000\n",
+    "untyped fields keep python values": (
+        "config_version = 2\n[server]\nport = \"8756\"\n[dictation]\n"
+        "silence_threshold_dbfs = -40\ncommand_names = \"x\"\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("name", LOAD_CASES)
+def test_config_load_cases(rust_build, sandbox, tmp_path, name):
+    path = tmp_path / "config.toml"
+    path.write_text(LOAD_CASES[name], encoding="utf-8")
+    expected = config_to_dict(py_config._config_from_v2(py_config._parse(path)))
+    assert_same(drive1(rust_build, sandbox, {"op": "config_load", "path": str(path)}), expected)
+
+
+@pytest.mark.parametrize("text", [
+    "config_version = 3\n",
+    "config_version = 2\n[llm\n",
+    "= broken",
+])
+def test_config_load_errors(rust_build, sandbox, tmp_path, text):
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError):
+        py_config._config_from_v2(py_config._parse(path))
+    result = drive1(rust_build, sandbox, {"op": "config_load", "path": str(path)})
+    assert isinstance(result, dict) and "error" in result
+
+
+UPDATE_CASES = [
+    {"llm": {"model": "x"}},
+    {"stt": {"language": None}},
+    {"stt": {"language": 3}},
+    {"cleanup": {"level": "loud"}},
+    {"cleanup": {"level": 1}},
+    {"paste": {"method": "teleport"}},
+    {"server": {"port": "80"}},
+    {"server": {"port": True}},
+    {"dictation": {"silence_threshold_dbfs": -40}},
+    {"dictation": {"command_names": ["a", 1]}},
+    {"dictation": {"max_recording_seconds": -5}},
+    {"history": {"keep_audio_clips": 0}},
+    {"llm": {"api_key_ref": "llm_activation_openai_0123456789abcdef0123456789abcdef"}},
+    {"llm": {"api_key_ref": ""}},
+    {"bogus": {"x": 1}},
+    {"llm": {"bogus": 1}},
+    {"llm": 5},
+    {},
+]
+
+
+@pytest.mark.parametrize("update", UPDATE_CASES, ids=json.dumps)
+def test_config_update_validation(rust_build, sandbox, update):
+    expected = _python_error(lambda: config_to_dict(apply_config_update(Config(), update)))
+    assert_same(drive1(rust_build, sandbox, {"op": "config_update", "update": update}), expected)
+
+
+def test_config_update_clears_key_binding_only_on_endpoint_change(rust_build, sandbox, tmp_path):
+    ref = "llm_activation_openai_0123456789abcdef0123456789abcdef"
+    path = tmp_path / "bound.toml"
+    path.write_text(
+        "config_version = 2\n[llm]\nprovider = \"openai-compatible\"\n"
+        f"base_url = \"https://api.openai.com/v1\"\napi_key_ref = \"{ref}\"\n",
+        encoding="utf-8",
+    )
+    bound = py_config._config_from_v2(py_config._parse(path))
+    updates = [
+        {"llm": {"model": "gpt"}},
+        {"llm": {"base_url": "https://api.openai.com/v1/"}},
+        {"llm": {"base_url": "https://other.example/v1"}},
+        {"llm": {"provider": "ollama"}},
+    ]
+    rust = drive(rust_build, sandbox, [
+        {"op": "config_update", "path": str(path), "update": u} for u in updates
+    ])
+    for update, result in zip(updates, rust):
+        assert_same(result, _python_error(lambda u=update: config_to_dict(apply_config_update(bound, u))))
+
+
+LEGACY_CASES = {
+    "full v1": {
+        "model_size": "small", "stt_backend": "mlx", "language": "fr",
+        "ollama_url": "http://h:1", "ollama_model": "m", "cleanup_enabled": False,
+        "hotkey": "<cmd>+<shift>+space", "sounds_enabled": False,
+        "paste_method": "clipboard", "server_port": 9999, "vault_path": "~/v",
+        "command_names": ["deploy"], "silence_threshold_dbfs": -42.5,
+    },
+    "unknown and invalid": {
+        "mystery": 1, "cleanup_level": "loud", "style_work": "rude",
+        "paste_last_hotkey": 5, "max_recording_seconds": -1, "keep_audio_clips": "x",
+        "llm_key_ref": "not-a-ref", "history_enabled": "yes", "language": "",
+    },
+    "empty": {},
+}
+
+
+@pytest.mark.parametrize("name", LEGACY_CASES)
+def test_legacy_v1_migration(rust_build, sandbox, monkeypatch, tmp_path, name):
+    data = LEGACY_CASES[name]
+    lines = [f"{key} = {py_config._toml_value(value)}" for key, value in data.items()]
+    text = "\n".join(lines) + "\n"
+    py_legacy = tmp_path / "py" / ".localflow.toml"
+    py_legacy.parent.mkdir()
+    py_legacy.write_text(text, encoding="utf-8")
+    py_target = tmp_path / "py" / "config.toml"
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(py_target))
+    expected = config_to_dict(py_config.migrate_legacy(py_legacy))
+
+    rust_legacy = sandbox["home"] / ".localflow.toml"
+    rust_legacy.write_text(text, encoding="utf-8")
+    explicit, default_path = drive(rust_build, sandbox, [
+        {"op": "migrate_legacy", "path": str(rust_legacy)},
+        {"op": "migrate_legacy"},
+    ])
+    assert_same(explicit, expected)
+    assert_same(default_path, expected)
+    written = sandbox["config"]
+    assert tomllib.loads(written.read_text(encoding="utf-8")) == tomllib.loads(
+        py_target.read_text(encoding="utf-8")
+    )
+    assert rust_legacy.read_text(encoding="utf-8") == text  # left in place
+
+
+def test_legacy_migration_missing_file(rust_build, sandbox, tmp_path):
+    assert py_config.migrate_legacy(tmp_path / "nope.toml") is None
+    assert drive1(rust_build, sandbox, {"op": "migrate_legacy", "path": str(tmp_path / "nope.toml")}) is None
+    assert not sandbox["config"].exists()
+
+
+# ---------------------------------------------------------------------------
+# dictionary
+# ---------------------------------------------------------------------------
+
+REPLACEMENT_CASES = [
+    ("I live in new york city", [("new york", "New York"), ("york city", "YC"), ("new", "NEW")]),
+    ("a b c", [("a", "b"), ("b", "c"), ("c", "a")]),
+    ("STRASSE straße Straße", [("straße", "street")]),
+    ("KELVIN Kelvin kelvin", [("kelvin", "K")]),
+    ("ſpeed speed SPEED", [("speed", "velocity")]),
+    ("Σίσυφος σίσυφος ΣΊΣΥΦΟΣ", [("σίσυφος", "Sisyphus")]),
+    ("İstanbul istanbul ISTANBUL", [("istanbul", "Constantinople")]),
+    ("(foo) foo, foo. foo's foo_bar foo-bar éfoo foo2 2foo", [("foo", "X")]),
+    ("éfoo foó", [("foo", "X")]),
+    ("use c++ and a.b and (x) not ab", [("c++", "C plus plus"), ("a.b", "AB"), ("(x)", "X")]),
+    ("gpt four gpt four o", [("gpt four", "GPT-4"), ("gpt four o", "GPT-4o")]),
+    ("nothing here", []),
+    ("", [("a", "b")]),
+    ("  spaced  ", [("  spaced  ", "s"), ("   ", "blank")]),
+    ("delete me please", [("me", "")]),
+    ("日本語 テキスト 日本語テキスト", [("日本語", "Japanese")]),
+    ("über Über ÜBER", [("über", "over")]),
+]
+
+
+def test_dictionary_replacement_corpus(rust_build, sandbox):
+    requests = [
+        {"op": "dict_apply", "text": text, "pairs": [list(p) for p in pairs]}
+        for text, pairs in REPLACEMENT_CASES
+    ]
+    requests.append({
+        "op": "dict_apply", "text": "Foo bar",
+        "pairs": [{"from": "foo", "to": "baz"}, {"from": "", "to": "x"}, {"to": "y"}],
+    })
+    results = drive(rust_build, sandbox, requests)
+    expected = [py_dictionary.apply_replacements(text, pairs) for text, pairs in REPLACEMENT_CASES]
+    expected.append(py_dictionary.apply_replacements(
+        "Foo bar", [{"from": "foo", "to": "baz"}, {"from": "", "to": "x"}, {"to": "y"}]
+    ))
+    assert results == expected
+
+
+def test_stt_prompt(rust_build, sandbox):
+    cases = [[], ["  ", ""], ["Kubernetes", " LocalFlow "], [f"word{i}" for i in range(200)]]
+    results = drive(rust_build, sandbox, [{"op": "stt_prompt", "words": c} for c in cases])
+    assert results == [py_dictionary.stt_prompt(c) for c in cases]
+
+
+def _dict_ops(store: DictionaryStore, ops: list[dict]) -> list:
+    results = []
+    for op in ops:
+        def call(op=op):
+            kind = op["op"]
+            if kind == "add_word":
+                return store.add_word(op["word"])
+            if kind == "add_replacement":
+                return store.add_replacement(op["from"], op["to"])
+            if kind == "remove":
+                return store.remove(op["value"], op.get("kind"))
+            if kind == "import":
+                return store.import_file(Path(op["file"]))
+            if kind == "list":
+                return store.list()
+            raise AssertionError(kind)
+        results.append(_python_error(call))
+    return results
+
+
+def test_dictionary_store_operations(rust_build, sandbox, tmp_path):
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    (imports / "words.csv").write_text(
+        "word\nKubernetes\n\nlocalflow\nKUBERNETES\n,\na,b,c\n", encoding="utf-8"
+    )
+    (imports / "pairs.csv").write_text(
+        "from,to\ngee pee tee,GPT\n  ,x\nGee Pee Tee,dup\n", encoding="utf-8"
+    )
+    (imports / "data.json").write_text(json.dumps({
+        "words": ["Ödön", 5, "  "], "replacements": [{"from": "a", "to": "b"}, 3, {"from": "x"}],
+    }), encoding="utf-8")
+    (imports / "bad.json").write_text("{nope", encoding="utf-8")
+    (imports / "list.json").write_text("[]", encoding="utf-8")
+    (imports / "notes.txt").write_text("x", encoding="utf-8")
+    (imports / "latin1.csv").write_bytes("caf\xe9\n".encode("latin-1"))
+    ops = [
+        {"op": "list"},
+        {"op": "add_word", "word": "  Straße "},
+        {"op": "add_word", "word": "STRASSE"},
+        {"op": "add_word", "word": "straße"},
+        {"op": "add_word", "word": "   "},
+        {"op": "add_replacement", "from": "new york", "to": "New York"},
+        {"op": "add_replacement", "from": "NEW YORK", "to": "NYC"},
+        {"op": "add_replacement", "from": "x", "to": " "},
+        *({"op": "import", "file": str(imports / name)} for name in (
+            "words.csv", "pairs.csv", "data.json", "bad.json", "list.json",
+            "notes.txt", "latin1.csv",
+        )),
+        {"op": "remove", "value": "kubernetes"},
+        {"op": "remove", "value": "missing"},
+        {"op": "remove", "value": "A", "kind": "word"},
+        {"op": "remove", "value": "a", "kind": "replacement"},
+        {"op": "list"},
+    ]
+    py_path = tmp_path / "py" / "dictionary.json"
+    rust_path = tmp_path / "rust" / "dictionary.json"
+    expected = _dict_ops(DictionaryStore(py_path), ops)
+    actual = drive1(rust_build, sandbox, {"op": "dict_store", "path": str(rust_path), "ops": ops})
+    for index, (rust, python) in enumerate(zip(actual, expected)):
+        if isinstance(python, dict) and "error" in python:
+            assert isinstance(rust, dict) and "error" in rust, (index, ops[index], rust)
+            if python["error"].startswith("invalid JSON: "):
+                # The detail is the JSON parser's own wording.
+                assert rust["error"].startswith("invalid JSON: "), (index, rust)
+            else:
+                assert rust["error"] == python["error"], (index, ops[index])
+        else:
+            assert_same(rust, python)
+    assert json.loads(rust_path.read_text(encoding="utf-8")) == json.loads(
+        py_path.read_text(encoding="utf-8")
+    )
+    # Each side reads the other's file.
+    assert_same(
+        drive1(rust_build, sandbox, {"op": "dict_store", "path": str(py_path), "ops": [{"op": "list"}]})[0],
+        DictionaryStore(rust_path).list(),
+    )
+
+
+def test_dictionary_malformed_file_reads_as_empty_and_is_replaced(rust_build, sandbox, tmp_path):
+    # Python DictionaryStore._read logs and treats an unreadable file as
+    # empty, so the next write replaces it. Each side gets its own corrupt copy.
+    corrupt = '{broken "words": ["ghost"]'
+    py_path = tmp_path / "py" / "dictionary.json"
+    rust_path = tmp_path / "rust" / "dictionary.json"
+    for path in (py_path, rust_path):
+        path.parent.mkdir(parents=True)
+        path.write_text(corrupt, encoding="utf-8")
+    ops = [{"op": "list"}, {"op": "add_word", "word": "x"}, {"op": "list"}]
+    expected = _dict_ops(DictionaryStore(py_path), ops)
+    actual = drive1(rust_build, sandbox, {"op": "dict_store", "path": str(rust_path), "ops": ops})
+    assert_same(actual, expected)
+    assert expected[0] == {"words": [], "replacements": []} and expected[1] is True
+    assert expected[2] == {"words": ["x"], "replacements": []}
+    python_json = json.loads(py_path.read_text(encoding="utf-8"))
+    assert python_json == {"words": ["x"], "replacements": []}
+    assert json.loads(rust_path.read_text(encoding="utf-8")) == python_json
+
+
+# ---------------------------------------------------------------------------
+# history
+# ---------------------------------------------------------------------------
+
+NOW = datetime(2026, 3, 18, 15, 30).timestamp()
+DAY = 86400.0
+
+
+def _seed_history(store: HistoryStore, clips: Path) -> list[int]:
+    clips.mkdir(parents=True, exist_ok=True)
+    inside = clips / "kept.wav"
+    inside.write_bytes(b"RIFF")
+    rows = [
+        {"kind": "dictate", "app_name": "Editor", "raw_text": "raw one", "final_text": "Clean one two", "ts": NOW - 60, "duration_s": 2.0, "status": "ok"},
+        {"kind": "dictate", "app_name": None, "raw_text": "100% sure_thing \\ back", "final_text": "", "ts": NOW - DAY, "duration_s": 0.5, "status": "silent"},
+        {"kind": "command", "app_name": "Mail", "bundle_id": "com.mail", "category": "email", "raw_text": "ünïcode Ü", "final_text": "Ünïcode 😀 words here", "ts": NOW - 2 * DAY, "duration_s": 3.0, "status": "ok", "audio_path": str(inside)},
+        {"kind": "transform", "app_name": "Editor", "raw_text": "x", "final_text": "failed text", "ts": NOW - 2 * DAY, "duration_s": 0, "status": "failed"},
+        {"kind": "dictate", "app_name": "mail", "raw_text": "multi\nline", "final_text": "multi\nline text", "ts": NOW - 10 * DAY, "duration_s": 60.0, "status": "ok"},
+        {"kind": "dictate", "app_name": "Browser", "raw_text": "", "final_text": "a b c d", "ts": NOW - 3 * DAY, "duration_s": 1.0, "status": "ok"},
+        {"kind": "dictate", "app_name": "Browser", "raw_text": "", "final_text": "tie", "ts": NOW - 3 * DAY, "duration_s": 1.0, "status": "ok"},
+    ]
+    return [store.add(**row) for row in rows]
+
+
+def _history_ops(store: HistoryStore, ops: list[dict]) -> list:
+    results = []
+    for op in ops:
+        def call(op=op):
+            kind = op["op"]
+            if kind == "recent":
+                return store.recent(limit=op.get("limit", 50), query=op.get("query"), offset=op.get("offset", 0))
+            if kind == "get":
+                return store.get(op["id"])
+            if kind == "last_ok":
+                return store.last_ok()
+            if kind == "stats":
+                stats = store.stats(op["now"])
+                stats["top_apps"] = [list(item) for item in stats["top_apps"]]
+                return stats
+            if kind == "update":
+                fields = {k: v for k, v in op.items() if k not in ("op", "id")}
+                return store.update(op["id"], **fields)
+            if kind == "delete":
+                return store.delete(op["id"])
+            if kind == "add":
+                fields = {k: v for k, v in op.items() if k != "op"}
+                return store.add(**fields)
+            if kind == "clear":
+                return store.clear()
+            raise AssertionError(kind)
+        results.append(_python_error(call))
+    return results
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    shutil.copytree(src, dst)
+
+
+def test_python_written_history_read_and_modified_by_rust(rust_build, sandbox, tmp_path):
+    base = tmp_path / "py"
+    store = HistoryStore(base / "history.sqlite", base / "clips")
+    ids = _seed_history(store, base / "clips")
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"RIFF")
+    store.update(ids[0], audio_path=str(outside))
+    mirror = tmp_path / "mirror"
+    _copy_tree(base, mirror)
+    # The mirror's audio paths still point into `base`; rewrite them so each
+    # side deletes only its own clips.
+    with sqlite3.connect(mirror / "history.sqlite") as connection:
+        connection.execute(
+            "UPDATE dictations SET audio_path = replace(audio_path, ?, ?)",
+            (str(base / "clips"), str(mirror / "clips")),
+        )
+
+    ops = [
+        {"op": "recent"},
+        {"op": "recent", "limit": 2, "offset": 1},
+        {"op": "recent", "limit": 0},
+        {"op": "recent", "query": "100%"},
+        {"op": "recent", "query": "_thing"},
+        {"op": "recent", "query": "\\"},
+        {"op": "recent", "query": "ÜNÏCODE"},
+        {"op": "recent", "query": "ünïcode"},
+        {"op": "recent", "query": "LINE"},
+        {"op": "recent", "query": ""},
+        {"op": "get", "id": ids[2]},
+        {"op": "get", "id": 9999},
+        {"op": "last_ok"},
+        {"op": "stats", "now": NOW},
+        {"op": "stats", "now": NOW + 5 * DAY},
+        {"op": "update", "id": ids[1], "final_text": "now  final\ttext", "status": "ok"},
+        {"op": "update", "id": ids[1], "status": "bogus"},
+        {"op": "update", "id": ids[1], "duration_s": -1},
+        {"op": "update", "id": 9999, "raw_text": "x"},
+        {"op": "update", "id": ids[3]},
+        {"op": "update", "id": 9999},
+        {"op": "delete", "id": ids[2]},
+        {"op": "delete", "id": ids[0]},
+        {"op": "delete", "id": 9999},
+        {"op": "add", "kind": "bogus"},
+        {"op": "add", "kind": "dictate", "status": "nope"},
+        {"op": "add", "kind": "dictate", "duration_s": -2},
+        {"op": "recent"},
+        {"op": "stats", "now": NOW},
+    ]
+    expected = _history_ops(HistoryStore(mirror / "history.sqlite", mirror / "clips"), ops)
+    # Rows from the mirror name the mirror's clip directory; map it back.
+    expected = json.loads(json.dumps(expected).replace(
+        json.dumps(str(mirror / "clips"))[1:-1], json.dumps(str(base / "clips"))[1:-1]
+    ))
+    actual = drive1(rust_build, sandbox, {
+        "op": "history", "path": str(base / "history.sqlite"), "clips": str(base / "clips"), "ops": ops,
+    })
+    for index, (rust, python) in enumerate(zip(actual, expected)):
+        if isinstance(python, dict) and set(python) == {"error"}:
+            assert isinstance(rust, dict) and "error" in rust, (index, ops[index], rust)
+        else:
+            assert_same(rust, python)
+    assert not (base / "clips" / "kept.wav").exists()
+    assert outside.exists()  # never deletes outside the clips dir
+    # Python reads what Rust modified.
+    assert_same(HistoryStore(base / "history.sqlite", base / "clips").recent(), expected[-2])
+
+
+def _schema(path: Path):
+    with sqlite3.connect(path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        tables = {}
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','index') ORDER BY name"
+        ):
+            if name.startswith("sqlite_"):
+                continue
+            info = connection.execute(f"PRAGMA table_info({name})").fetchall() if not name.endswith("_ts") else []
+            sql = connection.execute("SELECT sql FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0]
+            tables[name] = (info, " ".join(sql.split()) if sql else None)
+    return version, tables
+
+
+def test_rust_written_history_read_by_python(rust_build, sandbox, tmp_path):
+    rust_db = tmp_path / "rust" / "history.sqlite"
+    py_db = tmp_path / "py" / "history.sqlite"
+    adds = [
+        {"op": "add", "kind": "dictate", "app_name": "Editor", "bundle_id": "b.id", "category": "work",
+         "duration_s": 1.5, "raw_text": "raw ✓", "final_text": "Final  text\nhere", "status": "ok", "ts": NOW},
+        {"op": "add", "kind": "command", "raw_text": "", "final_text": "", "status": "silent", "ts": NOW + 1, "duration_s": 0},
+        {"op": "add", "kind": "transform", "final_text": "x", "status": "failed", "ts": NOW + 2.25,
+         "audio_path": str(tmp_path / "rust" / "clips" / "a.wav")},
+        {"op": "add", "kind": "dictate", "final_text": "default ts"},
+    ]
+    rust_ids = drive1(rust_build, sandbox, {"op": "history", "path": str(rust_db), "clips": str(rust_db.parent / "clips"), "ops": adds})
+    py_store = HistoryStore(py_db, py_db.parent / "clips")
+    py_ids = _history_ops(py_store, adds)
+    assert rust_ids == py_ids
+    rust_rows = HistoryStore(rust_db, rust_db.parent / "clips").recent()
+    py_rows = py_store.recent()
+    assert len(rust_rows) == len(py_rows) == 4
+    for rust, python in zip(rust_rows, py_rows):
+        if python["final_text"] == "default ts":
+            assert abs(rust["ts"] - python["ts"]) < 600
+            rust, python = dict(rust, ts=0), dict(python, ts=0)
+        assert_same(rust, python)
+    assert _schema(rust_db) == _schema(py_db)
+
+
+def test_history_disabled_and_newer_schema(rust_build, sandbox, tmp_path):
+    db = tmp_path / "newer.sqlite"
+    with sqlite3.connect(db) as connection:
+        connection.execute("PRAGMA user_version = 7")
+    with pytest.raises(RuntimeError):
+        HistoryStore(db, tmp_path / "clips")
+    result = drive1(rust_build, sandbox, {"op": "history", "path": str(db), "clips": str(tmp_path / "clips"), "ops": [{"op": "recent"}]})
+    assert isinstance(result, dict) and "error" in result
+
+    missing = tmp_path / "disabled" / "history.sqlite"
+    ops = [{"op": "recent"}, {"op": "add", "kind": "dictate"}, {"op": "stats", "now": NOW}, {"op": "clear"}, {"op": "delete", "id": 1}]
+    rust = drive1(rust_build, sandbox, {"op": "history", "path": str(missing), "clips": str(tmp_path / "c"), "enabled": False, "ops": ops})
+    expected = _history_ops(HistoryStore(missing, tmp_path / "c", enabled=False), ops)
+    assert_same(rust, expected)
+    assert not missing.exists()
+
+
+# ---------------------------------------------------------------------------
+# spoken symbols, punctuation, styles, hot phrases
+# ---------------------------------------------------------------------------
+
+SYMBOL_CASES = [
+    ("slash help", []),
+    ("run slash deploy now", ["deploy"]),
+    ("Slash. skill dash part", ["skill-part"]),
+    ("slash skill part", ["skill_part"]),
+    ("slash skill underscore part", ["skill_part", "skill-part"]),
+    ("foo dash bar underscore baz dot com", []),
+    ("path slash to slash file", []),
+    ("a dash dash b", []),
+    ("SLASH Deploy", ["deploy"]),
+    ("slash review full", ["review", "review-full"]),
+    ("slashdot dashboard underscored", []),
+    ("", []),
+    ("email at sign example dot com", []),
+    ("über dash straße", []),
+]
+
+
+def test_spoken_symbols_corpus(rust_build, sandbox):
+    results = drive(rust_build, sandbox, [
+        {"op": "symbols", "text": text, "commands": commands} for text, commands in SYMBOL_CASES
+    ])
+    assert results == [py_symbols.apply_spoken_symbols(text, commands) for text, commands in SYMBOL_CASES]
+
+
+PUNCTUATION_CASES = [
+    "send it period", "is it ready question mark", "wait comma what", "a new line b",
+    "a new paragraph b", "Call me. New line. Thanks", "I need a new line of credit.",
+    "the new line is great", "scratch that hello", "hello scratch that. world",
+    "full stop", "period period", "say comma, then", "x exclamation mark!", "x colon\ny",
+    "ÜBER period", "new line", "", "one semicolon two semicolon", "a ,new line b",
+    "NEW PARAGRAPH start here", "the period of time", "end with question mark   ",
+]
+
+
+def test_spoken_punctuation_corpus(rust_build, sandbox):
+    results = drive(rust_build, sandbox, [{"op": "formatting", "text": t} for t in PUNCTUATION_CASES])
+    assert results == [py_formatting.apply_spoken_formatting(t) for t in PUNCTUATION_CASES]
+
+
+STYLE_CASES = [
+    ("Hello there.", "casual", []), ("Hello. There.", "casual", []), ("Hello there.  ", "casual", []),
+    ("Hello\nthere.", "casual", []), ("Hello. There.", "very_casual", []), ("I think so.", "very_casual", []),
+    ("NASA rocks.", "very_casual", []), ("Kubernetes rocks.", "very_casual", ["kubernetes"]),
+    ("  Émile says hi.", "very_casual", []), ("Hello.", "formal", []), ("Hello.", "excited", []),
+    ("Hello.", "unknown", []), ("", "very_casual", []), ("...", "very_casual", []),
+]
+
+
+def test_styles(rust_build, sandbox):
+    results = drive(rust_build, sandbox, [
+        {"op": "style", "text": t, "style": s, "vocabulary": v} for t, s, v in STYLE_CASES
+    ])
+    assert results == [py_formatting.apply_style(t, s, v) for t, s, v in STYLE_CASES]
+
+
+HOT_CASES = [
+    ("review checklist", [("review checklist", "EXPANDED")]),
+    ("Review checklist.", [("review checklist", "EXPANDED")]),
+    ("please run review checklist now", [("review checklist", "EXPANDED")]),
+    ("pr review full and pr review", [("pr review", "A"), ("pr review full", "B")]),
+    ("review-checklist, done", [("review checklist", "E")]),
+    ("reviewchecklist", [("review checklist", "E")]),
+    ("say slash then", [("slash", "slash literal")]),
+    ("ıi İ", [("i", "dotted")]),
+    ("nothing", []),
+    ("", [("x", "y")]),
+    ("x_y x y", [("x y", "Z")]),
+]
+
+
+def test_hot_phrases(rust_build, sandbox):
+    requests = []
+    expected = []
+    for text, phrases in HOT_CASES:
+        pairs = [list(p) for p in phrases]
+        requests.append({"op": "hot_expand", "text": text, "phrases": pairs})
+        expected.append(py_hotphrases.expand_hot_phrases(text, phrases))
+        requests.append({"op": "hot_matched", "text": text, "phrases": pairs})
+        expected.append(py_hotphrases.matched_triggers(text, phrases))
+        requests.append({"op": "normalize_trigger", "text": text})
+        expected.append(py_hotphrases.normalize_trigger(text))
+    assert drive(rust_build, sandbox, requests) == expected
+
+
+def _corpus():
+    return [json.loads(line) for line in CORPUS.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_dictation_corpus_pipeline(rust_build, sandbox):
+    """Shared fixture tests/fixtures/dictation_corpus.jsonl through the same
+    replace -> format -> park -> style -> restore pipeline on both sides."""
+    requests, expected = [], []
+    for case in _corpus():
+        overrides = case["config_overrides"]
+        style = overrides.get("style")
+        replacements = case.get("replacements", [])
+        phrases = [tuple(p) for p in case.get("phrases", [])]
+        fmt = overrides.get("spoken_formatting", False)
+        requests.append({
+            "op": "render", "text": case["input"], "phrases": [list(p) for p in phrases],
+            "replacements": replacements, "formatting": fmt, "style": style,
+        })
+        expected.append(py_hotphrases.render_dictation(
+            case["input"], phrases,
+            replace=(lambda t, r=replacements: py_dictionary.apply_replacements(t, r)) if replacements else None,
+            fmt=py_formatting.apply_spoken_formatting if fmt else None,
+            clean=None, symbols=None,
+            style=(lambda t, s=style: py_formatting.apply_style(t, s)) if style is not None else None,
+        ))
+    assert drive(rust_build, sandbox, requests) == expected
+
+
+def test_hot_phrase_store_files_interoperate(rust_build, sandbox, tmp_path):
+    py_path = tmp_path / "hot_phrases.json"
+    store = py_hotphrases.HotPhraseStore(py_path)
+    store.add("review checklist", "Line one\n  indented")
+    store.add("ship it", "SHIP", enabled=False)
+    listed, enabled, add_dup, add_ok = drive1(rust_build, sandbox, {
+        "op": "hot_store", "path": str(py_path), "ops": [
+            {"op": "list"}, {"op": "enabled"},
+            {"op": "add", "trigger": "Review, checklist!", "text": "dup"},
+            {"op": "add", "trigger": "deploy now", "text": "DEPLOY"},
+        ],
+    })
+    assert_same(listed, store.list()[:2])
+    assert [list(p) for p in py_hotphrases.HotPhraseStore(py_path).enabled()][:1] == enabled[:1]
+    assert isinstance(add_dup, dict) and "error" in add_dup
+    entries = py_hotphrases.HotPhraseStore(py_path).list()
+    assert [e["trigger"] for e in entries] == ["review checklist", "ship it", "deploy now"]
+    assert entries[-1]["id"] == add_ok["id"]
+
+
+# ---------------------------------------------------------------------------
+# API token
+# ---------------------------------------------------------------------------
+
+def _sandbox_paths(rust_build, sandbox) -> dict:
+    return drive1(rust_build, sandbox, {"op": "paths"})
+
+
+def _inside(path: str, root: Path) -> bool:
+    try:
+        Path(path).resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def test_paths_are_isolated_by_the_sandbox(rust_build, sandbox):
+    paths = _sandbox_paths(rust_build, sandbox)
+    assert Path(paths["config_path"]) == sandbox["config"]
+    for key in ("config_dir", "token_path", "legacy_config_path"):
+        assert _inside(paths[key], sandbox["root"]), (key, paths[key])
+    # Python resolves these through Path.home() (HOME / USERPROFILE), never
+    # the Windows profile known folder; lf-core must agree on every OS.
+    base = sandbox["home"] / ".localflow"
+    assert Path(paths["legacy_config_path"]) == sandbox["home"] / ".localflow.toml"
+    assert Path(paths["history_path"]) == base / "history.sqlite"
+    assert Path(paths["dictionary_path"]) == base / "dictionary.json"
+    assert Path(paths["hot_phrases_path"]) == base / "hot_phrases.json"
+
+
+def _require_isolated(rust_build, sandbox, *keys):
+    """Fail (never skip) before a test could write outside the sandbox."""
+    paths = _sandbox_paths(rust_build, sandbox)
+    for key in keys:
+        assert _inside(paths[key], sandbox["root"]), f"{key} escapes the sandbox: {paths[key]}"
+    return paths
+
+
+def test_token_read_never_creates(rust_build, sandbox):
+    paths = _require_isolated(rust_build, sandbox, "token_path")
+    token_path = Path(paths["token_path"])
+    assert drive1(rust_build, sandbox, {"op": "token"}) == {"read": None, "load": ""}
+    assert not token_path.exists()
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text("  tok-123 \n", encoding="utf-8")
+    assert drive1(rust_build, sandbox, {"op": "token"}) == {"read": "tok-123", "load": "tok-123"}
+    created = drive1(rust_build, sandbox, {"op": "token_create"})
+    assert len(created) == 43 and set(created) <= set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
+    assert token_path.read_text(encoding="utf-8") == created + "\n"
+
+
+# ---------------------------------------------------------------------------
+# lf-rs end to end
+# ---------------------------------------------------------------------------
+
+def test_cli_help_and_usage_errors(rust_build, sandbox):
+    result = lf(rust_build, sandbox, "--help")
+    assert result.returncode == 0
+    for name in ("config", "dict", "history", "llm", "keys", "status"):
+        assert name in result.stdout
+    assert lf(rust_build, sandbox, "history", "clear", "--help").returncode == 0
+    assert lf(rust_build, sandbox, "bogus").returncode == 2
+    assert lf(rust_build, sandbox, "history", "--limit", "0").returncode == 2
+    assert lf(rust_build, sandbox, "history", "list", "--limit", "1001").returncode == 2
+    assert lf(rust_build, sandbox, "config", "set", "llm.model").returncode == 2
+    assert "panicked" not in lf(rust_build, sandbox, "config", "get", "x").stderr
+
+
+def test_cli_config_get_set(rust_build, sandbox, py_env):
+    defaults = Config()
+    for key, value in (
+        ("llm.model", defaults.llm_model),
+        ("dictation.silence_threshold_dbfs", str(defaults.silence_threshold_dbfs)),
+        ("dictation.skills_dirs", json.dumps(defaults.skills_dirs)),
+        ("hotkey.sounds", "true"),
+        ("stt.language", ""),
+        ("server.port", "8756"),
+    ):
+        result = lf(rust_build, sandbox, "config", "get", key)
+        assert (result.returncode, result.stdout) == (0, value + "\n"), key
+
+    full = lf(rust_build, sandbox, "config", "get")
+    assert full.returncode == 0
+    assert tomllib.loads(full.stdout) == tomllib.loads(config_toml(py_config.load_config()))
+
+    unknown = lf(rust_build, sandbox, "config", "get", "nope.x")
+    assert unknown.returncode == 1
+    assert unknown.stderr == (
+        "Error: unknown config key 'nope.x'; valid keys: " + ", ".join(valid_config_keys()) + "\n"
+    )
+
+    for key, raw in (
+        ("llm.model", "qwen ✓"), ("hotkey.sounds", "FALSE"), ("server.port", " 9_000 "),
+        ("dictation.silence_threshold_dbfs", "-42.5"), ("dictation.command_names", "a, b,,c "),
+        ("stt.language", "fr"), ("paste.method", "clipboard"), ("cleanup.level", "medium"),
+    ):
+        result = lf(rust_build, sandbox, "config", "set", key, raw)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"saved {sandbox['config']}\n"
+    loaded = py_config.load_config()
+    assert (loaded.llm_model, loaded.sounds_enabled, loaded.server_port) == ("qwen ✓", False, 9000)
+    assert loaded.silence_threshold_dbfs == -42.5 and loaded.command_names == ["a", "b", "c"]
+    assert (loaded.language, loaded.paste_method, loaded.cleanup_level) == ("fr", "clipboard", "medium")
+    assert lf(rust_build, sandbox, "config", "set", "stt.language", "").returncode == 0
+    assert py_config.load_config().language is None
+
+    before = sandbox["config"].read_text(encoding="utf-8")
+    for args, message in (
+        (("hotkey.sounds", "yes"), "Error: boolean values must be true or false\n"),
+        (("server.port", "1.5"), "Error: invalid integer: '1.5'\n"),
+        (("dictation.silence_threshold_dbfs", "loud"), "Error: invalid float: 'loud'\n"),
+        (("paste.method", "teleport"), ("Error: invalid paste method 'teleport'; valid methods: "
+         "auto, clipboard, wtype, xdotool, pynput, osascript\n")),
+        (("cleanup.level", "loud"), None),
+        (("dictation.max_recording_seconds", "-1"), None),
+        (("llm.api_key_ref", "llm_activation_openai_0123456789abcdef0123456789abcdef"), None),
+    ):
+        result = lf(rust_build, sandbox, "config", "set", *args)
+        assert result.returncode == 1, args
+        if message is None:
+            section, key = args[0].split(".")
+            python = _python_error(lambda s=section, k=key, v=args[1]: apply_config_update(
+                py_config.load_config(),
+                {s: {k: int(v) if v.lstrip("-").isdigit() else v}},
+            ))
+            message = f"Error: {python['error']}\n"
+        assert result.stderr == message, args
+    assert sandbox["config"].read_text(encoding="utf-8") == before
+
+
+def test_cli_config_path_and_migrate(rust_build, sandbox):
+    paths = lf(rust_build, sandbox, "config", "path")
+    assert paths.returncode == 0
+    assert paths.stdout.splitlines()[0] == f"path: {sandbox['config']}"
+    assert paths.stdout.splitlines()[1].startswith("legacy: missing (")
+    assert lf(rust_build, sandbox, "config", "migrate").stdout == "no legacy config found\n"
+    legacy = Path(_sandbox_paths(rust_build, sandbox)["legacy_config_path"])
+    assert _inside(str(legacy), sandbox["root"]), f"legacy config escapes the sandbox: {legacy}"
+    legacy.write_text('llm_model = "legacy-model"\nsounds_enabled = false\n', encoding="utf-8")
+    result = lf(rust_build, sandbox, "config", "migrate")
+    assert result.stdout == f"migrated legacy config to {sandbox['config']}\n"
+    assert lf(rust_build, sandbox, "config", "get", "llm.model").stdout == "legacy-model\n"
+
+
+def test_cli_dictionary(rust_build, sandbox, tmp_path):
+    _require_isolated(rust_build, sandbox, "dictionary_path")
+    run = lambda *a: lf(rust_build, sandbox, "dict", *a)
+    assert run("list").stdout == "No dictionary entries.\n"
+    assert run("add", "  Kubernetes ").stdout == "added: word: Kubernetes\n"
+    assert run("add", "kubernetes").stdout == "already exists: word: kubernetes\n"
+    assert run("add", "--from", " gee pee tee ", "--to", "GPT").stdout == "added: gee pee tee -> GPT\n"
+    assert run("add", "word", "--from", "x", "--to", "y").returncode == 2
+    assert run("add", "--from", "x").returncode == 2
+    assert run("add").returncode == 2
+    blank = run("add", "   ")
+    assert blank.returncode == 1 and blank.stderr.startswith("Error: ")
+    assert run("list").stdout == "word: Kubernetes\ngee pee tee -> GPT\n"
+    csv_file = tmp_path / "words.csv"
+    csv_file.write_text("word\nLocalFlow\nkubernetes\n,\n", encoding="utf-8")
+    assert run("import", str(csv_file)).stdout == "added 1; skipped_duplicate 1; skipped_invalid 1\n"
+    assert run("import", str(tmp_path / "missing.csv")).returncode == 2
+    bad = tmp_path / "bad.txt"
+    bad.write_text("x", encoding="utf-8")
+    result = run("import", str(bad))
+    assert (result.returncode, result.stderr) == (1, "Error: import file must be CSV or JSON\n")
+    assert run("remove", "KUBERNETES").stdout == "removed: KUBERNETES\n"
+    missing = run("remove", "nope")
+    assert (missing.returncode, missing.stderr) == (1, "Error: dictionary entry not found: nope\n")
+
+
+def _seed_cli_history(home: Path) -> list[int]:
+    base = home / ".localflow"
+    store = HistoryStore(base / "history.sqlite", base / "clips")
+    return _seed_history(store, base / "clips")
+
+
+def test_cli_history(rust_build, sandbox):
+    _require_isolated(rust_build, sandbox, "history_path")
+    run = lambda *a, **k: lf(rust_build, sandbox, "history", *a, **k)
+    assert run().stdout == "No history entries.\n"
+    assert run("stats").stdout.startswith("Dictations: 0\nWords: 0\nAverage WPM: 0.0\n")
+    ids = _seed_cli_history(sandbox["home"])
+
+    listed = run()
+    assert listed.returncode == 0
+    lines = listed.stdout.splitlines()
+    assert lines[0].split() == ["ID", "When", "Kind", "App", "Status", "Text"]
+    assert len(lines) == 1 + len(ids)
+    assert "Clean one two" in lines[1] and "Unknown" in listed.stdout
+    assert "multi line text" in listed.stdout
+    assert len(run("list", "--limit", "2").stdout.splitlines()) == 3
+    searched = run("search", "100%")
+    assert len(searched.stdout.splitlines()) == 2 and "silent" in searched.stdout
+    assert len(run("--search", "ünïcode", "--limit", "5").stdout.splitlines()) == 2
+    assert run("search", "zzz").stdout == "No history entries.\n"
+
+    store = HistoryStore(sandbox["home"] / ".localflow" / "history.sqlite", sandbox["home"] / ".localflow" / "clips")
+    stats = store.stats()
+    out = run("stats").stdout
+    assert f"Dictations: {stats['total_dictations']}\n" in out
+    assert f"Average WPM: {stats['avg_wpm']:.1f}\n" in out
+    assert "Top apps: " + ", ".join(f"{n} ({c})" for n, c in stats["top_apps"]) in out
+    assert lf(rust_build, sandbox, "stats").stdout == out
+
+    bad = run("delete", "abc")
+    assert (bad.returncode, bad.stderr) == (1, "Error: invalid history entry 'abc'\n")
+    gone = run("delete", "9999")
+    assert (gone.returncode, gone.stderr) == (1, "Error: history entry 9999 not found\n")
+    assert run("delete", str(ids[3])).stdout == f"Deleted history entry {ids[3]}.\n"
+    assert store.get(ids[3]) is None
+    assert run("delete", "last").stdout == f"Deleted history entry {ids[0]}.\n"
+
+    if sys.platform.startswith("linux"):
+        # No DISPLAY/WAYLAND_DISPLAY in the sandbox: copying must fail honestly.
+        copy = run("copy", "last")
+        assert copy.returncode == 1 and "Copied" not in copy.stdout
+
+    remaining = len(store.recent())
+    refused = run("clear", input_text="n\n")
+    assert refused.returncode == 1
+    assert len(store.recent()) == remaining
+    assert run("clear").returncode == 1  # end of input = no
+    cleared = run("clear", "--yes")
+    assert cleared.stdout == f"Cleared {remaining} history entries.\n"
+    assert store.recent() == []
+
+
+def test_cli_history_disabled_by_config(rust_build, sandbox):
+    _require_isolated(rust_build, sandbox, "history_path")
+    _seed_cli_history(sandbox["home"])
+    assert lf(rust_build, sandbox, "config", "set", "history.enabled", "false").returncode == 0
+    assert lf(rust_build, sandbox, "history").stdout == "No history entries.\n"
+
+
+def test_cli_keys_list_masks_values(rust_build, sandbox):
+    result = lf(rust_build, sandbox, "keys", "list", env={"LOCALFLOW_PROVIDER_KEY_OPENAI": "sk-secret-9876"})
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == "Local (Ollama): No key needed"
+    assert "OpenAI: ••••9876" in lines
+    assert "Fireworks: No key" in lines
+    assert "sk-secret" not in result.stdout
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_cli_llm(rust_build, sandbox, py_env):
+    bad = lf(rust_build, sandbox, "llm", "use", "bogus")
+    assert (bad.returncode, bad.stderr) == (1, "Error: unknown LLM provider: bogus\n")
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    ok = lf(rust_build, sandbox, "llm", "use", "ollama", "--base-url", url, "--model", "m1")
+    assert ok.stdout == f"saved {sandbox['config']}\n"
+    loaded = py_config.load_config()
+    assert (loaded.llm_provider, loaded.llm_base_url, loaded.llm_model) == ("ollama", url, "m1")
+    listed = lf(rust_build, sandbox, "llm", "list", "--json")
+    assert listed.returncode == 1
+    payload = json.loads(listed.stdout)
+    assert payload["models"] == [] and payload["error"]
+    tested = lf(rust_build, sandbox, "llm", "test")
+    assert tested.returncode == 1 and tested.stdout.strip()
+
+
+class _FakeServer(BaseHTTPRequestHandler):
+    token = "tok-abc"
+    status: ClassVar[dict] = {"platform": "server", "stt": {"loaded": True}, "autostart": "installed"}
+    meeting: ClassVar[dict] = {"watching": False, "session": None}
+
+    def do_GET(self):
+        if self.headers.get("X-Localflow-Token") != self.token:
+            self.send_response(401)
+            self.end_headers()
+            return
+        body = {"/api/status": self.status, "/meeting/status": self.meeting}.get(self.path)
+        data = json.dumps(body).encode()
+        self.send_response(200 if body is not None else 404)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_cli_status(rust_build, sandbox, py_env):
+    paths = _require_isolated(rust_build, sandbox, "token_path")
+    token_path = Path(paths["token_path"])
+    port = _free_port()
+    assert lf(rust_build, sandbox, "config", "set", "server.port", str(port)).returncode == 0
+
+    down = lf(rust_build, sandbox, "status")
+    assert down.returncode == 0
+    assert "meeting.server: down\n" in down.stdout
+    assert "stt.loaded: False\n" in down.stdout
+    assert f"server.port: {port}\n" in down.stdout
+    assert "server not running" in down.stderr
+    assert not token_path.exists()  # status never creates a token
+    as_json = json.loads(lf(rust_build, sandbox, "status", "--json").stdout)
+    assert as_json["meeting"] == {"server": "down"}
+    assert as_json["llm"]["model"] == Config().llm_model
+    assert list(as_json)[:3] == ["platform", "config_path", "stt"]
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeServer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        unauthorized = json.loads(lf(rust_build, sandbox, "status", "--json").stdout)
+        assert unauthorized["meeting"]["server"] == "unauthorized"
+        assert not token_path.exists()
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(_FakeServer.token + "\n", encoding="utf-8")
+        up = json.loads(lf(rust_build, sandbox, "status", "--json").stdout)
+        assert up == {**_FakeServer.status, "meeting": _FakeServer.meeting}
+        text = lf(rust_build, sandbox, "status").stdout
+        assert "stt.loaded: True\n" in text and "meeting.session: None\n" in text
+        assert token_path.read_text(encoding="utf-8") == _FakeServer.token + "\n"
+    finally:
+        server.shutdown()
+        server.server_close()

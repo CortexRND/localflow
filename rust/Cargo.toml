@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["lf-core", "lf-providers", "lf"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Shared version pins. Member crates may use `dep = { workspace = true }` or
+# declare their own versions directly.
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: Python dicts keep insertion order; config sections, update
+# payloads and parsed TOML tables must iterate in the same order.
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = { version = "0.8", features = ["preserve_order"] }
+dirs = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+regex = "1"
+csv = "1"
+chrono = "0.4"
+getrandom = "0.3"
+uuid = { version = "1", features = ["v4"] }
+caseless = "0.2"
+tempfile = "3"
+log = "0.4"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
