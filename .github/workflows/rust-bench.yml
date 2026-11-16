@@ -20,6 +20,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      - name: Install benchmark diagnostics
+        run: brew install ripgrep
       - name: Restore native runtimes pruned by Rust cache
         shell: bash
         run: |
