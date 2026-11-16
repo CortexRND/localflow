@@ -38,6 +38,7 @@ pub fn label(key: &str) -> &str {
     match key {
         "sounds_enabled" => "Sounds",
         "dictation_enabled" => "Dictation",
+        "dictation_toggle_hotkey" => "Toggle dictation shortcut",
         "cleanup_enabled" => "Cleanup",
         "cleanup_level" => "Cleanup level",
         "styles_enabled" => "Writing styles",
@@ -642,7 +643,8 @@ fn mentions(c: &Change, request: &str) -> bool {
             if SHORTCUTS.contains(&key.as_str()) && regex::Regex::new(r"\b(?:all|every|each)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:keyboard\s+)?(?:hot\s?keys?|shortcuts?|key\s+bindings?)\b").unwrap().is_match(&text) { return true; }
             let synonyms: &[&str] = match key.as_str() {
                 "sounds_enabled" => &["sound", "beep", "chime", "audio cue"],
-                "dictation_enabled" => &["dictation"],
+                "dictation_enabled" => &["dictation", "dictating", "push to talk", "push-to-talk"],
+                "dictation_toggle_hotkey" => &["toggle dictation", "dictation toggle"],
                 "cleanup_enabled" | "cleanup_level" => &["cleanup", "clean up", "clean-up"],
                 "styles_enabled" => &["writing style", "styles"],
                 "style_work" => &[

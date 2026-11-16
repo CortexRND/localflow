@@ -25,9 +25,10 @@ reads, token creation, provider changes, or CLI integration.
 
 ## Compatibility notes
 
-* Python's allowlist and config currently **lack `dictation_enabled`**. Rust lists
-  it as requested, but it fails closed through lf-core validation: implementing
-  it needs an authorized config schema/runtime change, not an agent-only change.
+* Includes the parallel dictation-toggle branch's `dictation_enabled` and
+  `dictation_toggle_hotkey` agent capabilities. Both fail closed when absent from
+  Config. Boolean validation supports an injected `dictation_enabled` field;
+  persistence activates automatically once lf-core owns its schema mapping.
 * Rust uses typed `Change` variants rather than Python display-bearing dataclasses;
   display fields cannot be forged independently. Errors use `anyhow::Result`;
   wording and result struct shapes are not Python API-identical.

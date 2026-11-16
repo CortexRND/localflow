@@ -767,3 +767,56 @@ fn all_shortcuts_intent_and_switch_warnings() {
     .unwrap()
     .contains("turns Cleanup off"));
 }
+
+#[test]
+fn dictation_toggle_branch_fields_and_turn_off_dictation() {
+    let (_dir, agent) = setup(Fake::new(vec![]));
+    let mut config = agent.load().unwrap();
+    assert!(ALLOWLIST.contains(&"dictation_enabled"));
+    assert!(ALLOWLIST.contains(&"dictation_toggle_hotkey"));
+    assert_eq!(
+        label("dictation_toggle_hotkey"),
+        "Toggle dictation shortcut"
+    );
+    assert!(agent
+        .validator
+        .value("dictation_enabled", &json!(false), &config)
+        .is_err());
+    config.set_field("dictation_enabled", json!(true));
+    for (input, expected) in [
+        (json!("off"), false),
+        (json!("on"), true),
+        (json!(false), false),
+        (json!(true), true),
+    ] {
+        assert_eq!(
+            agent
+                .validator
+                .value("dictation_enabled", &input, &config)
+                .unwrap(),
+            json!(expected)
+        );
+    }
+    for request in [
+        "turn off dictation",
+        "stop dictating",
+        "disable push to talk",
+        "disable push-to-talk",
+    ] {
+        let (changes, rejected) = agent.changes_from_calls(
+            &[setting("dictation_enabled", json!("off"))],
+            &config,
+            request,
+        );
+        assert_eq!(changes.len(), 1);
+        assert!(rejected.is_empty());
+        assert!(changes[0]
+            .warning()
+            .unwrap()
+            .contains("turns Dictation off"));
+    }
+    // Persistence must stay closed until lf-core owns the actual schema mapping.
+    assert!(agent
+        .set_setting("dictation_enabled", json!(false))
+        .is_err());
+}

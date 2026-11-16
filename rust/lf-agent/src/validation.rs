@@ -6,8 +6,9 @@ use unicode_general_category::{get_general_category, GeneralCategory as G};
 use unicode_normalization::UnicodeNormalization;
 
 pub const ALLOWLIST: &[&str] = &[
-    "sounds_enabled",
     "dictation_enabled",
+    "dictation_toggle_hotkey",
+    "sounds_enabled",
     "cleanup_enabled",
     "cleanup_level",
     "styles_enabled",
@@ -31,6 +32,7 @@ pub const ALLOWLIST: &[&str] = &[
     "work_prompts",
 ];
 pub const SHORTCUTS: &[&str] = &[
+    "dictation_toggle_hotkey",
     "hotkey",
     "command_hotkey",
     "polish_hotkey",
@@ -252,6 +254,12 @@ impl Validator {
     }
     pub fn value(&self, key: &str, value: &Value, config: &Config) -> Result<Value> {
         ensure!(ALLOWLIST.contains(&key), "setting is not allowed");
+        if ["dictation_enabled", "dictation_toggle_hotkey"].contains(&key) {
+            ensure!(
+                config.field(key).is_some(),
+                "setting is not supported by this config schema"
+            );
+        }
         if let Some(s) = value.as_str() {
             ensure!(
                 s.chars().count() <= 64 && raw_text_ok(s),
@@ -301,7 +309,14 @@ impl Validator {
         } else {
             json!(text.replace([' ', '-'], "_"))
         };
-        update(config, key, &result)?;
+        if field_location(key).is_none() && key == "dictation_enabled" {
+            ensure!(
+                config.field(key).is_some_and(Value::is_boolean) && result.is_boolean(),
+                "must be on or off"
+            );
+        } else {
+            update(config, key, &result)?;
+        }
         Ok(result)
     }
     pub fn conflicts(&self, config: &Config, changed: &[String]) -> Result<()> {
