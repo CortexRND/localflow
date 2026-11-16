@@ -11,6 +11,7 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf-core` | config (v2 TOML + legacy v1 migration), API token, keyring secrets, dictionary, history (SQLite), hot phrases, spoken symbols/punctuation, styles |
 | `lf-providers` | Ollama / OpenAI-compatible LLM clients, provider presets and keys, endpoint-bound key activation |
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
+| `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
 
 ## Build
 
@@ -22,7 +23,7 @@ cargo build --bin lf-rs          # target/debug/lf-rs
 cargo build --release --bin lf-rs
 ```
 
-No system development packages are needed: on Linux the Secret Service
+On Linux, install `pkg-config` and `libasound2-dev` for `lf-audio`/cpal. The Secret Service
 client vendors libdbus, the clipboard uses pure-Rust X11, and HTTPS uses
 rustls.
 
@@ -134,13 +135,13 @@ the above on Ubuntu, macOS and Windows.
 
 This is not a full port and does not imply a Rust runtime or UI:
 
-* no dictation runtime, audio capture, speech-to-text, hotkeys, paste
+* no dictation runtime, speech-to-text, hotkeys, paste
   injection, meetings, server, menu bar, Hub, setup or settings windows;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
   Python `wave`'s header), `load_clip` (PCM / extensible-PCM WAV inside the
   clips dir only), `prune_audio_clips` and `delete_clip` — but nothing in the
-  port records audio, `lf-rs` exposes no clip command, and there is no
+  CLI records audio (`lf-audio` is standalone), `lf-rs` exposes no clip command, and there is no
   retry-from-audio (`lf history retry` needs speech-to-text); no other audio
   codecs;
 * `lf-rs` implements only the commands listed above (no `serve`, `dictate`,

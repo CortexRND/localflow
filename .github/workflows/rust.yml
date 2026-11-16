@@ -34,12 +34,11 @@ jobs:
         with:
           workspaces: rust
 
-      # lf-core vendors libdbus (dbus-secret-service "vendored"), arboard uses
-      # pure-Rust X11 and reqwest uses rustls, so no system -dev packages are
-      # needed; pkg-config is installed only as a harmless safety net.
+      # lf-audio/cpal needs ALSA headers. lf-core vendors libdbus, arboard
+      # uses pure-Rust X11, and reqwest uses rustls.
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
 
       - name: cargo fmt
         working-directory: rust
