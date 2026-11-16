@@ -4,6 +4,11 @@ Kept separate from hub_mac so the rules (dictionary validation, prompt review,
 responsive sizing) can be unit-tested on any platform.
 """
 
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+
 from localflow.dictionary import DictionaryError
 from localflow.dispatch import (
     APPROVE_FROM,
@@ -12,10 +17,53 @@ from localflow.dispatch import (
     approve_prompt,
     reject_prompt,
 )
+from localflow.text_wrap import wrap_lines
+from localflow.ui_tokens import HUB_HEADER_OFFSET
 
 # Width below which the Home stat cards wrap from four columns into two.
 STAT_FOUR_COLUMN_MIN_CARD = 150
 STAT_GAP = 12
+
+# ------------------------------------------------------------------ sidebar ---
+
+# Display labels only: routing (PAGES, hub_route, show_page) keeps the page ids.
+SIDEBAR_LABELS = {"Models": "Models & keys"}
+SIDEBAR_BUTTON_WIDTH = 168
+# Room the borderless button cell keeps around its title (both sides).
+SIDEBAR_TITLE_INSET = 16
+SIDEBAR_TITLE_PREFIX = "  "
+
+
+def sidebar_label(page: str) -> str:
+    """What the sidebar button and the page title say for `page`."""
+    return SIDEBAR_LABELS.get(page, page)
+
+
+def sidebar_title(page: str, measure=None, width: int = SIDEBAR_BUTTON_WIDTH) -> str:
+    """The sidebar button title; the plain page id if the label would not fit.
+
+    `measure(text) -> points` is the real font measurement (13pt semibold) in
+    the AppKit hub; without it the label is used as is.
+    """
+    title = SIDEBAR_TITLE_PREFIX + sidebar_label(page)
+    if measure is not None and measure(title) > width - SIDEBAR_TITLE_INSET:
+        return SIDEBAR_TITLE_PREFIX + page
+    return title
+
+
+# --------------------------------------------------------------------- home ---
+
+HOME_DECORATION_WIDTH = 150
+HOME_DECORATION_GAP = 8  # between the decoration and the stat cards below it
+
+
+def home_decoration_frame(width: int) -> tuple[int, int, int, int]:
+    """The halftone's (x, y, w, h): the right end of the header band only,
+    ending above the stat cards (which start at HUB_HEADER_OFFSET)."""
+    return (
+        width - HOME_DECORATION_WIDTH, 0, HOME_DECORATION_WIDTH,
+        HUB_HEADER_OFFSET - HOME_DECORATION_GAP,
+    )
 
 
 def stat_layout(width: int, count: int = 4) -> tuple[int, int]:
@@ -29,6 +77,293 @@ def stat_layout(width: int, count: int = 4) -> tuple[int, int]:
 def meeting_notes_height(viewport_height: int, top: int) -> int:
     """Height of the meeting notes box: roomy when tall, never below 110."""
     return int(max(110, min(220, viewport_height - top - 330)))
+
+
+# ----------------------------------------------------------------- meetings ---
+
+MEETING_SUBTITLE = (
+    "Transcribe a meeting, jot notes alongside, and save both to your vault."
+)
+MEETING_NOTES_PLACEHOLDER = (
+    "Type notes while you talk: headings and bullets work. When you stop, "
+    "LocalFlow fills them in from the transcript."
+)
+MEETING_FIELD_LABEL_H = 18
+MEETING_LABEL_GAP = 4
+MEETING_FIELD_H = 32  # == ui_tokens.INPUT_HEIGHT, shared by field and picker
+MEETING_SECTION_GAP = 14
+MEETING_HEADING_H = 22
+MEETING_NOTES_STATUS_W = 220
+MEETING_ACTION_GAP = 12  # notes card -> error (when shown) -> Start button
+
+
+def meeting_form_layout(
+    width: int, top: int, notes_height: int, *, error_height: int = 0,
+) -> dict:
+    """Frames (x, y, w, h) of the Meetings form, from the subtitle down to the
+    Start/Stop button.
+
+    The title field and the template picker share one row: the same y and the
+    same height, so they line up exactly. The autosave status sits on the
+    "Your notes" heading row (no space is reserved for it under the card) and
+    an error only takes room when there is one.
+    """
+    title_w = int((width - 20) * 0.58)
+    template_x = title_w + 20
+    form_top = top + 28
+    field_y = form_top + MEETING_FIELD_LABEL_H + MEETING_LABEL_GAP
+    heading_y = field_y + MEETING_FIELD_H + MEETING_SECTION_GAP
+    notes_y = heading_y + MEETING_HEADING_H + MEETING_LABEL_GAP
+    notes_bottom = notes_y + notes_height
+    frames = {
+        "subtitle": (0, top, width, 20),
+        "title_label": (0, form_top, title_w, MEETING_FIELD_LABEL_H),
+        "title_field": (0, field_y, title_w, MEETING_FIELD_H),
+        "template_label": (template_x, form_top, width - template_x, MEETING_FIELD_LABEL_H),
+        "template_field": (template_x, field_y, width - template_x, MEETING_FIELD_H),
+        "notes_label": (0, heading_y, width - MEETING_NOTES_STATUS_W - 12, MEETING_HEADING_H),
+        "notes_status": (
+            width - MEETING_NOTES_STATUS_W, heading_y + 3, MEETING_NOTES_STATUS_W, 18,
+        ),
+        "notes": (0, notes_y, width, notes_height),
+        "retry": (0, form_top, 100, 36),
+    }
+    y = notes_bottom + MEETING_ACTION_GAP
+    if error_height:
+        frames["error"] = (0, y, width, error_height)
+        y += error_height + MEETING_ACTION_GAP
+    frames["action_y"] = y
+    return frames
+
+
+SYSTEM_AUDIO_PERMISSION = (
+    "Recording your mic only. Allow system audio to also capture others."
+)
+SYSTEM_AUDIO_UNAVAILABLE = (
+    "Recording your mic only. System audio isn't available on this Mac right now."
+)
+_PERMISSION_HINTS = ("permission", "not authorized", "not permitted", "denied", "tcc")
+
+
+def system_audio_is_permission_error(error: str) -> bool:
+    """True when a system-audio failure reads as a missing OS permission.
+
+    Only the ScreenCaptureKit path reports these; a missing loopback device,
+    absent bindings or a timeout are not permission problems.
+    """
+    text = (error or "").lower()
+    return any(hint in text for hint in _PERMISSION_HINTS)
+
+
+def meeting_capture_status(session: dict) -> str:
+    """One plain sentence about what a running meeting is recording.
+
+    Replaces the old "mic only — system audio unavailable — <raw error>" line:
+    the mic and system-audio failure are reported once, and the raw error only
+    decides which sentence is honest.
+    """
+    state = session.get("system_audio")
+    if state == "on":
+        return "Recording your mic and system audio."
+    if state == "error":
+        if system_audio_is_permission_error(session.get("system_audio_error", "")):
+            return SYSTEM_AUDIO_PERMISSION
+        return SYSTEM_AUDIO_UNAVAILABLE
+    return "Recording your mic only."
+
+
+_STAMP_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} \d{4}\s+")
+
+
+def note_title_from_path(path: str) -> str:
+    """'Planning' from '.../2026-11-15 1430 Planning.md' (date prefix dropped)."""
+    stem = Path(str(path or "")).stem
+    return _STAMP_PREFIX.sub("", stem).strip() or stem or "Meeting"
+
+
+def saved_notes_message(saved: dict) -> str:
+    """The saved-state line: the note's title, never its raw path."""
+    title = (saved.get("title") or "").strip() or note_title_from_path(
+        saved.get("notes_path", "")
+    )
+    return f"Notes saved: {title}"
+
+
+# The newest saved notes shown on the Meetings page.
+RECENT_NOTES_LIMIT = 5
+RECENT_NOTES_SCAN_LIMIT = 2000  # files looked at, so a huge folder stays cheap
+RECENT_NOTES_MAX_DEPTH = 3  # notes_folder/<category>/<file>.md, with slack
+RECENT_NOTES_UNREADABLE = "Couldn't read your meeting notes folder."
+RECENT_NOTES_OUTSIDE = (
+    "Your meeting notes folder is outside your vault, so it isn't listed here."
+)
+_HEAD_BYTES = 4096
+_FILE_STAMP = re.compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:\s+(.*))?$")
+
+
+def _note_heading(path: Path) -> str:
+    """The note's '# Title' line (after any frontmatter), or ''."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            head = handle.read(_HEAD_BYTES)
+    except OSError:
+        return ""
+    lines = head.splitlines()
+    if lines and lines[0].strip() == "---":
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                lines = lines[index + 1:]
+                break
+    for line in lines:
+        if line.startswith("# "):
+            return line[2:].strip()
+        if line.strip():
+            return ""
+    return ""
+
+
+def _note_when(path: Path, mtime: float) -> datetime:
+    match = _FILE_STAMP.match(path.stem)
+    if match:
+        try:
+            return datetime(*(int(match.group(i)) for i in range(1, 6)))
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(mtime)
+
+
+def note_date_label(when: datetime, now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    clock = when.strftime("%I:%M %p").lstrip("0")
+    if when.date() == now.date():
+        return f"Today, {clock}"
+    if when.year == now.year:
+        return f"{when.strftime('%b')} {when.day}, {clock}"
+    return f"{when.strftime('%b')} {when.day}, {when.year}"
+
+
+def recent_notes(
+    vault_path, notes_folder: str, *, limit: int = RECENT_NOTES_LIMIT,
+    now: datetime | None = None,
+) -> tuple[list[dict], str]:
+    """The newest saved meeting notes: ([{title, date_label, path}], error).
+
+    Same storage the CLI's `lf notes` and recall read: Markdown files under
+    <vault>/<notes_folder>/ as ObsidianWriter writes them
+    (<category>/YYYY-MM-DD HHMM Title.md, '# Title' after the frontmatter).
+    Only that folder is walked (never the whole vault), symlinks are not
+    followed, anything resolving outside it is skipped, transcripts are
+    excluded, and only the `limit` newest files are opened for their heading.
+    A missing folder is simply "no notes yet"; an unreadable one is a friendly
+    error, never an exception.
+    """
+    if not vault_path or not notes_folder:
+        return [], ""
+    try:
+        vault = Path(vault_path).expanduser().resolve()
+        root = (vault / notes_folder).resolve()
+        # An absolute or ../ notes_folder, or a notes folder that is itself a
+        # symlink out of the vault, is never read.
+        if not root.is_relative_to(vault):
+            return [], RECENT_NOTES_OUTSIDE
+        if not root.exists():
+            return [], ""
+        if not root.is_dir() or not os.access(root, os.R_OK | os.X_OK):
+            return [], RECENT_NOTES_UNREADABLE
+    except (OSError, RuntimeError, ValueError):
+        return [], RECENT_NOTES_UNREADABLE
+    try:
+        return _recent_notes_in(root, limit, now)
+    except (OSError, RuntimeError, ValueError):
+        return [], RECENT_NOTES_UNREADABLE
+
+
+def _recent_notes_in(root: Path, limit: int, now: datetime | None):
+    failures = []
+    found = []
+    seen = 0
+    for directory, subdirs, files in os.walk(
+        root, followlinks=False, onerror=failures.append,
+    ):
+        depth = len(Path(directory).relative_to(root).parts)
+        if depth >= RECENT_NOTES_MAX_DEPTH:
+            subdirs[:] = []
+        subdirs[:] = [name for name in subdirs if not name.startswith(".")]
+        for name in files:
+            if not name.lower().endswith(".md") or name.endswith(" (transcript).md"):
+                continue
+            seen += 1
+            if seen > RECENT_NOTES_SCAN_LIMIT:
+                break
+            path = Path(directory) / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if not path.resolve().is_relative_to(root):
+                    continue
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            found.append((_note_when(path, mtime), mtime, path))
+        if seen > RECENT_NOTES_SCAN_LIMIT:
+            break
+    if not found and failures and any(
+        Path(getattr(error, "filename", "") or "") == root for error in failures
+    ):
+        return [], RECENT_NOTES_UNREADABLE
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    notes = []
+    for when, _mtime, path in found[:limit]:
+        match = _FILE_STAMP.match(path.stem)
+        fallback = ((match.group(6) or "").strip() if match else "") or path.stem
+        notes.append({
+            "title": _note_heading(path) or fallback,
+            "date_label": note_date_label(when, now),
+            "path": str(path),
+        })
+    return notes, ""
+
+
+RECENT_ROW_H = 44
+RECENT_EMPTY = "No saved meeting notes yet. Notes you save appear here."
+
+
+# -------------------------------------------------------------------- style ---
+
+STYLE_LABEL_W = 160
+STYLE_GROUP_X = 180
+STYLE_ROW_H = 86
+STYLE_EXAMPLE_Y = 28
+STYLE_EXAMPLE_H = 34  # two 11pt lines: examples wrap instead of truncating
+STYLE_SAVE_FAILED = (
+    "Couldn't save your style settings. Check that ~/.localflow can be "
+    "written to and try again."
+)
+STYLE_AUTOSAVE_HINT = "Changes save automatically."
+
+
+def style_row_frames(y: int, group_width: int) -> dict:
+    """Label, wrapped example and segmented group of one style row.
+
+    The label and its example share the left column (STYLE_LABEL_W wide); the
+    example wraps over two lines inside the row, and the group starts right of
+    the column, so nothing overlaps at any width.
+    """
+    return {
+        "label": (0, y + 4, STYLE_LABEL_W, 22),
+        "example": (0, y + STYLE_EXAMPLE_Y, STYLE_LABEL_W, STYLE_EXAMPLE_H),
+        "group": (STYLE_GROUP_X, y, group_width, 36),
+    }
+
+
+def style_update(cleanup: str, styles: dict) -> dict:
+    """The config update for the Style page's current selections."""
+    return {
+        "cleanup": {
+            "level": cleanup,
+            **{f"style_{name}": value for name, value in styles.items()},
+        }
+    }
 
 
 # ------------------------------------------------------------------ hotkeys ---
@@ -160,19 +495,36 @@ def prompt_context(entry: dict) -> str:
     return entry.get("repo") or entry.get("meeting") or "Unknown meeting"
 
 
+ORCA_NOT_OPEN = "Couldn't send — the Orca agent app isn't open"
+# What `orca_available` records ("Orca app is not running — run `orca open`…")
+# and older queues stored ("Orca is not running"). Other failures (a missing
+# CLI, an unreachable runtime, a bad repo, a timeout) keep their own text.
+_ORCA_NOT_RUNNING = re.compile(r"\borca(?: app)? is not running\b", re.IGNORECASE)
+
+
+def prompt_error_text(error) -> str:
+    """The failure shown on a prompt row: shared copy for a known cause only."""
+    text = " ".join(str(error or "").split())
+    if _ORCA_NOT_RUNNING.search(text):
+        return ORCA_NOT_OPEN
+    return text
+
+
 def prompt_rows(entries: list[dict]) -> list[dict]:
     """Newest first. Buttons follow the same guards the server API enforces."""
     rows = []
     for entry in reversed(entries):
         status = entry.get("status") or "pending"
         context = prompt_context(entry)
-        if status == "failed" and entry.get("error"):
-            context = f'{context} — {entry["error"]}'
+        error = prompt_error_text(entry.get("error")) if status == "failed" else ""
+        if error:
+            context = f"{context} · {error}"
         rows.append(
             {
                 "id": entry.get("id", ""),
                 "title": entry.get("title") or "Untitled prompt",
                 "context": context,
+                "error": error,
                 "status": status,
                 "status_label": status.title(),
                 "can_approve": status in APPROVE_FROM,
@@ -180,6 +532,47 @@ def prompt_rows(entries: list[dict]) -> list[dict]:
             }
         )
     return rows
+
+
+PROMPT_ROW_MIN_H = 68
+PROMPT_TITLE_Y = 12
+PROMPT_CONTEXT_Y = 36
+PROMPT_CONTEXT_LINE = 16
+PROMPT_ROW_BOTTOM = 14
+PROMPT_BUTTONS = {"approve": 88, "reject": 80}
+PROMPT_BUTTON_GAP = 8
+PROMPT_EDGE = 12
+
+
+def prompt_row_layout(width: int, row: dict, pill_width: int, measure=None) -> dict:
+    """Geometry of one prompt row: buttons, pill, text column and height.
+
+    The context line (source plus any failure) wraps inside the text column and
+    the row grows to fit it, so a friendly failure sentence is never truncated
+    even at the minimum window width with both actions shown. `measure(text)`
+    is the real 11pt measurement in AppKit; without it a conservative estimate
+    is used.
+    """
+    widths = []
+    if row.get("can_approve"):
+        widths.append(PROMPT_BUTTONS["approve"])
+    if row.get("can_reject"):
+        widths.append(PROMPT_BUTTONS["reject"])
+    action_x = width - PROMPT_EDGE - sum(widths) - PROMPT_BUTTON_GAP * max(0, len(widths) - 1)
+    pill_x = action_x - pill_width - 12
+    text_width = max(pill_x - 12 - 14, 40)
+    measure = measure or (lambda text: len(text) * 6.5)
+    lines = wrap_lines(row.get("context", ""), text_width, measure)
+    context_h = max(1, len(lines)) * PROMPT_CONTEXT_LINE + 2
+    height = max(PROMPT_ROW_MIN_H, PROMPT_CONTEXT_Y + context_h + PROMPT_ROW_BOTTOM)
+    return {
+        "action_x": action_x,
+        "pill_x": pill_x,
+        "text_width": text_width,
+        "context_h": context_h,
+        "height": height,
+        "lines": len(lines),
+    }
 
 
 def review_prompt(queue, entry_id: str, action: str) -> str | None:

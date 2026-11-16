@@ -77,6 +77,10 @@ class Label(View):
         self._frame = Rect(0, 0, width + 0.4, 14.2)
 
 
+class TextView(View):
+    """Base for mac_style.PlaceholderTextView; the pill never uses it."""
+
+
 class Color:
     def CGColor(self):
         return "cgcolor"
@@ -88,6 +92,7 @@ def mac_style(monkeypatch):
     appkit = types.ModuleType("AppKit")
     appkit.NSView = View
     appkit.NSTextField = Label
+    appkit.NSTextView = TextView
     appkit.NSLineBreakByClipping = 2
     appkit.NSFontWeightRegular = "regular"
     appkit.NSFontWeightSemibold = "semibold"

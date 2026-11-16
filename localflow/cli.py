@@ -44,7 +44,9 @@ from localflow.config import (
 from localflow.config import config_path as resolved_config_path
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.dispatch import (
+    APPROVE_FROM,
     QUEUE_PATH,
+    REJECT_FROM,
     STATUSES,
     PromptQueue,
     StatusConflict,
@@ -900,14 +902,14 @@ def prompts_show(prompt_id: str) -> None:
 @click.argument("ids", nargs=-1, required=True)
 def prompts_approve(ids: tuple[str, ...]) -> None:
     """Approve prompts IDS for dispatch (retries a failed one, clearing its error)."""
-    _set_reviewed(ids, "approved", ("pending", "failed"))
+    _set_reviewed(ids, "approved", APPROVE_FROM)
 
 
 @prompts.command("reject", hidden=True)
 @click.argument("ids", nargs=-1, required=True)
 def prompts_reject(ids: tuple[str, ...]) -> None:
-    """Reject prompts IDS so they are never dispatched."""
-    _set_reviewed(ids, "rejected", ("pending",))
+    """Reject prompts IDS (pending or failed) so they are never dispatched."""
+    _set_reviewed(ids, "rejected", REJECT_FROM)
 
 
 def _set_reviewed(ids: tuple[str, ...], status: str, from_statuses: tuple[str, ...]) -> None:
@@ -928,7 +930,11 @@ def _set_reviewed(ids: tuple[str, ...], status: str, from_statuses: tuple[str, .
             continue
         # Compare-and-set on the status we just read: the server can approve or
         # dispatch the same entry between the read above and this write.
-        clear = {"error": "", "worktree": "", "handle": ""} if entry["status"] == "failed" else {}
+        # A rejected failure keeps its error as the record of what went wrong.
+        clear = (
+            {"error": "", "worktree": "", "handle": ""}
+            if entry["status"] == "failed" and status == "approved" else {}
+        )
         try:
             queue.set_status(prompt_id, status, expect=from_statuses, **clear)
         except StatusConflict as conflict:

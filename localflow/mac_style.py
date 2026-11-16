@@ -9,6 +9,8 @@ from Foundation import NSMakeRect, NSMakeSize
 from localflow.ui_tokens import (
     ACTION_HEIGHT,
     ACTION_PADDING,
+    INPUT_BORDER_WIDTH,
+    INPUT_HEIGHT,
     LIGHT,
     PAGE_TITLE_HEIGHT,
     PILL_BORDER_WIDTH,
@@ -19,6 +21,8 @@ from localflow.ui_tokens import (
     SHADOW_OFFSET,
     SUN_TEXT,
     TYPE,
+    halftone_dots,
+    input_inner_frame,
     surface_tint,
     tokens_for,
 )
@@ -30,24 +34,88 @@ class FlippedView(AppKit.NSView):
 
 
 class HalftoneView(AppKit.NSView):
+    """Sun halftone decoration. Dots come from `halftone_dots`, which only
+    returns dots inside the bounds, and drawing is clipped to the bounds too,
+    so the pattern can never paint over neighbouring views."""
+
     def initWithFrame_palette_(self, frame, palette):
         self = super().initWithFrame_(frame)  # noqa: PLW0642
         if self is not None:
             self.palette = palette
+            # macOS 14+ no longer clips views to their bounds by default.
+            if self.respondsToSelector_("setClipsToBounds:"):
+                self.setClipsToBounds_(True)
+            self.anchor = "bottom-left"
+            self.step = 14
+            self.max_radius = 4
+            self.pad = 8
         return self
 
     def drawRect_(self, _dirty_rect):
-        color(self.palette["paper"]).set()
-        AppKit.NSRectFill(self.bounds())
-        color(self.palette["sun"]).set()
-        for row in range(12):
-            for column in range(12 - row):
-                radius = max(1, 4 - (row + column) // 5)
-                x, y = 8 + column * 14, 8 + row * 14
-                path = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
-                    AppKit.NSMakeRect(x, y, radius * 2, radius * 2)
-                )
-                path.fill()
+        bounds = self.bounds()
+        AppKit.NSGraphicsContext.saveGraphicsState()
+        try:
+            AppKit.NSBezierPath.clipRect_(bounds)
+            color(self.palette["paper"]).set()
+            AppKit.NSRectFill(bounds)
+            color(self.palette["sun"]).set()
+            for x, y, diameter in halftone_dots(
+                bounds.size.width, bounds.size.height, step=self.step,
+                max_radius=self.max_radius, pad=self.pad, anchor=self.anchor,
+            ):
+                AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+                    AppKit.NSMakeRect(x, y, diameter, diameter)
+                ).fill()
+        finally:
+            AppKit.NSGraphicsContext.restoreGraphicsState()
+
+
+class PlaceholderTextView(AppKit.NSTextView):
+    """An NSTextView that draws a muted placeholder while it holds no text.
+
+    The placeholder is only drawn, never inserted: `string()` stays empty, so
+    it cannot be copied, autosaved, sent to a model or seen by tests as text.
+    """
+
+    placeholder = ""
+    placeholder_color = None
+
+    def setPlaceholder_color_(self, text, placeholder_color):
+        self.placeholder = text or ""
+        self.placeholder_color = placeholder_color
+        self.setNeedsDisplay_(True)
+
+    def didChangeText(self):
+        super().didChangeText()
+        # Typing the first character / deleting the last one must repaint the
+        # whole view, not just the edited glyph rect.
+        self.setNeedsDisplay_(True)
+
+    def setString_(self, text):
+        super().setString_(text)
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, dirty_rect):
+        super().drawRect_(dirty_rect)
+        if self.string() or not self.placeholder:
+            return
+        inset = self.textContainerInset()
+        padding = self.textContainer().lineFragmentPadding()
+        width = self.bounds().size.width - 2 * (inset.width + padding)
+        attributes = {
+            AppKit.NSFontAttributeName: self.font() or font(13),
+            AppKit.NSForegroundColorAttributeName: (
+                self.placeholder_color or NSColor.placeholderTextColor()
+            ),
+        }
+        AppKit.NSAttributedString.alloc().initWithString_attributes_(
+            self.placeholder, attributes
+        ).drawInRect_(
+            NSMakeRect(
+                inset.width + padding, inset.height, max(width, 0),
+                self.bounds().size.height - 2 * inset.height,
+            )
+        )
 
 
 def tokens_for_window(window):
@@ -279,6 +347,43 @@ def style_bubble(view, palette=None, *, role="assistant"):
     layer.setCornerRadius_(RADIUS["card"])
     layer.setShadowOpacity_(0)
     return view
+
+
+def style_input_box(box, palette=None, *, readonly=False):
+    """The shared ink-outlined input box; read-only boxes go quiet (paper, line)."""
+    style_surface(
+        box, palette, fill="paper" if readonly else "surface",
+        border="line" if readonly else "ink", width=INPUT_BORDER_WIDTH,
+    )
+    box.layer().setCornerRadius_(RADIUS["button"])
+    return box
+
+
+def input_box(control, frame, palette=None, *, readonly=False):
+    """Put a text field or combo box in one shared input box; returns the box.
+
+    The native bezels are switched off and both kinds of control use the same
+    font and control size, centred at their own cell height inside a box of
+    INPUT_HEIGHT, so a field and a picker side by side are visibly the same
+    height with the same top edge (a bezeled NSComboBox keeps its intrinsic
+    ~22pt look whatever its frame says).
+    """
+    x, y, width, height = frame
+    box = FlippedView.alloc().initWithFrame_(NSMakeRect(x, y, width, height or INPUT_HEIGHT))
+    control.setFont_(font(13))
+    control.setControlSize_(AppKit.NSControlSizeRegular)
+    control.setBezeled_(False)
+    control.setBordered_(False)
+    control.setDrawsBackground_(False)
+    if control.respondsToSelector_("setButtonBordered:"):
+        control.setButtonBordered_(False)
+    cell_height = math.ceil(control.cell().cellSize().height)
+    control.setFrame_(
+        NSMakeRect(*input_inner_frame(width, box.frame().size.height, cell_height))
+    )
+    box.addSubview_(control)
+    style_input_box(box, palette, readonly=readonly)
+    return box
 
 
 def style_surface(

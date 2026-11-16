@@ -96,10 +96,51 @@ def test_use_button_is_hidden_only_when_already_active_and_unchanged():
 
 
 def test_summary_values_name_the_speech_and_cleanup_models():
-    config = replace(cloud(FIREWORKS, model=""), stt_backend="parakeet", model_size="small")
+    config = replace(cloud(FIREWORKS, model=""), stt_backend="mlx-whisper", model_size="small")
     speech, cleanup = ml.summary_values(config)
-    assert speech == "parakeet / small"
+    assert speech == "MLX Whisper / small"
     assert cleanup == "Fireworks / not selected"
+
+
+def test_speech_summary_uses_the_provider_field_not_the_device():
+    # Regression: an explicit provider with a different stt_device must name
+    # the provider. The screenshot's "auto / base" came from the provider
+    # field (default auto), never from stt_device.
+    parakeet = replace(Config(), stt_backend="parakeet", model_size="large-v3", stt_device="cpu")
+    assert ml.speech_summary(parakeet) == "Parakeet / TDT 0.6B v2"
+    assert "cpu" not in ml.speech_summary(parakeet)
+    assert "large-v3" not in ml.speech_summary(parakeet)  # ignored by Parakeet
+    for backend, label in (
+        ("faster-whisper", "Faster Whisper / base"),
+        ("mlx", "MLX Whisper / base"),
+        ("mlx-whisper", "MLX Whisper / base"),
+        ("my-plugin", "my-plugin / base"),
+    ):
+        config = replace(Config(), stt_backend=backend, model_size="base", stt_device="mps")
+        assert ml.speech_summary(config) == label
+        assert "mps" not in ml.speech_summary(config)
+
+
+def test_automatic_speech_is_not_resolved_or_loaded(monkeypatch):
+    # "auto" stays "Automatic": no guessing the engine, no model load/download.
+    from localflow import stt as stt_module
+    from localflow.providers import registry
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("display must not touch the speech providers")
+
+    monkeypatch.setattr(registry, "stt_provider_class", boom)
+    monkeypatch.setattr(registry, "stt_available", boom)
+    monkeypatch.setattr(stt_module, "Transcriber", boom)
+    assert ml.speech_summary(Config()) == "Automatic / base"
+    assert ml.speech_summary(replace(Config(), stt_device="cuda")) == "Automatic / base"
+    assert ml.summary_values(Config())[0] == "Automatic / base"
+
+
+def test_snapshots_prove_the_explicit_provider_label():
+    snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text(encoding="utf-8")
+    assert 'stt_backend="parakeet"' in snapshots and 'stt_device="cpu"' in snapshots
+    assert '"hub-models-parakeet"' in snapshots
 
 
 # --------------------------------------------------------------- import ---

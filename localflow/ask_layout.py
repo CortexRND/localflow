@@ -10,6 +10,7 @@ drawn on one line.
 """
 
 from localflow.ask_model import SOURCES, TIME_FILTERS
+from localflow.text_wrap import wrap_lines  # shared; still ask_layout.wrap_lines
 from localflow.ui_tokens import (
     ACTION_PADDING,
     ASK_ANSWER_LINE,
@@ -37,34 +38,6 @@ CAPTION_FONT = 11
 BODY_FONT = 13
 ASK_BUTTON_MIN_WIDTH = 72
 SLACK = 4  # a wrapped label never ends up a hair narrower than its text
-
-
-def wrap_lines(text, width, measure_line):
-    """Greedy word wrap of `text` into lines no wider than `width`.
-
-    `measure_line(str) -> width`. A single word wider than `width` is broken
-    by characters, like a wrapping label does.
-    """
-    lines = []
-    for paragraph in str(text).split("\n"):
-        current = ""
-        for word in paragraph.split(" "):
-            candidate = word if not current else current + " " + word
-            if measure_line(candidate) <= width:
-                current = candidate
-                continue
-            if current:
-                lines.append(current)
-                current = ""
-            while len(word) > 1 and measure_line(word) > width:
-                cut = len(word) - 1
-                while cut > 1 and measure_line(word[:cut]) > width:
-                    cut -= 1
-                lines.append(word[:cut])
-                word = word[cut:]
-            current = word
-        lines.append(current)
-    return lines
 
 
 def flow_chips(labels, width, measure, *, size=CHIP_FONT):

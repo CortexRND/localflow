@@ -73,8 +73,18 @@ def test_page_titles_share_one_display_style_that_clears_the_header_offset():
     assert 'TYPE["display"]' in body and "PAGE_TITLE_HEIGHT" in body
     # Hub: every page title goes through the shared helper (no per-page 20pt label).
     hub = (root / "hub_mac.py").read_text(encoding="utf-8")
-    assert "page_title(page," in hub
+    calls = [
+        node for node in ast.walk(ast.parse(hub))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "page_title"
+    ]
+    assert calls
+    for call in calls:
+        # The title text is the page's display label (e.g. "Models & keys").
+        text = call.args[0]
+        assert isinstance(text, ast.Call) and ast.unparse(text) == "sidebar_label(page)"
     assert '_label(page, 0' not in hub
+    assert '_label(sidebar_label(page)' not in hub
     # Setup keeps the same size and line height through the tokens.
     setup = (root / "setup_mac.py").read_text(encoding="utf-8")
     assert 'TYPE["display"][0], True, height=PAGE_TITLE_HEIGHT' in setup

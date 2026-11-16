@@ -93,9 +93,39 @@ def use_button_visible(preset, config, *, url, model):
     )
 
 
+# Friendly names for the configured speech provider (`[stt] provider`, i.e.
+# Config.stt_backend; ids as in providers.registry.STT_BUILTINS plus the
+# `auto` / `mlx` aliases). Display only: nothing is resolved or loaded.
+STT_LABELS = {
+    "auto": "Automatic",
+    "faster-whisper": "Faster Whisper",
+    "mlx-whisper": "MLX Whisper",
+    "mlx": "MLX Whisper",
+    "parakeet": "Parakeet",
+}
+# Parakeet runs one fixed model and ignores [stt] model (see config.py), so
+# its size is not shown as if it were chosen.
+STT_FIXED_MODEL = {"parakeet": "TDT 0.6B v2"}
+
+
+def speech_summary(config):
+    """'Parakeet / TDT 0.6B v2', 'MLX Whisper / small', 'Automatic / base'.
+
+    Reads only the configured provider and model size. `auto` stays
+    "Automatic": which engine auto picks depends on what is installed and is
+    only known once the model loads, so it is never guessed here. `stt_device`
+    is not the provider and plays no part. Unknown (entry-point) ids are shown
+    as they are.
+    """
+    provider = (getattr(config, "stt_backend", "") or "auto").strip()
+    label = STT_LABELS.get(provider.lower(), provider)
+    model = STT_FIXED_MODEL.get(provider.lower()) or config.model_size
+    return f"{label} / {model}" if model else label
+
+
 def summary_values(config):
     """(speech text, cleanup & Ask text) for the summary card."""
-    speech = f"{config.stt_backend} / {config.model_size}"
+    speech = speech_summary(config)
     preset = active_preset(config)
     provider = preset.label if preset else config.llm_provider
     return speech, f"{provider} / {config.llm_model or 'not selected'}"

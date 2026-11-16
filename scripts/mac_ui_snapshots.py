@@ -119,11 +119,63 @@ def _setup_check_snapshots(setup):
     setup._render()
 
 
+def _isolated_config(base, name, **overrides):
+    """A default Config whose vault is a temp folder: the Meetings page's
+    Recent meetings list (and anything else vault-based) never reads the
+    user's real vault, whichever page a snapshot shows."""
+    return Config(vault_path=str(base / f"vault-{name}"), **overrides)
+
+
+def _write_note(vault, category, stamp, title, body="## Summary\n- Decided.\n"):
+    """A note laid out the way ObsidianWriter writes them."""
+    folder = Path(vault) / "notes" / "meetings" / category
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{stamp} {title}.md"
+    date, clock = stamp.split(" ")
+    path.write_text(
+        "---\n"
+        f"date: {date}T{clock[:2]}:{clock[2:]}\n"
+        f"platform: {category}\n"
+        "duration_minutes: 30\n"
+        "tags: [meeting, localflow]\n"
+        "---\n\n"
+        f"# {title}\n\n{body}\n"
+        f"Raw transcript: [[{stamp} {title} (transcript)]]\n",
+        encoding="utf-8",
+    )
+    # Transcripts live in their own folder and are never listed.
+    logs = Path(vault) / "notes" / "transcripts" / category
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"{stamp} {title} (transcript).md").write_text("# t\n", encoding="utf-8")
+    return path
+
+
+def _style_snapshots(base):
+    """Style autosave: default, after a successful click, and a failed save.
+
+    save_config is patched, so no click ever touches the real config file;
+    the failure keeps the clicked selection beside the inline error.
+    """
+    history = HistoryStore(base / "style-history.sqlite", base / "style-clips")
+    dictionary = DictionaryStore(base / "style-dictionary.json")
+    with patch("localflow.hub_mac.save_config"):
+        controller = build_hub_window(
+            history, dictionary, _isolated_config(base, "style"), initial_page="Style",
+        )
+        _hub_sized_shots(controller, "hub-style-default")
+        controller.selectCleanupLevel_(controller.cleanup_buttons[2])
+        controller.selectStyle_(controller.style_buttons["work"][1])
+        _hub_sized_shots(controller, "hub-style-autosaved")
+    with patch("localflow.hub_mac.save_config", side_effect=OSError("read-only")):
+        controller.selectStyle_(controller.style_buttons["email"][3])
+        _hub_sized_shots(controller, "hub-style-save-error")
+
+
 def _hub_snapshots(base):
     for state in ("empty", "populated", "error"):
         history = HistoryStore(base / f"hub-{state}.sqlite", base / f"clips-{state}")
         dictionary = DictionaryStore(base / f"dictionary-{state}.json")
-        config = Config()
+        config = _isolated_config(base, f"hub-{state}")
         if state == "populated":
             history.add(
                 kind="dictate", status="ok", app_name="Editor",
@@ -154,8 +206,24 @@ def _hub_snapshots(base):
             controller.show_page(page)
             _shot(controller, f"hub-{page.lower()}-{state}")
 
+    # Models summary with an explicit speech provider whose device differs:
+    # the card must say "Parakeet", not "auto" and not the device.
+    parakeet = _isolated_config(
+        base, "parakeet", stt_backend="parakeet", model_size="large-v3",
+        stt_device="cpu",
+    )
+    with patch("localflow.hub_mac.load_config", return_value=parakeet):
+        controller = build_hub_window(
+            HistoryStore(base / "hub-parakeet.sqlite", base / "clips-parakeet"),
+            DictionaryStore(base / "dictionary-parakeet.json"), parakeet,
+            initial_page="Models",
+        )
+        _shot(controller, "hub-models-parakeet")
+        _hub_sized_shots(controller, "hub-models-parakeet")
+
     class SnapshotMeetingClient:
         state = "idle"
+        notes_path = ""
 
         def templates(self):
             return {
@@ -166,14 +234,30 @@ def _hub_snapshots(base):
                 ],
             }
 
+        @staticmethod
+        def running(state):
+            """(system_audio, system_audio_error) of a running state: a
+            permission failure vs. no source at all (not a permission)."""
+            return {
+                "running": ("error", (
+                    "ScreenCaptureKit: no display available — grant "
+                    "Screen Recording permission to this Python binary (None)"
+                )),
+                "running-no-system-audio": ("error", (
+                    "no system audio source found: set up BlackHole and set "
+                    "[meetings] system_audio_device"
+                )),
+            }.get(state)
+
         def status(self):
-            if self.state == "running":
+            if self.running(self.state):
+                system_audio, system_error = self.running(self.state)
                 return {
                     "session": {
                         "title": "Planning", "template": "standup",
                         "user_notes": "Check launch date",
-                        "system_audio": "error",
-                        "system_audio_error": "System audio permission unavailable",
+                        "system_audio": system_audio,
+                        "system_audio_error": system_error,
                         "seconds": 185, "segment_count": 2,
                         "segments": [
                             {"stamp": "00:04", "source": "me", "text": "I can take this"},
@@ -185,10 +269,7 @@ def _hub_snapshots(base):
             if self.state == "saved":
                 return {
                     "session": None,
-                    "last_saved": {
-                        "notes_path": "/Users/runner/Meeting notes/Planning.md",
-                        "enhanced": True,
-                    },
+                    "last_saved": {"notes_path": self.notes_path, "enhanced": True},
                     "chat_available": True,
                 }
             return {
@@ -202,7 +283,7 @@ def _hub_snapshots(base):
             return {"ok": True}
 
         def stop(self):
-            return {"notes_path": "/Users/runner/Meeting notes/Planning.md"}
+            return {"notes_path": self.notes_path}
 
         def chat(self, _question):
             return {"answer": "The launch date is March 3."}
@@ -210,13 +291,30 @@ def _hub_snapshots(base):
         def dismiss(self):
             return None
 
+    # Recent meetings come from a temp vault laid out like ObsidianWriter's:
+    # six notes (five newest are listed) plus transcripts that must not show.
+    vault = base / "vault-meetings"
+    saved_note = None
+    for stamp, title, category in (
+        ("2026-11-10 0930", "Design review", "Zoom"),
+        ("2026-11-11 1100", "Hiring sync", "Meet"),
+        ("2026-11-12 1500", "Customer call: Acme", "Zoom"),
+        ("2026-11-13 1000", "Weekly standup", "Other"),
+        ("2026-11-14 1600", "Retro", "Meet"),
+        ("2026-11-15 1430", "Planning", "Zoom"),
+    ):
+        saved_note = _write_note(vault, category, stamp, title)
     client = SnapshotMeetingClient()
+    client.notes_path = str(saved_note)
     history = HistoryStore(base / "hub-meetings.sqlite", base / "hub-meetings-clips")
     dictionary = DictionaryStore(base / "hub-meetings-dictionary.json")
     controller = build_hub_window(
-        history, dictionary, Config(), meeting_client=client
+        history, dictionary, Config(vault_path=str(vault)), meeting_client=client
     )
-    for state in ("idle", "running", "saved"):
+    # idle: empty notes (placeholder drawn, nothing typed) + recent notes;
+    # running: permission failure; running-no-system-audio: generic failure;
+    # saved: "Notes saved: Planning" and Open notes, never the raw path.
+    for state in ("idle", "running", "running-no-system-audio", "saved"):
         client.state = state
         if state == "saved":
             controller.meeting_notes_text = ""
@@ -229,6 +327,17 @@ def _hub_snapshots(base):
         controller._meeting_event("status", client.status(), None)
         _shot(controller, f"hub-meetings-{state}")
         _hub_sized_shots(controller, f"hub-meetings-{state}")
+
+    # No saved notes yet: the Recent meetings card says so (empty temp vault).
+    controller = build_hub_window(
+        HistoryStore(base / "hub-meetings-empty.sqlite", base / "hub-meetings-empty-clips"),
+        DictionaryStore(base / "hub-meetings-empty-dictionary.json"),
+        _isolated_config(base, "meetings-empty"), meeting_client=SnapshotMeetingClient(),
+        initial_page="Meetings",
+    )
+    controller._meeting_event("templates", client.templates(), None)
+    controller._meeting_event("status", {"session": None, "last_saved": None}, None)
+    _hub_sized_shots(controller, "hub-meetings-recent-empty")
 
 
 def _hub_sized_shots(controller, name):
@@ -264,8 +373,8 @@ def _hub_hot_phrases_snapshots(base):
         for trigger, text, enabled in entries:
             model.store.add(trigger, text, enabled)
         return build_hub_window(
-            history, dictionary, Config(), initial_page="Hot Phrases",
-            phrases_model=model,
+            history, dictionary, _isolated_config(base, f"hp-{name}"),
+            initial_page="Hot Phrases", phrases_model=model,
         )
 
     controller = hub("empty")
@@ -278,9 +387,26 @@ def _hub_hot_phrases_snapshots(base):
     )
     controller = hub("populated3", entries)
     editor = controller.phrases
+    # "sign off" is disabled: the switch label reads "Off", and the empty
+    # preview box shows its drawn placeholder (no test phrase typed).
     editor.select(next(e["id"] for e in editor.entries if e["trigger"] == "sign off"))
     controller._phrases_sync()
     _hub_sized_shots(controller, "hub-hot-phrases-populated3-selected")
+
+    # A real preview result (normal output, unchanged) next to the enabled
+    # "On" label. The preview reads the dictionary: point it at a temp store.
+    with patch(
+        "localflow.phrases_model.DictionaryStore",
+        lambda: DictionaryStore(base / "hp-preview-dictionary.json"),
+    ):
+        controller = hub("preview", entries)
+        editor = controller.phrases
+        editor.select(
+            next(e["id"] for e in editor.entries if e["trigger"] == "review checklist")
+        )
+        editor.set_test_input("please review checklist now")
+        controller._phrases_sync()
+        _hub_sized_shots(controller, "hub-hot-phrases-preview-result")
 
     controller = hub("invalid", entries)
     editor = controller.phrases
@@ -344,13 +470,35 @@ def _hub_responsive_snapshots(base):
         [base / "prompts" / "01.md", base / "prompts" / "02.md"],
         "Weekly planning",
     )
+    # The stored technical error is shown as the shared friendly sentence;
+    # both the pending and the failed row offer Reject.
     queue.set_status(
         failed["id"], "failed", repo="localflow", error="Orca is not running",
+    )
+    # Failures with other causes keep their own text (not masked as "Orca
+    # isn't open"), and long context wraps instead of being cut off.
+    failures = PromptQueue(base / "queue-failures.json")
+    orca_down, repo_missing = failures.add(
+        [
+            WorkPrompt("Migrate session storage to Redis", "Replace local files."),
+            WorkPrompt("Update deploy docs for Redis", "Document the new dependency."),
+        ],
+        [base / "prompts" / "03.md", base / "prompts" / "04.md"],
+        "Weekly planning",
+    )
+    failures.set_status(
+        orca_down["id"], "failed", repo="localflow",
+        error="Orca app is not running — run `orca open`",
+    )
+    failures.set_status(
+        repo_missing["id"], "failed", repo="localflow",
+        error="orca exited 2: repo not found",
     )
 
     # Hot Phrases reads the injected temp store, never ~/.localflow.
     controller = build_hub_window(
-        history, dictionary, Config(), prompt_queue=empty_queue,
+        history, dictionary, _isolated_config(base, "responsive"),
+        prompt_queue=empty_queue,
         phrases_model=_phrases_model(base / "resp-hot-phrases.json"),
     )
     controller.show_page("Home")
@@ -420,6 +568,9 @@ def _hub_responsive_snapshots(base):
     controller.prompt_queue = queue
     controller.show_page("Prompts")
     _hub_sized_shots(controller, "hub-prompts-two")
+    controller.prompt_queue = failures
+    controller.show_page("Prompts")
+    _hub_sized_shots(controller, "hub-prompts-failures")
 
     controller.show_page("Dictionary")
     _hub_sized_shots(controller, "hub-dictionary-entries")
@@ -437,7 +588,7 @@ def _hub_responsive_snapshots(base):
 def _hub_provider_snapshots(base):
     history = HistoryStore(base / "provider-history.sqlite", base / "provider-clips")
     dictionary = DictionaryStore(base / "provider-dictionary.json")
-    config = Config()
+    config = _isolated_config(base, "provider")
     store = {}
     candidates = [
         provider_keys.ImportCandidate("fireworks", "environment: FIREWORKS_API_KEY", "fake-key-1234"),
@@ -478,7 +629,7 @@ def _hub_provider_snapshots(base):
             # previous state's views before anything below is reset.
             controller.show_page("Home")
             store.clear()
-            config = Config()
+            config = _isolated_config(base, "provider")
             controller.provider_candidates = []
             controller.provider_checked = {}
             controller.provider_message = ("", False)
@@ -522,8 +673,14 @@ def main():
         patch("localflow.secrets.set_secret"),
         patch("localflow.secrets.delete_secret"),
         # The Models page reads (and Use writes) the config: keep both off the
-        # real ~/.localflow.
-        patch("localflow.hub_mac.load_config", return_value=Config()),
+        # real ~/.localflow. The default config's vault is a temp folder too
+        # (`tmp` is bound by the first item above before this is evaluated),
+        # and Style autosave never writes the real config file.
+        patch(
+            "localflow.hub_mac.load_config",
+            return_value=Config(vault_path=str(Path(tmp) / "vault-default")),
+        ),
+        patch("localflow.hub_mac.save_config"),
         patch("localflow.provider_keys.save_config"),
         patch("localflow.provider_keys.fetch_models", return_value=[]),
         patch("localflow.provider_keys.test_llm", return_value=(False, "Snapshot: offline")),
@@ -631,6 +788,7 @@ def main():
         setup._render()
         _shot(setup, "setup-download-error")
         _hub_snapshots(tmp)
+        _style_snapshots(tmp)
         _hub_responsive_snapshots(tmp)
         _hub_hot_phrases_snapshots(tmp)
         _hub_provider_snapshots(tmp)

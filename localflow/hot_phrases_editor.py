@@ -30,6 +30,34 @@ DELETED_ELSEWHERE = (
 )
 PREVIEW_PROMPT = "Type a test phrase to see what dictation would paste."
 PREVIEW_ERROR = "Preview isn't available right now."
+# Drawn (never inserted) in the empty read-only preview box.
+PREVIEW_PLACEHOLDER = "What dictation would paste appears here."
+PREVIEW_EMPTY_RESULT = "Nothing would be pasted."
+# The switch's visible label follows its state; "Off" fits ENABLED_LABEL_W.
+ENABLED_LABELS = {True: "On", False: "Off"}
+ENABLED_ACCESSIBILITY = "Phrase enabled"
+
+
+def enabled_label(enabled) -> str:
+    """The text beside the enabled switch for its current state."""
+    return ENABLED_LABELS[bool(enabled)]
+
+
+def preview_placeholder(test_input, output, status) -> str:
+    """Muted text drawn in the preview box only while it has no output.
+
+    No test phrase: say what the box is for. A test phrase whose result is
+    empty: say so, rather than leaving a blank box. Real output: nothing (the
+    output itself is shown, unchanged). A preview error is already in the
+    status line, so the box stays plain.
+    """
+    if output:
+        return ""
+    if not (test_input or "").strip():
+        return PREVIEW_PLACEHOLDER
+    if status == PREVIEW_ERROR:
+        return ""
+    return PREVIEW_EMPTY_RESULT
 DISABLED_BANNER = (
     "Hot phrases are turned off in your settings, so they won't expand yet."
 )

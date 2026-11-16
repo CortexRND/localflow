@@ -124,7 +124,7 @@ def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()
     assert "from localflow.hub_mac import build_window" in snapshots
     assert "SnapshotMeetingClient" in snapshots
-    assert '("idle", "running", "saved")' in snapshots
+    assert '("idle", "running", "running-no-system-audio", "saved")' in snapshots
     assert 'f"hub-meetings-{state}"' in snapshots
     assert '"Home", "History", "Dictionary", "Style", "Models"' in snapshots
     assert '"Unable to load local data."' in snapshots

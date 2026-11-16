@@ -330,8 +330,11 @@ class PromptQueue:
 
 # Approve doubles as retry: a `failed` entry is a dispatch that errored, and
 # stranding it would let one transient Orca hiccup kill the prompt for good.
+# A failed entry can equally be rejected, so the user is never forced to retry
+# a prompt they no longer want. approved / rejected / dispatched stay final for
+# reject (and only pending / failed can be approved).
 APPROVE_FROM = ("pending", "failed")
-REJECT_FROM = ("pending",)
+REJECT_FROM = ("pending", "failed")
 
 
 class PromptTransitionError(Exception):

@@ -252,8 +252,10 @@ def test_meetings_respects_the_standard_header_offset():
     assert "top = self.cursor_y" in page
     assert "0, top, width, 13" in page  # the status message, not y=0
     assert "HUB_HEADER_OFFSET" in sources["show_page"]
-    # Controls track the available width instead of fixed 740/720 columns.
-    assert "NSMakeRect(0, notes_top, width, notes_height)" in page
+    # Controls track the available width instead of fixed 740/720 columns:
+    # the form frames come from the pure layout, sized by the page width.
+    assert "meeting_form_layout(width, top, notes_height)" in page
+    assert 'rect("notes")' in page
     layout = sources["_meeting_layout"]
     assert "width - 140" in layout and "width - 120" in layout
     # The autosave / state machine is still the same one.
@@ -502,7 +504,7 @@ def test_server_delegates_to_the_same_transition_code():
     assert 'return _transition(entry_id, "approve", "approved", APPROVE_FROM)' in source
     assert 'return _transition(entry_id, "reject", "rejected", REJECT_FROM)' in source
     assert "_APPROVE_FROM" not in source and "_REJECT_FROM" not in source
-    assert APPROVE_FROM == ("pending", "failed") and REJECT_FROM == ("pending",)
+    assert APPROVE_FROM == ("pending", "failed") and REJECT_FROM == ("pending", "failed")
 
 
 def test_approve_and_reject_follow_the_server_semantics(queue, tmp_path):
@@ -513,21 +515,91 @@ def test_approve_and_reject_follow_the_server_semantics(queue, tmp_path):
     with pytest.raises(PromptTransitionError) as conflict:
         reject_prompt(queue, first["id"])
     assert conflict.value.status_code == 409
-    assert "cannot reject a approved prompt (allowed from: pending)" == conflict.value.detail
+    assert (
+        "cannot reject a approved prompt (allowed from: pending, failed)"
+        == conflict.value.detail
+    )
     with pytest.raises(PromptTransitionError) as conflict:
         approve_prompt(queue, second["id"])
     assert conflict.value.status_code == 409
     assert queue.get(first["id"])["status"] == "approved"
 
 
-def test_failed_prompts_can_be_approved_again_but_not_rejected(queue, tmp_path):
+def test_failed_prompts_can_be_approved_again(queue, tmp_path):
     entry, _other = _two(queue, tmp_path)
     queue.set_status(entry["id"], "failed", error="orca down")
+    retried = approve_prompt(queue, entry["id"])
+    assert retried["status"] == "approved" and retried["error"] == ""
+
+
+def test_failed_prompts_can_be_rejected(queue, tmp_path):
+    entry, _other = _two(queue, tmp_path)
+    queue.set_status(entry["id"], "failed", error="orca down")
+    rejected = reject_prompt(queue, entry["id"])
+    # Rejecting keeps the failure on record; it is never dispatched now.
+    assert rejected["status"] == "rejected" and rejected["error"] == "orca down"
+    assert hub_model.review_prompt(queue, entry["id"], "approve") is not None
+    assert queue.get(entry["id"])["status"] == "rejected"
+
+
+@pytest.mark.parametrize("final", ["approved", "rejected", "dispatched"])
+def test_reject_is_refused_from_every_other_status(queue, tmp_path, final):
+    # Allowing failed must not open any other transition.
+    entry, _other = _two(queue, tmp_path)
+    queue.set_status(entry["id"], final)
     with pytest.raises(PromptTransitionError) as conflict:
         reject_prompt(queue, entry["id"])
     assert conflict.value.status_code == 409
-    retried = approve_prompt(queue, entry["id"])
-    assert retried["status"] == "approved" and retried["error"] == ""
+    assert queue.get(entry["id"])["status"] == final
+    message = hub_model.review_prompt(queue, entry["id"], "reject")
+    assert "changed before it could be rejected" in message
+    assert queue.get(entry["id"])["status"] == final
+
+
+@pytest.mark.parametrize("final", ["approved", "rejected", "dispatched"])
+def test_approve_is_still_refused_from_final_statuses(queue, tmp_path, final):
+    entry, _other = _two(queue, tmp_path)
+    queue.set_status(entry["id"], final)
+    with pytest.raises(PromptTransitionError) as conflict:
+        approve_prompt(queue, entry["id"])
+    assert conflict.value.status_code == 409
+    assert queue.get(entry["id"])["status"] == final
+
+
+def test_server_hub_and_cli_share_the_same_guards():
+    # The server endpoint and the hub both go through transition_prompt with
+    # the shared tuples; the CLI uses the same tuples (no local copies).
+    server = (ROOT / "localflow" / "server.py").read_text(encoding="utf-8")
+    assert 'return _transition(entry_id, "reject", "rejected", REJECT_FROM)' in server
+    cli = (ROOT / "localflow" / "cli.py").read_text(encoding="utf-8")
+    assert '_set_reviewed(ids, "rejected", REJECT_FROM)' in cli
+    assert '_set_reviewed(ids, "approved", APPROVE_FROM)' in cli
+    assert '("pending",)' not in cli and '("pending", "failed"))' not in cli
+    for row in hub_model.prompt_rows(
+        [{"id": s, "status": s} for s in ("pending", "approved", "rejected",
+                                          "dispatched", "failed")]
+    ):
+        assert row["can_reject"] == (row["status"] in REJECT_FROM)
+        assert row["can_approve"] == (row["status"] in APPROVE_FROM)
+
+
+def test_server_reject_endpoint_accepts_failed_and_refuses_final(tmp_path, monkeypatch):
+    fastapi = pytest.importorskip("fastapi")
+    from localflow import server
+
+    queue = PromptQueue(tmp_path / "server-queue.json")
+    entries = queue.add(
+        [WorkPrompt("A", "a"), WorkPrompt("B", "b")],
+        [tmp_path / "a.md", tmp_path / "b.md"], "Planning",
+    )
+    queue.set_status(entries[0]["id"], "failed", error="orca down")
+    queue.set_status(entries[1]["id"], "dispatched")
+    monkeypatch.setattr(server, "_queue", queue)
+    assert server.prompts_reject(entries[0]["id"])["status"] == "rejected"
+    with pytest.raises(fastapi.HTTPException) as refused:
+        server.prompts_reject(entries[1]["id"])
+    assert refused.value.status_code == 409
+    assert queue.get(entries[1]["id"])["status"] == "dispatched"
 
 
 def test_dispatched_prompts_cannot_move(queue, tmp_path):
@@ -596,15 +668,97 @@ def test_prompt_rows_use_repo_then_meeting_and_guard_the_buttons():
     rows = {row["id"]: row for row in hub_model.prompt_rows(entries)}
     assert [row["id"] for row in hub_model.prompt_rows(entries)] == ["d", "c", "b", "a"]
     assert rows["a"]["context"] == "Standup"
-    assert rows["b"]["context"] == "localflow — Orca is not running"
+    # The stored technical error becomes the shared friendly sentence.
+    assert rows["b"]["context"] == (
+        "localflow · Couldn't send — the Orca agent app isn't open"
+    )
+    assert rows["b"]["error"] == hub_model.ORCA_NOT_OPEN
+    assert "Orca is not running" not in rows["b"]["context"]
     assert rows["c"]["context"] == "Unknown meeting"
     assert rows["d"]["title"] == "Untitled prompt"
     flags = {k: (v["can_approve"], v["can_reject"]) for k, v in rows.items()}
     assert flags == {
-        "a": (True, True), "b": (True, False),
+        "a": (True, True), "b": (True, True),
         "c": (False, False), "d": (False, False),
     }
     assert hub_model.prompt_rows([]) == []
+
+
+def test_prompt_errors_map_only_the_known_orca_cause():
+    text = hub_model.prompt_error_text
+    for stored in (
+        "Orca is not running",
+        "Orca app is not running — run `orca open`",
+        (
+            "Orca app is not running — run `orca open` (not possible over SSH: it "
+            "launches a GUI app on the Mac's own display)"
+        ),
+    ):
+        assert text(stored) == "Couldn't send — the Orca agent app isn't open"
+    # Unrelated failures keep their own meaning; nothing is masked.
+    for stored in (
+        "orca exited 2: repo not found",
+        "orca CLI not found on PATH",
+        "Orca runtime not reachable (stopped) — run `orca open`",
+        "cannot read prompt file /tmp/x.md: [Errno 2] No such file",
+        "orca worktree create timed out after 120s",
+    ):
+        assert text(stored) == stored
+    assert text("") == "" and text(None) == ""
+    rows = hub_model.prompt_rows([
+        {"id": "x", "status": "failed", "repo": "r", "error": "orca exited 2: repo not found"},
+        {"id": "y", "status": "pending", "error": "Orca is not running"},
+    ])
+    assert rows[1]["context"] == "r · orca exited 2: repo not found"
+    assert rows[0]["context"] == "Unknown meeting" and rows[0]["error"] == ""
+
+
+def _text_measure(text):
+    # A deliberately generous 11pt width estimate (wider than SF Pro).
+    return len(text) * 6.8
+
+
+@pytest.mark.parametrize("width", [
+    HUB_MIN_WIDTH - HUB_CONTENT_X - 2 * 16, 1280 - HUB_CONTENT_X - 2 * 16,
+])
+def test_prompt_rows_wrap_the_failure_instead_of_truncating(width):
+    row = hub_model.prompt_rows([
+        {"id": "f", "status": "failed", "repo": "localflow",
+         "error": "Orca is not running", "title": "Migrate"},
+    ])[0]
+    assert row["can_approve"] and row["can_reject"]
+    geometry = hub_model.prompt_row_layout(width, row, 60, _text_measure)
+    lines = hub_model.wrap_lines(row["context"], geometry["text_width"], _text_measure)
+    # Every wrapped line fits the text column, and the column is tall enough.
+    assert all(_text_measure(line) <= geometry["text_width"] for line in lines)
+    assert " ".join(lines) == row["context"]
+    assert geometry["context_h"] >= len(lines) * hub_model.PROMPT_CONTEXT_LINE
+    assert geometry["height"] >= hub_model.PROMPT_CONTEXT_Y + geometry["context_h"]
+    # Approve + Reject + pill + text never overlap and stay inside the row.
+    assert 14 + geometry["text_width"] <= geometry["pill_x"]
+    assert geometry["pill_x"] + 60 <= geometry["action_x"]
+    assert geometry["action_x"] + 88 + 8 + 80 <= width - 12
+    if width < 700:
+        assert len(lines) >= 2 and geometry["height"] > hub_model.PROMPT_ROW_MIN_H
+
+
+def test_prompt_rows_keep_the_compact_height_for_short_context():
+    row = hub_model.prompt_rows([{"id": "p", "status": "pending", "meeting": "Standup"}])[0]
+    geometry = hub_model.prompt_row_layout(600, row, 60, _text_measure)
+    assert geometry["height"] == hub_model.PROMPT_ROW_MIN_H and geometry["lines"] == 1
+
+
+def test_prompts_page_rows_use_the_wrapping_layout_and_both_actions():
+    sources = _controller_sources()
+    row = sources["_prompt_row"]
+    assert "prompt_row_layout(" in row and "wrap=True" in row
+    assert 'height=geometry["context_h"]' in row
+    assert 'return geometry["height"]' in row
+    page = sources["_page_prompts"]
+    assert "y += height" in page
+    snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text(encoding="utf-8")
+    assert '"hub-prompts-failures"' in snapshots
+    assert "orca exited 2: repo not found" in snapshots
 
 
 def test_shortcut_rows_follow_the_config_and_invent_no_enable_flag():

@@ -125,6 +125,59 @@ def surface_tint(token: str, palette: dict[str, str], amount: float = 0.12) -> s
     return "#" + "".join(f"{channel:02X}" for channel in channels)
 
 
+# Native text inputs (AppKit): one outer height for fields and pickers so a
+# title field and a template picker side by side line up exactly.
+INPUT_HEIGHT = 32
+INPUT_BORDER_WIDTH = 1.5
+INPUT_PADDING_X = 8
+
+
+def input_inner_frame(width: float, height: float, control_height: float):
+    """(x, y, w, h) of an unbezeled control inside its shared input box.
+
+    Every control is centred vertically at its own cell height, so a text
+    field and a picker in boxes of the same height share the same text
+    baseline band and top edge, whatever their intrinsic heights are.
+    """
+    inner_h = min(control_height, height - 2 * INPUT_BORDER_WIDTH)
+    return (
+        INPUT_PADDING_X, round((height - inner_h) / 2),
+        max(width - 2 * INPUT_PADDING_X, 0), inner_h,
+    )
+
+
+def halftone_dots(
+    width: float, height: float, *, step: int = 14, max_radius: int = 4,
+    pad: int = 8, anchor: str = "bottom-left",
+) -> list[tuple[float, float, float]]:
+    """(x, y, diameter) of the sun halftone, every dot inside width x height.
+
+    Dots fade with their distance from `anchor` (in the view's own, unflipped
+    coordinates) and stop at the diagonal, as the original 12 x 12 pattern did.
+    Only whole dots that fit are returned, so drawing never leaves the bounds.
+    """
+    span = 2 * max_radius
+    cols = int((width - 2 * pad - span) // step) + 1 if width >= 2 * pad + span else 0
+    rows = int((height - 2 * pad - span) // step) + 1 if height >= 2 * pad + span else 0
+    limit = max(cols, rows)
+    dots = []
+    for row in range(rows):
+        for col in range(cols):
+            if row + col >= limit:
+                continue
+            radius = max(1, max_radius - (row + col) // 5)
+            x = pad + col * step
+            y = pad + row * step
+            if anchor.endswith("right"):
+                x = width - pad - span - col * step
+            if anchor.startswith("top"):
+                y = height - pad - span - row * step
+            # Smaller dots sit centred in their cell.
+            offset = max_radius - radius
+            dots.append((x + offset, y + offset, 2 * radius))
+    return dots
+
+
 def resolve_tk_font(available_families) -> str:
     families = {family.casefold(): family for family in available_families}
     for preferred in ("SF Pro Text", "Helvetica Neue", "DejaVu Sans"):

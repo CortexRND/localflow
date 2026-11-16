@@ -25,37 +25,60 @@ from AppKit import (
 )
 from Foundation import NSMakePoint, NSMakeSize, NSObject, NSTimer
 
-from localflow.config import apply_config_update, load_config, save_config
+from localflow.config import ConfigError, apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryStore
 from localflow.dispatch import PromptQueue
 from localflow.history import HistoryStore
 from localflow.hot_phrases_editor import (
     EMPTY_MESSAGE,
+    ENABLED_ACCESSIBILITY,
     HotPhrasesEditor,
     empty_layout,
+    enabled_label,
     hot_phrases_layout,
+    preview_placeholder,
 )
 from localflow.hotphrases import HotPhraseStore
 from localflow.hub_model import (
+    MEETING_NOTES_PLACEHOLDER,
+    MEETING_SUBTITLE,
     PROMPT_STATUS_PILLS,
     PROMPTS_EMPTY,
     PROMPTS_UNREADABLE,
+    RECENT_EMPTY,
+    RECENT_ROW_H,
+    STYLE_AUTOSAVE_HINT,
+    STYLE_SAVE_FAILED,
     dictionary_entries,
+    home_decoration_frame,
+    meeting_capture_status,
+    meeting_form_layout,
     meeting_notes_height,
+    prompt_row_layout,
     prompt_rows,
+    recent_notes,
     remove_entry,
     review_prompt,
+    saved_notes_message,
     shortcut_rows,
+    sidebar_label,
+    sidebar_title,
     stat_layout,
+    style_row_frames,
+    style_update,
     submit_replacement,
     submit_word,
 )
 from localflow.mac_style import (
     FlippedView,
     HalftoneView,
+    PlaceholderTextView,
+    input_box,
     make_pill,
+    measure_text,
     page_title,
     style_button,
+    style_input_box,
     style_surface,
     tokens_for_window,
 )
@@ -89,7 +112,9 @@ from localflow.models_layout import (
 )
 from localflow.phrases_model import PhrasesModel
 from localflow.platform import current
+from localflow.text_wrap import wrap_lines
 from localflow.ui_tokens import (
+    CARD_BORDER_WIDTH,
     CARD_PADDING,
     HUB_CONTENT_GUTTER,
     HUB_CONTENT_TOP,
@@ -195,6 +220,9 @@ class HubWindowController(NSObject):
         self.meeting_error = ""
         self.meeting_next_poll = 0
         self.meeting_session_active = False
+        self.meeting_title_shows_session = False
+        self.meeting_recent = []
+        self.meeting_recent_error = ""
         self.tokens = LIGHT
         self.page = "Home"
         self.page_errors = {}
@@ -245,10 +273,16 @@ class HubWindowController(NSObject):
         mark.layer().setCornerRadius_(5)
         self.sidebar.addSubview_(mark)
         self.sidebar_buttons = []
+        sidebar_font = _font(13, "semibold")  # style_flat_button's title font
         for index, page in enumerate(PAGES):
             button = NSButton.buttonWithTitle_target_action_(page, self, "showPage:")
             button.setFrame_(NSMakeRect(16, 76 + index * 44, 168, 36))
-            button.setTitle_(f"\u2002\u2002{page}")
+            # Display label only ("Models & keys"); the tag still routes by
+            # PAGES, and a label that would not fit falls back to the page id.
+            button.setTitle_(
+                sidebar_title(page, lambda text: measure_text(text, sidebar_font))
+            )
+            button.setAccessibilityLabel_(sidebar_label(page))
             button.setAlignment_(AppKit.NSTextAlignmentLeft)
             button.setTag_(index)
             _style_button(button, selected=page == self.page, palette=self.tokens)
@@ -375,6 +409,9 @@ class HubWindowController(NSObject):
         ):
             page = "Hot Phrases"
         entering_phrases = page == "Hot Phrases" and self.page != "Hot Phrases"
+        # Recent notes are read when Meetings is shown (and after a stop), never
+        # by the 2s status poll, a resize rebuild or any other page.
+        entering_meetings = page == "Meetings" and self.page != "Meetings"
         if self.page == "Meetings" and hasattr(self, "meeting_notes"):
             self._meeting_capture_state()
         # Every rebuild (resize, appearance, navigation) funnels through here,
@@ -413,7 +450,10 @@ class HubWindowController(NSObject):
         # Every page shares the setup display title; History leaves room for
         # its right-aligned action so the two frames never overlap.
         self.body.addSubview_(
-            page_title(page, width - 140 if page == "History" else width, self.tokens)
+            page_title(
+                sidebar_label(page), width - 140 if page == "History" else width,
+                self.tokens,
+            )
         )
         if page == "History":
             self._button(
@@ -427,6 +467,8 @@ class HubWindowController(NSObject):
             self._callout(error)
         if entering_phrases:
             self._phrases().on_show()
+        if entering_meetings:
+            self._meeting_load_recent()
         getattr(self, f'_page_{page.lower().replace(" ", "_")}')()
         self._fit_body_height()
 
@@ -559,11 +601,16 @@ class HubWindowController(NSObject):
     def _page_home(self):
         stats = self.history.stats()
         width = self.body.frame().size.width
-        self.body.addSubview_(
-            HalftoneView.alloc().initWithFrame_palette_(
-                NSMakeRect(width - 150, 0, 150, 116), self.tokens
-            )
+        # The decoration lives in the header band only (it ends above the stat
+        # cards at HUB_HEADER_OFFSET) and the view clips its own drawing, so it
+        # never paints over a card at any width.
+        halftone = HalftoneView.alloc().initWithFrame_palette_(
+            NSMakeRect(*home_decoration_frame(width)), self.tokens
         )
+        halftone.anchor, halftone.step, halftone.max_radius, halftone.pad = (
+            "top-right", 9, 3, 4,
+        )
+        self.body.addSubview_(halftone)
         streak = stats["current_streak_days"]
         longest_streak = stats["longest_streak_days"]
         cards = (
@@ -1205,14 +1252,22 @@ class HubWindowController(NSObject):
         }
         for index, (category, example) in enumerate(examples.items()):
             y = self.cursor_y
+            frames = style_row_frames(y, group_width)
+            label_x, label_y, label_w, label_h = frames["label"]
             self.body.addSubview_(
                 _label(
-                    f"{category.title()} style", 0, y + 4, 160, 15,
-                    "ink", palette=self.tokens, height=22, weight="semibold",
+                    f"{category.title()} style", label_x, label_y, label_w, 15,
+                    "ink", palette=self.tokens, height=label_h, weight="semibold",
                 )
             )
+            # The example wraps onto a second line inside the row instead of
+            # being cut off in the 160pt label column.
+            example_x, example_y, example_w, example_h = frames["example"]
             self.body.addSubview_(
-                _label(example, 0, y + 29, 160, 11, "muted", palette=self.tokens, height=18)
+                _label(
+                    example, example_x, example_y, example_w, 11, "muted",
+                    palette=self.tokens, height=example_h, wrap=True,
+                )
             )
             self.style_selections[category] = getattr(self.config, f"style_{category}")
             self.style_buttons[category] = []
@@ -1237,10 +1292,9 @@ class HubWindowController(NSObject):
                 self.tokens,
             )
             self.cursor_y += 86
-        self._button(
-            "Save style", "saveStyle:", 0, self.cursor_y,
-            width=150, kind="primary",
-        )
+        # No Save button: every click is saved right away (selectCleanupLevel_
+        # / selectStyle_ -> _style_autosave); a failure is shown in the callout.
+        self._add_text(STYLE_AUTOSAVE_HINT, size=12, color="muted", height=20, gap=8)
 
     @objc.python_method
     def _segment_group(self, y, x, width):
@@ -1267,9 +1321,12 @@ class HubWindowController(NSObject):
 
     def selectCleanupLevel_(self, sender):
         self.cleanup_selection = self.cleanup_options[sender.tag()]
+        # The clicked segment is restyled in place (no page rebuild), then the
+        # choice is saved straight away.
         self._update_segment_buttons(
             self.cleanup_group, self.cleanup_buttons, sender.tag()
         )
+        self._style_autosave()
 
     def selectStyle_(self, sender):
         category, value = self.style_tag_map[sender.tag()]
@@ -1278,28 +1335,35 @@ class HubWindowController(NSObject):
         self._update_segment_buttons(
             self.style_groups[category], self.style_buttons[category], selected
         )
+        self._style_autosave()
 
-    def saveStyle_(self, _sender):
-        update = {
-            "cleanup": {
-                "level": self.cleanup_selection,
-                **{
-                    f"style_{name}": value
-                    for name, value in self.style_selections.items()
-                },
-            }
-        }
+    @objc.python_method
+    def _style_autosave(self):
+        """Persist the Style selections through the one config write path.
+
+        The committed `self.config` only changes once save_config succeeded.
+        On failure it is left as it was, the page shows the error inline and
+        the clicked (pending) selections stay visible, so the next click saves
+        them all again.
+        """
         try:
-            self.config = apply_config_update(self.config, update)
-            save_config(self.config)
-            self.page_errors.pop("Style", None)
-            self.show_page("Style")
+            updated = apply_config_update(
+                self.config, style_update(self.cleanup_selection, self.style_selections),
+            )
+            save_config(updated)
         except Exception as exc:  # noqa: BLE001
-            # Keep the unsaved selections visible beside the error.
+            message = str(exc) if isinstance(exc, ConfigError) else STYLE_SAVE_FAILED
             state = self._preserve_page_state()
-            self.page_errors["Style"] = str(exc)
+            self.page_errors["Style"] = message
             self.show_page("Style")
             self._restore_page_state(state)
+            return False
+        self.config = updated
+        if self.page_errors.pop("Style", None) is not None:
+            # Only an earlier error forces a rebuild (to drop its callout);
+            # a normal click keeps the in-place segment update above.
+            self._rebuild_current_page()
+        return True
 
     @objc.python_method
     def _meeting_button(self, title, action, x, y, width, kind="secondary"):
@@ -1314,79 +1378,124 @@ class HubWindowController(NSObject):
         # error callout), never from y=0 where the page title sits.
         top = self.cursor_y
         notes_height = meeting_notes_height(self._viewport_height(), top)
+        self.meeting_top, self.meeting_notes_h = top, notes_height
+        frames = meeting_form_layout(width, top, notes_height)
+
+        def rect(key):
+            return NSMakeRect(*frames[key])
+
+        # The subtitle and the connection message share the line under the
+        # page title: the message replaces the subtitle while it has text.
+        self.meeting_subtitle = _label(
+            MEETING_SUBTITLE, 0, top, width, 13, "muted",
+            palette=self.tokens, height=20,
+        )
+        self.body.addSubview_(self.meeting_subtitle)
         self.meeting_message = _label(
             "" if self.meeting_status else "Connecting to LocalFlow…",
-            0, top, width, 13, "muted", palette=self.tokens, height=28,
+            0, top, width, 13, "muted", palette=self.tokens, height=20,
         )
         self.body.addSubview_(self.meeting_message)
         self.meeting_retry = self._button(
-            "Retry", "meetingRetry:", 0, top + 36, width=100,
+            "Retry", "meetingRetry:", *frames["retry"][:2], width=100,
         )
         self.meeting_retry.setHidden_(True)
         self.meeting_watch = _label(
-            "", 0, 0, width, 11, "muted", palette=self.tokens, height=22,
+            "", 0, 0, width, 12, "muted", palette=self.tokens, height=20,
         )
         self.body.addSubview_(self.meeting_watch)
-        title_width = int((width - 20) * 0.58)
-        template_x = title_width + 20
         self.meeting_title_label = _label(
-            "Meeting title", 0, top + 28, 150, 11,
-            "ink", palette=self.tokens, height=18, weight="semibold",
+            "Meeting title", *frames["title_label"][:3], 11,
+            "ink", palette=self.tokens, height=frames["title_label"][3],
+            weight="semibold",
         )
         self.body.addSubview_(self.meeting_title_label)
-        self.meeting_title = self._field(
-            self.meeting_title_value, 0, top + 48, title_width
+        # Title field and template picker: one shared input box each, the
+        # same height and the same top edge (see mac_style.input_box).
+        self.meeting_title = NSTextField.alloc().initWithFrame_(rect("title_field"))
+        self.meeting_title.setStringValue_(self.meeting_title_value or "")
+        self.meeting_title.setAccessibilityLabel_("Meeting title")
+        self.meeting_title_box = input_box(
+            self.meeting_title, frames["title_field"], self.tokens,
         )
+        self.body.addSubview_(self.meeting_title_box)
         self.meeting_template_label = _label(
-            "Notes template", template_x, top + 28, 150, 11,
-            "ink", palette=self.tokens, height=18, weight="semibold",
+            "Notes template", *frames["template_label"][:3], 11,
+            "ink", palette=self.tokens, height=frames["template_label"][3],
+            weight="semibold",
         )
         self.body.addSubview_(self.meeting_template_label)
-        self.meeting_template = NSComboBox.alloc().initWithFrame_(
-            NSMakeRect(template_x, top + 48, width - template_x, 32)
-        )
+        self.meeting_template = NSComboBox.alloc().initWithFrame_(rect("template_field"))
         self.meeting_template.setCompletes_(False)
-        self.body.addSubview_(self.meeting_template)
+        self.meeting_template.setAccessibilityLabel_("Notes template")
+        self.meeting_template_box = input_box(
+            self.meeting_template, frames["template_field"], self.tokens,
+        )
+        self.body.addSubview_(self.meeting_template_box)
         if self.meeting_templates:
             self._meeting_fill_templates()
 
         self.body.addSubview_(
             _label(
-                "Your notes", 0, top + 92, 300, 13,
-                "ink", palette=self.tokens, height=22, weight="semibold",
+                "Your notes", *frames["notes_label"][:3], 13,
+                "ink", palette=self.tokens, height=frames["notes_label"][3],
+                weight="semibold",
             )
         )
-        notes_top = top + 118
-        notes_bottom = notes_top + notes_height
+        # Autosave status rides on the heading row: no blank band is kept
+        # for it under the card, and typing never moves the Start button.
+        self.meeting_notes_status = _label(
+            "", *frames["notes_status"][:3], 11, "muted",
+            palette=self.tokens, height=frames["notes_status"][3],
+        )
+        self.meeting_notes_status.setAlignment_(AppKit.NSTextAlignmentRight)
+        self.body.addSubview_(self.meeting_notes_status)
+        _notes_x, _notes_y, notes_w, notes_h = frames["notes"]
+        self.meeting_notes_card = FlippedView.alloc().initWithFrame_(rect("notes"))
+        style_surface(
+            self.meeting_notes_card, self.tokens, border="ink",
+            width=CARD_BORDER_WIDTH,
+        )
         self.meeting_notes_scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(0, notes_top, width, notes_height)
+            NSMakeRect(4, 4, notes_w - 8, notes_h - 8)
         )
         self.meeting_notes_scroll.setHasVerticalScroller_(True)
         self.meeting_notes_scroll.setAutohidesScrollers_(True)
-        self.meeting_notes_scroll.setDrawsBackground_(True)
-        self.meeting_notes = NSTextView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, width - 20, notes_height - 4)
+        self.meeting_notes_scroll.setBorderType_(AppKit.NSNoBorder)
+        self.meeting_notes_scroll.setDrawsBackground_(False)
+        content = self.meeting_notes_scroll.contentSize()
+        self.meeting_notes = PlaceholderTextView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, content.width, content.height)
         )
+        self.meeting_notes.setMinSize_(NSMakeSize(0, content.height))
+        self.meeting_notes.setMaxSize_(NSMakeSize(10000000, 10000000))
+        self.meeting_notes.setVerticallyResizable_(True)
+        self.meeting_notes.setHorizontallyResizable_(False)
         self.meeting_notes.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        self.meeting_notes.textContainer().setWidthTracksTextView_(True)
+        self.meeting_notes.setTextContainerInset_(NSMakeSize(6, 8))
         self.meeting_notes.setFont_(_font(13))
-        self.meeting_notes.setBackgroundColor_(_color("surface", self.tokens))
+        self.meeting_notes.setRichText_(False)
+        self.meeting_notes.setDrawsBackground_(False)
         self.meeting_notes.setTextColor_(_color("ink", self.tokens))
+        self.meeting_notes.setInsertionPointColor_(_color("ink", self.tokens))
+        self.meeting_notes.setAccessibilityLabel_("Your notes")
+        # Drawn only while the box is empty; never part of string(), so it is
+        # never autosaved, sent with Start, or handed to the notes model.
+        self.meeting_notes.setPlaceholder_color_(
+            MEETING_NOTES_PLACEHOLDER, _color("muted", self.tokens),
+        )
         self.meeting_notes.setString_(self.meeting_notes_text)
         self.meeting_notes.setDelegate_(self)
         self.meeting_notes_scroll.setDocumentView_(self.meeting_notes)
-        style_surface(self.meeting_notes_scroll, self.tokens)
-        self.body.addSubview_(self.meeting_notes_scroll)
-        self.meeting_notes_status = _label(
-            "", 0, notes_bottom + 4, width, 10, "muted",
-            palette=self.tokens, height=18,
-        )
-        self.body.addSubview_(self.meeting_notes_status)
+        self.meeting_notes_card.addSubview_(self.meeting_notes_scroll)
+        self.body.addSubview_(self.meeting_notes_card)
         self.meeting_error_label = _label(
-            "", 0, notes_bottom + 26, width, 11, "red", palette=self.tokens, height=22,
+            "", 0, 0, width, 12, "red", palette=self.tokens, height=18, wrap=True,
         )
         self.body.addSubview_(self.meeting_error_label)
         self.meeting_action = self._button(
-            "Start meeting transcription", "meetingAction:", 0, notes_bottom + 54,
+            "Start meeting transcription", "meetingAction:", 0, frames["action_y"],
             width=250, kind="primary",
         )
         self.meeting_live_label = _label(
@@ -1396,36 +1505,34 @@ class HubWindowController(NSObject):
             AppKit.NSLineBreakByWordWrapping
         )
         self.meeting_live_label.setMaximumNumberOfLines_(0)
+        # Everything from here down is positioned by _meeting_layout, which
+        # follows the action button; the frames below are placeholders.
         self.meeting_live_card = FlippedView.alloc().initWithFrame_(
-            NSMakeRect(0, notes_bottom + 98, width, 98)
+            NSMakeRect(0, 0, width, 98)
         )
         style_surface(self.meeting_live_card, self.tokens)
         self.meeting_live_card.addSubview_(self.meeting_live_label)
         self.body.addSubview_(self.meeting_live_card)
         self.meeting_saved_label = _label(
-            "", 0, notes_bottom + 212, width - 160, 11, "ink",
-            palette=self.tokens, height=32,
+            "", 0, 0, width - 160, 13, "ink",
+            palette=self.tokens, height=22, weight="semibold",
         )
         self.body.addSubview_(self.meeting_saved_label)
         self.meeting_open_notes = self._button(
-            "Open notes", "meetingOpenNotes:", width - 140, notes_bottom + 208,
-            width=140,
+            "Open notes", "meetingOpenNotes:", width - 140, 0, width=140,
         )
         self.meeting_chat_heading = _label(
-            "Ask the transcript", 0, notes_bottom + 252, 400, 13,
+            "Ask the transcript", 0, 0, 400, 13,
             "ink", palette=self.tokens, height=22, weight="semibold",
         )
         self.body.addSubview_(self.meeting_chat_heading)
-        self.meeting_question = self._field(
-            "", 0, notes_bottom + 278, width - 120
-        )
+        self.meeting_question = self._field("", 0, 0, width - 120)
         self.meeting_question.setPlaceholderString_("Ask about this meeting")
         self.meeting_ask = self._button(
-            "Ask", "meetingAsk:", width - 100, notes_bottom + 278,
-            width=100, kind="primary",
+            "Ask", "meetingAsk:", width - 100, 0, width=100, kind="primary",
         )
         self.meeting_answer_scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(0, notes_bottom + 320, width, 64)
+            NSMakeRect(0, 0, width, 64)
         )
         self.meeting_answer_scroll.setHasVerticalScroller_(True)
         self.meeting_answer_scroll.setAutohidesScrollers_(True)
@@ -1434,9 +1541,84 @@ class HubWindowController(NSObject):
         )
         self.meeting_answer_scroll.setDocumentView_(self.meeting_answer_content)
         self.body.addSubview_(self.meeting_answer_scroll)
+        self.meeting_recent_heading = _label(
+            "Recent meetings", 0, 0, 400, 13,
+            "ink", palette=self.tokens, height=22, weight="semibold",
+        )
+        self.body.addSubview_(self.meeting_recent_heading)
+        self.meeting_recent_card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, width, RECENT_ROW_H)
+        )
+        style_surface(self.meeting_recent_card, self.tokens)
+        self.body.addSubview_(self.meeting_recent_card)
+        self._meeting_render_recent()
         self._meeting_render()
         self._meeting_worker("templates")
         self._meeting_poll()
+
+    @objc.python_method
+    def _meeting_load_recent(self):
+        """Newest saved notes from the configured vault's notes folder.
+
+        Called when Meetings is shown and after a stop, never from the status
+        poll. Reads only <vault>/<notes_folder> (see hub_model.recent_notes).
+        """
+        self.meeting_recent, self.meeting_recent_error = recent_notes(
+            getattr(self.config, "vault_path", ""),
+            getattr(self.config, "notes_folder", ""),
+        )
+
+    @objc.python_method
+    def _meeting_render_recent(self):
+        """Rows of the Recent meetings card: title, date and Open."""
+        card = self.meeting_recent_card
+        for view in list(card.subviews()):
+            view.removeFromSuperview()
+        width = self.body.frame().size.width
+        notes = self.meeting_recent
+        if not notes:
+            message = self.meeting_recent_error or RECENT_EMPTY
+            card.setFrame_(NSMakeRect(0, card.frame().origin.y, width, RECENT_ROW_H))
+            card.addSubview_(
+                _label(
+                    message, CARD_PADDING, 12, width - 2 * CARD_PADDING, 12,
+                    "muted", palette=self.tokens, height=20,
+                )
+            )
+            return
+        card.setFrame_(
+            NSMakeRect(0, card.frame().origin.y, width, len(notes) * RECENT_ROW_H)
+        )
+        date_w = 150
+        open_w = 72
+        for index, note in enumerate(notes):
+            y = index * RECENT_ROW_H
+            open_x = width - CARD_PADDING - open_w
+            date_x = open_x - 12 - date_w
+            card.addSubview_(
+                _label(
+                    note["title"], CARD_PADDING, y + 12, date_x - CARD_PADDING - 12,
+                    13, "ink", palette=self.tokens, height=20, weight="semibold",
+                )
+            )
+            date = _label(
+                note["date_label"], date_x, y + 14, date_w, 11, "muted",
+                palette=self.tokens, height=18,
+            )
+            date.setAlignment_(AppKit.NSTextAlignmentRight)
+            card.addSubview_(date)
+            button = self._button(
+                "Open", "meetingOpenRecent:", open_x, y + 8, index, open_w,
+                parent=card, kind="ghost", height=28,
+            )
+            button.setAccessibilityLabel_(f"Open notes: {note['title']}")
+            if index < len(notes) - 1:
+                divider = NSView.alloc().initWithFrame_(
+                    NSMakeRect(12, y + RECENT_ROW_H - 1, width - 24, 1)
+                )
+                divider.setWantsLayer_(True)
+                divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
+                card.addSubview_(divider)
 
     @objc.python_method
     def _meeting_worker(self, operation, *args):
@@ -1648,7 +1830,17 @@ class HubWindowController(NSObject):
             if error:
                 self.meeting_error = str(error)
             else:
+                # The stop payload has paths only; remember the session's
+                # title for the "Notes saved: <title>" line.
+                previous = self.meeting_status.get("session") or {}
+                result = dict(result or {})
+                if previous.get("title"):
+                    result.setdefault("title", previous["title"])
                 self.meeting_last_saved = result
+                # A new note exists: refresh Recent meetings (not on every poll).
+                self._meeting_load_recent()
+                if self.page == "Meetings" and hasattr(self, "meeting_recent_card"):
+                    self._meeting_render_recent()
                 self.meeting_notes_text = ""
                 self.meeting_notes_dirty = False
                 self.meeting_session_active = False
@@ -1674,13 +1866,15 @@ class HubWindowController(NSObject):
     @objc.python_method
     def _meeting_page_controls(self):
         return (
-            self.meeting_watch, self.meeting_title_label, self.meeting_title,
-            self.meeting_template_label, self.meeting_template,
-            self.meeting_notes_scroll, self.meeting_notes_status,
+            self.meeting_subtitle,
+            self.meeting_watch, self.meeting_title_label, self.meeting_title_box,
+            self.meeting_template_label, self.meeting_template_box,
+            self.meeting_notes_card, self.meeting_notes_status,
             self.meeting_error_label, self.meeting_action, self.meeting_live_card,
             self.meeting_saved_label, self.meeting_open_notes,
             self.meeting_chat_heading, self.meeting_question,
             self.meeting_ask, self.meeting_answer_scroll,
+            self.meeting_recent_heading, self.meeting_recent_card,
         )
 
     @objc.python_method
@@ -1695,25 +1889,78 @@ class HubWindowController(NSObject):
         )
 
     @objc.python_method
-    def _meeting_layout(self, session):
+    def _meeting_show_title(self, session):
+        """The title stays on screen in every state.
+
+        Idle: the editable draft. Recording: the running session's own title,
+        read-only but selectable, in a quiet box. The draft is set aside first
+        and put back when the session ends, so showing the session title never
+        overwrites what the user typed for the next meeting.
+        """
+        title = self.meeting_title
+        if session:
+            if not self.meeting_title_shows_session:
+                self.meeting_title_value = title.stringValue()
+                self.meeting_title_shows_session = True
+            title.setStringValue_(session.get("title") or "Meeting")
+            title.setEditable_(False)
+            title.setSelectable_(True)
+        else:
+            if self.meeting_title_shows_session:
+                title.setStringValue_(self.meeting_title_value or "")
+                self.meeting_title_shows_session = False
+            title.setEditable_(True)
+        title.setTextColor_(_color("ink", self.tokens))
+        style_input_box(self.meeting_title_box, self.tokens, readonly=bool(session))
+        style_input_box(self.meeting_template_box, self.tokens, readonly=bool(session))
+
+    @objc.python_method
+    def _meeting_error_height(self, width):
+        """Wrapped height of the meeting error, 0 when there is none."""
+        if not self.meeting_error:
+            return 0
+        error_font = _font(12)
+        lines = wrap_lines(
+            self.meeting_error, width - 8,
+            lambda text: measure_text(text, error_font),
+        )
+        return max(1, len(lines)) * 16 + 2
+
+    @objc.python_method
+    def _meeting_layout(self, session, saved=None, chat_available=False):
         width = self.body.frame().size.width
+        # The form part (error, action) comes from the pure layout: an error
+        # takes room only while there is one, otherwise the Start button sits
+        # a compact 12pt under the notes card.
+        frames = meeting_form_layout(
+            width, self.meeting_top, self.meeting_notes_h,
+            error_height=self._meeting_error_height(width),
+        )
+        self.meeting_error_label.setHidden_("error" not in frames)
+        if "error" in frames:
+            self.meeting_error_label.setFrame_(NSMakeRect(*frames["error"]))
+        current = self.meeting_action.frame()
+        self.meeting_action.setFrame_(
+            NSMakeRect(0, frames["action_y"], current.size.width, current.size.height)
+        )
         action_frame = self.meeting_action.frame()
         watch_y = action_frame.origin.y + action_frame.size.height + 4
+        watch_visible = bool(self.meeting_watch.stringValue())
         self.meeting_watch.setFrame_(
-            NSMakeRect(action_frame.origin.x, watch_y, width, 22)
+            NSMakeRect(action_frame.origin.x, watch_y, width, 20)
         )
-        live_y = watch_y + 30
+        live_y = watch_y + (26 if watch_visible else 0)
         self.meeting_live_card.setFrame_(NSMakeRect(0, live_y, width, 98))
         self.meeting_live_label.setFrame_(NSMakeRect(8, 8, width - 16, 82))
         self.meeting_live_card.setHidden_(not bool(session))
         saved_y = live_y + (108 if session else 8)
         self.meeting_saved_label.setFrame_(
-            NSMakeRect(0, saved_y, width - 160, 32)
+            NSMakeRect(0, saved_y + 4, width - 160, 22)
         )
         self.meeting_open_notes.setFrame_(
-            NSMakeRect(width - 140, saved_y - 4, 140, 36)
+            NSMakeRect(width - 140, saved_y, 140, 36)
         )
-        chat_y = saved_y + 44
+        chat_y = saved_y + (48 if saved else 0)
         self.meeting_chat_heading.setFrame_(
             NSMakeRect(0, chat_y, 400, 22)
         )
@@ -1726,6 +1973,15 @@ class HubWindowController(NSObject):
         self.meeting_answer_scroll.setFrame_(
             NSMakeRect(0, chat_y + 68, width, 64)
         )
+        recent_y = chat_y
+        if chat_available:
+            recent_y = chat_y + (140 if self.meeting_answers else 74)
+        recent_y += 8
+        self.meeting_recent_heading.setFrame_(NSMakeRect(0, recent_y, 400, 22))
+        recent = self.meeting_recent_card.frame()
+        self.meeting_recent_card.setFrame_(
+            NSMakeRect(0, recent_y + 28, width, recent.size.height)
+        )
         self._fit_body_height()
 
     @objc.python_method
@@ -1734,22 +1990,15 @@ class HubWindowController(NSObject):
             return
         for view in self._meeting_page_controls():
             view.setHidden_(False)
+        # The subtitle gives way to a connection message ("Connecting…").
+        self.meeting_subtitle.setHidden_(bool(self.meeting_message.stringValue()))
         self.meeting_error_label.setStringValue_(self.meeting_error or "")
         session = self.meeting_status.get("session")
+        self._meeting_show_title(session)
         if session:
-            self.meeting_title_label.setHidden_(True)
-            self.meeting_title.setHidden_(True)
-            system_audio = session.get("system_audio")
-            watch = (
-                "mic + system audio" if system_audio == "on"
-                else "mic only — system audio unavailable" if system_audio == "error"
-                else "mic only"
-            )
-            if session.get("title"):
-                watch = f"{session['title']} · {watch}"
-            if system_audio == "error" and session.get("system_audio_error"):
-                watch += " — " + session["system_audio_error"]
-            self.meeting_watch.setStringValue_(watch)
+            # One plain sentence: mic vs system audio, with the raw error only
+            # choosing between "allow it" (permission) and "not available".
+            self.meeting_watch.setStringValue_(meeting_capture_status(session))
             self.meeting_template.setEnabled_(False)
             self._meeting_set_action_title(
                 f"Stop & save notes — {int(session.get('seconds', 0)) // 60}m"
@@ -1766,8 +2015,6 @@ class HubWindowController(NSObject):
                 "\n\n".join(lines) or "(listening — first transcript segment lands after ~30s)"
             )
         else:
-            self.meeting_title_label.setHidden_(False)
-            self.meeting_title.setHidden_(False)
             watch = (
                 "mic in use" if self.meeting_status.get("watching")
                 and self.meeting_status.get("mic_busy")
@@ -1779,20 +2026,19 @@ class HubWindowController(NSObject):
             self.meeting_template.setEnabled_(True)
             self._meeting_set_action_title("Start meeting transcription")
             self.meeting_live_label.setStringValue_("")
-        self._meeting_layout(session)
         self.meeting_action.setEnabled_(not self.meeting_busy)
         saved = self.meeting_last_saved if not session else None
         self.meeting_saved_label.setHidden_(not bool(saved))
         self.meeting_open_notes.setHidden_(not bool(saved))
         if saved:
-            label = "Enhanced notes: " if saved.get("enhanced") else "Saved: "
-            self.meeting_saved_label.setStringValue_(
-                label + saved.get("notes_path", "")
-            )
+            # The note's title, never its raw path; Open notes still goes
+            # through the vault check in meetingOpenNotes_.
+            self.meeting_saved_label.setStringValue_(saved_notes_message(saved))
         chat_available = bool(
             not session
             and (self.meeting_status.get("chat_available") or self.meeting_last_saved)
         )
+        self._meeting_layout(session, saved=saved, chat_available=chat_available)
         self.meeting_chat_heading.setHidden_(not chat_available)
         self.meeting_question.setHidden_(not chat_available)
         self.meeting_ask.setHidden_(not chat_available)
@@ -1916,7 +2162,10 @@ class HubWindowController(NSObject):
     @objc.python_method
     def _meeting_capture_state(self):
         self.meeting_notes_text = self.meeting_notes.string()
-        self.meeting_title_value = self.meeting_title.stringValue()
+        # While recording the field shows the session's title; the draft was
+        # already set aside by _meeting_show_title and must not be replaced.
+        if not self.meeting_title_shows_session:
+            self.meeting_title_value = self.meeting_title.stringValue()
         selected = self.meeting_template.indexOfSelectedItem()
         if 0 <= selected < len(self.meeting_templates):
             self.meeting_template_value = self.meeting_templates[selected]["id"]
@@ -1924,6 +2173,17 @@ class HubWindowController(NSObject):
     def meetingOpenNotes_(self, _sender):
         saved = self.meeting_last_saved or {}
         path = vault_notes_path(saved.get("notes_path"), load_config().vault_path)
+        if path:
+            current().open_path(path)
+
+    def meetingOpenRecent_(self, sender):
+        index = sender.tag()
+        if not 0 <= index < len(self.meeting_recent):
+            return
+        # Same guard as Open notes: only an existing .md inside the vault.
+        path = vault_notes_path(
+            self.meeting_recent[index].get("path"), load_config().vault_path
+        )
         if path:
             current().open_path(path)
 
@@ -2457,7 +2717,9 @@ class HubWindowController(NSObject):
         scroll.setDrawsBackground_(True)
         scroll.setBackgroundColor_(_color("surface", self.tokens))
         size = scroll.contentSize()
-        view = NSTextView.alloc().initWithFrame_(
+        # PlaceholderTextView only adds a drawn (never inserted) placeholder;
+        # with none set it behaves exactly like NSTextView.
+        view = PlaceholderTextView.alloc().initWithFrame_(
             NSMakeRect(0, 0, size.width, size.height)
         )
         view.setMinSize_(NSMakeSize(0, size.height))
@@ -2678,10 +2940,12 @@ class HubWindowController(NSObject):
         self.phrase_views["enabled_switch"] = self.phrase_switch
         self.phrase_switch.setTarget_(self)
         self.phrase_switch.setAction_("phrasesToggle:")
-        self.phrase_switch.setAccessibilityLabel_("Enabled")
+        # The switch's own value says on/off; its name stays meaningful.
+        self.phrase_switch.setAccessibilityLabel_(ENABLED_ACCESSIBILITY)
         card.addSubview_(self.phrase_switch)
+        # "On" / "Off" follows the switch (set in _phrases_render_enabled).
         self.phrase_enabled_label = add_label(
-            "Enabled", "enabled_label", 13, "ink", "regular"
+            enabled_label(editor.enabled), "enabled_label", 13, "ink", "regular"
         )
         # Short status ("Saved ✓") sits inline here and never moves the page.
         self.phrase_notice = add_label("", "enabled_notice", 12, "success", "regular")
@@ -2742,7 +3006,13 @@ class HubWindowController(NSObject):
             AppKit.NSControlStateValueOn if editor.enabled
             else AppKit.NSControlStateValueOff
         )
+        self._phrases_render_enabled()
         editor.ack_fields()
+
+    @objc.python_method
+    def _phrases_render_enabled(self):
+        """The label beside the switch says what the switch is: On or Off."""
+        self.phrase_enabled_label.setStringValue_(enabled_label(self.phrases.enabled))
 
     @objc.python_method
     def _phrases_sync(self):
@@ -2854,6 +3124,7 @@ class HubWindowController(NSObject):
         self.phrase_delete.setEnabled_(
             editor.current_id is not None or not editor.blank()
         )
+        self._phrases_render_enabled()
         self._phrases_render_preview()
 
     @objc.python_method
@@ -2896,6 +3167,12 @@ class HubWindowController(NSObject):
     @objc.python_method
     def _phrases_render_preview(self):
         output, status = self.phrases.preview()
+        # Real output is shown unchanged; an empty box gets a drawn, muted
+        # placeholder that is never part of the preview's string().
+        self.phrase_preview.setPlaceholder_color_(
+            preview_placeholder(self.phrases.test_input, output, status),
+            _color("muted", self.tokens),
+        )
         self.phrase_preview.setString_(output)
         self.phrase_status_label.setStringValue_(status)
 
@@ -3076,18 +3353,23 @@ class HubWindowController(NSObject):
             )
             style_surface(listing, self.tokens)
             self.body.addSubview_(listing)
+            # Rows grow with their wrapped context line (a failure sentence is
+            # never cut off), so each row's top is the sum of those above.
+            y = 0
             for index, row in enumerate(rows):
-                self._prompt_row(listing, row, index, width)
+                height = self._prompt_row(listing, row, index, width, y)
+                y += height
                 if index < len(rows) - 1:
                     divider = NSView.alloc().initWithFrame_(
-                        NSMakeRect(12, (index + 1) * 68 - 1, width - 24, 1)
+                        NSMakeRect(12, y - 1, width - 24, 1)
                     )
                     divider.setWantsLayer_(True)
                     divider.layer().setBackgroundColor_(
                         _color("line", self.tokens).CGColor()
                     )
                     listing.addSubview_(divider)
-            self.cursor_y += len(rows) * 68 + 12
+            listing.setFrame_(NSMakeRect(0, self.cursor_y, width, y))
+            self.cursor_y += y + 12
 
         # Section 3: teaser linking to the Hot Phrases page.
         teaser = FlippedView.alloc().initWithFrame_(
@@ -3110,30 +3392,33 @@ class HubWindowController(NSObject):
         self.cursor_y += 76
 
     @objc.python_method
-    def _prompt_row(self, listing, row, index, width):
-        y = index * 68
+    def _prompt_row(self, listing, row, index, width, y):
+        """One queue row at `y`; returns its height (see prompt_row_layout)."""
         self.prompt_ids[index] = row["id"]
+        pill = make_pill(
+            row["status_label"], PROMPT_STATUS_PILLS.get(row["status"], ("line", "muted")),
+            self.tokens,
+        )
+        pill_width = pill.frame().size.width
+        context_font = _font(11)
+        geometry = prompt_row_layout(
+            width, row, pill_width, lambda text: measure_text(text, context_font),
+        )
         buttons = []
         if row["can_approve"]:
             buttons.append(("Approve", "approvePrompt:", 88, "primary"))
         if row["can_reject"]:
             buttons.append(("Reject", "rejectPrompt:", 80, "destructive_ghost"))
-        x = width - 12 - sum(w for _t, _a, w, _k in buttons) - 8 * max(0, len(buttons) - 1)
-        action_start = x
+        x = geometry["action_x"]
         for title, action, button_width, kind in buttons:
             self._button(
                 title, action, x, y + 16, index, button_width,
                 parent=listing, kind=kind,
             )
             x += button_width + 8
-        pill = make_pill(
-            row["status_label"], PROMPT_STATUS_PILLS.get(row["status"], ("line", "muted")),
-            self.tokens,
-        )
-        pill_width = pill.frame().size.width
-        pill.setFrameOrigin_(NSMakePoint(action_start - pill_width - 12, y + 22))
+        pill.setFrameOrigin_(NSMakePoint(geometry["pill_x"], y + 22))
         listing.addSubview_(pill)
-        text_width = action_start - pill_width - 12 - 12 - 14
+        text_width = geometry["text_width"]
         listing.addSubview_(
             _label(
                 row["title"], 14, y + 12, text_width, 13, "ink",
@@ -3142,10 +3427,12 @@ class HubWindowController(NSObject):
         )
         listing.addSubview_(
             _label(
-                row["context"], 14, y + 36, text_width, 11, "muted",
-                palette=self.tokens, height=18,
+                row["context"], 14, y + 36, text_width, 11,
+                "red" if row.get("error") else "muted",
+                palette=self.tokens, height=geometry["context_h"], wrap=True,
             )
         )
+        return geometry["height"]
 
     @objc.python_method
     def _review_prompt(self, sender, action):
