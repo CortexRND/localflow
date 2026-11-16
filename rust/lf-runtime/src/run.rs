@@ -163,6 +163,14 @@ pub fn run(options: RunOptions) -> Result<()> {
         crate::live::DEFAULT_INTERVAL,
     );
     let _watch = watcher.start();
+    // An edit made while the speech model loaded predates the watcher's
+    // baseline signature: apply the file as it is now (a no-op if unchanged).
+    match load_runtime_config(None) {
+        Ok(fresh) => {
+            live.apply(&fresh);
+        }
+        Err(e) => log::warn!("config reload skipped: {e}"),
+    }
 
     let warn_menu = menu.clone();
     let warn: lf_input::listener::WarningSink = Arc::new(move |w| {
