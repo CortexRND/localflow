@@ -93,10 +93,16 @@ pub fn set_dictation_enabled(path: &Path, enabled: bool) -> Result<()> {
     let mut doc: toml_edit::DocumentMut = text
         .parse()
         .map_err(|e| anyhow!("invalid config file {}: {e}", path.display()))?;
-    if !doc.contains_table("dictation") {
-        doc["dictation"] = toml_edit::table();
+    // An inline `dictation = { ... }` table is edited in place too.
+    match doc.get_mut("dictation").and_then(|item| item.as_table_like_mut()) {
+        Some(section) => {
+            section.insert("enabled", toml_edit::value(enabled));
+        }
+        None => {
+            doc["dictation"] = toml_edit::table();
+            doc["dictation"]["enabled"] = toml_edit::value(enabled);
+        }
     }
-    doc["dictation"]["enabled"] = toml_edit::value(enabled);
     write_atomic(path, &doc.to_string())?;
     Ok(())
 }
@@ -156,6 +162,17 @@ mod tests {
             str_field(&config, DICTATION_TOGGLE_HOTKEY),
             "<ctrl>+<alt>+d"
         );
+    }
+
+    #[test]
+    fn toggle_keeps_an_inline_dictation_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "dictation = { sample_rate = 48000 }\n").unwrap();
+        set_dictation_enabled(&path, false).unwrap();
+        let config = load_runtime_config(Some(&path)).unwrap();
+        assert!(!dictation_enabled(&config));
+        assert_eq!(config.field_i64("sample_rate"), Some(48000));
     }
 
     #[test]
