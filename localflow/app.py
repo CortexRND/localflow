@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 
 import numpy as np
 
-from localflow import sounds
+from localflow import sounds, stt_lease
 from localflow.audio import Recorder, rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
@@ -24,7 +24,9 @@ from localflow.hotkey import KeyboardHub, is_hold_key
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.inject import paste_text
 from localflow.jobs import Job
+from localflow.live_config import HOTKEY_FIELDS, ConfigWatcher, merge_live
 from localflow.log import setup_logging
+from localflow.logfiles import prepare_process_logs
 from localflow.providers.factory import build_llm, build_stt
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
@@ -49,6 +51,62 @@ def _print_banner(config) -> None:
     print("  System Settings -> Privacy & Security -> Microphone")
     print("  System Settings -> Privacy & Security -> Accessibility")
     print("=" * 60)
+
+
+def keyboard_bindings(config, controller) -> dict:
+    """KeyboardHub binding arguments for `config` (construction and rebinds)."""
+    hold = is_hold_key(config.hotkey)
+    combos = [
+        (shortcut, callback)
+        for shortcut, callback in (
+            (config.paste_last_hotkey, controller.note_paste_last),
+            (config.polish_hotkey, lambda: controller.note_transform("polish")),
+            (config.prompt_hotkey, lambda: controller.note_transform("prompt")),
+        )
+        if shortcut
+    ]
+    return {
+        "hold_key": config.hotkey if hold else None,
+        "toggle_combo": None if hold else config.hotkey,
+        "combos": combos,
+        "command_key": config.command_hotkey,
+    }
+
+
+class LiveSettings:
+    """The running dictation app's config, refreshed when the file changes.
+
+    Jobs read `config` per item; the controller gets the new config on its
+    own consumer thread; shortcut changes are rebound in place on the one
+    KeyboardHub (deferred while a recording or key is in progress). The STT
+    model, recorder, LLM and listener are never rebuilt here: only the
+    allowlisted live fields change (see live_config.merge_live).
+    """
+
+    def __init__(self, config, controller, hub=None):
+        self.config = config
+        self.controller = controller
+        self.hub = hub
+        self._lock = threading.Lock()
+
+    def apply(self, fresh) -> frozenset:
+        with self._lock:
+            merged, changed = merge_live(self.config, fresh)
+            if not changed:
+                return changed
+            self.config = merged
+            self.controller.update_config(merged)
+            if changed & HOTKEY_FIELDS and self.hub is not None:
+                now = self.hub.reconfigure(**keyboard_bindings(merged, self.controller))
+                if not now:
+                    log.info("shortcut change waits until dictation is idle")
+            log.info("settings updated without restart: %s", ", ".join(sorted(changed)))
+            return changed
+
+    def retry(self) -> None:
+        hub = self.hub
+        if hub is not None and hub.reconfigure_pending:
+            hub.apply_pending()
 
 
 def _worker_loop(work_queue, process_job, deliver_result) -> None:
@@ -101,12 +159,25 @@ def main() -> None:
         # the lock.
         raise SystemExit(0)
 
+    # Before logging opens localflow.log: cap oversized logs (including the
+    # launchd stdout/stderr files this process may be writing to).
+    prepare_process_logs()
     log_path = setup_logging()
     log.info("localflow starting")
     config = load_config()
+    live = None
+    # Created now so an edit made while the model loads is still noticed;
+    # started once the runtime below exists.
+    watcher = ConfigWatcher(
+        lambda fresh: live.apply(fresh) if live is not None else None,
+        on_tick=lambda: live.retry() if live is not None else None,
+    )
 
     print("loading model…")
     transcriber = build_stt(config)
+    # Kept until exit even if the saved model changes: Free up space reads
+    # this lease so the loaded model is never deleted under us.
+    stt_lease.record(transcriber.backend, config.model_size)
     print(f"  stt backend:  {transcriber.backend}")
     commands = discover_commands(config.command_names, config.skills_dirs)
     print(f"  commands:     {len(commands)} registered")
@@ -129,11 +200,12 @@ def main() -> None:
         recorder, config, work_queue, on_state=write_state,
         history_store=history_store,
     )
+    live = LiveSettings(config, controller)
 
     def process_item(item):
         return _process_job(
             item,
-            config,
+            live.config,
             transcriber,
             cleaner,
             transformer,
@@ -161,33 +233,25 @@ def main() -> None:
     _print_banner(config)
     print(f"  log file:     {log_path}")
 
-    combos = [
-        (shortcut, callback)
-        for shortcut, callback in (
-            (config.paste_last_hotkey, controller.note_paste_last),
-            (config.polish_hotkey, lambda: controller.note_transform("polish")),
-            (config.prompt_hotkey, lambda: controller.note_transform("prompt")),
-        )
-        if shortcut
-    ]
     listener = KeyboardHub(
-        hold_key=config.hotkey if is_hold_key(config.hotkey) else None,
-        toggle_combo=None if is_hold_key(config.hotkey) else config.hotkey,
-        combos=combos,
+        **keyboard_bindings(config, controller),
         on_down=controller.note_down,
         on_up=controller.note_up,
         on_toggle=controller.note_toggle,
         on_cancel=controller.note_cancel,
-        command_key=config.command_hotkey,
         on_command_down=controller.note_command_down,
         on_command_up=controller.note_command_up,
         on_command_cancel=controller.note_command_cancel,
+        can_reconfigure=controller.is_idle,
     )
+    live.hub = listener
+    watcher.start()
     try:
         listener.run_forever()
     except KeyboardInterrupt:
         print("\nexiting…")
     finally:
+        watcher.stop()
         controller.shutdown()
         work_queue.put(None)
         worker_thread.join(timeout=1)
@@ -399,10 +463,20 @@ def retry_history_entry(
     if entry is None or entry["kind"] != "dictate" or not entry["audio_path"]:
         raise ValueError("history entry has no retryable audio clip")
     captured = []
+    lease = None
     try:
         config = config or load_config()
         audio, _sample_rate = history_store.load_clip(entry["audio_path"])
-        transcriber = transcriber or build_stt(config)
+        if transcriber is None:
+            transcriber = build_stt(config)
+            # A temporary model in this (Hub/CLI) process: lease it while the
+            # retry runs so Free up space never deletes it mid-transcribe.
+            # Scoped, so a long-lived lease of this pid is left untouched.
+            lease = stt_lease.record(
+                str(getattr(transcriber, "backend", "unknown")),
+                config.model_size,
+                scoped=True,
+            )
         cleaner = cleaner or Cleaner(build_llm(config))
         dictionary_store = dictionary_store or DictionaryStore()
         hot_phrases = hot_phrases or HotPhraseStore()
@@ -426,6 +500,9 @@ def retry_history_entry(
     except Exception:
         log.exception("retry failed for history entry %s", entry_id)
         raise
+    finally:
+        if lease is not None:
+            stt_lease.release(lease)
     if not text:
         log.warning("retry produced no text for history entry %s", entry_id)
         raise RuntimeError("retry produced no text")

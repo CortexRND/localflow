@@ -41,6 +41,21 @@ def _gui_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
+def trim_agent_logs() -> list[Path]:
+    """Cap the StandardOutPath/StandardErrorPath files launchd appends to.
+
+    launchd never rotates them; the running agent also trims them at start
+    (app.main -> logfiles.prepare_process_logs). In place, so launchd's open
+    descriptors stay valid.
+    """
+    from localflow.logfiles import AGENT_LOGS, trim_in_place
+
+    base = _log_dir()
+    return [
+        base / name for name in AGENT_LOGS if trim_in_place(base / name, root=base)
+    ]
+
+
 def plist_content(program: str | None = None) -> str:
     """XML plist text for the LaunchAgent.
 
@@ -83,20 +98,21 @@ def install(program: str | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(plist_content(program))
     _log_dir().mkdir(parents=True, exist_ok=True)
+    trim_agent_logs()
 
     # Unload any existing copy first; a clean "not loaded" failure here is
     # expected and ignored.
-    subprocess.run(["launchctl", "bootout", _gui_target()], capture_output=True, text=True)
+    subprocess.run(["launchctl", "bootout", _gui_target()], capture_output=True, text=True, check=False)
 
     result = subprocess.run(
         ["launchctl", "bootstrap", _gui_domain(), str(path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         bootstrap_err = (result.stderr or "").strip()
         fallback = subprocess.run(
             ["launchctl", "load", "-w", str(path)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         if fallback.returncode != 0:
             load_err = (fallback.stderr or "").strip()
@@ -109,7 +125,7 @@ def install(program: str | None = None) -> Path:
 
 def uninstall() -> None:
     """Boot the agent out of launchd and remove its plist."""
-    subprocess.run(["launchctl", "bootout", _gui_target()], capture_output=True, text=True)
+    subprocess.run(["launchctl", "bootout", _gui_target()], capture_output=True, text=True, check=False)
     path = _plist_path()
     if path.exists():
         path.unlink()
@@ -121,7 +137,7 @@ def status() -> str:
         return "not installed"
     result = subprocess.run(
         ["launchctl", "print", _gui_target()],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         return f"not loaded ({LABEL})"

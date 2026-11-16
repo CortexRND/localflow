@@ -109,9 +109,23 @@ def _held(name: str) -> bool:
 
 
 def _log_file():
+    """app.log, opened for append: children (server, menu bar, dictation)
+    inherit it as stdout/stderr, so an in-place trim (logfiles) keeps them
+    writing at the new end."""
     log_dir = Path.home() / ".localflow"
     log_dir.mkdir(parents=True, exist_ok=True)
     return open(log_dir / "app.log", "ab")
+
+
+def _trim_logs() -> None:
+    """Cap app.log and the other LocalFlow logs; never blocks the app."""
+    try:
+        from localflow.logfiles import trim_runtime_logs
+
+        trim_runtime_logs()
+    except Exception:  # noqa: BLE001, S110 - housekeeping only
+        pass
+
 
 def _log(message: str) -> None:
     try:
@@ -219,6 +233,9 @@ def ensure_runtime() -> None:
 
     A failure to start any one is logged but never blocks the window.
     """
+    # Every launch/reopen: app.log keeps receiving the server's output for
+    # as long as the app runs, so check its size here too (one stat when small).
+    _trim_logs()
     if not _held("localflow"):
         try:
             _start_dictation()

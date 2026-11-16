@@ -17,12 +17,13 @@ from starlette.concurrency import run_in_threadpool
 
 from localflow import api as api_logic
 from localflow import recall as recall_logic
-from localflow import sounds
+from localflow import sounds, stt_lease
 from localflow.apitoken import load_or_create
 from localflow.audio import rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
 from localflow.config import (
+    Config,
     ConfigError,
     apply_config_update,
     config_to_dict,
@@ -43,7 +44,9 @@ from localflow.dispatch import (
 from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore, render_dictation
+from localflow.live_config import ConfigWatcher, merge_live
 from localflow.log import setup_logging
+from localflow.logfiles import prepare_process_logs
 from localflow.meeting_templates import load_templates, resolve_template
 from localflow.meetings import (
     MeetingSession,
@@ -254,6 +257,9 @@ def _get_transcriber() -> Transcriber:
         with _lock:
             if _transcriber is None:
                 _transcriber = build_stt(_config)
+                # What actually loaded (auto may have fallen back): Free up
+                # space must never delete it while this process runs.
+                stt_lease.record(_transcriber.backend, _config.model_size)
     return _transcriber
 
 
@@ -702,7 +708,7 @@ def _start_session(title: str, category: str, template: str = "",
 
 def _on_meeting_detected(platform: str) -> None:
     """Watcher-thread callback: auto-start a session on detection."""
-    if not _config.meeting_auto_start:
+    if not _config.meeting_auto_start or not _config.meeting_watch:
         return
     with _session_lock:
         if _session_state != "idle":
@@ -924,9 +930,36 @@ def prompts_reject(entry_id: str) -> dict:
     return _transition(entry_id, "reject", "rejected", REJECT_FROM)
 
 
+def _sync_meeting_watcher() -> None:
+    """Start or stop mic watching to match the (possibly reloaded) config."""
+    if _config.meetings_enabled and _config.meeting_watch:
+        _watcher.start()
+    else:
+        _watcher.stop()
+
+
+def _apply_live_config(fresh: Config) -> None:
+    """ConfigWatcher callback: adopt live settings edited by another process
+    (Hub Settings, `lf tweak`, `lf config set`). Host, port, providers and
+    paths stay as started; merge_live logs those as restart-only."""
+    global _config
+    with _config_lock:
+        merged, changed = merge_live(_config, fresh)
+        if not changed:
+            return
+        _config = merged
+    if "meeting_watch" in changed:
+        _sync_meeting_watcher()
+    log.info("settings updated without restart: %s", ", ".join(sorted(changed)))
+
+
 def main() -> None:
     import uvicorn
 
+    prepare_process_logs()
+    # Started here, not in the startup hook, so tests driving the app through
+    # TestClient never watch the real config file.
+    ConfigWatcher(_apply_live_config).start()
     uvicorn.run(app, host=_config.server_host, port=_config.server_port)
 
 

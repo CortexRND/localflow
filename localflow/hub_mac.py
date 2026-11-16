@@ -138,7 +138,7 @@ from localflow.ui_tokens import (
 
 PAGES = (
     "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
-    "Meetings", "History", "Style", "Models",
+    "Meetings", "History", "Style", "Models", "Settings",
 )
 
 
@@ -419,6 +419,10 @@ class HubWindowController(NSObject):
         # down. The controller and model themselves are never recreated.
         if self.page == "Ask" and hasattr(self, "ask_page"):
             self.ask_page.capture()
+        # Settings keeps its typed request the same way (preview, errors and
+        # an in-flight request live on its controller already).
+        if self.page == "Settings" and hasattr(self, "settings_page"):
+            self.settings_page.capture()
         # Models & keys: pending URL/model text and import ticks are read from
         # the live controls before they are removed. Secure key fields are never
         # captured, so an unsaved key is dropped with its view.
@@ -510,6 +514,8 @@ class HubWindowController(NSObject):
         self._closed = True
         if hasattr(self, "ask_page"):
             self.ask_page.shutdown()
+        if hasattr(self, "settings_page"):
+            self.settings_page.shutdown()
         if self.phrases is not None:
             self.phrases.cancel()
 
@@ -585,6 +591,8 @@ class HubWindowController(NSObject):
         self.page_notices.pop(page, None)
         if page == "Dictionary":
             self.dictionary_error_card = None
+        if page == "Models":
+            self.storage_message = ("", True)
         self.show_page(page)
 
     def showHotPhrases_(self, _sender):
@@ -596,6 +604,13 @@ class HubWindowController(NSObject):
         if not hasattr(self, "ask_page"):
             self.ask_page = AskPageController.alloc().initWithHub_(self)
         self.ask_page.render()
+
+    @objc.python_method
+    def _page_settings(self):
+        from localflow.hub_settings_mac import SettingsPageController
+        if not hasattr(self, "settings_page"):
+            self.settings_page = SettingsPageController.alloc().initWithHub_(self)
+        self.settings_page.render()
 
     @objc.python_method
     def _page_home(self):
@@ -2225,6 +2240,116 @@ class HubWindowController(NSObject):
         if self.provider_candidates:
             self._models_import_card(width, statuses)
         self._models_provider_list(width, statuses)
+        self._models_storage_card(width)
+
+    @objc.python_method
+    def _models_storage_card(self, width):
+        """Free up space: downloaded speech models, sizes, the one in use.
+
+        Only LocalFlow's own speech catalog in the Hugging Face cache is listed
+        (model_storage); nothing is loaded or downloaded to draw it.
+        """
+        from localflow import model_storage
+
+        try:
+            models = model_storage.inventory(
+                self.config, cache=getattr(self, "storage_cache", None)
+            )
+        except Exception:  # noqa: BLE001 - the card says so instead of failing the page
+            models = []
+            self.storage_message = ("Couldn't read the model cache.", False)
+        self.storage_repos = [model.repo for model in models]
+        message, ok = getattr(self, "storage_message", ("", True))
+        row_h = 36
+        top = CARD_PADDING + 22 + 20 + 8
+        rows_h = max(len(models), 1) * row_h
+        height = top + rows_h + (26 if message else 0) + CARD_PADDING
+        card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, self.cursor_y, width, height)
+        )
+        style_surface(card, self.tokens, border="ink", width=CARD_BORDER_WIDTH)
+        self.body.addSubview_(card)
+        self._card_label(card, "Free up space", CARD_PADDING, size=15, weight="semibold")
+        self._card_label(
+            card,
+            "Downloaded speech models. Models in use or selected are kept; "
+            "others can be downloaded again any time.",
+            CARD_PADDING + 24, size=12, color="muted", height=18,
+        )
+        inner = width - 2 * CARD_PADDING
+        if not models:
+            self._card_label(
+                card, "No other speech models are taking up space.", top + 6,
+                size=13, color="muted",
+            )
+        for index, model in enumerate(models):
+            y = top + index * row_h
+            card.addSubview_(_label(
+                model.label, CARD_PADDING, y + 6, inner - 260, 13, "ink",
+                palette=self.tokens, height=22, weight="semibold",
+            ))
+            card.addSubview_(_label(
+                model_storage.format_bytes(model.size_bytes),
+                CARD_PADDING + inner - 250, y + 7, 100, 12, "muted",
+                palette=self.tokens, height=20,
+            ))
+            if model.protected:
+                # "In use" = loaded by a running process; "Selected" = the
+                # saved settings could load it. Either way it can't be deleted.
+                kind = ("success", "success") if model.status == "In use" else ("line", "ink")
+                pill = make_pill(model.status, kind, self.tokens)
+                size = pill.frame().size
+                pill.setFrameOrigin_(NSMakePoint(
+                    CARD_PADDING + inner - size.width, y + (row_h - size.height) / 2,
+                ))
+                card.addSubview_(pill)
+            else:
+                button = self._button(
+                    "Delete…", "deleteSpeechModel:", CARD_PADDING + inner - 120, y + 2,
+                    tag=index, width=120, parent=card, kind="destructive_ghost",
+                    height=32,
+                )
+                button.setAccessibilityLabel_(f"Delete {model.label}")
+        if message:
+            self._card_label(
+                card, message, top + rows_h + 4, size=12,
+                color="success" if ok else "red", height=20,
+            )
+        self.cursor_y += height + 12
+
+    def deleteSpeechModel_(self, sender):
+        from localflow import model_storage
+
+        repos = getattr(self, "storage_repos", [])
+        if not 0 <= sender.tag() < len(repos):
+            return
+        repo = repos[sender.tag()]
+        label = model_storage.catalog().get(repo, repo)
+        cache = getattr(self, "storage_cache", None)
+        folder = (cache or model_storage.hf_hub_cache()) / model_storage.repo_folder_name(repo)
+        size = model_storage.folder_size(folder) if folder.is_dir() else 0
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Delete {label}?")
+        alert.setInformativeText_(
+            f"This frees {model_storage.format_bytes(size)}. LocalFlow can download "
+            "it again later."
+        )
+        alert.addButtonWithTitle_("Delete")
+        alert.addButtonWithTitle_("Cancel")
+        if alert.runModal() != AppKit.NSAlertFirstButtonReturn:
+            return
+        try:
+            # Re-read the config (and, inside delete_unused, the live STT
+            # leases) now: what is selected or loaded may have changed since
+            # the list was drawn, and it must never be deleted.
+            freed = model_storage.delete_unused(repo, load_config(), cache=cache)
+        except model_storage.ModelStorageError as exc:
+            self.storage_message = (str(exc), False)
+        else:
+            self.storage_message = (
+                f"Deleted {label} and freed {model_storage.format_bytes(freed)}.", True
+            )
+        self.show_page("Models")
 
     @objc.python_method
     def _models_summary(self, width):

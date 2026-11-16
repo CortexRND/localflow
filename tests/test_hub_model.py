@@ -28,7 +28,7 @@ ROOT = Path(__file__).parent.parent
 HUB_MAC = ROOT / "localflow" / "hub_mac.py"
 EXPECTED_PAGES = (
     "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
-    "Meetings", "History", "Style", "Models",
+    "Meetings", "History", "Style", "Models", "Settings",
 )
 
 

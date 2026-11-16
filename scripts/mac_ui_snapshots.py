@@ -695,6 +695,143 @@ def _hub_provider_snapshots(base):
                 _shot(controller, f"hub-models-keys-{state}-{label}")
 
 
+class _OfflineSession:
+    """Snapshots never reach Ollama: any request is a bug."""
+
+    def get(self, *_args, **_kwargs):
+        raise AssertionError("snapshot made a network request")
+
+    post = get
+
+
+def _snapshot_settings_agent(base):
+    """A real SettingsAgent over temp config/dictionary/undo files, offline."""
+    from localflow.config import save_config
+    from localflow.settings_agent import SettingsAgent
+
+    folder = base / "settings"
+    folder.mkdir(parents=True, exist_ok=True)
+    config_path = folder / "config.toml"
+    if not config_path.exists():
+        save_config(_isolated_config(base, "settings"), config_path)
+    return SettingsAgent(
+        config_path=config_path,
+        dictionary=DictionaryStore(folder / "dictionary.json"),
+        undo_path=folder / "settings-undo.json",
+        session=_OfflineSession(),
+        templates=lambda _config: ("general", "standup"),
+    )
+
+
+def _hub_settings_snapshots(base):
+    """Settings page: empty, preview, applied (with undo) and error states.
+
+    States are set on the page controller directly (no worker, no model);
+    Apply runs for real against temp files so the undo summary is genuine.
+    """
+    from localflow.settings_agent import Proposal, setting_change, word_change
+
+    _progress("settings: build")
+    agent = _snapshot_settings_agent(base)
+    controller = build_hub_window(
+        HistoryStore(base / "settings-history.sqlite", base / "settings-clips"),
+        DictionaryStore(base / "settings" / "dictionary.json"),
+        _isolated_config(base, "settings"),
+    )
+    controller.settings_agent_factory = lambda: agent
+    controller.show_page("Settings")
+    page = controller.settings_page
+    _hub_sized_shots(controller, "hub-settings-empty")
+
+    changes = (
+        setting_change("sounds_enabled", True, False),
+        # Right Ctrl, not Right Option: that is already the Command key.
+        setting_change("hotkey", "alt_l", "ctrl_r"),
+        word_change("Kubernetes"),
+    )
+    def type_request(text):
+        """Type into the live text box, then take it the way a rebuild does,
+        so no stale field content can overwrite the state later."""
+        page.text_view.setString_(text)
+        page.capture()
+        assert page.state.draft == text and page.text_view is None
+
+    def shown_request():
+        return str(page.text_view.string())
+
+    request = "Turn off sounds, dictate with Right Ctrl, learn Kubernetes"
+    type_request(request)
+    token = page.state.begin_preview(page.state.draft)
+    page.state.finish_preview(
+        token,
+        Proposal(request, "gemma4:e4b", changes,
+                 ("Server port is not a setting LocalFlow can change here",)),
+    )
+    controller.show_page("Settings")
+    assert shown_request() == request, "preview must show the typed request"
+    _hub_sized_shots(controller, "hub-settings-preview")
+    assert shown_request() == request  # kept across the resizes
+
+    page.capture()  # the live box is taken first, as apply_ does
+    page.state.applied(agent.apply(changes))
+    controller.show_page("Settings")
+    assert shown_request() == "", "applied state starts with an empty box"
+    _hub_sized_shots(controller, "hub-settings-applied")
+    assert shown_request() == ""
+
+    type_request("Make it purple")
+    token = page.state.begin_preview(page.state.draft)
+    page.state.finish_preview(
+        token,
+        error="Couldn't reach Ollama at http://localhost:11434. Start Ollama, then try again.",
+    )
+    controller.show_page("Settings")
+    assert shown_request() == "Make it purple"  # kept for a retry
+    _hub_sized_shots(controller, "hub-settings-error")
+
+
+def _fake_hf_cache(base):
+    """A tiny fake Hugging Face cache (sparse files) for the storage card."""
+    from localflow import model_storage
+
+    cache = base / "hf-cache"
+    for repo, size in (
+        ("Systran/faster-whisper-base", 148_000_000),
+        ("Systran/faster-whisper-small", 486_000_000),
+        (model_storage.PARAKEET_REPO, 2_472_000_000),
+    ):
+        blobs = cache / model_storage.repo_folder_name(repo) / "blobs"
+        blobs.mkdir(parents=True, exist_ok=True)
+        with open(blobs / "weights", "wb") as handle:
+            handle.truncate(size)  # sparse: reports the size, uses no disk
+    return cache
+
+
+def _hub_storage_snapshots(base):
+    """Models & keys -> Free up space: sizes, the model in use, a result."""
+    from localflow.stt_lease import Lease
+
+    config = _isolated_config(base, "storage", stt_backend="faster-whisper", model_size="base")
+    # A running process still has Small loaded (settings changed, not yet
+    # restarted): Small shows "In use", Base (the saved choice) "Selected".
+    running = [Lease(1, "faster-whisper", "Systran/faster-whisper-small", True)]
+    with (
+        patch("localflow.hub_mac.load_config", return_value=config),
+        patch("localflow.stt_lease.live_leases", return_value=running),
+    ):
+        controller = build_hub_window(
+            HistoryStore(base / "storage-history.sqlite", base / "storage-clips"),
+            DictionaryStore(base / "storage-dictionary.json"), config,
+            initial_page="Models",
+        )
+        controller.storage_cache = _fake_hf_cache(base)
+        controller.show_page("Models")
+        _hub_sized_shots(controller, "hub-models-storage")
+        controller.storage_message = ("Deleted Parakeet v2 and freed 2.5 GB.", True)
+        controller.show_page("Models")
+        _hub_sized_shots(controller, "hub-models-storage-deleted")
+
+
 def main():
     _install_crash_diagnostics()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -715,6 +852,14 @@ def main():
         patch("localflow.provider_keys.save_config"),
         patch("localflow.provider_keys.fetch_models", return_value=[]),
         patch("localflow.provider_keys.test_llm", return_value=(False, "Snapshot: offline")),
+        # Free up space lists an empty temp cache unless a snapshot injects
+        # one: the runner's real Hugging Face cache is never read.
+        patch(
+            "localflow.model_storage.hf_hub_cache",
+            return_value=Path(tmp) / "hf-cache-empty",
+        ),
+        # Nor this machine's real STT leases.
+        patch("localflow.stt_lease.live_leases", return_value=[]),
     ):
         tmp = Path(tmp)
 
@@ -828,6 +973,10 @@ def main():
         _hub_hot_phrases_snapshots(tmp)
         _progress("section providers")
         _hub_provider_snapshots(tmp)
+        _progress("section settings")
+        _hub_settings_snapshots(tmp)
+        _progress("section storage")
+        _hub_storage_snapshots(tmp)
 
     print(f"wrote snapshots to {OUT}")
 

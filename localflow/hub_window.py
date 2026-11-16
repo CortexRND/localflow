@@ -9,7 +9,7 @@ fallback calls it directly so the dispatcher never routes back into itself.
 import argparse
 import sys
 
-from localflow.hub_route import DEFAULT_PAGE, HUB_PAGES
+from localflow.hub_route import DEFAULT_PAGE, HUB_PAGES, canonical_page
 
 
 def run_backend(page=DEFAULT_PAGE):
@@ -43,7 +43,11 @@ def route_to_main_app(page):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--page", choices=HUB_PAGES, default=DEFAULT_PAGE)
+    parser.add_argument(
+        "--page", choices=HUB_PAGES, default=DEFAULT_PAGE,
+        # "settings" -> "Settings"; anything unknown still fails `choices`.
+        type=lambda value: canonical_page(value) or value,
+    )
     args = parser.parse_args(argv)
     if sys.platform == "darwin":
         return route_to_main_app(args.page)

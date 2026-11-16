@@ -100,9 +100,9 @@ def detect_platform() -> str:
     """Best-effort guess of the meeting app; browser meetings land in Other."""
     for name, cmd in _PLATFORM_PROCESSES:
         try:
-            if subprocess.run(cmd, capture_output=True).returncode == 0:
+            if subprocess.run(cmd, capture_output=True, check=False).returncode == 0:
                 return name
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
     return "Other"
 
@@ -132,17 +132,44 @@ class MeetingWatcher:
         self._pause = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # start/stop may be called again at runtime (meeting detection
+        # toggled in settings); this keeps it to one polling thread.
+        self._lifecycle = threading.Lock()
 
     def start(self) -> None:
-        try:
-            self._probe = MicUsageProbe()
-        except OSError as exc:
-            self.error = f"mic watcher unavailable: {exc}"
-            log.error(self.error)
-            return
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        with self._lifecycle:
+            if self._thread is not None:
+                # Still running (or not yet acted on a stop): keep that thread.
+                self._stop.clear()
+                return
+            try:
+                self._probe = MicUsageProbe()
+            except OSError as exc:
+                self.error = f"mic watcher unavailable: {exc}"
+                log.error(self.error)
+                return
+            self.error = ""
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
         log.info("meeting watcher started")
+
+    def stop(self) -> None:
+        """Stop polling (the thread exits within one poll interval)."""
+        with self._lifecycle:
+            self._stop.set()
+            self.detected = False
+            self.mic_busy = False
+            self._busy_since = None
+            self._notified = False
+
+    def _stopping(self) -> bool:
+        """Called by the thread after a stop: exit unless start() undid it."""
+        with self._lifecycle:
+            if self._stop.is_set():
+                self._thread = None
+                return True
+            return False
 
     def pause(self) -> None:
         self._pause.set()
@@ -158,8 +185,11 @@ class MeetingWatcher:
         self.detected = False
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            time.sleep(self.poll_seconds)
+        while True:
+            if self._stop.wait(self.poll_seconds):
+                if self._stopping():
+                    return
+                continue
             if self._pause.is_set():
                 continue
             try:

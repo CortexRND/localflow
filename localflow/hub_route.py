@@ -22,7 +22,7 @@ from localflow.singleinstance import lock_dir
 
 HUB_PAGES = (
     "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
-    "Meetings", "History", "Style", "Models",
+    "Meetings", "History", "Style", "Models", "Settings",
 )
 DEFAULT_PAGE = "Home"
 REQUEST_NAME = "page-request.json"
@@ -37,6 +37,18 @@ def validate_page(page) -> str | None:
         return None
     page = page.strip()
     return page if page in HUB_PAGES else None
+
+
+def canonical_page(page) -> str | None:
+    """Case-insensitive lookup for typed input (`lf hub --page settings`).
+
+    Only user-facing entry points use this; requests and routing stay on the
+    strict `validate_page`.
+    """
+    if not isinstance(page, str):
+        return None
+    folded = " ".join(page.split()).casefold()
+    return next((name for name in HUB_PAGES if name.casefold() == folded), None)
 
 
 def request_path() -> Path:

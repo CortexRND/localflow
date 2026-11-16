@@ -54,7 +54,7 @@ from localflow.dispatch import (
     orca_available,
 )
 from localflow.history import HistoryStore
-from localflow.hub_route import DEFAULT_PAGE, HUB_PAGES
+from localflow.hub_route import DEFAULT_PAGE, HUB_PAGES, canonical_page
 from localflow.platform import current
 from localflow.platform.base import PASTE_METHODS
 from localflow.providers import registry
@@ -384,14 +384,73 @@ def stats_command() -> None:
 @cli.command("hub")
 @click.option(
     "--page",
-    type=click.Choice(HUB_PAGES),
+    # Case-insensitive ("settings", "hot phrases"); Click hands back the
+    # canonical page name, which is all the Hub ever receives.
+    type=click.Choice(HUB_PAGES, case_sensitive=False),
     default=DEFAULT_PAGE,
     show_default=True,
     help="Hub page to open.",
 )
 def hub_command(page: str) -> None:
     """Open the native history and settings hub."""
+    page = canonical_page(page) or DEFAULT_PAGE
     subprocess.Popen([sys.executable, "-m", "localflow.hub_window", "--page", page])
+
+
+def _tweak_agent():
+    """Seam for tests: the Settings agent `lf tweak` uses."""
+    from localflow.settings_agent import SettingsAgent
+
+    return SettingsAgent()
+
+
+@cli.command("tweak")
+@click.argument("request", required=False)
+@click.option("--yes", "-y", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--undo", "undo_last", is_flag=True, help="Undo the last applied tweak.")
+def tweak(request: str | None, yes: bool, undo_last: bool) -> None:
+    """Change settings in plain words with a local model, e.g. lf tweak "turn off sounds".
+
+    Shows a preview first; nothing changes until you confirm (or pass --yes).
+    Runs on this computer through Ollama, whatever cloud provider is active.
+    """
+    from localflow.settings_agent import SettingsAgentError
+
+    if undo_last:
+        if request is not None:
+            raise click.UsageError("use either a request or --undo, not both")
+        if yes:
+            raise click.UsageError("--yes only applies to a request")
+        try:
+            result = _tweak_agent().undo()
+        except SettingsAgentError as exc:
+            raise click.ClickException(str(exc)) from None
+        for line in result.reverted:
+            click.echo(f"  {line}")
+        click.echo(result.message)
+        return
+    if request is None or not request.strip():
+        raise click.UsageError('say what to change, e.g. lf tweak "turn off sounds"')
+    agent = _tweak_agent()
+    try:
+        proposal = agent.propose(request)
+    except SettingsAgentError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"Preview (runs on your computer with {proposal.model}):")
+    for change in proposal.changes:
+        click.echo(f"  {change.line()}")
+    for note in proposal.rejected:
+        click.echo(f"  skipped: {note}")
+    if not yes and not click.confirm("Apply these changes?", default=False):
+        click.echo("Nothing changed.")
+        return
+    try:
+        result = agent.apply(proposal.changes)
+    except SettingsAgentError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(result.message)
+    if result.applied:
+        click.echo("Undo with: lf tweak --undo")
 
 
 @dictionary.command("list", hidden=True)

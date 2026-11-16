@@ -128,6 +128,29 @@ class PushToTalkController:
             else:
                 self.note_stop()
 
+    def update_config(self, config) -> None:
+        """Swap in a reloaded config. Applied on the consumer thread, between
+        events, so a gesture in progress never sees half of each."""
+        self._events.put(("config", config))
+
+    @property
+    def config(self):
+        return self._config
+
+    def is_idle(self) -> bool:
+        """True when no recording, gesture or command is in progress.
+
+        Read from other threads (KeyboardHub's reconfigure check): each field
+        is a single attribute read, and a stale answer only defers a rebind.
+        """
+        return (
+            self._gesture_state == "IDLE"
+            and not self._legacy_active
+            and not self._command_active
+            and not self._recorder.recording
+            and self._events.empty()
+        )
+
     def shutdown(self, timeout: float | None = 1.0) -> None:
         self._events.put(_SHUTDOWN)
         self._thread.join(timeout=timeout)
@@ -171,6 +194,14 @@ class PushToTalkController:
                 continue
             if event[0] == "transform":
                 self._handle_transform(event[1])
+                continue
+            if event[0] == "config":
+                self._config = event[1]
+                if not self._recorder.recording:
+                    # A toggle that never started recording must not leave the
+                    # next press of a new toggle shortcut meaning "stop".
+                    with self._toggle_lock:
+                        self._toggle_intent = False
                 continue
             kind, timestamp = event
             if kind == "command_cancel":
@@ -226,7 +257,12 @@ class PushToTalkController:
                 if text:
                     paste_text(text, self._config.paste_method)
 
-    def _timer_timeout(self) -> float:
+    def _timer_timeout(self) -> float | None:
+        """How long the consumer may block; None = until the next event.
+
+        Idle there is no deadline to check, so the thread sleeps on the queue
+        instead of waking 20 times a second.
+        """
         now = self._clock()
         deadlines = []
         if self._gesture_state == "TAPPED" and self._tapped_at is not None:
@@ -238,7 +274,7 @@ class PushToTalkController:
                 deadlines.append(self._recording_started_at + warning_at)
             deadlines.append(self._recording_started_at + maximum)
         if not deadlines:
-            return 0.05
+            return None
         return max(0.001, min(0.05, min(deadlines) - now))
 
     def _check_timers(self, now: float) -> None:

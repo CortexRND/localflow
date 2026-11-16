@@ -309,6 +309,35 @@ class DictionaryStore:
                 self._write(data)
         return removed
 
+    def remove_exact_word(self, word: str) -> bool:
+        """Remove `word` only if stored with exactly this text.
+
+        Compare and remove happen under one lock, so an entry another
+        process edited (even just its casing) is never removed. Unlike
+        `remove`, nothing is matched case-insensitively.
+        """
+        with self._exclusive():
+            data = self._read()
+            if word not in data["words"]:
+                return False
+            data["words"] = [item for item in data["words"] if item != word]
+            self._write(data)
+        return True
+
+    def remove_exact_replacement(self, source: str, target: str) -> bool:
+        """Remove the replacement only if it is exactly `source` -> `target`."""
+        with self._exclusive():
+            data = self._read()
+            kept = [
+                item for item in data["replacements"]
+                if not (item["from"] == source and item["to"] == target)
+            ]
+            if len(kept) == len(data["replacements"]):
+                return False
+            data["replacements"] = kept
+            self._write(data)
+        return True
+
     def import_file(self, path: Path) -> dict[str, int]:
         source = Path(path)
         raw = source.read_bytes()

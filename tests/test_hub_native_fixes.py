@@ -666,7 +666,8 @@ def test_models_sidebar_label_is_display_only_and_fits():
     from localflow import hub_route
 
     assert hub_model.sidebar_label("Models") == "Models & keys"
-    assert hub_route.HUB_PAGES[-1] == "Models"  # routing id unchanged
+    assert "Models" in hub_route.HUB_PAGES  # routing id unchanged
+    assert hub_route.HUB_PAGES[-2:] == ("Models", "Settings")
     title = hub_model.sidebar_title("Models", _sidebar_measure)
     assert title.strip() == "Models & keys"
     assert _sidebar_measure(title) <= (

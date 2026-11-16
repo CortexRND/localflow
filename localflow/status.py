@@ -100,6 +100,61 @@ def read_last_text(path: Path = LAST_TEXT_PATH) -> str:
         return ""
 
 
+class LiveStateCache:
+    """`live_state` for a frequent UI timer, without the per-tick cost.
+
+    Each call is one `stat` of the status file. The file is read only when
+    its signature changes (the writer replaces it atomically, so every write
+    is a new inode), and the writer's pid is checked (`ps`, a subprocess on
+    POSIX) only while a non-idle state is shown: when the state first
+    appears and then every `pid_recheck` seconds, so a crashed recorder
+    still falls back to idle. An idle state never spawns anything.
+    """
+
+    def __init__(
+        self,
+        path: Path = STATUS_PATH,
+        pid_recheck: float = 5.0,
+        clock=time.monotonic,
+    ):
+        self.path = path
+        self.pid_recheck = pid_recheck
+        self._clock = clock
+        self._signature = ()
+        self._state = "idle"
+        self._pid = 0
+        self._alive = False
+        self._checked_at: float | None = None
+
+    def _read(self) -> None:
+        self._state, self._pid, self._checked_at = "idle", 0, None
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            pid = int(data["pid"])
+            state = data.get("state", "idle")
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return
+        if pid > 0 and isinstance(state, str):
+            self._state, self._pid = state, pid
+
+    def state(self) -> str:
+        try:
+            info = self.path.stat()
+            signature = (info.st_mtime_ns, info.st_size, info.st_ino)
+        except OSError:
+            signature = None
+        if signature != self._signature:
+            self._signature = signature
+            self._read()
+        if self._state == "idle":
+            return "idle"
+        now = self._clock()
+        if self._checked_at is None or now - self._checked_at >= self.pid_recheck:
+            self._alive = _pid_is_alive(self._pid)
+            self._checked_at = now
+        return self._state if self._alive else "idle"
+
+
 def live_state(path: Path = STATUS_PATH) -> str:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
