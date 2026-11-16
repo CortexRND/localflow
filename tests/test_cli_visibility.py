@@ -15,9 +15,26 @@ from localflow.dispatch import PromptQueue
 from localflow.history import HistoryStore
 
 VISIBLE_TOP = [
-    "autostart", "config", "dict", "dictate", "doctor", "history", "hub", "keys",
-    "llm", "meeting", "menubar", "open", "prompts", "serve", "setup", "status",
-    "stt", "token", "tweak",
+    "autostart",
+    "config",
+    "dict",
+    "dictate",
+    "dictation",
+    "doctor",
+    "history",
+    "hub",
+    "keys",
+    "llm",
+    "meeting",
+    "menubar",
+    "open",
+    "prompts",
+    "serve",
+    "setup",
+    "status",
+    "stt",
+    "token",
+    "tweak",
 ]
 HIDDEN_TOP = [
     "phrases", "recall", "secret", "agent", "ui", "watch", "notes", "models", "stats",

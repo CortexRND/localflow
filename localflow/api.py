@@ -71,6 +71,7 @@ def status(config: Config, platform: object, loaded: bool) -> dict:
         "hotkey": config.hotkey,
         "paste_method": config.paste_method,
         "sounds_enabled": config.sounds_enabled,
+        "dictation_enabled": config.dictation_enabled,
         "server": {"host": config.server_host, "port": config.server_port},
         "meetings_enabled": config.meetings_enabled,
         "autostart": autostart,

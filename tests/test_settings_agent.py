@@ -862,11 +862,44 @@ def test_normalized_combos_are_accepted_by_the_real_hotkey_parser(value, monkeyp
 
 def test_allowlist_is_exactly_the_documented_fields():
     assert set(sa.ALLOWLIST) == {
-        "sounds_enabled", "cleanup_enabled", "cleanup_level", "styles_enabled",
-        "style_work", "style_email", "style_personal", "style_other", "hotkey",
-        "command_hotkey", "polish_hotkey", "prompt_hotkey", "paste_last_hotkey",
-        "paste_method", "spoken_symbols", "spoken_punctuation", "hot_phrases",
-        "meeting_watch", "meeting_auto_start", "capture_system_audio",
-        "meeting_default_template", "work_prompts",
+        "dictation_enabled",
+        "dictation_toggle_hotkey",
+        "sounds_enabled",
+        "cleanup_enabled",
+        "cleanup_level",
+        "styles_enabled",
+        "style_work",
+        "style_email",
+        "style_personal",
+        "style_other",
+        "hotkey",
+        "command_hotkey",
+        "polish_hotkey",
+        "prompt_hotkey",
+        "paste_last_hotkey",
+        "paste_method",
+        "spoken_symbols",
+        "spoken_punctuation",
+        "hot_phrases",
+        "meeting_watch",
+        "meeting_auto_start",
+        "capture_system_audio",
+        "meeting_default_template",
+        "work_prompts",
     }
     assert set(sa.LABELS) == set(sa.ALLOWLIST)
+
+
+def test_turn_off_dictation(paths):
+    agent = make_agent(
+        paths,
+        FakeOllama(
+            [
+                call("set_setting", key="dictation_enabled", value="off"),
+            ]
+        ),
+    )
+    proposal = agent.propose("turn off dictation")
+    assert len(proposal.changes) == 1
+    agent.apply(proposal.changes)
+    assert read_config(paths).dictation_enabled is False
