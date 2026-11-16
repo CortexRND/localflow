@@ -1,0 +1,49 @@
+[package]
+name = "lf-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "LocalFlow core: config, API token, secrets and local storage (Stage 1 Rust port)"
+
+[lib]
+name = "lf_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+rusqlite = { workspace = true }
+regex = { workspace = true }
+csv = { workspace = true }
+chrono = { workspace = true }
+getrandom = { workspace = true }
+uuid = { workspace = true }
+caseless = { workspace = true }
+tempfile = { workspace = true }
+log = { workspace = true }
+base64 = { workspace = true }
+
+# passwd lookup for platformdirs-compatible home resolution, errno values.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Native credential stores, matching the Python `keyring` backends LocalFlow
+# ships with so both implementations read and write the same accounts.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+# Linux/BSD: talk to the Secret Service directly (the same D-Bus API and item
+# attributes Python keyring's SecretService backend uses). `vendored` builds
+# libdbus from source so no system dbus development headers are required.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+dbus-secret-service = { version = "4", features = ["crypto-rust", "vendored"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

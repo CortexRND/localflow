@@ -1,0 +1,358 @@
+//! Port of `localflow/providers/llm_openai_compat.py`.
+
+use crate::base::{Health, LlmProvider, ModelInfo, ProviderError};
+use crate::http;
+use serde_json::{json, Value};
+
+#[derive(Clone, PartialEq)]
+pub struct OpenAiCompatLlm {
+    pub base_url: String,
+    pub model: String,
+    api_key: String,
+    pub timeout: i64,
+    pub temperature: Option<f64>,
+}
+
+/// Never prints the key.
+impl std::fmt::Debug for OpenAiCompatLlm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatLlm")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("has_api_key", &!self.api_key.is_empty())
+            .field("timeout", &self.timeout)
+            .field("temperature", &self.temperature)
+            .finish()
+    }
+}
+
+pub const DEFAULT_TIMEOUT: i64 = 120;
+
+impl OpenAiCompatLlm {
+    pub fn new(
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+        timeout: i64,
+        temperature: Option<f64>,
+    ) -> Self {
+        OpenAiCompatLlm {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            model: model.to_string(),
+            api_key: api_key.to_string(),
+            timeout,
+            temperature,
+        }
+    }
+
+    pub fn has_api_key(&self) -> bool {
+        !self.api_key.is_empty()
+    }
+
+    /// The `/chat/completions` request body.
+    pub fn chat_body(&self, system: &str, user: &str, max_tokens: Option<i64>) -> Value {
+        let mut body = json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        });
+        if let Some(max_tokens) = max_tokens {
+            body["max_tokens"] = json!(max_tokens);
+        }
+        if let Some(temperature) = self.temperature {
+            body["temperature"] = json!(temperature);
+        }
+        body
+    }
+
+    fn authorize(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        if self.api_key.is_empty() {
+            request
+        } else {
+            request.header("Authorization", format!("Bearer {}", self.api_key))
+        }
+    }
+
+    fn try_complete(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: Option<i64>,
+    ) -> Result<String, String> {
+        let client = http::client(self.timeout)?;
+        let body = self.chat_body(system, user, max_tokens);
+        let request = client
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Content-Type", "application/json")
+            .json(&body);
+        let data = http::send_json(self.authorize(request))?;
+        let choices = http::dict_index(&data, "choices")?;
+        let first = first_item(choices)?;
+        let message = http::dict_index(first, "message")?;
+        let content = http::dict_index(message, "content")?;
+        Ok(crate::pyfmt::py_strip(http::as_str(content, "strip")?).to_string())
+    }
+
+    fn try_list(&self) -> Result<Vec<ModelInfo>, String> {
+        let client = http::client(self.timeout)?;
+        let request = client.get(format!("{}/models", self.base_url));
+        let data = http::send_json(self.authorize(request))?;
+        let empty = Value::Array(Vec::new());
+        let models = http::dict_get(&data, "data")?.unwrap_or(&empty);
+        http::iter_items(models)?
+            .into_iter()
+            .map(|model| {
+                let id = http::dict_index(model, "id")?;
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| format!("model id is a {}, not a string", http::py_type(id)))?;
+                Ok(ModelInfo {
+                    id: id.into(),
+                    label: id.into(),
+                    installed: None,
+                })
+            })
+            .collect()
+    }
+}
+
+/// `value[0]` with Python's error text.
+fn first_item(value: &Value) -> Result<&Value, String> {
+    match value {
+        Value::Array(items) => items
+            .first()
+            .ok_or_else(|| "list index out of range".to_string()),
+        Value::Object(_) => Err("0".into()),
+        Value::String(s) if s.is_empty() => Err("string index out of range".into()),
+        Value::String(_) => Err("string indices must be integers, not 'str'".into()),
+        other => Err(format!(
+            "'{}' object is not subscriptable",
+            http::py_type(other)
+        )),
+    }
+}
+
+impl LlmProvider for OpenAiCompatLlm {
+    fn id(&self) -> &'static str {
+        "openai-compatible"
+    }
+
+    fn offline(&self) -> bool {
+        false
+    }
+
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: Option<i64>,
+    ) -> Result<String, ProviderError> {
+        match self.try_complete(system, user, max_tokens) {
+            Ok(text) if text.is_empty() => Err(ProviderError(
+                "OpenAI-compatible provider returned an empty response".into(),
+            )),
+            Ok(text) => Ok(text),
+            Err(exc) => Err(ProviderError(format!(
+                "OpenAI-compatible completion failed: {exc}"
+            ))),
+        }
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        self.try_list()
+            .map_err(|exc| ProviderError(format!("OpenAI-compatible model listing failed: {exc}")))
+    }
+
+    fn healthcheck(&self) -> Health {
+        match self.list_models() {
+            Ok(_) => Health::ok(),
+            Err(exc) => Health::failed(exc.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{MockResponse, MockServer};
+
+    fn llm(server: &MockServer, key: &str, temperature: Option<f64>) -> OpenAiCompatLlm {
+        OpenAiCompatLlm::new(
+            &format!("{}/v1/", server.url()),
+            "gpt-x",
+            key,
+            5,
+            temperature,
+        )
+    }
+
+    const OK_BODY: &str =
+        r#"{"choices":[{"message":{"role":"assistant","content":"  Hi there \n"}}]}"#;
+
+    #[test]
+    fn complete_sends_payload_and_bearer_key() {
+        let server = MockServer::start(vec![MockResponse::json(200, OK_BODY)]);
+        let text = llm(&server, "sk-test", None)
+            .complete("sys", "usr", None)
+            .unwrap();
+        assert_eq!(text, "Hi there");
+        let request = server.request(0);
+        assert_eq!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/v1/chat/completions")
+        );
+        assert_eq!(
+            request.header("authorization").as_deref(),
+            Some("Bearer sk-test")
+        );
+        assert_eq!(
+            request.header("content-type").as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(
+            request.json(),
+            json!({"model": "gpt-x", "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "usr"},
+            ]})
+        );
+    }
+
+    #[test]
+    fn complete_optional_fields_and_missing_token() {
+        let server = MockServer::start(vec![MockResponse::json(200, OK_BODY)]);
+        llm(&server, "", Some(0.3))
+            .complete("s", "u", Some(7))
+            .unwrap();
+        let request = server.request(0);
+        assert!(
+            request.header("authorization").is_none(),
+            "no key => no Authorization header"
+        );
+        let body = request.json();
+        assert_eq!(body["max_tokens"], 7);
+        assert_eq!(body["temperature"], 0.3);
+    }
+
+    #[test]
+    fn complete_errors() {
+        let cases = [
+            (r#"{"choices":[{"message":{"content":"   "}}]}"#, "OpenAI-compatible provider returned an empty response"),
+            (r#"{"choices":[]}"#, "OpenAI-compatible completion failed: list index out of range"),
+            (r#"{}"#, "OpenAI-compatible completion failed: 'choices'"),
+            (r#"{"choices":[{"message":{"content":null}}]}"#, "OpenAI-compatible completion failed: 'NoneType' object has no attribute 'strip'"),
+            (r#"{"choices":[{"message":{}}]}"#, "OpenAI-compatible completion failed: 'content'"),
+            (r#"[]"#, "OpenAI-compatible completion failed: list indices must be integers or slices, not str"),
+            (r#"{"choices":{}}"#, "OpenAI-compatible completion failed: 0"),
+        ];
+        for (body, expected) in cases {
+            let server = MockServer::start(vec![MockResponse::json(200, body)]);
+            assert_eq!(
+                llm(&server, "k", None)
+                    .complete("s", "u", None)
+                    .unwrap_err()
+                    .0,
+                expected,
+                "{body}"
+            );
+        }
+        let server = MockServer::start(vec![MockResponse::json(200, "<html>")]);
+        let err = llm(&server, "k", None)
+            .complete("s", "u", None)
+            .unwrap_err()
+            .0;
+        assert!(
+            err.starts_with("OpenAI-compatible completion failed: "),
+            "{err}"
+        );
+
+        let server = MockServer::start(vec![MockResponse::json(401, r#"{"error":"bad key"}"#)]);
+        let err = llm(&server, "k", None)
+            .complete("s", "u", None)
+            .unwrap_err()
+            .0;
+        assert!(
+            err.starts_with(
+                "OpenAI-compatible completion failed: 401 Client Error: Unauthorized for url: "
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("Bearer"), "the key never appears in errors");
+    }
+
+    #[test]
+    fn list_models_and_healthcheck() {
+        let server = MockServer::start(vec![MockResponse::json(
+            200,
+            r#"{"data":[{"id":"a"},{"id":"b","owned_by":"x"}]}"#,
+        )]);
+        let models = llm(&server, "sk", None).list_models().unwrap();
+        assert_eq!(
+            models,
+            vec![
+                ModelInfo {
+                    id: "a".into(),
+                    label: "a".into(),
+                    installed: None
+                },
+                ModelInfo {
+                    id: "b".into(),
+                    label: "b".into(),
+                    installed: None
+                },
+            ]
+        );
+        let request = server.request(0);
+        assert_eq!(
+            (request.method.as_str(), request.path.as_str()),
+            ("GET", "/v1/models")
+        );
+        assert_eq!(
+            request.header("authorization").as_deref(),
+            Some("Bearer sk")
+        );
+
+        let server = MockServer::start(vec![MockResponse::json(200, "{}")]);
+        assert_eq!(llm(&server, "", None).list_models().unwrap(), vec![]);
+        assert!(server.request(0).header("authorization").is_none());
+
+        let server = MockServer::start(vec![MockResponse::json(200, r#"{"data":[{"name":"x"}]}"#)]);
+        assert_eq!(
+            llm(&server, "", None).list_models().unwrap_err().0,
+            "OpenAI-compatible model listing failed: 'id'"
+        );
+
+        let server = MockServer::start(vec![MockResponse::json(200, r#"{"data":[]}"#)]);
+        assert_eq!(llm(&server, "k", None).healthcheck(), Health::ok());
+
+        let server = MockServer::start(vec![MockResponse::json(403, "{}")]);
+        let health = llm(&server, "k", None).healthcheck();
+        assert!(!health.ok);
+        assert!(
+            health.detail.starts_with(
+                "OpenAI-compatible model listing failed: 403 Client Error: Forbidden for url: "
+            ),
+            "{}",
+            health.detail
+        );
+
+        let server = MockServer::start(vec![MockResponse::json(200, "garbage")]);
+        assert!(!llm(&server, "k", None).healthcheck().ok);
+    }
+
+    #[test]
+    fn debug_never_prints_the_key() {
+        let client = OpenAiCompatLlm::new("https://x/", "m", "sk-secret", 120, None);
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("sk-secret"));
+        assert_eq!(client.base_url, "https://x");
+        assert_eq!(client.id(), "openai-compatible");
+        assert!(!client.offline());
+        assert!(client.has_api_key());
+    }
+}
