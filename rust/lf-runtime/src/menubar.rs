@@ -128,7 +128,10 @@ impl MeetingStatusPoller {
                             break;
                         }
                         let wait = Duration::from_secs_f64(st.schedule.next_due() - now);
-                        st = wake.wait_timeout(st, wait).unwrap_or_else(|p| p.into_inner()).0;
+                        st = wake
+                            .wait_timeout(st, wait)
+                            .unwrap_or_else(|p| p.into_inner())
+                            .0;
                     }
                 }
                 let result = match fetch() {
@@ -148,7 +151,10 @@ impl MeetingStatusPoller {
 
     pub fn poke(&self) {
         let (lock, wake) = &*self.shared;
-        lock.lock().unwrap_or_else(|p| p.into_inner()).schedule.poke();
+        lock.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .schedule
+            .poke();
         wake.notify_all();
     }
 }
@@ -192,7 +198,12 @@ impl Default for MenuModel {
 impl MenuModel {
     pub fn title(&self) -> String {
         let suffix = if self.dictation_enabled { "" } else { " (off)" };
-        format!("{}{}{}", title_prefix(&self.app_state), self.base_icon, suffix)
+        format!(
+            "{}{}{}",
+            title_prefix(&self.app_state),
+            self.base_icon,
+            suffix
+        )
     }
 
     pub fn dictation_item(&self) -> &'static str {
@@ -222,9 +233,18 @@ impl MenuModel {
         self.session_active = session.is_some();
         self.detected = truthy(status.get("detected"));
         if let Some(session) = session {
-            let seconds = session.get("seconds").and_then(Value::as_f64).unwrap_or(0.0) as i64;
-            let title = session.get("title").and_then(Value::as_str).unwrap_or_default();
-            let segments = session.get("segment_count").and_then(Value::as_i64).unwrap_or(0);
+            let seconds = session
+                .get("seconds")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0) as i64;
+            let title = session
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let segments = session
+                .get("segment_count")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             self.base_icon = LIVE_ICON;
             self.status_line = format!(
                 "recording: {title} — {}m{:02}s, {segments} segments",
@@ -245,7 +265,11 @@ impl MenuModel {
             self.status_line = format!("meeting detected ({platform})");
         } else {
             self.base_icon = IDLE_ICON;
-            let busy = if truthy(status.get("mic_busy")) { "mic in use" } else { "idle" };
+            let busy = if truthy(status.get("mic_busy")) {
+                "mic in use"
+            } else {
+                "idle"
+            };
             self.status_line = format!("watching · {busy}");
         }
     }
@@ -348,10 +372,14 @@ mod tests {
         assert_eq!(m.dictation_item(), "Dictation: Off");
         m.apply_status(&PollResult::Down);
         assert_eq!(m.status_line, "server: down (lf serve)");
-        m.apply_status(&PollResult::Ok(json!({"session": {"title": "Standup", "seconds": 125, "segment_count": 4}})));
+        m.apply_status(&PollResult::Ok(
+            json!({"session": {"title": "Standup", "seconds": 125, "segment_count": 4}}),
+        ));
         assert_eq!(m.status_line, "recording: Standup — 2m05s, 4 segments");
         assert_eq!(m.meeting_toggle, "Stop & save notes");
-        m.apply_status(&PollResult::Ok(json!({"detected": true, "platform": "Zoom"})));
+        m.apply_status(&PollResult::Ok(
+            json!({"detected": true, "platform": "Zoom"}),
+        ));
         assert_eq!(m.status_line, "meeting detected (Zoom)");
         assert_eq!(m.base_icon, DETECTED_ICON);
     }

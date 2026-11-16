@@ -11,7 +11,9 @@ use lf_input::hub::{Callback, HubActions, KeyboardHub, Shortcuts};
 use lf_input::is_hold_key;
 
 use crate::controller::{ControllerHandle, Job};
-use crate::live::{adopt_groups, merge_live, runtime_changes, runtime_fields, RUNTIME_GROUPS, HOTKEY_FIELDS};
+use crate::live::{
+    adopt_groups, merge_live, runtime_changes, runtime_fields, HOTKEY_FIELDS, RUNTIME_GROUPS,
+};
 use crate::menubar::MenuState;
 use crate::settings::{dictation_enabled, str_field, DICTATION_TOGGLE_HOTKEY};
 use crate::worker::WorkItem;
@@ -97,7 +99,10 @@ impl LiveSettings {
     }
 
     pub fn config(&self) -> Arc<Config> {
-        self.config.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Apply a freshly loaded config; the names that changed.
@@ -161,7 +166,10 @@ impl LiveSettings {
 pub fn job_sink(work: Sender<WorkItem>) -> crate::controller::JobSink {
     let work = Mutex::new(work);
     Arc::new(move |job: Job| {
-        let _ = work.lock().unwrap_or_else(|p| p.into_inner()).send(WorkItem::Job(job));
+        let _ = work
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .send(WorkItem::Job(job));
     })
 }
 

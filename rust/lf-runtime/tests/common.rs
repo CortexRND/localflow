@@ -124,8 +124,9 @@ pub fn rig_with(config: Config) -> Rig {
     let now = Arc::new(Mutex::new(0.0));
     let toggles: Arc<Mutex<Vec<bool>>> = Default::default();
     // The "file": toggling flips this stored value (Err = save failure).
-    let stored: Arc<Mutex<Result<bool, String>>> =
-        Arc::new(Mutex::new(Ok(lf_runtime::settings::dictation_enabled(&config))));
+    let stored: Arc<Mutex<Result<bool, String>>> = Arc::new(Mutex::new(Ok(
+        lf_runtime::settings::dictation_enabled(&config),
+    )));
     let (j, s, st, n, t, sv) = (
         jobs.clone(),
         sounds.clone(),

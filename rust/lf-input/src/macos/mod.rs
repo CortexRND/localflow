@@ -6,14 +6,16 @@ use std::sync::Arc;
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventType, CallbackResult, EventField,
+    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventType, CallbackResult, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 use crate::hub::KeyboardHub;
 use crate::keys::{Key, Modifier, Side};
-use crate::listener::{emit, watchdog_armed, InputError, InputWarning, WarningSink, DEAD_TAP, LISTEN_EVENT};
+use crate::listener::{
+    emit, watchdog_armed, InputError, InputWarning, WarningSink, DEAD_TAP, LISTEN_EVENT,
+};
 
 #[link(name = "IOKit", kind = "framework")]
 extern "C" {
@@ -49,13 +51,53 @@ pub fn key_for_code(code: u16) -> Option<Key> {
     let m = |m, s| Some(Key::Mod(m, s));
     let named = |n: &'static str| Some(Key::Named(n));
     const CHARS: &[(u16, char)] = &[
-        (0, 'a'), (1, 's'), (2, 'd'), (3, 'f'), (4, 'h'), (5, 'g'), (6, 'z'), (7, 'x'),
-        (8, 'c'), (9, 'v'), (11, 'b'), (12, 'q'), (13, 'w'), (14, 'e'), (15, 'r'),
-        (16, 'y'), (17, 't'), (18, '1'), (19, '2'), (20, '3'), (21, '4'), (22, '6'),
-        (23, '5'), (24, '='), (25, '9'), (26, '7'), (27, '-'), (28, '8'), (29, '0'),
-        (30, ']'), (31, 'o'), (32, 'u'), (33, '['), (34, 'i'), (35, 'p'), (37, 'l'),
-        (38, 'j'), (39, '\''), (40, 'k'), (41, ';'), (42, '\\'), (43, ','), (44, '/'),
-        (45, 'n'), (46, 'm'), (47, '.'), (50, '`'),
+        (0, 'a'),
+        (1, 's'),
+        (2, 'd'),
+        (3, 'f'),
+        (4, 'h'),
+        (5, 'g'),
+        (6, 'z'),
+        (7, 'x'),
+        (8, 'c'),
+        (9, 'v'),
+        (11, 'b'),
+        (12, 'q'),
+        (13, 'w'),
+        (14, 'e'),
+        (15, 'r'),
+        (16, 'y'),
+        (17, 't'),
+        (18, '1'),
+        (19, '2'),
+        (20, '3'),
+        (21, '4'),
+        (22, '6'),
+        (23, '5'),
+        (24, '='),
+        (25, '9'),
+        (26, '7'),
+        (27, '-'),
+        (28, '8'),
+        (29, '0'),
+        (30, ']'),
+        (31, 'o'),
+        (32, 'u'),
+        (33, '['),
+        (34, 'i'),
+        (35, 'p'),
+        (37, 'l'),
+        (38, 'j'),
+        (39, '\''),
+        (40, 'k'),
+        (41, ';'),
+        (42, '\\'),
+        (43, ','),
+        (44, '/'),
+        (45, 'n'),
+        (46, 'm'),
+        (47, '.'),
+        (50, '`'),
     ];
     if let Some((_, c)) = CHARS.iter().find(|(k, _)| *k == code) {
         return Some(Key::Char(*c));
@@ -138,7 +180,11 @@ pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
         CGEventTapLocation::Session,
         CGEventTapPlacement::HeadInsertEventTap,
         CGEventTapOptions::ListenOnly,
-        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged],
+        vec![
+            CGEventType::KeyDown,
+            CGEventType::KeyUp,
+            CGEventType::FlagsChanged,
+        ],
         move |_proxy, etype, event: &CGEvent| {
             match etype {
                 CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -148,8 +194,10 @@ pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
                     }
                 }
                 CGEventType::KeyDown | CGEventType::KeyUp => {
-                    let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
-                    let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
+                    let code =
+                        event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+                    let repeat =
+                        event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
                     if let Some(key) = key_for_code(code) {
                         if matches!(etype, CGEventType::KeyDown) {
                             if !repeat {
@@ -161,7 +209,8 @@ pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
                     }
                 }
                 CGEventType::FlagsChanged => {
-                    let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+                    let code =
+                        event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
                     if let (Some(key), Some(mask)) = (key_for_code(code), modifier_mask(code)) {
                         if event.get_flags().bits() & mask != 0 {
                             feed.press(key);
@@ -181,7 +230,10 @@ pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
     })?;
     {
         use core_foundation::base::TCFType;
-        port.store(tap.mach_port().as_concrete_TypeRef() as usize, Ordering::SeqCst);
+        port.store(
+            tap.mach_port().as_concrete_TypeRef() as usize,
+            Ordering::SeqCst,
+        );
     }
     let source = tap
         .mach_port()

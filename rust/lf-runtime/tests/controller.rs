@@ -113,7 +113,11 @@ fn escape_cancels_active_gesture_states() {
         r.handle.send(Event::Cancel(0.25));
         r.controller.drain();
         assert!(!r.recording());
-        let expected = if state == Gesture::Tapped { Gesture::Idle } else { Gesture::AwaitUp };
+        let expected = if state == Gesture::Tapped {
+            Gesture::Idle
+        } else {
+            Gesture::AwaitUp
+        };
         assert_eq!(r.controller.gesture(), expected, "{state:?}");
         assert_eq!(r.jobs(), 0);
     }
@@ -136,7 +140,15 @@ fn max_duration_warns_once_then_stops_and_queues() {
     r.set_now(1140.0);
     r.controller.check_timers(1140.0);
     r.controller.check_timers(1140.0);
-    assert_eq!(r.sounds.lock().unwrap().iter().filter(|s| *s == "warn").count(), 1);
+    assert_eq!(
+        r.sounds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| *s == "warn")
+            .count(),
+        1
+    );
     r.set_now(1200.0);
     r.controller.check_timers(1200.0);
     assert!(!r.recording());
@@ -216,11 +228,20 @@ fn transform_needs_a_selection() {
 #[test]
 fn job_result_pastes_and_failed_result_restores_selection() {
     let mut r = rig();
-    r.handle.note_job_result(Some("hi".into()), Some("before".into()), false, Some(String::new()));
-    r.handle.note_job_result(None, Some("before".into()), true, Some("sel".into()));
+    r.handle.note_job_result(
+        Some("hi".into()),
+        Some("before".into()),
+        false,
+        Some(String::new()),
+    );
+    r.handle
+        .note_job_result(None, Some("before".into()), true, Some("sel".into()));
     r.controller.drain();
     let out = r.output.0.lock().unwrap();
-    assert_eq!(out.pasted, vec![("hi".into(), "auto".into(), Some("before".into()))]);
+    assert_eq!(
+        out.pasted,
+        vec![("hi".into(), "auto".into(), Some("before".into()))]
+    );
     assert_eq!(out.restored, vec![("sel".into(), Some("before".into()))]);
     drop(out);
     // Paste last now uses the newest result.

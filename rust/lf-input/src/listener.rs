@@ -17,7 +17,8 @@ pub const LISTEN_EVENT: u32 = 1;
 /// silence this long almost always means TCC is dropping events.
 pub const DEAD_TAP: Duration = Duration::from_secs(15);
 
-pub const INPUT_MONITORING_HELP: &str = "hold-to-talk and global hotkeys cannot see keystrokes until Input Monitoring \
+pub const INPUT_MONITORING_HELP: &str =
+    "hold-to-talk and global hotkeys cannot see keystrokes until Input Monitoring \
 is enabled for the app that launched LocalFlow — 'LocalFlow' when started \
 from the app, or your terminal app / 'Python' when run from a terminal — in \
 System Settings → Privacy & Security → Input Monitoring. Restart LocalFlow \
@@ -58,7 +59,10 @@ impl fmt::Display for InputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             InputError::TapCreateFailed => {
-                write!(f, "could not create the keyboard event tap: {INPUT_MONITORING_HELP}")
+                write!(
+                    f,
+                    "could not create the keyboard event tap: {INPUT_MONITORING_HELP}"
+                )
             }
             InputError::Unsupported(what) => write!(f, "{what}"),
         }

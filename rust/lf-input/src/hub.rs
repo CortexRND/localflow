@@ -129,7 +129,8 @@ fn build(shortcuts: &Shortcuts, on_toggle: &Callback) -> (Bindings, Vec<BindingW
         let clash = seen.iter().find(|(r, _)| match (r, &reserved) {
             (Reserved::Single(a), Reserved::Single(b)) => a == b,
             (Reserved::Chord(a), Reserved::Chord(b)) => a == b,
-            (Reserved::Single(a), Reserved::Chord(b)) | (Reserved::Chord(b), Reserved::Single(a)) => {
+            (Reserved::Single(a), Reserved::Chord(b))
+            | (Reserved::Chord(b), Reserved::Single(a)) => {
                 b.keys().len() == 1 && b.contains(&a.canonical())
             }
         });
@@ -148,10 +149,18 @@ fn build(shortcuts: &Shortcuts, on_toggle: &Callback) -> (Bindings, Vec<BindingW
     let chord = |s: &str| Chord::parse(s).ok().map(Reserved::Chord);
 
     let mut bindings = Bindings::default();
-    if reserve("dictation", &shortcuts.hold_key, single(&shortcuts.hold_key)) {
+    if reserve(
+        "dictation",
+        &shortcuts.hold_key,
+        single(&shortcuts.hold_key),
+    ) {
         bindings.hold_key = Key::from_name(&shortcuts.hold_key);
     }
-    if reserve("dictation", &shortcuts.toggle_combo, chord(&shortcuts.toggle_combo)) {
+    if reserve(
+        "dictation",
+        &shortcuts.toggle_combo,
+        chord(&shortcuts.toggle_combo),
+    ) {
         bindings.toggle = Chord::parse(&shortcuts.toggle_combo).ok().map(|c| Combo {
             chord: c,
             state: BTreeSet::new(),
@@ -175,7 +184,11 @@ fn build(shortcuts: &Shortcuts, on_toggle: &Callback) -> (Bindings, Vec<BindingW
             }
         }
     }
-    if reserve("command mode", &shortcuts.command_key, single(&shortcuts.command_key)) {
+    if reserve(
+        "command mode",
+        &shortcuts.command_key,
+        single(&shortcuts.command_key),
+    ) {
         bindings.command_key = Key::from_name(&shortcuts.command_key);
     }
     (bindings, warnings)
@@ -414,7 +427,8 @@ impl KeyboardHub {
         }
         for combo in st.bindings.combos.iter_mut() {
             if combo_press(combo, &canonical) {
-                if st.command_key_down && command.as_ref().is_some_and(|c| combo.chord.contains(c)) {
+                if st.command_key_down && command.as_ref().is_some_and(|c| combo.chord.contains(c))
+                {
                     cancel_command = true;
                     fired.push(actions.on_command_cancel.clone());
                 }
@@ -461,14 +475,24 @@ impl KeyboardHub {
         st.timer_generation += 1;
         let generation = st.timer_generation;
         st.command_timer = Some(generation);
-        let mut slot = self.inner.timer.slot.lock().unwrap_or_else(|p| p.into_inner());
+        let mut slot = self
+            .inner
+            .timer
+            .slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         slot.deadline = Some((Instant::now() + self.inner.command_delay, generation));
         self.inner.timer.wake.notify_all();
     }
 
     fn cancel_timer(&self, st: &mut State) {
         st.command_timer = None;
-        let mut slot = self.inner.timer.slot.lock().unwrap_or_else(|p| p.into_inner());
+        let mut slot = self
+            .inner
+            .timer
+            .slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         slot.deadline = None;
         self.inner.timer.wake.notify_all();
     }

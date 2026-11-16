@@ -84,7 +84,12 @@ fn routes_hold_and_command_key_events() {
     hub.release(k("alt_r"));
     assert_eq!(
         *log.lock().unwrap(),
-        vec!["dictation-down", "dictation-up", "command-down", "command-up"]
+        vec![
+            "dictation-down",
+            "dictation-up",
+            "command-down",
+            "command-up"
+        ]
     );
 }
 
@@ -183,7 +188,10 @@ fn distinct_chords_are_still_allowed() {
     ] {
         let log: Log = Default::default();
         let shortcuts = Shortcuts {
-            combos: vec![(left.into(), rec(&log, "a")), (right.into(), rec(&log, "b"))],
+            combos: vec![
+                (left.into(), rec(&log, "a")),
+                (right.into(), rec(&log, "b")),
+            ],
             ..Default::default()
         };
         assert!(hub(shortcuts, &log).1.is_empty(), "{left} vs {right}");
@@ -288,7 +296,12 @@ fn reconfigure_is_deferred_until_keys_are_up() {
     hub.release(k("f18"));
     assert_eq!(
         *log.lock().unwrap(),
-        vec!["dictation-down", "dictation-up", "dictation-down", "dictation-up"]
+        vec![
+            "dictation-down",
+            "dictation-up",
+            "dictation-down",
+            "dictation-up"
+        ]
     );
 }
 
@@ -345,7 +358,10 @@ fn first_event_marks_tap_alive() {
     assert!(!lf_input::listener::check_tap_alive(&hub, &sink));
     hub.press(k("a"));
     assert!(lf_input::listener::check_tap_alive(&hub, &sink));
-    assert_eq!(*warned.lock().unwrap(), vec![lf_input::InputWarning::DeadTap]);
+    assert_eq!(
+        *warned.lock().unwrap(),
+        vec![lf_input::InputWarning::DeadTap]
+    );
     assert!(lf_input::listener::watchdog_armed(false));
     assert!(!lf_input::listener::watchdog_armed(true));
 }

@@ -22,8 +22,14 @@ use crate::menubar::{MenuActions, MenuBar, MenuModel};
 
 pub fn frontmost_app() -> Option<AppInfo> {
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-    let name = app.localizedName().map(|n| n.to_string()).unwrap_or_default();
-    let bundle_id = app.bundleIdentifier().map(|n| n.to_string()).unwrap_or_default();
+    let name = app
+        .localizedName()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let bundle_id = app
+        .bundleIdentifier()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
     Some(AppInfo { name, bundle_id })
 }
 
@@ -87,7 +93,12 @@ fn menu_item(
     target: &MenuTarget,
 ) -> Retained<NSMenuItem> {
     let item = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(title), action, &ns(""))
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &ns(title),
+            action,
+            &ns(""),
+        )
     };
     if action.is_some() {
         unsafe { item.setTarget(Some(target)) };
@@ -124,7 +135,9 @@ impl MenuBar for MacMenuBar {
     fn update(&self, model: &MenuModel) {
         let model = model.clone();
         DispatchQueue::main().exec_async(move || {
-            let Some(mtm) = MainThreadMarker::new() else { return };
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
             UI.with(|ui| {
                 if let Some(ui) = ui.borrow().as_ref() {
                     render(ui, &model, mtm);
@@ -143,15 +156,30 @@ pub fn run_menu_bar(model: MenuModel, actions: MenuActions) -> Result<(), String
     let target = MenuTarget::new(mtm, actions);
     let menu = NSMenu::new(mtm);
     let status = menu_item(mtm, &model.status_line, None, &target);
-    let dictation = menu_item(mtm, model.dictation_item(), Some(sel!(toggleDictation:)), &target);
+    let dictation = menu_item(
+        mtm,
+        model.dictation_item(),
+        Some(sel!(toggleDictation:)),
+        &target,
+    );
     let warning = menu_item(mtm, "", None, &target);
     menu.addItem(&status);
     menu.addItem(&dictation);
     menu.addItem(&warning);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "Paste last transcript", Some(sel!(pasteLast:)), &target));
+    menu.addItem(&menu_item(
+        mtm,
+        "Paste last transcript",
+        Some(sel!(pasteLast:)),
+        &target,
+    ));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "Quit LocalFlow", Some(sel!(quit:)), &target));
+    menu.addItem(&menu_item(
+        mtm,
+        "Quit LocalFlow",
+        Some(sel!(quit:)),
+        &target,
+    ));
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     item.setMenu(Some(&menu));
     let ui = Ui {

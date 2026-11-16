@@ -25,7 +25,10 @@ fn merge_live_takes_only_allowlisted_fields() {
     let (merged, changed) = merge_live(&running, &fresh, &BTreeSet::new());
     assert_eq!(
         changed,
-        ["dictation_enabled", "sounds_enabled"].iter().map(|s| s.to_string()).collect()
+        ["dictation_enabled", "sounds_enabled"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     );
     assert_eq!(merged.field("sample_rate"), running.field("sample_rate"));
     assert_eq!(merged.field("sounds_enabled"), Some(&json!(false)));
@@ -168,7 +171,7 @@ fn watcher_notifies_once_per_change_and_survives_bad_files() {
     set_dictation_enabled(&path, false).unwrap();
     assert!(watcher.check());
     assert!(!watcher.check());
-    std::fs::write(&path, "[dictation]\nenabled = \"nope\"\n").unwrap();
+    std::fs::write(&path, "[dictation\nenabled = = nope\n").unwrap();
     assert!(!watcher.check());
     assert_eq!(*seen.lock().unwrap(), vec![false]);
 }

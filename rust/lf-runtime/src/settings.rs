@@ -1,10 +1,10 @@
 //! Typed reads of the shared config plus the dictation on/off switch.
 //!
 //! `dictation_enabled` (`[dictation] enabled`) and `dictation_toggle_hotkey`
-//! (`[hotkey] dictation_toggle`) match the keys the Python app adds. They are
-//! read from the raw TOML here rather than added to lf-core's field table,
-//! and the toggle edits just that key in place (toml_edit), so every other
-//! byte of the user's file is preserved.
+//! (`[hotkey] dictation_toggle`) are the Python app's keys; until lf-core's
+//! field table carries them they are filled from the raw TOML. The toggle edits
+//! just that key in place (toml_edit), so every other byte of the user's
+//! file (comments, ordering) is preserved.
 
 use std::path::Path;
 
@@ -37,28 +37,33 @@ pub fn dictation_enabled(config: &Config) -> bool {
     bool_field(config, DICTATION_ENABLED, true)
 }
 
-/// Copy `[dictation] enabled` / `[hotkey] dictation_toggle` from the raw
-/// file data onto `config` (defaults true / ""). Wrong types are errors,
-/// like Python's `ConfigError`.
-pub fn apply_extras(config: &mut Config, data: &serde_json::Map<String, Value>) -> Result<()> {
+/// Fill `dictation_enabled` / `dictation_toggle_hotkey` from the raw file
+/// data when lf-core's field table doesn't carry them (yet). A wrong type
+/// keeps the default, as Python does.
+pub fn apply_extras(config: &mut Config, data: &serde_json::Map<String, Value>) {
     let section = |name: &str| data.get(name).and_then(Value::as_object);
-    let enabled = match section("dictation").and_then(|s| s.get("enabled")) {
-        None => true,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => return Err(anyhow!("dictation.enabled must be true or false")),
-    };
-    let toggle = match section("hotkey").and_then(|s| s.get("dictation_toggle")) {
-        None => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(_) => return Err(anyhow!("hotkey.dictation_toggle must be a string")),
-    };
-    config.set_field(DICTATION_ENABLED, Value::Bool(enabled));
-    config.set_field(DICTATION_TOGGLE_HOTKEY, Value::String(toggle));
-    Ok(())
+    if config.field(DICTATION_ENABLED).is_none() {
+        let enabled = match section("dictation").and_then(|s| s.get("enabled")) {
+            Some(Value::Bool(b)) => *b,
+            Some(_) => {
+                log::warn!("invalid config value for dictation.enabled; using default");
+                true
+            }
+            None => true,
+        };
+        config.set_field(DICTATION_ENABLED, Value::Bool(enabled));
+    }
+    if config.field(DICTATION_TOGGLE_HOTKEY).is_none() {
+        let toggle = match section("hotkey").and_then(|s| s.get("dictation_toggle")) {
+            Some(Value::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        config.set_field(DICTATION_TOGGLE_HOTKEY, Value::String(toggle));
+    }
 }
 
-/// The runtime config: lf-core's `load_config` (or `load_from(path)`) plus
-/// the dictation switch fields.
+/// The runtime config: lf-core's `load_config`, or `load_from(path)` when
+/// that file exists (defaults when it doesn't), plus the dictation switch.
 pub fn load_runtime_config(path: Option<&Path>) -> Result<Config> {
     let (mut config, file) = match path {
         Some(p) if p.exists() => (lf_core::config::load_from(p)?, Some(p.to_path_buf())),
@@ -73,7 +78,7 @@ pub fn load_runtime_config(path: Option<&Path>) -> Result<Config> {
         Some(p) => lf_core::config::parse_toml_file(p)?,
         None => serde_json::Map::new(),
     };
-    apply_extras(&mut config, &data)?;
+    apply_extras(&mut config, &data);
     Ok(config)
 }
 
@@ -126,9 +131,13 @@ mod tests {
         assert_eq!(str_field(&config, DICTATION_TOGGLE_HOTKEY), "");
 
         assert!(!toggle_dictation(&path).unwrap());
-        assert!(!dictation_enabled(&load_runtime_config(Some(&path)).unwrap()));
+        assert!(!dictation_enabled(
+            &load_runtime_config(Some(&path)).unwrap()
+        ));
         assert!(toggle_dictation(&path).unwrap());
-        assert!(dictation_enabled(&load_runtime_config(Some(&path)).unwrap()));
+        assert!(dictation_enabled(
+            &load_runtime_config(Some(&path)).unwrap()
+        ));
     }
 
     #[test]
@@ -143,14 +152,19 @@ mod tests {
         assert!(text.contains("[dictation]\nenabled = false"));
         let config = load_runtime_config(Some(&path)).unwrap();
         assert!(!dictation_enabled(&config));
-        assert_eq!(str_field(&config, DICTATION_TOGGLE_HOTKEY), "<ctrl>+<alt>+d");
+        assert_eq!(
+            str_field(&config, DICTATION_TOGGLE_HOTKEY),
+            "<ctrl>+<alt>+d"
+        );
     }
 
     #[test]
-    fn wrong_type_is_an_error() {
+    fn wrong_type_falls_back_to_the_default_like_python() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[dictation]\nenabled = \"false\"\n").unwrap();
-        assert!(load_runtime_config(Some(&path)).is_err());
+        assert!(dictation_enabled(
+            &load_runtime_config(Some(&path)).unwrap()
+        ));
     }
 }

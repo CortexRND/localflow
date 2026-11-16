@@ -92,12 +92,17 @@ pub fn merge_live(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|n| {
-            !LIVE_FIELDS.contains(&n.as_str()) && !reloaded.contains(n.as_str()) && differs(running, fresh, n)
+            !LIVE_FIELDS.contains(&n.as_str())
+                && !reloaded.contains(n.as_str())
+                && differs(running, fresh, n)
         })
         .collect();
     if !others.is_empty() {
         let names: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
-        log::info!("config changed; restart LocalFlow to apply: {}", names.join(", "));
+        log::info!(
+            "config changed; restart LocalFlow to apply: {}",
+            names.join(", ")
+        );
     }
     if changed.is_empty() {
         return (running.clone(), changed);
@@ -294,7 +299,10 @@ impl ConfigWatcher {
         let polling = match &watcher {
             Ok(_) => false,
             Err(e) => {
-                log::warn!("file watcher unavailable ({e}); checking the config every {:?}", self.interval);
+                log::warn!(
+                    "file watcher unavailable ({e}); checking the config every {:?}",
+                    self.interval
+                );
                 true
             }
         };
@@ -304,7 +312,8 @@ impl ConfigWatcher {
             .spawn(move || loop {
                 let pending = this.on_tick.as_ref().is_some_and(|t| t());
                 let woke = if polling || pending {
-                    rx.recv_timeout(this.interval).map_err(|e| matches!(e, mpsc::RecvTimeoutError::Disconnected))
+                    rx.recv_timeout(this.interval)
+                        .map_err(|e| matches!(e, mpsc::RecvTimeoutError::Disconnected))
                 } else {
                     rx.recv().map_err(|_| true)
                 };

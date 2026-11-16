@@ -36,7 +36,11 @@ fn main() {
         })
         .collect();
     let mut out = io::stdout().lock();
-    let _ = out.write_all(serde_json::to_string(&responses).unwrap_or_default().as_bytes());
+    let _ = out.write_all(
+        serde_json::to_string(&responses)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     let _ = out.flush();
 }
 
@@ -49,7 +53,11 @@ fn text<'a>(r: &'a Value, name: &str) -> Result<&'a str> {
 fn strings(r: &Value, name: &str) -> Vec<String> {
     r.get(name)
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -89,13 +97,24 @@ fn handle(r: &Value) -> Result<Value> {
     match text(r, "op")? {
         "category_for" => {
             let app = r.get("app").filter(|a| !a.is_null()).map(|a| AppInfo {
-                name: a.get("name").and_then(Value::as_str).unwrap_or_default().into(),
-                bundle_id: a.get("bundle_id").and_then(Value::as_str).unwrap_or_default().into(),
+                name: a
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
+                bundle_id: a
+                    .get("bundle_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
             });
             Ok(json!(category_for(app.as_ref(), &strings(r, "overrides"))))
         }
         "title_prefix" => Ok(json!(title_prefix(text(r, "state")?))),
-        "command_prompt" => Ok(json!(command_prompt(text(r, "instruction")?, text(r, "selection")?))),
+        "command_prompt" => Ok(json!(command_prompt(
+            text(r, "instruction")?,
+            text(r, "selection")?
+        ))),
         "transform_prompt" => transform_prompt(text(r, "preset")?, text(r, "text")?)
             .map(Value::String)
             .map_err(|e| anyhow!(e)),
@@ -106,11 +125,12 @@ fn handle(r: &Value) -> Result<Value> {
         "merge_live" => {
             let running = config(r, "running");
             let fresh = config(r, "fresh");
-            let reloaded: BTreeSet<&str> = if r.get("reloaded").and_then(Value::as_bool).unwrap_or(false) {
-                runtime_fields()
-            } else {
-                BTreeSet::new()
-            };
+            let reloaded: BTreeSet<&str> =
+                if r.get("reloaded").and_then(Value::as_bool).unwrap_or(false) {
+                    runtime_fields()
+                } else {
+                    BTreeSet::new()
+                };
             let (merged, changed) = merge_live(&running, &fresh, &reloaded);
             Ok(json!({
                 "changed": changed.into_iter().collect::<Vec<_>>(),
@@ -122,7 +142,12 @@ fn handle(r: &Value) -> Result<Value> {
             // Steps: ["start", t] | ["finish", t, status|null] | ["poke"]; returns next_due after each.
             let mut s = PollSchedule::default();
             let mut out = Vec::new();
-            for step in r.get("steps").and_then(Value::as_array).into_iter().flatten() {
+            for step in r
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 let kind = step.get(0).and_then(Value::as_str).unwrap_or_default();
                 let t = step.get(1).and_then(Value::as_f64).unwrap_or(0.0);
                 match kind {

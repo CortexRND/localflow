@@ -39,7 +39,9 @@ fn style_for(config: &Config, app_info: Option<&AppInfo>) -> Option<String> {
     if !bool_field(config, "styles_enabled", true) {
         return None;
     }
-    let overrides = config.field_str_list("app_category_overrides").unwrap_or_default();
+    let overrides = config
+        .field_str_list("app_category_overrides")
+        .unwrap_or_default();
     let category = category_for(app_info, &overrides);
     let style = str_field(config, &format!("style_{category}"));
     (!style.is_empty()).then_some(style)
@@ -77,13 +79,20 @@ pub fn render_text(
     let symbols = |t: &str| apply_spoken_symbols(t, &vocab.commands);
     let style = |t: &str| apply_style(t, style_name.as_deref().unwrap_or_default(), &vocab.words);
     // Cleanup only pays off on real sentences; short fragments have nothing to fix.
-    let use_clean = level != "none" && !level.is_empty() && llm.is_some() && text.split_whitespace().count() >= 5;
+    let use_clean = level != "none"
+        && !level.is_empty()
+        && llm.is_some()
+        && text.split_whitespace().count() >= 5;
     let steps = RenderSteps {
         replace: Some(&replace),
-        fmt: bool_field(config, "spoken_punctuation", true).then_some(&fmt as &dyn Fn(&str) -> String),
+        fmt: bool_field(config, "spoken_punctuation", true)
+            .then_some(&fmt as &dyn Fn(&str) -> String),
         clean: use_clean.then_some(&clean as &dyn Fn(&str) -> String),
-        symbols: bool_field(config, "spoken_symbols", true).then_some(&symbols as &dyn Fn(&str) -> String),
-        style: style_name.is_some().then_some(&style as &dyn Fn(&str) -> String),
+        symbols: bool_field(config, "spoken_symbols", true)
+            .then_some(&symbols as &dyn Fn(&str) -> String),
+        style: style_name
+            .is_some()
+            .then_some(&style as &dyn Fn(&str) -> String),
     };
     render_dictation(text, phrases, &steps)
 }
@@ -145,14 +154,20 @@ pub fn process_job(
         match job.kind {
             JobKind::Dictate => {
                 let audio = job.audio.as_deref().unwrap_or_default();
-                let (raw, final_text) = process_clip(audio, config, models, vocab, job.app_info.as_ref())?;
+                let (raw, final_text) =
+                    process_clip(audio, config, models, vocab, job.app_info.as_ref())?;
                 raw_text = raw;
-                status = if final_text.is_empty() { "silent" } else { "ok" };
+                status = if final_text.is_empty() {
+                    "silent"
+                } else {
+                    "ok"
+                };
                 text = (!final_text.is_empty()).then_some(final_text);
             }
             JobKind::Command
                 if str_field(config, "llm_provider") == "ollama"
-                    && (!bool_field(config, "cleanup_enabled", true) || str_field(config, "llm_model").is_empty()) =>
+                    && (!bool_field(config, "cleanup_enabled", true)
+                        || str_field(config, "llm_model").is_empty()) =>
             {
                 log::error!("command mode needs a local LLM — choose one in lf setup");
                 error = true;
@@ -197,7 +212,9 @@ pub fn process_job(
             h.delete_clip(audio_path.as_deref());
             audio_path = None;
         }
-        let overrides = config.field_str_list("app_category_overrides").unwrap_or_default();
+        let overrides = config
+            .field_str_list("app_category_overrides")
+            .unwrap_or_default();
         let info = job.app_info.as_ref();
         let mut entry = NewEntry::new(job.kind.as_str());
         entry.app_name = info.map(|i| i.name.clone());

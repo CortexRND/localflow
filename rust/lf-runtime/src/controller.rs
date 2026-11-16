@@ -17,7 +17,9 @@ use lf_core::config::Config;
 
 use crate::context::AppInfo;
 use crate::engine::{AudioSource, Pcm, TextOutput};
-use crate::settings::{bool_field, dictation_enabled, f64_field, i64_field, str_field, DICTATION_ENABLED};
+use crate::settings::{
+    bool_field, dictation_enabled, f64_field, i64_field, str_field, DICTATION_ENABLED,
+};
 
 pub const MIN_CLIP_SECONDS: f64 = 0.3;
 pub const TAP_MAX: f64 = MIN_CLIP_SECONDS;
@@ -202,7 +204,11 @@ impl ControllerHandle {
     /// Toggle-chord gesture: flips the intent so a rapid double press resolves
     /// to start+stop in order.
     pub fn note_toggle(&self) {
-        let mut intent = self.shared.toggle_intent.lock().unwrap_or_else(|p| p.into_inner());
+        let mut intent = self
+            .shared
+            .toggle_intent
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         *intent = !*intent;
         if *intent {
             self.note_start();
@@ -218,7 +224,11 @@ impl ControllerHandle {
 
     /// The consumer's current config (after the last applied update).
     pub fn config(&self) -> Arc<Config> {
-        self.shared.config.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.shared
+            .config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// No recording, gesture or command in progress and nothing queued.
@@ -381,7 +391,11 @@ impl Controller {
     }
 
     fn reset_toggle_intent(&self) {
-        *self.shared.toggle_intent.lock().unwrap_or_else(|p| p.into_inner()) = false;
+        *self
+            .shared
+            .toggle_intent
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = false;
     }
 
     /// One event; returns a looked-ahead event to handle next, if any.
@@ -455,7 +469,10 @@ impl Controller {
                     Some(next) => {
                         if let Event::Stop(stop_at) = next {
                             if stop_at - timestamp < self.deps.min_clip_seconds {
-                                log::info!("spam press coalesced ({:.2}s), dropped", stop_at - timestamp);
+                                log::info!(
+                                    "spam press coalesced ({:.2}s), dropped",
+                                    stop_at - timestamp
+                                );
                                 return None;
                             }
                         }
@@ -481,7 +498,9 @@ impl Controller {
             Event::PasteLast(_) => {
                 let text = (self.deps.latest_text)(&self.last_text);
                 if !text.is_empty() {
-                    self.deps.output.paste_text(&text, &self.paste_method(), None);
+                    self.deps
+                        .output
+                        .paste_text(&text, &self.paste_method(), None);
                 }
             }
             _ => {}
@@ -568,7 +587,9 @@ impl Controller {
             self.publish_state("idle");
         }
         let maximum = self.max_recording_seconds();
-        let Some(started) = self.recording_started_at else { return };
+        let Some(started) = self.recording_started_at else {
+            return;
+        };
         if maximum <= 0.0 {
             return;
         }
@@ -586,7 +607,11 @@ impl Controller {
             } else {
                 self.do_stop(JobKind::Dictate, String::new(), None, false);
             }
-            self.gesture = if self.key_held { Gesture::AwaitUp } else { Gesture::Idle };
+            self.gesture = if self.key_held {
+                Gesture::AwaitUp
+            } else {
+                Gesture::Idle
+            };
             self.tapped_at = None;
             self.locked_at = None;
         }
@@ -695,7 +720,11 @@ impl Controller {
         self.discard_recording();
         self.legacy_active = false;
         self.play("cancel");
-        self.gesture = if self.key_held { Gesture::AwaitUp } else { Gesture::Idle };
+        self.gesture = if self.key_held {
+            Gesture::AwaitUp
+        } else {
+            Gesture::Idle
+        };
         self.tapped_at = None;
         self.locked_at = None;
         self.reset_toggle_intent();
@@ -787,7 +816,9 @@ impl Controller {
             self.publish_state("idle");
             return;
         };
-        self.deps.output.paste_text(&text, &self.paste_method(), clipboard_before);
+        self.deps
+            .output
+            .paste_text(&text, &self.paste_method(), clipboard_before);
         self.last_text = text;
         self.publish_state("idle");
     }
@@ -814,7 +845,13 @@ impl Controller {
         true
     }
 
-    fn do_stop(&mut self, kind: JobKind, selection: String, clipboard_before: Option<String>, force: bool) {
+    fn do_stop(
+        &mut self,
+        kind: JobKind,
+        selection: String,
+        clipboard_before: Option<String>,
+        force: bool,
+    ) {
         if !self.deps.audio.is_recording() {
             return;
         }

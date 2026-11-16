@@ -13,7 +13,14 @@ pub const COPY_SETTLE: Duration = Duration::from_millis(150);
 /// U+2063 marks the sentinel so it never collides with real clipboard text.
 pub const SENTINEL_PREFIX: &str = "\u{2063}localflow-";
 
-pub const PASTE_METHODS: &[&str] = &["auto", "clipboard", "wtype", "xdotool", "pynput", "osascript"];
+pub const PASTE_METHODS: &[&str] = &[
+    "auto",
+    "clipboard",
+    "wtype",
+    "xdotool",
+    "pynput",
+    "osascript",
+];
 
 pub trait Clipboard: Send {
     fn get(&mut self) -> Option<String>;
@@ -52,7 +59,10 @@ impl Injector {
 
     /// The OS clipboard and keystroke backend for this platform.
     pub fn native() -> Self {
-        Injector::new(Box::new(SystemClipboard::default()), Box::new(NativeKeystrokes))
+        Injector::new(
+            Box::new(SystemClipboard::default()),
+            Box::new(NativeKeystrokes),
+        )
     }
 
     pub fn with_settle(mut self, paste: Duration, copy: Duration) -> Self {
@@ -104,7 +114,9 @@ impl Injector {
 
     /// Put `clipboard_before` back only if the clipboard still holds `expected`.
     pub fn restore_clipboard_if_matches(&self, expected: &str, clipboard_before: Option<&str>) {
-        let Some(before) = clipboard_before else { return };
+        let Some(before) = clipboard_before else {
+            return;
+        };
         let mut clip = self.clip();
         if clip.get().as_deref() == Some(expected) {
             clip.set(before);
@@ -178,9 +190,7 @@ impl Keystrokes for NativeKeystrokes {
             // Pasteboard + Cmd+V as a CGEvent: no AppleScript round trip.
             "auto" => {
                 if !crate::macos::accessibility_trusted() {
-                    log::warn!(
-                        "Accessibility is not granted; macOS may drop the synthetic Cmd+V"
-                    );
+                    log::warn!("Accessibility is not granted; macOS may drop the synthetic Cmd+V");
                 }
                 crate::macos::post_command_key(9)
             }
@@ -196,7 +206,8 @@ impl Keystrokes for NativeKeystrokes {
 
 #[cfg(target_os = "macos")]
 fn osascript_keystroke(key: &str) -> Result<(), String> {
-    let script = format!("tell application \"System Events\" to keystroke \"{key}\" using command down");
+    let script =
+        format!("tell application \"System Events\" to keystroke \"{key}\" using command down");
     run("osascript", &["-e", &script])
 }
 

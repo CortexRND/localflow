@@ -11,6 +11,31 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf-core` | config (v2 TOML + legacy v1 migration), API token, keyring secrets, dictionary, history (SQLite), hot phrases, spoken symbols/punctuation, styles |
 | `lf-providers` | Ollama / OpenAI-compatible LLM clients, provider presets and keys, endpoint-bound key activation |
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
+| `lf-input` | global hotkeys (`KeyboardHub`, pynput-compatible key names, order-insensitive chords, macOS CGEventTap with the Input Monitoring checks) and paste/clipboard (`Injector`) |
+| `lf-runtime` | the dictation controller state machine, worker and text pipeline, live config reload, the `dictation_enabled` switch, menu bar model + macOS NSStatusItem, single-instance lock; parity driver `lf-runtime/examples/runtime_parity.rs` |
+
+### Dictation runtime (`lf-input`, `lf-runtime`)
+
+A library port of `hotkey.py`, `pushtotalk.py`, `inject.py`, `app.py`
+(worker, `LiveSettings`, `_process_clip`/`_process_job`), `live_config.py`,
+`menubar.py`/`menubar_poll.py`, `transform.py` and `singleinstance.py`.
+Audio and speech-to-text come in through the `AudioSource` and
+`SpeechEngine` traits (`lf-runtime/src/engine.rs`) so the `lf-audio` and
+`lf-stt` crates can be plugged in; `lf_runtime::run::run` wires everything,
+and no binary ships it yet.
+
+Everything is event-driven. The controller blocks on its channel and only
+sets a deadline for the double-tap window and the max-duration timer. The
+hotkey timer, the config watcher (`notify`: FSEvents/inotify/
+ReadDirectoryChangesW) and the meeting poller all sleep on condvars or
+channels, and the menu gets state pushed to it. `cargo run --release -p
+lf-runtime --example idle -- 10` reports the idle footprint on Linux.
+
+`dictation_enabled` (`[dictation] enabled`, default true) and
+`dictation_toggle_hotkey` (`[hotkey] dictation_toggle`) match the Python
+keys. While dictation is off, every gesture except paste-last is ignored and
+the microphone is never opened. The toggle shortcut and the menu item flip
+the key in the file in place (`toml_edit`) and reload it live.
 
 ## Build
 
@@ -134,8 +159,17 @@ the above on Ubuntu, macOS and Windows.
 
 This is not a full port and does not imply a Rust runtime or UI:
 
-* no dictation runtime, audio capture, speech-to-text, hotkeys, paste
-  injection, meetings, server, menu bar, Hub, setup or settings windows;
+* no audio capture, speech-to-text, meetings, server, Hub, setup or
+  settings windows; the dictation runtime (`lf-runtime`) is a library with
+  no `dictate` binary yet;
+* hotkeys and the menu bar are implemented on macOS only: on Linux and
+  Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
+  tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
+  on macOS, `wtype`/`xdotool` on Linux, `SendInput` on Windows; Linux
+  `pynput` paste is not ported). Keys are mapped by US-layout keycode;
+* not ported from the runtime: pausing media while dictating, the
+  achievement cue, speech-model leases and explicit speech retry requests,
+  and the frontmost-app AppleScript fallback;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
   Python `wave`'s header), `load_clip` (PCM / extensible-PCM WAV inside the

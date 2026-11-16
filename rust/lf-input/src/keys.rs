@@ -204,7 +204,8 @@ impl Chord {
             if token.is_empty() {
                 return Err(invalid());
             }
-            let key = if let Some(inner) = token.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+            let key = if let Some(inner) = token.strip_prefix('<').and_then(|t| t.strip_suffix('>'))
+            {
                 Key::from_name(&inner.to_lowercase())
                     .filter(|k| !matches!(k, Key::Char(_)))
                     .ok_or_else(invalid)?
@@ -285,7 +286,14 @@ mod tests {
 
     #[test]
     fn rejects_bad_shortcuts() {
-        for bad in ["", "+", "<ctrl>+", "<nope>+a", "<ctrl>+<ctrl>+a", "ctrl+bogus"] {
+        for bad in [
+            "",
+            "+",
+            "<ctrl>+",
+            "<nope>+a",
+            "<ctrl>+<ctrl>+a",
+            "ctrl+bogus",
+        ] {
             assert!(Chord::parse(bad).is_err(), "{bad:?}");
         }
         assert_eq!(Chord::parse("<ctrl>++").unwrap().canonical(), "<ctrl>++");

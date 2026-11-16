@@ -105,11 +105,20 @@ mod tests {
     fn categories() {
         let none: [&str; 0] = [];
         assert_eq!(category_for(None, &none), "other");
-        assert_eq!(category_for(Some(&app("Slack", "com.tinyspeck.slackmacgap")), &none), "work");
-        assert_eq!(category_for(Some(&app("Mail", "")), &none), "email");
-        assert_eq!(category_for(Some(&app("Xcode", "com.apple.dt.Xcode")), &none), "other");
         assert_eq!(
-            category_for(Some(&app("Xcode", "com.apple.dt.Xcode")), &["xcode = Personal"]),
+            category_for(Some(&app("Slack", "com.tinyspeck.slackmacgap")), &none),
+            "work"
+        );
+        assert_eq!(category_for(Some(&app("Mail", "")), &none), "email");
+        assert_eq!(
+            category_for(Some(&app("Xcode", "com.apple.dt.Xcode")), &none),
+            "other"
+        );
+        assert_eq!(
+            category_for(
+                Some(&app("Xcode", "com.apple.dt.Xcode")),
+                &["xcode = Personal"]
+            ),
             "personal"
         );
         assert_eq!(

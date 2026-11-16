@@ -55,9 +55,13 @@ impl Worker {
                             old.unload();
                             log::info!("speech model reloaded");
                         }
-                        Err(e) => log::error!("speech model failed to load; keeping the old one: {e}"),
+                        Err(e) => {
+                            log::error!("speech model failed to load; keeping the old one: {e}")
+                        }
                     },
-                    Err(e) => log::error!("could not build the speech model; keeping the old one: {e}"),
+                    Err(e) => {
+                        log::error!("could not build the speech model; keeping the old one: {e}")
+                    }
                 },
                 WorkItem::Job(job) => self.process(job, llm.as_deref()),
             }

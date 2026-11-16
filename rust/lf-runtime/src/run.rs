@@ -53,14 +53,14 @@ pub fn run(options: RunOptions) -> Result<()> {
     };
     let config_path = lf_core::config::try_config_path()?;
     let config = Arc::new(load_runtime_config(None)?);
-    options.speech.load().map_err(|e| anyhow!("speech model failed to load: {e}"))?;
+    options
+        .speech
+        .load()
+        .map_err(|e| anyhow!("speech model failed to load: {e}"))?;
     let history_enabled = bool_field(&config, "history_enabled", true);
     let _ = write_state("idle", &status_path());
 
-    let menu = MenuState::new(
-        crate::platform_menu_bar(),
-        dictation_enabled(&config),
-    );
+    let menu = MenuState::new(crate::platform_menu_bar(), dictation_enabled(&config));
     let (work_tx, work_rx) = work_queue();
     let state_menu = menu.clone();
     let toggle_path = config_path.clone();
@@ -139,7 +139,10 @@ pub fn run(options: RunOptions) -> Result<()> {
         .name("localflow-worker".into())
         .spawn(move || worker.run(work_rx))?;
 
-    let (hub, warnings) = KeyboardHub::new(&keyboard_bindings(&config, &controller), hub_actions(&controller));
+    let (hub, warnings) = KeyboardHub::new(
+        &keyboard_bindings(&config, &controller),
+        hub_actions(&controller),
+    );
     for warning in warnings {
         eprintln!("warning: {warning}");
     }
@@ -155,7 +158,10 @@ pub fn run(options: RunOptions) -> Result<()> {
             apply_live.apply(&fresh);
         }),
     )
-    .with_tick(Arc::new(move || tick_live.retry()), crate::live::DEFAULT_INTERVAL);
+    .with_tick(
+        Arc::new(move || tick_live.retry()),
+        crate::live::DEFAULT_INTERVAL,
+    );
     let _watch = watcher.start();
 
     let warn_menu = menu.clone();
@@ -183,7 +189,9 @@ pub fn run(options: RunOptions) -> Result<()> {
                 if let Err(e) = lf_input::listener::run_forever(&listener_hub, listener_warn) {
                     log::error!("{e}");
                 }
-                log::error!("hotkey listener exited unexpectedly — exiting non-zero for launchd to restart");
+                log::error!(
+                    "hotkey listener exited unexpectedly — exiting non-zero for launchd to restart"
+                );
                 std::process::exit(1);
             })?;
         let toggle = controller.clone();
