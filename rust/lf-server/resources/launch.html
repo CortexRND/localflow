@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<title>Opening LocalFlow…</title></head>
+<body>
+<form method="post" action="__ACTION__">
+<input type="hidden" name="launch" value="__CODE__">
+<noscript><button type="submit">Open LocalFlow</button></noscript>
+</form>
+<p id="used" hidden>This launch link was already used — reopen LocalFlow from lf ui or Settings.</p>
+<script>
+(() => {
+  const showUsed = () => { document.getElementById('used').hidden = false; };
+  window.addEventListener('pageshow', (event) => { if (event.persisted) showUsed(); });
+  const key = 'localflow-launch-submitted:' + location.pathname;
+  const nav = performance.getEntriesByType('navigation')[0];
+  let submitted = false;
+  try { submitted = sessionStorage.getItem(key) === '1'; } catch (e) { /* storage off */ }
+  if ((nav && nav.type !== 'navigate') || submitted) { showUsed(); return; }
+  try { sessionStorage.setItem(key, '1'); } catch (e) { /* storage off */ }
+  document.forms[0].submit();
+})();
+</script>
+</body></html>

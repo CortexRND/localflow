@@ -13,6 +13,7 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
 | `lf-stt` | Whisper/Parakeet inference, downloads, model cache protection, Python-compatible leases and lazy engine slot; [API and gaps](lf-stt/README.md) |
+| `lf-server` | optional axum HTTP server, embedded web UI, auth, config/provider/key APIs and runtime backend interface (see `lf-server/README.md`) |
 
 ## Build
 
@@ -43,6 +44,7 @@ lf-rs history copy ID|last | raw ID|last | delete ID|last | clear [--yes] | stat
 lf-rs llm list [--provider P] [--base-url URL] [--json] | use PROVIDER [--base-url URL] [--model M] | test [...]
 lf-rs keys list
 lf-rs status [--json]
+lf-rs serve [--host HOST] [--port PORT]
 ```
 
 * `config get` without a key prints the full v2 TOML (`config show`).
@@ -199,7 +201,9 @@ Transcripts/timing need not be bit-identical across models/backends. See the
 This is not a full port and does not imply a Rust runtime or UI:
 
 * no dictation runtime, integrated speech-to-text, hotkeys, paste
-  injection, meetings, server, menu bar, Hub, setup or settings windows;
+  injection, meetings, menu bar, Hub, setup or native settings windows;
+  `serve` hosts the web UI and core APIs; runtime routes return explicit
+  unavailable-backend errors until their Rust crates are linked;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
   Python `wave`'s header), `load_clip` (PCM / extensible-PCM WAV inside the
@@ -207,7 +211,7 @@ This is not a full port and does not imply a Rust runtime or UI:
   CLI records audio (`lf-audio` is standalone), `lf-rs` exposes no clip command, and there is no
   retry-from-audio (`lf history retry` needs speech-to-text); no other audio
   codecs;
-* `lf-rs` implements only the commands listed above (no `serve`, `dictate`,
+* `lf-rs` implements only the commands listed above (no `dictate`,
   `meeting`, `models`, `stt`, `setup`, `tweak`, `recall`, `prompts`,
   `history retry`, `keys import`, `secret`, `token`, …);
 * `status` without a server cannot read the autostart state (the platform
