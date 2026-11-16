@@ -539,6 +539,73 @@ mod tests {
     }
 
     #[test]
+    fn meetings_backend_stacks_in_both_orders_without_claiming_transcribe() {
+        use lf_meetings::dispatch::PromptQueue;
+        use lf_meetings_backend::MeetingsBackend;
+
+        fn prompts() -> BackendRequest {
+            let mut request = request("/prompts", b"");
+            request.method = "GET".parse().unwrap();
+            request
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (template, loads, _) = isolated(root.path(), false, "stt outer");
+        let SttBackend {
+            slot,
+            make_engine,
+            dictionary,
+            phrases,
+            history_path,
+            ..
+        } = template;
+        let outer = SttBackend {
+            inner: MeetingsBackend::new()
+                .unwrap()
+                .with_queue(PromptQueue::new(root.path().join("queue.json")))
+                .with_inner(Arc::new(Inner)),
+            slot,
+            make_engine,
+            dictionary,
+            phrases,
+            history_path,
+        };
+        assert_eq!(outer.handle(prompts()).body, json!({"entries":[]}));
+        assert_eq!(outer.handle(request("/other", b"unchanged")).status, 202);
+        assert_eq!(
+            outer
+                .handle(request("/transcribe", &wav(16000, 1, 16000)))
+                .body["text"],
+            "stt outer"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert!(outer.transcriber_loaded());
+        assert_eq!(outer.autostart_status(), "enabled");
+
+        let root = tempfile::tempdir().unwrap();
+        let (stt, loads, _) = isolated(root.path(), false, "stt inner");
+        let outer = MeetingsBackend::new()
+            .unwrap()
+            .with_queue(PromptQueue::new(root.path().join("queue.json")))
+            .with_inner(Arc::new(stt));
+        assert_eq!(outer.handle(prompts()).body, json!({"entries":[]}));
+        assert_eq!(outer.handle(request("/other", b"unchanged")).status, 202);
+        assert!(!outer.transcriber_loaded());
+        assert_eq!(
+            outer
+                .handle(request("/transcribe", &wav(16000, 1, 16000)))
+                .body["text"],
+            "stt inner"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert!(outer.transcriber_loaded());
+        assert_eq!(outer.autostart_status(), "enabled");
+        assert_eq!(
+            outer.stt_available("faster-whisper"),
+            cfg!(feature = "whisper")
+        );
+    }
+
+    #[test]
     fn silence_normal_history_model_switch_and_drop() {
         let root = tempfile::tempdir().unwrap();
         let (backend, loads, unloads) = isolated(root.path(), false, "hello local flow comma.");

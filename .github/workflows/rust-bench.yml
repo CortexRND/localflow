@@ -28,7 +28,7 @@ jobs:
           if [ -d rust/target/sherpa-onnx-prebuilt ]; then
             find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
           fi
-          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
       - name: Cache HF models
         uses: actions/cache@v4
         with:

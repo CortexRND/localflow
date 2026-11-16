@@ -2005,6 +2005,8 @@ dependencies = [
  "hound",
  "lf-audio",
  "lf-core",
+ "lf-meetings",
+ "lf-meetings-backend",
  "lf-providers",
  "lf-runtime",
  "lf-server",

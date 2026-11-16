@@ -48,6 +48,15 @@ slot state and compiled providers. Wrapping a loaded DictationBackend with an
 unloaded SttBackend therefore reports the outer slot as unloaded. A runtime
 adapter is a frozen model snapshot, not an automatic per-request config reload.
 
+`lf_meetings_backend::MeetingsBackend` owns meeting, Ask and prompt-review
+routes, not `/transcribe`. Either `SttBackend::new(meetings_backend)` or
+`meetings_backend.with_inner(Arc::new(stt_backend))` composes without a
+transcription conflict. STT still owns only `/transcribe`; all other requests
+reach the next backend unchanged. MeetingsBackend delegates STT availability,
+loaded state and autostart status. Tests exercise both orders with real backend
+wrappers, isolated queues and fake speech engines, without starting capture or
+any status poller.
+
 ## HTTP backend (optional)
 
 Enable `server` and pass `SttBackend::new(inner_backend)` from `lf_stt::server`

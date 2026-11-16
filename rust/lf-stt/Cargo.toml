@@ -55,6 +55,8 @@ windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 lf-audio = { path = "../lf-audio" }
+lf-meetings = { path = "../lf-meetings" }
+lf-meetings-backend = { path = "../lf-meetings-backend" }
 clap.workspace = true
 hound = "3.5"
 memory-stats = "1.2"
