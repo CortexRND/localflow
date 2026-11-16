@@ -110,7 +110,10 @@ fn vault(root: &Path) -> (PathBuf, PathBuf) {
     let vault = root.join("vault");
     fs::create_dir_all(vault.join("notes/nested")).unwrap();
     fs::create_dir_all(vault.join("logs/nested")).unwrap();
-    let log = vault.join("logs/nested/2026-11-14 1000 Launch sync (transcript).md");
+    let log = vault
+        .join("logs")
+        .join("nested")
+        .join("2026-11-14 1000 Launch sync (transcript).md");
     fs::write(&log,"---\ncategory: Zoom\n---\n# Launch sync — transcript\n\nNotes: [[Launch sync]]\n\n**00:00** **Me:** we will drop the Windows beta next week\n\n**01:15** **Others:** agreed, Dana owns the announcement\n\n## My raw notes\nPRIVATE RAW NOTES").unwrap();
     fs::write(
         vault.join("notes/nested/2026-11-14 1000 Launch sync.md"),
@@ -286,7 +289,9 @@ fn filename_stamp_mtime_and_fallback_title() {
     assert_eq!(title, "Launch sync");
     let odd = dir.path().join("random notes.md");
     fs::write(&odd, "x").unwrap();
-    fs::File::open(&odd)
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&odd)
         .unwrap()
         .set_times(
             fs::FileTimes::new()
@@ -338,13 +343,23 @@ fn chunks_preserve_speaker_lines_and_split_long_lines() {
 #[test]
 fn transcripts_refs_times_frontmatter_and_bad_encoding() {
     let dir = tempfile::tempdir().unwrap();
-    let (_, log) = vault(dir.path());
-    let passages = transcript_passages(&log);
+    let (vault, log) = vault(dir.path());
+    let mixed = vault.join("logs/nested/2026-11-14 1000 Launch sync (transcript).md");
+    let passages = transcript_passages(&mixed);
     assert_eq!(passages.len(), 1);
     let first = &passages[0];
     assert_eq!(first.source, "meeting");
     assert_eq!(first.title, "Launch sync");
     assert_eq!(first.reference, format!("{}#00:00", log.display()));
+    let notes = vault
+        .join("notes")
+        .join("nested")
+        .join("2026-11-14 1000 Launch sync.md");
+    let mixed_notes = vault.join("notes/nested/2026-11-14 1000 Launch sync.md");
+    assert_eq!(
+        notes_passages(&mixed_notes)[0].reference,
+        notes.to_string_lossy()
+    );
     assert!(first.text.contains("Windows beta"));
     assert!(!first.text.contains("Notes: [["));
     assert!(!first.text.contains("PRIVATE RAW"));
@@ -405,7 +420,7 @@ fn search_dictation_meetings_notes_from_config_and_sources() {
         .iter()
         .find(|c| c.source == "meeting")
         .unwrap();
-    assert!(meeting.reference.starts_with(log.to_str().unwrap()));
+    assert_eq!(meeting.reference, format!("{}#00:00", log.display()));
     assert_eq!(meeting.when, "2026-11-14T10:00");
     let result = search("budget", &corpus, &options()).unwrap();
     assert_eq!(result.citations.len(), 1);

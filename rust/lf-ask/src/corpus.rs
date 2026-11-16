@@ -93,6 +93,40 @@ fn strip_frontmatter(text: &str) -> &str {
 fn read_text(path: &Path) -> std::io::Result<String> {
     fs::read_to_string(path).map(|s| s.replace("\r\n", "\n").replace('\r', "\n"))
 }
+fn path_reference(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy().replace('/', "\\");
+        use std::path::Component;
+        let mut normalized = String::new();
+        let mut has_part = false;
+        for component in Path::new(&text).components() {
+            match component {
+                Component::Prefix(prefix) => {
+                    normalized.push_str(&prefix.as_os_str().to_string_lossy())
+                }
+                Component::RootDir => normalized.push('\\'),
+                Component::CurDir => (),
+                Component::Normal(_) | Component::ParentDir => {
+                    if has_part && !normalized.ends_with('\\') {
+                        normalized.push('\\');
+                    }
+                    normalized.push_str(&component.as_os_str().to_string_lossy());
+                    has_part = true;
+                }
+            }
+        }
+        if normalized.is_empty() {
+            ".".into()
+        } else {
+            normalized
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into()
+    }
+}
 pub fn read_transcript_log(path: &Path) -> std::io::Result<String> {
     let text = read_text(path)?;
     let text = strip_frontmatter(&text)
@@ -139,9 +173,9 @@ pub fn transcript_passages(path: &Path) -> Vec<Passage> {
                 title: title.clone(),
                 ts: Some(timestamp(when)),
                 reference: if stamp.is_empty() {
-                    path.to_string_lossy().into()
+                    path_reference(path)
                 } else {
-                    format!("{}#{stamp}", path.display())
+                    format!("{}#{stamp}", path_reference(path))
                 },
                 app: String::new(),
             }
@@ -160,7 +194,7 @@ pub fn notes_passages(path: &Path) -> Vec<Passage> {
             source: SOURCE_NOTES.into(),
             title: title.clone(),
             ts: Some(timestamp(started)),
-            reference: path.to_string_lossy().into(),
+            reference: path_reference(path),
             app: String::new(),
         })
         .collect()
@@ -237,4 +271,34 @@ pub fn build_corpus(corpus: &Corpus<'_>) -> Result<Vec<Passage>> {
         }
     }
     Ok(passages)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn references_match_python_pure_windows_path_strings() {
+        for (input, expected) in [
+            ("C:/vault/logs/Sync.md", r"C:\vault\logs\Sync.md"),
+            (r"C:\vault\logs/Zoom\Sync.md", r"C:\vault\logs\Zoom\Sync.md"),
+            (
+                r"\\?\C:\vault\logs/Zoom\Sync.md",
+                r"\\?\C:\vault\logs\Zoom\Sync.md",
+            ),
+            (
+                r"\\server\share\vault/logs\Sync.md",
+                r"\\server\share\vault\logs\Sync.md",
+            ),
+            (r"C:\vault\.\logs\\Sync.md", r"C:\vault\logs\Sync.md"),
+            (
+                r"\\?\C:\vault\..\logs\Sync.md",
+                r"\\?\C:\vault\..\logs\Sync.md",
+            ),
+            (r"C:logs/Sync.md", r"C:logs\Sync.md"),
+            ("", "."),
+        ] {
+            assert_eq!(path_reference(Path::new(input)), expected);
+        }
+    }
 }
