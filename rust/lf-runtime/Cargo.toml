@@ -1,0 +1,29 @@
+[package]
+name = "lf-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Dictation controller, worker loop and menu bar for the LocalFlow Rust port"
+license = "MIT"
+
+[dependencies]
+lf-core = { path = "../lf-core" }
+lf-providers = { path = "../lf-providers" }
+lf-input = { path = "../lf-input" }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tempfile = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+toml_edit = "0.22"
+notify = "8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSThread", "NSRunLoop", "NSDate"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSStatusBar", "NSStatusItem", "NSMenu", "NSMenuItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSRunningApplication", "NSWorkspace", "NSCell", "objc2-core-foundation"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
