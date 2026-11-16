@@ -45,7 +45,7 @@ def measure(text):
 
 def test_manual_groups_cover_every_allowlist_key_exactly_once():
     keys = [key for _group, group_keys in sa.MANUAL_GROUPS for key in group_keys]
-    assert len(keys) == len(set(keys)) == 22
+    assert len(keys) == len(set(keys)) == 24
     assert set(keys) == set(sa.ALLOWLIST)
     assert [group for group, _keys in sa.MANUAL_GROUPS] == [
         "Dictation", "Cleanup & style", "Shortcuts", "Meetings",

@@ -32,6 +32,7 @@ log = logging.getLogger("localflow.live_config")
 
 LIVE_FIELDS = frozenset(ALLOWLIST)
 HOTKEY_FIELDS = frozenset({
+    "dictation_toggle_hotkey",
     "hotkey", "command_hotkey", "polish_hotkey", "prompt_hotkey", "paste_last_hotkey",
 })
 DEFAULT_INTERVAL = 2.0

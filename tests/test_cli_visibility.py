@@ -15,7 +15,7 @@ from localflow.dispatch import PromptQueue
 from localflow.history import HistoryStore
 
 VISIBLE_TOP = [
-    "autostart", "config", "dict", "dictate", "doctor", "history", "hub", "keys",
+    "autostart", "config", "dict", "dictate", "dictation", "doctor", "history", "hub", "keys",
     "llm", "meeting", "menubar", "open", "prompts", "serve", "setup", "status",
     "stt", "token", "tweak",
 ]

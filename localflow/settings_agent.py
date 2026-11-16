@@ -85,6 +85,8 @@ log = logging.getLogger("localflow.settings_agent")
 # The exact config fields the agent may change. Nothing else is ever offered
 # to the model or accepted back from it.
 ALLOWLIST = (
+    "dictation_enabled",
+    "dictation_toggle_hotkey",
     "sounds_enabled",
     "cleanup_enabled",
     "cleanup_level",
@@ -129,6 +131,8 @@ UNDO_VERSION = 1
 UNDO_NAME = "settings-undo.json"
 
 LABELS = {
+    "dictation_enabled": "Dictation",
+    "dictation_toggle_hotkey": "Toggle dictation shortcut",
     "sounds_enabled": "Sounds",
     "cleanup_enabled": "Cleanup",
     "cleanup_level": "Cleanup level",
@@ -171,6 +175,7 @@ CURRENT_KEYS = (
 # once, grouped as the page shows them (a test keeps this exhaustive).
 MANUAL_GROUPS = (
     ("Dictation", (
+        "dictation_enabled",
         "sounds_enabled", "paste_method", "spoken_symbols", "spoken_punctuation",
         "hot_phrases",
     )),
@@ -179,6 +184,7 @@ MANUAL_GROUPS = (
         "style_email", "style_personal", "style_other",
     )),
     ("Shortcuts", (
+        "dictation_toggle_hotkey",
         "hotkey", "command_hotkey", "polish_hotkey", "prompt_hotkey",
         "paste_last_hotkey",
     )),
@@ -189,6 +195,7 @@ MANUAL_GROUPS = (
 )
 
 _BOOL_KEYS = frozenset({
+    "dictation_enabled",
     "sounds_enabled", "cleanup_enabled", "styles_enabled", "spoken_symbols",
     "spoken_punctuation", "hot_phrases", "meeting_watch", "meeting_auto_start",
     "capture_system_audio", "work_prompts",
@@ -202,6 +209,7 @@ _ENUMS = {
     "style_other": _STYLES,
 }
 _SHORTCUT_KEYS = (
+    "dictation_toggle_hotkey",
     "hotkey", "command_hotkey", "polish_hotkey", "prompt_hotkey", "paste_last_hotkey",
 )
 # What each platform's paste backend really accepts (others fail silently).
@@ -338,6 +346,8 @@ SAFETY_SWITCHES = _BOOL_KEYS
 # Kept narrow on purpose: each entry should only appear in a request that is
 # really about that setting (the label and key are matched too).
 _INTENT_WORDS = {
+    "dictation_enabled": ("dictation", "dictating", "push to talk", "push-to-talk"),
+    "dictation_toggle_hotkey": ("toggle dictation", "dictation toggle"),
     "sounds_enabled": ("sound", "beep", "chime", "audio cue"),
     "cleanup_enabled": ("cleanup", "clean up", "clean-up"),
     "cleanup_level": ("cleanup", "clean up", "clean-up"),

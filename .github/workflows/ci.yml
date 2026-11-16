@@ -52,6 +52,7 @@ jobs:
           localflow/stt.py
           tests/test_platform.py
           tests/test_config.py
+          tests/test_dictation_toggle.py
           tests/test_providers.py
           localflow/meeting_templates.py
           localflow/system_audio.py
