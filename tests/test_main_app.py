@@ -12,6 +12,9 @@ from localflow import appbundle, launchagent, main_app
 from localflow.config import Config, save_config
 
 ROOT = Path(__file__).parent.parent
+SERVER_ARGV = [sys.executable, "-m", "localflow.server"]
+_real_server_healthy = main_app.server_healthy
+_real_watch_server = main_app._watch_server
 
 
 class Result:
@@ -20,11 +23,33 @@ class Result:
         self.stderr = stderr
 
 
+class FakeChild:
+    """Stands in for a spawned Popen; `returncode` None means still running."""
+
+    _next_pid = 5000
+
+    def __init__(self, argv, kwargs):
+        FakeChild._next_pid += 1
+        self.pid = FakeChild._next_pid
+        self.argv = argv
+        self.kwargs = kwargs
+        self.returncode = None
+        self.polls = 0
+
+    def poll(self):
+        self.polls += 1
+        return self.returncode
+
+    def wait(self):  # only called by the reaper, which tests replace
+        return self.returncode
+
+
 class Recorder:
     """Records Popen/run calls; `run_result` may be a Result or an exception."""
 
     def __init__(self, monkeypatch):
         self.popen = []
+        self.children = []
         self.run = []
         self.run_result = Result()
         self.popen_error = None
@@ -36,6 +61,12 @@ class Recorder:
         if self.popen_error is not None:
             raise self.popen_error
         self.popen.append(list(argv))
+        child = FakeChild(list(argv), kwargs)
+        self.children.append(child)
+        return child
+
+    def server_spawns(self):
+        return [a for a in self.popen if a == SERVER_ARGV]
 
     def _run(self, argv, **kwargs):
         self.run.append(list(argv))
@@ -51,6 +82,25 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main_app", "--bogus"])
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(main_app, "_held", lambda name: False)
+    # No test touches the network or leaves a reaper thread behind: the
+    # health probe answers from `probes` and the reaper only records.
+    probes.clear()
+    reaped.clear()
+    healthy.clear()
+    monkeypatch.setattr(main_app, "_server_child", None)
+    monkeypatch.setattr(
+        main_app,
+        "server_healthy",
+        lambda url, timeout=main_app.SERVER_PROBE_TIMEOUT: (
+            probes.append((url, timeout)) or bool(healthy)
+        ),
+    )
+    monkeypatch.setattr(main_app, "_watch_server", reaped.append)
+
+
+probes = []  # (url, timeout) of every health probe
+reaped = []  # children handed to the background reaper
+healthy = []  # non-empty = the faked /healthz answers {"ok": true}
 
 
 @pytest.fixture
@@ -252,17 +302,20 @@ def test_configured_starts_runtime_then_hub(monkeypatch, rec):
     assert sys.argv == ["main_app"]
     assert len([a for a in rec.popen if a[0].endswith("/localflow")]) == 1
     assert [sys.executable, "-m", "localflow.menubar"] in rec.popen
+    assert rec.server_spawns() == [SERVER_ARGV]
 
 
 def test_running_runtime_is_not_started_twice(monkeypatch, rec):
     save_config(Config(setup_version=1))
     calls = _fake_windows(monkeypatch)
     monkeypatch.setattr(main_app, "_held", lambda name: True)
+    healthy.append(True)  # the local server is part of the running runtime
 
     main_app.main()
 
     assert calls == ["hub"]
     assert rec.popen == [] and rec.run == []
+    assert probes == [("http://127.0.0.1:8756", main_app.SERVER_PROBE_TIMEOUT)]
 
 
 # --- login agent handling -----------------------------------------------
@@ -331,6 +384,7 @@ def test_runtime_start_failure_is_logged_and_hub_still_opens(monkeypatch, rec, t
     assert calls == ["hub"]
     log = _log_text(tmp_path)
     assert "could not start dictation" in log and "could not start the menu bar" in log
+    assert "could not start the local server: no exec" in log
 
 
 def test_detach_closes_log_when_popen_raises(monkeypatch, rec):
@@ -354,6 +408,259 @@ def test_detach_closes_log_when_popen_raises(monkeypatch, rec):
         main_app._detach(["x"])
 
     assert log.closed
+
+
+# --- local server -------------------------------------------------------
+
+
+def test_healthy_server_is_not_spawned_again(rec):
+    healthy.append(True)
+
+    main_app.ensure_server()
+    main_app.ensure_server()
+
+    assert rec.popen == []
+    assert [url for url, _ in probes] == ["http://127.0.0.1:8756"] * 2
+    assert all(0 < timeout <= 1 for _, timeout in probes)
+
+
+def test_unavailable_server_is_spawned_detached_once_while_starting(rec, tmp_path):
+    main_app.ensure_server()
+    # Reopen / page requests while the child is still starting (not healthy).
+    main_app.ensure_server()
+    main_app.ensure_server()
+
+    assert rec.server_spawns() == [SERVER_ARGV]
+    child = rec.children[0]
+    assert child.kwargs["stdin"] is subprocess.DEVNULL
+    assert child.kwargs["start_new_session"] is True
+    assert child.kwargs["close_fds"] is True
+    log_file = child.kwargs["stdout"]
+    assert child.kwargs["stderr"] is log_file
+    assert Path(log_file.name) == tmp_path / ".localflow" / "app.log"
+    assert log_file.closed  # the parent keeps no handle open
+    assert child.polls == 2  # later ensures checked the live child, no new probe
+    assert len(probes) == 1
+    assert reaped == [child]
+    assert f"started local server (pid {child.pid})" in _log_text(tmp_path)
+
+
+def test_server_child_that_exited_is_retried(rec):
+    main_app.ensure_server()
+    first = rec.children[0]
+    first.returncode = 1  # e.g. crashed during startup
+
+    main_app.ensure_server()
+
+    assert rec.server_spawns() == [SERVER_ARGV, SERVER_ARGV]
+    assert main_app._server_child is rec.children[1]
+    assert len(probes) == 2
+
+
+def test_server_child_that_became_healthy_is_left_alone(rec):
+    main_app.ensure_server()
+    healthy.append(True)
+    rec.children[0].returncode = 0  # e.g. lost a bind race to `lf serve`
+
+    main_app.ensure_server()
+
+    assert rec.server_spawns() == [SERVER_ARGV]
+    assert main_app._server_child is None
+
+
+def test_server_reaper_waits_and_logs_a_failed_start(rec, tmp_path):
+    import threading
+
+    child = FakeChild(SERVER_ARGV, {})
+    child.returncode = 3
+
+    _real_watch_server(child)
+    for thread in threading.enumerate():
+        if thread.name == "localflow-server-reaper":
+            thread.join(timeout=5)
+
+    assert f"local server (pid {child.pid}) exited with status 3" in _log_text(tmp_path)
+
+
+def test_server_spawn_failure_is_logged_and_retried_next_time(rec, tmp_path):
+    rec.popen_error = OSError("no exec")
+
+    main_app.ensure_server()
+
+    assert main_app._server_child is None
+    assert "could not start the local server: no exec" in _log_text(tmp_path)
+    rec.popen_error = None
+    main_app.ensure_server()
+    assert rec.server_spawns() == [SERVER_ARGV]
+
+
+def test_server_config_error_is_logged_without_spawning(monkeypatch, rec, tmp_path):
+    from localflow import server_url
+    from localflow.config import ConfigError
+
+    def broken(config=None):
+        raise ConfigError("config is broken")
+
+    monkeypatch.setattr(server_url, "configured_base_url", broken)
+
+    main_app.ensure_server()
+
+    assert rec.popen == []
+    assert "could not start the local server: config is broken" in _log_text(tmp_path)
+
+
+def test_server_probe_error_is_logged_without_breaking_the_hub(monkeypatch, rec, tmp_path):
+    save_config(Config(setup_version=1))
+    calls = _fake_windows(monkeypatch)
+    monkeypatch.setattr(launchagent, "status", lambda: "not installed")
+
+    def exploding(url, timeout=None):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(main_app, "server_healthy", exploding)
+
+    main_app.main()
+
+    assert calls == ["hub"]
+    assert rec.server_spawns() == []
+    assert [sys.executable, "-m", "localflow.menubar"] in rec.popen
+    assert "could not start the local server: probe exploded" in _log_text(tmp_path)
+
+
+def test_unknowable_server_child_is_treated_as_gone(rec, tmp_path):
+    main_app.ensure_server()
+
+    def broken_poll():
+        raise OSError("no such process")
+
+    rec.children[0].poll = broken_poll
+    main_app.ensure_server()
+
+    assert rec.server_spawns() == [SERVER_ARGV, SERVER_ARGV]
+    assert "could not check pid" in _log_text(tmp_path)
+
+
+def test_server_starts_even_without_rumps(monkeypatch, rec):
+    monkeypatch.setitem(sys.modules, "rumps", None)  # import rumps fails
+    monkeypatch.setattr(launchagent, "status", lambda: "not installed")
+
+    main_app.ensure_runtime()
+    main_app.ensure_runtime()
+
+    assert rec.server_spawns() == [SERVER_ARGV]
+    assert [sys.executable, "-m", "localflow.menubar"] not in rec.popen
+
+
+def test_router_reopens_share_one_server_child(monkeypatch, rec):
+    save_config(Config(setup_version=1))
+    monkeypatch.setattr(launchagent, "status", lambda: "not installed")
+    opened = []
+    router = main_app.WindowRouter(
+        main_app.is_configured,
+        main_app.ensure_runtime,
+        lambda existing, page: opened.append(page) or "hub",
+        lambda existing: "setup",
+    )
+
+    router.show()
+    router.show("History")
+
+    assert opened == [None, "History"]
+    assert rec.server_spawns() == [SERVER_ARGV]
+
+
+@pytest.mark.parametrize(
+    ("host", "port", "url"),
+    [
+        ("127.0.0.1", 8756, "http://127.0.0.1:8756"),
+        ("127.0.0.1", 9911, "http://127.0.0.1:9911"),
+        ("0.0.0.0", 9911, "http://127.0.0.1:9911"),
+        ("::", 9911, "http://[::1]:9911"),
+        ("::1", 9911, "http://[::1]:9911"),
+        ("localhost", 9911, "http://localhost:9911"),
+    ],
+)
+def test_server_probe_uses_the_configured_host_and_port(rec, host, port, url):
+    save_config(Config(setup_version=1, server_host=host, server_port=port))
+
+    main_app.ensure_server()
+
+    assert [u for u, _ in probes] == [url]
+
+
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, limit=-1):
+        return self.body
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (_FakeResponse(200, b'{"ok": true}'), True),
+        (_FakeResponse(200, b'{"ok": false}'), False),
+        (_FakeResponse(200, b'{"ok": "true"}'), False),
+        (_FakeResponse(200, b"[true]"), False),
+        (_FakeResponse(200, b"<html>not localflow</html>"), False),
+        (_FakeResponse(503, b'{"ok": true}'), False),
+        (ConnectionRefusedError("refused"), False),
+        (TimeoutError("timed out"), False),
+    ],
+)
+def test_server_healthy_probe(monkeypatch, answer, expected):
+    import urllib.error
+    import urllib.request
+
+    opened = []
+    handlers = []
+
+    class Opener:
+        def open(self, url, timeout):
+            opened.append((url, timeout))
+            if isinstance(answer, Exception):
+                raise urllib.error.URLError(answer)
+            return answer
+
+    def build_opener(*args):
+        handlers.extend(args)
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+
+    assert _real_server_healthy("http://[::1]:9911", timeout=0.25) is expected
+    assert opened == [("http://[::1]:9911/healthz", 0.25)]
+    # Loopback probes never go through an environment proxy.
+    assert [h.proxies for h in handlers if isinstance(h, urllib.request.ProxyHandler)] == [{}]
+
+
+def _imports(path, top_level_only=False):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    nodes = tree.body if top_level_only else ast.walk(tree)
+    names = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.add(node.module or "")
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return names
+
+
+def test_app_and_client_paths_never_import_the_server_module():
+    for name in ("main_app.py", "meeting_client.py", "server_url.py"):
+        assert "localflow.server" not in _imports(ROOT / "localflow" / name), name
+    # `lf serve` imports it lazily inside the command; module import must not.
+    assert "localflow.server" not in _imports(ROOT / "localflow" / "cli.py", True)
+    assert "localflow.server" not in _imports(ROOT / "localflow" / "menubar.py", True)
 
 
 # --- reopen -------------------------------------------------------------

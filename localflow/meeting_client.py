@@ -6,6 +6,12 @@ import requests
 
 from localflow.apitoken import load
 from localflow.config import load_config
+from localflow.server_url import configured_base_url
+
+SERVER_DOWN = (
+    "LocalFlow server not running — open LocalFlow.app (it starts the server) "
+    "or run `lf serve`"
+)
 
 
 def vault_notes_path(notes_path, vault_path) -> str | None:
@@ -38,7 +44,7 @@ class MeetingClient:
         http=requests,
     ):
         if base_url is None:
-            base_url = f"http://127.0.0.1:{load_config().server_port}"
+            base_url = configured_base_url(load_config())
         self.base_url = base_url.rstrip("/")
         self._fixed_token = token
         self.token = token if token is not None else load()
@@ -58,15 +64,11 @@ class MeetingClient:
                 **({"json": json} if json is not None else {}),
             )
         except requests.RequestException as exc:
-            raise MeetingClientError(
-                "LocalFlow server not running — start it with `lf serve`"
-            ) from exc
+            raise MeetingClientError(SERVER_DOWN) from exc
         except Exception as exc:
             # Injected HTTP adapters can expose their own connection exception.
             if isinstance(exc, OSError):
-                raise MeetingClientError(
-                    "LocalFlow server not running — start it with `lf serve`"
-                ) from exc
+                raise MeetingClientError(SERVER_DOWN) from exc
             raise
         if not 200 <= response.status_code < 300:
             try:

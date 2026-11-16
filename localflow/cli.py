@@ -58,11 +58,15 @@ from localflow.platform.base import PASTE_METHODS
 from localflow.providers import registry
 from localflow.providers.factory import build_llm
 from localflow.secrets import SecretsUnavailable, delete_secret, get_secret, set_secret
+from localflow.server_url import configured_base_url
 from localflow.weblaunch import open_web_ui
 
 console = Console()
 _config = load_config()
-BASE = f"http://127.0.0.1:{_config.server_port}"
+BASE = configured_base_url(_config)
+_START_SERVER_HINT = (
+    "open [bold]LocalFlow.app[/bold] (it starts the server) or run: [bold]lf serve[/bold]"
+)
 
 
 def _history_store() -> HistoryStore:
@@ -80,7 +84,7 @@ def _get(path: str, timeout: float = 5) -> dict:
         resp.raise_for_status()
         return resp.json()
     except requests.ConnectionError:
-        console.print("[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
+        console.print(f"[red]server not running[/red] — {_START_SERVER_HINT}")
         sys.exit(1)
 
 
@@ -88,7 +92,7 @@ def _post(path: str, json: dict | None = None) -> dict:
     try:
         resp = requests.post(BASE + path, json=json, headers=_auth_headers(), timeout=600)
     except requests.ConnectionError:
-        console.print("[red]server not running[/red] — start it with: [bold]lf serve[/bold]")
+        console.print(f"[red]server not running[/red] — {_START_SERVER_HINT}")
         sys.exit(1)
     if not resp.ok:
         try:
@@ -102,7 +106,10 @@ def _post(path: str, json: dict | None = None) -> dict:
 
 @click.group()
 def cli() -> None:
-    """localflow: local dictation + meeting transcription to Obsidian."""
+    """localflow: local dictation + meeting transcription to Obsidian.
+
+    Most features live in the LocalFlow app (`lf hub`).
+    """
 
 
 @cli.group("keys")
@@ -273,13 +280,13 @@ def _show_history(entries: list[dict]) -> None:
     console.print(table)
 
 
-@history_cli.command("list")
+@history_cli.command("list", hidden=True)
 @click.option("--limit", type=click.IntRange(min=1, max=1000), default=20)
 def history_list(limit: int) -> None:
     _show_history(_history_store().recent(limit=limit))
 
 
-@history_cli.command("search")
+@history_cli.command("search", hidden=True)
 @click.argument("query")
 @click.option("--limit", type=click.IntRange(min=1, max=1000), default=100)
 def history_search(query: str, limit: int) -> None:
@@ -301,7 +308,7 @@ def _history_entry(entry_id: str) -> dict:
     return entry
 
 
-@history_cli.command("copy")
+@history_cli.command("copy", hidden=True)
 @click.argument("entry_id")
 def history_copy(entry_id: str) -> None:
     import pyperclip
@@ -355,7 +362,7 @@ def history_clear(yes: bool) -> None:
     click.echo(f"Cleared {count} history entries.")
 
 
-@cli.command("stats")
+@cli.command("stats", hidden=True)
 def stats_command() -> None:
     stats = _history_store().stats()
     click.echo(f"Dictations: {stats['total_dictations']}")
@@ -385,7 +392,7 @@ def hub_command(page: str) -> None:
     subprocess.Popen([sys.executable, "-m", "localflow.hub_window", "--page", page])
 
 
-@dictionary.command("list")
+@dictionary.command("list", hidden=True)
 def dictionary_list() -> None:
     entries = DictionaryStore().list()
     if not entries["words"] and not entries["replacements"]:
@@ -397,7 +404,7 @@ def dictionary_list() -> None:
         click.echo(f"{pair['from']} -> {pair['to']}")
 
 
-@dictionary.command("add")
+@dictionary.command("add", hidden=True)
 @click.argument("word", required=False)
 @click.option("--from", "source")
 @click.option("--to", "target")
@@ -419,7 +426,7 @@ def dictionary_add(word: str | None, source: str | None, target: str | None) -> 
     click.echo(f"{'added' if added else 'already exists'}: {label}")
 
 
-@dictionary.command("remove")
+@dictionary.command("remove", hidden=True)
 @click.argument("word_or_from")
 def dictionary_remove(word_or_from: str) -> None:
     if not DictionaryStore().remove(word_or_from):
@@ -443,7 +450,7 @@ def dictionary_import(file_path: Path) -> None:
     )
 
 
-@cli.group()
+@cli.group(hidden=True)
 def secret() -> None:
     """Manage provider API-key secrets."""
 
@@ -509,7 +516,7 @@ def stt() -> None:
     """Inspect and select speech-to-text providers."""
 
 
-@stt.command("list")
+@stt.command("list", hidden=True)
 @click.option("--json", "json_output", is_flag=True, help="Print JSON.")
 def stt_list(json_output: bool) -> None:
     """List STT providers and models."""
@@ -538,7 +545,7 @@ def stt_list(json_output: bool) -> None:
         console.print(f"[red]error:[/red] {error}")
 
 
-@stt.command("use")
+@stt.command("use", hidden=True)
 @click.argument("provider")
 @click.argument("model", required=False)
 @click.option("--device", type=click.Choice(("auto", "cpu", "cuda")), default="auto")
@@ -576,7 +583,7 @@ def llm() -> None:
     """Inspect and select language-model providers."""
 
 
-@llm.command("list")
+@llm.command("list", hidden=True)
 @click.option("--provider", default=None)
 @click.option("--base-url", default=None)
 @click.option("--json", "json_output", is_flag=True, help="Print JSON.")
@@ -609,7 +616,7 @@ def llm_list(
             click.echo(f"{model['id']}: {model.get('label', '')}")
 
 
-@llm.command("use")
+@llm.command("use", hidden=True)
 @click.argument("provider")
 @click.option("--base-url", default=None)
 @click.option("--model", "model_name", default=None)
@@ -650,7 +657,7 @@ def llm_pull(tag: str) -> None:
     _pull_ollama_model(tag)
 
 
-@cli.command("recall")
+@cli.command("recall", hidden=True)
 @click.argument("question")
 @click.option("--since", default=None, help="today, yesterday, 7d, 30d or YYYY-MM-DD.")
 @click.option("--k", type=click.IntRange(min=1, max=20), default=8, show_default=True,
@@ -759,7 +766,7 @@ def _render(st: dict) -> Panel:
     return Panel(body, title=f"localflow — {state}", border_style="grey50")
 
 
-@cli.command()
+@cli.command(hidden=True)
 def watch() -> None:
     """Live dashboard: detection state and rolling transcript. Ctrl+C exits."""
     with Live(_render(_get("/meeting/status")), refresh_per_second=1, console=console) as live:
@@ -773,7 +780,7 @@ def watch() -> None:
                 pass
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.option("--limit", "-n", default=10, help="How many recent notes to list.")
 def notes(limit: int) -> None:
     """List recent meeting notes in the vault."""
@@ -841,7 +848,7 @@ def prompts() -> None:
     """Review work prompts from meetings and dispatch them to Orca."""
 
 
-@prompts.command("list")
+@prompts.command("list", hidden=True)
 @click.option("--status", "-s", default=None, type=click.Choice(STATUSES),
               help="Only show prompts with this status.")
 def prompts_list(status: str | None) -> None:
@@ -868,7 +875,7 @@ def prompts_list(status: str | None) -> None:
     console.print(table)
 
 
-@prompts.command("show")
+@prompts.command("show", hidden=True)
 @click.argument("prompt_id")
 def prompts_show(prompt_id: str) -> None:
     """Print the full text of prompt PROMPT_ID."""
@@ -889,14 +896,14 @@ def prompts_show(prompt_id: str) -> None:
     console.print(path.read_text())
 
 
-@prompts.command("approve")
+@prompts.command("approve", hidden=True)
 @click.argument("ids", nargs=-1, required=True)
 def prompts_approve(ids: tuple[str, ...]) -> None:
     """Approve prompts IDS for dispatch (retries a failed one, clearing its error)."""
     _set_reviewed(ids, "approved", ("pending", "failed"))
 
 
-@prompts.command("reject")
+@prompts.command("reject", hidden=True)
 @click.argument("ids", nargs=-1, required=True)
 def prompts_reject(ids: tuple[str, ...]) -> None:
     """Reject prompts IDS so they are never dispatched."""
@@ -1041,7 +1048,7 @@ def dictate() -> None:
     app_main()
 
 
-@cli.command()
+@cli.command(hidden=True)
 def ui() -> None:
     """Open the web UI in the default browser."""
     open_web_ui(BASE, "/settings", opener=current().open_path)
@@ -1052,12 +1059,15 @@ def token_command() -> None:
     """Print the API token (for a phone bookmark or an iOS Shortcut)."""
     token = read_api_token()
     if not token:
-        console.print("[red]no API token yet[/red] — start the server once: [bold]lf serve[/bold]")
+        console.print(
+            "[red]no API token yet[/red] — start the server once: "
+            "open [bold]LocalFlow.app[/bold] or run [bold]lf serve[/bold]"
+        )
         sys.exit(1)
     click.echo(token)
 
 
-@cli.group(invoke_without_command=True)
+@cli.group(invoke_without_command=True, hidden=True)
 def phrases() -> None:
     """Manage hot phrases (no subcommand = open the Hub's Hot Phrases page)."""
     ctx = click.get_current_context()
@@ -1517,7 +1527,7 @@ def setup_uninstall_app() -> None:
         console.print("[dim]not installed[/dim]")
 
 
-@cli.group()
+@cli.group(hidden=True)
 def models() -> None:
     """List and manage local speech and cleanup models."""
 
@@ -1618,7 +1628,7 @@ def menubar() -> None:
     menubar_main()
 
 
-@cli.group()
+@cli.group(hidden=True)
 def agent() -> None:
     """Alias of `lf autostart` (launchd LaunchAgent on macOS)."""
 

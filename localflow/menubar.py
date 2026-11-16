@@ -16,12 +16,13 @@ from localflow.config import load_config
 from localflow.history import HistoryStore
 from localflow.inject import paste_text
 from localflow.platform import current
+from localflow.server_url import configured_base_url
 from localflow.status import live_state, read_last_text, title_prefix
 from localflow.weblaunch import open_web_ui
 
 _config = load_config()
 _history = HistoryStore(enabled=_config.history_enabled)
-BASE = f"http://127.0.0.1:{_config.server_port}"
+BASE = configured_base_url(_config)
 
 
 def _auth_headers() -> dict[str, str]:

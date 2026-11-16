@@ -1,7 +1,8 @@
 """Entry point of ~/Applications/LocalFlow.app.
 
 Unconfigured -> native setup window. Configured -> make sure the background
-runtime (dictation + menu bar) is running, then show the native Hub. The app
+runtime (dictation, the local server, menu bar) is running, then show the
+native Hub. The server is started detached, so it outlives the Hub. The app
 keeps running after its window is closed; a later reopen (Dock click or
 double-click, delivered by LaunchServices as an Apple event) restores the
 right window through the delegate in `main_app_mac`.
@@ -120,9 +121,10 @@ def _log(message: str) -> None:
         pass
 
 
-def _detach(argv: list[str]) -> None:
+def _detach(argv: list[str]):
+    """Start `argv` in its own session, output appended to app.log."""
     with _log_file() as log:
-        subprocess.Popen(
+        return subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -132,16 +134,97 @@ def _detach(argv: list[str]) -> None:
         )
 
 
-def ensure_runtime() -> None:
-    """Start dictation and the menu bar unless they are already running.
+SERVER_PROBE_TIMEOUT = 0.5  # seconds; the probe runs on the UI thread
+SERVER_MODULE = "localflow.server"
 
-    A failure to start either one is logged but never blocks the window.
+# The server process this app spawned and has not yet seen exit. While it is
+# alive a later ensure (reopen, page request) does not spawn another, even if
+# the server is still starting and not answering yet; once it exits, the next
+# ensure may try again.
+_server_child = None
+
+
+def server_healthy(url: str, timeout: float = SERVER_PROBE_TIMEOUT) -> bool:
+    """True when `url`/healthz answers `{"ok": true}` within `timeout`."""
+    import json
+    import urllib.request
+
+    # Never route a loopback probe through a configured HTTP proxy.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"{url}/healthz", timeout=timeout) as response:
+            if response.status != 200:
+                return False
+            body = json.loads(response.read(4096).decode("utf-8"))
+    except (OSError, ValueError):
+        # URLError/timeouts are OSErrors; bad JSON or a bad URL is ValueError.
+        return False
+    return isinstance(body, dict) and body.get("ok") is True
+
+
+def _watch_server(child) -> None:
+    """Reap `child` in the background and log how it ended."""
+    import threading
+
+    def wait():
+        try:
+            code = child.wait()
+        except Exception as exc:  # noqa: BLE001 - only logging is left to do
+            _log(f"local server: could not wait for pid {child.pid}: {exc}")
+            return
+        if code:
+            _log(f"local server (pid {child.pid}) exited with status {code}")
+
+    threading.Thread(target=wait, name="localflow-server-reaper", daemon=True).start()
+
+
+def _server_child_alive() -> bool:
+    global _server_child
+    child = _server_child
+    if child is None:
+        return False
+    try:
+        if child.poll() is None:
+            return True
+    except Exception as exc:  # noqa: BLE001 - treat an unknowable child as gone
+        _log(f"local server: could not check pid {getattr(child, 'pid', '?')}: {exc}")
+    _server_child = None
+    return False
+
+
+def ensure_server() -> None:
+    """Start the local server (meetings, phone, web UI) unless it answers.
+
+    Spawns `python -m localflow.server` at most once while that child lives.
+    Any failure (config, probe, spawn) is logged and never reaches the window.
+    """
+    global _server_child
+    try:
+        if _server_child_alive():
+            return
+        from localflow.server_url import configured_base_url
+
+        if server_healthy(configured_base_url()):
+            return
+        child = _detach([sys.executable, "-m", SERVER_MODULE])
+        _server_child = child
+        _log(f"started local server (pid {child.pid})")
+        _watch_server(child)
+    except Exception as exc:  # noqa: BLE001 - the Hub must open regardless
+        _log(f"could not start the local server: {exc}")
+
+
+def ensure_runtime() -> None:
+    """Start dictation, the local server and the menu bar unless running.
+
+    A failure to start any one is logged but never blocks the window.
     """
     if not _held("localflow"):
         try:
             _start_dictation()
         except OSError as exc:
             _log(f"could not start dictation: {exc}")
+    ensure_server()
     if not _held("menubar"):
         try:
             import rumps  # noqa: F401
