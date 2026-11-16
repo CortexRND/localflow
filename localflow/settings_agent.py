@@ -437,6 +437,48 @@ def _validate_bool(value: object) -> bool:
     raise SettingError("must be on or off")
 
 
+# What KeyboardHub really matches, mirrored without importing pynput (which
+# would pull in Quartz/AppKit). Combos: pynput's HotKey matches the *set* of
+# keys after Listener.canonical, which folds case and maps left/right modifier
+# variants to the generic one. Holds: KeyboardHub compares the raw key, so
+# sides stay distinct; only names that are the same Key on darwin (same vk)
+# are one hold key there.
+_COMBO_MODIFIER_FOLD = {
+    "alt_l": "alt", "alt_r": "alt", "ctrl_l": "ctrl", "ctrl_r": "ctrl",
+    "cmd_l": "cmd", "cmd_r": "cmd", "shift_l": "shift", "shift_r": "shift",
+}
+_DARWIN_KEY_ALIASES = {
+    "alt_l": "alt", "ctrl_l": "ctrl", "cmd_l": "cmd", "shift_l": "shift",
+    "alt_gr": "alt_r",
+}
+
+
+def _shortcut_identity(value: object, platform: str) -> tuple | None:
+    """What KeyboardHub would match for a saved shortcut; None if off or
+    unparseable (KeyboardHub disables those, so they can't clash)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if "+" not in value:
+        name = value.strip().lower()
+        if name.startswith("<") and name.endswith(">"):
+            name = name[1:-1]
+        if platform == "darwin":
+            name = _DARWIN_KEY_ALIASES.get(name, name)
+        return ("hold", name)
+    parts = set()
+    for part in value.split("+"):
+        if len(part) == 1:
+            parts.add(part.lower())
+        elif len(part) > 2 and part[0] == "<" and part[-1] == ">":
+            name = part[1:-1].lower()
+            if platform == "darwin" and name == "alt_gr":
+                name = "alt_r"  # same Key as alt_r there
+            parts.add(_COMBO_MODIFIER_FOLD.get(name, name))
+        else:
+            return None
+    return ("combo", frozenset(parts))
+
+
 class Validator:
     """Turns raw (key, value) pairs into checked config values."""
 
@@ -502,17 +544,23 @@ class Validator:
         """(key, reason) for each shortcut clash a `changed` key causes in `config`.
 
         KeyboardHub silently disables the later of two equal shortcuts, so a
-        clash is refused up front instead.
+        clash is refused up front instead. Equal means the same chord or hold
+        key as KeyboardHub sees it, not the same spelling; saved strings are
+        compared only, never rewritten.
         """
+        identities = {
+            k: _shortcut_identity(getattr(config, k), self.platform) for k in _SHORTCUT_KEYS
+        }
         problems = []
         for key in changed:
             if key not in _SHORTCUT_KEYS:
                 continue
             value = getattr(config, key)
-            if not value:
+            identity = identities[key]
+            if identity is None:
                 continue
             for other in _SHORTCUT_KEYS:
-                if other != key and getattr(config, other) == value:
+                if other != key and identities[other] == identity:
                     problems.append((
                         key,
                         (f"{LABELS[key]}: {format_shortcut(value)} is already the "
