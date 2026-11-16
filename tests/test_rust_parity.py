@@ -14,6 +14,7 @@ never consulted); Python-side environment changes go through monkeypatch.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -26,6 +27,7 @@ import tomllib
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import ModuleType
 from typing import ClassVar
 
 import pytest
@@ -1285,8 +1287,13 @@ def test_cli_status(rust_build, sandbox, py_env):
 # ---------------------------------------------------- audio / STT storage ---
 
 
-def test_stt_audio_rms_parity(stt_driver):
+def test_stt_audio_rms_parity(stt_driver, monkeypatch):
     import numpy as np
+
+    try:
+        importlib.import_module("sounddevice")
+    except (ImportError, OSError):
+        monkeypatch.setitem(sys.modules, "sounddevice", ModuleType("sounddevice"))
 
     from localflow.audio import rms_dbfs
 
