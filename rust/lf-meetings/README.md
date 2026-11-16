@@ -106,9 +106,8 @@ follows Python's platform behavior, including CRLF on Windows.
 - Session transcription is fixed to 16 kHz; source adapters resample. Rust
   snapshots are owned copies. `Drop` stops live capture/watchers, and stopping
   the microphone logs rather than propagating device shutdown errors. Watcher
-  notification delivery is injected. The CoreAudio probe uses the SDK's
-  `kAudioDevicePropertyDeviceIsRunningSomewhere` (`gone`), rather than Python's
-  `goin` literal (the SDK's distinct `DeviceIsRunning` property).
+  notification delivery is injected. The CoreAudio probe preserves Python's
+  `_RUNNING_SOMEWHERE` selector (`goin`, named `DeviceIsRunning` in the SDK).
 
 No `lf-core` or `lf-providers` additions are required. macOS/Windows runtime
 verification must run on those platforms; no UI verification is applicable.

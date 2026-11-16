@@ -7,9 +7,9 @@ use objc2::{
     define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
 };
 use objc2_core_audio::{
-    kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioHardwarePropertyDefaultInputDevice,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
-    AudioObjectGetPropertyData, AudioObjectPropertyAddress,
+    kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, AudioObjectGetPropertyData,
+    AudioObjectPropertyAddress,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
@@ -24,6 +24,8 @@ use std::{
 };
 
 pub struct CoreAudioMicUsageProbe;
+// Python's _RUNNING_SOMEWHERE uses 'goin' (the SDK names it DeviceIsRunning).
+const RUNNING_SOMEWHERE: u32 = u32::from_be_bytes(*b"goin");
 impl CoreAudioMicUsageProbe {
     fn get_u32(object: u32, selector: u32) -> anyhow::Result<u32> {
         let mut address = AudioObjectPropertyAddress {
@@ -54,10 +56,7 @@ impl MicUsageProbe for CoreAudioMicUsageProbe {
             kAudioObjectSystemObject as u32,
             kAudioHardwarePropertyDefaultInputDevice,
         )?;
-        Ok(
-            device != 0
-                && Self::get_u32(device, kAudioDevicePropertyDeviceIsRunningSomewhere)? != 0,
-        )
+        Ok(device != 0 && Self::get_u32(device, RUNNING_SOMEWHERE)? != 0)
     }
 }
 
@@ -285,9 +284,6 @@ mod tests {
             wait(rx, Duration::ZERO, "start").unwrap_err().to_string(),
             "ScreenCaptureKit: start timed out"
         );
-        assert_eq!(
-            kAudioDevicePropertyDeviceIsRunningSomewhere,
-            u32::from_be_bytes(*b"gone")
-        );
+        assert_eq!(RUNNING_SOMEWHERE, u32::from_be_bytes(*b"goin"));
     }
 }
