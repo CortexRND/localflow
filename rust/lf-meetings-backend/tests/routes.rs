@@ -1015,6 +1015,64 @@ async fn recall_storage_failure_and_failed_prompt_retry_are_reported() {
     }
 }
 
+struct FailedSetup;
+impl ProviderFactory for FailedSetup {
+    fn llm(&self, _: &Config) -> Result<Box<dyn LlmProvider>> {
+        anyhow::bail!("model setup failed")
+    }
+}
+#[tokio::test]
+async fn failed_summary_provider_setup_still_saves_recording_and_user_notes() {
+    let f = Fixture::new();
+    let backend = Arc::new(
+        MeetingsBackend::new()
+            .unwrap()
+            .with_capture(f.capture.clone())
+            .with_providers(Arc::new(FailedSetup))
+            .with_queue(PromptQueue::new(
+                f.dir.path().join("failed-setup-queue.json"),
+            )),
+    );
+    for user_notes in ["", "## Keep this\nImportant user notes"] {
+        assert_eq!(
+            request(
+                app(f.config.clone(), backend.clone()),
+                "POST",
+                "/meeting/start",
+                Some(json!({"title":"Rescued","user_notes":user_notes}))
+            )
+            .await
+            .0,
+            200
+        );
+        let saved = request(
+            app(f.config.clone(), backend.clone()),
+            "POST",
+            "/meeting/stop",
+            None,
+        )
+        .await;
+        assert_eq!(saved.0, 200, "{}", saved.1);
+        assert_eq!(saved.1["segments"], 1);
+        let notes = fs::read_to_string(saved.1["notes_path"].as_str().unwrap()).unwrap();
+        assert!(notes.contains("(LLM summarization failed — see the linked transcript log.)"));
+        assert!(notes.contains(user_notes));
+        let transcript = fs::read_to_string(saved.1["log_path"].as_str().unwrap()).unwrap();
+        assert!(transcript.contains("we will launch on March 3"));
+        assert_eq!(
+            request(
+                app(f.config.clone(), backend.clone()),
+                "GET",
+                "/meeting/status",
+                None
+            )
+            .await
+            .1["last_saved"],
+            saved.1
+        );
+    }
+}
+
 struct Inner;
 impl Backend for Inner {
     fn handle(&self, request: BackendRequest) -> BackendResponse {

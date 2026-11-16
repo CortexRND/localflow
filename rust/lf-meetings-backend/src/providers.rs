@@ -5,7 +5,7 @@ use lf_providers::{
     factory::{self, BuildOptions},
     ollama::OllamaLlm,
     openai::OpenAiCompatLlm,
-    CoreSecrets, LlmProvider,
+    CoreSecrets, Health, LlmProvider, ModelInfo, ProviderError,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -20,6 +20,24 @@ pub trait ProviderFactory: Send + Sync + 'static {
     }
 }
 pub struct ConfiguredProviders;
+pub(crate) struct FailedProvider(pub String);
+impl LlmProvider for FailedProvider {
+    fn id(&self) -> &'static str {
+        "unavailable"
+    }
+    fn offline(&self) -> bool {
+        true
+    }
+    fn complete(&self, _: &str, _: &str, _: Option<i64>) -> Result<String, ProviderError> {
+        Err(ProviderError(self.0.clone()))
+    }
+    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Err(ProviderError(self.0.clone()))
+    }
+    fn healthcheck(&self) -> Health {
+        Health::failed(self.0.clone())
+    }
+}
 impl ProviderFactory for ConfiguredProviders {
     fn llm(&self, config: &Config) -> Result<Box<dyn LlmProvider>> {
         Ok(factory::build_llm(

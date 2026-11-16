@@ -279,7 +279,10 @@ impl MeetingsBackend {
             Some(&meta.template),
             Some(&expanded(config, "meeting_templates_dir")),
         );
-        let llm = self.providers.llm(config).map_err(|_| internal())?;
+        let llm = self
+            .providers
+            .llm(config)
+            .unwrap_or_else(|error| Box::new(providers::FailedProvider(error.to_string())));
         let mut notes =
             MeetingSummarizer::new(&*llm).summarize(&transcript, &meta.user_notes, Some(&template));
         let (title, generated) = if meta.title_auto {
