@@ -105,6 +105,48 @@ def rust_build():
     return LF_RS, PARITY
 
 
+@pytest.fixture(scope="session")
+def rust_stt_build():
+    result = subprocess.run(
+        [CARGO, "build", "-p", "lf-stt", "--example", "parity_stt"],
+        cwd=RUST, capture_output=True, text=True, encoding="utf-8", timeout=1800,
+        check=False,
+    )
+    if result.returncode:
+        pytest.fail(f"cargo build failed:\n{result.stderr[-6000:]}")
+    return TARGET / "debug" / "examples" / f"parity_stt{EXE}"
+
+
+@pytest.fixture
+def stt_driver(rust_stt_build, sandbox):
+    """Keep Rust lease guards alive while Python inspects their files."""
+    process = subprocess.Popen(
+        [str(rust_stt_build)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", env=sandbox["env"],
+    )
+
+    def drive_stt(requests):
+        process.stdin.write(json.dumps(requests) + "\n")
+        process.stdin.flush()
+        line = process.stdout.readline()
+        assert line, f"STT driver exited: {process.poll()}"
+        responses = json.loads(line)
+        assert len(responses) == len(requests)
+        return [r["ok"] if "ok" in r else {"error": r["error"]} for r in responses]
+
+    yield drive_stt
+    process.stdin.close()
+    try:
+        process.wait(timeout=30)
+        assert process.returncode == 0, process.stderr.read()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
 @pytest.fixture
 def sandbox(tmp_path):
     """Isolated environment for Rust subprocesses (the test process is untouched)."""
@@ -1238,3 +1280,249 @@ def test_cli_status(rust_build, sandbox, py_env):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ---------------------------------------------------- audio / STT storage ---
+
+
+def test_stt_audio_rms_parity(stt_driver):
+    import numpy as np
+
+    from localflow.audio import rms_dbfs
+
+    clips = [[], [0.0] * 4, [0.5] * 4, [-1.0, 1.0],
+             np.random.default_rng(42).normal(0, 0.2, 1000).astype(np.float32).tolist()]
+    actual = stt_driver([{"op": "rms_dbfs", "pcm": pcm} for pcm in clips])
+    for pcm, value in zip(clips, actual, strict=True):
+        expected = rms_dbfs(np.asarray(pcm, dtype=np.float32))
+        if np.isneginf(expected):
+            assert value == "-inf"
+        else:
+            assert value == pytest.approx(expected, abs=1e-12)
+    assert actual[2] == -6.020599913279624
+
+
+def test_stt_catalog_runtime_selection_and_sizes(stt_driver):
+    from localflow import model_storage as ms
+    from localflow import stt_lease as sl
+
+    sizes = list(dict.fromkeys([
+        *ms.FASTER_WHISPER_REPOS, *ms._MLX_REPOS, "org/custom", "/models/local",
+        "./local", "~/local", "a/b/c", "invalid", "",
+    ]))
+    pairs = [(backend, size) for backend in
+             ("auto", "mlx", "mlx-whisper", "faster-whisper", "parakeet", "plugin", "")
+             for size in sizes]
+    assert_same(stt_driver([{"op": "runtime_repo", "backend": b, "size": s} for b, s in pairs]),
+                [sl.runtime_repo(b, s) for b, s in pairs])
+    backends = [None, 42, False, "", " ", "auto", "mlx", " mlx-whisper ",
+                "faster-whisper", "parakeet", "plugin"]
+    assert stt_driver([{"op": "selection_backend", "backend": b} for b in backends]) == [
+        sl.selection_backend(b) for b in backends
+    ]
+    configs = [
+        {"stt_backend": backend, "model_size": size, "stt_device": device}
+        for backend in ("auto", "mlx", "mlx-whisper", "faster-whisper", "parakeet", "plugin")
+        for size in sizes for device in ("auto", "cpu")
+    ]
+    for mlx in (False, True):
+        expected = []
+        for config in configs:
+            repos = ms.selected_repos(Config(**config), lambda: mlx)
+            expected.append("UNKNOWN" if repos is ms.UNKNOWN else sorted(repos))
+        assert stt_driver([{"op": "selected_repos", "config": c, "mlx": mlx}
+                           for c in configs]) == expected
+    sizes_bytes = [-1000, -1, 0, 1, 512, 999, 1000, 1050, 1150, 1250, 9999,
+                   10000, 10500, 11500, 999999, 1000000, 486000000,
+                   1622000000, 999999999999, 2**53 + 1]
+    assert stt_driver([{"op": "format_bytes", "size": s} for s in sizes_bytes]) == [
+        ms.format_bytes(s) for s in sizes_bytes
+    ]
+    catalog = stt_driver([{"op": "catalog"}])[0]
+    assert catalog[:len(ms.catalog())] == [list(item) for item in ms.catalog().items()]
+    cpp = "ggerganov/whisper.cpp"
+    onnx = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
+    assert dict(catalog)[cpp] == "Whisper Base (whisper.cpp)"
+    assert dict(catalog)[onnx] == "Parakeet v2 (ONNX)"
+    for backend, size, repo in [("whisper-cpp", "base.en", cpp),
+                                 ("parakeet-onnx", "ignored", onnx)]:
+        assert stt_driver([
+            {"op": "runtime_repo", "backend": backend, "size": size},
+            {"op": "selection_backend", "backend": backend},
+            {"op": "selected_repos", "config": {"stt_backend": backend, "model_size": size}},
+        ]) == [[repo, True], backend, [repo]]
+
+
+def test_stt_hf_cache_environment_parity(stt_driver, sandbox, monkeypatch):
+    from localflow import model_storage as ms
+
+    for key in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+        if key in sandbox["env"]:
+            monkeypatch.setenv(key, sandbox["env"][key])
+    cases = [
+        {}, {"XDG_CACHE_HOME": "/x"}, {"XDG_CACHE_HOME": ""},
+        {"HF_HOME": "/h", "XDG_CACHE_HOME": "/x"},
+        {"HUGGINGFACE_HUB_CACHE": "/old", "HF_HOME": "/h"},
+        {"HF_HUB_CACHE": "/new", "HUGGINGFACE_HUB_CACHE": "/old"},
+        {"HF_HUB_CACHE": "", "HUGGINGFACE_HUB_CACHE": "/old"},
+        {"HF_HOME": "~/models"}, {"HF_HOME": "$HOME/models"},
+        {"HF_HOME": "${HOME}/models"}, {"HF_HUB_CACHE": "$LF_MISSING_CACHE_VAR/x"},
+        {"HF_HUB_CACHE": "~/a/../hub"}, {"HF_HUB_CACHE": "relative//hub/"},
+    ]
+    if os.name == "nt":
+        cases.extend([{"HF_HOME": "%USERPROFILE%/models"},
+                      {"HF_HOME": "'$HOME'/models"}, {"HF_HOME": "$$HOME/%%x%%"}])
+    actual = stt_driver([{"op": "hf_hub_cache", "env": env} for env in cases])
+    assert [Path(p) for p in actual] == [ms.hf_hub_cache(env) for env in cases]
+
+
+def test_stt_lease_cross_language_and_validation(stt_driver, tmp_path):
+    from dataclasses import asdict
+
+    from localflow import stt_lease as sl
+
+    root = tmp_path / "leases"
+    written = stt_driver([{"op": "record", "backend": "whisper-cpp", "size": "base",
+                           "root": str(root)}])[0]
+    path, pid = Path(written["path"]), written["pid"]
+    data = json.loads(path.read_text())
+    assert set(data) == {"version", "pid", "backend", "repo", "known", "created"}
+    assert sl._read(path, pid) == sl.Lease(pid, "whisper-cpp", "ggerganov/whisper.cpp", True)
+    assert sl.pid_alive(pid)
+    assert sl.live_leases(root) == [sl._read(path, pid)]
+    if os.name != "nt":
+        assert root.stat().st_mode & 0o777 == 0o700
+        assert path.stat().st_mode & 0o777 == 0o600
+    python_path = sl.record("mlx", "base", root=root, scoped=True)
+    try:
+        assert stt_driver([{"op": "read_lease", "path": str(python_path), "pid": os.getpid()}])[0] == asdict(sl._read(python_path, os.getpid()))
+        assert stt_driver([{"op": "pid_alive", "pid": os.getpid()},
+                           {"op": "pid_alive", "pid": 0}]) == [True, False]
+        assert stt_driver([{"op": "live_leases", "root": str(root)}])[0] == [
+            asdict(lease) for lease in sl.live_leases(root)
+        ]
+        # Neither implementation may release the other process's lease.
+        sl.release(path)
+        stt_driver([{"op": "release", "path": str(python_path)}])
+        assert path.exists() and python_path.exists()
+    finally:
+        sl.release(python_path)
+    scoped = stt_driver([{"op": "record", "backend": "parakeet-onnx", "size": "base",
+                          "root": str(root), "scoped": True}])[0]
+    assert Path(scoped["path"]) != path
+    assert len(sl.live_leases(root)) == 2
+    stt_driver([{"op": "release", "path": scoped["path"]},
+                {"op": "release", "path": str(path)}])
+    assert not path.exists() and not Path(scoped["path"]).exists()
+
+    valid = {"version": 1, "pid": 4242, "backend": "mlx", "repo": None, "known": True}
+    samples = [valid, {**valid, "pid": 1}, {**valid, "version": 2},
+               {**valid, "backend": None}, {**valid, "known": 1},
+               {**valid, "repo": 42}, {**valid, "version": 1.0},
+               {**valid, "version": True}, {**valid, "pid": 4242.0}, [], None]
+    requests, expected = [], []
+    for index, sample in enumerate(samples):
+        candidate = root / f"4242.{index:016x}.json"
+        candidate.write_text(json.dumps(sample))
+        requests.append({"op": "read_lease", "path": str(candidate), "pid": 4242})
+        expected.append(asdict(sl._read(candidate, 4242)))
+    assert stt_driver(requests) == expected
+    # Python's validator accepts a missing repo then indexes it, raising KeyError.
+    # Rust deliberately fails closed so corrupt live leases still block deletion.
+    missing = root / "4242.ffffffffffffffff.json"
+    missing.write_text(json.dumps({k: v for k, v in valid.items() if k != "repo"}))
+    with pytest.raises(KeyError, match="repo"):
+        sl._read(missing, 4242)
+    assert stt_driver([{"op": "read_lease", "path": str(missing), "pid": 4242}])[0] == asdict(sl.Lease(4242, "unknown", None, False))
+    missing.unlink()
+    for name, content in [("4243.json", "{broken"), ("4244.json", " " * 4097),
+                           ("12.json.bak", "{}"), ("12.ABCDEF0123456789.json", "{}"),
+                           ("12.short.json", "{}"), ("-1.json", "{}"),
+                           ("٤٢٤٥.json", "{}")]:
+        (root / name).write_text(content)
+    assert stt_driver([{"op": "live_leases", "root": str(root),
+                       "alive": [4242, 4243, 4244, 4245]}])[0] == [
+        asdict(lease) for lease in sl.live_leases(root, alive=lambda p: p in (4242, 4243, 4244, 4245))
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX symlinks")
+def test_stt_inventory_and_deletion_parity(stt_driver, tmp_path):
+    from dataclasses import asdict
+
+    from localflow import model_storage as ms
+    from localflow.stt_lease import Lease
+
+    cache = tmp_path / "hub"
+    cache.mkdir()
+
+    def repo(name, size):
+        folder = cache / ms.repo_folder_name(name)
+        (folder / "blobs").mkdir(parents=True)
+        (folder / "refs").mkdir()
+        (folder / "refs" / "main").write_text("rev1")
+        (folder / "blobs" / "data").write_bytes(b"x" * size)
+        for rev in ("rev1", "rev2"):
+            snap = folder / "snapshots" / rev
+            snap.mkdir(parents=True)
+            (snap / "weights").symlink_to("../../blobs/data")
+        os.link(folder / "blobs" / "data", folder / "hardlink")
+        return folder
+
+    base, small = "Systran/faster-whisper-base", "Systran/faster-whisper-small"
+    mlx, qwen = "mlx-community/whisper-base-mlx", "Qwen/LLM"
+    repo(base, 200)
+    repo(small, 1500)
+    mlx_path = repo(mlx, 300)
+    unrelated = repo(qwen, 5000)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"y" * 7000)
+    (mlx_path / "escape").symlink_to(outside)
+    (cache / ms.repo_folder_name("Systran/faster-whisper-tiny")).symlink_to(unrelated)
+    running = Lease(4242, "faster-whisper", small, True)
+    unknown = Lease(4242, "unknown", None, False)
+    cases = [
+        ({"stt_backend": "faster-whisper", "model_size": "small"}, False, []),
+        ({"stt_backend": "auto", "model_size": "base"}, True, [running]),
+        ({"stt_backend": "plugin"}, False, []),
+        ({"stt_backend": "parakeet"}, False, [unknown]),
+    ]
+    for fields, mlx_available, leases in cases:
+        common = {"cache": str(cache), "config": fields, "mlx": mlx_available,
+                  "leases": [asdict(lease) for lease in leases]}
+        expected = [{**asdict(model), "path": str(model.path)} for model in ms.inventory(
+            Config(**fields), cache, lambda: mlx_available, leases)]
+        assert stt_driver([{**common, "op": "inventory"}])[0] == expected
+        for name in (small, base, qwen, "../../etc", "Systran/faster-whisper-tiny"):
+            try:
+                # Only exercise refusal cases here; success is compared below.
+                guard = ms.protection(Config(**fields), lambda: mlx_available, leases)
+                if name in ms.catalog() and not guard.unknown and not guard.status(name) and ms._model_folder(cache, name):
+                    continue
+                ms.delete_unused(name, Config(**fields), cache, lambda: mlx_available, leases)
+            except ms.ModelStorageError as error:
+                assert stt_driver([{**common, "op": "delete_unused", "repo": name}])[0] == {"error": str(error)}
+            else:
+                pytest.fail("expected deletion refusal")
+    # Snapshot symlinks/hardlinks count once; outside links never contribute.
+    assert stt_driver([{"op": "folder_size", "path": str(mlx_path)}])[0] == ms.folder_size(mlx_path) == 304
+    # Delete from the exact same fixture, restoring it between implementations.
+    fields = {"stt_backend": "faster-whisper", "model_size": "small"}
+    freed = ms.delete_unused(mlx, Config(**fields), cache, lambda: False, [])
+    mlx_path = repo(mlx, 300)
+    (mlx_path / "escape").symlink_to(outside)
+    assert stt_driver([{"op": "delete_unused", "repo": mlx, "cache": str(cache),
+                       "config": fields, "mlx": False, "leases": []}])[0] == freed == 304
+    assert not mlx_path.exists() and unrelated.exists() and outside.stat().st_size == 7000
+    # Both implementations expose the same OS reason and freed-byte message.
+    if os.geteuid() != 0:
+        mlx_path.mkdir()
+        (mlx_path / "weight").write_bytes(b"x" * 300)
+        mlx_path.chmod(0o500)
+        try:
+            with pytest.raises(ms.ModelStorageError) as failed:
+                ms.delete_unused(mlx, Config(**fields), cache, lambda: False, [])
+            assert stt_driver([{"op": "delete_unused", "repo": mlx, "cache": str(cache),
+                               "config": fields, "mlx": False, "leases": []}])[0] == {"error": str(failed.value)}
+        finally:
+            mlx_path.chmod(0o700)

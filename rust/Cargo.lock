@@ -1264,6 +1264,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lf-stt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "getrandom 0.3.4",
+ "lf-audio",
+ "lf-core",
+ "libc",
+ "log",
+ "regex",
+ "same-file",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"

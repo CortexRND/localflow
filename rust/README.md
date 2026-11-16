@@ -12,6 +12,7 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf-providers` | Ollama / OpenAI-compatible LLM clients, provider presets and keys, endpoint-bound key activation |
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
+| `lf-stt` | model catalog/cache protection, Python-compatible leases and lazy engine slot; [gaps and API](lf-stt/README.md) |
 
 ## Build
 
