@@ -1484,10 +1484,11 @@ class SetupWindowController(NSObject):
         self.start_on_login = sender.state() == AppKit.NSOnState
 
     def launchAction_(self, sender):
-        import subprocess
-        import sys
+        # Dictation, local server and menu bar, each started at most once —
+        # also when setup runs standalone, outside the main app.
+        from localflow import main_app
 
-        subprocess.Popen([sys.executable, "-m", "localflow.app"])
+        main_app.ensure_runtime()
 
     def timerTick_(self, timer):
         self._handle_events()

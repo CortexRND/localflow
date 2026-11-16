@@ -369,25 +369,33 @@ class WindowRouter:
         self.hub = None
         self.setup = None
         self.desired = None
+        # Setup was shown while unconfigured; poll watches for it finishing.
+        self._awaiting_setup = False
 
     def show(self, page=None) -> None:
         requested = validate_page(page) or consume_request()
         if requested:
             self.desired = requested
         if self._configured():
+            self._awaiting_setup = False
             self._runtime()
             page, self.desired = self.desired, None
             self.hub = self._open_hub(self.hub, page)
         else:
+            self._awaiting_setup = True
             self.setup = self._open_setup(self.setup)
 
     def poll(self) -> bool:
-        """Run-loop timer hook: serve a pending page request. True if served."""
+        """Run-loop timer hook: serve a pending page request, or bring up the
+        runtime and Hub once setup has saved the config. True if served."""
         page = consume_request()
-        if page is None:
-            return False
-        self.show(page)
-        return True
+        if page is not None:
+            self.show(page)
+            return True
+        if self._awaiting_setup and self._configured():
+            self.show()  # runtime once, then the Hub at `desired` (or Home)
+            return True
+        return False
 
 
 def _native_hub(existing, page=None):
