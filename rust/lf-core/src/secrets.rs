@@ -259,14 +259,16 @@ mod windows_vault {
     /// `DecodingCredential.value`: UTF-16 (BOM-aware, little-endian default),
     /// falling back to UTF-8.
     fn decode_blob(blob: &[u8]) -> Result<String> {
-        if blob.len() % 2 == 0 {
+        if blob.len().is_multiple_of(2) {
             let (body, big_endian) = match blob {
                 [0xFF, 0xFE, rest @ ..] => (rest, false),
                 [0xFE, 0xFF, rest @ ..] => (rest, true),
                 _ => (blob, false),
             };
             let units: Vec<u16> = body
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     if big_endian {
                         u16::from_be_bytes([pair[0], pair[1]])
