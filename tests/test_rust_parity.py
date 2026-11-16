@@ -1335,7 +1335,7 @@ def test_stt_catalog_runtime_selection_and_sizes(stt_driver):
     for mlx in (False, True):
         expected = []
         for config in configs:
-            repos = ms.selected_repos(Config(**config), lambda: mlx)
+            repos = ms.selected_repos(Config(**config), lambda mlx=mlx: mlx)
             expected.append("UNKNOWN" if repos is ms.UNKNOWN else sorted(repos))
         actual = stt_driver([{"op": "selected_repos", "config": c, "mlx": mlx}
                              for c in configs])
@@ -1503,15 +1503,15 @@ def test_stt_inventory_and_deletion_parity(stt_driver, tmp_path):
         common = {"cache": str(cache), "config": fields, "mlx": mlx_available,
                   "leases": [asdict(lease) for lease in leases]}
         expected = [{**asdict(model), "path": str(model.path)} for model in ms.inventory(
-            Config(**fields), cache, lambda: mlx_available, leases)]
+            Config(**fields), cache, lambda mlx_available=mlx_available: mlx_available, leases)]
         assert stt_driver([{**common, "op": "inventory"}])[0] == expected
         for name in (small, base, qwen, "../../etc", "Systran/faster-whisper-tiny"):
             try:
                 # Only exercise refusal cases here; success is compared below.
-                guard = ms.protection(Config(**fields), lambda: mlx_available, leases)
+                guard = ms.protection(Config(**fields), lambda mlx_available=mlx_available: mlx_available, leases)
                 if name in ms.catalog() and not guard.unknown and not guard.status(name) and ms._model_folder(cache, name):
                     continue
-                ms.delete_unused(name, Config(**fields), cache, lambda: mlx_available, leases)
+                ms.delete_unused(name, Config(**fields), cache, lambda mlx_available=mlx_available: mlx_available, leases)
             except ms.ModelStorageError as error:
                 assert stt_driver([{**common, "op": "delete_unused", "repo": name}])[0] == {"error": str(error)}
             else:

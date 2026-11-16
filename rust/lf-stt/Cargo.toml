@@ -25,10 +25,10 @@ log.workspace = true
 same-file = "1"
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 sherpa-onnx = { version = "2.0.1", optional = true, default-features = false, features = ["shared"] }
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(not(any(target_os = "linux", target_os = "windows")))'.dependencies]
 sherpa-onnx = { version = "2.0.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1,11 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use hf_hub::api::sync::ApiBuilder;
 
 use crate::model_storage;
 
-pub(crate) fn cached_file_exists(path: &Path) -> bool {
+#[cfg(any(feature = "whisper", feature = "parakeet", test))]
+pub(crate) fn cached_file_exists(path: &std::path::Path) -> bool {
     path.is_file()
 }
 

@@ -47,7 +47,9 @@ Parakeet run without Whisper linked succeeded. Shared libraries isolate those
 C++ dependencies. The upstream build copies `.so` files beside Cargo outputs;
 this package sets relative rpaths for its benchmark/tests. Downstream Linux
 executables must likewise ship the `.so` files and set an appropriate rpath
-or `LD_LIBRARY_PATH`. macOS/Windows retain upstream's default static linking.
+or `LD_LIBRARY_PATH`. Windows also uses shared libraries to avoid mixing sherpa's
+static MSVC runtime with whisper-rs's dynamic runtime; upstream copies the DLLs
+beside Cargo executables. macOS retains upstream's default static linking.
 
 `download()` resolves HF assets separately so benchmark load excludes download
 and cache-lookup time; `load()` also calls it if needed and reports that time
