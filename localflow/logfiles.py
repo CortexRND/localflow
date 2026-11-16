@@ -1,6 +1,7 @@
 """Keep LocalFlow's own log files bounded.
 
-Python logging rotates `localflow.log` itself (log.py). The other files are
+Python logging rotates `localflow.log` and the server's `server.log` itself
+(log.py). The other files are
 written by someone else's file descriptor and can't be renamed under them:
 launchd's StandardOutPath/StandardErrorPath (`agent.out.log`,
 `agent.err.log`) and the app-launched server/menu bar output (`app.log`).
@@ -31,6 +32,7 @@ LOG_BACKUPS = 3
 KEEP_BYTES = MAX_LOG_BYTES // 2
 CHUNK_BYTES = 1024 * 1024
 LOGGING_NAME = "localflow.log"
+SERVER_LOGGING_NAME = "server.log"  # the local server's own rotating log
 AGENT_LOGS = ("agent.out.log", "agent.err.log")
 APP_LOG = "app.log"
 
@@ -40,8 +42,10 @@ def log_dir() -> Path:
 
 
 def runtime_log_names() -> tuple[str, ...]:
-    backups = tuple(f"{LOGGING_NAME}.{n}" for n in range(1, LOG_BACKUPS + 1))
-    return (LOGGING_NAME, *backups, *AGENT_LOGS, APP_LOG)
+    rotated = []
+    for name in (LOGGING_NAME, SERVER_LOGGING_NAME):
+        rotated += [name, *(f"{name}.{n}" for n in range(1, LOG_BACKUPS + 1))]
+    return (*rotated, *AGENT_LOGS, APP_LOG)
 
 
 def _pread(fd: int, size: int, offset: int) -> bytes:

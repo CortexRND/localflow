@@ -45,7 +45,7 @@ from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.live_config import ConfigWatcher, merge_live
-from localflow.log import setup_logging
+from localflow.log import SERVER_LOG_PATH, setup_logging
 from localflow.logfiles import prepare_process_logs
 from localflow.meeting_templates import load_templates, resolve_template
 from localflow.meetings import (
@@ -68,7 +68,7 @@ from localflow.workprompts import WorkPromptGenerator
 
 app = FastAPI()
 
-setup_logging()
+setup_logging(SERVER_LOG_PATH)  # not localflow.log: dictation rotates that one
 log = logging.getLogger("localflow.server")
 _config = load_config()
 _api_token = load_or_create()
