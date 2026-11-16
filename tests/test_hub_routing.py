@@ -23,6 +23,7 @@ ROOT = Path(__file__).parent.parent
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
     return tmp_path
 
 
@@ -46,7 +47,8 @@ def test_request_is_atomic_private_and_consumed_once(home):
 
     path = hub_route.request_path()
     assert path == home / ".localflow" / "page-request.json"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name == "posix":  # Windows has no POSIX permission bits to check
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert _leftovers(home) == ["page-request.json"]  # no tmp file left behind
     assert hub_route.consume_request() == "Hot Phrases"
     assert _leftovers(home) == []  # cleaned up on consume

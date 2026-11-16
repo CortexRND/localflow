@@ -272,7 +272,7 @@ def test_import_card_height_grows_with_candidates_only():
 # ---------------------------------------------------- hub behaviour/security ---
 
 def controller_methods():
-    tree = ast.parse(HUB.read_text())
+    tree = ast.parse(HUB.read_text(encoding="utf-8"))
     cls = next(
         n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "HubWindowController"
     )
@@ -290,7 +290,7 @@ def extracted(name):
 
 
 def source_of(name):
-    return ast.get_source_segment(HUB.read_text(), controller_methods()[name])
+    return ast.get_source_segment(HUB.read_text(encoding="utf-8"), controller_methods()[name])
 
 
 def toggle_controller(expanded=None):

@@ -20,6 +20,7 @@ def _lines(count, prefix="line"):
 def root(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     folder = home / ".localflow"
     folder.mkdir(parents=True)
     return folder
@@ -145,6 +146,9 @@ def test_launchagent_install_trims_its_own_log_files(root):
 def test_launchagent_install_calls_the_trim(root, monkeypatch):
     calls = []
     monkeypatch.setattr(launchagent, "trim_agent_logs", lambda: calls.append("trim"))
+    # launchctl domains need os.getuid (POSIX only); the boundary is stubbed below.
+    monkeypatch.setattr(launchagent, "_gui_target", lambda: f"gui/501/{launchagent.LABEL}")
+    monkeypatch.setattr(launchagent, "_gui_domain", lambda: "gui/501")
     monkeypatch.setattr(
         launchagent.subprocess, "run",
         lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})(),

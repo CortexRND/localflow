@@ -1,4 +1,5 @@
 import ast
+import os
 import plistlib
 import stat
 import subprocess
@@ -44,6 +45,11 @@ class FakeChild:
         return self.returncode
 
 
+class FakeLock:
+    def release(self):
+        pass
+
+
 class Recorder:
     """Records Popen/run calls; `run_result` may be a Result or an exception."""
 
@@ -78,10 +84,18 @@ class Recorder:
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
     monkeypatch.setenv("LOCALFLOW_CONFIG", str(tmp_path / "config.toml"))
     monkeypatch.setattr(sys, "argv", ["main_app", "--bogus"])
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(main_app, "_held", lambda name: False)
+    # The real lock picks its backend from the host OS (fcntl is absent on
+    # Windows even while sys.platform is faked); singleinstance has its own
+    # tests, so main() gets a granted lock unless a test says otherwise.
+    monkeypatch.setattr(main_app, "acquire", lambda name: FakeLock())
+    # launchctl domains use os.getuid, which Windows lacks.
+    monkeypatch.setattr(launchagent, "_gui_target", lambda: f"gui/501/{launchagent.LABEL}")
+    monkeypatch.setattr(launchagent, "_gui_domain", lambda: "gui/501")
     # No test touches the network or leaves a reaper thread behind: the
     # health probe answers from `probes` and the reaper only records.
     probes.clear()
@@ -264,7 +278,7 @@ def test_legacy_daily_user_routes_to_runtime_and_hub(monkeypatch, rec, tmp_path)
     main_app.main()
 
     assert calls == ["hub"]
-    assert [a for a in rec.popen if a[0].endswith("/localflow")]
+    assert [a for a in rec.popen if Path(a[0]).name == "localflow"]
     assert [sys.executable, "-m", "localflow.menubar"] in rec.popen
 
 
@@ -300,7 +314,7 @@ def test_configured_starts_runtime_then_hub(monkeypatch, rec):
 
     assert calls == ["hub"]
     assert sys.argv == ["main_app"]
-    assert len([a for a in rec.popen if a[0].endswith("/localflow")]) == 1
+    assert len([a for a in rec.popen if Path(a[0]).name == "localflow"]) == 1
     assert [sys.executable, "-m", "localflow.menubar"] in rec.popen
     assert rec.server_spawns() == [SERVER_ARGV]
 
@@ -327,7 +341,7 @@ def test_loaded_agent_is_kickstarted(monkeypatch, rec):
     main_app._start_dictation()
 
     assert rec.run[0][:2] == ["launchctl", "kickstart"]
-    assert not [a for a in rec.popen if a[0].endswith("/localflow")]
+    assert not [a for a in rec.popen if Path(a[0]).name == "localflow"]
 
 
 def test_not_loaded_agent_is_bootstrapped_again(monkeypatch, rec):
@@ -350,7 +364,7 @@ def test_bootstrap_failure_falls_back_to_detached_runtime(monkeypatch, rec, tmp_
 
     main_app._start_dictation()
 
-    assert [a for a in rec.popen if a[0].endswith("/localflow")]
+    assert [a for a in rec.popen if Path(a[0]).name == "localflow"]
     assert "bootstrap denied" in _log_text(tmp_path)
 
 
@@ -360,7 +374,7 @@ def test_kickstart_failure_falls_back_to_detached_runtime(monkeypatch, rec, tmp_
 
     main_app._start_dictation()
 
-    assert [a for a in rec.popen if a[0].endswith("/localflow")]
+    assert [a for a in rec.popen if Path(a[0]).name == "localflow"]
     assert "Could not find service" in _log_text(tmp_path)
 
 
@@ -370,7 +384,7 @@ def test_kickstart_oserror_falls_back_to_detached_runtime(monkeypatch, rec):
 
     main_app._start_dictation()
 
-    assert [a for a in rec.popen if a[0].endswith("/localflow")]
+    assert [a for a in rec.popen if Path(a[0]).name == "localflow"]
 
 
 def test_runtime_start_failure_is_logged_and_hub_still_opens(monkeypatch, rec, tmp_path):
@@ -882,7 +896,8 @@ def test_main_app_bundle_plist_and_launcher(tmp_path):
     assert launcher.read_text() == (
         "#!/bin/bash\nexec '/opt/lf venv/bin/python' -m localflow.main_app \"$@\"\n"
     )
-    assert launcher.stat().st_mode & stat.S_IXUSR
+    if os.name == "posix":  # Windows has no POSIX execute bit
+        assert launcher.stat().st_mode & stat.S_IXUSR
     assert ("CFBundleIconFile" in plist) == (
         (bundle / "Contents" / "Resources" / "LocalFlow.icns").exists()
     )

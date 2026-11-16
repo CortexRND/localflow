@@ -451,7 +451,8 @@ def test_apply_and_undo_round_trip_across_a_restart(paths):
     assert config.sounds_enabled is False and config.hotkey == "f13"
     assert store.words() == ["Existing", "Kubernetes"]
     assert ("kay eight s", "k8s") in store.replacements()
-    assert stat.S_IMODE(paths["undo"].stat().st_mode) == 0o600
+    if os.name == "posix":  # Windows has no POSIX permission bits to check
+        assert stat.S_IMODE(paths["undo"].stat().st_mode) == 0o600
     record = json.loads(paths["undo"].read_text())
     assert record["words"] == ["Kubernetes"]  # pre-existing entries never recorded
     assert len(paths["undo"].read_bytes()) < sa.MAX_UNDO_BYTES
@@ -792,13 +793,31 @@ def test_insert_is_refused_on_macos_only():
 @pytest.mark.parametrize("value", [
     "<ctrl>+<alt>+d", "Cmd+Shift+Space", "ctrl+f5", "ctrl+option+5", "<cmd>+<ctrl>+v",
 ])
-def test_normalized_combos_are_accepted_by_the_real_hotkey_parser(value):
+def test_normalized_combos_are_accepted_by_the_real_hotkey_parser(value, monkeypatch):
     """KeyboardHub stays the real parser: what we save, it accepts."""
+    import enum
     import importlib.util
 
     if importlib.util.find_spec("pynput") is None:
         pytest.skip("pynput not installed")
+    import pynput.keyboard as kb
     from pynput.keyboard import HotKey  # the test process, not the pure module
+
+    if kb.Key.ctrl == kb.Key.alt:
+        # PYNPUT_BACKEND=dummy (CI) gives every Key the same vk, so Enum
+        # aliases them all and the real parser rejects any two named keys
+        # as duplicates. Swap in the same names with distinct vks; HotKey.parse
+        # itself (grammar, modifier handling, duplicate check) stays real.
+        fake = enum.Enum("Key", {
+            name: kb.KeyCode.from_vk(0x10000 + i) for i, name in enumerate(kb.Key.__members__)
+        })
+        groups = {"alt_gr": ("alt_gr",)} | {
+            base: (base, f"{base}_l", f"{base}_r") for base in ("alt", "cmd", "ctrl", "shift")
+        }
+        monkeypatch.setattr(kb, "Key", fake)
+        monkeypatch.setattr(kb, "_NORMAL_MODIFIERS", {
+            fake[name].value: fake[base] for base, names in groups.items() for name in names
+        })
 
     try:
         keys = HotKey.parse(sa.normalize_combo(value, "linux"))
