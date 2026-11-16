@@ -1,4 +1,6 @@
+import ctypes
 import logging
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -6,6 +8,50 @@ from collections.abc import Callable, Iterable
 from pynput import keyboard
 
 log = logging.getLogger("localflow.hotkey")
+
+# kIOHIDRequestTypeListenEvent — the Input Monitoring TCC service.
+_LISTEN_EVENT = 1
+# A live tap sees *something* (any key, any modifier) well within this window
+# of normal use; silence this long almost always means TCC is dropping events.
+_DEAD_TAP_SECONDS = 15.0
+_INPUT_MONITORING_HELP = (
+    "hold-to-talk and global hotkeys cannot see keystrokes until Input Monitoring "
+    "is enabled for the app that launched LocalFlow — 'LocalFlow' when started "
+    "from the app, or your terminal app / 'Python' when run from a terminal — in "
+    "System Settings → Privacy & Security → Input Monitoring. Restart LocalFlow "
+    "after granting; macOS does not re-arm a running event tap."
+)
+
+
+def _iokit():
+    iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+    iokit.IOHIDCheckAccess.argtypes = [ctypes.c_uint32]
+    iokit.IOHIDCheckAccess.restype = ctypes.c_int
+    iokit.IOHIDRequestAccess.argtypes = [ctypes.c_uint32]
+    iokit.IOHIDRequestAccess.restype = ctypes.c_bool
+    return iokit
+
+
+def _input_monitoring_granted() -> bool | None:
+    """True/False from IOHIDCheckAccess; None when it can't be determined."""
+    try:
+        return _iokit().IOHIDCheckAccess(_LISTEN_EVENT) == 0
+    except (AttributeError, OSError):
+        return None
+
+
+def _request_input_monitoring() -> None:
+    # Makes macOS show its grant prompt / list the responsible app in Settings.
+    try:
+        _iokit().IOHIDRequestAccess(_LISTEN_EVENT)
+    except (AttributeError, OSError):
+        log.debug("IOHIDRequestAccess unavailable", exc_info=True)
+
+
+def _warn(message: str) -> None:
+    # Both: log for the app log file, stderr for whoever launched us by hand.
+    log.warning(message)
+    print(f"warning: {message}", file=sys.stderr)
 
 
 class _Bindings:
@@ -227,6 +273,26 @@ class KeyboardHub:
             self._saw_any_event = True
             log.info("first keyboard event received — Input Monitoring OK")
 
+    def _preflight_input_monitoring(self) -> bool:
+        """Return True when the tap is known to be allowed to see keystrokes."""
+        if sys.platform != "darwin":
+            # No TCC gate elsewhere; nothing to preflight or watch for.
+            return True
+        granted = _input_monitoring_granted()
+        if granted is False:
+            _request_input_monitoring()
+            _warn(f"Input Monitoring not granted: {_INPUT_MONITORING_HELP}")
+        return granted is True
+
+    def _check_tap_alive(self) -> None:
+        # The tap is created even when TCC denies it; it just never delivers.
+        if not self._saw_any_event:
+            _warn(
+                f"no keyboard events received {_DEAD_TAP_SECONDS:.0f}s after start; "
+                f"if hold-to-talk does not respond, the event tap is dead: "
+                f"{_INPUT_MONITORING_HELP}"
+            )
+
     def _canonical(self, key):
         if self._listener is None:
             return key
@@ -331,14 +397,25 @@ class KeyboardHub:
             self._invoke(self._on_command_down)
 
     def run_forever(self) -> None:
+        granted = self._preflight_input_monitoring()
         self._listener = keyboard.Listener(on_press=self._press, on_release=self._release)
         with self._lock:
             if self._command_key is not None:
                 self._command_combo_key = self._canonical(self._command_key)
+        # Only watch for a dead tap when access is denied or unknown: with a
+        # confirmed grant, 15s of silence is just a user who hasn't typed yet.
+        watchdog = None
+        if not granted:
+            watchdog = threading.Timer(_DEAD_TAP_SECONDS, self._check_tap_alive)
+            watchdog.daemon = True
         try:
             with self._listener as listener:
+                if watchdog is not None:
+                    watchdog.start()
                 listener.join()
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
             if self._command_timer is not None:
                 self._command_timer.cancel()
                 self._command_timer = None
