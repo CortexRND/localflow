@@ -84,7 +84,13 @@ def show_use_button(preset, config, *, url, model, key_changed=False):
 
 def use_button_visible(preset, config, *, url, model):
     """show_use_button plus the key comparison, made only when the provider is
-    otherwise active and unchanged (no secret lookup for other rows)."""
+    otherwise active and unchanged (no secret lookup for other rows).
+
+    A blank model is never offered: activation would refuse it (or quietly
+    pick a default the user did not choose), so Use stays hidden until a
+    model is typed or picked."""
+    if not (model or "").strip():
+        return False
     if show_use_button(preset, config, url=url, model=model):
         return True
     return show_use_button(

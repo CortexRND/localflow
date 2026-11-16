@@ -252,14 +252,15 @@ def activate(
     preset = get_preset(provider_id)
     url = _url(preset, base_url)
     base = config or load_config()
+    # Decided before any key or config write: never persist an unusable model.
+    chosen = _choose_model(preset, model, base.llm_model)
     key = secrets.get_secret(f"provider_key_{preset.id}") if preset.needs_key else ""
     if preset.needs_key and not key:
         raise ValueError("Save a provider key before activating it")
     updated = replace(
         base, llm_provider=preset.llm_provider, llm_base_url=url, llm_key_ref="",
+        llm_model=chosen,
     )
-    if model is not None:
-        updated.llm_model = model
     if not preset.needs_key:
         save_config(updated)  # keyless (Ollama): nothing to pair
         return updated
@@ -279,6 +280,22 @@ def activate(
         _discard_snapshot(ref, index)
         raise
     return updated
+
+
+def _choose_model(preset: Preset, model: str | None, current: str) -> str:
+    """The stripped model to activate.
+
+    An explicit `model` wins; `None` keeps the configured model. Either one
+    blank falls back to the preset's own default (only Ollama defines one);
+    with no default the caller must choose, so nothing is written.
+    """
+    picked = model if model is not None else current
+    picked = picked.strip() if isinstance(picked, str) else ""
+    if not picked:
+        picked = preset.default_model.strip()
+    if not picked:
+        raise ValueError("Choose a model before using this provider")
+    return picked
 
 
 def _reusable_snapshot(config: Config, provider_id: str, url: str, key: str) -> str:
