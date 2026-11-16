@@ -55,14 +55,16 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.sh
-echo "7fc43f686914c5968191011c93f64d9e0f4ddc991ce1ad8992b7727aa4316a2e  install.sh" | shasum -a 256 -c -
-bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.sh && echo "7fc43f686914c5968191011c93f64d9e0f4ddc991ce1ad8992b7727aa4316a2e  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
-(`sha256sum -c -` works too.) Do not run the script if the check fails.
-To install and start Ollama for optional transcript cleanup, run
-`bash install.sh --with-ollama` instead.
+(`sha256sum -c -` works too.) To install and start Ollama for optional
+transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
+the final command:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.sh && echo "7fc43f686914c5968191011c93f64d9e0f4ddc991ce1ad8992b7727aa4316a2e  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+```
 
 The installer is pinned to release `v0.1.0`. Without git it downloads
 `localflow-0.1.0.tar.gz` from that release and verifies it against the
@@ -95,13 +97,11 @@ installer prints a warning saying so.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing -OutFile install.ps1 https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.ps1
-if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -ne '7FDA5D436A6DE8D175F5B135914366BF9E20B700A11DB07A62B847FA9E7E442D') { throw 'install.ps1 checksum mismatch' }
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq '7FDA5D436A6DE8D175F5B135914366BF9E20B700A11DB07A62B847FA9E7E442D') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
 ```
 
-To install and start Ollama for optional transcript cleanup, add `-WithOllama`
-to the last command.
+To install and start Ollama for optional transcript cleanup, add
+`-WithOllama` to the `powershell` command inside the success branch.
 
 Without git, the installer downloads `localflow-0.1.0.zip` from the `v0.1.0`
 release and verifies it against the release's `SHA256SUMS`
