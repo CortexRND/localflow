@@ -16,6 +16,7 @@ tempfile = { workspace = true }
 log = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
+caseless = { workspace = true }
 toml_edit = "0.22"
 notify = "8"
 

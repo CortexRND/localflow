@@ -1164,6 +1164,7 @@ name = "lf-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "caseless",
  "chrono",
  "dispatch2",
  "lf-core",

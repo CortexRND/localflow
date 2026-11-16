@@ -41,12 +41,9 @@ const NAME_CATEGORIES: &[(&str, &str)] = &[
 
 const CATEGORIES: &[&str] = &["work", "email", "personal", "other"];
 
+/// Python `str.casefold` (full Unicode case folding: "ß" -> "ss").
 fn fold(s: &str) -> String {
-    caseless_fold(s)
-}
-
-fn caseless_fold(s: &str) -> String {
-    s.chars().flat_map(char::to_lowercase).collect()
+    caseless::default_case_fold_str(s)
 }
 
 /// `category_for(app, overrides)`: "name=category" / "bundle=category"
@@ -120,6 +117,10 @@ mod tests {
                 &["xcode = Personal"]
             ),
             "personal"
+        );
+        assert_eq!(
+            category_for(Some(&app("Straße", "")), &["STRASSE=work"]),
+            "work"
         );
         assert_eq!(
             category_for(Some(&app("Slack", "")), &["slack=bogus", "nope"]),
