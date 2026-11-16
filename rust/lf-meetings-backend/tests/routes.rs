@@ -1056,7 +1056,7 @@ async fn failed_summary_provider_setup_still_saves_recording_and_user_notes() {
         assert_eq!(saved.1["segments"], 1);
         let notes = fs::read_to_string(saved.1["notes_path"].as_str().unwrap()).unwrap();
         assert!(notes.contains("(LLM summarization failed — see the linked transcript log.)"));
-        assert!(notes.contains(user_notes));
+        assert!(notes.replace("\r\n", "\n").contains(user_notes));
         let transcript = fs::read_to_string(saved.1["log_path"].as_str().unwrap()).unwrap();
         assert!(transcript.contains("we will launch on March 3"));
         assert_eq!(
