@@ -72,7 +72,11 @@ impl SpeechEngine for ParakeetEngine {
         "parakeet-onnx"
     }
     fn download(&mut self) -> Result<f64> {
-        if self.paths.is_some() {
+        if self
+            .paths
+            .as_ref()
+            .is_some_and(|paths| paths.iter().all(|path| downloads::cached_file_exists(path)))
+        {
             return Ok(0.0);
         }
         let start = Instant::now();

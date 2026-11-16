@@ -62,7 +62,11 @@ impl SpeechEngine for WhisperEngine {
         "whisper-cpp"
     }
     fn download(&mut self) -> Result<f64> {
-        if self.path.is_some() {
+        if self
+            .path
+            .as_ref()
+            .is_some_and(|path| downloads::cached_file_exists(path))
+        {
             return Ok(0.0);
         }
         let start = Instant::now();
