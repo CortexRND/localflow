@@ -439,3 +439,16 @@ fn status_without_server_is_clear_and_never_creates_a_token() {
     }
     assert!(!has_token(sandbox.root()));
 }
+
+#[test]
+fn serve_rejects_a_saved_port_that_would_wrap() {
+    let sandbox = Sandbox::new();
+    assert_eq!(
+        code(&sandbox.run(&["config", "set", "server.port", "65536"])),
+        0
+    );
+    let output = sandbox.run(&["serve"]);
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("server_port must be between 0 and 65535"));
+    assert!(stdout(&output).is_empty());
+}

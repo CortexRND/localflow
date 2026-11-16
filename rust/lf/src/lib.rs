@@ -155,8 +155,11 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
                     .unwrap_or("127.0.0.1")
                     .into()
             });
-            let port =
-                port.unwrap_or_else(|| config.field_i64("server_port").unwrap_or(8756) as u16);
+            let port = match port {
+                Some(port) => port,
+                None => u16::try_from(config.field_i64("server_port").unwrap_or(8756))
+                    .map_err(|_| anyhow::anyhow!("server_port must be between 0 and 65535"))?,
+            };
             outln!(
                 io.out,
                 "LocalFlow Rust server listening on {}",
