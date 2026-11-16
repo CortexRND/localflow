@@ -100,11 +100,13 @@ mod tests {
         let path = dir.path().join("dictate.lock");
         let mut first = acquire_at(&path).unwrap().expect("first acquire");
         assert!(acquire_at(&path).unwrap().is_none());
+        first.release();
+        first.release();
+        // Read after release: Windows locks are mandatory, so another handle
+        // cannot read the file while it is held.
         let (pid, ts) = read_holder_at(&path);
         assert_eq!(pid, Some(std::process::id()));
         assert!(ts.unwrap().ends_with("+00:00"));
-        first.release();
-        first.release();
         assert!(acquire_at(&path).unwrap().is_some());
     }
 
