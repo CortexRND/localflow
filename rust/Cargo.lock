@@ -1000,6 +1000,7 @@ dependencies = [
  "clap",
  "lf-core",
  "lf-providers",
+ "log",
  "reqwest",
  "serde",
  "serde_json",
