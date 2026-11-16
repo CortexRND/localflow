@@ -294,12 +294,11 @@ fn dispatch(
         } else {
             "__LOCALFLOW_TOKEN__"
         };
-        let page = STATIC
-            .get_file(file)
-            .unwrap()
-            .contents_utf8()
-            .unwrap()
-            .replace(marker, &weblaunch::escape_html(&page_token));
+        let page = render_page(
+            STATIC.get_file(file).unwrap().contents_utf8().unwrap(),
+            marker,
+            &page_token,
+        );
         return ([(header::CACHE_CONTROL, "no-store")], Html(page)).into_response();
     }
     if path == "/api/launch-code" {
@@ -425,5 +424,25 @@ fn dispatch(
             });
             respond(response.status, response.body)
         }
+    }
+}
+
+fn render_page(template: &str, marker: &str, token: &str) -> String {
+    // Python Path.read_text uses universal newlines, including on Windows
+    // checkouts where Git converts the embedded HTML to CRLF.
+    template
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace(marker, &weblaunch::escape_html(token))
+}
+
+#[cfg(test)]
+mod page_tests {
+    #[test]
+    fn crlf_checkouts_match_python_universal_newlines() {
+        assert_eq!(
+            super::render_page("<html>\r\nTOKEN\r</html>\n", "TOKEN", "a&b"),
+            "<html>\na&amp;b\n</html>\n"
+        );
     }
 }
