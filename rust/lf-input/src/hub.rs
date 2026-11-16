@@ -6,8 +6,9 @@
 //! app is busy, so a gesture started with the old shortcut ends with it too.
 
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, TryLockError, Weak};
 use std::time::{Duration, Instant};
 
 use crate::keys::{is_hold_key, Chord, Key};
@@ -214,6 +215,10 @@ struct TimerSlot {
 
 struct Inner {
     state: Mutex<State>,
+    /// Callbacks in decision order: queued under `state`, run under `delivery`,
+    /// so a release can never be delivered before the press that preceded it.
+    queue: Mutex<VecDeque<Callback>>,
+    delivery: Mutex<()>,
     actions: HubActions,
     clock: Clock,
     command_delay: Duration,
@@ -261,6 +266,8 @@ impl KeyboardHub {
                 timer_generation: 0,
                 last_event_at: None,
             }),
+            queue: Mutex::new(VecDeque::new()),
+            delivery: Mutex::new(()),
             actions,
             clock,
             command_delay,
@@ -312,33 +319,87 @@ impl KeyboardHub {
     }
 
     pub fn press(&self, key: Key) {
-        let fired = {
+        {
             let mut st = self.lock();
             st.last_event_at = Some((self.inner.clock)());
-            self.press_locked(&mut st, key)
-        };
-        run(fired);
+            let fired = self.press_locked(&mut st, key);
+            self.enqueue(fired);
+        }
+        self.deliver();
     }
 
     pub fn release(&self, key: Key) {
-        let fired = {
+        {
             let mut st = self.lock();
             st.last_event_at = Some((self.inner.clock)());
             let fired = self.release_locked(&mut st, &key);
             if st.pending.is_some() && st.pressed_raw.is_empty() {
                 self.apply_pending_locked(&mut st);
             }
-            fired
-        };
-        run(fired);
+            self.enqueue(fired);
+        }
+        self.deliver();
     }
 
     /// Fire the command-mode timer now (what the timer thread does on expiry).
     pub fn fire_command_timer(&self) {
+        self.fire_command_timer_with_gap(|| {});
+    }
+
+    /// `fire_command_timer`, running `gap` after the decision but before its
+    /// callback is delivered (tests use it to race a key release).
+    #[doc(hidden)]
+    pub fn fire_command_timer_with_gap(&self, gap: impl FnOnce()) {
         let generation = self.lock().command_timer;
         if let Some(generation) = generation {
-            self.command_timer_fired(generation);
+            self.command_timer_fired(generation, gap);
         }
+    }
+
+    /// Call with the state lock held, so queue order is decision order.
+    fn enqueue(&self, fired: Vec<Callback>) {
+        if !fired.is_empty() {
+            self.inner
+                .queue
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .extend(fired);
+        }
+    }
+
+    /// Run queued callbacks one at a time, in order. A thread that finds
+    /// delivery busy (another thread, or a callback re-entering the hub)
+    /// leaves its callbacks to the deliverer, which re-checks the queue after
+    /// letting go, so nothing is stranded and nothing deadlocks.
+    fn deliver(&self) {
+        loop {
+            let _guard = match self.inner.delivery.try_lock() {
+                Ok(guard) => guard,
+                Err(TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
+            while let Some(callback) = self.pop() {
+                run(callback);
+            }
+            drop(_guard);
+            if self
+                .inner
+                .queue
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty()
+            {
+                return;
+            }
+        }
+    }
+
+    fn pop(&self) -> Option<Callback> {
+        self.inner
+            .queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop_front()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -497,8 +558,8 @@ impl KeyboardHub {
         self.inner.timer.wake.notify_all();
     }
 
-    fn command_timer_fired(&self, generation: u64) {
-        let fired = {
+    fn command_timer_fired(&self, generation: u64, gap: impl FnOnce()) {
+        {
             let mut st = self.lock();
             if st.command_timer != Some(generation) {
                 return;
@@ -513,9 +574,10 @@ impl KeyboardHub {
                 return;
             }
             st.command_key_down = true;
-            vec![self.inner.actions.on_command_down.clone()]
-        };
-        run(fired);
+            self.enqueue(vec![self.inner.actions.on_command_down.clone()]);
+        }
+        gap();
+        self.deliver();
     }
 }
 
@@ -535,11 +597,9 @@ fn combo_press(combo: &mut Combo, key: &Key) -> bool {
     false
 }
 
-fn run(callbacks: Vec<Callback>) {
-    for callback in callbacks {
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback())).is_err() {
-            log::error!("keyboard shortcut callback failed");
-        }
+fn run(callback: Callback) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback())).is_err() {
+        log::error!("keyboard shortcut callback failed");
     }
 }
 
@@ -575,7 +635,7 @@ fn spawn_timer(weak: Weak<Inner>, timer: Arc<TimerShared>) {
                 }
             };
             match weak.upgrade() {
-                Some(inner) => KeyboardHub { inner }.command_timer_fired(due),
+                Some(inner) => KeyboardHub { inner }.command_timer_fired(due, || {}),
                 None => return,
             }
         })

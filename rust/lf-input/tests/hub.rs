@@ -94,6 +94,62 @@ fn routes_hold_and_command_key_events() {
 }
 
 #[test]
+fn release_racing_the_command_timer_is_delivered_after_command_down() {
+    let log: Log = Default::default();
+    let shortcuts = Shortcuts {
+        command_key: "alt_r".into(),
+        ..Default::default()
+    };
+    let (hub, _) = hub(shortcuts, &log);
+    hub.press(k("alt_r"));
+    // The key comes up on the listener thread after the timer decided to
+    // enter command mode but before it delivered command-down.
+    hub.fire_command_timer_with_gap(|| {
+        let listener = hub.clone();
+        std::thread::spawn(move || listener.release(k("alt_r")))
+            .join()
+            .unwrap();
+    });
+    assert_eq!(*log.lock().unwrap(), vec!["command-down", "command-up"]);
+}
+
+#[test]
+fn a_callback_re_entering_the_hub_does_not_deadlock() {
+    let log: Log = Default::default();
+    let slot: Arc<std::sync::OnceLock<KeyboardHub>> = Default::default();
+    let reenter = {
+        let slot = slot.clone();
+        let log = log.clone();
+        Arc::new(move || {
+            log.lock().unwrap().push("toggle");
+            let hub = slot.get().unwrap();
+            hub.press(k("f19"));
+            hub.release(k("f19"));
+            log.lock().unwrap().push("toggle-done");
+        }) as Callback
+    };
+    let shortcuts = Shortcuts {
+        hold_key: "f19".into(),
+        toggle_combo: "<ctrl>+<alt>+t".into(),
+        ..Default::default()
+    };
+    let mut acts = actions(&log);
+    acts.on_toggle = reenter;
+    let (hub, _) = KeyboardHub::with_options(
+        &shortcuts,
+        acts,
+        Arc::new(|| 0.0),
+        Duration::from_secs(3600),
+    );
+    slot.set(hub.clone()).ok().unwrap();
+    tap_chord(&hub, &["ctrl_l", "alt_l", "t"]);
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["toggle", "toggle-done", "dictation-down", "dictation-up"]
+    );
+}
+
+#[test]
 fn command_timer_thread_fires_without_polling() {
     let log: Log = Default::default();
     let shortcuts = Shortcuts {
