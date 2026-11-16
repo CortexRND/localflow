@@ -15,6 +15,8 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf-meetings` | meeting capture/session abstractions, notes, titles, transcript Q&A and prompt dispatch |
 | `lf-meetings-backend` | optional composable meeting/Ask/prompt-review backend for `lf-server` |
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
+| `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
+| `lf-stt` | Whisper/Parakeet inference, downloads, model cache protection, Python-compatible leases and lazy engine slot; [API and gaps](lf-stt/README.md) |
 | `lf-input` | global hotkeys (`KeyboardHub`, pynput-compatible key names, order-insensitive chords, macOS CGEventTap with the Input Monitoring checks) and paste/clipboard (`Injector`) |
 | `lf-runtime` | the dictation controller state machine, worker and text pipeline, live config reload, the `dictation_enabled` switch, menu bar model + macOS NSStatusItem, single-instance lock; parity driver `lf-runtime/examples/runtime_parity.rs` |
 | `lf-server` | optional axum HTTP server, embedded web UI, auth, config/provider/key APIs and runtime backend interface (see `lf-server/README.md`) |
@@ -25,8 +27,10 @@ A library port of `hotkey.py`, `pushtotalk.py`, `inject.py`, `app.py`
 (worker, `LiveSettings`, `_process_clip`/`_process_job`), `live_config.py`,
 `menubar.py`/`menubar_poll.py`, `transform.py` and `singleinstance.py`.
 Audio and speech-to-text come in through the `AudioSource` and
-`SpeechEngine` traits (`lf-runtime/src/engine.rs`) so the `lf-audio` and
-`lf-stt` crates can be plugged in; `lf_runtime::run::run` wires everything,
+`SpeechEngine` traits (`lf-runtime/src/engine.rs`). `lf-stt`'s optional `runtime`
+feature supplies real lf-audio capture and SttSlot adapters, a worker factory
+and `run_options` ([integration and HTTP stacking](lf-stt/README.md#dictation-runtime-optional));
+`lf_runtime::run::run` wires everything,
 and no binary ships it yet.
 
 Everything is event-driven. The controller blocks on its channel and only
@@ -59,7 +63,9 @@ cargo build --bin lf-rs          # target/debug/lf-rs
 cargo build --release --bin lf-rs
 ```
 
-No system development packages are needed: on Linux the Secret Service
+On Linux, install `pkg-config` and `libasound2-dev` for `lf-audio`/cpal, plus
+`cmake`, a C/C++ compiler and `libclang-dev` for `lf-stt`/whisper-rs. CMake and
+libclang are also needed on macOS/Windows (included on GitHub runners). The Secret Service
 client vendors libdbus, the clipboard uses pure-Rust X11, and HTTPS uses
 rustls.
 
@@ -203,15 +209,75 @@ cargo build --release -p lf-ask --example bench_search
 The example reports search-only milliseconds and citations; `time` adds
 whole-process wall time and peak RSS, including startup.
 
+## Standalone audio and STT
+
+`lf-audio` ports microphone capture (native sample formats/rates, channel 0,
+16 kHz f32 output), RMS metering and the Python silence/minimum-clip gates.
+The stream lives and is dropped on its capture thread; stop/drop joins it.
+The hardware test is opt-in: `cargo test -p lf-audio -- --ignored`.
+
+`lf-stt` ports cache inventory/deletion protections and lease formats, and adds
+native `whisper-cpp` and `parakeet-onnx` engines. Both features are **on by
+default**; `--no-default-features` builds storage/lifecycle only. Whisper uses
+`whisper-rs` (Metal on macOS only); Parakeet uses the first-party `sherpa-onnx`
+offline transducer API and downloaded prebuilt libraries, not a local
+sherpa build. HF downloads use the standard shared blobs/snapshots cache and
+the same `HF_HUB_CACHE`/`HUGGINGFACE_HUB_CACHE`/`HF_HOME`/`XDG_CACHE_HOME`
+precedence as Python. The factory maps Python provider IDs to the native
+counterparts without changing model size; the engines are not yet wired into
+`lf-rs` or the Python app.
+
+Benchmark (downloads models and the fixed Parakeet `test_wavs/0.wav`):
+
+```sh
+cd rust
+cargo run --release -p lf-stt --example stt_bench -- \
+  --engines whisper-cpp,parakeet-onnx --model base.en --provider cpu --runs 10 \
+  --json bench.json --table bench.md
+# macOS defaults: Whisper Metal, Parakeet CoreML requested (unverified)
+cargo run --release -p lf-stt --example stt_bench -- --engines parakeet-onnx --provider coreml
+# Optional local PCM/float WAV, language/prompt, alternate Whisper model:
+cargo run --release -p lf-stt --example stt_bench -- \
+  --engines whisper-cpp --model small --clip speech.wav --language en --runs 10
+# Real-model tests download weights; ordinary workspace tests stay offline:
+cargo test -p lf-stt --test real_models -- --ignored
+```
+
+JSON is printed on stdout; the Markdown table and transcript on stderr.
+Downloads/cache lookup are measured separately from load; Parakeet load
+includes its one-second-silence warm-up. RSS is process-wide before/after
+load; first/median/p95 cover N full transcription calls, with median RTF.
+The benchmark rejects empty transcripts and reports clip path, duration and
+original rate (channel 0 and FFT resampling to 16 kHz when needed). JSON's
+`effective_provider` and the table report `cpu (fallback)` after an explicit
+CoreML initialization failure. A successful request is labeled
+`coreml requested (unverified)` because sherpa's C API cannot reveal silent
+native fallback or per-operator assignment. macOS uses upstream shared sherpa
+and ONNX Runtime libraries; its static build disables CoreML entirely
+([details](lf-stt/README.md)). Even a CoreML-capable runtime can place
+unsupported operators on CPU. Separate benchmark processes
+avoid retained allocator memory skew between engines. `rust-bench.yml` records
+macOS base.en/small/Parakeet CoreML-request/CPU results and uploads JSON/tables
+plus native logs. The summary distinguishes observed CPU fallback diagnostics
+from their absence; absence alone is not proof of CoreML execution.
+
+Parity gaps: Whisper uses fast deterministic greedy best-of-1, temperature 0
+without beam/temperature fallback or Python faster-whisper's VAD; independent
+clips don't carry context. Optional language and initial prompts are supported.
+Parakeet is the int8 ONNX TDT v2 model, not MLX, and ignores prompts like Python;
+it skips clips below the verified 512-sample FFT frame and warms up on load.
+Transcripts/timing need not be bit-identical across models/backends. See the
+[STT README](lf-stt/README.md) for storage parity and lifecycle details.
+
 ## Known gaps (Stage 1)
 
-This is not a full port and does not imply a Rust runtime or UI:
+This is not a full application port:
 
-* no integrated speech-to-text, Hub, setup or native
-  settings windows; `serve` hosts the web UI and core APIs; runtime routes
-  return explicit unavailable-backend errors until their Rust crates are
-  linked; the dictation runtime (`lf-runtime`) is a library with no
-  `dictate` binary yet;
+* no Hub, setup or native settings windows;
+  `serve` hosts the web UI and core APIs; `lf-stt`'s optional `server` feature
+  provides an opt-in transcription backend adapter ([integration](lf-stt/README.md#http-backend-optional));
+  other runtime routes return explicit unavailable-backend errors until linked;
+  the dictation runtime (`lf-runtime`) is a library with no `dictate` binary yet;
 * hotkeys and the menu bar are implemented on macOS only: on Linux and
   Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
   tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
@@ -220,7 +286,7 @@ This is not a full port and does not imply a Rust runtime or UI:
   the character Shift types (as pynput reports it), so `<ctrl>++` works;
   Option never changes the key;
 * not ported from the runtime: pausing media while dictating, the
-  achievement cue, speech-model leases and explicit speech retry requests,
+  achievement cue and explicit speech retry requests,
   and the frontmost-app AppleScript fallback;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with

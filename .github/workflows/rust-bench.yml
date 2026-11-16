@@ -1,0 +1,83 @@
+name: Rust STT benchmark
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stt-bench:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      HF_HUB_CACHE: ${{ github.workspace }}/.hf-cache/hub
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install benchmark diagnostics
+        run: brew install ripgrep
+      - name: Restore native runtimes pruned by Rust cache
+        shell: bash
+        run: |
+          if [ -d rust/target/sherpa-onnx-prebuilt ]; then
+            find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
+      - name: Cache HF models
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: stt-hf-v1-${{ runner.os }}-${{ runner.arch }}
+      - name: Build release benchmark
+        working-directory: rust
+        run: cargo build --locked --release -p lf-stt --example stt_bench
+      - name: Record native library and CoreML capability evidence
+        shell: bash
+        run: |
+          mkdir -p bench-results
+          {
+            otool -L rust/target/release/examples/stt_bench
+            for library in rust/target/release/libonnxruntime*.dylib; do
+              echo "$library"
+              nm -gU "$library" | rg 'OrtSessionOptionsAppendExecutionProvider_CoreML'
+            done
+          } | tee bench-results/native-libraries.log
+      - name: Benchmark Whisper base.en and small, Parakeet CoreML and CPU
+        shell: bash
+        run: |
+          mkdir -p bench-results
+          status=0
+          for entry in 'whisper-cpp base.en auto' 'whisper-cpp small auto' 'parakeet-onnx base coreml' 'parakeet-onnx base cpu'; do
+            read -r engine model provider <<< "$entry"
+            name="$engine-$model-$provider"
+            rust/target/release/examples/stt_bench \
+              --engines "$engine" --model "$model" --provider "$provider" --runs 10 \
+              --json "bench-results/$name.json" --table "bench-results/$name.md" \
+              2>&1 | tee "bench-results/$name.log" || status=1
+            if [ -f "bench-results/$name.md" ]; then
+              cat "bench-results/$name.md" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Benchmark failed: $name (see step logs)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ "$provider" = coreml ]; then
+              if rg -i 'fallback to cpu|falling back to cpu' "bench-results/$name.log"; then
+                echo 'Native CPU fallback diagnostic observed; this is NOT a verified CoreML measurement.' >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo 'No native CPU fallback diagnostic observed. CoreML operator assignment remains unverified; see the uploaded native-library and benchmark logs.' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          done
+          exit "$status"
+      - name: Upload benchmark JSON and tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-stt-bench-${{ runner.os }}-${{ runner.arch }}
+          path: bench-results/
+          if-no-files-found: warn
