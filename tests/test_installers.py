@@ -85,6 +85,45 @@ def test_install_ps1_rejects_non_localflow_install_destination() -> None:
     assert "is not a LocalFlow install" in script
 
 
+def test_macos_permissions_extra_has_no_iokit_package() -> None:
+    extras = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["optional-dependencies"]["macos-permissions"]
+
+    assert not any("iokit" in requirement.lower() for requirement in extras)
+    assert any(r.startswith("pyobjc-framework-AVFoundation") for r in extras)
+    assert any(r.startswith("pyobjc-framework-ApplicationServices") for r in extras)
+
+
+def test_windows_cmd_installer_downloads_and_runs_install_ps1() -> None:
+    raw = (ROOT / "packaging" / "windows" / "Install LocalFlow.cmd").read_bytes()
+    script = raw.decode("ascii")
+
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    assert "powershell -NoProfile -ExecutionPolicy Bypass" in script
+    assert "install.ps1" in script
+    assert "pause" in script
+    assert "exit /b 1" in script
+
+
+def test_mac_installer_workflow_builds_validates_and_publishes() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "mac-installer.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "runs-on: macos-latest" in workflow
+    assert "macos-14" not in workflow
+    assert "contents: write" in workflow
+    assert "plutil -lint" in workflow
+    assert "hdiutil verify" in workflow
+    assert "test -x" in workflow
+    assert "LocalFlow-Installer.dmg" in workflow
+    assert "Install LocalFlow.cmd" in workflow
+    assert "'v*'" in workflow
+    assert "gh release upload" in workflow
+    assert "secrets.GITHUB_TOKEN" in workflow
+
+
 def test_mit_license_is_declared_in_project_metadata() -> None:
     license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[

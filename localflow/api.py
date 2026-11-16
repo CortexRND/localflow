@@ -1,8 +1,10 @@
 from dataclasses import asdict, replace
 
+from localflow import llm_activation
 from localflow.config import Config, ConfigError, config_path
+from localflow.provider_keys import PROVIDER_SECRET_NAMES
 from localflow.providers import registry
-from localflow.providers.factory import build_llm
+from localflow.providers.factory import build_llm, llm_api_key
 from localflow.secrets import (
     SecretsUnavailable,
     delete_secret,
@@ -10,7 +12,7 @@ from localflow.secrets import (
     set_secret,
 )
 
-SECRET_NAMES = ("llm_api_key", "fireworks_api_key")
+SECRET_NAMES = ("llm_api_key", "fireworks_api_key", *PROVIDER_SECRET_NAMES)
 _STT_ALIASES = {"auto": "faster-whisper", "mlx": "mlx-whisper"}
 
 
@@ -160,18 +162,72 @@ def test_llm(
         return {"ok": False, "detail": f"{exc}{hint}"}
 
 
-def secrets_status() -> dict[str, bool]:
-    return {name: bool(get_secret(name)) for name in SECRET_NAMES}
+class InvalidKeyRef(ValueError):
+    """The active config names an LLM key outside the activation namespace."""
 
 
-def update_secret(name: str, value: str) -> None:
+def _bound_ref(name: str, config: Config | None) -> str:
+    """The activation slot `llm_api_key` means for `config`, or "" (legacy).
+
+    Only the LLM key is ever redirected, and only into our own namespace: a
+    bad `llm_key_ref` is refused before anything is written, so it can never
+    make the web overwrite or delete some other stored secret.
+    """
+    if name != "llm_api_key" or config is None:
+        return ""
+    ref = getattr(config, "llm_key_ref", "")
+    if not ref:
+        return ""
+    if not llm_activation.is_ref(ref):
+        raise InvalidKeyRef(
+            "The active LLM key reference is invalid; activate the provider "
+            "again in Models & keys"
+        )
+    return ref
+
+
+def secrets_status(config: Config | None = None) -> dict[str, bool]:
+    """Which secrets are set. With `config`, `llm_api_key` reports the key its
+    LLM client really sends (its activation slot when bound), never an unused
+    generic key."""
+    status = {name: bool(get_secret(name)) for name in SECRET_NAMES}
+    if config is not None and getattr(config, "llm_key_ref", ""):
+        status["llm_api_key"] = bool(llm_api_key(config))
+    return status
+
+
+def update_secret(name: str, value: str, config: Config | None = None) -> None:
+    """Set (or clear, with "") a secret.
+
+    With an activated `config`, `llm_api_key` rotates that config's own
+    endpoint-bound activation slot in place, for the same endpoint, and
+    leaves the generic `llm_api_key` to legacy configs (a config cached
+    before activation still pairs it with its own endpoint). No config is
+    written and no new slot name is created; a slot recreated after Remove
+    is listed in the activation index so removing the key revokes it again.
+    Clearing deletes the slot (never touching the index), so the client
+    sends no key rather than falling back to the generic one.
+    """
     if name not in SECRET_NAMES:
         raise KeyError(name)
+    ref = _bound_ref(name, config)
+    target = ref or name
     if value:
-        set_secret(name, value)
+        if ref:
+            # A slot recreated after Remove must stay revocable by name: list
+            # it first (names only), so a failed write leaves at most a
+            # harmless index entry, never an unlisted credential.
+            index = llm_activation.read_index(get_secret)
+            if ref not in index:
+                set_secret(
+                    llm_activation.INDEX_NAME,
+                    llm_activation.encode_index([*index, ref]),
+                )
+        stored = llm_activation.encode(config.llm_base_url, value) if ref else value
+        set_secret(target, stored)
     else:
         try:
-            delete_secret(name)
+            delete_secret(target)
         except SecretsUnavailable:
-            if get_secret(name):
+            if get_secret(target):
                 raise

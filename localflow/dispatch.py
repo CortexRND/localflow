@@ -198,7 +198,8 @@ class PromptQueue:
             if fcntl is not None:  # non-POSIX: in-process safety only
                 try:
                     self.path.parent.mkdir(parents=True, exist_ok=True)
-                    handle = open(self._lock_path, "a+")
+                    # Deliberately not a `with`: held across the yield, closed in finally.
+                    handle = open(self._lock_path, "a+")  # noqa: SIM115
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 except OSError:
                     # A lock we cannot take (read-only parent, NFS without lockd)
@@ -327,9 +328,58 @@ class PromptQueue:
         return None
 
 
+# Approve doubles as retry: a `failed` entry is a dispatch that errored, and
+# stranding it would let one transient Orca hiccup kill the prompt for good.
+# A failed entry can equally be rejected, so the user is never forced to retry
+# a prompt they no longer want. approved / rejected / dispatched stay final for
+# reject (and only pending / failed can be approved).
+APPROVE_FROM = ("pending", "failed")
+REJECT_FROM = ("pending", "failed")
+
+
+class PromptTransitionError(Exception):
+    """A guarded approve/reject was refused. `status_code` is 404 or 409."""
+
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
+
+
+def transition_prompt(
+    queue: "PromptQueue", entry_id: str, verb: str, status: str,
+    allowed: tuple[str, ...],
+) -> dict:
+    """Guarded status change shared by the server API and the native hub.
+
+    404 if the entry is gone, 409 if the move is invalid. Compare-and-set inside
+    the queue rather than get-then-set here: the CLI dispatches in a separate
+    process, so it can flip an entry to `dispatched` between our check and our
+    write, and we would silently undo it.
+    """
+    try:
+        updated = queue.set_status(entry_id, status, expect=allowed)
+    except StatusConflict as exc:
+        raise PromptTransitionError(
+            409,
+            f"cannot {verb} a {exc.current} prompt (allowed from: {', '.join(allowed)})",
+        ) from exc
+    if updated is None:
+        raise PromptTransitionError(404, f"unknown prompt: {entry_id}")
+    return updated
+
+
+def approve_prompt(queue: "PromptQueue", entry_id: str) -> dict:
+    return transition_prompt(queue, entry_id, "approve", "approved", APPROVE_FROM)
+
+
+def reject_prompt(queue: "PromptQueue", entry_id: str) -> dict:
+    return transition_prompt(queue, entry_id, "reject", "rejected", REJECT_FROM)
+
+
 def _entry_id(path: Path, title: str) -> str:
     """Stable dedupe key. Same (path, title) always yields the same id."""
-    return hashlib.sha256(f"{path}\n{title}".encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha256(f"{path}\n{title}".encode()).hexdigest()[:8]
 
 
 # --------------------------------------------------------------------- orca ---
@@ -347,13 +397,13 @@ def orca_available() -> tuple[bool, str]:
     try:
         proc = subprocess.run(
             ["orca", "status", "--json"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, check=False,
         )
     except FileNotFoundError:
         return False, "orca CLI not found on PATH"
     except subprocess.TimeoutExpired:
         return False, "orca status timed out"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary: never raise into the caller
         return False, f"orca status failed: {exc}"
 
     if proc.returncode != 0:
@@ -361,7 +411,7 @@ def orca_available() -> tuple[bool, str]:
     try:
         # stderr carries a benign SecCodeCheckValidity line; ignore it entirely.
         data = _parse_json_stdout(proc.stdout or "")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary: report any parse failure
         return False, f"unreadable orca status output: {exc}"
 
     result = data.get("result") or {}
@@ -388,7 +438,7 @@ def dispatch(entry: dict, repo: str, agent: str = "claude") -> dict:
     path = Path(entry.get("path", ""))
     try:
         body = _strip_frontmatter(path.read_text(encoding="utf-8")).strip()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary: report any read failure
         return {"ok": False, "error": f"cannot read prompt file {path}: {exc}"}
     if not body:
         return {"ok": False, "error": f"prompt file is empty: {path}"}
@@ -409,19 +459,21 @@ def dispatch(entry: dict, repo: str, agent: str = "claude") -> dict:
         "--json",
     ]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=120, check=False,
+        )
     except FileNotFoundError:
         return {"ok": False, "error": "orca CLI not found on PATH"}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "orca worktree create timed out after 120s"}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary: never raise into the caller
         return {"ok": False, "error": f"orca worktree create failed: {exc}"}
 
     if proc.returncode != 0:
         return {"ok": False, "error": f"orca exited {proc.returncode}: {_last_line(proc.stderr)}"}
     try:
         data = _parse_json_stdout(proc.stdout or "")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary: report any parse failure
         return {"ok": False, "error": f"unreadable orca output: {exc}"}
     if data.get("ok") is False:
         return {"ok": False, "error": f"orca reported failure: {_last_line(str(data.get('error') or data))}"}

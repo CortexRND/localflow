@@ -9,6 +9,7 @@ from pathlib import Path
 
 import platformdirs
 
+from localflow import llm_activation
 from localflow.platform.base import PASTE_METHODS
 
 log = logging.getLogger("localflow.config")
@@ -26,6 +27,7 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "provider": "llm_provider",
         "base_url": "llm_base_url",
         "model": "llm_model",
+        "api_key_ref": "llm_key_ref",
         "cleanup_enabled": "cleanup_enabled",
         "cleanup_timeout": "cleanup_timeout",
         "num_ctx": "cleanup_num_ctx",
@@ -103,6 +105,9 @@ class Config:
     llm_provider: str = "ollama"       # ollama | openai-compatible | entry-point id
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3.2:3b"
+    # Name (never the value) of the endpoint-bound key snapshot written by
+    # provider activation (see llm_activation); "" = legacy `llm_api_key`.
+    llm_key_ref: str = ""
     cleanup_enabled: bool = True
     cleanup_level: str = "light"
     styles_enabled: bool = True
@@ -228,6 +233,10 @@ def _config_from_v2(data: dict) -> Config:
                 )
                 continue
             if field_name in _FIELD_TYPES and not _valid_field_value(field_name, value):
+                if field_name == "llm_key_ref":
+                    config.llm_key_ref = "llm_activation_invalid"
+                    log.warning("invalid LLM credential reference; activate the provider again")
+                    continue
                 log.warning(
                     "invalid config value for %s.%s: %r; using default",
                     section,
@@ -371,6 +380,7 @@ _ENUM_VALUES = {
 }
 
 _FIELD_TYPES = {
+    "llm_key_ref": str,
     "paste_last_hotkey": str,
     "command_hotkey": str,
     "polish_hotkey": str,
@@ -392,6 +402,10 @@ def _valid_field_value(field_name: str, value: object) -> bool:
         return False
     if field_name in {"max_recording_seconds", "keep_audio_clips"}:
         return value >= 0
+    if field_name == "llm_key_ref":
+        # Only our own activation namespace: a config can never point the
+        # LLM client at some other stored secret.
+        return value == "" or llm_activation.is_ref(value)
     return True
 
 
@@ -449,5 +463,20 @@ def apply_config_update(config: Config, update: dict) -> Config:
                     f"invalid value for config key '{section}.{file_key}'; "
                     f"choose from: {choices}"
                 )
+            if field_name == "llm_key_ref" and value not in ("", current):
+                raise ConfigError(
+                    "llm.api_key_ref is set by activating a provider in Models & "
+                    "keys; it can only be cleared here"
+                )
             changes[field_name] = value
+    # A hand-picked endpoint (`lf llm use`, the web settings) is not the one a
+    # snapshot was activated for: drop the binding so the legacy llm_api_key
+    # flow applies, exactly as before activation snapshots existed.
+    endpoint_changed = (
+        changes.get("llm_provider", config.llm_provider) != config.llm_provider
+        or llm_activation.endpoint(changes.get("llm_base_url", config.llm_base_url))
+        != llm_activation.endpoint(config.llm_base_url)
+    )
+    if endpoint_changed:
+        changes["llm_key_ref"] = ""
     return replace(config, **changes)

@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterable
 
 from pynput import keyboard
@@ -7,8 +8,31 @@ from pynput import keyboard
 log = logging.getLogger("localflow.hotkey")
 
 
+class _Bindings:
+    """One parsed set of shortcuts; swapped as a whole by `reconfigure`."""
+
+    __slots__ = ("combos", "command_key", "hold_key", "toggle_combo")
+
+    def __init__(self, hold_key, toggle_combo, combos, command_key):
+        self.hold_key = hold_key
+        self.toggle_combo = toggle_combo
+        self.combos = combos
+        self.command_key = command_key
+
+
 class KeyboardHub:
-    """Route hold keys and global shortcut chords through one listener."""
+    """Route hold keys and global shortcut chords through one listener.
+
+    `reconfigure` swaps every binding in place, without restarting the pynput
+    listener (on macOS that must not be torn down off the main thread). The
+    swap is deferred while any key is down or `can_reconfigure()` says the
+    app is busy (recording, locked, command mode), so a recording started
+    with the old shortcut is always ended by the same physical key.
+    """
+
+    # A press whose release pynput never reported must not block a pending
+    # reconfiguration forever once nothing else is held.
+    STALE_PRESS_SECONDS = 10.0
 
     def __init__(
         self,
@@ -23,6 +47,8 @@ class KeyboardHub:
         on_command_down: Callable[[], None],
         on_command_up: Callable[[], None],
         on_command_cancel: Callable[[], None] | None = None,
+        can_reconfigure: Callable[[], bool] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._pressed: set[object] = set()
         self._pressed_raw: set[object] = set()
@@ -39,7 +65,20 @@ class KeyboardHub:
         self._on_command_down = on_command_down
         self._on_command_up = on_command_up
         self._on_command_cancel = on_command_cancel or (lambda: None)
+        self._can_reconfigure = can_reconfigure or (lambda: True)
+        self._clock = clock
+        # Guards the bindings and key state: pynput's thread, the command
+        # timer and a reconfiguring thread all go through it.
+        self._lock = threading.RLock()
+        self._pending: _Bindings | None = None
+        self._pending_since: float | None = None
+        self._last_event_at: float | None = None
+        self._install(
+            self._build(hold_key, toggle_combo, combos, command_key, on_toggle)
+        )
 
+    def _build(self, hold_key, toggle_combo, combos, command_key, on_toggle) -> _Bindings:
+        """Parse shortcuts into fresh pynput objects (no shared state touched)."""
         seen: dict[str, str] = {}
 
         def reserve(name: str, shortcut: str | None) -> bool:
@@ -55,16 +94,16 @@ class KeyboardHub:
             return True
 
         if reserve("dictation", hold_key):
-            self._hold_key = self._key_from_name(hold_key)
+            parsed_hold = self._key_from_name(hold_key)
         else:
-            self._hold_key = None
+            parsed_hold = None
 
         if reserve("dictation", toggle_combo):
-            self._toggle_combo = self._parse_combo(toggle_combo, on_toggle)
+            parsed_toggle = self._parse_combo(toggle_combo, on_toggle)
         else:
-            self._toggle_combo = None
+            parsed_toggle = None
 
-        self._combos = []
+        parsed_combos = []
         for shortcut, callback in combos:
             if reserve("shortcut", shortcut):
                 hotkey_ref = []
@@ -86,12 +125,77 @@ class KeyboardHub:
                 hotkey = self._parse_combo(shortcut, fire)
                 if hotkey is not None:
                     hotkey_ref.append(hotkey)
-                    self._combos.append(hotkey)
+                    parsed_combos.append(hotkey)
 
         if reserve("command mode", command_key):
-            self._command_key = self._key_from_name(command_key)
+            parsed_command = self._key_from_name(command_key)
         else:
-            self._command_key = None
+            parsed_command = None
+        return _Bindings(parsed_hold, parsed_toggle, parsed_combos, parsed_command)
+
+    def _install(self, bindings: _Bindings) -> None:
+        with self._lock:
+            self._hold_key = bindings.hold_key
+            self._toggle_combo = bindings.toggle_combo
+            self._combos = bindings.combos
+            self._command_key = bindings.command_key
+            self._command_combo_key = (
+                self._canonical(self._command_key)
+                if self._listener is not None and self._command_key is not None
+                else None
+            )
+
+    def reconfigure(
+        self,
+        hold_key: str | None,
+        toggle_combo: str | None,
+        combos: Iterable[tuple[str, Callable[[], None]]],
+        command_key: str | None,
+    ) -> bool:
+        """Replace every binding; True when applied now, False when deferred.
+
+        A deferred set is applied by the first safe key release or
+        `apply_pending()`; a newer reconfigure replaces an older pending one.
+        """
+        bindings = self._build(hold_key, toggle_combo, combos, command_key, self._on_toggle)
+        with self._lock:
+            self._pending = bindings
+            if self._pending_since is None:
+                self._pending_since = self._clock()
+        return self.apply_pending()
+
+    def apply_pending(self) -> bool:
+        """Install a pending binding set if it is safe now. True when installed."""
+        with self._lock:
+            if self._pending is None or not self._safe_to_swap():
+                return False
+            bindings, self._pending, self._pending_since = self._pending, None, None
+            # Every key is up: no chord can be half pressed in the new set.
+            self._pressed.clear()
+            self._pressed_raw.clear()
+            self._install(bindings)
+        log.info("keyboard shortcuts updated")
+        return True
+
+    @property
+    def reconfigure_pending(self) -> bool:
+        return self._pending is not None
+
+    def _safe_to_swap(self) -> bool:
+        if self._held_key_down or self._command_key_down or self._command_timer is not None:
+            return False
+        try:
+            if not self._can_reconfigure():
+                return False
+        except Exception:
+            log.exception("reconfigure check failed; deferring")
+            return False
+        if not self._pressed_raw:
+            return True
+        # Keys still look pressed. Only trust that for a while: pynput can
+        # miss a release, and that must not freeze the old shortcuts forever.
+        last = self._last_event_at if self._last_event_at is not None else self._pending_since
+        return last is not None and self._clock() - last >= self.STALE_PRESS_SECONDS
 
     @staticmethod
     def _key_from_name(name: str | None):
@@ -136,6 +240,18 @@ class KeyboardHub:
             log.exception("keyboard shortcut callback failed")
 
     def _press(self, key) -> None:
+        with self._lock:
+            self._last_event_at = self._clock()
+            self._press_locked(key)
+
+    def _release(self, key) -> None:
+        with self._lock:
+            self._last_event_at = self._clock()
+            self._release_locked(key)
+            if self._pending is not None and not self._pressed_raw:
+                self.apply_pending()
+
+    def _press_locked(self, key) -> None:
         self._note_event()
         canonical = self._canonical(key)
         if key in self._pressed_raw:
@@ -163,7 +279,7 @@ class KeyboardHub:
         for hotkey in self._combos:
             hotkey.press(canonical)
 
-    def _release(self, key) -> None:
+    def _release_locked(self, key) -> None:
         self._note_event()
         canonical = self._canonical(key)
         self._pressed_raw.discard(key)
@@ -202,21 +318,23 @@ class KeyboardHub:
         return False
 
     def _command_down_fire(self) -> None:
-        if (
-            self._command_key_down
-            or self._command_key not in self._pressed_raw
-            or self._is_combo_chord()
-        ):
+        with self._lock:
+            if (
+                self._command_key_down
+                or self._command_key not in self._pressed_raw
+                or self._is_combo_chord()
+            ):
+                self._command_timer = None
+                return
             self._command_timer = None
-            return
-        self._command_timer = None
-        self._command_key_down = True
-        self._invoke(self._on_command_down)
+            self._command_key_down = True
+            self._invoke(self._on_command_down)
 
     def run_forever(self) -> None:
         self._listener = keyboard.Listener(on_press=self._press, on_release=self._release)
-        if self._command_key is not None:
-            self._command_combo_key = self._canonical(self._command_key)
+        with self._lock:
+            if self._command_key is not None:
+                self._command_combo_key = self._canonical(self._command_key)
         try:
             with self._listener as listener:
                 listener.join()

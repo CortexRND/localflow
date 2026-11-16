@@ -157,7 +157,8 @@ def test_setup_header_labels_refresh_from_current_appearance_tokens():
 def test_setup_model_cards_use_scroll_content_width_and_measured_badges():
     source = SRC.read_text(encoding="utf-8")
     assert "content_width = scroll.contentSize().width" in source
-    assert "NSMakeRect(0, 0, content_width, height)" in source
+    # The document is never shorter than the viewport, so lists fill the page.
+    assert "NSMakeRect(0, 0, content_width, max(height, frame_height))" in source
     assert (
         "card_width = parent.bounds().size.width - 8 "
         "if parent is not None else 710"

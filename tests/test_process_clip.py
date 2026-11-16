@@ -1,3 +1,4 @@
+import os
 import queue
 from pathlib import Path
 from types import SimpleNamespace
@@ -416,6 +417,81 @@ def test_retry_empty_result_leaves_history_fields_unchanged(tmp_path):
     assert {key: after[key] for key in ("status", "raw_text", "final_text")} == {
         key: before[key] for key in ("status", "raw_text", "final_text")
     }
+
+
+class _LeaseCheckingTranscriber:
+    """A built (not injected) STT stub: records the leases seen mid-transcribe."""
+
+    backend = "faster-whisper"
+
+    def __init__(self, result="retried words", error=None):
+        self.result = result
+        self.error = error
+        self.seen = None
+
+    def transcribe(self, _audio, prompt=None):
+        from localflow import stt_lease
+
+        self.seen = stt_lease.live_leases(alive=lambda pid: pid == os.getpid())
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError("STT failed")])
+def test_retry_leases_a_newly_built_model_only_while_it_runs(tmp_path, monkeypatch, error):
+    from localflow import stt_lease
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # leases go to tmp only
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(kind="dictate", status="failed", audio_path=clip,
+                         raw_text="", final_text="")
+    monkeypatch.setattr(app, "write_last_text", lambda _text: None)
+    stub = _LeaseCheckingTranscriber(error=error)
+    monkeypatch.setattr(app, "build_stt", lambda _config: stub)
+    config = SimpleNamespace(**vars(_config()), model_size="small")
+    long_lived = stt_lease.record("mlx", "base")  # e.g. the app's own model
+
+    def retry():
+        return app.retry_history_entry(
+            entry_id, store, config=config,
+            cleaner=Mock(clean=Mock(side_effect=lambda value, **_kwargs: value)),
+            dictionary_store=DictionaryStore(tmp_path / "dictionary.json"),
+            hot_phrases=HotPhraseStore(tmp_path / "phrases.json"),
+        )
+
+    if error is None:
+        assert retry() == "retried words"
+    else:
+        with pytest.raises(RuntimeError, match="STT failed"):
+            retry()
+
+    repos = {lease.repo for lease in stub.seen}
+    assert "Systran/faster-whisper-small" in repos  # leased during transcribe
+    assert "mlx-community/whisper-base-mlx" in repos  # long-lived one coexists
+    after = stt_lease.live_leases(alive=lambda pid: pid == os.getpid())
+    assert [lease.repo for lease in after] == ["mlx-community/whisper-base-mlx"]
+    assert long_lived.exists()  # the scoped release never touches it
+    stt_lease.release(long_lived)
+
+
+def test_retry_with_an_injected_transcriber_records_no_lease(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(kind="dictate", status="failed", audio_path=clip,
+                         raw_text="", final_text="")
+    monkeypatch.setattr(app, "write_last_text", lambda _text: None)
+    monkeypatch.setattr(app.stt_lease, "record", lambda *a, **k: pytest.fail("no lease"))
+    app.retry_history_entry(
+        entry_id, store, config=_config(),
+        transcriber=Mock(transcribe=Mock(return_value="retried words")),
+        cleaner=Mock(clean=Mock(side_effect=lambda value, **_kwargs: value)),
+        dictionary_store=DictionaryStore(tmp_path / "dictionary.json"),
+        hot_phrases=HotPhraseStore(tmp_path / "phrases.json"),
+    )
+    assert not (tmp_path / "home" / ".localflow" / "stt-leases").exists()
 
 
 def test_worker_continues_when_last_text_write_fails(monkeypatch):

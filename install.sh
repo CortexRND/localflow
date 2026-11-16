@@ -17,8 +17,11 @@ Environment:
   LOCALFLOW_WITH_OLLAMA=1  Same as --with-ollama
   LOCALFLOW_NO_LAUNCH=1    Same as --no-launch
   LOCALFLOW_HOME           Install checkout location
-  LOCALFLOW_REPO_URL       Git repository URL or local path
-  LOCALFLOW_REF            Git ref to check out after cloning or pulling
+  LOCALFLOW_REPO_URL       Git repository URL or local path (git installs only)
+  LOCALFLOW_REF            Git ref to check out, or tarball ref (default: main)
+
+On macOS, Homebrew, git and Python are optional: without them the installer
+uses a uv-managed Python 3.12 and a downloaded source tarball.
 EOF
 }
 
@@ -45,6 +48,7 @@ done
 OS="$(uname -s)"
 PYTHON=""
 USE_UV=0
+HAVE_BREW=0
 
 install_linux_system_deps() {
     local -a wayland_packages=()
@@ -98,6 +102,96 @@ find_linux_python() {
     return 1
 }
 
+# True when the Xcode Command Line Tools are installed. /usr/bin/git and
+# /usr/bin/python3 are shims that pop up an install dialog without them.
+mac_has_clt() {
+    xcode-select -p >/dev/null 2>&1
+}
+
+# Succeeds when the executable at $1 is safe to invoke on macOS.
+mac_exec_allowed() {
+    if [[ "$1" == /usr/bin/* ]] && ! mac_has_clt; then
+        return 1
+    fi
+    return 0
+}
+
+find_mac_python() {
+    local candidate resolved
+    for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
+        resolved="$(command -v "$candidate" 2>/dev/null)" || continue
+        mac_exec_allowed "$resolved" || continue
+        if "$resolved" -c \
+            'import sys; raise SystemExit(sys.version_info < (3, 11))' \
+            >/dev/null 2>&1; then
+            PYTHON="$resolved"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_git() {
+    local resolved
+    resolved="$(command -v git 2>/dev/null)" || return 1
+    if [[ "$OS" == "Darwin" ]] && ! mac_exec_allowed "$resolved"; then
+        return 1
+    fi
+    return 0
+}
+
+ensure_uv() {
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "Installing uv for this user."
+        curl -fsSL https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "uv installation failed or uv is not on PATH." >&2
+        exit 1
+    fi
+    uv python install 3.12
+    USE_UV=1
+}
+
+# Download the source tarball into $REPO, replacing older source but keeping .venv.
+install_tarball() {
+    local parent tmp url
+    parent="$(dirname "$REPO")"
+    mkdir -p "$parent"
+    tmp="$(mktemp -d "$parent/.localflow-download.XXXXXX")"
+    url="https://codeload.github.com/CortexRND/localflow/tar.gz/${LOCALFLOW_REF:-main}"
+    echo "Downloading LocalFlow source (${LOCALFLOW_REF:-main})..."
+    mkdir "$tmp/src"
+    if ! curl -fsSL "$url" -o "$tmp/source.tar.gz" \
+        || ! tar -xzf "$tmp/source.tar.gz" -C "$tmp/src" --strip-components=1 \
+        || [[ ! -f "$tmp/src/pyproject.toml" ]]; then
+        rm -rf "$tmp"
+        echo "Could not download LocalFlow from $url" >&2
+        exit 1
+    fi
+    : >"$tmp/src/.localflow-tarball"
+    if [[ -e "$REPO" ]]; then
+        if [[ -d "$REPO/.venv" ]]; then
+            mv "$REPO/.venv" "$tmp/src/.venv"
+        fi
+        mv "$REPO" "$tmp/previous"
+        if ! mv "$tmp/src" "$REPO"; then
+            mv "$tmp/previous" "$REPO"
+            if [[ -d "$tmp/src/.venv" ]]; then
+                mv "$tmp/src/.venv" "$REPO/.venv"
+            fi
+            rm -rf "$tmp"
+            echo "Could not replace $REPO" >&2
+            exit 1
+        fi
+    else
+        mv "$tmp/src" "$REPO"
+    fi
+    rm -rf "$tmp"
+}
+
 wait_for_ollama() {
     local attempt
     for ((attempt = 1; attempt <= 30; attempt++)); do
@@ -111,23 +205,30 @@ wait_for_ollama() {
 }
 
 if [[ "$OS" == "Darwin" ]]; then
-    if ! command -v brew >/dev/null 2>&1; then
-        echo "Homebrew is required. Install it from https://brew.sh, then rerun this script." >&2
-        exit 1
+    for brew_dir in /opt/homebrew/bin /usr/local/bin; do
+        if [[ -x "$brew_dir/brew" ]]; then
+            case ":${PATH}:" in
+                *":$brew_dir:"*) ;;
+                *) PATH="$PATH:$brew_dir" ;;
+            esac
+        fi
+    done
+    if command -v brew >/dev/null 2>&1; then
+        HAVE_BREW=1
     fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "Python 3.11+ is required. Install it with: brew install python@3.12" >&2
-        exit 1
+    if [[ "$HAVE_BREW" -eq 0 ]] || ! find_mac_python; then
+        echo "Using a uv-managed Python 3.12 (no Homebrew, or no Python 3.11+ found)."
+        ensure_uv
     fi
-    if ! python3 -c \
-        'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
-        echo "Python 3.11+ is required; install it with: brew install python@3.12" >&2
-        exit 1
-    fi
-    PYTHON=python3
     if ! command -v ffmpeg >/dev/null 2>&1; then
-        echo "Installing ffmpeg..."
-        brew install ffmpeg
+        if [[ "$HAVE_BREW" -eq 1 ]]; then
+            echo "Installing ffmpeg..."
+            brew install ffmpeg
+        else
+            echo "Note: ffmpeg was not installed (Homebrew not found)."
+            echo "It is only needed to decode audio uploaded through the web page;"
+            echo "dictation works without it. Install later with: brew install ffmpeg"
+        fi
     fi
 elif [[ "$OS" == "Linux" ]]; then
     if [[ "$NO_SYSTEM_DEPS" -eq 1 ]]; then
@@ -137,16 +238,7 @@ elif [[ "$OS" == "Linux" ]]; then
     fi
     if ! find_linux_python; then
         echo "No Python 3.11+ with tkinter found; installing uv for this user."
-        if ! command -v uv >/dev/null 2>&1; then
-            curl -fsSL https://astral.sh/uv/install.sh | sh
-            export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-        fi
-        if ! command -v uv >/dev/null 2>&1; then
-            echo "uv installation failed or uv is not on PATH." >&2
-            exit 1
-        fi
-        uv python install 3.12
-        USE_UV=1
+        ensure_uv
     fi
 else
     echo "LocalFlow's installer supports macOS and Linux." >&2
@@ -166,17 +258,25 @@ else
     REPO="${LOCALFLOW_HOME:-$HOME/.localflow/app}"
     if [[ -e "$REPO/.git" ]]; then
         EXISTING_INSTALL=1
-    else
-        if [[ -e "$REPO" ]]; then
-            echo "Install destination exists but is not a git checkout: $REPO" >&2
-            exit 1
-        fi
+    elif [[ -f "$REPO/.localflow-tarball" ]]; then
+        install_tarball
+    elif [[ -e "$REPO" ]]; then
+        echo "Install destination exists but is not a LocalFlow install: $REPO" >&2
+        exit 1
+    elif find_git; then
         mkdir -p "$(dirname "$REPO")"
         git clone "${LOCALFLOW_REPO_URL:-https://github.com/CortexRND/localflow.git}" "$REPO"
+    else
+        echo "No usable git found; downloading a source tarball instead."
+        install_tarball
     fi
 fi
 
-if [[ -n "${LOCALFLOW_REF:-}" ]]; then
+if [[ ! -e "$REPO/.git" ]]; then
+    : # Tarball install: already at the requested ref.
+elif ! find_git; then
+    echo "Note: no usable git found; keeping the existing checkout at $REPO as is."
+elif [[ -n "${LOCALFLOW_REF:-}" ]]; then
     git -C "$REPO" fetch origin
     if ! git -C "$REPO" rev-parse --verify --quiet \
         "${LOCALFLOW_REF}^{commit}" >/dev/null; then
@@ -188,15 +288,23 @@ elif [[ "$EXISTING_INSTALL" -eq 1 ]]; then
 fi
 
 cd "$REPO"
+EXTRAS=""
+if [[ "$OS" == "Darwin" ]]; then
+    if [[ "$(uname -m)" == "arm64" ]]; then
+        EXTRAS="[mlx,parakeet,menubar,macos-permissions]"
+    else
+        EXTRAS="[macos-permissions]"
+    fi
+fi
 if [[ "$USE_UV" -eq 1 ]]; then
-    uv venv --python 3.12 .venv
+    uv venv --allow-existing --python 3.12 .venv
     if [[ "$OS" == "Linux" ]] \
         && ! .venv/bin/python -c 'import tkinter' >/dev/null 2>&1; then
         echo "The uv-managed Python does not include tkinter." >&2
         exit 1
     fi
     uv pip install --python .venv/bin/python --upgrade pip
-    uv pip install --python .venv/bin/python -e .
+    uv pip install --python .venv/bin/python -e ".${EXTRAS}"
 else
     "$PYTHON" -m venv .venv
     if [[ "$OS" == "Linux" ]] \
@@ -205,15 +313,7 @@ else
         exit 1
     fi
     .venv/bin/python -m pip install --upgrade pip
-    if [[ "$OS" == "Darwin" ]]; then
-        if [[ "$(uname -m)" == "arm64" ]]; then
-            .venv/bin/pip install -e ".[mlx,parakeet,menubar,macos-permissions]"
-        else
-            .venv/bin/pip install -e ".[macos-permissions]"
-        fi
-    else
-        .venv/bin/pip install -e .
-    fi
+    .venv/bin/pip install -e ".${EXTRAS}"
 fi
 
 if [[ "$WITH_OLLAMA" -eq 1 ]]; then
@@ -272,6 +372,12 @@ fi
 if [[ "$NO_LAUNCH" -eq 1 ]]; then
     echo "Skipping setup launch."
     exit 0
+fi
+
+if [[ "$OS" == "Darwin" ]]; then
+    # First run routes to the setup window; later runs open the Hub.
+    echo "Opening LocalFlow..."
+    exec open "$HOME/Applications/LocalFlow.app"
 fi
 
 echo "Opening LocalFlow Setup..."

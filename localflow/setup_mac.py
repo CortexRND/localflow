@@ -1,17 +1,40 @@
 """AppKit setup wizard for macOS."""
 
-import objc
-import AppKit
-from AppKit import NSApplication, NSButton, NSColor, NSFont, NSProgressIndicator, NSWindow
-from Foundation import NSMakePoint, NSMakeRect, NSObject, NSTimer, NSURL
-
 import queue
 import threading
 import time
 from dataclasses import replace
 
+import AppKit
+import objc
+from AppKit import (
+    NSApplication,
+    NSButton,
+    NSProgressIndicator,
+    NSWindow,
+)
+from Foundation import NSURL, NSMakePoint, NSMakeRect, NSMakeSize, NSObject, NSTimer
+
 from localflow import setup_flow
 from localflow.config import load_config
+from localflow.mac_style import (
+    FlippedView,
+    HalftoneView,
+    fit_button,
+    make_pill,
+    style_button,
+    style_surface,
+    tokens_for_window,
+)
+from localflow.mac_style import (
+    color as _style_color,
+)
+from localflow.mac_style import (
+    font as _font,
+)
+from localflow.mac_style import (
+    segmented as _segmented,
+)
 from localflow.models import (
     LLM_MODELS,
     DownloadCancelled,
@@ -23,28 +46,77 @@ from localflow.models import (
     is_stt_downloaded,
     recommend,
 )
-from localflow.setup_flow import HOTKEY_OPTIONS, MicLevelMonitor, SetupChoices, initial_choices
-from localflow.stt import Transcriber
-from localflow.mac_style import (
-    FlippedView,
-    HalftoneView,
-    color as _style_color,
-    font as _font,
-    segmented as _segmented,
-    style_button,
-    style_surface,
-    tokens_for_window,
+from localflow.setup_flow import (
+    HOTKEY_OPTIONS,
+    MicLevelMonitor,
+    initial_choices,
 )
+from localflow.stt import Transcriber
 from localflow.ui_tokens import (
+    ACTION_HEIGHT,
+    CALLOUT_HEIGHT,
+    CARD_BORDER_WIDTH,
+    CARD_GAP,
+    CARD_PADDING,
+    CHECK_CARD_HEIGHT,
+    CHECK_STATUS,
+    CONTROL_GAP,
     LIGHT,
+    LINE_HEIGHT,
+    PAGE_TITLE_HEIGHT,
+    SHADOW_OFFSET,
     SUN_TEXT,
-    TOKENS as TOKENS,
+    TYPE,
+    WINDOW_MIN_HEIGHT,
+    WINDOW_MIN_WIDTH,
     surface_tint,
 )
 
+# Real check keys from setup_flow.run_checks -> label of the fix action.
+_CHECK_ACTION_LABELS = {
+    "microphone": "Allow microphone",
+    "accessibility": "Allow accessibility",
+    "input-monitoring": "Allow input monitoring",
+    "ffmpeg": "Install ffmpeg",
+    "ollama-installed": "Get Ollama",
+    "ollama-running": "Start Ollama",
+    "microphone-device": "Check microphone",
+}
+
+
+def check_action_label(check):
+    """Label of the fix action for `check`, or None when no action is shown.
+
+    Ready checks never get an action, even when they carry a fix label.
+    """
+    if check.ok is True or not check.fix_label:
+        return None
+    return _CHECK_ACTION_LABELS.get(check.key, check.fix_label)
+
+
+def check_status(ok, pending=False):
+    """(label, tint token, text token) for a check result."""
+    if pending:
+        return CHECK_STATUS["checking"]
+    if ok is True:
+        return CHECK_STATUS["ready"]
+    if ok is None:
+        return CHECK_STATUS["unknown"]
+    return CHECK_STATUS["needs"]
+
+
+def ordered_check_indexes(checks):
+    """Original indexes with checks needing action first, then ready ones.
+
+    Stable within each group; callers keep using the original index as the
+    action tag so fixes always target the right check.
+    """
+    return sorted(range(len(checks)), key=lambda index: checks[index].ok is True)
+
+
 _STEP_TITLES = (
     "Let's get you talking.",
-    "A quick setup check.",
+    "Quick checkup.",
     "Pick your speech model.",
     "Choose your cleanup model.",
     "Mic and hotkey.",
@@ -59,7 +131,7 @@ def _color(name, palette=None):
 
 class SetupWindowController(NSObject):
     def init(self):
-        self = super().init()
+        self = super().init()  # noqa: PLW0642 - PyObjC init pattern
         if self is None:
             return None
         self.config = load_config()
@@ -108,14 +180,19 @@ class SetupWindowController(NSObject):
             AppKit.NSWindowStyleMaskTitled
             | AppKit.NSWindowStyleMaskClosable
             | AppKit.NSWindowStyleMaskMiniaturizable
+            | AppKit.NSWindowStyleMaskResizable
         )
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 800, 700), style, AppKit.NSBackingStoreBuffered, False
+            NSMakeRect(0, 0, WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT),
+            style, AppKit.NSBackingStoreBuffered, False,
         )
         self.window.setTitle_("LocalFlow Setup")
+        self.window.setContentMinSize_(NSMakeSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT))
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self)
-        self.root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 800, 670))
+        self.root = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+        )
         self.root.setWantsLayer_(True)
         self.root.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
         self.window.setContentView_(self.root)
@@ -129,9 +206,18 @@ class SetupWindowController(NSObject):
             segment.setWantsLayer_(True)
             self.root.addSubview_(segment)
             self.progress_segments.append(segment)
-        self.title = self._label("", 32, 86, 736, 28, True, height=38)
+        self.title = self._label(
+            "", 32, 86, 736, TYPE["display"][0], True, height=PAGE_TITLE_HEIGHT,
+        )
         self.subtitle = self._label("", 32, 130, 736, 13, height=24)
-        self.page = FlippedView.alloc().initWithFrame_(NSMakeRect(32, 174, 736, 420))
+        self.page = FlippedView.alloc().initWithFrame_(NSMakeRect(32, 174, 736, 456))
+        # Flipped root: MinYMargin keeps the bottom distance fixed.
+        self.step_label.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        self.title.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        self.subtitle.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        self.page.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
+        )
         self.root.addSubview_(self.brand)
         mark = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, 25, 14, 14))
         mark.setWantsLayer_(True)
@@ -141,18 +227,29 @@ class SetupWindowController(NSObject):
         self.root.addSubview_(self.title)
         self.root.addSubview_(self.subtitle)
         self.root.addSubview_(self.page)
-        divider = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, 612, 736, 1))
-        divider.setWantsLayer_(True)
-        divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
-        self.root.addSubview_(divider)
-        self.back_button = self._button("Back", 32, 628, 100, "backAction_")
-        self.primary_button = self._button("Get started", 636, 624, 132, "stepAction_", True)
-        self.status = self._label("", 152, 629, 450, 11, height=20)
+        self.divider = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, 642, 736, 1))
+        self.divider.setWantsLayer_(True)
+        self.divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
+        self.divider.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin
+        )
+        self.root.addSubview_(self.divider)
+        self.back_button = self._button("Back", 32, 658, 100, "backAction_")
+        self.primary_button = self._button("Get started", 636, 654, 132, "stepAction_", True)
+        self.status = self._label("", 152, 659, 450, 11, height=20)
         self.root.addSubview_(self.back_button)
         self.root.addSubview_(self.primary_button)
         self.root.addSubview_(self.status)
-        self.cancel_button = self._button("Cancel", 520, 624, 100, "cancelAction_")
+        self.cancel_button = self._button("Cancel", 520, 654, 100, "cancelAction_")
         self.root.addSubview_(self.cancel_button)
+        self.back_button.setAutoresizingMask_(AppKit.NSViewMinYMargin)
+        self.status.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin
+        )
+        for right_anchored in (self.primary_button, self.cancel_button):
+            right_anchored.setAutoresizingMask_(
+                AppKit.NSViewMinXMargin | AppKit.NSViewMinYMargin
+            )
 
     @objc.python_method
     def _label(self, text, x, y, width, size=13, bold=False, *, height):
@@ -198,6 +295,9 @@ class SetupWindowController(NSObject):
             (self.status, "muted"),
         ):
             label.setTextColor_(_color(token, self.tokens))
+        self.divider.layer().setBackgroundColor_(
+            _color("line", self.tokens).CGColor()
+        )
 
     @objc.python_method
     def _add_card_button(
@@ -208,6 +308,7 @@ class SetupWindowController(NSObject):
         card = FlippedView.alloc().initWithFrame_(
             NSMakeRect(0, y, card_width, 76)
         )
+        card.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         style_surface(
             card, self.tokens, border="ink" if selected else "line",
             shadow=selected,
@@ -225,7 +326,9 @@ class SetupWindowController(NSObject):
             dot.layer().setCornerRadius_(4)
             dot.layer().setBackgroundColor_(_color("sun", self.tokens).CGColor())
             radio.addSubview_(dot)
-        card.addSubview_(self._label(title, 46, 10, 390, 15, True, height=22))
+        title_label = self._label(title, 46, 10, 390, 15, True, height=22)
+        title_label.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        card.addSubview_(title_label)
         pills = []
         for label in tags:
             pill_label = self._label(label, 0, 0, 200, 10, True, height=16)
@@ -249,6 +352,7 @@ class SetupWindowController(NSObject):
             pill = FlippedView.alloc().initWithFrame_(
                 NSMakeRect(pill_x, 10, pill_width, 20)
             )
+            pill.setAutoresizingMask_(AppKit.NSViewMinXMargin)
             pill.setWantsLayer_(True)
             pill.layer().setBackgroundColor_(_color(fill, self.tokens).CGColor())
             pill.layer().setCornerRadius_(10)
@@ -282,14 +386,18 @@ class SetupWindowController(NSObject):
                     card.addSubview_(dot_view)
                 meter_x += 59
         else:
-            card.addSubview_(
-                self._label(
-                    detail, 46, 43, card_width - 58, 11, height=18
-                )
+            detail_label = self._label(
+                detail, 46, 43, card_width - 58, 11, height=18
             )
+            detail_label.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+            card.addSubview_(detail_label)
         button = NSButton.alloc().initWithFrame_(card.bounds())
+        button.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
+        )
         button.setTitle_("")
         button.setBordered_(False)
+        button.setFocusRingType_(AppKit.NSFocusRingTypeExterior)
         button.setTag_(index)
         button.setTarget_(self)
         button.setAction_(objc.selector(getattr(self, action), signature=b"v@:@"))
@@ -298,18 +406,31 @@ class SetupWindowController(NSObject):
         return button
 
     @objc.python_method
-    def _make_scroll(self, height, frame_height=310, y=None):
+    def _make_scroll(self, height, frame_height=None, y=None, reserve=0, x=8):
+        """Scroll view from `y` down to the page bottom minus `reserve`.
+
+        Sizes come from the page bounds, so the list fills the space above the
+        footer at any window size; `frame_height` pins a fixed height instead.
+        """
         if y is None:
             y = self.cursor_y
+        page_size = self.page.bounds().size
+        if frame_height is None:
+            frame_height = max(0, page_size.height - y - reserve)
         scroll = AppKit.NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(8, y, 720, frame_height)
+            NSMakeRect(x, y, page_size.width - 2 * x, frame_height)
+        )
+        scroll.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
         )
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(AppKit.NSNoBorder)
+        scroll.setDrawsBackground_(False)
         content_width = scroll.contentSize().width
         document = FlippedView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, content_width, height)
+            NSMakeRect(0, 0, content_width, max(height, frame_height))
         )
+        document.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         scroll.setDocumentView_(document)
         self.page.addSubview_(scroll)
         if y == self.cursor_y:
@@ -557,7 +678,7 @@ class SetupWindowController(NSObject):
         style_button(self.cancel_button, "secondary", self.tokens)
         subtitles = (
             "Choose a local voice setup that fits your machine.",
-            "Check that audio and model services are ready.",
+            "Let's make sure LocalFlow can hear you and type for you.",
             "Pick the speech model that transcribes your voice.",
             "Optional cleanup keeps your transcript clear and readable.",
             "Choose how LocalFlow listens and responds.",
@@ -600,44 +721,15 @@ class SetupWindowController(NSObject):
             self._add_text(f"Suggested speech model: {stt_id}  ·  Cleanup: {llm_id or 'off'}")
             self._add_text("Your audio and models stay on this machine.")
         elif self.step == 1:
-            self._add_text("Nothing here blocks setup. Fix what you can; revisit any time.")
-            if self.checks is None:
-                self._add_text("Checking this machine…")
-                if not self.snapshot_mode:
-                    self._start_checks()
-            else:
-                for index, check in enumerate(self.checks):
-                    color_name = "success" if check.ok else ("muted" if check.ok is None else "red")
-                    self.page.addSubview_(
-                        self._label(
-                            f"{check.label}  ·  {check.detail}",
-                            8, self.cursor_y, 510, 13, height=28,
-                        )
-                    )
-                    status = self._label(
-                        "Ready" if check.ok else ("Check" if check.ok is None else "Needs attention"),
-                        526, self.cursor_y, 150, 11, True, height=28,
-                    )
-                    status.setTextColor_(_color(color_name, self.tokens))
-                    self.page.addSubview_(status)
-                    if check.fix_label:
-                        button = self._button(
-                            check.fix_label, 560, self.cursor_y, 150, "fixAction_"
-                        )
-                        button.setTag_(index)
-                        self.page.addSubview_(button)
-                    self.cursor_y += 38
-                self.page.addSubview_(
-                    self._button("Recheck", 8, self.cursor_y, 120, "recheckAction_")
-                )
+            self._render_checks()
+            if self.checks is None and not self.snapshot_mode:
+                self._start_checks()
         elif self.step == 2:
             self._add_text("Models stay on this machine. Size is shown before download.", size=11)
             if self.status_message or self.error_message:
                 self._add_callout()
             rec, _ = recommend(self.hardware)
-            document = self._make_scroll(
-                max(240, len(self.models) * 84), frame_height=272,
-            )
+            document = self._make_scroll(len(self.models) * 84 + SHADOW_OFFSET)
             for index, model in enumerate(self.models):
                 tags = []
                 if model.id == rec:
@@ -681,8 +773,11 @@ class SetupWindowController(NSObject):
                     )
                     for model in LLM_MODELS
                 )
+                # The list fills down to a bottom row that holds the Ollama
+                # action, so there is no dead band above the footer divider.
                 document = self._make_scroll(
-                    max(240, len(options) * 84), frame_height=182,
+                    len(options) * 84 + SHADOW_OFFSET,
+                    reserve=ACTION_HEIGHT + CARD_GAP,
                 )
                 for index, (model_id, label, detail) in enumerate(options):
                     tags = ["Downloaded"] if model_id in self.ollama_models else []
@@ -693,20 +788,7 @@ class SetupWindowController(NSObject):
                     )
                 if not self.snapshot_mode and not self.ollama_checked:
                     self._start_ollama_check()
-                if not self.ollama_running:
-                    self._add_text("Ollama is not running. Cleanup is optional.")
-                    installed = setup_flow.ollama_installed()
-                    action = "recheckAction_" if installed else "ollamaDownloadAction_"
-                    title = "Recheck Ollama" if installed else "Get Ollama"
-                    self.page.addSubview_(
-                        self._button(title, 8, self.cursor_y, 150, action)
-                    )
-                else:
-                    self.page.addSubview_(
-                        self._button(
-                            "Refresh models", 8, self.cursor_y, 150, "recheckAction_"
-                        )
-                    )
+                self._add_ollama_row()
         elif self.step == 4:
             self.page.addSubview_(
                 self._label("Microphone", 8, self.cursor_y, 200, 11, True, height=20)
@@ -851,6 +933,143 @@ class SetupWindowController(NSObject):
         self.window.makeKeyAndOrderFront_(None)
 
     @objc.python_method
+    def _render_checks(self):
+        """Quick checkup page: intro + Recheck row, optional callout, card list."""
+        page_width = self.page.bounds().size.width
+        recheck = self._button("Recheck", 0, 0, 0, "recheckAction_")
+        style_button(recheck, "secondary", self.tokens)
+        fit_button(recheck)
+        recheck_width = recheck.frame().size.width
+        recheck.setFrameOrigin_(NSMakePoint(page_width - recheck_width, 0))
+        recheck.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        intro = self._label(
+            "Nothing here blocks setup. Fix what you can; revisit any time.",
+            0, 0, page_width - recheck_width - CARD_GAP, TYPE["caption"][0],
+            height=ACTION_HEIGHT,
+        )
+        intro.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        self.page.addSubview_(intro)
+        self.page.addSubview_(recheck)
+        y = ACTION_HEIGHT + CARD_GAP
+
+        if self.checks is None:
+            pending = self._label(
+                "Checking this machine…", 0, y, page_width, TYPE["body"][0],
+                height=CALLOUT_HEIGHT,
+            )
+            self.page.addSubview_(pending)
+            return
+        if all(check.ok is True for check in self.checks):
+            callout = FlippedView.alloc().initWithFrame_(
+                NSMakeRect(0, y, page_width - SHADOW_OFFSET, CALLOUT_HEIGHT)
+            )
+            callout.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+            style_surface(
+                callout, self.tokens, fill="sun", border="ink",
+                width=CARD_BORDER_WIDTH,
+            )
+            message = self._label(
+                "All set — nothing to fix.", CARD_PADDING, 0,
+                page_width - SHADOW_OFFSET - 2 * CARD_PADDING, TYPE["body"][0], True,
+                height=CALLOUT_HEIGHT,
+            )
+            message.setTextColor_(_color(SUN_TEXT, self.tokens))
+            message.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+            callout.addSubview_(message)
+            self.page.addSubview_(callout)
+            y += CALLOUT_HEIGHT + CARD_GAP
+
+        order = ordered_check_indexes(self.checks)
+        step = CHECK_CARD_HEIGHT + CARD_GAP
+        document = self._make_scroll(len(order) * step + SHADOW_OFFSET, y=y, x=0)
+        for position, index in enumerate(order):
+            self._add_check_card(document, self.checks[index], index, position * step)
+
+    @objc.python_method
+    def _add_check_card(self, document, check, index, y):
+        """One check card. `index` is the check's original index (the fix tag)."""
+        card_width = document.bounds().size.width - SHADOW_OFFSET
+        card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, y, card_width, CHECK_CARD_HEIGHT)
+        )
+        card.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        style_surface(
+            card, self.tokens, border="ink", shadow=True, width=CARD_BORDER_WIDTH,
+        )
+        text, tint, text_token = check_status(check.ok)
+        pill = make_pill(text, (tint, text_token), self.tokens)
+        pill_width = pill.frame().size.width
+        pill.setFrameOrigin_(NSMakePoint(
+            card_width - CARD_PADDING - pill_width,
+            (CHECK_CARD_HEIGHT - pill.frame().size.height) / 2,
+        ))
+        pill.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        controls_left = pill.frame().origin.x
+
+        action_label = check_action_label(check)
+        if action_label:
+            action = self._button(action_label, 0, 0, 0, "fixAction_")
+            style_button(action, "secondary", self.tokens)
+            fit_button(action)
+            action_width = action.frame().size.width
+            action.setFrameOrigin_(NSMakePoint(
+                controls_left - CONTROL_GAP - action_width,
+                (CHECK_CARD_HEIGHT - ACTION_HEIGHT) / 2,
+            ))
+            action.setTag_(index)
+            action.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+            controls_left = action.frame().origin.x
+            card.addSubview_(action)
+
+        text_width = controls_left - CARD_GAP - CARD_PADDING
+        name = self._label(
+            check.label, CARD_PADDING, CARD_PADDING, text_width,
+            TYPE["heading"][0], True, height=LINE_HEIGHT["heading"],
+        )
+        detail = self._label(
+            check.detail, CARD_PADDING, CARD_PADDING + LINE_HEIGHT["heading"],
+            text_width, TYPE["body"][0], height=LINE_HEIGHT["body"],
+        )
+        for line in (name, detail):
+            line.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
+            line.setMaximumNumberOfLines_(1)
+            line.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        detail.setToolTip_(check.detail)
+        card.addSubview_(name)
+        card.addSubview_(detail)
+        card.addSubview_(pill)
+        document.addSubview_(card)
+
+    @objc.python_method
+    def _add_ollama_row(self):
+        """Bottom-anchored Ollama action (and hint) under the cleanup list."""
+        page_size = self.page.bounds().size
+        y = page_size.height - ACTION_HEIGHT
+        if self.ollama_running:
+            title, action, hint = "Refresh models", "recheckAction_", ""
+        elif setup_flow.ollama_installed():
+            title, action = "Recheck Ollama", "recheckAction_"
+            hint = "Ollama is not running. Cleanup is optional."
+        else:
+            title, action = "Get Ollama", "ollamaDownloadAction_"
+            hint = "Ollama is not running. Cleanup is optional."
+        button = self._button(title, CONTROL_GAP, y, 0, action)
+        style_button(button, "secondary", self.tokens)
+        fit_button(button, x=CONTROL_GAP, y=y)
+        button.setAutoresizingMask_(AppKit.NSViewMinYMargin)
+        self.page.addSubview_(button)
+        if hint:
+            left = CONTROL_GAP + button.frame().size.width + CONTROL_GAP
+            label = self._label(
+                hint, left, y, page_size.width - left - CONTROL_GAP,
+                TYPE["caption"][0], height=ACTION_HEIGHT,
+            )
+            label.setAutoresizingMask_(
+                AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin
+            )
+            self.page.addSubview_(label)
+
+    @objc.python_method
     def _add_callout(self):
         error = bool(self.error_message)
         box = FlippedView.alloc().initWithFrame_(
@@ -891,7 +1110,7 @@ class SetupWindowController(NSObject):
         def run():
             try:
                 result = function()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker errors are reported as events
                 if job_token is not None:
                     self.events.put(("error", key, job_token, model_id, exc))
                 elif model_id is not None:
@@ -1187,14 +1406,13 @@ class SetupWindowController(NSObject):
         elif self.step == 5:
             if "trial" not in self.busy:
                 self._start_trial()
-        elif self.step == 6:
-            if "apply" not in self.busy:
-                self.choices = replace(
-                    self.choices,
-                    start_on_login=bool(self.start_on_login),
-                    cleanup_level=self.cleanup_level,
-                )
-                self._start_worker("apply", lambda: setup_flow.apply(self.choices))
+        elif self.step == 6 and "apply" not in self.busy:
+            self.choices = replace(
+                self.choices,
+                start_on_login=bool(self.start_on_login),
+                cleanup_level=self.cleanup_level,
+            )
+            self._start_worker("apply", lambda: setup_flow.apply(self.choices))
 
     def backAction_(self, sender):
         if self.busy & {"stt-download", "llm-pull"}:
@@ -1266,11 +1484,11 @@ class SetupWindowController(NSObject):
         self.start_on_login = sender.state() == AppKit.NSOnState
 
     def launchAction_(self, sender):
-        import subprocess
+        # Dictation, local server and menu bar, each started at most once —
+        # also when setup runs standalone, outside the main app.
+        from localflow import main_app
 
-        import sys
-
-        subprocess.Popen([sys.executable, "-m", "localflow.app"])
+        main_app.ensure_runtime()
 
     def timerTick_(self, timer):
         self._handle_events()

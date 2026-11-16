@@ -4,6 +4,28 @@ Local push-to-talk dictation for macOS. Fully offline STT using Whisper (faster-
 
 See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a feature-by-feature overview.
 
+## Easiest install (no Terminal needed)
+
+**macOS:** download `LocalFlow-Installer.dmg` from the
+[latest release](https://github.com/CortexRND/localflow/releases/latest) (or from
+the artifacts of a "Mac installer" run on the Actions tab), open it, and
+double-click **Install LocalFlow**. A window installs everything, which takes a
+few minutes, and LocalFlow opens when it is done. Homebrew, git and Python
+are not required.
+
+The installer puts **LocalFlow** in `~/Applications` (Applications → LocalFlow).
+Double-click it: the first time it opens the native setup window; after setup
+it starts dictation and the menu bar in the background (reusing the login agent
+if installed, never twice) and opens the native Hub. Opening it again just
+brings the Hub to the front.
+
+The app is unsigned, so macOS may block it the first time. Right-click it and
+choose **Open**, then **Open** again; or go to System Settings > Privacy &
+Security and click **Open Anyway**.
+
+**Windows:** download `Install LocalFlow.cmd` from the same release (or the
+Actions artifact) and double-click it.
+
 ## What it is
 
 An open-source WisprFlow-style dictation app:
@@ -49,8 +71,10 @@ cd localflow
 ./install.sh
 ```
 
-The installer creates a Python environment and installs LocalFlow. macOS
-requires Homebrew; its setup app is placed in `~/Applications`. Linux installs
+The installer creates a Python environment and installs LocalFlow. On macOS,
+Homebrew, git and a supported Python are optional (the installer falls back to
+a uv-managed Python 3.12 and a source tarball); its setup app is placed in
+`~/Applications`. Linux installs
 system dependencies and creates `~/.local/bin/lf` plus desktop launchers. When
 piped, the app checkout defaults to `~/.localflow/app`; override it with
 `LOCALFLOW_HOME`.
@@ -272,21 +296,25 @@ mid-dictation: say "review checklist" and the saved review prompt is pasted
 instead. Entries live in `~/.localflow/hot_phrases.json`; the desktop app
 re-reads the file when it changes, so edits apply without a restart.
 
-Manage them in the hot phrases window:
+Manage them on the Hot Phrases page of the LocalFlow Hub:
 
 ```bash
-lf phrases                  # open the window
-lf phrases install-app      # also available from the menu bar ("Hot Phrases…")
-lf phrases uninstall-app
+lf phrases                  # open the Hub on Hot Phrases (also the menu bar's "Hot Phrases…")
+lf hub --page "Hot Phrases" # the same, through the Hub command
 ```
 
-On macOS this is a native AppKit window: a sidebar lists your phrases
-(searchable, one row each with an on/off state), edits autosave as you
-type, the switch toggles a phrase without deleting it, Delete shows an
-Undo bar, and a "Test a phrase" section previews what dictation would
-paste — including which triggers matched. `install-app` writes
-`~/Applications/LocalFlow Hot Phrases.app` so the window can be opened
-from Spotlight/Launchpad too.
+On macOS the Hub is one native window owned by the main LocalFlow app, so
+all of these reach the same window (and bring it forward if it is already
+open). The Hot Phrases page has a searchable list on the left (one row per
+phrase with an on/off dot) and an editor on the right: "When I say", "Type
+this", an Enabled switch, Delete with Undo, and a "Try it" preview that shows
+what dictation would paste and which triggers matched. Edits autosave as you
+type; an invalid edit stays in the editor with an inline message and is
+never lost when you navigate.
+
+`lf phrases install-app` is optional: it writes a `LocalFlow Hot Phrases.app`
+compatibility alias in `~/Applications` that simply opens the Hub on that
+page (`lf phrases uninstall-app` removes it). The installer does not create it.
 
 Elsewhere (or if PyObjC is missing on macOS) a simpler Tk window opens
 as a fallback. It keeps the classic layout — an entry list plus explicit

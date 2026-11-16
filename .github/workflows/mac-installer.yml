@@ -1,0 +1,60 @@
+name: Mac installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - install.sh
+      - scripts/build_mac_installer.sh
+      - packaging/**
+      - .github/workflows/mac-installer.yml
+  pull_request:
+    paths:
+      - install.sh
+      - scripts/build_mac_installer.sh
+      - packaging/**
+      - .github/workflows/mac-installer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build installer disk image
+        run: bash scripts/build_mac_installer.sh
+      - name: Validate app bundle
+        run: |
+          app="dist/Install LocalFlow.app"
+          plutil -lint "$app/Contents/Info.plist"
+          test -x "$app/Contents/MacOS/install-localflow"
+          cmp install.sh "$app/Contents/Resources/install.sh"
+      - name: Verify disk image
+        run: |
+          hdiutil verify dist/LocalFlow-Installer.dmg
+          mount_point="$(mktemp -d)"
+          hdiutil attach dist/LocalFlow-Installer.dmg -readonly -nobrowse -mountpoint "$mount_point"
+          test -x "$mount_point/Install LocalFlow.app/Contents/MacOS/install-localflow"
+          test -f "$mount_point/Read Me.txt"
+          hdiutil detach "$mount_point"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalFlow-Installer-dmg
+          path: dist/LocalFlow-Installer.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalFlow-Installer-windows
+          path: packaging/windows/Install LocalFlow.cmd
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/LocalFlow-Installer.dmg \
+            "packaging/windows/Install LocalFlow.cmd" \
+            --clobber

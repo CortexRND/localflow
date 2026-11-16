@@ -17,12 +17,13 @@ from starlette.concurrency import run_in_threadpool
 
 from localflow import api as api_logic
 from localflow import recall as recall_logic
-from localflow import sounds
+from localflow import sounds, stt_lease
 from localflow.apitoken import load_or_create
 from localflow.audio import rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
 from localflow.config import (
+    Config,
     ConfigError,
     apply_config_update,
     config_to_dict,
@@ -32,15 +33,20 @@ from localflow.config import (
 from localflow.context import category_for
 from localflow.dictionary import DictionaryStore, apply_replacements, stt_prompt
 from localflow.dispatch import (
+    APPROVE_FROM,
+    REJECT_FROM,
     PromptQueue,
-    StatusConflict,
+    PromptTransitionError,
     parse_work_prompts,
+    transition_prompt,
     write_prompts,
 )
 from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore, render_dictation
-from localflow.log import setup_logging
+from localflow.live_config import ConfigWatcher, merge_live
+from localflow.log import SERVER_LOG_PATH, setup_logging
+from localflow.logfiles import prepare_process_logs
 from localflow.meeting_templates import load_templates, resolve_template
 from localflow.meetings import (
     MeetingSession,
@@ -62,7 +68,7 @@ from localflow.workprompts import WorkPromptGenerator
 
 app = FastAPI()
 
-setup_logging()
+setup_logging(SERVER_LOG_PATH)  # not localflow.log: dictation rotates that one
 log = logging.getLogger("localflow.server")
 _config = load_config()
 _api_token = load_or_create()
@@ -251,6 +257,9 @@ def _get_transcriber() -> Transcriber:
         with _lock:
             if _transcriber is None:
                 _transcriber = build_stt(_config)
+                # What actually loaded (auto may have fallen back): Free up
+                # space must never delete it while this process runs.
+                stt_lease.record(_transcriber.backend, _config.model_size)
     return _transcriber
 
 
@@ -323,9 +332,9 @@ def _run_ffmpeg(data: bytes, max_seconds: int = 1200) -> subprocess.CompletedPro
             "pipe:1",
         ],
         input=data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=FFMPEG_TIMEOUT_SECONDS,
+        check=False,
     )
 
 
@@ -481,7 +490,7 @@ def api_test_llm(body: dict | None = None) -> dict:
 
 @app.get("/api/secrets")
 def api_secrets() -> dict[str, bool]:
-    return api_logic.secrets_status()
+    return api_logic.secrets_status(_config)
 
 
 @app.put("/api/secrets/{name}")
@@ -494,16 +503,20 @@ def api_secret_update(name: str, body: dict) -> dict[str, bool]:
         raise HTTPException(status_code=400, detail="value must be a string")
     with _config_lock:
         try:
-            api_logic.update_secret(name, value)
+            # An activated config's key is rotated in its own endpoint-bound
+            # slot; the generic llm_api_key stays with legacy configs.
+            api_logic.update_secret(name, value, _config)
             if name == "llm_api_key":
                 _ollama = build_llm(_config)
                 _summarizer = MeetingSummarizer(build_llm(_config, timeout=300, num_ctx=8192))
                 _cleaner = None
             elif name == "fireworks_api_key":
                 _prompt_gen = WorkPromptGenerator(build_workprompts_llm(_config))
+        except api_logic.InvalidKeyRef as exc:  # raised before any write
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except SecretsUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return api_logic.secrets_status()
+    return api_logic.secrets_status(_config)
 
 
 @app.get("/api/autostart")
@@ -670,7 +683,7 @@ def _start_session(title: str, category: str, template: str = "",
         )
         session.system_audio_error = system_error
         session.start()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - cleanup boundary: always release the slot
         _watcher.resume()
         with _session_lock:
             _session_state = "idle"
@@ -699,7 +712,7 @@ def _start_session(title: str, category: str, template: str = "",
 
 def _on_meeting_detected(platform: str) -> None:
     """Watcher-thread callback: auto-start a session on detection."""
-    if not _config.meeting_auto_start:
+    if not _config.meeting_auto_start or not _config.meeting_watch:
         return
     with _session_lock:
         if _session_state != "idle":
@@ -827,7 +840,7 @@ def _write_prompt_files(prompts_md: str, title: str, started_at: datetime) -> di
 
 @app.post("/meeting/stop")
 async def meeting_stop() -> dict:
-    global _session, _last_saved, _session_state
+    global _session, _session_state
     with _session_lock:
         if _session_state != "running" or _session is None:
             raise HTTPException(status_code=409, detail="no meeting session running")
@@ -894,10 +907,8 @@ def meeting_dismiss() -> dict:
 
 
 # Prompts are reviewed here but dispatched from the CLI only — no run endpoint.
-# Approve doubles as retry: a `failed` entry is a dispatch that errored, and
-# stranding it would let one transient Orca hiccup kill the prompt for good.
-_APPROVE_FROM = ("pending", "failed")
-_REJECT_FROM = ("pending",)
+# The approve/reject rules live in localflow.dispatch so the native hub applies
+# exactly the same guards and compare-and-set.
 
 
 @app.get("/prompts")
@@ -906,37 +917,53 @@ def prompts_list(status: str | None = None) -> dict:
 
 
 def _transition(entry_id: str, verb: str, status: str, allowed: tuple[str, ...]) -> dict:
-    """Guarded status change. 404 if the entry is gone, 409 if the move is invalid.
-
-    Compare-and-set inside the queue rather than get-then-set here: the CLI
-    dispatches in a separate process, so it can flip an entry to `dispatched`
-    between our check and our write, and we would silently undo it.
-    """
+    """Guarded status change. 404 if the entry is gone, 409 if the move is invalid."""
     try:
-        updated = _queue.set_status(entry_id, status, expect=allowed)
-    except StatusConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot {verb} a {exc.current} prompt (allowed from: {', '.join(allowed)})",
-        )
-    if updated is None:
-        raise HTTPException(status_code=404, detail=f"unknown prompt: {entry_id}")
-    return updated
+        return transition_prompt(_queue, entry_id, verb, status, allowed)
+    except PromptTransitionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 @app.post("/prompts/{entry_id}/approve")
 def prompts_approve(entry_id: str) -> dict:
-    return _transition(entry_id, "approve", "approved", _APPROVE_FROM)
+    return _transition(entry_id, "approve", "approved", APPROVE_FROM)
 
 
 @app.post("/prompts/{entry_id}/reject")
 def prompts_reject(entry_id: str) -> dict:
-    return _transition(entry_id, "reject", "rejected", _REJECT_FROM)
+    return _transition(entry_id, "reject", "rejected", REJECT_FROM)
+
+
+def _sync_meeting_watcher() -> None:
+    """Start or stop mic watching to match the (possibly reloaded) config."""
+    if _config.meetings_enabled and _config.meeting_watch:
+        _watcher.start()
+    else:
+        _watcher.stop()
+
+
+def _apply_live_config(fresh: Config) -> None:
+    """ConfigWatcher callback: adopt live settings edited by another process
+    (Hub Settings, `lf tweak`, `lf config set`). Host, port, providers and
+    paths stay as started; merge_live logs those as restart-only."""
+    global _config
+    with _config_lock:
+        merged, changed = merge_live(_config, fresh)
+        if not changed:
+            return
+        _config = merged
+    if "meeting_watch" in changed:
+        _sync_meeting_watcher()
+    log.info("settings updated without restart: %s", ", ".join(sorted(changed)))
 
 
 def main() -> None:
     import uvicorn
 
+    prepare_process_logs()
+    # Started here, not in the startup hook, so tests driving the app through
+    # TestClient never watch the real config file.
+    ConfigWatcher(_apply_live_config).start()
     uvicorn.run(app, host=_config.server_host, port=_config.server_port)
 
 

@@ -83,9 +83,45 @@ def test_client_maps_server_detail_and_connection_errors():
     http.error = requests.ConnectionError("connection refused")
     with pytest.raises(
         MeetingClientError,
-        match="LocalFlow server not running — start it with `lf serve`",
+        match=r"LocalFlow server not running — open LocalFlow\.app .*or run `lf serve`",
     ):
         client.status()
+
+    http.error = ConnectionRefusedError("adapter-level refusal")
+    with pytest.raises(MeetingClientError, match="LocalFlow.app"):
+        client.status()
+
+
+def _config_file(tmp_path, monkeypatch, server_section):
+    path = tmp_path / "config.toml"
+    path.write_text(f"config_version = 2\n[server]\n{server_section}", encoding="utf-8")
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("server_section", "expected"),
+    [
+        ("", "http://127.0.0.1:8756"),
+        ('host = "127.0.0.1"\nport = 9911\n', "http://127.0.0.1:9911"),
+        ('host = "0.0.0.0"\nport = 9911\n', "http://127.0.0.1:9911"),
+        ('host = "::"\nport = 9911\n', "http://[::1]:9911"),
+        ('host = "::1"\nport = 9911\n', "http://[::1]:9911"),
+        ('host = "localhost"\nport = 9911\n', "http://localhost:9911"),
+        ('host = "192.168.1.20"\nport = 9911\n', "http://192.168.1.20:9911"),
+    ],
+)
+def test_default_base_url_follows_configured_host_and_port(
+    tmp_path, monkeypatch, server_section, expected
+):
+    _config_file(tmp_path, monkeypatch, server_section)
+    http = FakeHTTP()
+
+    client = MeetingClient(token="t", http=http)
+    client.status()
+
+    assert client.base_url == expected
+    assert http.calls[0][1] == f"{expected}/meeting/status"
 
 
 def test_client_defaults_to_existing_token_and_omits_empty_header(monkeypatch):
