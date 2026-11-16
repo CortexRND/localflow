@@ -1311,6 +1311,368 @@ pub fn prompt_entries(queue: &dyn PromptQueue) -> Result<Vec<PromptEntry>, &'sta
     queue.list(None).map_err(|_| PROMPTS_UNREADABLE)
 }
 
+// ===================================================== Home / History pages ===
+// Pure helpers of the Home and History pages (lf-ui `mac::pages::{home,history}`).
+
+/// The Home page's dictation switch state (`hub_model.dictation_state`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DictationState {
+    pub enabled: bool,
+    pub label: String,
+    pub action: &'static str,
+    pub detail: &'static str,
+}
+
+/// `dictation_state(config)`. `None` when this build's `Config` has no
+/// `dictation_enabled` field (it arrives with the `dictation.enabled` config
+/// key); the Home page then shows no toggle rather than a switch that cannot
+/// be saved.
+pub fn dictation_state(config: &Config) -> Option<DictationState> {
+    let enabled = config.field_bool("dictation_enabled")?;
+    Some(DictationState {
+        enabled,
+        label: format!("Dictation: {}", if enabled { "On" } else { "Off" }),
+        action: if enabled {
+            "Turn Dictation Off"
+        } else {
+            "Turn Dictation On"
+        },
+        detail: if enabled {
+            "Dictation is on — push-to-talk is ready"
+        } else {
+            "Dictation is off — push-to-talk is paused"
+        },
+    })
+}
+
+/// Rows per History page (`_render_history` shows 8 and probes a 9th).
+pub const HISTORY_PAGE_SIZE: i64 = 8;
+/// Height of one History/Home row.
+pub const HISTORY_ROW_HEIGHT: i32 = 56;
+/// Python's `(text, size)` fallback when an entry has no text.
+pub const HISTORY_NO_TEXT: &str = "(no text)";
+
+/// `final_text or raw_text or "(no text)"`.
+pub fn history_row_text(final_text: &str, raw_text: &str) -> String {
+    if !final_text.is_empty() {
+        final_text.to_string()
+    } else if !raw_text.is_empty() {
+        raw_text.to_string()
+    } else {
+        HISTORY_NO_TEXT.to_string()
+    }
+}
+
+/// `"3:05 PM"` for today, `"Nov 5"` otherwise (`_history_row`).
+pub fn history_date_label(when: NaiveDateTime, now: NaiveDateTime) -> String {
+    if when.date() == now.date() {
+        let (pm, hour12) = when.hour12();
+        format!(
+            "{hour12}:{:02} {}",
+            when.minute(),
+            if pm { "PM" } else { "AM" }
+        )
+    } else {
+        // `strftime("%b %d").replace(" 0", " ")`
+        format!("{} {}", when.format("%b"), when.day())
+    }
+}
+
+/// Local date-time of a history timestamp (seconds since the epoch).
+pub fn history_when(ts: f64) -> NaiveDateTime {
+    local_from_timestamp(ts)
+}
+
+/// `"{app or Unknown}  ·  {date}  ·  {Kind}"` (`kind.title()`).
+pub fn history_meta_line(
+    app_name: Option<&str>,
+    ts: f64,
+    kind: &str,
+    now: NaiveDateTime,
+) -> String {
+    let app = app_name.filter(|a| !a.is_empty()).unwrap_or("Unknown");
+    let mut title = String::new();
+    let mut start = true;
+    for c in kind.chars() {
+        if c.is_alphabetic() {
+            if start {
+                title.extend(c.to_uppercase());
+            } else {
+                title.extend(c.to_lowercase());
+            }
+            start = false;
+        } else {
+            title.push(c);
+            start = true;
+        }
+    }
+    format!(
+        "{app}  ·  {}  ·  {title}",
+        history_date_label(history_when(ts), now)
+    )
+}
+
+/// The status chip of a non-`ok` entry: `(label, failed)`.
+pub fn history_status_chip(status: &str) -> Option<(&'static str, bool)> {
+    match status {
+        "ok" => None,
+        "failed" => Some(("Failed", true)),
+        _ => Some(("Silent", false)),
+    }
+}
+
+/// `(title, width)` of the per-row action buttons, in order (Copy, Original,
+/// Retry for dictations that kept their audio, Delete).
+pub fn history_row_actions(kind: &str, has_audio: bool) -> Vec<(&'static str, i32)> {
+    let mut entries = vec![("Copy", 56), ("Original", 76)];
+    if kind == "dictate" && has_audio {
+        entries.push(("Retry", 60));
+    }
+    entries.push(("Delete", 72));
+    entries
+}
+
+/// x where the action buttons start in a row `width` wide (`width` when the
+/// row has no actions).
+pub fn history_action_start(width: i32, actions: &[(&'static str, i32)]) -> i32 {
+    if actions.is_empty() {
+        return width;
+    }
+    width - 12 - actions.iter().map(|(_, w)| *w).sum::<i32>() - 8 * (actions.len() as i32 - 1)
+}
+
+/// Geometry of one row's text and chip: `(text_width, chip_x)`; `chip_x` is
+/// `None` for an `ok` entry.
+pub fn history_row_text_layout(
+    width: i32,
+    action_start: Option<i32>,
+    failed_or_silent: bool,
+) -> (i32, Option<i32>) {
+    let mut text_width = match action_start {
+        Some(start) => start - 24,
+        None => width - 40,
+    };
+    if !failed_or_silent {
+        return (text_width, None);
+    }
+    let chip_x = match action_start {
+        Some(start) => start - 82,
+        None => width - 102,
+    };
+    text_width = chip_x - 26;
+    (text_width, Some(chip_x))
+}
+
+/// The four Home stat cards `(title, value)` (`_page_home`).
+pub fn home_stat_cards(stats: &lf_core::history::Stats) -> [(&'static str, String); 4] {
+    let plural = |n: i64| if n == 1 { "" } else { "s" };
+    [
+        ("Words", stats.total_words.to_string()),
+        ("Avg WPM", format!("{:.1}", stats.avg_wpm)),
+        (
+            "Streak",
+            format!(
+                "{} day{}",
+                stats.current_streak_days,
+                plural(stats.current_streak_days)
+            ),
+        ),
+        ("Dictations", stats.total_dictations.to_string()),
+    ]
+}
+
+/// The "Today … Last 7 days … Longest streak …" line under the cards.
+pub fn home_stats_summary(stats: &lf_core::history::Stats) -> String {
+    format!(
+        "Today  {} words     Last 7 days  {} words     Longest streak  {} day{}",
+        stats.words_today,
+        stats.words_7d,
+        stats.longest_streak_days,
+        if stats.longest_streak_days == 1 {
+            ""
+        } else {
+            "s"
+        }
+    )
+}
+
+/// `(title, detail, button, action id)` of an empty list. `query` is the
+/// active History search (`None` on Home, which says "Your recent dictations").
+pub fn history_empty_state(
+    searching: bool,
+    home: bool,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    if searching {
+        (
+            "No matching entries",
+            "Try another search or start a new dictation.",
+            "Clear search",
+            "clearSearch",
+        )
+    } else if home {
+        (
+            "No dictations yet",
+            "Your recent dictations will appear here.",
+            "Open setup",
+            "openSetup",
+        )
+    } else {
+        (
+            "No dictations yet",
+            "Your dictations will appear here.",
+            "Open setup",
+            "openSetup",
+        )
+    }
+}
+
+/// `"Page N"` for the History pager.
+pub fn history_page_label(offset: i64) -> String {
+    format!("Page {}", offset / HISTORY_PAGE_SIZE + 1)
+}
+
+/// Offset after "Newer".
+pub fn history_newer_offset(offset: i64) -> i64 {
+    (offset - HISTORY_PAGE_SIZE).max(0)
+}
+
+/// Offset after "Older".
+pub fn history_older_offset(offset: i64) -> i64 {
+    offset + HISTORY_PAGE_SIZE
+}
+
+/// Text copied by Copy (`final_text`) / Original (`raw_text`).
+pub const HISTORY_CLEAR_CONFIRM: &str = "Clear all history and stored clips?";
+/// Shown when Retry is pressed: re-transcription needs speech-to-text, which
+/// this Rust build does not contain.
+pub const HISTORY_RETRY_UNAVAILABLE: &str =
+    "Retry needs speech-to-text, which isn't available in this build.";
+
+#[cfg(test)]
+mod home_history_tests {
+    use super::*;
+
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(y, mo, d)
+            .unwrap()
+            .and_hms_opt(h, mi, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn dictation_state_needs_the_config_field() {
+        // This branch's Config has no dictation_enabled: no toggle, no guess.
+        let config = Config::defaults_for(true);
+        assert_eq!(
+            dictation_state(&config).is_some(),
+            config.field_bool("dictation_enabled").is_some()
+        );
+        let mut on = config.clone();
+        on.set_field("dictation_enabled", serde_json::Value::Bool(true));
+        if let Some(state) = dictation_state(&on) {
+            assert_eq!(state.label, "Dictation: On");
+            assert_eq!(state.action, "Turn Dictation Off");
+        }
+    }
+
+    #[test]
+    fn row_text_and_dates_follow_python() {
+        assert_eq!(history_row_text("final", "raw"), "final");
+        assert_eq!(history_row_text("", "raw"), "raw");
+        assert_eq!(history_row_text("", ""), "(no text)");
+        let now = dt(2026, 11, 16, 20, 0);
+        assert_eq!(history_date_label(dt(2026, 11, 16, 15, 5), now), "3:05 PM");
+        assert_eq!(history_date_label(dt(2026, 11, 16, 0, 7), now), "12:07 AM");
+        assert_eq!(history_date_label(dt(2026, 11, 5, 9, 0), now), "Nov 5");
+        assert_eq!(history_date_label(dt(2026, 11, 15, 9, 0), now), "Nov 15");
+    }
+
+    #[test]
+    fn row_actions_and_layout() {
+        let a = history_row_actions("dictate", true);
+        assert_eq!(
+            a.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            ["Copy", "Original", "Retry", "Delete"]
+        );
+        assert_eq!(history_row_actions("dictate", false).len(), 3);
+        assert_eq!(history_row_actions("note", true).len(), 3);
+        // 1000 - 12 - (56+76+60+72) - 8*3
+        assert_eq!(history_action_start(1000, &a), 1000 - 12 - 264 - 24);
+        assert_eq!(history_action_start(1000, &[]), 1000);
+        assert_eq!(history_row_text_layout(1000, None, false), (960, None));
+        assert_eq!(
+            history_row_text_layout(1000, None, true),
+            (1000 - 102 - 26, Some(898))
+        );
+        assert_eq!(history_row_text_layout(1000, Some(600), false), (576, None));
+        assert_eq!(
+            history_row_text_layout(1000, Some(600), true),
+            (492, Some(518))
+        );
+    }
+
+    #[test]
+    fn chips_and_titles() {
+        assert_eq!(history_status_chip("ok"), None);
+        assert_eq!(history_status_chip("failed"), Some(("Failed", true)));
+        assert_eq!(history_status_chip("silent"), Some(("Silent", false)));
+        let now = dt(2026, 11, 16, 20, 0);
+        let when = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
+        let ts = Local
+            .from_local_datetime(&when.and_hms_opt(9, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp() as f64;
+        assert_eq!(
+            history_meta_line(None, ts, "dictate", now),
+            "Unknown  ·  Nov 5  ·  Dictate"
+        );
+        assert_eq!(
+            history_meta_line(Some("Mail"), ts, "MEETING note", now),
+            "Mail  ·  Nov 5  ·  Meeting Note"
+        );
+    }
+
+    #[test]
+    fn paging_and_empty_states() {
+        assert_eq!(history_page_label(0), "Page 1");
+        assert_eq!(history_page_label(16), "Page 3");
+        assert_eq!(history_newer_offset(4), 0);
+        assert_eq!(history_newer_offset(16), 8);
+        assert_eq!(history_older_offset(8), 16);
+        assert_eq!(history_empty_state(true, false).3, "clearSearch");
+        assert_eq!(
+            history_empty_state(false, true).1,
+            "Your recent dictations will appear here."
+        );
+        assert_eq!(
+            history_empty_state(false, false).1,
+            "Your dictations will appear here."
+        );
+    }
+
+    #[test]
+    fn stat_cards_pluralise() {
+        let stats = lf_core::history::Stats {
+            total_words: 1234,
+            total_dictations: 9,
+            avg_wpm: 101.25,
+            words_today: 3,
+            words_7d: 40,
+            current_streak_days: 1,
+            longest_streak_days: 5,
+            top_apps: vec![],
+        };
+        let cards = home_stat_cards(&stats);
+        assert_eq!(cards[1], ("Avg WPM", "101.2".to_string()));
+        assert_eq!(cards[2], ("Streak", "1 day".to_string()));
+        assert_eq!(
+            home_stats_summary(&stats),
+            "Today  3 words     Last 7 days  40 words     Longest streak  5 days"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2557,3 +2919,261 @@ mod tests {
         assert_eq!(py_splitlines(""), Vec::<&str>::new());
     }
 }
+
+// ===== BEGIN lf-ui mac pages: Dictionary/Style page logic (fork P2, append-only) =====
+
+/// Shown when importing a dictionary file fails (`importDictionary_`).
+pub const DICTIONARY_IMPORT_FAILED: &str =
+    "Couldn't import that file. Choose a CSV or JSON file of words and replacements.";
+
+/// `Imported {added}; duplicates {skipped_duplicate}; invalid {skipped_invalid}.`
+pub fn dictionary_import_notice(counts: &lf_core::dictionary::ImportCounts) -> String {
+    format!(
+        "Imported {}; duplicates {}; invalid {}.",
+        counts.added, counts.skipped_duplicate, counts.skipped_invalid
+    )
+}
+
+/// The dictionary card a submit belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DictionaryCard {
+    Word,
+    Replacement,
+}
+
+/// What the Dictionary page keeps across rebuilds: the three typed fields and
+/// the entries being edited (`_preserve_page_state` / `_restore_page_state`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DictionaryDraft {
+    pub word: String,
+    pub source: String,
+    pub target: String,
+    pub editing_word: Option<String>,
+    pub editing_source: Option<String>,
+}
+
+impl DictionaryDraft {
+    /// `_sync_dictionary_buttons`: the add-word button title.
+    pub fn word_button_title(&self) -> &'static str {
+        if self.editing_word.as_deref().is_some_and(|w| !w.is_empty()) {
+            "Save word"
+        } else {
+            "Add word"
+        }
+    }
+
+    /// `_sync_dictionary_buttons`: the add-replacement button title.
+    pub fn replacement_button_title(&self) -> &'static str {
+        if self
+            .editing_source
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+        {
+            "Save replacement"
+        } else {
+            "Add replacement"
+        }
+    }
+
+    /// `editDictionary_`: load a row into its card's fields.
+    pub fn begin_edit(&mut self, row: &DictionaryRow) {
+        match row.kind {
+            EntryKind::Word => {
+                self.editing_word = Some(row.key.clone());
+                self.word = row.key.clone();
+            }
+            EntryKind::Replacement => {
+                self.editing_source = Some(row.key.clone());
+                self.source = row.key.clone();
+                self.target = row.target.clone();
+            }
+        }
+    }
+
+    /// The success branch of `_reload_dictionary`: clear the submitted card's
+    /// fields and drop the editing id of an entry that no longer exists
+    /// (compared case-insensitively, restricted to `forget_kind` when given).
+    pub fn after_success(
+        &mut self,
+        clear: Option<DictionaryCard>,
+        forget: Option<(&str, Option<EntryKind>)>,
+    ) {
+        match clear {
+            Some(DictionaryCard::Word) => {
+                self.word.clear();
+                self.editing_word = None;
+            }
+            Some(DictionaryCard::Replacement) => {
+                self.source.clear();
+                self.target.clear();
+                self.editing_source = None;
+            }
+            None => {}
+        }
+        if let Some((key, kind)) = forget.filter(|(key, _)| !key.is_empty()) {
+            let same = |editing: &Option<String>| {
+                editing.as_deref().is_some_and(|e| {
+                    !e.is_empty()
+                        && caseless::default_case_fold_str(e)
+                            == caseless::default_case_fold_str(key)
+                })
+            };
+            if matches!(kind, None | Some(EntryKind::Word)) && same(&self.editing_word) {
+                self.editing_word = None;
+            }
+            if matches!(kind, None | Some(EntryKind::Replacement)) && same(&self.editing_source) {
+                self.editing_source = None;
+            }
+        }
+    }
+}
+
+/// Cleanup levels in segment order (`cleanup_options`).
+pub const STYLE_CLEANUP_OPTIONS: [&str; 3] = ["none", "light", "medium"];
+/// Segment titles of [`STYLE_CLEANUP_OPTIONS`].
+pub const STYLE_CLEANUP_TITLES: [&str; 3] = ["None", "Light", "Medium"];
+/// Style options in segment order (`style_options`).
+pub const STYLE_OPTIONS: [&str; 4] = ["formal", "casual", "very_casual", "excited"];
+/// `(category, example)` rows of the Style page, in display order.
+pub const STYLE_CATEGORIES: [(&str, &str); 4] = [
+    ("work", "Please share the updated timeline."),
+    ("email", "Thanks for following up."),
+    ("personal", "Let's catch up soon!"),
+    ("other", "The main point is clear."),
+];
+
+/// `value.replace("_", " ").title()`: `very_casual` -> `Very Casual`.
+pub fn style_option_title(value: &str) -> String {
+    py_title(&value.replace('_', " "))
+}
+
+/// The row label, `f"{category.title()} style"`.
+pub fn style_category_label(category: &str) -> String {
+    format!("{} style", py_title(category))
+}
+
+/// `_style_autosave`'s failure text: a rejected config shows its own message,
+/// anything else (an unwritable file) the generic one.
+pub fn style_save_error_text(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<lf_core::config::ConfigError>() {
+        Some(config_error) => config_error.to_string(),
+        None => STYLE_SAVE_FAILED.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod p2_page_logic_tests {
+    use super::*;
+
+    fn row(kind: EntryKind, key: &str, target: &str) -> DictionaryRow {
+        DictionaryRow {
+            label: key.into(),
+            key: key.into(),
+            kind,
+            target: target.into(),
+        }
+    }
+
+    #[test]
+    fn edit_loads_the_row_and_switches_button_titles() {
+        let mut draft = DictionaryDraft::default();
+        assert_eq!(draft.word_button_title(), "Add word");
+        assert_eq!(draft.replacement_button_title(), "Add replacement");
+        draft.begin_edit(&row(EntryKind::Word, "Kubernetes", ""));
+        assert_eq!(
+            (draft.word.as_str(), draft.word_button_title()),
+            ("Kubernetes", "Save word")
+        );
+        assert_eq!(draft.replacement_button_title(), "Add replacement");
+        draft.begin_edit(&row(EntryKind::Replacement, "my email", "me@example.com"));
+        assert_eq!(
+            (
+                draft.source.as_str(),
+                draft.target.as_str(),
+                draft.replacement_button_title()
+            ),
+            ("my email", "me@example.com", "Save replacement")
+        );
+        // An empty editing id is "not editing", like Python's truthiness.
+        draft.editing_word = Some(String::new());
+        assert_eq!(draft.word_button_title(), "Add word");
+    }
+
+    #[test]
+    fn success_clears_only_the_submitted_card() {
+        let mut draft = DictionaryDraft {
+            word: "w".into(),
+            source: "s".into(),
+            target: "t".into(),
+            editing_word: Some("w".into()),
+            editing_source: Some("s".into()),
+        };
+        draft.after_success(Some(DictionaryCard::Word), None);
+        assert_eq!(
+            (draft.word.as_str(), draft.editing_word.clone()),
+            ("", None)
+        );
+        assert_eq!((draft.source.as_str(), draft.target.as_str()), ("s", "t"));
+        assert_eq!(draft.editing_source.as_deref(), Some("s"));
+        draft.after_success(Some(DictionaryCard::Replacement), None);
+        assert_eq!(draft, DictionaryDraft::default());
+    }
+
+    #[test]
+    fn removing_an_edited_entry_forgets_it_case_insensitively_by_kind() {
+        let mut draft = DictionaryDraft {
+            editing_word: Some("Kubernetes".into()),
+            editing_source: Some("kubernetes".into()),
+            ..DictionaryDraft::default()
+        };
+        // A replacement removal leaves the word being edited alone.
+        draft.after_success(None, Some(("KUBERNETES", Some(EntryKind::Replacement))));
+        assert_eq!(draft.editing_word.as_deref(), Some("Kubernetes"));
+        assert_eq!(draft.editing_source, None);
+        draft.after_success(None, Some(("kubernetes", Some(EntryKind::Word))));
+        assert_eq!(draft.editing_word, None);
+        // Unrestricted kind drops both; an empty key forgets nothing; `ß` folds to `ss`.
+        let mut both = DictionaryDraft {
+            editing_word: Some("Straße".into()),
+            editing_source: Some("STRASSE".into()),
+            ..DictionaryDraft::default()
+        };
+        both.after_success(None, Some(("", None)));
+        assert!(both.editing_word.is_some() && both.editing_source.is_some());
+        both.after_success(None, Some(("strasse", None)));
+        assert_eq!((both.editing_word, both.editing_source), (None, None));
+    }
+
+    #[test]
+    fn import_notice_and_failure_texts_match_python() {
+        let counts = lf_core::dictionary::ImportCounts {
+            added: 3,
+            skipped_duplicate: 1,
+            skipped_invalid: 2,
+        };
+        assert_eq!(
+            dictionary_import_notice(&counts),
+            "Imported 3; duplicates 1; invalid 2."
+        );
+        assert_eq!(
+            DICTIONARY_IMPORT_FAILED,
+            "Couldn't import that file. Choose a CSV or JSON file of words and replacements."
+        );
+    }
+
+    #[test]
+    fn style_titles_labels_and_error_text() {
+        assert_eq!(style_option_title("very_casual"), "Very Casual");
+        assert_eq!(style_option_title("formal"), "Formal");
+        assert_eq!(style_category_label("work"), "Work style");
+        assert_eq!(STYLE_CLEANUP_OPTIONS.len(), STYLE_CLEANUP_TITLES.len());
+        assert_eq!(STYLE_CATEGORIES[3].0, "other");
+        let rejected = anyhow::Error::new(lf_core::config::ConfigError("bad level".into()));
+        assert_eq!(style_save_error_text(&rejected), "bad level");
+        assert_eq!(
+            style_save_error_text(&anyhow::anyhow!("disk full")),
+            STYLE_SAVE_FAILED
+        );
+    }
+}
+// ===== END lf-ui mac pages: Dictionary/Style page logic (fork P2) =====

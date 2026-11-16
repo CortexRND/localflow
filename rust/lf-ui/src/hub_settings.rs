@@ -988,9 +988,7 @@ impl SettingsPageController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::settings_agent::{
-        setting_change, tool_call, FakeSettingsAgent, SettingsAgentError,
-    };
+    use crate::backends::settings_agent::{FakeCall, FakeSettingsAgent, SettingsAgentError};
     use crate::tokens::{HUB_CONTENT_GUTTER, HUB_CONTENT_X, HUB_HEADER_OFFSET, HUB_MIN_WIDTH};
     use serde_json::json;
 
@@ -1002,11 +1000,15 @@ mod tests {
         text.chars().count() as f64 * 7.0
     }
 
+    fn sounds_change() -> Change {
+        Change::setting("sounds_enabled", json!(true), json!(false))
+    }
+
     fn proposal(model: &str) -> Proposal {
         Proposal::new(
             "turn off sounds",
             model,
-            vec![setting_change("sounds_enabled", json!(true), json!(false))],
+            vec![sounds_change()],
             vec!["Server port is not a setting LocalFlow can change here".into()],
         )
     }
@@ -1289,18 +1291,16 @@ mod tests {
 
     #[test]
     fn long_change_lines_wrap_in_full_and_short_rows_keep_their_size() {
-        use crate::backends::settings_agent::replacement_change;
         use crate::text_wrap::wrap_text;
         for width in [MIN_CONTENT, WIDE_CONTENT] {
             for status in ["preview", "applied"] {
                 let long_text = format!("{}{}", "Ünïcødé ẞtraße — ".repeat(5), "x".repeat(15));
-                let long_change =
-                    replacement_change(&json!("ü".repeat(10)), &json!(long_text)).unwrap();
+                let long_change = Change::replacement(&"ü".repeat(10), &long_text);
                 assert_eq!(
                     long_change.replacement_pair().unwrap().1.chars().count(),
                     100
                 );
-                let short = setting_change("sounds_enabled", json!(true), json!(false));
+                let short = sounds_change();
                 let mut state = SettingsPageState::new();
                 let token = state.begin_preview("x").unwrap();
                 state.finish_preview(
@@ -1398,7 +1398,7 @@ mod tests {
     }
 
     fn agent() -> FakeSettingsAgent {
-        FakeSettingsAgent::new(Some("darwin"), &["general", "standup"])
+        FakeSettingsAgent::new()
     }
 
     #[test]
@@ -1537,9 +1537,16 @@ mod tests {
         assert_eq!(choice_value_at(level, 3), None);
         assert_eq!(choice_value_at(level, -1), None);
 
-        let mut config = backend.config();
-        config.set_field("cleanup_level", json!("weird"));
-        backend.set_config(config);
+        // The agent reports a stored value it rejected: no value, not valid.
+        let mut invalid = rows.clone();
+        let broken = invalid
+            .iter_mut()
+            .find(|r| r.key == "cleanup_level")
+            .unwrap();
+        broken.value = None;
+        broken.valid = false;
+        broken.display = "Not set".into();
+        backend.set_rows(invalid);
         let rows = rows_with(&backend);
         let level = rows.iter().find(|r| r.key == "cleanup_level").unwrap();
         assert!(!level.valid);
@@ -1584,11 +1591,20 @@ mod tests {
         (backend, controller)
     }
 
-    fn sounds_off_call() -> Value {
-        tool_call(
-            "set_setting",
-            json!({"key": "sounds_enabled", "value": "off"}),
-        )
+    fn applied(changes: Vec<Change>, message: &str) -> Result<ApplyResult, SettingsAgentError> {
+        Ok(ApplyResult {
+            applied: changes,
+            message: message.into(),
+        })
+    }
+
+    fn refused(message: &str) -> Result<ApplyResult, SettingsAgentError> {
+        Err(SettingsAgentError(message.into()))
+    }
+
+    /// The saved-from-the-page notice of one manual setting change.
+    fn spoken_symbols_off() -> Change {
+        Change::setting("spoken_symbols", json!(true), json!(false))
     }
 
     #[test]
@@ -1596,7 +1612,7 @@ mod tests {
         let (backend, mut controller) = setup();
         assert_eq!(controller.manual_rows.len(), 22);
         assert!(controller.state.undo_lines.is_none());
-        backend.script_calls("gemma4:e4b", vec![sounds_off_call()]);
+        backend.script_proposal(proposal("gemma4:e4b"));
         assert!(controller.start_preview("   ").is_none());
         let job = controller.start_preview("turn off sounds").unwrap();
         assert!(controller.state.busy());
@@ -1606,34 +1622,68 @@ mod tests {
         assert_eq!(controller.state.status, Status::Preview);
         assert_eq!(controller.state.model.as_deref(), Some("gemma4:e4b"));
         assert!(!controller.preview_done()); // delivered once
+                                             // Only the real request reached the agent: blank and busy ones never do.
+        assert_eq!(
+            backend.calls(),
+            vec![FakeCall::Propose("turn off sounds".into())]
+        );
 
+        // Apply hands the previewed changes to the agent and shows its result.
+        backend.script_apply(applied(vec![sounds_change()], "Applied 1 change."));
         controller.apply();
         assert_eq!(controller.state.status, Status::Applied);
         assert_eq!(controller.state.lines, vec!["Sounds: On → Off"]);
         assert_eq!(controller.state.draft, "");
-        assert_eq!(backend.config().field_bool("sounds_enabled"), Some(false));
+        assert_eq!(
+            backend.calls().last(),
+            Some(&FakeCall::Apply(vec![sounds_change()]))
+        );
+        backend.set_undo_lines(Some(vec!["Sounds: Off → On".to_string()]));
         controller.refresh_local();
         assert_eq!(
             controller.state.undo_lines,
             Some(vec!["Sounds: Off → On".to_string()])
         );
 
+        backend.script_undo(Ok(UndoResult {
+            reverted: vec!["Sounds: On".into()],
+            skipped: vec![],
+            message: "Undid the last change.".into(),
+        }));
         controller.undo();
         assert_eq!(controller.state.status, Status::Applied);
         assert_eq!(controller.state.message, "Undid the last change.");
-        assert_eq!(backend.config().field_bool("sounds_enabled"), Some(true));
+        backend.script_undo(Err(SettingsAgentError("There's no change to undo.".into())));
         controller.undo(); // nothing left
         assert_eq!(controller.state.status, Status::Error);
         assert_eq!(controller.state.message, "There's no change to undo.");
-        // Apply is a no-op outside the preview state.
+        // Apply is a no-op outside the preview state: the agent is not asked.
+        let asked = backend.calls().len();
         controller.apply();
         assert_eq!(controller.state.status, Status::Error);
+        assert_eq!(backend.calls().len(), asked);
+    }
+
+    #[test]
+    fn a_refused_apply_shows_the_agents_message_and_drops_the_preview() {
+        let (backend, mut controller) = setup();
+        backend.script_proposal(proposal("m"));
+        controller.start_preview("turn off sounds").unwrap().run();
+        controller.preview_done();
+        backend.script_apply(refused("Nothing was changed: your settings changed."));
+        controller.apply();
+        assert_eq!(controller.state.status, Status::Error);
+        assert_eq!(
+            controller.state.message,
+            "Nothing was changed: your settings changed."
+        );
+        assert!(controller.state.proposal.is_none());
     }
 
     #[test]
     fn cancel_while_busy_ignores_the_late_answer() {
         let (backend, mut controller) = setup();
-        backend.script_calls("m", vec![sounds_off_call()]);
+        backend.script_proposal(proposal("m"));
         let job = controller.start_preview("turn off sounds").unwrap();
         controller.cancel();
         assert_eq!(controller.state.status, Status::Empty);
@@ -1668,37 +1718,45 @@ mod tests {
             .state
             .message
             .contains("no scripted model answer"));
-        assert_eq!(backend.config().field_bool("sounds_enabled"), Some(true));
+        assert_eq!(controller.state.status, Status::Error);
     }
 
     #[test]
     fn manual_changes_go_through_set_setting_and_retire_a_preview() {
         let (backend, mut controller) = setup();
-        backend.script_calls("m", vec![sounds_off_call()]);
+        backend.script_proposal(proposal("m"));
         controller.start_preview("turn off sounds").unwrap().run();
         controller.preview_done();
         assert_eq!(controller.state.status, Status::Preview);
 
+        backend.script_set_setting(applied(vec![spoken_symbols_off()], "Applied 1 change."));
         controller.manual_toggle("spoken_symbols", false);
-        assert!(backend
-            .calls()
-            .contains(&"set_setting:spoken_symbols".to_string()));
+        assert_eq!(
+            backend.calls().last(),
+            Some(&FakeCall::SetSetting {
+                key: "spoken_symbols".into(),
+                value: json!(false)
+            })
+        );
         assert_eq!(
             controller.state.manual_notice,
             "Saved: Spoken symbols: On → Off"
         );
         assert_eq!(controller.state.status, Status::Error);
         assert_eq!(controller.state.message, STALE_PREVIEW);
-        assert_eq!(backend.config().field_bool("spoken_symbols"), Some(false));
-        // Apply of the retired preview is a no-op.
+        // Apply of the retired preview is a no-op: the agent is not asked.
+        let asked = backend.calls().len();
         controller.apply();
-        assert_eq!(backend.config().field_bool("sounds_enabled"), Some(true));
+        assert_eq!(backend.calls().len(), asked);
 
-        controller.manual_toggle("spoken_symbols", false); // unchanged: no notice change, draft cleared
+        // Unchanged value: the agent applied nothing, the notice stays.
+        backend.script_set_setting(applied(vec![], "Nothing needed changing."));
+        controller.manual_toggle("spoken_symbols", false);
         assert_eq!(
             controller.state.manual_notice,
             "Saved: Spoken symbols: On → Off"
         );
+        backend.set_undo_lines(Some(vec!["Spoken symbols: Off → On".to_string()]));
         controller.refresh_local();
         assert_eq!(
             controller.state.undo_lines,
@@ -1706,35 +1764,76 @@ mod tests {
         );
     }
 
+    fn set_setting_calls(backend: &FakeSettingsAgent) -> Vec<(String, Value)> {
+        backend
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                FakeCall::SetSetting { key, value } => Some((key, value)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn manual_choose_and_shortcut_commit_and_errors() {
         let (backend, mut controller) = setup();
+        backend.script_set_setting(applied(
+            vec![Change::setting(
+                "style_work",
+                json!("casual"),
+                json!("excited"),
+            )],
+            "Applied 1 change.",
+        ));
         controller.manual_choose("style_work", 3); // formal, casual, very_casual, excited
-        assert_eq!(backend.config().field_str("style_work"), Some("excited"));
+        assert_eq!(
+            set_setting_calls(&backend),
+            vec![("style_work".to_string(), json!("excited"))]
+        );
+        assert_eq!(
+            controller.state.manual_notice,
+            "Saved: Work style: Casual → Excited"
+        );
         controller.manual_choose("style_work", 9); // out of range: ignored
         controller.manual_choose("nope", 0);
-        assert_eq!(backend.config().field_str("style_work"), Some("excited"));
+        assert_eq!(set_setting_calls(&backend).len(), 1);
 
-        // Unchanged text and no error: nothing is written.
-        let before = backend.calls().len();
+        // Unchanged text and no error: nothing is sent to the agent.
         controller.manual_shortcut("hotkey", "left_option");
-        assert_eq!(backend.calls().len(), before);
-        // An invalid shortcut stays in the field with its error.
+        assert_eq!(set_setting_calls(&backend).len(), 1);
+        // A shortcut the agent refuses stays in the field with its error.
+        backend.script_set_setting(refused("“a” is not a key you can hold"));
         controller.manual_shortcut("hotkey", "a");
+        assert_eq!(
+            set_setting_calls(&backend).last(),
+            Some(&("hotkey".to_string(), json!("a")))
+        );
         assert!(controller.state.manual_errors["hotkey"].contains("is not a key you can hold"));
         assert_eq!(controller.state.manual_drafts["hotkey"], "a");
-        assert_eq!(backend.config().field_str("hotkey"), Some("alt_l"));
         // The unchanged text is retried because an error is showing.
+        backend.script_set_setting(applied(vec![], "Nothing needed changing."));
         controller.manual_shortcut("hotkey", "left_option");
+        assert_eq!(
+            set_setting_calls(&backend).last(),
+            Some(&("hotkey".to_string(), json!("left_option")))
+        );
         assert!(!controller.state.manual_errors.contains_key("hotkey"));
         assert!(!controller.state.manual_drafts.contains_key("hotkey"));
-        // Clash with another shortcut.
+        // The agent's clash message is shown inline as given.
+        backend.script_set_setting(refused(
+            "Nothing was changed: ctrl+alt+1 is already the Polish shortcut.",
+        ));
         controller.manual_shortcut("prompt_hotkey", "ctrl+alt+1");
         assert!(controller.state.manual_errors["prompt_hotkey"].starts_with("Nothing was changed:"));
         assert!(controller.state.manual_errors["prompt_hotkey"].contains("already the"));
-        // Blank means "off".
+        // Blank means "off": the text sent is the word `off`, not an empty value.
+        backend.script_set_setting(applied(vec![], "Nothing needed changing."));
         controller.manual_shortcut("polish_hotkey", "   ");
-        assert_eq!(backend.config().field_str("polish_hotkey"), Some(""));
+        assert_eq!(
+            set_setting_calls(&backend).last(),
+            Some(&("polish_hotkey".to_string(), json!("off")))
+        );
     }
 
     #[test]
@@ -1778,7 +1877,8 @@ mod tests {
         controller.refresh_local();
         assert!(controller.manual_rows.is_empty());
         assert!(controller.state.undo_lines.is_none());
-        // Writes report the load failure inline.
+        // Writes report the agent's load failure inline.
+        backend.script_set_setting(refused("Couldn't read your settings (bad toml)."));
         controller.manual_toggle("sounds_enabled", false);
         assert_eq!(
             controller.state.manual_errors["sounds_enabled"],

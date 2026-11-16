@@ -206,9 +206,136 @@ pub fn clear_request() {
     RequestFile::in_lock_dir().clear_request();
 }
 
+/// What the app knows about the Hub window it already has
+/// (`main_app.front_or_build`'s `existing` controller).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubWindowState {
+    /// The Hub was closed (its window delegate shut it down): never reusable.
+    pub closed: bool,
+    pub miniaturized: bool,
+    pub visible: bool,
+    /// The page currently shown.
+    pub page: String,
+}
+
+/// What to do for a launch, reopen or page request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReopenPlan {
+    /// Bring the existing Hub forward (deminiaturizing it first if needed) and
+    /// go to `navigate` when a different page was asked for.
+    Reuse {
+        deminiaturize: bool,
+        navigate: Option<&'static str>,
+    },
+    /// Build a new Hub on `page` and show it.
+    Build { page: &'static str },
+}
+
+/// Port of `main_app.front_or_build` + `_native_hub`: a miniaturized or
+/// visible Hub is reused; a closed one never is (its views and timers are shut
+/// down for good), so a new Hub is built. `requested` is the page asked for
+/// (validated here; unknown or absent means none).
+pub fn plan_reopen(existing: Option<&HubWindowState>, requested: Option<&str>) -> ReopenPlan {
+    let page = requested.and_then(validate_page);
+    if let Some(hub) = existing {
+        if !hub.closed && (hub.miniaturized || hub.visible) {
+            // Same page: nothing to do (a rebuild would only reset scrolling).
+            let navigate = page.filter(|page| *page != hub.page);
+            return ReopenPlan::Reuse {
+                deminiaturize: hub.miniaturized,
+                navigate,
+            };
+        }
+    }
+    ReopenPlan::Build {
+        page: page.unwrap_or(DEFAULT_PAGE),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(closed: bool, miniaturized: bool, visible: bool, page: &str) -> HubWindowState {
+        HubWindowState {
+            closed,
+            miniaturized,
+            visible,
+            page: page.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_closed_hub_is_never_reused() {
+        // The window delegate shut the closed Hub down for good: build a new one.
+        let closed = window(true, false, true, "Home");
+        assert_eq!(
+            plan_reopen(Some(&closed), None),
+            ReopenPlan::Build { page: "Home" }
+        );
+        assert_eq!(
+            plan_reopen(Some(&closed), Some("history")),
+            ReopenPlan::Build { page: "Home" },
+            "an unvalidated lower-case name is no request"
+        );
+        assert_eq!(
+            plan_reopen(Some(&window(true, true, false, "Style")), Some("History")),
+            ReopenPlan::Build { page: "History" }
+        );
+    }
+
+    #[test]
+    fn first_launch_and_a_hidden_window_build() {
+        assert_eq!(plan_reopen(None, None), ReopenPlan::Build { page: "Home" });
+        assert_eq!(
+            plan_reopen(None, Some("Dictionary")),
+            ReopenPlan::Build { page: "Dictionary" }
+        );
+        // Not closed, but neither visible nor miniaturized (ordered out).
+        let hidden = window(false, false, false, "Home");
+        assert_eq!(
+            plan_reopen(Some(&hidden), Some("Prompts")),
+            ReopenPlan::Build { page: "Prompts" }
+        );
+        assert_eq!(
+            plan_reopen(Some(&hidden), Some("Nonsense")),
+            ReopenPlan::Build { page: "Home" }
+        );
+    }
+
+    #[test]
+    fn a_live_hub_is_reused_and_navigates_only_to_a_different_page() {
+        let live = window(false, false, true, "Home");
+        assert_eq!(
+            plan_reopen(Some(&live), None),
+            ReopenPlan::Reuse {
+                deminiaturize: false,
+                navigate: None
+            }
+        );
+        assert_eq!(
+            plan_reopen(Some(&live), Some("Home")),
+            ReopenPlan::Reuse {
+                deminiaturize: false,
+                navigate: None
+            }
+        );
+        assert_eq!(
+            plan_reopen(Some(&live), Some("Style")),
+            ReopenPlan::Reuse {
+                deminiaturize: false,
+                navigate: Some("Style")
+            }
+        );
+        let mini = window(false, true, false, "History");
+        assert_eq!(
+            plan_reopen(Some(&mini), Some("History")),
+            ReopenPlan::Reuse {
+                deminiaturize: true,
+                navigate: None
+            }
+        );
+    }
 
     #[test]
     fn canonical_page_folds_python_whitespace() {

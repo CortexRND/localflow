@@ -1,0 +1,183 @@
+//! The contract between the Hub shell ([`super::hub`]) and its pages
+//! ([`super::pages`]).
+//!
+//! In Python every page is a method of the one `HubWindowController`. Here a
+//! page is a long-lived object implementing [`HubPage`]: the shell keeps it for
+//! the Hub's lifetime, so drafts, search text and the like live in the page and
+//! survive the full re-layout the shell performs on every resize, appearance
+//! change and navigation. Before the views are torn down the shell calls
+//! [`HubPage::capture`] (read live controls into the page state) and afterwards
+//! [`HubPage::render`] rebuilds the views from that state.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use anyhow::Result;
+use lf_core::config::{apply_config_update, save_config, Config};
+use lf_core::dictionary::DictionaryStore;
+use lf_core::history::HistoryStore;
+use objc2::rc::Retained;
+use objc2::MainThreadMarker;
+use serde_json::Value;
+
+use super::actions::ActionTarget;
+use super::style::FlippedView;
+use crate::backends::meeting::MeetingClient;
+use crate::backends::prompts::PromptQueue;
+use crate::tokens::{Palette, Weight};
+
+/// The text-measure closure pages pass to the step-1 layout code.
+pub type Measure = Rc<dyn Fn(&str, f64, Weight) -> f64>;
+
+/// Everything the Hub reads and writes, injected so snapshots and tests never
+/// touch the user's real files.
+pub struct HubServices {
+    /// The live config snapshot; replaced after every successful save.
+    pub config: RefCell<Config>,
+    /// Where config updates are written (`None`: the default config path).
+    pub config_path: RefCell<Option<PathBuf>>,
+    /// When true (snapshots, tests) config updates stay in memory only.
+    pub memory_only_config: Cell<bool>,
+    pub history: Rc<HistoryStore>,
+    pub dictionary: Rc<DictionaryStore>,
+    pub prompt_queue: Arc<dyn PromptQueue>,
+    pub meeting_client: Arc<dyn MeetingClient>,
+    /// Per-page inline error text (`page_errors` in Python), cleared when the
+    /// user navigates to the page from the sidebar.
+    pub page_errors: RefCell<HashMap<String, String>>,
+    /// Per-page notices (`page_notices`).
+    pub page_notices: RefCell<HashMap<String, String>>,
+}
+
+impl HubServices {
+    pub fn new(
+        config: Config,
+        history: Rc<HistoryStore>,
+        dictionary: Rc<DictionaryStore>,
+        prompt_queue: Arc<dyn PromptQueue>,
+        meeting_client: Arc<dyn MeetingClient>,
+    ) -> Rc<Self> {
+        Rc::new(HubServices {
+            config: RefCell::new(config),
+            config_path: RefCell::new(None),
+            memory_only_config: Cell::new(false),
+            history,
+            dictionary,
+            prompt_queue,
+            meeting_client,
+            page_errors: RefCell::default(),
+            page_notices: RefCell::default(),
+        })
+    }
+
+    /// Like [`Self::new`] but config updates stay in memory (snapshots, tests):
+    /// no config file is ever written.
+    pub fn new_isolated(
+        config: Config,
+        history: Rc<HistoryStore>,
+        dictionary: Rc<DictionaryStore>,
+        prompt_queue: Arc<dyn PromptQueue>,
+        meeting_client: Arc<dyn MeetingClient>,
+    ) -> Rc<Self> {
+        Rc::new(HubServices {
+            config: RefCell::new(config),
+            config_path: RefCell::new(None),
+            memory_only_config: Cell::new(true),
+            history,
+            dictionary,
+            prompt_queue,
+            meeting_client,
+            page_errors: RefCell::default(),
+            page_notices: RefCell::default(),
+        })
+    }
+
+    /// A copy of the current config.
+    pub fn config(&self) -> Config {
+        self.config.borrow().clone()
+    }
+
+    /// Validate and apply a nested config update (`{"section": {"key": v}}`),
+    /// write it (unless [`Self::memory_only_config`]) and make it current. The
+    /// current config is unchanged on error.
+    pub fn update_config(&self, update: &Value) -> Result<Config> {
+        let updated = apply_config_update(&self.config.borrow(), update)?;
+        if !self.memory_only_config.get() {
+            save_config(&updated, self.config_path.borrow().as_deref())?;
+        }
+        *self.config.borrow_mut() = updated.clone();
+        Ok(updated)
+    }
+
+    pub fn set_page_error(&self, page: &str, message: &str) {
+        self.page_errors
+            .borrow_mut()
+            .insert(page.to_string(), message.to_string());
+    }
+
+    pub fn page_error(&self, page: &str) -> Option<String> {
+        self.page_errors.borrow().get(page).cloned()
+    }
+
+    pub fn clear_page_error(&self, page: &str) {
+        self.page_errors.borrow_mut().remove(page);
+    }
+}
+
+/// What a page needs to build its views.
+pub struct PageCtx {
+    pub mtm: MainThreadMarker,
+    /// The page canvas (a flipped document view): add every control here.
+    pub body: Retained<FlippedView>,
+    /// Content width of the canvas.
+    pub width: f64,
+    /// Visible height of the scroll viewport (pages may be taller; they scroll).
+    pub viewport_height: f64,
+    pub palette: Palette,
+    pub services: Rc<HubServices>,
+    /// Target/action + delegate dispatcher for every control on the page.
+    pub target: Retained<ActionTarget>,
+    pub measure: Measure,
+    /// Ask the shell to navigate (`show_page`).
+    pub navigate: Rc<dyn Fn(&str)>,
+    /// Ask the shell to rebuild the current page (after a data change).
+    pub rebuild: Rc<dyn Fn()>,
+}
+
+/// One Hub page.
+pub trait HubPage {
+    /// The page id (`"Home"`, ...), one of [`crate::hub_route::HUB_PAGES`].
+    fn name(&self) -> &'static str;
+
+    /// Build the page into `ctx.body` starting at `top` (below the shared
+    /// title and any callout). Returns the y of the bottom of the content; the
+    /// shell grows the document to it so tall pages scroll.
+    fn render(&mut self, ctx: &PageCtx, top: f64) -> f64;
+
+    /// Read live controls (search text, typed drafts, selections) into the page
+    /// state. Called right before the views are torn down.
+    fn capture(&mut self) {}
+
+    /// Called when the page is left or the window closes: write anything a
+    /// debounced timer was still holding. Must never panic.
+    fn flush(&mut self) {}
+
+    /// Called once when the Hub closes: stop timers and drop view references.
+    fn shutdown(&mut self) {
+        self.flush();
+    }
+
+    /// Whether leaving is allowed (an invalid draft may keep the user here).
+    fn can_leave(&mut self) -> bool {
+        true
+    }
+}
+
+/// Shared mutable handle to a page (closures hold `Weak` clones of it).
+pub type PageHandle = Rc<RefCell<dyn HubPage>>;
+
+/// A convenience flag cell used by pages for "rebuild requested".
+pub type Flag = Rc<Cell<bool>>;
