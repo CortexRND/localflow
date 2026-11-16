@@ -890,7 +890,12 @@ def _hub_settings_snapshots(base):
     States are set on the page controller directly (no worker, no model);
     Apply runs for real against temp files so the undo summary is genuine.
     """
-    from localflow.settings_agent import Proposal, setting_change, word_change
+    from localflow.settings_agent import (
+        ALLOWLIST,
+        Proposal,
+        setting_change,
+        word_change,
+    )
 
     _progress("settings: build")
     agent = _snapshot_settings_agent(base)
@@ -969,7 +974,9 @@ def _hub_settings_snapshots(base):
     # shortcut kept in its field with the inline error. Both go through the
     # agent's set_setting against the temp config, as the real controls do.
     controller.show_page("Settings")
-    assert len(page.manual_rows) == 22, "every allowlisted setting has a control"
+    assert {row.key for row in page.manual_rows} == set(ALLOWLIST), (
+        "every allowlisted setting has a control"
+    )
     page._manual_commit("cleanup_level", "medium")
     assert page.state.manual_notice, "a manual change reports what was saved"
     # The manual panel is full width under the agent: label left, control

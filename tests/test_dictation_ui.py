@@ -13,7 +13,7 @@ ROOT = Path(__file__).parent.parent
 
 
 def _methods(filename, classname, namespace):
-    tree = ast.parse((ROOT / "localflow" / filename).read_text())
+    tree = ast.parse((ROOT / "localflow" / filename).read_text(encoding="utf-8"))
     cls = next(
         node
         for node in tree.body
@@ -61,6 +61,14 @@ def test_shortcut_listing_includes_dictation_toggle():
 
 
 def test_menubar_toggle_persists_and_external_changes_refresh(tmp_path, monkeypatch):
+    read_text = Path.read_text
+
+    def windows_read_text(path, *args, **kwargs):
+        if path.name == "menubar.py":
+            kwargs.setdefault("encoding", "cp1252")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_read_text)
     monkeypatch.setenv("LOCALFLOW_CONFIG", str(tmp_path / "config.toml"))
     config.save_config(config.Config(llm_model="keep-me"))
     notifications = Mock()
@@ -130,3 +138,32 @@ def test_native_home_toggle_saves_switch_value(tmp_path, monkeypatch):
     ns["toggleDictation_"](hub, SimpleNamespace(state=lambda: 1))
     assert not config.load_config().dictation_enabled
     assert "read-only" in hub.page_errors["Home"]
+
+
+def test_snapshot_manual_controls_match_current_allowlist():
+    from localflow.settings_agent import ALLOWLIST
+
+    tree = ast.parse((ROOT / "scripts/mac_ui_snapshots.py").read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_hub_settings_snapshots"
+    )
+    assertion = next(
+        node
+        for node in function.body
+        if isinstance(node, ast.Assert)
+        and any(
+            isinstance(child, ast.Attribute) and child.attr == "manual_rows"
+            for child in ast.walk(node)
+        )
+    )
+    code = compile(
+        ast.Module(body=[assertion], type_ignores=[]), "snapshot_assertion", "exec"
+    )
+    page = SimpleNamespace(manual_rows=[SimpleNamespace(key=key) for key in ALLOWLIST])
+    namespace = {"page": page, "ALLOWLIST": ALLOWLIST}
+    exec(code, namespace)  # noqa: S102 - exercise the snapshot guard without AppKit
+    page.manual_rows.pop()
+    with pytest.raises(AssertionError, match="every allowlisted setting"):
+        exec(code, namespace)  # noqa: S102
