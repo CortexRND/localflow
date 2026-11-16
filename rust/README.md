@@ -13,7 +13,39 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
 | `lf-stt` | Whisper/Parakeet inference, downloads, model cache protection, Python-compatible leases and lazy engine slot; [API and gaps](lf-stt/README.md) |
+| `lf-input` | global hotkeys (`KeyboardHub`, pynput-compatible key names, order-insensitive chords, macOS CGEventTap with the Input Monitoring checks) and paste/clipboard (`Injector`) |
+| `lf-runtime` | the dictation controller state machine, worker and text pipeline, live config reload, the `dictation_enabled` switch, menu bar model + macOS NSStatusItem, single-instance lock; parity driver `lf-runtime/examples/runtime_parity.rs` |
 | `lf-server` | optional axum HTTP server, embedded web UI, auth, config/provider/key APIs and runtime backend interface (see `lf-server/README.md`) |
+
+### Dictation runtime (`lf-input`, `lf-runtime`)
+
+A library port of `hotkey.py`, `pushtotalk.py`, `inject.py`, `app.py`
+(worker, `LiveSettings`, `_process_clip`/`_process_job`), `live_config.py`,
+`menubar.py`/`menubar_poll.py`, `transform.py` and `singleinstance.py`.
+Audio and speech-to-text come in through the `AudioSource` and
+`SpeechEngine` traits (`lf-runtime/src/engine.rs`) so the `lf-audio` and
+`lf-stt` crates can be plugged in; `lf_runtime::run::run` wires everything,
+and no binary ships it yet.
+
+Everything is event-driven. The controller blocks on its channel and only
+sets a deadline for the double-tap window and the max-duration timer. The
+hotkey timer, the config watcher (`notify`: FSEvents/inotify/
+ReadDirectoryChangesW) and the meeting poller all sleep on condvars or
+channels, and the menu gets state pushed to it. `cargo run --release -p
+lf-runtime --example idle -- 10` reports the idle footprint on Linux.
+
+`dictation_enabled` (`[dictation] enabled`, default true) and
+`dictation_toggle_hotkey` (`[hotkey] dictation_toggle`) match the Python
+keys. While dictation is off, every gesture except paste-last is ignored and
+the microphone is never opened. The toggle shortcut and the menu item flip
+the key in the file in place (`toml_edit`) and reload it live.
+
+`lf_runtime::server::DictationBackend` implements `lf_server::backend::Backend`
+for `POST /transcribe` (Python's `server.transcribe`): multipart `file` and
+`clean` query, ffmpeg decode to 16 kHz mono f32, the same silence gate,
+pipeline and `phone` history row. Other backend routes go to its `fallback`
+(`UnavailableBackend` by default). Pass it to
+`ServerState::load_with_backend` together with a loaded `SpeechEngine`.
 
 ## Build
 
@@ -198,13 +230,23 @@ Transcripts/timing need not be bit-identical across models/backends. See the
 
 ## Known gaps (Stage 1)
 
-This is not a full port and does not imply a Rust runtime or UI:
+This is not a full application port:
 
-* no desktop dictation runtime, hotkeys, paste
-  injection, meetings, menu bar, Hub, setup or native settings windows;
+* no meetings, Hub, setup or native settings windows;
   `serve` hosts the web UI and core APIs; `lf-stt`'s optional `server` feature
   provides an opt-in transcription backend adapter ([integration](lf-stt/README.md#http-backend-optional));
   other runtime routes return explicit unavailable-backend errors until linked;
+  the dictation runtime (`lf-runtime`) is a library with no `dictate` binary yet;
+* hotkeys and the menu bar are implemented on macOS only: on Linux and
+  Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
+  tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
+  on macOS, `wtype`/`xdotool` on Linux, `SendInput` on Windows; Linux
+  `pynput` paste is not ported). Keys are mapped by US-layout keycode, plus
+  the character Shift types (as pynput reports it), so `<ctrl>++` works;
+  Option never changes the key;
+* not ported from the runtime: pausing media while dictating, the
+  achievement cue, speech-model leases and explicit speech retry requests,
+  and the frontmost-app AppleScript fallback;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
   Python `wave`'s header), `load_clip` (PCM / extensible-PCM WAV inside the
