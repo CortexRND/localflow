@@ -8,6 +8,71 @@ permissions:
   contents: read
 
 jobs:
+  lf-ui-snapshots:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      PYNPUT_BACKEND: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Native lf-ui tests
+        working-directory: rust
+        run: cargo test -p lf-ui
+
+      - name: Rust Hub snapshots
+        working-directory: rust
+        run: cargo run -p lf-ui --example snapshots -- ../artifacts/rust-ui
+
+      - name: Rust Hub idle RSS
+        env:
+          LOCALFLOW_CONFIG: ${{ runner.temp }}/rust-hub-config.toml
+        run: |
+          cargo build --manifest-path rust/Cargo.toml -p lf-ui --bin lf-hub --release
+          bash scripts/ci_hub_rss.sh Rust artifacts/rust-ui/idle-rss.txt rust/target/release/lf-hub --page Home
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-ui-snapshots
+          path: artifacts/rust-ui
+          if-no-files-found: error
+
+      - uses: actions/setup-python@v5
+        if: always()
+        continue-on-error: true
+        with:
+          python-version: "3.12"
+
+      - name: Install Python UI dependencies
+        if: always()
+        continue-on-error: true
+        run: pip install -e . pytest
+
+      - name: Python Hub snapshots
+        if: always()
+        continue-on-error: true
+        run: python scripts/mac_ui_snapshots.py
+
+      - name: Python Hub idle RSS
+        if: always()
+        continue-on-error: true
+        env:
+          LOCALFLOW_CONFIG: ${{ runner.temp }}/python-hub-config.toml
+        run: bash scripts/ci_hub_rss.sh Python artifacts/mac-ui/idle-rss.txt python -m localflow.hub_mac
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: python-ui-snapshots
+          path: artifacts/mac-ui
+
   rust:
     name: rust (${{ matrix.os }})
     strategy:

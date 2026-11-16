@@ -15,7 +15,6 @@ use lf_core::history::Stats;
 use objc2::DefinedClass;
 use objc2_app_kit::{NSAccessibility, NSControlStateValueOff, NSControlStateValueOn, NSSwitch};
 use objc2_foundation::NSString;
-use serde_json::json;
 
 use crate::hub_model::{
     dictation_state, history_empty_state, home_decoration_frame, home_stat_cards,
@@ -65,8 +64,8 @@ impl HubPage for HomePage {
         let width = ctx.width;
         let mut cursor = top;
 
-        // Dictation switch (only when the config can store it).
-        if let Some(state) = dictation_state(&ctx.services.config()) {
+        {
+            let state = dictation_state(&ctx.services.dictation_config());
             let switch = NSSwitch::initWithFrame(
                 mtm.alloc::<NSSwitch>(),
                 rect(width - 54.0, cursor + 4.0, 54.0, 32.0),
@@ -83,7 +82,7 @@ impl HubPage for HomePage {
                 let sender = switch.clone();
                 ctx.target.on_action(&switch, move || {
                     let on = sender.state() == NSControlStateValueOn;
-                    match services.update_config(&json!({"dictation": {"enabled": on}})) {
+                    match services.update_dictation(on) {
                         Ok(_) => services.clear_page_error(PAGE),
                         Err(e) => services
                             .set_page_error(PAGE, &format!("Couldn't change dictation: {e}")),

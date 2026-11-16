@@ -1323,13 +1323,10 @@ pub struct DictationState {
     pub detail: &'static str,
 }
 
-/// `dictation_state(config)`. `None` when this build's `Config` has no
-/// `dictation_enabled` field (it arrives with the `dictation.enabled` config
-/// key); the Home page then shows no toggle rather than a switch that cannot
-/// be saved.
-pub fn dictation_state(config: &Config) -> Option<DictationState> {
-    let enabled = config.field_bool("dictation_enabled")?;
-    Some(DictationState {
+/// `dictation_state(config)`.
+pub fn dictation_state(config: &Config) -> DictationState {
+    let enabled = config.field_bool("dictation_enabled").unwrap_or(true);
+    DictationState {
         enabled,
         label: format!("Dictation: {}", if enabled { "On" } else { "Off" }),
         action: if enabled {
@@ -1342,7 +1339,7 @@ pub fn dictation_state(config: &Config) -> Option<DictationState> {
         } else {
             "Dictation is off — push-to-talk is paused"
         },
-    })
+    }
 }
 
 /// Rows per History page (`_render_history` shows 8 and probes a 9th).
@@ -1560,19 +1557,19 @@ mod home_history_tests {
     }
 
     #[test]
-    fn dictation_state_needs_the_config_field() {
-        // This branch's Config has no dictation_enabled: no toggle, no guess.
-        let config = Config::defaults_for(true);
-        assert_eq!(
-            dictation_state(&config).is_some(),
-            config.field_bool("dictation_enabled").is_some()
-        );
-        let mut on = config.clone();
-        on.set_field("dictation_enabled", serde_json::Value::Bool(true));
-        if let Some(state) = dictation_state(&on) {
-            assert_eq!(state.label, "Dictation: On");
-            assert_eq!(state.action, "Turn Dictation Off");
-        }
+    fn dictation_state_tracks_enabled_config() {
+        let mut config = Config::defaults_for(true);
+        let state = dictation_state(&config);
+        assert!(state.enabled);
+        assert_eq!(state.label, "Dictation: On");
+        assert_eq!(state.action, "Turn Dictation Off");
+        assert_eq!(state.detail, "Dictation is on — push-to-talk is ready");
+        config.set_field("dictation_enabled", serde_json::Value::Bool(false));
+        let state = dictation_state(&config);
+        assert!(!state.enabled);
+        assert_eq!(state.label, "Dictation: Off");
+        assert_eq!(state.action, "Turn Dictation On");
+        assert_eq!(state.detail, "Dictation is off — push-to-talk is paused");
     }
 
     #[test]

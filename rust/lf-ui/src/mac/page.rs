@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lf_core::config::{apply_config_update, save_config, Config};
+use lf_core::config::{apply_config_update, load_config, load_from, save_config, Config};
 use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
 use objc2::rc::Retained;
@@ -100,6 +100,38 @@ impl HubServices {
         self.config.borrow().clone()
     }
 
+    fn latest_config(&self) -> Result<Config> {
+        if self.memory_only_config.get() {
+            return Ok(self.config());
+        }
+        match self.config_path.borrow().as_deref() {
+            Some(path) => load_from(path),
+            None => load_config(),
+        }
+    }
+
+    pub fn dictation_config(&self) -> Config {
+        let mut config = self.config();
+        if let Ok(latest) = self.latest_config() {
+            if let Some(enabled) = latest.field_bool("dictation_enabled") {
+                config.set_field("dictation_enabled", Value::Bool(enabled));
+            }
+        }
+        config
+    }
+
+    pub fn update_dictation(&self, enabled: bool) -> Result<Config> {
+        let updated = apply_config_update(
+            &self.latest_config()?,
+            &serde_json::json!({"dictation": {"enabled": enabled}}),
+        )?;
+        if !self.memory_only_config.get() {
+            save_config(&updated, self.config_path.borrow().as_deref())?;
+        }
+        *self.config.borrow_mut() = updated.clone();
+        Ok(updated)
+    }
+
     /// Validate and apply a nested config update (`{"section": {"key": v}}`),
     /// write it (unless [`Self::memory_only_config`]) and make it current. The
     /// current config is unchanged on error.
@@ -181,3 +213,61 @@ pub type PageHandle = Rc<RefCell<dyn HubPage>>;
 
 /// A convenience flag cell used by pages for "rebuild requested".
 pub type Flag = Rc<Cell<bool>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::{meeting::FakeMeetingClient, prompts::FakePromptQueue};
+
+    #[test]
+    fn dictation_updates_reload_disk_and_preserve_config_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = Config::defaults_for(true);
+        save_config(&config, Some(&path)).unwrap();
+        let services = HubServices::new(
+            config.clone(),
+            Rc::new(
+                HistoryStore::open(
+                    Some(dir.path().join("history.sqlite")),
+                    Some(dir.path().join("clips")),
+                    true,
+                )
+                .unwrap(),
+            ),
+            Rc::new(DictionaryStore::new(Some(
+                dir.path().join("dictionary.json"),
+            ))),
+            Arc::new(FakePromptQueue::default()),
+            Arc::new(FakeMeetingClient::default()),
+        );
+        *services.config_path.borrow_mut() = Some(path.clone());
+        let mut external = config;
+        external.set_field("dictation_enabled", Value::Bool(false));
+        external.set_field("cleanup_level", Value::String("light".into()));
+        save_config(&external, Some(&path)).unwrap();
+        assert_eq!(
+            services.dictation_config().field_bool("dictation_enabled"),
+            Some(false)
+        );
+        let updated = services.update_dictation(true).unwrap();
+        assert_eq!(updated.field_bool("dictation_enabled"), Some(true));
+        assert_eq!(
+            load_from(&path).unwrap().field_bool("dictation_enabled"),
+            Some(true)
+        );
+        assert_eq!(updated.field_str("cleanup_level"), Some("light"));
+        std::fs::write(&path, "not valid TOML [").unwrap();
+        assert!(services.update_dictation(false).is_err());
+        assert_eq!(
+            services.config().field_bool("dictation_enabled"),
+            Some(true)
+        );
+        services.memory_only_config.set(true);
+        services.update_dictation(false).unwrap();
+        assert_eq!(
+            services.config().field_bool("dictation_enabled"),
+            Some(false)
+        );
+    }
+}
