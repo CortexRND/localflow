@@ -169,19 +169,30 @@ def test_watcher_notifies_once_per_change_and_survives_bad_files(tmp_path):
     assert watcher.check() is True and seen[-1].sounds_enabled is True
 
 
-def test_watcher_thread_sleeps_between_checks(tmp_path):
+def test_watcher_thread_sleeps_between_checks(tmp_path, monkeypatch):
     path = tmp_path / "config.toml"
     save_config(Config(), path)
-    ticks = []
+    ticks, waits = [], []
     watcher = live_config.ConfigWatcher(
         lambda _c: None, path=path, loader=Config, interval=0.01,
-        on_tick=lambda: ticks.append(time.monotonic()),
-    ).start()
+        on_tick=lambda: ticks.append(None),
+    )
+    wait = watcher._stop.wait
+
+    def record_wait(interval):
+        waits.append(interval)
+        return wait(interval)
+
+    monkeypatch.setattr(watcher._stop, "wait", record_wait)
+    watcher.start()
     try:
         assert _wait_until(lambda: len(ticks) >= 3)
     finally:
         watcher.stop()
-    assert ticks[-1] - ticks[0] >= 0.015  # waits, not a busy loop
+        watcher._thread.join(timeout=2)
+    assert not watcher._thread.is_alive()
+    assert len(waits) >= len(ticks) >= 3
+    assert waits == [watcher.interval] * len(waits)
 
 
 def test_lazy_config_refreshes_live_fields_on_read(tmp_path):
