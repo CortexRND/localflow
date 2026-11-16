@@ -39,7 +39,11 @@ jobs:
       # needed; pkg-config is installed only as a harmless safety net.
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libportaudio2
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libportaudio2 pulseaudio
+
+      - name: Start PulseAudio for Python HTTP contracts
+        if: runner.os == 'Linux'
+        run: pulseaudio --start --exit-idle-time=-1
 
       - name: cargo fmt
         working-directory: rust
