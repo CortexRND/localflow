@@ -10,6 +10,10 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | --- | --- |
 | `lf-core` | config (v2 TOML + legacy v1 migration), API token, keyring secrets, dictionary, history (SQLite), hot phrases, spoken symbols/punctuation, styles |
 | `lf-providers` | Ollama / OpenAI-compatible LLM clients, provider presets and keys, endpoint-bound key activation |
+| `lf-agent` | local Ollama settings proposals, validation, preview/apply/undo and dictionary tools |
+| `lf-ask` | history/vault retrieval, ranking, citations and Ask prompts |
+| `lf-meetings` | meeting capture/session abstractions, notes, titles, transcript Q&A and prompt dispatch |
+| `lf-meetings-backend` | optional composable meeting/Ask/prompt-review backend for `lf-server` |
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
 | `lf-stt` | Whisper/Parakeet inference, downloads, model cache protection, Python-compatible leases and lazy engine slot; [API and gaps](lf-stt/README.md) |
@@ -168,7 +172,42 @@ runs use temporary `HOME`/`USERPROFILE`/XDG/AppData directories and
 overrides, so real config, history and keychain entries are not touched.
 
 The `rust` GitHub Actions workflow (`.github/workflows/rust.yml`) runs all of
-the above on Ubuntu, macOS and Windows.
+the above on Ubuntu, macOS and Windows. The additive `lf-meetings` parity
+example also compares settings-agent prompts/validation, Ask retrieval,
+meeting formatting/writer bytes and Python/Rust prompt-queue round trips.
+
+## Meetings / Ask / Settings agent
+
+These three crates are libraries: there is no CLI/UI integration yet. Optional
+HTTP integration is provided by `lf-meetings-backend`, explicitly injected into
+`lf-server`; it is not installed in the default `lf-rs serve` backend.
+They preserve Python prompts and on-disk formats (including history SQLite,
+meeting Markdown, `queue.json` and `settings-undo.json`). Providers,
+transcription, audio sources and watcher notifications are injectable;
+`lf-meetings` does not depend on a particular speech-to-text implementation.
+
+Real CPAL audio capture and macOS ScreenCaptureKit/CoreAudio adapters require
+the opt-in `lf-meetings/capture` feature on every platform. Default workspace
+builds need no ALSA development headers; enabling capture on Linux does.
+macOS/Windows CI compiles the hardware paths with `capture` and runs only
+device-free tests. Real microphone, loopback, ScreenCaptureKit permissions
+and CoreAudio hardware behavior are not run in CI.
+
+Intentional differences: Rust exposes typed inputs/results rather than Python
+objects; native OS/process/JSON error details and Unicode-table versions may
+differ. Ask's optional source filter is additive (off by default); its result
+count is unsigned. Watcher notifications are delivered through callbacks.
+See each crate's README for the public API and remaining platform caveats.
+
+For a prepared synthetic history/vault, measure release retrieval with:
+
+```sh
+cargo build --release -p lf-ask --example bench_search
+/usr/bin/time -v target/release/examples/bench_search HISTORY.sqlite VAULT
+```
+
+The example reports search-only milliseconds and citations; `time` adds
+whole-process wall time and peak RSS, including startup.
 
 ## Standalone audio and STT
 
@@ -234,7 +273,7 @@ Transcripts/timing need not be bit-identical across models/backends. See the
 
 This is not a full application port:
 
-* no meetings, Hub, setup or native settings windows;
+* no Hub, setup or native settings windows;
   `serve` hosts the web UI and core APIs; `lf-stt`'s optional `server` feature
   provides an opt-in transcription backend adapter ([integration](lf-stt/README.md#http-backend-optional));
   other runtime routes return explicit unavailable-backend errors until linked;
@@ -253,7 +292,7 @@ This is not a full application port:
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
   Python `wave`'s header), `load_clip` (PCM / extensible-PCM WAV inside the
   clips dir only), `prune_audio_clips` and `delete_clip` — but nothing in the
-  CLI records audio (`lf-audio` is standalone), `lf-rs` exposes no clip command, and there is no
+  CLI records audio, `lf-rs` exposes no clip command, and there is no
   retry-from-audio (`lf history retry` needs speech-to-text); no other audio
   codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
