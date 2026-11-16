@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import ClassVar
+
+import pytest
 
 from localflow import hotkey as hotkey_module
 
@@ -245,3 +248,136 @@ def test_active_command_is_cancelled_before_command_key_chord_callback():
     hub._release(keyboard.Key.alt_r)
 
     assert called == ["command", "command-cancel", "polish"]
+
+
+def _stub_input_monitoring(monkeypatch, granted):
+    requests = []
+    monkeypatch.setattr(hotkey_module.sys, "platform", "darwin")
+    monkeypatch.setattr(hotkey_module, "_input_monitoring_granted", lambda: granted)
+    monkeypatch.setattr(
+        hotkey_module, "_request_input_monitoring", lambda: requests.append(True)
+    )
+    return requests
+
+
+def test_denied_input_monitoring_requests_access_once_and_warns(monkeypatch, caplog, capsys):
+    requests = _stub_input_monitoring(monkeypatch, granted=False)
+
+    with caplog.at_level("WARNING", logger="localflow.hotkey"):
+        assert _hub()._preflight_input_monitoring() is False
+
+    assert requests == [True]
+    assert "Input Monitoring not granted" in caplog.text
+    stderr = capsys.readouterr().err
+    assert "Input Monitoring" in stderr
+    assert "LocalFlow" in stderr
+    assert "Restart" in stderr
+
+
+def test_granted_input_monitoring_is_silent(monkeypatch, caplog, capsys):
+    requests = _stub_input_monitoring(monkeypatch, granted=True)
+
+    with caplog.at_level("WARNING", logger="localflow.hotkey"):
+        assert _hub()._preflight_input_monitoring() is True
+
+    assert requests == []
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert capsys.readouterr().err == ""
+
+
+def test_input_monitoring_preflight_skipped_off_macos(monkeypatch, caplog):
+    requests = _stub_input_monitoring(monkeypatch, granted=False)
+    monkeypatch.setattr(hotkey_module.sys, "platform", "linux")
+
+    with caplog.at_level("WARNING", logger="localflow.hotkey"):
+        assert _hub()._preflight_input_monitoring() is True
+
+    assert requests == []
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_undetermined_input_monitoring_is_not_treated_as_granted(monkeypatch, caplog):
+    requests = _stub_input_monitoring(monkeypatch, granted=None)
+
+    with caplog.at_level("WARNING", logger="localflow.hotkey"):
+        assert _hub()._preflight_input_monitoring() is False
+
+    assert requests == []
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+class _InstantListener:
+    """Listener stub whose join() returns at once, so run_forever completes."""
+
+    def __init__(self, on_press, on_release):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def join(self):
+        pass
+
+    def canonical(self, key):
+        return key
+
+
+class _RecordingTimer:
+    created: ClassVar[list] = []
+
+    def __init__(self, interval, function):
+        self.interval = interval
+        self.function = function
+        self.started = False
+        self.cancelled = False
+        _RecordingTimer.created.append(self)
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+
+@pytest.mark.parametrize(
+    ("granted", "armed"), [(True, False), (False, True), (None, True)]
+)
+def test_dead_tap_watchdog_armed_only_without_confirmed_grant(monkeypatch, granted, armed):
+    _stub_input_monitoring(monkeypatch, granted=granted)
+    hub = _hub()
+    _RecordingTimer.created = []
+    monkeypatch.setattr(keyboard, "Listener", _InstantListener, raising=False)
+    monkeypatch.setattr(hotkey_module, "threading", SimpleNamespace(Timer=_RecordingTimer))
+
+    hub.run_forever()
+
+    if armed:
+        [timer] = _RecordingTimer.created
+        assert timer.interval == hotkey_module._DEAD_TAP_SECONDS
+        assert timer.function == hub._check_tap_alive
+        assert timer.started and timer.cancelled
+    else:
+        assert _RecordingTimer.created == []
+
+
+def test_dead_tap_watchdog_warns_without_events(caplog, capsys):
+    with caplog.at_level("WARNING", logger="localflow.hotkey"):
+        _hub()._check_tap_alive()
+
+    assert "no keyboard events received" in caplog.text
+    assert "Input Monitoring" in capsys.readouterr().err
+
+
+def test_dead_tap_watchdog_quiet_after_real_event(caplog, capsys):
+    hub = _hub()
+    hub._press(_KeyCode("a"))
+    hub._release(_KeyCode("a"))
+
+    with caplog.at_level("WARNING", logger="localflow.hotkey"):
+        hub._check_tap_alive()
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert capsys.readouterr().err == ""
