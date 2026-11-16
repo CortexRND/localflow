@@ -133,6 +133,26 @@ impl Key {
     }
 }
 
+/// The keys one key event presses: `base` (the key at its US-layout
+/// position), plus the character Shift typed there when it is a different
+/// printable one. pynput reports that character ("+" for Shift+"="), so
+/// `<ctrl>++` matches as in Python while `<ctrl>+<shift>+=` keeps matching.
+/// Option is left out: it would turn Option+2 into "™".
+pub fn keys_for_typed(base: Key, shift: bool, option: bool, typed: &str) -> Vec<Key> {
+    let mut chars = typed.chars();
+    let extra = match (&base, chars.next(), chars.next()) {
+        (Key::Char(_), Some(c), None)
+            if shift && !option && !c.is_control() && !c.is_whitespace() =>
+        {
+            Some(Key::Char(c)).filter(|k| k.canonical() != base.canonical())
+        }
+        _ => None,
+    };
+    let mut keys = vec![base];
+    keys.extend(extra);
+    keys
+}
+
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -1,8 +1,9 @@
 //! macOS: CGEventTap keyboard listener, TCC checks and CGEvent keystrokes.
 
-use std::ffi::c_void;
+use std::collections::HashMap;
+use std::ffi::{c_ulong, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
@@ -10,9 +11,10 @@ use core_graphics::event::{
     CGEventType, CallbackResult, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use foreign_types::ForeignType;
 
 use crate::hub::KeyboardHub;
-use crate::keys::{Key, Modifier, Side};
+use crate::keys::{keys_for_typed, Key, Modifier, Side};
 use crate::listener::{
     emit, watchdog_armed, InputError, InputWarning, WarningSink, DEAD_TAP, LISTEN_EVENT,
 };
@@ -27,6 +29,27 @@ extern "C" {
 extern "C" {
     fn CGEventTapEnable(tap: *mut c_void, enable: bool);
     fn AXIsProcessTrusted() -> bool;
+    fn CGEventKeyboardGetUnicodeString(
+        event: *const c_void,
+        max_len: c_ulong,
+        actual_len: *mut c_ulong,
+        buf: *mut u16,
+    );
+}
+
+/// The text the key event typed (what pynput reports as the key's char).
+fn typed_text(event: &CGEvent) -> String {
+    let mut buf = [0u16; 8];
+    let mut len: c_ulong = 0;
+    unsafe {
+        CGEventKeyboardGetUnicodeString(
+            event.as_ptr() as *const c_void,
+            buf.len() as c_ulong,
+            &mut len,
+            buf.as_mut_ptr(),
+        );
+    }
+    String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())])
 }
 
 pub fn input_monitoring_granted() -> bool {
@@ -176,6 +199,7 @@ pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
     let port = Arc::new(AtomicUsize::new(0));
     let tap_port = port.clone();
     let feed = hub.clone();
+    let down: Mutex<HashMap<u16, Vec<Key>>> = Mutex::new(HashMap::new());
     let tap = CGEventTap::new(
         CGEventTapLocation::Session,
         CGEventTapPlacement::HeadInsertEventTap,
@@ -199,12 +223,28 @@ pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
                     let repeat =
                         event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
                     if let Some(key) = key_for_code(code) {
+                        let mut down = down.lock().unwrap_or_else(|p| p.into_inner());
                         if matches!(etype, CGEventType::KeyDown) {
                             if !repeat {
-                                feed.press(key);
+                                let flags = event.get_flags();
+                                let keys = keys_for_typed(
+                                    key,
+                                    flags.contains(CGEventFlags::CGEventFlagShift),
+                                    flags.contains(CGEventFlags::CGEventFlagAlternate),
+                                    &typed_text(event),
+                                );
+                                for key in &keys {
+                                    feed.press(key.clone());
+                                }
+                                down.insert(code, keys);
                             }
                         } else {
-                            feed.release(key);
+                            // Release what the press pressed, even if Shift
+                            // came up first.
+                            let keys = down.remove(&code).unwrap_or_else(|| vec![key]);
+                            for key in keys.into_iter().rev() {
+                                feed.release(key);
+                            }
                         }
                     }
                 }

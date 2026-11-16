@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lf_input::hub::{BindingWarning, Callback, HubActions, KeyboardHub, Shortcuts};
-use lf_input::Key;
+use lf_input::{keys_for_typed, Key};
 
 type Log = Arc<Mutex<Vec<&'static str>>>;
 
@@ -420,4 +420,69 @@ fn first_event_marks_tap_alive() {
     );
     assert!(lf_input::listener::watchdog_armed(false));
     assert!(!lf_input::listener::watchdog_armed(true));
+}
+
+#[test]
+fn shift_adds_the_typed_character_like_pynput() {
+    let eq = Key::Char('=');
+    assert_eq!(
+        keys_for_typed(eq.clone(), true, false, "+"),
+        vec![eq.clone(), Key::Char('+')]
+    );
+    assert_eq!(
+        keys_for_typed(eq.clone(), false, false, "="),
+        vec![eq.clone()]
+    );
+    // Option would type "≠"; keycode position wins, as for Option+2.
+    assert_eq!(
+        keys_for_typed(eq.clone(), true, true, "±"),
+        vec![eq.clone()]
+    );
+    // Same key after case folding, control characters and named keys add nothing.
+    assert_eq!(
+        keys_for_typed(Key::Char('a'), true, false, "A"),
+        vec![Key::Char('a')]
+    );
+    assert_eq!(
+        keys_for_typed(eq.clone(), true, false, "\u{1d}"),
+        vec![eq.clone()]
+    );
+    assert_eq!(keys_for_typed(eq.clone(), true, false, ""), vec![eq]);
+    assert_eq!(keys_for_typed(k("tab"), true, false, "\t"), vec![k("tab")]);
+}
+
+#[test]
+fn ctrl_plus_fires_on_ctrl_shift_equal_and_shift_chords_still_work() {
+    let log: Log = Default::default();
+    let shortcuts = Shortcuts {
+        combos: vec![
+            ("<ctrl>++".into(), rec(&log, "plus")),
+            ("<ctrl>+<shift>+2".into(), rec(&log, "shift-2")),
+        ],
+        ..Default::default()
+    };
+    let (hub, warnings) = hub(shortcuts, &log);
+    assert!(warnings.is_empty());
+    let press_typed = |base: &str, typed: &str| {
+        let keys = keys_for_typed(k(base), true, false, typed);
+        for key in &keys {
+            hub.press(key.clone());
+        }
+        keys
+    };
+    hub.press(k("ctrl_l"));
+    hub.press(k("shift_l"));
+    let plus = press_typed("=", "+");
+    hub.release(k("shift_l"));
+    for key in plus.into_iter().rev() {
+        hub.release(key);
+    }
+    hub.press(k("shift_l"));
+    let at = press_typed("2", "@");
+    for key in at.into_iter().rev() {
+        hub.release(key);
+    }
+    hub.release(k("shift_l"));
+    hub.release(k("ctrl_l"));
+    assert_eq!(*log.lock().unwrap(), vec!["plus", "shift-2"]);
 }

@@ -15,5 +15,7 @@ pub mod paste;
 mod macos;
 
 pub use hub::{BindingWarning, Callback, HubActions, KeyboardHub, Shortcuts};
-pub use keys::{canonical_shortcut, is_hold_key, Chord, Key, Modifier, ShortcutError};
+pub use keys::{
+    canonical_shortcut, is_hold_key, keys_for_typed, Chord, Key, Modifier, ShortcutError,
+};
 pub use listener::{InputError, InputWarning};

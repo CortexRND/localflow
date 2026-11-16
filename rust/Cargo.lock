@@ -1251,6 +1251,7 @@ dependencies = [
  "arboard",
  "core-foundation 0.10.1",
  "core-graphics",
+ "foreign-types 0.5.0",
  "log",
  "windows-sys 0.61.2",
 ]

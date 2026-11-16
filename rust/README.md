@@ -177,7 +177,9 @@ This is not a full port and does not imply a Rust runtime or UI:
   Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
   tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
   on macOS, `wtype`/`xdotool` on Linux, `SendInput` on Windows; Linux
-  `pynput` paste is not ported). Keys are mapped by US-layout keycode;
+  `pynput` paste is not ported). Keys are mapped by US-layout keycode, plus
+  the character Shift types (as pynput reports it), so `<ctrl>++` works;
+  Option never changes the key;
 * not ported from the runtime: pausing media while dictating, the
   achievement cue, speech-model leases and explicit speech retry requests,
   and the frontmost-app AppleScript fallback;
