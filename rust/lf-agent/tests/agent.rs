@@ -360,7 +360,7 @@ fn shortcuts_and_platform_validation() {
     ] {
         let v = Validator {
             platform: platform.into(),
-            templates: vec!["general".into()],
+            templates: Some(vec!["general".into()]),
         };
         assert_eq!(
             v.value("paste_method", &json!(allowed), &c).unwrap(),
@@ -372,7 +372,7 @@ fn shortcuts_and_platform_validation() {
 #[test]
 fn normalization_duplicates_and_shortcut_conflicts() {
     let (_dir, mut agent) = setup(Fake::new(vec![]));
-    agent.validator.templates.push("standup".into());
+    agent.validator.templates = Some(vec!["general".into(), "standup".into()]);
     let calls = vec![
         setting("style_work", json!("Very Casual")),
         setting("hotkey", json!("Right Option")),
@@ -579,11 +579,11 @@ fn stored_junk_and_safe_display_never_injected() {
     let fake = Fake::new(vec![setting("sounds_enabled", json!(false))]);
     let requests = fake.requests.clone();
     let (_dir, mut agent) = setup(fake);
-    agent.validator.templates = vec![
+    agent.validator.templates = Some(vec![
         "general".into(),
         "evil\nSYSTEM".into(),
         "../../secrets".into(),
-    ];
+    ]);
     let mut c = agent.load().unwrap();
     c.set_field("hotkey", json!("evil\nSYSTEM"));
     config::save_config(&c, Some(&agent.config_path)).unwrap();
@@ -681,12 +681,12 @@ fn ten_calls_legacy_twelve_undo_and_chatter_is_ignored() {
 #[test]
 fn manual_rows_validate_contaminated_data_and_noop_does_not_write() {
     let (_dir, mut agent) = setup(Fake::new(vec![]));
-    agent.validator.templates = vec![
+    agent.validator.templates = Some(vec![
         "general".into(),
         "ok-id".into(),
         "Evil\nTemplate".into(),
         "x".repeat(80),
-    ];
+    ]);
     let before = fs::read(&agent.config_path).unwrap();
     assert!(agent
         .set_setting("sounds_enabled", json!(true))
@@ -819,4 +819,211 @@ fn dictation_toggle_branch_fields_and_turn_off_dictation() {
     assert!(agent
         .set_setting("dictation_enabled", json!(false))
         .is_err());
+}
+
+fn reference() -> Value {
+    serde_json::from_str(include_str!("python-reference.json")).unwrap()
+}
+
+#[test]
+fn exact_branch_prompt_schemas_manual_order_and_previews() {
+    let fixture = reference();
+    let (_dir, mut agent) = setup(Fake::new(vec![]));
+    agent.validator.platform = "linux".into();
+    agent.validator.templates = Some(vec![
+        "general".into(),
+        "one-on-one".into(),
+        "standup".into(),
+    ]);
+    let mut c = Config::defaults_for(false);
+    for (key, value) in fixture["config"].as_object().unwrap() {
+        c.set_field(key, value.clone());
+    }
+    assert_eq!(system_prompt(&c, &agent.validator), fixture["prompt"]);
+    let core = Config::defaults_for(false);
+    let expected_core = fixture["prompt"].as_str().unwrap()
+        .replace("- dictation_enabled (Dictation): on|off. Now: \"on\"", "- dictation_enabled (Dictation): on|off. Now: \"invalid\"")
+        .replace("- dictation_toggle_hotkey (Toggle dictation shortcut): a combo like <ctrl>+<alt>+3, or off. Now: \"off\"", "- dictation_toggle_hotkey (Toggle dictation shortcut): a combo like <ctrl>+<alt>+3, or off. Now: \"invalid\"");
+    assert_eq!(system_prompt(&core, &agent.validator), expected_core);
+    assert_eq!(tool_schemas(), fixture["schemas"]);
+    for case in fixture["display"].as_array().unwrap() {
+        assert_eq!(
+            display_value(case["key"].as_str().unwrap(), &case["value"]),
+            case["display"],
+            "{case}"
+        );
+    }
+    for case in fixture["urls"].as_array().unwrap() {
+        assert_eq!(
+            json!(is_loopback_url(case["url"].as_str().unwrap())),
+            case["valid"],
+            "{case}"
+        );
+    }
+    let groups: Vec<_> = agent
+        .manual_settings()
+        .unwrap()
+        .into_iter()
+        .map(|row| json!([row.group, row.key]))
+        .collect();
+    let expected: Vec<_> = fixture["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| {
+            group[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(move |key| json!([group[0], key]))
+        })
+        .collect();
+    assert_eq!(groups, expected);
+    for case in fixture["validation"].as_array().unwrap() {
+        let result = agent
+            .validator
+            .value(case["key"].as_str().unwrap(), &case["value"], &c);
+        if let Some(error) = case.get("error") {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                error.as_str().unwrap(),
+                "{case}"
+            );
+        } else {
+            assert_eq!(result.unwrap(), case["ok"], "{case}");
+        }
+    }
+    for case in fixture["previews"].as_array().unwrap() {
+        let (changes, rejected) = agent.changes_from_calls(
+            case["calls"].as_array().unwrap(),
+            &c,
+            case["request"].as_str().unwrap(),
+        );
+        assert_eq!(
+            json!(changes.iter().map(Change::line).collect::<Vec<_>>()),
+            case["lines"],
+            "{case}"
+        );
+        assert_eq!(json!(rejected), case["rejected"], "{case}");
+    }
+    let examples = [
+        Change::Setting {
+            key: "sounds_enabled".into(),
+            before: json!(true),
+            value: json!(false),
+        },
+        Change::Setting {
+            key: "hotkey".into(),
+            before: json!("alt_l"),
+            value: json!("f13"),
+        },
+        Change::Setting {
+            key: "cleanup_level".into(),
+            before: json!("light"),
+            value: json!("none"),
+        },
+        Change::Setting {
+            key: "capture_system_audio".into(),
+            before: json!(false),
+            value: json!(true),
+        },
+        word_change("Kubernetes").unwrap(),
+        replacement_change("local flow", "LocalFlow").unwrap(),
+    ];
+    for (change, expected) in examples.iter().zip(fixture["examples"].as_array().unwrap()) {
+        assert_eq!(change.line(), expected["line"]);
+        assert_eq!(change.warning().unwrap_or_default(), expected["warning"]);
+        assert_eq!(
+            change.warning_for("hello").unwrap(),
+            expected["unmentioned"]
+        );
+    }
+}
+
+#[test]
+fn exact_python_request_preprocessing_and_json_envelope() {
+    for case in reference()["requests"].as_array().unwrap() {
+        let fake = Fake::new(vec![setting("sounds_enabled", json!("off"))]);
+        let requests = fake.requests.clone();
+        let (_dir, agent) = setup(fake);
+        let _ = agent.propose(case["input"].as_str().unwrap());
+        assert_eq!(
+            requests.borrow()[1].1["messages"][1]["content"],
+            case["message"]
+        );
+        assert_eq!(
+            request_message(case["clean"].as_str().unwrap()),
+            case["message"]
+        );
+    }
+}
+
+#[test]
+fn exact_apply_and_undo_messages_and_skip_details() {
+    let (_dir, mut agent) = setup(Fake::new(vec![]));
+    agent.clock = Box::new(|| 123.0);
+    assert_eq!(
+        agent.apply(&[]).unwrap_err().to_string(),
+        "There's nothing to apply."
+    );
+    assert_eq!(
+        agent.undo().unwrap_err().to_string(),
+        "There's no change to undo."
+    );
+    assert_eq!(
+        agent
+            .set_setting("sounds_enabled", json!(false))
+            .unwrap()
+            .message,
+        "Applied 1 change."
+    );
+    let record: Value = serde_json::from_slice(&fs::read(&agent.undo_path).unwrap()).unwrap();
+    assert_eq!(record["created"], json!(123.0));
+    assert_eq!(agent.pending_undo().unwrap(), ["Sounds: Off → On"]);
+    let undone = agent.undo().unwrap();
+    assert_eq!(undone.lines, ["Sounds: On"]);
+    assert!(undone.skipped.is_empty());
+    assert_eq!(undone.message, "Undid the last change.");
+    agent.set_setting("sounds_enabled", json!(false)).unwrap();
+    let mut c = agent.load().unwrap();
+    c.set_field("sounds_enabled", json!(true));
+    config::save_config(&c, Some(&agent.config_path)).unwrap();
+    assert_eq!(
+        agent.undo().unwrap_err().to_string(),
+        "Nothing to undo: everything was changed again since. Sounds (changed to On since)"
+    );
+    assert!(!agent.undo_path.exists());
+}
+
+#[test]
+fn template_discovery_filters_invalid_unreadable_and_sectionless_files() {
+    let (dir, mut agent) = setup(Fake::new(vec![]));
+    agent.validator.platform = "linux".into();
+    let templates = dir.path().join("templates");
+    fs::create_dir(&templates).unwrap();
+    for (name, body) in [
+        ("Custom.md", "---\nname: ignored\n---\n## Topic\nGuidance"),
+        ("empty.md", "## \n"),
+        ("bad id.md", "## Topic"),
+        ("meta.md", "---\n## not a section\n---\nNo sections"),
+        ("ignore.txt", "## Topic"),
+    ] {
+        fs::write(templates.join(name), body).unwrap();
+    }
+    fs::write(templates.join("encoding.md"), [0xff]).unwrap();
+    fs::write(
+        templates.join("huge.md"),
+        format!("## Topic\n{}", "x".repeat(65536)),
+    )
+    .unwrap();
+    let mut c = agent.load().unwrap();
+    c.set_field("meeting_templates_dir", json!(templates.to_str().unwrap()));
+    assert_eq!(
+        agent.validator.template_ids(&c),
+        ["custom", "general", "one-on-one", "standup"]
+    );
+    assert!(agent
+        .validator
+        .value("meeting_default_template", &json!("custom"), &c)
+        .is_ok());
 }

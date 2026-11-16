@@ -1,0 +1,216 @@
+{
+  "reference": "origin/devin/1794863370-dictation-toggle",
+  "passages": [
+    {
+      "text": "budget budget plan",
+      "source": "dictation",
+      "title": "Slack",
+      "ts": null,
+      "ref": "first",
+      "app": "Slack"
+    },
+    {
+      "text": "budget budget plan",
+      "source": "meeting",
+      "title": "Review",
+      "ts": null,
+      "ref": "second",
+      "app": ""
+    },
+    {
+      "text": "budget plan",
+      "source": "notes",
+      "title": "Plan",
+      "ts": null,
+      "ref": "third",
+      "app": ""
+    }
+  ],
+  "ranked": [
+    "first",
+    "second",
+    "third"
+  ],
+  "prompt": "You answer questions about the user's own past dictations, meetings and notes. Use ONLY the numbered passages below. Be concise (a few sentences). Cite the passages you used like [2]. Never guess or add outside knowledge. If the passages do not contain the answer, reply with exactly: I couldn't find that in your history.\n\nPassages:\n[1] (unknown time · dictation · Slack)\n<<<\nbudget budget plan\n>>>\n\n[2] (unknown time · meeting · Review)\n<<<\nbudget budget plan\n>>>\n\n[3] (unknown time · notes · Plan)\n<<<\nbudget plan\n>>>\n\nQuestion: What budget?\n",
+  "citations": [
+    {
+      "n": 1,
+      "source": "dictation",
+      "title": "Slack",
+      "app": "Slack",
+      "when": "",
+      "snippet": "budget budget plan",
+      "ref": "first"
+    },
+    {
+      "n": 2,
+      "source": "meeting",
+      "title": "Review",
+      "app": "",
+      "when": "",
+      "snippet": "budget budget plan",
+      "ref": "second"
+    },
+    {
+      "n": 3,
+      "source": "notes",
+      "title": "Plan",
+      "app": "",
+      "when": "",
+      "snippet": "budget plan",
+      "ref": "third"
+    }
+  ],
+  "texts": [
+    {
+      "text": "running stopped classes studies boss's",
+      "tokens": [
+        "run",
+        "stop",
+        "class",
+        "study",
+        "boss"
+      ],
+      "chunks": [
+        "running stopped classes studies boss's"
+      ],
+      "snippet": "running stopped classes studies boss's"
+    },
+    {
+      "text": "Budget\u001fplanning notes",
+      "tokens": [
+        "budget",
+        "plan",
+        "note"
+      ],
+      "chunks": [
+        "Budget\u001fplanning\nnotes"
+      ],
+      "snippet": "Budget planning notes"
+    },
+    {
+      "text": "İİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİ budget details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details ",
+      "tokens": [
+        "budget",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail",
+        "detail"
+      ],
+      "chunks": [
+        "İİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİ budget details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details details"
+      ],
+      "snippet": "…ls details details details details details details details details details details details details details details details details details details details details details details details details detai…"
+    },
+    {
+      "text": "",
+      "tokens": [],
+      "chunks": [],
+      "snippet": ""
+    },
+    {
+      "text": "a\r\nb c\u001ed",
+      "tokens": [
+        "b",
+        "c",
+        "d"
+      ],
+      "chunks": [
+        "a\nb\nc\nd"
+      ],
+      "snippet": "a b c d"
+    }
+  ],
+  "since": [
+    {
+      "value": "",
+      "ok": null
+    },
+    {
+      "value": " today ",
+      "ok": "2026-11-15T00:00:00"
+    },
+    {
+      "value": "yesterday",
+      "ok": "2026-11-14T00:00:00"
+    },
+    {
+      "value": "7d",
+      "ok": "2026-11-08T12:00:00"
+    },
+    {
+      "value": "٧d",
+      "ok": "2026-11-08T12:00:00"
+    },
+    {
+      "value": "2026-1-2",
+      "ok": "2026-01-02T00:00:00"
+    },
+    {
+      "value": "+2026-01-01",
+      "error": "invalid since value '+2026-01-01'; use today, yesterday, 7d, 30d or YYYY-MM-DD"
+    },
+    {
+      "value": "7 days",
+      "error": "invalid since value '7 days'; use today, yesterday, 7d, 30d or YYYY-MM-DD"
+    },
+    {
+      "value": "nonsense",
+      "error": "invalid since value 'nonsense'; use today, yesterday, 7d, 30d or YYYY-MM-DD"
+    },
+    {
+      "value": "\n",
+      "error": "invalid since value '\\n'; use today, yesterday, 7d, 30d or YYYY-MM-DD"
+    }
+  ],
+  "clean": [
+    {
+      "text": "See [١, 2; ９] . [12:30]",
+      "result": "See [1, 2]. [12:30]"
+    },
+    {
+      "text": "[0] a [3,3] [999]",
+      "result": "a [3, 3] [999]"
+    },
+    {
+      "text": "\u001ftext [9] !\u001f",
+      "result": "text!"
+    }
+  ]
+}

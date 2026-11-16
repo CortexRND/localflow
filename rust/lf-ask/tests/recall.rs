@@ -562,6 +562,70 @@ fn long_dictation_late_facts_prompt_limit_and_unicode_snippet() {
     assert!(snip.starts_with('…') && snip.ends_with('…'));
     assert!(snip.chars().count() <= 202);
 }
+
+#[test]
+fn frozen_python_reference_strings_retrieval_and_edge_cases() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("python-reference.json")).unwrap();
+    let passages: Vec<Passage> = serde_json::from_value(fixture["passages"].clone()).unwrap();
+    assert_eq!(build_prompt("What budget?", &passages), fixture["prompt"]);
+    assert_eq!(json!(citations(&passages, "budget")), fixture["citations"]);
+    assert_eq!(
+        json!(rank("budget \"budget plan\"", &passages, &options())
+            .unwrap()
+            .iter()
+            .map(|p| &p.reference)
+            .collect::<Vec<_>>()),
+        fixture["ranked"]
+    );
+    for case in fixture["texts"].as_array().unwrap() {
+        let text = case["text"].as_str().unwrap();
+        assert_eq!(json!(tokenize(text, false)), case["tokens"]);
+        assert_eq!(json!(chunk_lines(text)), case["chunks"]);
+        assert_eq!(
+            snippet(text, &["budget".into()].into_iter().collect()),
+            case["snippet"]
+        );
+    }
+    for case in fixture["since"].as_array().unwrap() {
+        let result = parse_since(Some(&Since::from(case["value"].as_str().unwrap())), now());
+        if let Some(error) = case.get("error") {
+            assert_eq!(result.unwrap_err().to_string(), error.as_str().unwrap());
+        } else {
+            assert_eq!(
+                json!(result
+                    .unwrap()
+                    .map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string())),
+                case["ok"]
+            );
+        }
+    }
+    for case in fixture["clean"].as_array().unwrap() {
+        assert_eq!(
+            clean_citations(case["text"].as_str().unwrap(), 3),
+            case["result"]
+        );
+    }
+}
+
+#[test]
+fn python_microsecond_rounding_and_zero_timestamp_ties() {
+    let mut first = p("budget", 0, "first");
+    first.ts = Some(-0.0);
+    let mut second = first.clone();
+    second.ts = Some(0.0);
+    second.reference = "second".into();
+    let top = rank("budget", &[first.clone(), second], &options()).unwrap();
+    assert_eq!(top[0].reference, "first");
+    first.ts = Some(ts(now()) - 0.0000002);
+    assert_eq!(
+        citations(&[first.clone()], "budget")[0].when,
+        "2026-11-15T12:00"
+    );
+    assert!(format_passage(1, &first).starts_with("[1] (2026-11-15 12:00"));
+    assert!(std::panic::catch_unwind(|| chunk_lines_with_limits("word", 10, 0)).is_err());
+    assert!(chunk_lines_with_limits("", 10, 0).is_empty());
+}
 #[test]
 fn corpus_skips_transcripts_in_notes_and_reads_newline_formats() {
     let dir = tempfile::tempdir().unwrap();

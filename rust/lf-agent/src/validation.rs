@@ -45,18 +45,32 @@ const MODIFIERS: &[&str] = &[
 ];
 
 pub fn raw_text_ok(s: &str) -> bool {
-    s.chars().all(|c| {
-        !matches!(
-            get_general_category(c),
-            G::Control
-                | G::Format
-                | G::Surrogate
-                | G::PrivateUse
-                | G::Unassigned
-                | G::LineSeparator
-                | G::ParagraphSeparator
-        ) && (!c.is_whitespace() || c == ' ')
-    })
+    raw_text_problem(s).is_none()
+}
+pub(crate) fn category_c(c: char) -> bool {
+    matches!(
+        get_general_category(c),
+        G::Control | G::Format | G::Surrogate | G::PrivateUse | G::Unassigned
+    )
+}
+pub(crate) fn python_whitespace(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+pub(crate) fn raw_text_problem(s: &str) -> Option<&'static str> {
+    for c in s.chars() {
+        if category_c(c)
+            || matches!(
+                get_general_category(c),
+                G::LineSeparator | G::ParagraphSeparator
+            )
+        {
+            return Some("has control characters or line breaks");
+        }
+        if get_general_category(c) == G::SpaceSeparator && c != ' ' {
+            return Some("has unusual spaces");
+        }
+    }
+    None
 }
 fn letter_number_mark(c: char) -> bool {
     matches!(
@@ -74,19 +88,34 @@ fn letter_number_mark(c: char) -> bool {
     )
 }
 pub fn clean_text(s: &str, limit: usize) -> Result<String> {
+    clean_text_for(
+        s,
+        limit,
+        if limit == 64 {
+            "dictionary word"
+        } else {
+            "written text"
+        },
+    )
+}
+pub(crate) fn clean_text_for(s: &str, limit: usize, what: &str) -> Result<String> {
     ensure!(
-        s.chars().count() <= 4 * limit && raw_text_ok(s),
-        "invalid text"
+        s.chars().count() <= 4 * limit,
+        "{what} is longer than {limit} characters"
     );
-    let s: String = s.trim().nfc().collect();
+    if let Some(problem) = raw_text_problem(s) {
+        bail!("{what} {problem}");
+    }
+    let s: String = s.trim_matches(python_whitespace).nfc().collect();
+    ensure!(!s.is_empty(), "{what} is empty");
     ensure!(
-        !s.is_empty() && s.chars().count() <= limit,
-        "empty or overlong text"
+        s.chars().count() <= limit,
+        "{what} is longer than {limit} characters"
     );
     ensure!(
         s.chars()
             .all(|c| letter_number_mark(c) || " -'’‘.,&+/#@_()!?:;\"“”–—·%$€£¥*".contains(c)),
-        "text must use ordinary punctuation"
+        "{what} may only use letters, numbers, spaces and ordinary punctuation"
     );
     Ok(s)
 }
@@ -114,7 +143,7 @@ pub fn safe_text(s: &str, limit: usize) -> String {
 }
 fn token(s: &str) -> String {
     let s = s
-        .trim()
+        .trim_matches(python_whitespace)
         .to_lowercase()
         .trim_matches(['<', '>'])
         .replace([' ', '-'], "_");
@@ -134,32 +163,64 @@ fn token(s: &str) -> String {
     }
     .to_string()
 }
-fn function(s: &str) -> bool {
+pub(crate) fn function(s: &str) -> bool {
     s.strip_prefix('f')
         .and_then(|n| n.parse::<u8>().ok())
         .is_some_and(|n| (1..=20).contains(&n) && s == format!("f{n}"))
 }
+pub(crate) fn is_hold(s: &str) -> bool {
+    MODIFIERS.contains(&s) || function(s)
+}
 pub fn normalize_hold_key(s: &str, platform: &str) -> Result<String> {
-    let s = token(s);
     ensure!(
-        MODIFIERS.contains(&s.as_str()) || function(&s),
-        "not a key you can hold"
+        !s.trim_matches(python_whitespace).is_empty(),
+        "needs a key name"
     );
-    ensure!(platform != "darwin" || s != "insert", "key not available");
-    Ok(s)
+    let name = token(s);
+    ensure!(
+        !name.contains('+'),
+        "must be a single key to hold, not a combination"
+    );
+    ensure!(
+        is_hold(&name),
+        "{} is not a key you can hold; use a modifier (e.g. alt_r) or a function key (f13)",
+        repr(s)
+    );
+    ensure!(
+        platform != "darwin" || name != "insert",
+        "{} is not available on this computer",
+        repr(s)
+    );
+    Ok(name)
 }
 pub fn normalize_combo(s: &str, platform: &str) -> Result<String> {
+    ensure!(
+        !s.trim_matches(python_whitespace).is_empty(),
+        "needs a shortcut"
+    );
     let tokens: Vec<String> = s.split('+').map(token).collect();
     let mut seen = HashSet::new();
     ensure!(
-        tokens.iter().all(|t| !t.is_empty() && seen.insert(t)),
-        "invalid or repeated key"
+        tokens.iter().all(|t| !t.is_empty()),
+        "{} is not a valid shortcut",
+        repr(s)
+    );
+    ensure!(
+        tokens.iter().all(|t| seen.insert(t)),
+        "{} repeats a key",
+        repr(s)
     );
     let (mods, keys): (Vec<_>, Vec<_>) =
         tokens.iter().partition(|t| MODIFIERS.contains(&t.as_str()));
     ensure!(
-        mods.iter().any(|m| !m.starts_with("shift")) && keys.len() == 1,
-        "shortcut needs Ctrl, Option/Alt or Cmd and one key"
+        mods.iter().any(|m| !m.starts_with("shift")),
+        "{} needs Ctrl, Option/Alt or Cmd so it can't fire while typing",
+        repr(s)
+    );
+    ensure!(
+        keys.len() == 1,
+        "{} needs exactly one non-modifier key",
+        repr(s)
     );
     let key = keys[0];
     let named = function(key)
@@ -180,11 +241,22 @@ pub fn normalize_combo(s: &str, platform: &str) -> Result<String> {
             "insert",
         ]
         .contains(&key.as_str());
+    if key.chars().count() == 1 {
+        ensure!(
+            raw_text_ok(key)
+                && !key.chars().any(char::is_whitespace)
+                && !"+<> ".contains(key.as_str()),
+            "{} uses an unsupported key",
+            repr(s)
+        );
+    } else {
+        ensure!(named, "{} uses an unknown key {}", repr(s), repr(key));
+    }
     ensure!(
-        named || (key.chars().count() == 1 && raw_text_ok(key) && !"+<> ".contains(key.as_str())),
-        "unknown shortcut key"
+        platform != "darwin" || key != "insert",
+        "{} is not available on this computer",
+        repr(s)
     );
-    ensure!(platform != "darwin" || key != "insert", "key not available");
     let mut result: Vec<_> = mods.iter().map(|m| format!("<{m}>")).collect();
     result.push(if named {
         format!("<{key}>")
@@ -192,6 +264,43 @@ pub fn normalize_combo(s: &str, platform: &str) -> Result<String> {
         key.clone()
     });
     Ok(result.join("+"))
+}
+pub(crate) fn repr(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = quote.to_string();
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if category_c(c)
+                || (matches!(
+                    get_general_category(c),
+                    G::SpaceSeparator | G::LineSeparator | G::ParagraphSeparator
+                ) && c != ' ') =>
+            {
+                out.push_str(&if c as u32 <= 0xff {
+                    format!("\\x{:02x}", c as u32)
+                } else if c as u32 <= 0xffff {
+                    format!("\\u{:04x}", c as u32)
+                } else {
+                    format!("\\U{:08x}", c as u32)
+                });
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
 }
 pub fn update(config: &Config, key: &str, value: &Value) -> Result<Config> {
     ensure!(ALLOWLIST.contains(&key), "setting is not allowed");
@@ -201,7 +310,7 @@ pub fn update(config: &Config, key: &str, value: &Value) -> Result<Config> {
 #[derive(Clone, Debug)]
 pub struct Validator {
     pub platform: String,
-    pub templates: Vec<String>,
+    pub templates: Option<Vec<String>>,
 }
 impl Default for Validator {
     fn default() -> Self {
@@ -214,32 +323,89 @@ impl Default for Validator {
                 "linux"
             }
             .into(),
-            templates: vec!["general".into()],
+            templates: None,
         }
     }
 }
 impl Validator {
-    pub fn choices(&self, key: &str) -> Vec<String> {
+    pub fn choices(&self, key: &str, config: &Config) -> Vec<String> {
         if key == "meeting_default_template" {
-            return self.template_ids();
+            return self.template_ids(config);
         }
         if key == "paste_method" {
             let methods: &[&str] = match self.platform.as_str() {
                 "darwin" => &["auto", "clipboard", "osascript"],
                 "win32" => &["auto", "clipboard", "pynput"],
-                _ => &["auto", "clipboard", "wtype", "xdotool", "pynput"],
+                "linux" => &["auto", "clipboard", "wtype", "xdotool", "pynput"],
+                _ => &["auto", "clipboard"],
             };
             return methods.iter().map(|s| (*s).into()).collect();
         }
         lf_core::config::ENUM_VALUES
             .iter()
-            .find(|(name, _)| *name == key)
+            .find(|(name, _)| *name == key && (key == "cleanup_level" || key.starts_with("style_")))
             .map(|(_, values)| values.iter().map(|s| (*s).into()).collect())
             .unwrap_or_default()
     }
-    pub fn template_ids(&self) -> Vec<String> {
-        self.templates
-            .iter()
+    pub fn template_ids(&self, config: &Config) -> Vec<String> {
+        let discovered;
+        let ids = if let Some(ids) = &self.templates {
+            ids
+        } else {
+            let mut ids = vec!["general".into(), "one-on-one".into(), "standup".into()];
+            if let Some(dir) = config
+                .field_str("meeting_templates_dir")
+                .filter(|s| !s.is_empty())
+                .and_then(|s| lf_core::home::expand_user(std::path::Path::new(s)).ok())
+            {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().is_none_or(|s| {
+                            if cfg!(windows) {
+                                !s.to_string_lossy().eq_ignore_ascii_case("md")
+                            } else {
+                                s != "md"
+                            }
+                        }) || path.metadata().map_or(true, |m| m.len() > 64 * 1024)
+                        {
+                            continue;
+                        }
+                        let Ok(text) = std::fs::read_to_string(&path) else {
+                            continue;
+                        };
+                        let text = text.replace("\r\n", "\n");
+                        let lines: Vec<_> = text.split('\n').collect();
+                        let body = if lines.first().is_some_and(|s| s.trim() == "---") {
+                            lines
+                                .iter()
+                                .skip(1)
+                                .position(|s| s.trim() == "---")
+                                .map(|i| &lines[i + 2..])
+                                .unwrap_or(&lines)
+                        } else {
+                            &lines
+                        };
+                        if body
+                            .iter()
+                            .any(|s| s.strip_prefix("## ").is_some_and(|s| !s.trim().is_empty()))
+                        {
+                            ids.push(
+                                path.file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_lowercase(),
+                            );
+                        }
+                    }
+                }
+            }
+            ids.sort();
+            ids.dedup();
+            discovered = ids;
+            &discovered
+        };
+        ids.iter()
             .filter(|s| {
                 !s.is_empty()
                     && s.len() <= 48
@@ -253,7 +419,11 @@ impl Validator {
             .collect()
     }
     pub fn value(&self, key: &str, value: &Value, config: &Config) -> Result<Value> {
-        ensure!(ALLOWLIST.contains(&key), "setting is not allowed");
+        ensure!(
+            ALLOWLIST.contains(&key),
+            "'{}' is not a setting LocalFlow can change here",
+            super::safe_text(key, 40)
+        );
         if ["dictation_enabled", "dictation_toggle_hotkey"].contains(&key) {
             ensure!(
                 config.field(key).is_some(),
@@ -261,19 +431,23 @@ impl Validator {
             );
         }
         if let Some(s) = value.as_str() {
-            ensure!(
-                s.chars().count() <= 64 && raw_text_ok(s),
-                "invalid setting value"
-            );
+            ensure!(s.chars().count() <= 64, "value is too long");
+            if let Some(problem) = raw_text_problem(s) {
+                bail!("value {problem}");
+            }
         }
         ensure!(
             value.is_string() || value.is_boolean() || value.is_null(),
             "value must be text or on/off"
         );
-        let text = value.as_str().unwrap_or("").trim().to_lowercase();
+        let text = value
+            .as_str()
+            .unwrap_or("")
+            .trim_matches(python_whitespace)
+            .to_lowercase();
         let off = value.is_null()
             || (value.is_string() && ["", "off", "none", "disabled"].contains(&text.as_str()));
-        let result = if config.field(key).is_some_and(Value::is_boolean) {
+        let result = if super::BOOL_KEYS.contains(&key) {
             if value.is_boolean() {
                 value.clone()
             } else if ["true", "on", "yes", "enabled", "enable", "1"].contains(&text.as_str()) {
@@ -285,61 +459,110 @@ impl Validator {
             }
         } else if SHORTCUTS.contains(&key) {
             if off {
-                ensure!(key != "hotkey", "dictation shortcut cannot be off");
+                ensure!(
+                    key != "hotkey",
+                    "dictation needs a shortcut; it can't be turned off"
+                );
                 json!("")
             } else if key == "command_hotkey" || (key == "hotkey" && !text.contains('+')) {
-                json!(normalize_hold_key(&text, &self.platform)?)
+                ensure!(value.is_string(), "needs a key name");
+                json!(normalize_hold_key(value.as_str().unwrap(), &self.platform)?)
             } else {
-                json!(normalize_combo(&text, &self.platform)?)
+                ensure!(value.is_string(), "needs a shortcut");
+                json!(normalize_combo(value.as_str().unwrap(), &self.platform)?)
             }
         } else if key == "paste_method" {
-            let allowed: &[&str] = match self.platform.as_str() {
-                "darwin" => &["auto", "clipboard", "osascript"],
-                "win32" => &["auto", "clipboard", "pynput"],
-                _ => &["auto", "clipboard", "wtype", "xdotool", "pynput"],
-            };
+            let allowed = self.choices(key, config);
             ensure!(
-                allowed.contains(&text.as_str()),
-                "paste method not available"
+                value.is_string() && allowed.contains(&text),
+                "on this computer choose one of: {}",
+                allowed.join(", ")
             );
             json!(text)
         } else if key == "meeting_default_template" {
-            ensure!(self.template_ids().contains(&text), "unknown template");
+            ensure!(value.is_string(), "needs a template id");
+            ensure!(
+                self.template_ids(config).contains(&text),
+                "unknown template; choose one of: {}",
+                self.template_ids(config).join(", ")
+            );
             json!(text)
         } else {
-            json!(text.replace([' ', '-'], "_"))
-        };
-        if field_location(key).is_none() && key == "dictation_enabled" {
+            let choice = text.replace([' ', '-'], "_");
+            let allowed = self.choices(key, config);
             ensure!(
-                config.field(key).is_some_and(Value::is_boolean) && result.is_boolean(),
-                "must be on or off"
+                value.is_string() && allowed.contains(&choice),
+                "choose one of: {}",
+                allowed.join(", ")
+            );
+            json!(choice)
+        };
+        if field_location(key).is_none()
+            && ["dictation_enabled", "dictation_toggle_hotkey"].contains(&key)
+        {
+            ensure!(
+                config.field(key).is_some(),
+                "setting is not supported by this config schema"
             );
         } else {
             update(config, key, &result)?;
         }
         Ok(result)
     }
-    pub fn conflicts(&self, config: &Config, changed: &[String]) -> Result<()> {
+    pub fn checked_current(&self, key: &str, config: &Config) -> Option<Value> {
+        let current = config.field(key)?;
+        self.value(key, current, config)
+            .ok()
+            .filter(|v| v == current)
+    }
+    pub fn conflict_details(&self, config: &Config, changed: &[String]) -> Vec<(String, String)> {
+        let mut problems = Vec::new();
         for key in changed.iter().filter(|k| SHORTCUTS.contains(&k.as_str())) {
             let value = config.field_str(key).unwrap_or("");
-            if value.is_empty() {
+            let Some(id) = identity(value, &self.platform) else {
                 continue;
-            }
+            };
             for other in SHORTCUTS.iter().filter(|k| **k != key.as_str()) {
-                let rhs = config.field_str(other).unwrap_or("");
-                ensure!(
-                    rhs.is_empty()
-                        || identity(value, &self.platform) != identity(rhs, &self.platform),
-                    "shortcut conflicts with another shortcut"
-                );
+                if identity(config.field_str(other).unwrap_or(""), &self.platform).as_ref()
+                    == Some(&id)
+                {
+                    problems.push((
+                        key.clone(),
+                        format!(
+                            "{}: {} is already the {}",
+                            super::label(key),
+                            super::format_shortcut(value),
+                            super::label(other)
+                        ),
+                    ));
+                }
             }
         }
+        problems
+    }
+    pub fn conflicts(&self, config: &Config, changed: &[String]) -> Result<()> {
+        let problems = self.conflict_details(config, changed);
+        ensure!(
+            problems.is_empty(),
+            "{}",
+            problems
+                .iter()
+                .map(|(_, r)| r.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
         Ok(())
     }
 }
-fn identity(s: &str, platform: &str) -> String {
+fn identity(s: &str, platform: &str) -> Option<String> {
+    if s.trim_matches(python_whitespace).is_empty() {
+        return None;
+    }
     if !s.contains('+') {
-        let mut t = token(s);
+        let mut t = s.trim_matches(python_whitespace).to_lowercase();
+        if let Some(inner) = t.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            t = inner.into();
+        }
         if platform == "darwin" {
             t = match t.as_str() {
                 "alt_l" => "alt",
@@ -351,23 +574,32 @@ fn identity(s: &str, platform: &str) -> String {
             }
             .into();
         }
-        return format!("hold:{t}");
+        return Some(format!("hold:{t}"));
     }
-    let mut parts: Vec<_> = s
-        .split('+')
-        .map(token)
-        .map(|s| {
-            if MODIFIERS.contains(&s.as_str()) {
-                s.strip_suffix("_l")
-                    .or_else(|| s.strip_suffix("_r"))
-                    .unwrap_or(&s)
-                    .to_string()
-            } else {
-                s
+    let mut parts = Vec::new();
+    for part in s.split('+') {
+        if part.chars().count() == 1 {
+            parts.push(part.to_lowercase());
+        } else {
+            let name = part
+                .strip_prefix('<')
+                .and_then(|s| s.strip_suffix('>'))
+                .filter(|s| !s.is_empty())?;
+            let mut name = name.to_lowercase();
+            if platform == "darwin" && name == "alt_gr" {
+                name = "alt_r".into();
             }
-        })
-        .collect();
+            parts.push(if MODIFIERS.contains(&name.as_str()) {
+                name.strip_suffix("_l")
+                    .or_else(|| name.strip_suffix("_r"))
+                    .unwrap_or(&name)
+                    .into()
+            } else {
+                name
+            });
+        }
+    }
     parts.sort();
     parts.dedup();
-    format!("combo:{}", parts.join("+"))
+    Some(format!("combo:{}", parts.join("+")))
 }

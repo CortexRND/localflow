@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use lf_core::config::Config;
-use reqwest::{blocking::Client, redirect::Policy, Url};
+use reqwest::{blocking::Client, redirect::Policy};
 use serde_json::Value;
 use std::{io::Read, net::IpAddr, time::Duration};
 
@@ -35,27 +35,61 @@ impl OllamaClient {
                 .get(format!("{}/api/tags", endpoint.trim_end_matches('/')))
                 .timeout(Duration::from_secs(5)),
         };
-        let response = request.send().context("Couldn't reach local Ollama")?;
-        ensure!(
-            response.status().as_u16() == 200,
-            "Local Ollama request failed"
-        );
-        if let Some(size) = response.content_length() {
-            ensure!(
-                size <= MAX_RESPONSE_BYTES as u64,
-                "Ollama response too large"
-            );
-        }
+        let model = payload.and_then(|p| p["model"].as_str()).unwrap_or("");
+        let response = request.send().map_err(|e| {
+            if payload.is_some() && e.is_timeout() {
+                anyhow::anyhow!("The local model ({model}) took too long to answer. Try again.")
+            } else {
+                anyhow::anyhow!(
+                    "Couldn't reach Ollama at {endpoint}. Start Ollama, then try again."
+                )
+            }
+        })?;
+        let status = response.status().as_u16();
+        let what = if payload.is_some() {
+            "chat"
+        } else if status == 200 {
+            "model list"
+        } else {
+            "error"
+        };
         let mut body = Vec::new();
         response
             .take(MAX_RESPONSE_BYTES as u64 + 1)
             .read_to_end(&mut body)
-            .context("Couldn't read Ollama response")?;
+            .map_err(|e| {
+                let timed_out = e.kind() == std::io::ErrorKind::TimedOut || e.get_ref().and_then(|e| e.downcast_ref::<reqwest::Error>()).is_some_and(reqwest::Error::is_timeout);
+                if timed_out { anyhow::anyhow!("Ollama took too long to send its {what} response. Try again.") }
+                else { anyhow::anyhow!("Lost the connection to Ollama while reading its {what} response. Check that Ollama is running, then try again.") }
+            })?;
         ensure!(
             body.len() <= MAX_RESPONSE_BYTES,
-            "Ollama response too large"
+            "Ollama sent an oversized {what} response."
         );
-        serde_json::from_slice(&body).context("Ollama sent invalid JSON")
+        let decoded: Option<Value> = serde_json::from_slice(&body).ok();
+        if payload.is_none() {
+            ensure!(
+                status == 200,
+                "Ollama at {endpoint} couldn't list its models."
+            );
+            return decoded
+                .filter(|v| !v.is_null())
+                .context("Ollama sent an invalid model list response.");
+        }
+        if status != 200 {
+            let detail = decoded
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .filter(|v| super::truthy(v))
+                .map(super::python_str)
+                .unwrap_or_else(|| format!("HTTP {status}"));
+            let detail = super::safe_text(&detail, 200);
+            ensure!(!detail.to_lowercase().contains("does not support tools"), "The local model {model} can't use tools. Install one that can (`ollama pull gemma4`) and try again.");
+            anyhow::bail!("Ollama couldn't run {model}: {detail}");
+        }
+        decoded
+            .filter(Value::is_object)
+            .context("Ollama sent an invalid chat response.")
     }
 }
 impl ChatClient for OllamaClient {
@@ -67,40 +101,77 @@ impl ChatClient for OllamaClient {
     }
 }
 pub fn is_loopback_url(s: &str) -> bool {
-    let Ok(url) = Url::parse(s.trim()) else {
+    let s = s
+        .trim_matches(super::validation::python_whitespace)
+        .trim_start_matches(|c: char| c <= '\u{20}')
+        .replace(['\n', '\r', '\t'], "");
+    let Some((scheme, rest)) = s.split_once("://") else {
         return false;
     };
-    if !["http", "https"].contains(&url.scheme())
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !["", "/"].contains(&url.path())
+    if !["http", "https"].contains(&scheme.to_lowercase().as_str()) {
+        return false;
+    }
+    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if !fragment.is_empty() || !query.is_empty() {
+        return false;
+    }
+    let (authority, path) = rest
+        .split_once('/')
+        .map(|(a, p)| (a, format!("/{p}")))
+        .unwrap_or((rest, String::new()));
+    if !["", "/"].contains(&path.as_str()) {
+        return false;
+    }
+    let authority = if let Some((creds, host)) = authority.rsplit_once('@') {
+        if !["", ":"].contains(&creds) {
+            return false;
+        }
+        host
+    } else {
+        authority
+    };
+    let (host, port) = if let Some(s) = authority.strip_prefix('[') {
+        let Some((host, rest)) = s.split_once(']') else {
+            return false;
+        };
+        if host
+            .split('%')
+            .next()
+            .unwrap_or("")
+            .parse::<std::net::Ipv6Addr>()
+            .is_err()
+        {
+            return false;
+        }
+        (host, rest.split_once(':').map(|(_, p)| p).unwrap_or(""))
+    } else {
+        authority.split_once(':').unwrap_or((authority, ""))
+    };
+    if !port.is_empty()
+        && (!port.bytes().all(|b| b.is_ascii_digit()) || port.parse::<u16>().is_err())
     {
         return false;
     }
-    // URL parsing normalizes legacy integer/octal IPv4 forms; Python refuses them.
-    let authority = s
-        .trim()
-        .split_once("://")
-        .map(|(_, s)| s.split('/').next().unwrap_or(""))
-        .unwrap_or("");
-    let host = if authority.starts_with('[') {
-        authority
-            .split(']')
+    if let Some((_, scope)) = host.split_once('%') {
+        if !host.contains(':') || scope.is_empty() || scope.contains('%') {
+            return false;
+        }
+    }
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .split('%')
             .next()
             .unwrap_or("")
-            .trim_start_matches('[')
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || matches!(ip, IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())))
 }
 pub fn local_ollama_url(config: &Config) -> String {
     let url = config.field_str("llm_base_url").unwrap_or("");
     if config.field_str("llm_provider") == Some("ollama") && is_loopback_url(url) {
-        url.trim().trim_end_matches('/').into()
+        url.trim_matches(super::validation::python_whitespace)
+            .trim_end_matches('/')
+            .into()
     } else {
         DEFAULT_OLLAMA_URL.into()
     }
@@ -113,11 +184,11 @@ pub fn valid_model_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"._:/@+-".contains(&c))
 }
 fn tag_key(s: &str) -> String {
-    let s = s.trim().to_lowercase();
     let s = s
-        .strip_prefix("registry.ollama.ai/library/")
-        .or_else(|| s.strip_prefix("registry.ollama.ai/"))
-        .unwrap_or(&s);
+        .trim_matches(super::validation::python_whitespace)
+        .to_lowercase();
+    let s = s.strip_prefix("registry.ollama.ai/library/").unwrap_or(&s);
+    let s = s.strip_prefix("registry.ollama.ai/").unwrap_or(s);
     if s.contains(':') {
         s.into()
     } else {

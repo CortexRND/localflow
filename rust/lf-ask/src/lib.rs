@@ -53,12 +53,16 @@ impl RecallResult {
     }
 }
 pub(crate) fn local_time(ts: f64) -> Option<DateTime<Local>> {
-    let secs = ts.floor() as i64;
-    DateTime::from_timestamp(
-        secs,
-        ((ts - secs as f64) * 1_000_000_000.0).clamp(0.0, 999_999_999.0) as u32,
-    )
-    .map(|d| d.with_timezone(&Local))
+    if !ts.is_finite() {
+        return None;
+    }
+    let mut secs = ts.floor() as i64;
+    let mut micros = ((ts - secs as f64) * 1_000_000.0).round_ties_even() as u32;
+    if micros == 1_000_000 {
+        secs = secs.checked_add(1)?;
+        micros = 0;
+    }
+    DateTime::from_timestamp(secs, micros * 1_000).map(|d| d.with_timezone(&Local))
 }
 pub fn citations(passages: &[Passage], question: &str) -> Vec<Citation> {
     let (plain, _) = extract_phrases(question);
@@ -92,7 +96,7 @@ pub fn format_passage(n: usize, passage: &Passage) -> String {
     } else {
         format!("{} · {}", passage.source, passage.title)
     };
-    let words: Vec<_> = passage.text.split_whitespace().collect();
+    let words: Vec<_> = text::words(&passage.text).collect();
     let text = if words.len() > PROMPT_PASSAGE_MAX_WORDS {
         format!("{} …", words[..PROMPT_PASSAGE_MAX_WORDS].join(" "))
     } else {
@@ -147,7 +151,7 @@ pub fn answer_from_passages(
             citations,
         },
         Ok(reply) => {
-            let reply = reply.trim();
+            let reply = reply.trim_matches(text::python_whitespace);
             if reply.is_empty()
                 || reply
                     .to_lowercase()

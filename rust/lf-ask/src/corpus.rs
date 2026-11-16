@@ -1,3 +1,4 @@
+use crate::text::{ascii_digits, lines, python_whitespace};
 use crate::{
     chunk_lines, ranking::timestamp, Passage, HISTORY_SCAN_LIMIT, SOURCE_DICTATION, SOURCE_MEETING,
     SOURCE_NOTES,
@@ -12,8 +13,9 @@ use std::{
     sync::LazyLock,
 };
 
-static FILE_STAMP: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:\s+(.*))?$").unwrap());
+static FILE_STAMP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:[\s\x1c-\x1f]+(.*))?\n?\z").unwrap()
+});
 static STAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\*\*\[?(\d+:\d{2}(?::\d{2})?)\]?\*\*").unwrap());
 
@@ -45,13 +47,25 @@ pub fn parse_file_stamp(path: &Path) -> (NaiveDateTime, String) {
         .unwrap_or(&file_stem);
     if let Some(c) = FILE_STAMP.captures(stem) {
         let parse = || -> Option<NaiveDateTime> {
-            NaiveDate::from_ymd_opt(c[1].parse().ok()?, c[2].parse().ok()?, c[3].parse().ok()?)?
-                .and_hms_opt(c[4].parse().ok()?, c[5].parse().ok()?, 0)
+            let year = ascii_digits(&c[1]).parse().ok()?;
+            if year == 0 {
+                return None;
+            }
+            NaiveDate::from_ymd_opt(
+                year,
+                ascii_digits(&c[2]).parse().ok()?,
+                ascii_digits(&c[3]).parse().ok()?,
+            )?
+            .and_hms_opt(
+                ascii_digits(&c[4]).parse().ok()?,
+                ascii_digits(&c[5]).parse().ok()?,
+                0,
+            )
         };
         if let Some(when) = parse() {
             let title = c
                 .get(6)
-                .map(|m| m.as_str().trim())
+                .map(|m| m.as_str().trim_matches(python_whitespace))
                 .filter(|s| !s.is_empty())
                 .unwrap_or(stem);
             return (when, title.into());
@@ -61,6 +75,9 @@ pub fn parse_file_stamp(path: &Path) -> (NaiveDateTime, String) {
         .and_then(|m| m.modified())
         .ok()
         .map(chrono::DateTime::<Local>::from)
+        .and_then(|d| {
+            crate::local_time(d.timestamp() as f64 + d.timestamp_subsec_nanos() as f64 / 1e9)
+        })
         .map(|d| d.naive_local())
         .unwrap_or_else(|| Local::now().naive_local());
     (when, stem.into())
@@ -82,13 +99,11 @@ pub fn read_transcript_log(path: &Path) -> std::io::Result<String> {
         .split("\n## My raw notes\n")
         .next()
         .unwrap_or("");
-    Ok(text
-        .trim()
-        .lines()
+    Ok(lines(text.trim_matches(python_whitespace))
         .filter(|line| !line.starts_with("Notes: [["))
         .collect::<Vec<_>>()
         .join("\n")
-        .trim()
+        .trim_matches(python_whitespace)
         .into())
 }
 pub fn transcript_passages(path: &Path) -> Vec<Passage> {
@@ -96,8 +111,7 @@ pub fn transcript_passages(path: &Path) -> Vec<Passage> {
         return vec![];
     };
     let (started, title) = parse_file_stamp(path);
-    let text = text
-        .lines()
+    let text = lines(&text)
         .filter(|line| !line.starts_with("# "))
         .collect::<Vec<_>>()
         .join("\n");
@@ -108,7 +122,7 @@ pub fn transcript_passages(path: &Path) -> Vec<Passage> {
                 .captures(&text)
                 .map(|c| c[1].to_owned())
                 .unwrap_or_default();
-            let seconds = stamp
+            let seconds = ascii_digits(&stamp)
                 .split(':')
                 .try_fold(0_u64, |total, p| {
                     total.checked_mul(60)?.checked_add(p.parse().ok()?)
@@ -166,10 +180,15 @@ fn files(root: &Path, transcripts: bool) -> Vec<PathBuf> {
             } else if path.is_file() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if if transcripts {
-                    name.ends_with(" (transcript).md")
+                let pattern_name = if cfg!(windows) {
+                    name.to_lowercase()
                 } else {
-                    name.ends_with(".md") && !name.ends_with(" (transcript).md")
+                    name.to_string()
+                };
+                if if transcripts {
+                    pattern_name.ends_with(" (transcript).md")
+                } else {
+                    pattern_name.ends_with(".md") && !name.ends_with(" (transcript).md")
                 } {
                     out.push(path);
                 }
@@ -178,14 +197,18 @@ fn files(root: &Path, transcripts: bool) -> Vec<PathBuf> {
     }
     let mut out = vec![];
     visit(root, transcripts, &mut out);
-    out.sort();
+    if cfg!(windows) {
+        out.sort_by_key(|p| p.to_string_lossy().to_lowercase());
+    } else {
+        out.sort();
+    }
     out
 }
 pub fn build_corpus(corpus: &Corpus<'_>) -> Result<Vec<Passage>> {
     let mut passages = Vec::new();
     if let Some(store) = corpus.store.filter(|s| s.enabled) {
         for row in store.recent(HISTORY_SCAN_LIMIT, None, 0)? {
-            let text = row.final_text.trim();
+            let text = row.final_text.trim_matches(python_whitespace);
             if row.status != "ok" || text.is_empty() {
                 continue;
             }

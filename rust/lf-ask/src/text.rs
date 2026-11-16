@@ -8,10 +8,73 @@ pub(crate) static WORD_RE: LazyLock<Regex> =
 static STOPWORDS: LazyLock<HashSet<&str>> =
     LazyLock::new(|| STOPWORD_TEXT.split_whitespace().collect());
 static PHRASE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]+)""#).unwrap());
-static CITATION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[(\d{1,2}(?:\s*[,;]\s*\d{1,2})*)\]").unwrap());
+static CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[(\d{1,2}(?:[\s\x1c-\x1f]*[,;][\s\x1c-\x1f]*\d{1,2})*)\]").unwrap()
+});
 static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]{2,}").unwrap());
 static PUNCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+([.,;:!?])").unwrap());
+static DECIMAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\p{Nd}$").unwrap());
+static NONPRINTABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\p{C}\p{Z}]$").unwrap());
+pub(crate) fn ascii_digits(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() || !DECIMAL.is_match(&c.to_string()) {
+                return c;
+            }
+            let mut first = c as u32;
+            while first > 0
+                && char::from_u32(first - 1).is_some_and(|c| DECIMAL.is_match(&c.to_string()))
+            {
+                first -= 1;
+            }
+            char::from(b'0' + ((c as u32 - first) % 10) as u8)
+        })
+        .collect()
+}
+pub(crate) fn python_whitespace(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+pub(crate) fn words(s: &str) -> impl Iterator<Item = &str> {
+    s.split(python_whitespace).filter(|s| !s.is_empty())
+}
+pub(crate) fn lines(s: &str) -> impl Iterator<Item = &str> {
+    s.split([
+        '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
+        '\u{2029}',
+    ])
+}
+pub(crate) fn repr(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = quote.to_string();
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c != ' ' && NONPRINTABLE.is_match(&c.to_string()) => {
+                out.push_str(&if c as u32 <= 0xff {
+                    format!("\\x{:02x}", c as u32)
+                } else if c as u32 <= 0xffff {
+                    format!("\\u{:04x}", c as u32)
+                } else {
+                    format!("\\U{:08x}", c as u32)
+                });
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
 pub fn stem(word: &str) -> String {
     let mut word = word.strip_suffix("'s").unwrap_or(word).replace('\'', "");
     let len = word.chars().count();
@@ -68,7 +131,11 @@ pub fn clean_citations(answer: &str, valid: usize) -> String {
     let replaced = CITATION_RE.replace_all(answer, |c: &regex::Captures<'_>| {
         let keep: Vec<_> = c[1]
             .split([',', ';'])
-            .filter_map(|n| n.trim().parse::<usize>().ok())
+            .filter_map(|n| {
+                ascii_digits(n.trim_matches(python_whitespace))
+                    .parse::<usize>()
+                    .ok()
+            })
             .filter(|n| (1..=valid).contains(n))
             .map(|n| n.to_string())
             .collect();
@@ -80,11 +147,11 @@ pub fn clean_citations(answer: &str, valid: usize) -> String {
     });
     PUNCT
         .replace_all(&SPACES.replace_all(&replaced, " "), "$1")
-        .trim()
+        .trim_matches(python_whitespace)
         .into()
 }
 pub fn snippet(text: &str, terms: &HashSet<String>) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = words(text).collect::<Vec<_>>().join(" ");
     let chars: Vec<_> = flat.chars().collect();
     if chars.len() <= SNIPPET_CHARS {
         return flat;
@@ -100,7 +167,7 @@ pub fn snippet(text: &str, terms: &HashSet<String>) -> String {
         .skip(start)
         .take(SNIPPET_CHARS)
         .collect::<String>()
-        .trim()
+        .trim_matches(python_whitespace)
         .to_string();
     format!(
         "{}{piece}{}",
@@ -121,7 +188,6 @@ pub fn chunk_lines_with_limits(text: &str, target: usize, maximum: usize) -> Vec
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut count = 0;
-    let maximum = maximum.max(1);
     let flush = |chunks: &mut Vec<String>, current: &mut Vec<String>, count: &mut usize| {
         if !current.is_empty() {
             chunks.push(current.join("\n"));
@@ -129,15 +195,11 @@ pub fn chunk_lines_with_limits(text: &str, target: usize, maximum: usize) -> Vec
         current.clear();
         *count = 0;
     };
-    for line in text
-        .split([
-            '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
-            '\u{2029}',
-        ])
-        .map(str::trim)
+    for line in lines(text)
+        .map(|s| s.trim_matches(python_whitespace))
         .filter(|s| !s.is_empty())
     {
-        let words: Vec<_> = line.split_whitespace().collect();
+        let words: Vec<_> = words(line).collect();
         if words.len() > maximum {
             flush(&mut chunks, &mut current, &mut count);
             chunks.extend(words.chunks(maximum).map(|w| w.join(" ")));

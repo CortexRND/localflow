@@ -13,8 +13,9 @@ dictionary removals. `pending_undo`, `current_settings`, `manual_settings` and
 `set_setting` support consumers without model calls.
 
 `Validator` exposes platform-specific shortcut/paste validation and safe template
-IDs. Supply template IDs in `validator.templates` (defaults to `general`); this
-crate does not load meeting template files. `choose_model`, `local_ollama_url`,
+IDs. `validator.templates = Some(ids)` injects choices; the default discovers
+valid custom templates from config alongside `general`, `one-on-one`, `standup`.
+`choose_model`, `local_ollama_url`,
 `is_loopback_url`, `request_message`, and display helpers are also public.
 
 Undo uses Python's version-1 `settings-undo.json` structure at
@@ -30,10 +31,13 @@ reads, token creation, provider changes, or CLI integration.
   Config. Boolean validation supports an injected `dictation_enabled` field;
   persistence activates automatically once lf-core owns its schema mapping.
 * Rust uses typed `Change` variants rather than Python display-bearing dataclasses;
-  display fields cannot be forged independently. Errors use `anyhow::Result`;
-  wording and result struct shapes are not Python API-identical.
-* Template discovery is injected, not ported from the meetings module. Manual
-  rows follow allowlist order rather than Python's manual page ordering.
+  display fields cannot be forged independently. Errors use `anyhow::Result`,
+  warnings use `Option<String>`, and native OS/network error details differ.
+  `UndoResult.lines` corresponds to Python's `reverted`; `skipped` is separate.
+* Prompt wording, per-setting descriptions, tool schemas, request envelope,
+  previews, warnings and manual group ordering follow the dictation-toggle branch.
+  `_clean_request` replaces Unicode C-category characters only, retaining other
+  whitespace, exactly as Python does. JSON envelopes escape all non-ASCII text.
 * Rollback/undo are best effort, like Python: config comparison is not a cross-file
   transaction. Dictionary removals are atomic compare-and-remove operations.
 * macOS/Windows runtime behavior and private Windows ACLs have not been tested
@@ -42,3 +46,8 @@ reads, token creation, provider changes, or CLI integration.
 Tests use injected Ollama responses and a loopback mock HTTP server, never a
 real model. They cover injection, malformed calls, request/response/tool bounds,
 local endpoint/model selection, validation, previews, rollback and undo records.
+Frozen fixtures in `tests/python-reference.json` were computed by running the
+branch's Python modules in isolation with `tests/python_reference.py`; no
+checked-out Python files were modified. They assert the complete default prompt
+(including a schema-gated current-core variant), schemas, preview/warning strings,
+validation failures, rejected calls, URL checks and Unicode display behavior.

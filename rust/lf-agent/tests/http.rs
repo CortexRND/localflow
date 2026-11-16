@@ -43,3 +43,23 @@ fn bounded_http_and_redirect_error_paths() {
     }
     assert!(client.tags("http://remote.invalid").is_err());
 }
+
+#[test]
+fn exact_python_transport_errors_and_body_bounds() {
+    let client = OllamaClient::new().unwrap();
+    for (status, body, chat, expected) in [
+        (500, r#"{"error":"model does not support tools"}"#.to_string(), true, "The local model gemma4 can't use tools. Install one that can (`ollama pull gemma4`) and try again."),
+        (500, r#"{"error":"bad\nrequest"}"#.to_string(), true, "Ollama couldn't run gemma4: bad\\u000arequest"),
+        (302, String::new(), true, "Ollama couldn't run gemma4: HTTP 302"),
+        (200, "[]".into(), true, "Ollama sent an invalid chat response."),
+        (200, "oops".into(), false, "Ollama sent an invalid model list response."),
+        (200, " ".repeat(MAX_RESPONSE_BYTES + 1), false, "Ollama sent an oversized model list response."),
+        (200, " ".repeat(MAX_RESPONSE_BYTES + 1), true, "Ollama sent an oversized chat response."),
+    ] {
+        let response = format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let (url, handle) = serve(response.into_bytes());
+        let result = if chat { client.chat(&url, &serde_json::json!({"model":"gemma4"})) } else { client.tags(&url) };
+        handle.join().unwrap();
+        assert_eq!(result.unwrap_err().to_string(), expected);
+    }
+}

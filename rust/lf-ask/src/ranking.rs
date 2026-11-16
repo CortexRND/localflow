@@ -1,6 +1,7 @@
+use crate::text::{ascii_digits, python_whitespace};
 use crate::{extract_phrases, tokenize, Passage};
 use anyhow::{anyhow, Result};
-use chrono::{Duration, Local, NaiveDate, NaiveDateTime, Offset, TimeZone};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, Offset, TimeZone};
 use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
@@ -12,7 +13,9 @@ pub const BM25_B: f64 = 0.75;
 pub const PHRASE_BOOST: f64 = 3.0;
 pub const RECENCY_WEIGHT: f64 = 0.1;
 pub const RECENCY_HALF_LIFE_DAYS: f64 = 30.0;
-static RELATIVE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)\s*d$").unwrap());
+static RELATIVE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)[\s\x1c-\x1f]*d$").unwrap());
+static DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{4}-[0-9]{1,2}-[0-9]{1,2}$").unwrap());
 
 #[derive(Clone, Debug)]
 pub enum Since {
@@ -47,20 +50,25 @@ pub fn parse_since(value: Option<&Since>, now: NaiveDateTime) -> Result<Option<N
     if text.is_empty() {
         return Ok(None);
     }
-    let normalized = text.trim().to_lowercase();
+    let normalized = text.trim_matches(python_whitespace).to_lowercase();
     let midnight = now.date().and_hms_opt(0, 0, 0).unwrap();
-    let invalid =
-        || anyhow!("invalid since value {text:?}; use today, yesterday, 7d, 30d or YYYY-MM-DD");
+    let invalid = || {
+        anyhow!(
+            "invalid since value {}; use today, yesterday, 7d, 30d or YYYY-MM-DD",
+            crate::text::repr(text)
+        )
+    };
     let parsed = match normalized.as_str() {
         "today" => Some(midnight),
         "yesterday" => midnight.checked_sub_signed(Duration::days(1)),
         s => {
             if let Some(c) = RELATIVE.captures(s) {
-                let days = c[1].parse::<i64>().map_err(|_| invalid())?;
+                let days = ascii_digits(&c[1]).parse::<i64>().map_err(|_| invalid())?;
                 Duration::try_days(days).and_then(|d| now.checked_sub_signed(d))
             } else {
-                NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                NaiveDate::parse_from_str(&ascii_digits(s), "%Y-%m-%d")
                     .ok()
+                    .filter(|d| DATE.is_match(s) && d.year() >= 1)
                     .and_then(|d| d.and_hms_opt(0, 0, 0))
             }
         }
@@ -176,7 +184,11 @@ pub fn rank(question: &str, passages: &[Passage], options: &SearchOptions) -> Re
             let age_days = ((now - ts) / 86400.0).max(0.0);
             score *= 1.0 + RECENCY_WEIGHT * 0.5_f64.powf(age_days / RECENCY_HALF_LIFE_DAYS);
         }
-        scored.push((score, passage.ts.unwrap_or(0.0), index));
+        scored.push((
+            score,
+            passage.ts.filter(|ts| *ts != 0.0).unwrap_or(0.0),
+            index,
+        ));
     }
     scored.sort_by(|a, b| {
         b.0.total_cmp(&a.0)
