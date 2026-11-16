@@ -17,6 +17,7 @@ use anyhow::{anyhow, Result};
 use lf_core::config::load_config;
 use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
+use lf_runtime::menubar::{MeetingStatusPoller, MenuActions, MenuState};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -34,6 +35,12 @@ pub const POLL_SECONDS: f64 = 0.25;
 
 /// The "show a window" action the delegate runs on reopen.
 pub type ShowFn = Rc<dyn Fn()>;
+
+enum MenuCommand {
+    ToggleDictation,
+    PasteLast,
+    Quit,
+}
 
 define_class!(
     /// `MainAppDelegate`: shows a window when the app is reopened with none
@@ -204,6 +211,35 @@ pub fn run_hub(initial_page: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("unknown Hub page: {initial_page:?}"))?;
     // Fail on unreadable data before any window exists, like Python's `main`.
     let first = real_services()?;
+    let config = first.config();
+    let menu = MenuState::new(
+        lf_runtime::platform_menu_bar(),
+        config.field_bool("dictation_enabled").unwrap_or(true),
+    );
+    let (commands, menu_commands) = std::sync::mpsc::channel();
+    let toggle = commands.clone();
+    let paste = commands.clone();
+    lf_runtime::macos::install_menu_bar(
+        menu.snapshot(),
+        MenuActions {
+            toggle_dictation: Arc::new(move || {
+                let _ = toggle.send(MenuCommand::ToggleDictation);
+            }),
+            paste_last: Arc::new(move || {
+                let _ = paste.send(MenuCommand::PasteLast);
+            }),
+            quit: Arc::new(move || {
+                let _ = commands.send(MenuCommand::Quit);
+            }),
+        },
+    )
+    .map_err(|error| anyhow!(error))?;
+    let meeting = HttpMeetingClient(HttpTransport::from_config(&config)?);
+    let meeting_menu = menu.clone();
+    let _meeting_poller = MeetingStatusPoller::start(
+        meeting.status_fetch(),
+        Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
+    );
     let handed_out = Cell::new(Some(first));
     let slot = HubSlot::new(
         mtm,
@@ -223,14 +259,70 @@ pub fn run_hub(initial_page: &str) -> Result<()> {
     };
     let poll: Box<dyn Fn() -> bool> = {
         let slot = slot.clone();
-        Box::new(move || match hub_route::consume_request() {
-            Some(page) => {
-                if let Err(error) = slot.open(Some(page)) {
-                    eprintln!("lf-hub: could not open the Hub: {error:#}");
+        Box::new(move || {
+            for command in menu_commands.try_iter() {
+                if let MenuCommand::Quit = command {
+                    if let Some(hub) = slot.hub() {
+                        hub.shutdown();
+                    }
+                    NSApplication::sharedApplication(mtm).terminate(None);
+                    continue;
                 }
-                true
+                if let Some(hub) = slot.hub() {
+                    let services = hub.services();
+                    match command {
+                        MenuCommand::ToggleDictation => {
+                            let enabled = services
+                                .dictation_config()
+                                .field_bool("dictation_enabled")
+                                .unwrap_or(true);
+                            match services.update_dictation(!enabled) {
+                                Ok(_) => services.clear_page_error("Home"),
+                                Err(error) => services.set_page_error(
+                                    "Home",
+                                    &format!("Couldn't change dictation: {error}"),
+                                ),
+                            }
+                            hub.rebuild_current_page();
+                        }
+                        MenuCommand::PasteLast => {
+                            let fallback = lf_runtime::status::read_last_text(
+                                &lf_runtime::status::last_text_path(),
+                            );
+                            let text = services.history.latest_text(&fallback).unwrap_or(fallback);
+                            if !text.is_empty() {
+                                lf_input::paste::Injector::native().paste_text(
+                                    &text,
+                                    services
+                                        .config()
+                                        .field_str("paste_method")
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or("auto"),
+                                    None,
+                                );
+                            }
+                        }
+                        MenuCommand::Quit => unreachable!(),
+                    }
+                }
             }
-            None => false,
+            if let Some(hub) = slot.hub() {
+                let enabled = hub
+                    .services()
+                    .config()
+                    .field_bool("dictation_enabled")
+                    .unwrap_or(true);
+                menu.change(|model| model.dictation_enabled = enabled);
+            }
+            match hub_route::consume_request() {
+                Some(page) => {
+                    if let Err(error) = slot.open(Some(page)) {
+                        eprintln!("lf-hub: could not open the Hub: {error:#}");
+                    }
+                    true
+                }
+                None => false,
+            }
         })
     };
     run_app(mtm, show, Some(poll));

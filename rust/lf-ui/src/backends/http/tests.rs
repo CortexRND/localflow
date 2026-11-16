@@ -3,7 +3,7 @@ use lf_server::backend::{Backend, BackendRequest, BackendResponse};
 use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::sync::{
-    atomic::{AtomicU16, Ordering},
+    atomic::{AtomicU16, AtomicU64, Ordering},
     Mutex,
 };
 
@@ -12,12 +12,14 @@ type Recorded = (Method, String, HashMap<String, String>, Value);
 #[derive(Default)]
 struct FakeBackend {
     status: AtomicU16,
+    delay_ms: AtomicU64,
     calls: Mutex<Vec<Recorded>>,
     response: Mutex<Option<Value>>,
 }
 
 impl Backend for FakeBackend {
     fn handle(&self, request: BackendRequest) -> BackendResponse {
+        std::thread::sleep(Duration::from_millis(self.delay_ms.load(Ordering::SeqCst)));
         let body = if request.body.is_empty() {
             Value::Null
         } else {
@@ -92,6 +94,67 @@ impl Drop for Server {
         let _ = self.stop.take().unwrap().send(());
         self.thread.take().unwrap().join().unwrap();
     }
+}
+
+#[test]
+fn runtime_poller_fetches_authenticated_status_and_reports_down() {
+    use lf_runtime::menubar::{MeetingStatusPoller, MenuState, PollResult};
+
+    let server = Server::new();
+    let status = json!({"session": null, "detected": false});
+    *server.backend.response.lock().unwrap() = Some(status.clone());
+    let client = HttpMeetingClient(server.http());
+    let menu = MenuState::new(None, true);
+    let updates = menu.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    let _poller = MeetingStatusPoller::start(
+        client.status_fetch(),
+        Arc::new(move |result| {
+            updates.change(|model| model.apply_status(&result));
+            send.send(result).unwrap();
+        }),
+    );
+    let next = || receive.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(next(), PollResult::Ok(status));
+    assert_eq!(menu.snapshot().status_line, "watching · idle");
+    let calls = server.backend.calls.lock().unwrap();
+    assert_eq!(calls[0].0, Method::GET);
+    assert_eq!(calls[0].1, "/meeting/status");
+    drop(calls);
+
+    server.backend.status.store(503, Ordering::SeqCst);
+    _poller.poke();
+    assert_eq!(next(), PollResult::Down);
+    assert_eq!(menu.snapshot().status_line, "server: down (lf serve)");
+
+    server.backend.status.store(0, Ordering::SeqCst);
+    *server.backend.response.lock().unwrap() = Some(Value::Null);
+    _poller.poke();
+    assert_eq!(next(), PollResult::Ok(json!({})));
+
+    drop(server);
+    _poller.poke();
+    assert_eq!(next(), PollResult::Down);
+}
+
+#[test]
+fn runtime_status_fetch_uses_two_second_deadline() {
+    use lf_runtime::menubar::{MeetingStatusPoller, PollResult};
+
+    let server = Server::new();
+    server.backend.delay_ms.store(2500, Ordering::SeqCst);
+    let client = HttpMeetingClient(server.http());
+    let (send, receive) = std::sync::mpsc::channel();
+    let _poller = MeetingStatusPoller::start(
+        client.status_fetch(),
+        Arc::new(move |result| {
+            let _ = send.send(result);
+        }),
+    );
+    assert_eq!(
+        receive.recv_timeout(Duration::from_secs(5)).unwrap(),
+        PollResult::Down
+    );
 }
 
 #[test]

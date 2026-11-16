@@ -154,6 +154,22 @@ impl HttpTransport {
 pub struct HttpMeetingClient(pub HttpTransport);
 
 impl HttpMeetingClient {
+    /// Short, read-only fetch for the runtime's adaptive menu bar poller.
+    pub fn status_fetch(&self) -> Arc<dyn Fn() -> Result<Value, String> + Send + Sync> {
+        let transport = self.0.clone();
+        Arc::new(move || {
+            transport
+                .request(
+                    Method::GET,
+                    &["meeting", "status"],
+                    &[],
+                    None,
+                    lf_runtime::menubar::REQUEST_TIMEOUT.as_secs(),
+                )
+                .map_err(|error| error.message)
+        })
+    }
+
     fn request(
         &self,
         method: Method,
