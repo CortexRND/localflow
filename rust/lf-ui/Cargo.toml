@@ -1,0 +1,33 @@
+[package]
+name = "lf-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "LocalFlow UI logic: platform-independent port of the pure Hub/setup/settings layout and state code (Stage 1 Rust port)"
+
+[lib]
+name = "lf_ui"
+path = "src/lib.rs"
+
+[dependencies]
+lf-core = { path = "../lf-core" }
+lf-providers = { path = "../lf-providers" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }
+caseless = { workspace = true }
+log = { workspace = true }
+uuid = { workspace = true }
+sha2 = "0.10"
+unicode-normalization = "0.1"
+unicode-general-category = "1"
+
+# `os.access` for the recent-notes folder check (hub_model).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["lf-core", "lf-providers", "lf"]
+members = ["lf-core", "lf-providers", "lf", "lf-ui"]
 
 [workspace.package]
 version = "0.1.0"
