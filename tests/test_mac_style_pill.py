@@ -1,10 +1,13 @@
-"""Exercise mac_style.make_pill on Linux with a minimal fake AppKit."""
+"""Exercise mac_style (make_pill, PlaceholderTextView) on Linux with a minimal
+fake AppKit and objc."""
 
+import ast
 import importlib.util
 import math
 import sys
 import types
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -78,7 +81,84 @@ class Label(View):
 
 
 class TextView(View):
-    """Base for mac_style.PlaceholderTextView; the pill never uses it."""
+    """Fake NSTextView. Like a PyObjC class, its overridden selectors are only
+    reachable through objc.super: a builtin super() call raises the same
+    AttributeError the native snapshot run hit in drawRect_."""
+
+    dispatching = False
+
+    def _objc_only(self, name):
+        if not TextView.dispatching:
+            raise AttributeError(f"'super' object has no attribute '{name}'")
+        self.super_calls.append(name)
+
+    def initWithFrame_(self, frame):
+        View.initWithFrame_(self, frame)
+        self.text, self.super_calls, self.needs_display = "", [], False
+        return self
+
+    def string(self):
+        return self.text
+
+    def setString_(self, text):
+        self._objc_only("setString_")
+        self.text = text
+
+    def didChangeText(self):
+        self._objc_only("didChangeText")
+
+    def drawRect_(self, _rect):
+        self._objc_only("drawRect_")
+
+    def setNeedsDisplay_(self, value):
+        self.needs_display = value
+
+    def bounds(self):
+        return self._frame
+
+    def textContainerInset(self):
+        return types.SimpleNamespace(width=6, height=8)
+
+    def textContainer(self):
+        return types.SimpleNamespace(lineFragmentPadding=lambda: 5)
+
+    def font(self):
+        return "font-13"
+
+
+def objc_super(cls, obj):
+    """Fake objc.super: dispatches to the next class's selector."""
+    base = cls.__mro__[1]
+
+    class Proxy:
+        def __getattr__(self, name):
+            method = getattr(base, name)
+
+            def call(*args):
+                TextView.dispatching = True
+                try:
+                    return method(obj, *args)
+                finally:
+                    TextView.dispatching = False
+
+            return call
+
+    return Proxy()
+
+
+class AttributedString:
+    drawn: ClassVar[list] = []
+
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def initWithString_attributes_(self, text, attributes):
+        self.text, self.attributes = text, attributes
+        return self
+
+    def drawInRect_(self, rect):
+        AttributedString.drawn.append((self.text, self.attributes, rect))
 
 
 class Color:
@@ -93,6 +173,9 @@ def mac_style(monkeypatch):
     appkit.NSView = View
     appkit.NSTextField = Label
     appkit.NSTextView = TextView
+    appkit.NSAttributedString = AttributedString
+    appkit.NSFontAttributeName = "font"
+    appkit.NSForegroundColorAttributeName = "color"
     appkit.NSLineBreakByClipping = 2
     appkit.NSFontWeightRegular = "regular"
     appkit.NSFontWeightSemibold = "semibold"
@@ -108,8 +191,12 @@ def mac_style(monkeypatch):
     foundation = types.ModuleType("Foundation")
     foundation.NSMakeRect = Rect
     foundation.NSMakeSize = lambda w, h: (w, h)
+    fake_objc = types.ModuleType("objc")
+    fake_objc.super = objc_super
+    AttributedString.drawn = []
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
     monkeypatch.setitem(sys.modules, "Foundation", foundation)
+    monkeypatch.setitem(sys.modules, "objc", fake_objc)
     spec = importlib.util.spec_from_file_location("mac_style_under_test", SRC)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -143,3 +230,57 @@ def test_pill_label_is_vertically_centered_and_uses_token_font_and_border(mac_st
     calls = pill.layer().calls
     assert calls["setBorderWidth_"] == ui_tokens.PILL_BORDER_WIDTH
     assert calls["setCornerRadius_"] == ui_tokens.PILL_HEIGHT / 2
+
+
+def _placeholder_view(mac_style):
+    view = mac_style.PlaceholderTextView.alloc().initWithFrame_(Rect(0, 0, 300, 120))
+    view.setPlaceholder_color_("Type notes", "muted-color")
+    return view
+
+
+def test_placeholder_view_draws_through_objc_super_and_only_when_empty(mac_style):
+    # Regression: builtin super() raised AttributeError in drawRect_ and
+    # crashed the native snapshot run on the Meetings page.
+    view = _placeholder_view(mac_style)
+    view.drawRect_(Rect(0, 0, 300, 120))
+    assert view.super_calls == ["drawRect_"]
+    [(text, attributes, rect)] = AttributedString.drawn
+    assert text == "Type notes" and attributes["color"] == "muted-color"
+    assert attributes["font"] == "font-13"
+    # Inside the text inset and line padding, never stored as text.
+    assert (rect.origin.x, rect.origin.y) == (6 + 5, 8)
+    assert rect.size.width == 300 - 2 * (6 + 5) and rect.size.height == 120 - 2 * 8
+    assert view.string() == ""
+
+
+def test_placeholder_view_set_string_and_edits_dispatch_to_nstextview(mac_style):
+    view = _placeholder_view(mac_style)
+    view.setString_("Real notes")
+    assert view.string() == "Real notes"  # the real text, unchanged
+    assert view.needs_display is True
+    view.needs_display = False
+    view.didChangeText()
+    assert view.needs_display is True
+    view.drawRect_(Rect(0, 0, 300, 120))
+    assert view.super_calls == ["setString_", "didChangeText", "drawRect_"]
+    assert AttributedString.drawn == []  # real text: no placeholder drawn
+    # Emptying the box brings the placeholder back; the text stays empty.
+    view.setString_("")
+    view.drawRect_(Rect(0, 0, 300, 120))
+    assert [entry[0] for entry in AttributedString.drawn] == ["Type notes"]
+    assert view.string() == ""
+
+
+def test_placeholder_overrides_never_use_builtin_super():
+    source = SRC.read_text(encoding="utf-8")
+    cls = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef) and node.name == "PlaceholderTextView"
+    )
+    for method in cls.body:
+        if not isinstance(method, ast.FunctionDef):
+            continue
+        body = ast.get_source_segment(source, method)
+        assert "super()" not in body, method.name
+        if method.name in {"drawRect_", "didChangeText", "setString_"}:
+            assert f"objc.super(PlaceholderTextView, self).{method.name}(" in body

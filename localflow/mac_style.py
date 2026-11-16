@@ -3,6 +3,7 @@
 import math
 
 import AppKit
+import objc
 from AppKit import NSColor
 from Foundation import NSMakeRect, NSMakeSize
 
@@ -85,18 +86,20 @@ class PlaceholderTextView(AppKit.NSTextView):
         self.placeholder_color = placeholder_color
         self.setNeedsDisplay_(True)
 
+    # Overrides call NSTextView through objc.super: builtin super() does not
+    # resolve these selectors on a PyObjC subclass (AttributeError in drawRect_).
     def didChangeText(self):
-        super().didChangeText()
+        objc.super(PlaceholderTextView, self).didChangeText()
         # Typing the first character / deleting the last one must repaint the
         # whole view, not just the edited glyph rect.
         self.setNeedsDisplay_(True)
 
     def setString_(self, text):
-        super().setString_(text)
+        objc.super(PlaceholderTextView, self).setString_(text)
         self.setNeedsDisplay_(True)
 
     def drawRect_(self, dirty_rect):
-        super().drawRect_(dirty_rect)
+        objc.super(PlaceholderTextView, self).drawRect_(dirty_rect)
         if self.string() or not self.placeholder:
             return
         inset = self.textContainerInset()
