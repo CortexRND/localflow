@@ -223,8 +223,9 @@ def test_live_settings_adopts_the_group_and_reloads_off_the_watcher():
     assert calls[-1] == ("stt", "parakeet", "base")
     live.retry()
     assert calls[-1] == ("retry",)
-    assert live.apply(live.config) == frozenset()  # nothing moved: nothing reloads...
-    assert calls[-1] == ("retry_failed", "base")  # ...unless that speech model had failed
+    before = list(calls)
+    assert live.apply(live.config) == frozenset()  # nothing moved: nothing reloads,
+    assert calls == before  # nor is a failed speech model retried (explicit requests only)
 
 
 def test_worker_takes_one_model_snapshot_per_job():

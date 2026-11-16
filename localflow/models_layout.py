@@ -9,6 +9,8 @@ from dataclasses import replace
 
 from localflow import provider_keys
 from localflow.config import save_config
+from localflow.live_config import STT_FIELDS
+from localflow.speech_retry import request_retry
 from localflow.text_wrap import wrap_lines
 from localflow.ui_tokens import (
     CARD_PADDING,
@@ -326,7 +328,9 @@ def speech_model_choices(provider):
     return tuple((size, _SIZE_LABELS[size]) for size in sizes)
 
 
-def set_speech(provider, model, config, *, available=None, save=save_config):
+def set_speech(
+    provider, model, config, *, available=None, save=save_config, retry=request_retry,
+):
     """Save the speech provider and model together; returns the config.
 
     Only providers this machine can run (plus the configured one) and only
@@ -334,9 +338,12 @@ def set_speech(provider, model, config, *, available=None, save=save_config):
     `model` is ignored and the saved size is left alone. Providers that only
     run on the default device get `stt_device = "auto"` so the pair can load.
     Nothing is loaded here: the app and server load it in the background.
-    An unchanged choice is saved too: re-saving is how picking the same model
-    again asks the running app to retry it after a failed load (a healthy
-    model is not reloaded).
+    Picking the speech selection that is already saved (STT_FIELDS unchanged)
+    also calls `retry(updated)` once the save succeeded
+    (speech_retry.request_retry): the explicit request for the running app to
+    load that model again if its load failed; a healthy or loading model is
+    left alone. A changed choice loads from the config change alone and makes
+    no request.
     """
     offered = [pid for pid, _label in speech_provider_choices(config, available)]
     if provider not in offered or provider not in SPEECH_PROVIDER_IDS:
@@ -353,6 +360,8 @@ def set_speech(provider, model, config, *, available=None, save=save_config):
         device = "auto"
     updated = replace(config, stt_backend=provider, model_size=size, stt_device=device)
     save(updated)
+    if all(getattr(updated, name) == getattr(config, name) for name in STT_FIELDS):
+        retry(updated)
     return updated
 
 

@@ -173,10 +173,13 @@ def test_whisper_sizes_and_refusals():
     with pytest.raises(ml.ModelChoiceError):
         ml.set_speech("whisper-cloud", None, config, available=lambda _p: True,
                       save=saved.append)
-    same = ml.set_speech("auto", "base", config, available=available(), save=saved.append)
-    # An unchanged choice is still saved: re-picking is the retry signal after a
-    # failed load (the running app reloads nothing for a healthy model).
+    retries = []
+    same = ml.set_speech("auto", "base", config, available=available(), save=saved.append,
+                         retry=retries.append)
+    # An unchanged choice is still saved and asks explicitly for a retry after
+    # a failed load (the running app reloads nothing for a healthy model).
     assert same == config and len(saved) == 3 and saved[-1] == config
+    assert retries == [config]
 
 
 # -------------------------------------------------------------- layout ---
@@ -391,7 +394,9 @@ def popup_title(popup):
     return popup.items[popup.index] if 0 <= popup.index < len(popup.items) else ""
 
 
-def namespace(saved, fresh):
+def namespace(saved, fresh, retry=lambda _config: None):
+    """Hub globals; `retry` receives speech retry requests (none written to disk)."""
+
     def load():
         return fresh[0]
 
@@ -423,7 +428,7 @@ def namespace(saved, fresh):
         "active_preset": ml.active_preset, "set_active_model": ml.set_active_model,
         "set_speech": lambda provider, model, config, save: ml.set_speech(
             provider, model, config, available=available("faster-whisper", "mlx-whisper"),
-            save=save),
+            save=save, retry=retry),
         "speech_summary": ml.speech_summary,
         "ModelChoiceError": ml.ModelChoiceError, "ConfigError": ConfigError,
         "load_config": load, "save_config": save,

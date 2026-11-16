@@ -11,7 +11,7 @@ from localflow import sounds, stt_lease
 from localflow.audio import Recorder, rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
-from localflow.config import load_config
+from localflow.config import config_path, load_config
 from localflow.context import AppInfo, category_for
 from localflow.dictionary import (
     DictionaryStore,
@@ -38,6 +38,7 @@ from localflow.logfiles import prepare_process_logs
 from localflow.providers.factory import build_llm, build_stt
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
+from localflow.speech_retry import RetryRequests
 from localflow.status import write_last_text, write_state
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
@@ -225,14 +226,17 @@ class LiveSettings:
     allowlisted live fields change via live_config.merge_live; the model
     groups (LLM provider/endpoint/model/key ref, speech provider/model) are
     adopted whole and their clients rebuilt by `models` (RuntimeModels). The
-    recorder and listener are never rebuilt here.
+    recorder and listener are never rebuilt here. A failed speech model is
+    loaded again only on an explicit request read from `retry_requests`
+    (speech_retry.RetryRequests) on watcher ticks, never from a config save.
     """
 
-    def __init__(self, config, controller, hub=None, models=None):
+    def __init__(self, config, controller, hub=None, models=None, retry_requests=None):
         self.config = config
         self.controller = controller
         self.hub = hub
         self.models = models
+        self.retry_requests = retry_requests
         self._lock = threading.Lock()
 
     def apply(self, fresh) -> frozenset:
@@ -240,11 +244,8 @@ class LiveSettings:
             merged, changed = merge_live(self.config, fresh, reloaded=RUNTIME_FIELDS)
             groups = runtime_changes(merged, fresh)
             if not changed and not groups:
-                # The file was saved with nothing different, as when the Hub
-                # re-saves a re-picked speech model: the one signal to retry
-                # that model if its load failed (never on watcher ticks).
-                if self.models is not None and self.models.retry_failed_stt(merged):
-                    log.info("retrying the speech model that failed to load")
+                # Never a speech retry: a save with nothing live in it (an
+                # unchanged file, a restart-only edit) asks for nothing.
                 return changed
             if groups:
                 runtime = frozenset(
@@ -275,7 +276,33 @@ class LiveSettings:
         if hub is not None and hub.reconfigure_pending:
             hub.apply_pending()
         if self.models is not None:
+            self._take_speech_retry()
             self.models.retry()
+
+    def _take_speech_retry(self) -> None:
+        """Act on one explicit "load this speech model again" request, if any.
+
+        The request (the Hub re-picking the saved model; speech_retry) is taken
+        once and only honoured for the speech selection this app now wants; the
+        load itself happens only if that choice's load failed
+        (RuntimeModels.retry_failed_stt).
+        """
+        if self.retry_requests is None:
+            return
+        try:
+            requested = self.retry_requests.take()
+        except Exception:
+            log.exception("could not read the speech retry request")
+            return
+        if requested is None:
+            return
+        with self._lock:
+            config = self.config
+            if tuple(requested) != _speech_selection(config):
+                log.info("ignoring a speech retry request for another model")
+                return
+            if self.models.retry_failed_stt(config):
+                log.info("retrying the speech model that failed to load")
 
 
 def _worker_loop(work_queue, process_job, deliver_result) -> None:
@@ -376,7 +403,12 @@ def main() -> None:
         can_swap=lambda: controller.is_idle() and work_queue.unfinished_tasks == 0,
     )
     del transcriber
-    live = LiveSettings(config, controller, models=models)
+    # Re-picking the saved speech model in the Hub (another process) asks for
+    # a retry through a request beside the config file; ones left from before
+    # this start are ignored.
+    live = LiveSettings(
+        config, controller, models=models, retry_requests=RetryRequests(config_path),
+    )
 
     def process_item(item):
         # One consistent set of models per job, whatever a reload does meanwhile.

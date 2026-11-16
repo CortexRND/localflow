@@ -25,6 +25,7 @@ from test_runtime_reload import FakeTranscriber, Recorder, models
 
 from localflow import app as app_module
 from localflow import config as config_module
+from localflow import speech_retry
 from localflow.live_config import ConfigWatcher
 
 WIDTH = 800
@@ -38,11 +39,13 @@ class Desk:
             config_module.Config(stt_backend="faster-whisper", model_size="base"), path,
         )
         self.runtime = runtime
+        # Re-picks reach the app as real retry requests beside `path`.
         self.live = app_module.LiveSettings(
             config_module.load_config(), Recorder(), models=runtime,
+            retry_requests=speech_retry.RetryRequests(path),
         )
         self.watcher = ConfigWatcher(self.live.apply, path=path, on_tick=self.live.retry)
-        ns = namespace([], [None])
+        ns = namespace([], [None], retry=speech_retry.request_retry)
         # The real config file, not the in-memory lists of test_models_change.
         ns.update({"load_config": config_module.load_config,
                    "save_config": config_module.save_config})
