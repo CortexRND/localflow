@@ -365,8 +365,8 @@ def test_astral_titles_are_capped_in_bytes_and_still_never_collide(tmp_path):
         for path in (saved.notes_path, saved.log_path):
             assert len(path.name.encode("utf-8")) <= 255 and path.is_file()
         assert saved.title.startswith(letter * 60)  # the heading keeps the full title
-        assert f"\n# {saved.title}\n" in saved.notes_path.read_text()
-        assert f"[[{saved.log_path.stem}]]" in saved.notes_path.read_text()
+        assert f"\n# {saved.title}\n" in saved.notes_path.read_text(encoding="utf-8")
+        assert f"[[{saved.log_path.stem}]]" in saved.notes_path.read_text(encoding="utf-8")
     assert second.notes_path.stem == f"{first.notes_path.stem} 2"
     stem_title = first.notes_path.stem.split(" ", 2)[2]
     assert len(stem_title.encode("utf-8")) <= meetings.MAX_NAME_BYTES
