@@ -1,0 +1,408 @@
+//! Native adapters for lf-runtime's capture, speech and worker-factory seams.
+
+use std::sync::{Arc, Mutex};
+
+use anyhow::{bail, Result};
+use lf_audio::{Recorder, SAMPLE_RATE};
+use lf_core::config::Config;
+use lf_runtime::engine::{AudioSource, Pcm, SpeechEngine};
+use lf_runtime::run::RunOptions;
+use lf_runtime::worker::SttFactory;
+
+use crate::{factory, EngineSpec, SttSlot};
+
+pub struct RecorderSource {
+    recorder: Recorder,
+    stop_error: Option<String>,
+}
+
+impl RecorderSource {
+    pub fn new(device: Option<String>) -> Self {
+        Self {
+            recorder: Recorder::new(device),
+            stop_error: None,
+        }
+    }
+
+    pub fn from_config(config: &Config) -> Result<Self> {
+        validate_sample_rate(config)?;
+        Ok(Self::new(
+            config.field_str("input_device").map(str::to_owned),
+        ))
+    }
+
+    /// AudioSource cannot return stop errors. A failed stop drops the clip;
+    /// callers may retrieve the error instead of mistaking it for silence.
+    pub fn take_stop_error(&mut self) -> Option<String> {
+        self.stop_error.take()
+    }
+}
+
+impl AudioSource for RecorderSource {
+    fn start(&mut self) -> Result<(), String> {
+        self.stop_error = None;
+        self.recorder.start().map_err(|e| e.to_string())
+    }
+
+    fn stop(&mut self) -> Pcm {
+        match self.recorder.stop() {
+            Ok(pcm) => pcm,
+            Err(error) => {
+                log::error!("microphone stop failed: {error}");
+                self.stop_error = Some(error.to_string());
+                Vec::new()
+            }
+        }
+    }
+
+    fn is_recording(&self) -> bool {
+        self.recorder.recording()
+    }
+}
+
+/// One frozen model snapshot, shared safely by runtime jobs and HTTP callers.
+pub struct SpeechAdapter {
+    slot: Mutex<SttSlot>,
+}
+
+impl SpeechAdapter {
+    pub fn from_config(config: &Config) -> Result<Self> {
+        validate_sample_rate(config)?;
+        Ok(Self::from_spec(factory::from_config(config, None)?))
+    }
+
+    /// Injection seam for custom engines, including offline fakes.
+    pub fn from_spec(spec: EngineSpec) -> Self {
+        Self::with_slot(SttSlot::new(), spec)
+    }
+
+    fn with_slot(slot: SttSlot, spec: EngineSpec) -> Self {
+        let mut slot = slot.with_scoped_leases();
+        slot.select(spec);
+        Self {
+            slot: Mutex::new(slot),
+        }
+    }
+
+    pub fn loaded(&self) -> bool {
+        self.slot.lock().map(|slot| slot.loaded()).unwrap_or(false)
+    }
+}
+
+impl SpeechEngine for SpeechAdapter {
+    fn load(&self) -> Result<(), String> {
+        self.slot
+            .lock()
+            .map_err(|_| "speech slot poisoned".to_string())?
+            .load()
+            .map_err(|e| e.to_string())
+    }
+
+    fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> Result<String, String> {
+        self.slot
+            .lock()
+            .map_err(|_| "speech slot poisoned".to_string())?
+            .transcribe(pcm, prompt)
+            .map(|result| result.text)
+            .map_err(|e| e.to_string())
+    }
+
+    fn unload(&self) {
+        // Even after an inference panic, unload native resources and their lease.
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).unload();
+    }
+}
+
+pub fn stt_factory() -> SttFactory {
+    Arc::new(|config| {
+        SpeechAdapter::from_config(config)
+            .map(|engine| Arc::new(engine) as Arc<dyn SpeechEngine>)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Pass to lf_runtime::run::run. Construction neither opens the mic nor loads weights.
+pub fn run_options(
+    config: &Config,
+    play_sound: Arc<dyn Fn(&str) + Send + Sync>,
+) -> Result<RunOptions> {
+    Ok(RunOptions {
+        audio: Box::new(RecorderSource::from_config(config)?),
+        speech: Arc::new(SpeechAdapter::from_config(config)?),
+        build_stt: stt_factory(),
+        play_sound,
+    })
+}
+
+fn validate_sample_rate(config: &Config) -> Result<()> {
+    let rate = config
+        .fields
+        .get("sample_rate")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(i64::from(SAMPLE_RATE));
+    if rate != i64::from(SAMPLE_RATE) {
+        bail!("native dictation requires sample_rate = {SAMPLE_RATE} (configured {rate})");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::{LoadInfo, Transcript};
+
+    #[derive(Default)]
+    struct Counts {
+        loads: AtomicUsize,
+        calls: AtomicUsize,
+        unloads: AtomicUsize,
+    }
+
+    struct Fake {
+        counts: Arc<Counts>,
+        loaded: Cell<bool>,
+        fail_load: bool,
+    }
+
+    impl crate::SpeechEngine for Fake {
+        fn id(&self) -> &str {
+            "fake"
+        }
+        fn load(&mut self) -> Result<LoadInfo> {
+            self.counts.loads.fetch_add(1, Ordering::SeqCst);
+            self.loaded.set(true);
+            if self.fail_load {
+                bail!("load failed");
+            }
+            Ok(LoadInfo::default())
+        }
+        fn transcribe(&mut self, pcm: &[f32], prompt: Option<&str>) -> Result<Transcript> {
+            assert!(self.loaded.get());
+            self.counts.calls.fetch_add(1, Ordering::SeqCst);
+            if prompt == Some("fail") {
+                bail!("inference failed");
+            }
+            Ok(Transcript {
+                text: if pcm.is_empty() {
+                    String::new()
+                } else {
+                    prompt.unwrap_or("native").into()
+                },
+                ..Transcript::default()
+            })
+        }
+        fn unload(&mut self) {
+            self.counts.unloads.fetch_add(1, Ordering::SeqCst);
+            self.loaded.set(false);
+        }
+        fn loaded(&self) -> bool {
+            self.loaded.get()
+        }
+    }
+
+    fn adapter(root: &std::path::Path, fail_load: bool) -> (Arc<SpeechAdapter>, Arc<Counts>) {
+        let counts = Arc::new(Counts::default());
+        let spec = EngineSpec {
+            key: "fake".into(),
+            backend: "whisper-cpp".into(),
+            model_size: "base".into(),
+            engine: Box::new(Fake {
+                counts: counts.clone(),
+                loaded: Cell::new(false),
+                fail_load,
+            }),
+        };
+        (
+            Arc::new(SpeechAdapter::with_slot(
+                SttSlot::with_lease_root(root.into()),
+                spec,
+            )),
+            counts,
+        )
+    }
+
+    #[test]
+    fn load_prompt_empty_error_unload_reload_and_shared_calls() {
+        let root = tempfile::tempdir().unwrap();
+        let (speech, counts) = adapter(root.path(), false);
+        assert!(!speech.loaded());
+        speech.load().unwrap();
+        speech.load().unwrap();
+        assert!(speech.loaded());
+        assert_eq!(counts.loads.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(speech.transcribe(&[], None).unwrap(), "");
+        assert_eq!(
+            speech
+                .transcribe(&[0.25], Some("dictionary prompt"))
+                .unwrap(),
+            "dictionary prompt"
+        );
+        assert_eq!(
+            speech.transcribe(&[0.25], Some("fail")).unwrap_err(),
+            "inference failed"
+        );
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let speech = speech.clone();
+                std::thread::spawn(move || speech.transcribe(&[0.25], None).unwrap())
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), "native");
+        }
+        speech.unload();
+        assert!(!speech.loaded());
+        assert!(crate::stt_lease::live_leases(Some(root.path()), |_| true).is_empty());
+        assert_eq!(speech.transcribe(&[0.25], None).unwrap(), "native");
+        assert_eq!(counts.loads.load(Ordering::SeqCst), 2);
+        drop(speech);
+        assert!(crate::stt_lease::live_leases(Some(root.path()), |_| true).is_empty());
+        assert_eq!(Arc::strong_count(&counts), 1);
+    }
+
+    #[test]
+    fn replacement_loads_before_old_unload_without_losing_either_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let (old, _) = adapter(root.path(), false);
+        old.load().unwrap();
+        let (failed, counts) = adapter(root.path(), true);
+        assert_eq!(failed.load().unwrap_err(), "load failed");
+        assert!(!failed.loaded());
+        assert_eq!(counts.unloads.load(Ordering::SeqCst), 1);
+        assert!(old.loaded());
+        assert_eq!(
+            crate::stt_lease::live_leases(Some(root.path()), |_| true).len(),
+            1
+        );
+        let (new, _) = adapter(root.path(), false);
+        new.load().unwrap();
+        assert_eq!(
+            crate::stt_lease::live_leases(Some(root.path()), |_| true).len(),
+            2
+        );
+        old.unload();
+        drop(old);
+        assert_eq!(
+            crate::stt_lease::live_leases(Some(root.path()), |_| true).len(),
+            1
+        );
+        assert_eq!(new.transcribe(&[0.25], None).unwrap(), "native");
+        drop(new);
+        drop(failed);
+        assert!(crate::stt_lease::live_leases(Some(root.path()), |_| true).is_empty());
+    }
+
+    #[test]
+    fn construction_is_idle_and_rejects_incompatible_rates_and_providers() {
+        let mut config = Config::default();
+        config
+            .fields
+            .insert("stt_backend".into(), serde_json::json!("whisper-cpp"));
+        let mut audio = RecorderSource::from_config(&config).unwrap();
+        assert!(!audio.is_recording());
+        assert!(audio.stop().is_empty());
+        assert!(audio.take_stop_error().is_none());
+        if cfg!(feature = "whisper") {
+            let options = run_options(&config, Arc::new(|_| {})).unwrap();
+            assert!(!options.audio.is_recording());
+            let speech = (options.build_stt)(&config).unwrap();
+            speech.unload();
+        }
+        config
+            .fields
+            .insert("sample_rate".into(), serde_json::json!(48000));
+        assert!(RecorderSource::from_config(&config).is_err());
+        assert!(SpeechAdapter::from_config(&config).is_err());
+        config
+            .fields
+            .insert("sample_rate".into(), serde_json::json!(16000));
+        config
+            .fields
+            .insert("stt_backend".into(), serde_json::json!("plugin"));
+        assert!(stt_factory()(&config).is_err());
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn stacked_http_backends_use_outer_transcribe_and_delegate_other_routes() {
+        use lf_runtime::server::DictationBackend;
+        use lf_server::backend::{Backend, BackendRequest, BackendResponse};
+        use serde_json::json;
+
+        struct Fallback;
+        impl Backend for Fallback {
+            fn handle(&self, request: BackendRequest) -> BackendResponse {
+                BackendResponse {
+                    status: 200,
+                    body: json!({"route":request.path}),
+                }
+            }
+            fn stt_available(&self, _: &str) -> bool {
+                false
+            }
+            fn transcriber_loaded(&self) -> bool {
+                false
+            }
+            fn autostart_status(&self) -> String {
+                "fallback".into()
+            }
+        }
+        fn request(path: &str) -> BackendRequest {
+            let mut config = Config::default();
+            config.fields.insert("styles_enabled".into(), json!(false));
+            let body = b"--test\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\ninvalid audio\r\n--test--\r\n".to_vec();
+            let mut request = BackendRequest {
+                method: "POST".parse().unwrap(),
+                path: path.into(),
+                query: Default::default(),
+                headers: Default::default(),
+                body: body.into(),
+                config,
+            };
+            request.headers.insert(
+                "content-type",
+                "multipart/form-data; boundary=test".parse().unwrap(),
+            );
+            request
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (speech, counts) = adapter(root.path(), false);
+        speech.load().unwrap();
+        let make = || DictationBackend {
+            speech: speech.clone(),
+            vocabulary: Arc::new(|_| Default::default()),
+            build_llm: Arc::new(|_| None),
+            history: Arc::new(|_| None),
+            decode: Arc::new(|_, _| Ok(vec![0.25; 1600])),
+            fallback: Arc::new(Fallback),
+        };
+        let stt_outer = crate::server::SttBackend::new(make());
+        assert_eq!(stt_outer.handle(request("/transcribe")).status, 400);
+        assert_eq!(counts.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            stt_outer.handle(request("/prompts")).body["route"],
+            "/prompts"
+        );
+        assert_eq!(stt_outer.autostart_status(), "fallback");
+
+        let mut runtime_outer = make();
+        runtime_outer.fallback = Arc::new(crate::server::SttBackend::new(Fallback));
+        let result = runtime_outer.handle(request("/transcribe"));
+        assert_eq!(result.status, 200);
+        assert_eq!(result.body["text"], "native");
+        assert_eq!(counts.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime_outer.handle(request("/prompts")).body["route"],
+            "/prompts"
+        );
+        assert_eq!(runtime_outer.autostart_status(), "fallback");
+        assert_eq!(
+            runtime_outer.stt_available("faster-whisper"),
+            cfg!(feature = "whisper")
+        );
+    }
+}

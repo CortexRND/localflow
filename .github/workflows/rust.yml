@@ -109,16 +109,34 @@ jobs:
         with:
           workspaces: rust
 
-      # lf-core vendors libdbus (dbus-secret-service "vendored"), arboard uses
-      # pure-Rust X11 and reqwest uses rustls, so no system -dev packages are
-      # needed; pkg-config is installed only as a harmless safety net.
+      # cpal needs ALSA headers; whisper-rs needs CMake and libclang.
+      # lf-core vendors libdbus; arboard uses X11 and HTTPS uses rustls.
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libportaudio2 pulseaudio
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev cmake libclang-dev libportaudio2 pulseaudio
 
       - name: Start PulseAudio for Python HTTP contracts
         if: runner.os == 'Linux'
         run: pulseaudio --start --exit-idle-time=-1
+
+      - name: Restore native runtimes pruned by Rust cache
+        shell: bash
+        run: |
+          if [ -d rust/target/sherpa-onnx-prebuilt ]; then
+            find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys
+
+      - name: Ensure ffmpeg for HTTP transcription tests
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            case "${{ runner.os }}" in
+              Linux) sudo apt-get update && sudo apt-get install -y ffmpeg ;;
+              macOS) brew install ffmpeg ;;
+              Windows) choco install ffmpeg -y --no-progress ;;
+            esac
+          fi
 
       - name: cargo fmt
         working-directory: rust
@@ -126,11 +144,11 @@ jobs:
 
       - name: cargo clippy
         working-directory: rust
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
       - name: cargo test
         working-directory: rust
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
 
       - name: Meeting capture feature (device-free checks)
         if: runner.os != 'Linux'
