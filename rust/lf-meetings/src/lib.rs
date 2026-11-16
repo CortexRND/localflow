@@ -1,11 +1,17 @@
-//! Non-capture meeting notes, transcript Q&A, title generation and work dispatch.
+//! Meeting capture, notes, transcript Q&A, title generation and work dispatch.
+pub mod capture;
 pub mod dispatch;
+#[cfg(target_os = "macos")]
+mod macos_audio;
 mod media;
 pub mod prompts;
+pub mod system_audio;
 pub mod templates;
 pub mod titles;
+pub mod watcher;
 pub mod writer;
 
+pub use capture::{MeetingSession, Transcriber};
 use caseless::Caseless;
 use lf_core::symbols::pycompat as py;
 use lf_providers::LlmProvider;
@@ -17,8 +23,10 @@ use std::{
     path::{Path, PathBuf},
     sync::LazyLock,
 };
+pub use system_audio::{AudioCallback, AudioSource, SystemAudioUnavailable};
 pub use templates::{MeetingTemplate, Section};
 pub use titles::{generate_title, title_client};
+pub use watcher::{MeetingWatcher, MicUsageProbe};
 pub use writer::{ObsidianWriter, SavedNote, WriteNote};
 
 pub(crate) fn trim(s: &str) -> &str {
