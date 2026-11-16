@@ -76,18 +76,38 @@ pub fn router(state: Arc<ServerState>) -> Router {
 /// Serve until Ctrl-C. Binding is independent of the persisted config, just as
 /// Python CLI overrides are; `/api/config` continues to describe saved settings.
 pub async fn serve(host: &str, port: u16) -> anyhow::Result<()> {
-    let state = Arc::new(ServerState::load()?);
-    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    let host = if host == "*" || host.is_empty() {
-        "0.0.0.0"
-    } else {
-        host
-    };
-    let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown())
-        .await?;
-    Ok(())
+    Server::bind(host, port).await?.run().await
+}
+
+/// A bound server. Callers can report readiness only after construction succeeds.
+pub struct Server {
+    listener: tokio::net::TcpListener,
+    state: Arc<ServerState>,
+}
+
+impl Server {
+    pub async fn bind(host: &str, port: u16) -> anyhow::Result<Self> {
+        let state = Arc::new(ServerState::load()?);
+        let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+        let host = if host == "*" || host.is_empty() {
+            "0.0.0.0"
+        } else {
+            host
+        };
+        let listener = tokio::net::TcpListener::bind((host, port)).await?;
+        Ok(Self { listener, state })
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    pub async fn run(self) -> anyhow::Result<()> {
+        axum::serve(self.listener, router(self.state))
+            .with_graceful_shutdown(shutdown())
+            .await?;
+        Ok(())
+    }
 }
 
 async fn shutdown() {

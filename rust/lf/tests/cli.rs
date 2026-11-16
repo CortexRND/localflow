@@ -452,3 +452,14 @@ fn serve_rejects_a_saved_port_that_would_wrap() {
     assert!(stderr(&output).contains("server_port must be between 0 and 65535"));
     assert!(stdout(&output).is_empty());
 }
+
+#[test]
+fn serve_does_not_announce_readiness_when_binding_fails() {
+    let sandbox = Sandbox::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let output = sandbox.run(&["serve", "--host", "127.0.0.1", "--port", &port]);
+    assert_eq!(code(&output), 1);
+    assert!(!stderr(&output).is_empty());
+    assert!(stdout(&output).is_empty());
+}

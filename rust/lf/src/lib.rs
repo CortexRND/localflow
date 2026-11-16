@@ -160,18 +160,19 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
                 None => u16::try_from(config.field_i64("server_port").unwrap_or(8756))
                     .map_err(|_| anyhow::anyhow!("server_port must be between 0 and 65535"))?,
             };
-            outln!(
-                io.out,
-                "LocalFlow Rust server listening on {}",
-                lf_server::server_url::base_url(&host, port)
-            )?;
-            io.out.flush()?;
-            tokio::runtime::Builder::new_multi_thread()
+            let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .max_blocking_threads(16)
                 .enable_all()
-                .build()?
-                .block_on(lf_server::serve(&host, port))
+                .build()?;
+            let server = runtime.block_on(lf_server::Server::bind(&host, port))?;
+            outln!(
+                io.out,
+                "LocalFlow Rust server listening on {}",
+                lf_server::server_url::base_url(&host, server.local_addr()?.port())
+            )?;
+            io.out.flush()?;
+            runtime.block_on(server.run())
         }
         Command::Config(command) => cmd_config::run(command, io),
         Command::Dict(command) => cmd_dict::run(command, io),
