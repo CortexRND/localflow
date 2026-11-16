@@ -209,6 +209,7 @@ pub fn selected_repos(config: &Config, mlx_available: impl Fn() -> bool) -> Sele
     match backend {
         "parakeet" => {
             repos.insert(PARAKEET_REPO.into());
+            repos.insert(PARAKEET_ONNX_REPO.into());
         }
         "parakeet-onnx" => {
             repos.insert(PARAKEET_ONNX_REPO.into());
@@ -217,6 +218,9 @@ pub fn selected_repos(config: &Config, mlx_available: impl Fn() -> bool) -> Sele
             repos.insert(WHISPER_CPP_REPO.into());
         }
         "auto" | "mlx" | "mlx-whisper" | "faster-whisper" => {
+            if whisper_cpp_file(size).is_some() {
+                repos.insert(WHISPER_CPP_REPO.into());
+            }
             if backend != "faster-whisper" && device == "auto" {
                 if let Some(repo) = mlx_repo(size) {
                     if mlx_available() {
@@ -523,9 +527,30 @@ mod tests {
     #[test]
     fn selected_repos_and_unknown_backends() {
         for (backend, size, device, mlx, expected) in [
-            ("auto", "base", "auto", true, vec![BASE, MLX]),
-            ("auto", "base", "auto", false, vec![BASE]),
-            ("auto", "base", "cpu", true, vec![BASE]),
+            (
+                "auto",
+                "base",
+                "auto",
+                true,
+                vec![BASE, MLX, WHISPER_CPP_REPO],
+            ),
+            ("auto", "base", "auto", false, vec![BASE, WHISPER_CPP_REPO]),
+            ("auto", "base", "cpu", true, vec![BASE, WHISPER_CPP_REPO]),
+            ("mlx", "base", "auto", false, vec![BASE, WHISPER_CPP_REPO]),
+            (
+                "mlx-whisper",
+                "base",
+                "cpu",
+                false,
+                vec![BASE, WHISPER_CPP_REPO],
+            ),
+            (
+                "faster-whisper",
+                "base",
+                "cpu",
+                false,
+                vec![BASE, WHISPER_CPP_REPO],
+            ),
             (
                 "mlx-whisper",
                 "distil-large-v3",
@@ -548,7 +573,13 @@ mod tests {
                 vec!["org/custom-ct2"],
             ),
             ("faster-whisper", "/models/local", "auto", true, vec![]),
-            ("parakeet", "large-v3", "auto", true, vec![PARAKEET_REPO]),
+            (
+                "parakeet",
+                "large-v3",
+                "auto",
+                true,
+                vec![PARAKEET_REPO, PARAKEET_ONNX_REPO],
+            ),
             ("whisper-cpp", "base", "auto", false, vec![WHISPER_CPP_REPO]),
             (
                 "parakeet-onnx",
@@ -567,6 +598,28 @@ mod tests {
             selected_repos(&config("plugin", "base", "auto"), || false),
             SelectedRepos::Unknown
         );
+    }
+
+    #[test]
+    fn aliased_native_models_cannot_be_deleted() {
+        for (backend, native) in [
+            ("auto", WHISPER_CPP_REPO),
+            ("mlx", WHISPER_CPP_REPO),
+            ("mlx-whisper", WHISPER_CPP_REPO),
+            ("faster-whisper", WHISPER_CPP_REPO),
+            ("parakeet", PARAKEET_ONNX_REPO),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let folder = repo(root.path(), native, 100);
+            let cfg = config(backend, "base", "auto");
+            let models = inventory(&cfg, Some(root.path()), || false, Some(&[]));
+            assert_eq!(
+                models.iter().find(|m| m.repo == native).unwrap().status,
+                "Selected"
+            );
+            assert!(delete_unused(native, &cfg, Some(root.path()), || false, Some(&[])).is_err());
+            assert!(folder.is_dir());
+        }
     }
 
     #[test]

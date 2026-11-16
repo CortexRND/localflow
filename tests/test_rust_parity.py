@@ -1330,8 +1330,13 @@ def test_stt_catalog_runtime_selection_and_sizes(stt_driver):
         for config in configs:
             repos = ms.selected_repos(Config(**config), lambda: mlx)
             expected.append("UNKNOWN" if repos is ms.UNKNOWN else sorted(repos))
-        assert stt_driver([{"op": "selected_repos", "config": c, "mlx": mlx}
-                           for c in configs]) == expected
+        actual = stt_driver([{"op": "selected_repos", "config": c, "mlx": mlx}
+                             for c in configs])
+        native_repos = {"ggerganov/whisper.cpp",
+                        "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"}
+        python_subset = [repos if repos == "UNKNOWN" else sorted(set(repos) - native_repos)
+                         for repos in actual]
+        assert python_subset == expected
     sizes_bytes = [-1000, -1, 0, 1, 512, 999, 1000, 1050, 1150, 1250, 9999,
                    10000, 10500, 11500, 999999, 1000000, 486000000,
                    1622000000, 999999999999, 2**53 + 1]
