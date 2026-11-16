@@ -1213,6 +1213,8 @@ dependencies = [
  "caseless",
  "chrono",
  "cpal",
+ "lf-agent",
+ "lf-ask",
  "lf-core",
  "lf-providers",
  "log",

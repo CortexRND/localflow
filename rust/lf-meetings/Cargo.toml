@@ -34,3 +34,5 @@ block2 = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true
+lf-agent = { path = "../lf-agent" }
+lf-ask = { path = "../lf-ask" }
