@@ -1,5 +1,6 @@
 """Native AppKit history and settings hub for macOS."""
 
+import logging
 import queue
 import subprocess
 import sys
@@ -159,6 +160,39 @@ def _label(
     return label
 
 
+class _MeetingNotesWriter:
+    """Puts meeting notes on the server in the order the Hub asked for them.
+
+    Every save takes a ticket on the main thread; writes are serialized and a
+    write older than one already sent is dropped. So the flush a closing Hub
+    sends (the newest ticket) is never overwritten by a save that was still
+    in flight, whichever worker thread reaches the lock first. No AppKit.
+    """
+
+    def __init__(self):
+        self._tickets = threading.Lock()
+        self._writes = threading.Lock()
+        self._issued = 0
+        self._sent = 0
+
+    def ticket(self):
+        with self._tickets:
+            self._issued += 1
+            return self._issued
+
+    def save(self, client, ticket, text):
+        with self._writes:
+            if ticket < self._sent:
+                return {}  # superseded by newer notes already sent
+            self._sent = ticket
+            return client.save_notes(text)
+
+
+# One per process: a Hub reopened after close orders its saves after the
+# closed one's final flush.
+_MEETING_NOTES_WRITER = _MeetingNotesWriter()
+
+
 class HubWindowController(NSObject):
     def init(self):
         config = load_config()
@@ -216,6 +250,8 @@ class HubWindowController(NSObject):
         self.meeting_notes_save_pending = False
         self.meeting_stop_flush_pending = False
         self.meeting_active_notes_text = ""
+        self.meeting_notes_save_operation = None  # the one in flight, if any
+        self.meeting_notes_writer = _MEETING_NOTES_WRITER
         self.meeting_busy = False
         self.meeting_error = ""
         self.meeting_next_poll = 0
@@ -511,13 +547,68 @@ class HubWindowController(NSObject):
         return False
 
     def windowWillClose_(self, _notification):
+        if self._closed:  # shut down once, however often AppKit tells us
+            return
         self._closed = True
+        try:
+            self._meeting_flush_on_close()
+        except Exception:
+            logging.getLogger("localflow.hub").warning(
+                "could not flush meeting notes on close", exc_info=True,
+            )
+        finally:
+            # The run loop retains the timer and the timer retains us: stop it
+            # so a closed Hub is released instead of ticking until quit.
+            timer, self.meeting_timer = getattr(self, "meeting_timer", None), None
+            if timer is not None:
+                timer.invalidate()
         if hasattr(self, "ask_page"):
             self.ask_page.shutdown()
         if hasattr(self, "settings_page"):
             self.settings_page.shutdown()
         if self.phrases is not None:
             self.phrases.cancel()
+
+    @objc.python_method
+    def _meeting_flush_on_close(self):
+        """Send the notes the stopped timer would have saved; the thread, or None.
+
+        Unsaved means typed < 0.8 s ago (`meeting_notes_due`) or queued behind
+        the save in flight; a Stop still waiting on its notes flush is sent
+        too, after the notes, as `_meeting_notes_save_completed` would have.
+        The text is read here on the main thread; the worker touches only the
+        client, and the shared writer orders it after any save in flight.
+        """
+        stop = self.meeting_stop_flush_pending or (
+            self.meeting_notes_save_in_flight
+            and self.meeting_notes_save_operation == "notes_stop_flush"
+        )
+        unsaved = (
+            stop or self.meeting_notes_due is not None or self.meeting_notes_save_pending
+        )
+        self.meeting_notes_due = None
+        self.meeting_notes_save_pending = self.meeting_stop_flush_pending = False
+        if not unsaved:
+            return None
+        text = self._meeting_current_notes_text()
+        client, writer = self.meeting_client, self.meeting_notes_writer
+        ticket = writer.ticket()
+
+        def run():
+            try:
+                writer.save(client, ticket, text)
+                if stop:
+                    client.stop()  # only once the final notes are on the server
+            except Exception:
+                logging.getLogger("localflow.hub").warning(
+                    "meeting notes flush on close failed", exc_info=True,
+                )
+
+        thread = threading.Thread(
+            target=run, name="localflow-meeting-close-flush", daemon=True
+        )
+        thread.start()
+        return thread
 
     def windowDidEndLiveResize_(self, _notification):
         self._rebuild_current_page()
@@ -1637,11 +1728,19 @@ class HubWindowController(NSObject):
 
     @objc.python_method
     def _meeting_worker(self, operation, *args):
-        method = "save_notes" if operation.startswith("notes_") else operation
+        if operation.startswith("notes_"):
+            writer = self.meeting_notes_writer
+            ticket = writer.ticket()  # main thread: the order saves were asked for
+
+            def call():
+                return writer.save(self.meeting_client, ticket, *args)
+        else:
+            def call():
+                return getattr(self.meeting_client, operation)(*args)
 
         def run():
             try:
-                result = getattr(self.meeting_client, method)(*args)
+                result = call()
                 error = None
             except Exception as exc:  # noqa: BLE001
                 result, error = None, exc
@@ -1689,6 +1788,7 @@ class HubWindowController(NSObject):
             return
         text = self._meeting_current_notes_text()
         self.meeting_notes_save_in_flight = True
+        self.meeting_notes_save_operation = operation
         self.meeting_active_notes_text = text
         self.meeting_notes_dirty = True
         if self.page == "Meetings":
@@ -2085,6 +2185,8 @@ class HubWindowController(NSObject):
     def meetingTimerTick_(self, _timer):
         # The Hub's one timer also drives Hot Phrases autosave, undo expiry and
         # the external-change poll; it does nothing off that page.
+        if self._closed:  # a tick queued before close: leave the closed UI alone
+            return
         self._phrases_tick()
         while True:
             try:
@@ -2711,6 +2813,7 @@ class HubWindowController(NSObject):
                 finally:
                     secure.setStringValue_("")
             elif operation == "remove":
+                # Also revokes its activation, so Ask/cleanup stop using it.
                 provider_keys.remove_key(preset.id, config=self.config)
             elif operation == "activate":
                 self.config = provider_keys.activate(preset.id, base_url=state["url"],
