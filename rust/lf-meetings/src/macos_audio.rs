@@ -1,5 +1,7 @@
 use crate::{
-    system_audio::{resample, AudioCallback, AudioSource, SystemAudioUnavailable, SCK_RATES},
+    system_audio::{
+        AudioCallback, AudioSource, StreamingResampler, SystemAudioUnavailable, SCK_RATES,
+    },
     watcher::MicUsageProbe,
 };
 use block2::RcBlock;
@@ -19,7 +21,7 @@ use objc2_screen_capture_kit::{
 };
 use std::{
     ptr::{self, NonNull},
-    sync::mpsc,
+    sync::{mpsc, Mutex},
     time::Duration,
 };
 
@@ -62,8 +64,7 @@ impl MicUsageProbe for CoreAudioMicUsageProbe {
 
 struct OutputIvars {
     callback: AudioCallback,
-    capture_rate: u32,
-    sample_rate: u32,
+    resampler: Mutex<StreamingResampler>,
 }
 define_class!(
     #[unsafe(super = NSObject)]
@@ -103,7 +104,12 @@ define_class!(
                     return;
                 }
                 let ivars = self.ivars();
-                (ivars.callback)(resample(&audio, ivars.capture_rate, ivars.sample_rate));
+                let audio = ivars
+                    .resampler
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .process(&audio);
+                (ivars.callback)(audio);
             }));
             if result.is_err() {
                 log::warn!("system audio buffer conversion failed");
@@ -115,8 +121,7 @@ impl LocalflowSystemAudioOutput {
     fn new(callback: AudioCallback, capture_rate: u32, sample_rate: u32) -> Retained<Self> {
         let this = Self::alloc().set_ivars(OutputIvars {
             callback,
-            capture_rate,
-            sample_rate,
+            resampler: Mutex::new(StreamingResampler::new(capture_rate, sample_rate)),
         });
         // NSObject has no additional initialization requirements.
         unsafe { msg_send![super(this), init] }

@@ -1,5 +1,5 @@
 use super::{
-    find_loopback_device, resample, to_mono, AudioCallback, AudioSource, InputDevice,
+    find_loopback_device, to_mono, AudioCallback, AudioSource, InputDevice, StreamingResampler,
     SystemAudioUnavailable, SAMPLE_RATE,
 };
 use cpal::{
@@ -87,12 +87,13 @@ impl CpalSource {
         let channels = self.config.channels as usize;
         let src_rate = self.config.sample_rate.0;
         let dst_rate = self.sample_rate;
+        let mut resampler = StreamingResampler::new(src_rate, dst_rate);
         self.device
             .build_input_stream(
                 &self.config,
                 move |data: &[T], _| {
                     let audio: Vec<f32> = data.iter().map(|v| v.to_sample::<f32>()).collect();
-                    let audio = resample(&to_mono(&audio, channels), src_rate, dst_rate);
+                    let audio = resampler.process(&to_mono(&audio, channels));
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(audio)))
                         .is_err()
                     {
