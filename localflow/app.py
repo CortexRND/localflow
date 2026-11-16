@@ -346,6 +346,7 @@ def main() -> None:
         # nothing queued or being transcribed.
         can_swap=lambda: controller.is_idle() and work_queue.unfinished_tasks == 0,
     )
+    del transcriber
     live = LiveSettings(config, controller, models=models)
 
     def process_item(item):
