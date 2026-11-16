@@ -57,6 +57,13 @@ jobs:
         working-directory: rust
         run: cargo test --workspace
 
+      - name: Meeting capture feature (device-free checks)
+        if: runner.os != 'Linux'
+        working-directory: rust
+        run: |
+          cargo clippy -p lf-meetings --features capture --all-targets -- -D warnings
+          cargo test -p lf-meetings --features capture
+
       - name: Build lf-rs
         working-directory: rust
         run: cargo build --bin lf-rs
