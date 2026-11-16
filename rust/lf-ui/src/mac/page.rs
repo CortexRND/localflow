@@ -25,6 +25,7 @@ use serde_json::Value;
 
 use super::actions::ActionTarget;
 use super::style::FlippedView;
+use crate::backends::ask::{AskBackend, FakeAskBackend};
 use crate::backends::meeting::MeetingClient;
 use crate::backends::prompts::PromptQueue;
 use crate::tokens::{Palette, Weight};
@@ -45,6 +46,7 @@ pub struct HubServices {
     pub dictionary: Rc<DictionaryStore>,
     pub prompt_queue: Arc<dyn PromptQueue>,
     pub meeting_client: Arc<dyn MeetingClient>,
+    pub ask_backend: RefCell<Box<dyn AskBackend>>,
     /// Per-page inline error text (`page_errors` in Python), cleared when the
     /// user navigates to the page from the sidebar.
     pub page_errors: RefCell<HashMap<String, String>>,
@@ -68,6 +70,7 @@ impl HubServices {
             dictionary,
             prompt_queue,
             meeting_client,
+            ask_backend: RefCell::new(Box::new(FakeAskBackend::default())),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
         })
@@ -90,6 +93,7 @@ impl HubServices {
             dictionary,
             prompt_queue,
             meeting_client,
+            ask_backend: RefCell::new(Box::new(FakeAskBackend::default())),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
         })

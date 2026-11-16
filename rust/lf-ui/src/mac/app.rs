@@ -21,14 +21,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
-use serde_json::{Map, Value};
 use std::sync::Arc;
 
 use super::actions::Timer;
 use super::hub::Hub;
 use super::page::HubServices;
-use crate::backends::meeting::{MeetingClient, MeetingClientError, MeetingResult, SERVER_DOWN};
-use crate::backends::prompts::{PromptEntry, PromptQueue, QueueError, WorkPrompt};
+use crate::backends::http::{HttpAskBackend, HttpMeetingClient, HttpPromptQueue, HttpTransport};
 use crate::hub_route::{self, HubWindowState};
 
 /// Seconds between page-request polls (`_POLL_SECONDS`).
@@ -95,94 +93,23 @@ pub fn run_app(mtm: MainThreadMarker, show: ShowFn, poll: Option<Box<dyn Fn() ->
     drop(delegate);
 }
 
-/// A prompt queue that reports itself unavailable instead of pretending.
-///
-/// There is no file-backed queue in this crate yet (the Python `queue.json`
-/// store is not ported), so the Hub's Prompts page shows its real "can't read
-/// the queue" state rather than an invented empty list.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnavailablePromptQueue;
-
-const QUEUE_UNAVAILABLE: &str = "prompt queue not available in this build";
-
-impl PromptQueue for UnavailablePromptQueue {
-    fn add(&self, _: &[WorkPrompt], _: &[String], _: &str) -> Result<Vec<PromptEntry>, QueueError> {
-        Err(QueueError::Io(QUEUE_UNAVAILABLE.into()))
-    }
-
-    fn list(&self, _status: Option<&str>) -> Result<Vec<PromptEntry>, QueueError> {
-        Err(QueueError::Io(QUEUE_UNAVAILABLE.into()))
-    }
-
-    fn get(&self, _entry_id: &str) -> Result<Option<PromptEntry>, QueueError> {
-        Err(QueueError::Io(QUEUE_UNAVAILABLE.into()))
-    }
-
-    fn set_status(
-        &self,
-        _entry_id: &str,
-        _status: &str,
-        _expect: Option<&[&str]>,
-        _fields: &Map<String, Value>,
-    ) -> Result<Option<PromptEntry>, QueueError> {
-        Err(QueueError::Io(QUEUE_UNAVAILABLE.into()))
-    }
-}
-
-/// A meeting client that always says the local server is not reachable (there
-/// is no HTTP client in this crate); every call fails with [`SERVER_DOWN`].
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnavailableMeetingClient;
-
-fn down<T>() -> MeetingResult<T> {
-    Err(MeetingClientError(SERVER_DOWN.to_string()))
-}
-
-impl MeetingClient for UnavailableMeetingClient {
-    fn status(&self) -> MeetingResult<Value> {
-        down()
-    }
-
-    fn templates(&self) -> MeetingResult<Value> {
-        down()
-    }
-
-    fn start(&self, _: &str, _: &str, _: &str, _: &str, _: Option<bool>) -> MeetingResult<Value> {
-        down()
-    }
-
-    fn save_notes(&self, _notes: &str) -> MeetingResult<Value> {
-        down()
-    }
-
-    fn stop(&self) -> MeetingResult<Value> {
-        down()
-    }
-
-    fn chat(&self, _question: &str) -> MeetingResult<Value> {
-        down()
-    }
-
-    fn dismiss(&self) -> MeetingResult<()> {
-        down()
-    }
-}
-
 /// Build the real services from lf-core: the user's config, history database
-/// and dictionary. The prompt queue and meeting client are the honest
-/// "unavailable" adapters above.
+/// and dictionary, with runtime services over the authenticated local API.
 pub fn real_services() -> Result<Rc<HubServices>> {
     let config = load_config()?;
     let enabled = config.field_bool("history_enabled").unwrap_or(true);
     let history = Rc::new(HistoryStore::open(None, None, enabled)?);
     let dictionary = Rc::new(DictionaryStore::new(None));
-    Ok(HubServices::new(
+    let http = HttpTransport::from_config(&config)?;
+    let services = HubServices::new(
         config,
         history,
         dictionary,
-        Arc::new(UnavailablePromptQueue),
-        Arc::new(UnavailableMeetingClient),
-    ))
+        Arc::new(HttpPromptQueue(http.clone())),
+        Arc::new(HttpMeetingClient(http.clone())),
+    );
+    *services.ask_backend.borrow_mut() = Box::new(HttpAskBackend::new(http));
+    Ok(services)
 }
 
 /// Owns "the" Hub of the app process and decides, on every launch, reopen and

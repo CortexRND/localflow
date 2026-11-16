@@ -64,7 +64,7 @@ jobs:
         continue-on-error: true
         env:
           LOCALFLOW_CONFIG: ${{ runner.temp }}/python-hub-config.toml
-        run: bash scripts/ci_hub_rss.sh Python artifacts/mac-ui/idle-rss.txt python -m localflow.hub_mac
+        run: bash scripts/ci_hub_rss.sh Python artifacts/mac-ui/idle-rss.txt python -c 'from localflow.hub_mac import main; main()'
 
       - uses: actions/upload-artifact@v4
         if: always()

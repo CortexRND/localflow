@@ -67,6 +67,8 @@ impl fmt::Display for StatusConflict {
 pub enum QueueError {
     /// [`StatusConflict`].
     Conflict(StatusConflict),
+    /// A guarded transition refused by the HTTP host.
+    Remote(PromptTransitionError),
     /// Python `ValueError` for an unknown status.
     InvalidStatus(String),
     /// Storage failure (unwritable queue file, ...). The text is for logs only.
@@ -77,6 +79,7 @@ impl fmt::Display for QueueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             QueueError::Conflict(conflict) => conflict.fmt(f),
+            QueueError::Remote(refused) => refused.fmt(f),
             QueueError::InvalidStatus(message) | QueueError::Io(message) => f.write_str(message),
         }
     }
@@ -180,6 +183,7 @@ pub fn transition_prompt(
                 ),
             }))
         }
+        Err(QueueError::Remote(refused)) => Err(TransitionFailure::Refused(refused)),
         Err(other) => Err(TransitionFailure::Queue(other)),
     }
 }

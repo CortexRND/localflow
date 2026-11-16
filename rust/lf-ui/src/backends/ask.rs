@@ -58,7 +58,7 @@ pub fn source_label(key: &str) -> Option<&'static str> {
 }
 
 /// One citation dict (`recall._citation`).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub struct Citation {
     pub n: i64,
     pub source: String,
@@ -68,6 +68,7 @@ pub struct Citation {
     pub when: String,
     pub snippet: String,
     /// History id (dictation), file path (notes) or `path#timestamp` (meeting).
+    #[serde(rename = "ref")]
     pub reference: String,
 }
 

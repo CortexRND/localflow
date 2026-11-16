@@ -4,6 +4,7 @@
 //! settings agent, prompt queue) belong to a later platform layer.
 
 pub mod ask;
+pub mod http;
 pub mod meeting;
 pub mod prompts;
 pub mod settings_agent;
