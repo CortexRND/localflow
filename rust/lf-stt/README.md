@@ -38,8 +38,10 @@ sherpa build is needed. It uses 128-bin features, greedy transducer decoding,
 up to 4 CPU threads, and a 1 s silence warm-up inside load. The source MLX model
 config's `preprocessor.n_fft` is 512; shorter inputs return empty without even
 requiring a loaded recognizer. Prompts are ignored. CoreML creation failure
-logs and retries CPU; native ONNX Runtime may also fall back at operator level.
-Reported initialized providers are not hardware-utilization measurements.
+logs and retries CPU, reported as `cpu (fallback)`. Successful CoreML requests
+are reported as `coreml requested (unverified)`: the sherpa C API exposes neither
+session provider assignment nor silent native fallback. This is deliberately
+not a hardware-utilization claim; unsupported ONNX operators may run on CPU.
 
 Linux uses the **shared** sherpa/ONNX prebuilt libraries: linking its static
 ORT with whisper.cpp produced a native regex/allocator abort, while the same
@@ -49,7 +51,22 @@ this package sets relative rpaths for its benchmark/tests. Downstream Linux
 executables must likewise ship the `.so` files and set an appropriate rpath
 or `LD_LIBRARY_PATH`. Windows also uses shared libraries to avoid mixing sherpa's
 static MSVC runtime with whisper-rs's dynamic runtime; upstream copies the DLLs
-beside Cargo executables. macOS retains upstream's default static linking.
+beside Cargo executables. macOS uses upstream's **shared** prebuilt too, with
+`@loader_path`/`@loader_path/..` rpaths for benchmark/tests. Ship the `.dylib`
+files beside downstream executables and set the corresponding rpaths.
+
+The v2.0.1 static macOS builds explicitly set `SHERPA_ONNX_DISABLE_COREML` in
+[`cmake/onnxruntime-osx-arm64-static.cmake`](https://github.com/k2-fsa/sherpa-onnx/blob/v2.0.1/cmake/onnxruntime-osx-arm64-static.cmake#L60-L61)
+(also x86_64/universal). In [`session.cc`](https://github.com/k2-fsa/sherpa-onnx/blob/v2.0.1/sherpa-onnx/csrc/session.cc#L462-L472),
+CoreML requires `__APPLE__`, `ORT_API_VERSION >= 15`, and that disable macro to
+be absent. Otherwise it logs the misleading "CoreML is for Apple only ..."
+message and silently returns CPU session options, even on Apple Silicon.
+The `shared` crate feature selects `sherpa-onnx-v2.0.1-osx-arm64-shared-lib`
+(x64 on Intel), whose CMake path uses shared ONNX Runtime 1.28.2 without that
+disable macro. No custom runtime build or wrapper fork is needed. The macOS
+benchmark records linked libraries, the CoreML EP entry-point export and
+native fallback diagnostics. Those establish capability, not per-operator
+execution; provider reporting remains conservative even with this build.
 
 `download()` resolves HF assets separately so benchmark load excludes download
 and cache-lookup time; `load()` also calls it if needed and reports that time

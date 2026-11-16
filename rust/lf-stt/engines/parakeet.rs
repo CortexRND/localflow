@@ -17,6 +17,16 @@ pub struct ParakeetEngine {
     effective_provider: String,
 }
 
+fn provider_report(provider: &str, fallback: bool) -> String {
+    if fallback {
+        "cpu (fallback)".into()
+    } else if provider == "coreml" {
+        "coreml requested (unverified)".into()
+    } else {
+        provider.into()
+    }
+}
+
 impl ParakeetEngine {
     pub fn new(provider: &str) -> Result<Self> {
         if !matches!(provider, "auto" | "cpu" | "coreml") {
@@ -93,10 +103,10 @@ impl SpeechEngine for ParakeetEngine {
         let start = Instant::now();
         if self.recognizer.is_none() {
             let (recognizer, provider) = match self.create(&self.provider) {
-                Ok(recognizer) => (recognizer, self.provider.clone()),
+                Ok(recognizer) => (recognizer, provider_report(&self.provider, false)),
                 Err(error) if self.provider == "coreml" => {
                     log::warn!("CoreML Parakeet init failed, falling back to CPU: {error}");
-                    (self.create("cpu")?, "cpu".into())
+                    (self.create("cpu")?, provider_report("cpu", true))
                 }
                 Err(error) => return Err(error),
             };
@@ -155,6 +165,16 @@ impl SpeechEngine for ParakeetEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_reporting_does_not_claim_unobserved_acceleration() {
+        assert_eq!(provider_report("cpu", false), "cpu");
+        assert_eq!(provider_report("cpu", true), "cpu (fallback)");
+        assert_eq!(provider_report("coreml", true), "cpu (fallback)");
+        assert_eq!(
+            provider_report("coreml", false),
+            "coreml requested (unverified)"
+        );
+    }
     #[test]
     fn short_input_never_runs_or_loads_the_recognizer() {
         let mut engine = ParakeetEngine::new("cpu").unwrap();

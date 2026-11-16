@@ -28,6 +28,17 @@ jobs:
       - name: Build release benchmark
         working-directory: rust
         run: cargo build --locked --release -p lf-stt --example stt_bench
+      - name: Record native library and CoreML capability evidence
+        shell: bash
+        run: |
+          mkdir -p bench-results
+          {
+            otool -L rust/target/release/examples/stt_bench
+            for library in rust/target/release/libonnxruntime*.dylib; do
+              echo "$library"
+              nm -gU "$library" | rg 'OrtSessionOptionsAppendExecutionProvider_CoreML'
+            done
+          } | tee bench-results/native-libraries.log
       - name: Benchmark Whisper base.en and small, Parakeet CoreML and CPU
         shell: bash
         run: |
@@ -38,11 +49,19 @@ jobs:
             name="$engine-$model-$provider"
             rust/target/release/examples/stt_bench \
               --engines "$engine" --model "$model" --provider "$provider" --runs 10 \
-              --json "bench-results/$name.json" --table "bench-results/$name.md" || status=1
+              --json "bench-results/$name.json" --table "bench-results/$name.md" \
+              2>&1 | tee "bench-results/$name.log" || status=1
             if [ -f "bench-results/$name.md" ]; then
               cat "bench-results/$name.md" >> "$GITHUB_STEP_SUMMARY"
             else
               echo "Benchmark failed: $name (see step logs)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ "$provider" = coreml ]; then
+              if rg -i 'fallback to cpu|falling back to cpu' "bench-results/$name.log"; then
+                echo 'Native CPU fallback diagnostic observed; this is NOT a verified CoreML measurement.' >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo 'No native CPU fallback diagnostic observed. CoreML operator assignment remains unverified; see the uploaded native-library and benchmark logs.' >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
           done
           exit "$status"

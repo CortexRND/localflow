@@ -159,7 +159,7 @@ cd rust
 cargo run --release -p lf-stt --example stt_bench -- \
   --engines whisper-cpp,parakeet-onnx --model base.en --provider cpu --runs 10 \
   --json bench.json --table bench.md
-# macOS defaults: Whisper Metal, Parakeet CoreML (falls back to CPU on init error)
+# macOS defaults: Whisper Metal, Parakeet CoreML requested (unverified)
 cargo run --release -p lf-stt --example stt_bench -- --engines parakeet-onnx --provider coreml
 # Optional local PCM/float WAV, language/prompt, alternate Whisper model:
 cargo run --release -p lf-stt --example stt_bench -- \
@@ -173,11 +173,18 @@ Downloads/cache lookup are measured separately from load; Parakeet load
 includes its one-second-silence warm-up. RSS is process-wide before/after
 load; first/median/p95 cover N full transcription calls, with median RTF.
 The benchmark rejects empty transcripts and reports clip path, duration and
-original rate (channel 0 and FFT resampling to 16 kHz when needed). Provider
-names indicate initialization, not verified accelerator utilization: ONNX
-Runtime can place unsupported operators on CPU. Separate benchmark processes
+original rate (channel 0 and FFT resampling to 16 kHz when needed). JSON's
+`effective_provider` and the table report `cpu (fallback)` after an explicit
+CoreML initialization failure. A successful request is labeled
+`coreml requested (unverified)` because sherpa's C API cannot reveal silent
+native fallback or per-operator assignment. macOS uses upstream shared sherpa
+and ONNX Runtime libraries; its static build disables CoreML entirely
+([details](lf-stt/README.md)). Even a CoreML-capable runtime can place
+unsupported operators on CPU. Separate benchmark processes
 avoid retained allocator memory skew between engines. `rust-bench.yml` records
-macOS base.en/small/Parakeet CoreML/CPU results and uploads JSON/tables.
+macOS base.en/small/Parakeet CoreML-request/CPU results and uploads JSON/tables
+plus native logs. The summary distinguishes observed CPU fallback diagnostics
+from their absence; absence alone is not proof of CoreML execution.
 
 Parity gaps: Whisper uses fast deterministic greedy best-of-1, temperature 0
 without beam/temperature fallback or Python faster-whisper's VAD; independent

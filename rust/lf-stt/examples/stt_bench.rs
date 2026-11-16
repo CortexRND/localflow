@@ -43,7 +43,7 @@ struct Measurement {
     engine: String,
     model: String,
     requested_provider: String,
-    initialized_provider: String,
+    effective_provider: String,
     download_ms: f64,
     load_ms: f64,
     rss_before_bytes: usize,
@@ -112,7 +112,7 @@ fn main() -> Result<()> {
                 args.model.clone()
             },
             requested_provider: args.provider.clone(),
-            initialized_provider: load.provider,
+            effective_provider: load.provider,
             download_ms: download_ms + load.download_ms,
             load_ms: load.load_ms,
             rss_before_bytes,
@@ -129,9 +129,9 @@ fn main() -> Result<()> {
         drop(lease);
     }
     let mut table = format!("Clip: `{}` ({seconds:.3} s, {} Hz → 16000 Hz), {} runs; load includes Parakeet's 1 s warm-up.\n\n", clip.name, clip.original_sample_rate, args.runs);
-    table.push_str("| Engine / model | Requested → initialized provider | Download/cache ms | Load ms | RSS before → loaded MiB | First ms | Median ms | p95 ms | RTF |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+    table.push_str("| Engine / model | Requested → effective provider / verification | Download/cache ms | Load ms | RSS before → loaded MiB | First ms | Median ms | p95 ms | RTF |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
     for result in &results {
-        table.push_str(&format!("| {} / {} | {} → {} | {:.1} | {:.1} | {:.1} → {:.1} | {:.1} | {:.1} | {:.1} | {:.3} |\n", result.engine, result.model, result.requested_provider, result.initialized_provider, result.download_ms, result.load_ms, result.rss_before_bytes as f64 / 1048576.0, result.rss_after_bytes as f64 / 1048576.0, result.first_ms, result.median_ms, result.p95_ms, result.real_time_factor));
+        table.push_str(&format!("| {} / {} | {} → {} | {:.1} | {:.1} | {:.1} → {:.1} | {:.1} | {:.1} | {:.1} | {:.3} |\n", result.engine, result.model, result.requested_provider, result.effective_provider, result.download_ms, result.load_ms, result.rss_before_bytes as f64 / 1048576.0, result.rss_after_bytes as f64 / 1048576.0, result.first_ms, result.median_ms, result.p95_ms, result.real_time_factor));
     }
     for result in &results {
         table.push_str(&format!(
@@ -139,7 +139,7 @@ fn main() -> Result<()> {
             result.engine, result.transcript
         ));
     }
-    table.push_str("\nProvider names describe initialization, not a guarantee that all ONNX operators run on that accelerator. RSS is process-wide (allocator caches may survive unload).\n");
+    table.push_str("\nParakeet CoreML requests are unverified: sherpa's C API does not expose session provider assignment or silent native fallback. Explicit initialization failures report cpu (fallback). Even an enabled CoreML EP may place unsupported operators on CPU. RSS is process-wide (allocator caches may survive unload).\n");
     let report = json!({ "clip": clip.name, "fixed_clip": support::FIXED_CLIP, "audio_seconds": seconds, "original_sample_rate": clip.original_sample_rate, "sample_rate": 16000, "runs": args.runs, "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "results": results });
     let encoded = serde_json::to_string_pretty(&report)?;
     if let Some(path) = args.json {
