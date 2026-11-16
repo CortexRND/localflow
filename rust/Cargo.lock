@@ -1062,6 +1062,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lf-meetings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "caseless",
+ "chrono",
+ "lf-core",
+ "lf-providers",
+ "log",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "unicode-general-category",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "lf-providers"
 version = "0.1.0"
 dependencies = [
