@@ -2711,7 +2711,7 @@ class HubWindowController(NSObject):
                 finally:
                     secure.setStringValue_("")
             elif operation == "remove":
-                provider_keys.remove_key(preset.id)
+                provider_keys.remove_key(preset.id, config=self.config)
             elif operation == "activate":
                 self.config = provider_keys.activate(preset.id, base_url=state["url"],
                                                      model=state["model"], config=self.config)

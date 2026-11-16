@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from localflow import api
+from localflow import api, llm_activation
 from localflow import provider_keys as keys
 from localflow.config import Config, load_config
 from localflow.providers.base import Health, ModelInfo
@@ -136,8 +136,15 @@ def test_activation_never_writes_keys_to_config(vault, tmp_path):
     assert config.llm_provider == "openai-compatible"
     assert config.llm_base_url == keys.get_preset("fireworks").base_url
     assert config.llm_model == "chosen-model"
-    assert vault["llm_api_key"] == key
+    # The key goes to a fresh endpoint-bound snapshot the config names; the
+    # shared legacy key is not rewritten (cached configs keep their pair).
+    assert llm_activation.is_ref(config.llm_key_ref)
+    assert llm_activation.resolve(
+        config.llm_key_ref, config.llm_base_url, lambda name: vault.get(name, ""),
+    ) == key
+    assert "llm_api_key" not in vault
     assert load_config().llm_model == "chosen-model"
+    assert load_config().llm_key_ref == config.llm_key_ref
     for path in tmp_path.rglob("*"):
         if path.is_file():
             assert key not in path.read_text()

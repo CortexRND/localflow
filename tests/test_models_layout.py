@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from localflow import llm_activation
 from localflow import models_layout as ml
 from localflow import provider_keys as keys
 from localflow.config import Config
@@ -469,10 +470,12 @@ def test_replacing_the_key_of_the_active_provider_offers_use_until_activated(vau
     config = keys.activate("fireworks", model="m", config=config)
     assert visible() is False  # active, same model, same key
     keys.save_key("fireworks", "fake-key-B")  # Save a replacement
-    assert visible() is True and keys.key_needs_activation("fireworks") is True
+    assert visible() is True and keys.key_needs_activation("fireworks", config) is True
+    assert "llm_api_key" not in vault  # Save alone never activates anything
     config = keys.activate("fireworks", model="m", config=config)
-    assert visible() is False  # activation synchronised the generic key
-    assert bool(vault["llm_api_key"] == "fake-key-B") is True  # Ask now uses it
+    assert visible() is False  # the new activation snapshot holds the new key
+    active = llm_activation.resolve(config.llm_key_ref, config.llm_base_url, vault.get)
+    assert bool(active == "fake-key-B") is True  # Ask now uses it
     keys.save_imports([keys.ImportCandidate("fireworks", "env: FIREWORKS_API_KEY", "fake-key-C")])
     assert visible() is True  # an imported replacement is activateable too
     config = keys.activate("fireworks", model="m", config=config)
@@ -485,7 +488,8 @@ def test_missing_or_irrelevant_keys_never_offer_reactivation(vault):
     keys.save_key("fireworks", "fake-key-A")
     config = keys.activate("fireworks", model="m", config=config)
     keys.remove_key("fireworks")
-    assert keys.key_needs_activation("fireworks") is False
+    assert keys.key_needs_activation("fireworks", config) is False
+    assert not vault  # the active snapshot (and its index entry) went too
     assert ml.use_button_visible(FIREWORKS, config, url=FIREWORKS.base_url, model="m") is False
     assert keys.key_needs_activation("ollama") is False  # keyless provider
 

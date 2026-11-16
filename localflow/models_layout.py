@@ -89,7 +89,7 @@ def use_button_visible(preset, config, *, url, model):
         return True
     return show_use_button(
         preset, config, url=url, model=model,
-        key_changed=provider_keys.key_needs_activation(preset.id),
+        key_changed=provider_keys.key_needs_activation(preset.id, config),
     )
 
 
