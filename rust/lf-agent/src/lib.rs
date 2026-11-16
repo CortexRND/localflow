@@ -447,9 +447,7 @@ impl<C: ChatClient> SettingsAgent<C> {
                 let valid = checked.is_some();
                 let kind = if SHORTCUTS.contains(&key) {
                     "shortcut"
-                } else if Config::default().field(key).is_some_and(Value::is_boolean)
-                    || key == "dictation_enabled"
-                {
+                } else if Config::default().field(key).is_some_and(Value::is_boolean) {
                     "switch"
                 } else {
                     "choice"

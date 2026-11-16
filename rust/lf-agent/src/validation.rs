@@ -424,12 +424,6 @@ impl Validator {
             "'{}' is not a setting LocalFlow can change here",
             super::safe_text(key, 40)
         );
-        if ["dictation_enabled", "dictation_toggle_hotkey"].contains(&key) {
-            ensure!(
-                config.field(key).is_some(),
-                "setting is not supported by this config schema"
-            );
-        }
         if let Some(s) = value.as_str() {
             ensure!(s.chars().count() <= 64, "value is too long");
             if let Some(problem) = raw_text_problem(s) {
@@ -497,16 +491,7 @@ impl Validator {
             );
             json!(choice)
         };
-        if field_location(key).is_none()
-            && ["dictation_enabled", "dictation_toggle_hotkey"].contains(&key)
-        {
-            ensure!(
-                config.field(key).is_some(),
-                "setting is not supported by this config schema"
-            );
-        } else {
-            update(config, key, &result)?;
-        }
+        update(config, key, &result)?;
         Ok(result)
     }
     pub fn checked_current(&self, key: &str, config: &Config) -> Option<Value> {

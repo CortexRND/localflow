@@ -26,10 +26,9 @@ reads, token creation, provider changes, or CLI integration.
 
 ## Compatibility notes
 
-* Includes the parallel dictation-toggle branch's `dictation_enabled` and
-  `dictation_toggle_hotkey` agent capabilities. Both fail closed when absent from
-  Config. Boolean validation supports an injected `dictation_enabled` field;
-  persistence activates automatically once lf-core owns its schema mapping.
+* `dictation_enabled` and `dictation_toggle_hotkey` validate and persist through
+  lf-core as `[dictation] enabled` and `[hotkey] dictation_toggle`. Tests cover
+  preview/apply/restart/undo for both directions and an empty toggle shortcut.
 * Rust uses typed `Change` variants rather than Python display-bearing dataclasses;
   display fields cannot be forged independently. Errors use `anyhow::Result`,
   warnings use `Option<String>`, and native OS/network error details differ.
@@ -49,5 +48,5 @@ local endpoint/model selection, validation, previews, rollback and undo records.
 Frozen fixtures in `tests/python-reference.json` were computed by running the
 branch's Python modules in isolation with `tests/python_reference.py`; no
 checked-out Python files were modified. They assert the complete default prompt
-(including a schema-gated current-core variant), schemas, preview/warning strings,
+against lf-core's defaults, schemas, preview/warning strings,
 validation failures, rejected calls, URL checks and Unicode display behavior.

@@ -596,10 +596,13 @@ fn stored_junk_and_safe_display_never_injected() {
     assert!(!prompt.contains("secrets"));
     assert!(prompt.contains("invalid"));
     assert!(ALLOWLIST.contains(&"dictation_enabled"));
-    assert!(agent
-        .validator
-        .value("dictation_enabled", &json!(false), &agent.load().unwrap())
-        .is_err());
+    assert_eq!(
+        agent
+            .validator
+            .value("dictation_enabled", &json!(false), &agent.load().unwrap())
+            .unwrap(),
+        json!(false)
+    );
 }
 
 #[test]
@@ -771,18 +774,20 @@ fn all_shortcuts_intent_and_switch_warnings() {
 #[test]
 fn dictation_toggle_branch_fields_and_turn_off_dictation() {
     let (_dir, agent) = setup(Fake::new(vec![]));
-    let mut config = agent.load().unwrap();
+    let config = agent.load().unwrap();
     assert!(ALLOWLIST.contains(&"dictation_enabled"));
     assert!(ALLOWLIST.contains(&"dictation_toggle_hotkey"));
     assert_eq!(
         label("dictation_toggle_hotkey"),
         "Toggle dictation shortcut"
     );
-    assert!(agent
-        .validator
-        .value("dictation_enabled", &json!(false), &config)
-        .is_err());
-    config.set_field("dictation_enabled", json!(true));
+    assert_eq!(
+        agent
+            .validator
+            .value("dictation_enabled", &json!(false), &config)
+            .unwrap(),
+        json!(false)
+    );
     for (input, expected) in [
         (json!("off"), false),
         (json!("on"), true),
@@ -815,10 +820,75 @@ fn dictation_toggle_branch_fields_and_turn_off_dictation() {
             .unwrap()
             .contains("turns Dictation off"));
     }
-    // Persistence must stay closed until lf-core owns the actual schema mapping.
-    assert!(agent
-        .set_setting("dictation_enabled", json!(false))
-        .is_err());
+    assert_eq!(
+        agent
+            .set_setting("dictation_enabled", json!(false))
+            .unwrap()
+            .changes
+            .len(),
+        1
+    );
+    assert_eq!(
+        agent.load().unwrap().field_bool("dictation_enabled"),
+        Some(false)
+    );
+}
+
+#[test]
+fn dictation_settings_apply_and_undo_round_trip_through_toml() {
+    for (before_enabled, before_combo, enabled, combo) in [
+        (true, "", false, "<ctrl>+<alt>+9"),
+        (false, "<ctrl>+<alt>+9", true, ""),
+    ] {
+        let (_dir, agent) = setup(Fake::new(vec![
+            setting("dictation_enabled", json!(enabled)),
+            setting("dictation_toggle_hotkey", json!(combo)),
+        ]));
+        let mut initial = agent.load().unwrap();
+        initial.set_field("dictation_enabled", json!(before_enabled));
+        initial.set_field("dictation_toggle_hotkey", json!(before_combo));
+        config::save_config(&initial, Some(&agent.config_path)).unwrap();
+        let before = fs::read(&agent.config_path).unwrap();
+        let proposal = agent
+            .propose("change dictation and the toggle dictation shortcut")
+            .unwrap();
+        assert!(proposal.rejected.is_empty(), "{:?}", proposal.rejected);
+        assert_eq!(proposal.changes.len(), 2);
+        assert_eq!(fs::read(&agent.config_path).unwrap(), before);
+        assert_eq!(agent.apply(&proposal.changes).unwrap().changes.len(), 2);
+        let persisted = config::parse_toml_file(&agent.config_path).unwrap();
+        assert_eq!(persisted["dictation"]["enabled"], enabled);
+        assert_eq!(persisted["hotkey"]["dictation_toggle"], combo);
+        let loaded = config::load_from(&agent.config_path).unwrap();
+        assert_eq!(loaded.field_bool("dictation_enabled"), Some(enabled));
+        assert_eq!(loaded.field_str("dictation_toggle_hotkey"), Some(combo));
+        let restarted = SettingsAgent::new(
+            Fake::new(vec![]),
+            agent.config_path.clone(),
+            agent.dictionary.path().into(),
+            agent.undo_path.clone(),
+        );
+        assert_eq!(restarted.undo().unwrap().lines.len(), 2);
+        assert_eq!(fs::read(&agent.config_path).unwrap(), before);
+        assert!(restarted.pending_undo().is_none());
+    }
+}
+
+#[test]
+fn invalid_dictation_settings_do_not_write_config_or_undo() {
+    let (_dir, agent) = setup(Fake::new(vec![]));
+    let before = fs::read(&agent.config_path).unwrap();
+    for (key, value) in [
+        ("dictation_enabled", Value::Null),
+        ("dictation_enabled", json!("maybe")),
+        ("dictation_enabled", json!(0)),
+        ("dictation_toggle_hotkey", json!("shift+a")),
+        ("dictation_toggle_hotkey", json!("ctrl+alt+1")),
+    ] {
+        assert!(agent.set_setting(key, value).is_err());
+        assert_eq!(fs::read(&agent.config_path).unwrap(), before);
+        assert!(!agent.undo_path.exists());
+    }
 }
 
 fn reference() -> Value {
@@ -841,10 +911,7 @@ fn exact_branch_prompt_schemas_manual_order_and_previews() {
     }
     assert_eq!(system_prompt(&c, &agent.validator), fixture["prompt"]);
     let core = Config::defaults_for(false);
-    let expected_core = fixture["prompt"].as_str().unwrap()
-        .replace("- dictation_enabled (Dictation): on|off. Now: \"on\"", "- dictation_enabled (Dictation): on|off. Now: \"invalid\"")
-        .replace("- dictation_toggle_hotkey (Toggle dictation shortcut): a combo like <ctrl>+<alt>+3, or off. Now: \"off\"", "- dictation_toggle_hotkey (Toggle dictation shortcut): a combo like <ctrl>+<alt>+3, or off. Now: \"invalid\"");
-    assert_eq!(system_prompt(&core, &agent.validator), expected_core);
+    assert_eq!(system_prompt(&core, &agent.validator), fixture["prompt"]);
     assert_eq!(tool_schemas(), fixture["schemas"]);
     for case in fixture["display"].as_array().unwrap() {
         assert_eq!(
