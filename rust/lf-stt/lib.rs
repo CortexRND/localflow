@@ -4,6 +4,8 @@ pub mod engine;
 pub mod engines;
 pub mod factory;
 pub mod model_storage;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod stt_lease;

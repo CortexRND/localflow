@@ -12,10 +12,12 @@ path = "lib.rs"
 default = ["whisper", "parakeet"]
 whisper = ["dep:whisper-rs"]
 parakeet = ["dep:sherpa-onnx"]
+runtime = ["dep:lf-runtime", "dep:lf-audio"]
 server = ["dep:lf-server", "dep:lf-providers", "dep:lf-audio", "dep:multer", "dep:futures-util", "dep:futures-executor", "dep:wait-timeout"]
 
 [dependencies]
 lf-core = { path = "../lf-core" }
+lf-runtime = { path = "../lf-runtime", optional = true }
 lf-server = { path = "../lf-server", optional = true }
 lf-providers = { path = "../lf-providers", optional = true }
 lf-audio = { path = "../lf-audio", optional = true }

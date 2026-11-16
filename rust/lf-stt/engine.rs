@@ -52,6 +52,7 @@ pub struct SttSlot {
     spec: Option<EngineSpec>,
     lease: Option<LeaseGuard>,
     lease_root: Option<PathBuf>,
+    scoped_leases: bool,
 }
 
 impl SttSlot {
@@ -63,7 +64,15 @@ impl SttSlot {
             lease_root: Some(root),
             spec: None,
             lease: None,
+            scoped_leases: false,
         }
+    }
+
+    /// Independent runtime snapshots may coexist while a replacement loads.
+    /// Scoped leases prevent unloading one snapshot from releasing another's lease.
+    pub fn with_scoped_leases(mut self) -> Self {
+        self.scoped_leases = true;
+        self
     }
 
     /// Does not load. A different selection releases the old model and lease
@@ -82,7 +91,7 @@ impl SttSlot {
         self.spec.as_ref().is_some_and(|s| s.engine.loaded())
     }
 
-    pub fn transcribe(&mut self, pcm: &[f32], prompt: Option<&str>) -> Result<Transcript> {
+    pub fn load(&mut self) -> Result<()> {
         let spec = self
             .spec
             .as_mut()
@@ -104,14 +113,27 @@ impl SttSlot {
                 &spec.backend,
                 &spec.model_size,
                 self.lease_root.as_deref(),
-                false,
+                self.scoped_leases,
             );
             if self.lease.is_none() {
                 spec.engine.unload();
                 bail!("could not record the speech model in use");
             }
         }
-        spec.engine.transcribe(pcm, prompt)
+        Ok(())
+    }
+
+    pub fn transcribe(&mut self, pcm: &[f32], prompt: Option<&str>) -> Result<Transcript> {
+        self.load()?;
+        self.spec.as_mut().unwrap().engine.transcribe(pcm, prompt)
+    }
+
+    /// Release weights and their lease, retaining the selection for a later load.
+    pub fn unload(&mut self) {
+        if let Some(spec) = self.spec.as_mut() {
+            spec.engine.unload();
+        }
+        self.lease.take();
     }
 
     pub fn release(&mut self) {

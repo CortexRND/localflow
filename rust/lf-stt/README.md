@@ -1,5 +1,53 @@
 # lf-stt
 
+## Dictation runtime (optional)
+
+Enable `runtime` to use `lf_stt::runtime` with the existing `lf-runtime` library:
+
+```rust,ignore
+let config = lf_runtime::settings::load_runtime_config(None)?;
+let options = lf_stt::runtime::run_options(&config, std::sync::Arc::new(|_sound| {}))?;
+lf_runtime::run::run(options)?;
+```
+
+The callback is the host's sound player; the example explicitly leaves sounds
+off. This adds no binary and changes no runtime/controller behavior.
+`RecorderSource` implements `lf_runtime::engine::AudioSource` using lf-audio's
+`Recorder`, including the configured input device and stop/drop mic release.
+Construction is idle. Since `AudioSource::stop` cannot return an error, capture
+failures are logged and drop the clip; `take_stop_error()` retrieves the error.
+
+`SpeechAdapter::{from_config, from_spec}` implements the runtime's shared
+`SpeechEngine` using a mutex-protected `SttSlot`. Load really loads weights
+without running inference, transcription passes the dictionary prompt through,
+and unload releases weights/leases while permitting reloading the snapshot.
+`stt_factory()` fits `Worker::build_stt`: each call creates a frozen config
+snapshot, preserving the runtime's load-new-before-unload-old and
+keep-old-on-failure behavior. Independent scoped leases protect both snapshots
+during reload (and any shared HTTP users); dropping the last reference releases
+the slot. Access to each native engine is serialized.
+
+Native audio and models use **16 kHz**. Config-based constructors reject other
+`sample_rate` values instead of letting the runtime miscalculate duration/gates.
+Set `[dictation] sample_rate = 16000`; input-device changes require rebuilding
+the audio source/restarting the runtime. No microphone or real-model tests run
+automatically; fakes cover snapshots, prompts, reload/failure, sharing and leases.
+
+### Composing HTTP backends
+
+Both `lf_runtime::server::DictationBackend` and `SttBackend<B>` handle
+`/transcribe`. They can be stacked, but **the outermost backend wins** for that
+route, exactly once; neither falls through after a transcription error. Other
+routes and autostart status continue through the chain. Tests cover both orders.
+Prefer one transcription owner rather than two model caches: use `SpeechAdapter`
+as `DictationBackend::speech` to share a runtime model snapshot, or put
+`SttBackend` outermost for per-request config-based model selection.
+`DictationBackend` retains its existing loaded-state reporting (`true`) and
+delegates provider availability to its fallback. `SttBackend` reports its own
+slot state and compiled providers. Wrapping a loaded DictationBackend with an
+unloaded SttBackend therefore reports the outer slot as unloaded. A runtime
+adapter is a frozen model snapshot, not an automatic per-request config reload.
+
 ## HTTP backend (optional)
 
 Enable `server` and pass `SttBackend::new(inner_backend)` from `lf_stt::server`

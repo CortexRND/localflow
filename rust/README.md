@@ -23,8 +23,10 @@ A library port of `hotkey.py`, `pushtotalk.py`, `inject.py`, `app.py`
 (worker, `LiveSettings`, `_process_clip`/`_process_job`), `live_config.py`,
 `menubar.py`/`menubar_poll.py`, `transform.py` and `singleinstance.py`.
 Audio and speech-to-text come in through the `AudioSource` and
-`SpeechEngine` traits (`lf-runtime/src/engine.rs`) so the `lf-audio` and
-`lf-stt` crates can be plugged in; `lf_runtime::run::run` wires everything,
+`SpeechEngine` traits (`lf-runtime/src/engine.rs`). `lf-stt`'s optional `runtime`
+feature supplies real lf-audio capture and SttSlot adapters, a worker factory
+and `run_options` ([integration and HTTP stacking](lf-stt/README.md#dictation-runtime-optional));
+`lf_runtime::run::run` wires everything,
 and no binary ships it yet.
 
 Everything is event-driven. The controller blocks on its channel and only
@@ -245,7 +247,7 @@ This is not a full application port:
   the character Shift types (as pynput reports it), so `<ctrl>++` works;
   Option never changes the key;
 * not ported from the runtime: pausing media while dictating, the
-  achievement cue, speech-model leases and explicit speech retry requests,
+  achievement cue and explicit speech retry requests,
   and the frontmost-app AppleScript fallback;
 * audio: `lf-core`'s `HistoryStore` has the Python clip helpers —
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
