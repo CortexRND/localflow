@@ -17,6 +17,15 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run the optional Rust HTTP server (runtime backends are not yet linked).
+    Serve {
+        /// Bind address; defaults to the saved server.host.
+        #[arg(long)]
+        host: Option<String>,
+        /// Bind port; defaults to the saved server.port (8756).
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Inspect and edit localflow configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
