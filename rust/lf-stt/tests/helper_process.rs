@@ -56,15 +56,22 @@ fn gone(pid: u32) -> bool {
 }
 #[cfg(windows)]
 fn gone(pid: u32) -> bool {
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
     // SAFETY: querying this test's known child id; successful handles are closed.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
         return true;
     }
-    // SAFETY: handle was returned by OpenProcess.
-    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-    false
+    let mut code = 0;
+    // SAFETY: handle was returned by OpenProcess and is closed after querying.
+    unsafe {
+        let running = GetExitCodeProcess(handle, &mut code) == 0 || code == STILL_ACTIVE as u32;
+        CloseHandle(handle);
+        !running
+    }
 }
 
 fn main() {
