@@ -23,7 +23,7 @@ use objc2_app_kit::{
     NSAccessibility, NSAutoresizingMaskOptions, NSBorderType, NSPopUpButton, NSScrollView,
     NSTextAlignment, NSTextField, NSView, NSWorkspace,
 };
-use objc2_foundation::{NSSize, NSString, NSURL};
+use objc2_foundation::{NSRange, NSSize, NSString, NSURL};
 use serde_json::{json, Value};
 
 use crate::backends::meeting::{
@@ -201,6 +201,13 @@ struct Event {
     kind: EventKind,
 }
 
+#[derive(Clone, Copy)]
+enum FocusedEditor {
+    Title,
+    Notes,
+    Question,
+}
+
 struct Controls {
     title: Retained<NSTextField>,
     template: Retained<NSPopUpButton>,
@@ -260,6 +267,7 @@ struct State {
     recent_loaded: Cell<bool>,
     vault_config: RefCell<(String, String)>,
     controls: RefCell<Option<Controls>>,
+    focus: Cell<Option<(FocusedEditor, NSRange)>>,
 }
 
 impl State {
@@ -310,6 +318,7 @@ impl State {
             recent_loaded: Cell::new(false),
             vault_config: RefCell::new((String::new(), String::new())),
             controls: RefCell::new(None),
+            focus: Cell::new(None),
         }
     }
 
@@ -343,6 +352,26 @@ impl State {
         let Some(controls) = controls_ref.as_ref() else {
             return;
         };
+        let focus = if let Some(editor) = controls.title.currentEditor() {
+            Some((FocusedEditor::Title, editor.selectedRange()))
+        } else if let Some(editor) = controls.question.currentEditor() {
+            Some((FocusedEditor::Question, editor.selectedRange()))
+        } else if controls
+            .notes
+            .window()
+            .and_then(|window| window.firstResponder())
+            .is_some_and(|responder| {
+                std::ptr::eq(
+                    &*responder as *const objc2_app_kit::NSResponder as *const (),
+                    &*controls.notes as *const _ as *const (),
+                )
+            })
+        {
+            Some((FocusedEditor::Notes, controls.notes.selectedRange()))
+        } else {
+            None
+        };
+        self.focus.set(focus);
         *self.notes_text.borrow_mut() = controls.notes.string().to_string();
         *self.question_draft.borrow_mut() = controls.question.stringValue().to_string();
         if !self.title_shows_session.get() {
@@ -352,6 +381,43 @@ impl State {
         if selected >= 0 {
             if let Some(template) = self.templates.borrow().get(selected as usize) {
                 *self.template_value.borrow_mut() = template.id.clone();
+            }
+        }
+    }
+
+    fn restore_focus(&self) {
+        let Some((focus, range)) = self.focus.take() else {
+            return;
+        };
+        let controls_ref = self.controls.borrow();
+        let Some(controls) = controls_ref.as_ref() else {
+            return;
+        };
+        let clamp = |text: &str| {
+            let count = text.encode_utf16().count();
+            let location = range.location.min(count);
+            NSRange::new(location, range.length.min(count - location))
+        };
+        match focus {
+            FocusedEditor::Notes => {
+                if let Some(window) = controls.notes.window() {
+                    window.makeFirstResponder(Some(&controls.notes));
+                    controls
+                        .notes
+                        .setSelectedRange(clamp(&controls.notes.string().to_string()));
+                }
+            }
+            FocusedEditor::Title | FocusedEditor::Question => {
+                let field = match focus {
+                    FocusedEditor::Title => &controls.title,
+                    _ => &controls.question,
+                };
+                if let Some(window) = field.window() {
+                    window.makeFirstResponder(Some(field));
+                    if let Some(editor) = field.currentEditor() {
+                        editor.setSelectedRange(clamp(&field.stringValue().to_string()));
+                    }
+                }
             }
         }
     }
@@ -493,7 +559,17 @@ impl State {
         if self.closed.get() || self.status_in_flight.replace(true) {
             return;
         }
+        self.next_poll.set(Some(Instant::now() + POLL_INTERVAL));
         self.launch(RequestKind::Status, Request::Status);
+    }
+
+    fn poll_if_due(&self, now: Instant) {
+        if self.visible.get()
+            && !self.snapshot_mode.get()
+            && self.next_poll.get().is_none_or(|next| now >= next)
+        {
+            self.poll();
+        }
     }
 
     fn load_templates(&self) {
@@ -893,12 +969,7 @@ impl State {
             self.notes_due.set(None);
             self.request_notes_save(false);
         }
-        if self.visible.get()
-            && !self.snapshot_mode.get()
-            && self.next_poll.get().is_none_or(|next| now >= next)
-        {
-            self.poll();
-        }
+        self.poll_if_due(now);
     }
 
     fn flush(&self) {
@@ -1344,9 +1415,7 @@ impl HubPage for MeetingsPage {
         }
         if !state.snapshot_mode.get() && !state.closed.get() {
             state.load_templates();
-            if !state.status_in_flight.get() {
-                state.poll();
-            }
+            state.poll_if_due(Instant::now());
         }
 
         let mtm = ctx.mtm;
@@ -2004,6 +2073,7 @@ impl HubPage for MeetingsPage {
             question,
             palette: ctx.palette,
         });
+        state.restore_focus();
         recent_y + 28.0 + recent_height
     }
 }
@@ -2014,6 +2084,44 @@ mod tests {
     use crate::backends::meeting::{FakeMeetingClient, MeetingCall};
     use crate::hub_model::RECENT_NOTES_LIMIT;
     use std::sync::{Condvar, Mutex};
+
+    #[test]
+    fn status_rebuilds_do_not_poll_again_until_the_python_interval() {
+        assert_eq!(POLL_INTERVAL, Duration::from_secs(2));
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = page(client.clone(), idle());
+        page.state.snapshot_mode.set(false);
+        page.state.visible.set(true);
+        page.state.poll_if_due(Instant::now());
+        assert!(page.state.status_in_flight.get());
+        page.state.apply_event(receive(&page));
+        let due = page.state.next_poll.get().unwrap();
+        for _ in 0..10 {
+            page.state.poll_if_due(due - Duration::from_millis(1));
+        }
+        assert_eq!(
+            client
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, MeetingCall::Status))
+                .count(),
+            1
+        );
+        page.state.poll_if_due(due);
+        page.state.apply_event(receive(&page));
+        assert_eq!(
+            client
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, MeetingCall::Status))
+                .count(),
+            2
+        );
+        page.state.visible.set(false);
+        page.state.poll_if_due(due + POLL_INTERVAL * 2);
+        assert!(!page.state.status_in_flight.get());
+        page.state.shutdown();
+    }
 
     #[test]
     fn snapshots_match_python_meeting_templates_transcripts_and_saved_notes() {

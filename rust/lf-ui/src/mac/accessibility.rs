@@ -12,9 +12,9 @@ use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, Message};
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationTerminateReply,
-    NSButton, NSPopUpButton, NSSearchField, NSSwitch, NSTextField, NSView,
+    NSButton, NSPopUpButton, NSSearchField, NSSwitch, NSTextField, NSTextView, NSView,
 };
-use objc2_foundation::NSString;
+use objc2_foundation::{NSRange, NSString};
 
 use lf_ui::backends::ask::FakeAskBackend;
 use lf_ui::backends::meeting::FakeMeetingClient;
@@ -71,6 +71,66 @@ fn named_button(view: &NSView, label: &str) -> Option<Retained<NSButton>> {
     view.subviews()
         .iter()
         .find_map(|child| named_button(&child, label))
+}
+
+fn assert_meetings_focus(mtm: MainThreadMarker) {
+    fn notes(view: &NSView) -> Option<Retained<NSTextView>> {
+        if let Ok(text) = view.retain().downcast::<NSTextView>() {
+            if text
+                .accessibilityLabel()
+                .is_some_and(|label| label.to_string() == "Your notes")
+            {
+                return Some(text);
+            }
+        }
+        view.subviews().iter().find_map(|child| notes(&child))
+    }
+    let root = tempfile::tempdir().unwrap();
+    let hub = Hub::new(mtm, services(root.path()), "Meetings");
+    hub.prepare_snapshot("running", root.path()).unwrap();
+    hub.show_page("Meetings");
+    hub.show();
+    let before = notes(&hub.content_view()).unwrap();
+    assert!(hub.window().makeFirstResponder(Some(&before)));
+    before.setSelectedRange(NSRange::new(1, 3));
+    let text = before.string().to_string();
+    hub.show_page("Meetings");
+    let after = notes(&hub.content_view()).unwrap();
+    assert_eq!(after.string().to_string(), text);
+    assert_eq!(after.selectedRange(), NSRange::new(1, 3));
+    assert!(hub
+        .window()
+        .firstResponder()
+        .is_some_and(|responder| std::ptr::eq(
+            &*responder as *const objc2_app_kit::NSResponder as *const (),
+            &*after as *const _ as *const ()
+        )));
+    for (preparation, label) in [
+        ("idle", "Meeting title"),
+        ("saved", "Ask about this meeting"),
+    ] {
+        hub.prepare_snapshot(preparation, root.path()).unwrap();
+        hub.show_page("Meetings");
+        let before = editable_field(&hub.content_view(), label).unwrap();
+        before.setStringValue(&NSString::from_str("Unsent text with 🦀"));
+        assert!(hub.window().makeFirstResponder(Some(&before)));
+        before
+            .currentEditor()
+            .unwrap()
+            .setSelectedRange(NSRange::new(4, 2));
+        hub.show_page("Meetings");
+        let after = editable_field(&hub.content_view(), label).unwrap();
+        assert_eq!(after.stringValue().to_string(), "Unsent text with 🦀");
+        assert_eq!(
+            after
+                .currentEditor()
+                .expect("restored field editor")
+                .selectedRange(),
+            NSRange::new(4, 2)
+        );
+    }
+    hub.shutdown();
+    println!("Native Meetings focus audit: notes/title/question focus and selection survive status-style rebuilds");
 }
 
 fn assert_dictionary_submissions(mtm: MainThreadMarker) {
@@ -284,6 +344,7 @@ pub fn run() {
     assert_eq!(terminate_calls.get(), 1);
     println!("Native Hub termination audit: AppKit quit invokes the flush callback once");
     assert_dictionary_submissions(mtm);
+    assert_meetings_focus(mtm);
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
     let mut failures = Vec::new();
