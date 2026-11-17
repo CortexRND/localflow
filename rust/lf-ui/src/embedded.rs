@@ -103,6 +103,7 @@ impl EmbeddedRuntime {
             let host = config.field_str("server_host").unwrap_or("127.0.0.1");
             let port = u16::try_from(config.field_i64("server_port").unwrap_or(8756))?;
             ensure_server(host, port, || {
+                ensure_server_token(&lf_core::apitoken::try_token_path()?)?;
                 let dictation = lf_runtime::server::DictationBackend::new(speech.clone(), &config);
                 let backend = lf_meetings_backend::MeetingsBackend::new()?
                     .with_inner(Arc::new(dictation))
@@ -150,6 +151,17 @@ impl Drop for EmbeddedRuntime {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn ensure_server_token(path: &std::path::Path) -> Result<()> {
+    if lf_core::apitoken::load_at(path)?.is_empty() {
+        lf_core::apitoken::load_or_create_at(path)?;
+        anyhow::ensure!(
+            !lf_core::apitoken::load_at(path)?.is_empty(),
+            "could not persist local server API token"
+        );
+    }
+    Ok(())
 }
 
 pub fn healthy(base: &str) -> bool {
@@ -253,6 +265,24 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn new_server_initializes_only_missing_or_empty_tokens_and_reports_file_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("api-token");
+        ensure_server_token(&path).unwrap();
+        let token = lf_core::apitoken::load_at(&path).unwrap();
+        assert!(!token.is_empty());
+        ensure_server_token(&path).unwrap();
+        assert_eq!(lf_core::apitoken::load_at(&path).unwrap(), token);
+        std::fs::write(&path, " \n").unwrap();
+        ensure_server_token(&path).unwrap();
+        assert!(!lf_core::apitoken::load_at(&path).unwrap().is_empty());
+        std::fs::write(&path, [255]).unwrap();
+        assert!(ensure_server_token(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), [255]);
+        assert!(ensure_server_token(&path.join("blocked")).is_err());
+    }
 
     #[test]
     fn server_tracks_only_successful_speech_replacements_and_old_unload_is_isolated() {
