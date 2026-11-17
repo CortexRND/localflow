@@ -518,7 +518,7 @@ mod tests {
         let server = MockServer::start(vec![MockResponse::json(200, r#"{"models":[]}"#)]);
         let cfg = config_with(&[("llm_base_url", &server.url())]);
         assert!(test_llm(&cfg, None, None, None, &MemSecrets::default()).ok);
-        let cfg = config_with(&[("llm_base_url", &crate::testutil::closed_port_url())]);
+        let cfg = config_with(&[("llm_base_url", crate::testutil::UNREACHABLE_URL)]);
         let result = test_llm(&cfg, None, None, None, &MemSecrets::default());
         assert!(!result.ok && !result.detail.is_empty());
         assert!(cli_list_models(&cfg, None, None, &MemSecrets::default())

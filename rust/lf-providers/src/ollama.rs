@@ -214,13 +214,13 @@ mod tests {
 
     #[test]
     fn connection_refused_is_wrapped() {
-        let url = crate::testutil::closed_port_url();
-        let err = OllamaLlm::new(&url, "m", 2, 1)
+        let url = crate::testutil::UNREACHABLE_URL;
+        let err = OllamaLlm::new(url, "m", 2, 1)
             .complete("s", "u", None)
             .unwrap_err()
             .0;
         assert!(err.starts_with("Ollama completion failed: "), "{err}");
-        assert!(!OllamaLlm::new(&url, "m", 2, 1).healthcheck().ok);
+        assert!(!OllamaLlm::new(url, "m", 2, 1).healthcheck().ok);
     }
 
     #[test]

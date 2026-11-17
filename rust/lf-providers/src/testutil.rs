@@ -150,13 +150,9 @@ impl MockServer {
     }
 }
 
-/// A URL on which nothing listens.
-pub fn closed_port_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("http://127.0.0.1:{port}")
-}
+/// Destination port zero is reserved; binding port zero allocates a different
+/// port, so no parallel mock server can accidentally answer this endpoint.
+pub const UNREACHABLE_URL: &str = "http://127.0.0.1:0";
 
 type SetHook = Box<dyn Fn(&str, &str) -> anyhow::Result<()>>;
 type DeleteHook = Box<dyn Fn(&str) -> anyhow::Result<()>>;
