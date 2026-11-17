@@ -592,7 +592,13 @@ def test_paste_last_loads_saved_text_on_controller_startup(monkeypatch):
         controller.shutdown()
 
 
-def test_status_transitions_cover_recording_processing_and_idle():
+def test_status_transitions_cover_recording_processing_and_idle(monkeypatch):
+    from localflow import pushtotalk
+
+    pasted = []
+    monkeypatch.setattr(
+        pushtotalk, "paste_text", lambda *args: pasted.append(args)
+    )
     states = []
     controller, _recorder, _config, _queue, _sounds = make_controller(
         on_state=states.append
@@ -604,6 +610,7 @@ def test_status_transitions_cover_recording_processing_and_idle():
 
         assert _wait_until(lambda: states and states[-1] == "idle")
         assert states == ["recording", "processing", "idle"]
+        assert pasted == [("result", "auto", None)]
     finally:
         controller.shutdown()
 
