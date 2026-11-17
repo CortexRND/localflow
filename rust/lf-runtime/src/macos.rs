@@ -150,6 +150,14 @@ impl MenuBar for MacMenuBar {
 /// Build the status item on the main thread and run the AppKit loop.
 /// Never returns while the app runs.
 pub fn run_menu_bar(model: MenuModel, actions: MenuActions) -> Result<(), String> {
+    install_menu_bar(model, actions)?;
+    let mtm = MainThreadMarker::new().ok_or("the menu bar must run on the main thread")?;
+    NSApplication::sharedApplication(mtm).run();
+    Ok(())
+}
+
+/// Install the menu in an app that owns its AppKit event loop (such as the Hub).
+pub fn install_menu_bar(model: MenuModel, actions: MenuActions) -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the menu bar must run on the main thread")?;
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -192,7 +200,6 @@ pub fn run_menu_bar(model: MenuModel, actions: MenuActions) -> Result<(), String
     };
     render(&ui, &model, mtm);
     UI.with(|slot| *slot.borrow_mut() = Some(ui));
-    app.run();
     Ok(())
 }
 
