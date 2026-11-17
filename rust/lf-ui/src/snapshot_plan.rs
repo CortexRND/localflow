@@ -208,6 +208,14 @@ mod tests {
         assert_eq!(rows.len(), 12);
         assert!(rows[0].clip);
         assert_eq!(rows[1].kind, "command");
+        let visible: Vec<_> = rows
+            .iter()
+            .rev()
+            .take(crate::hub_model::HISTORY_PAGE_SIZE as usize)
+            .collect();
+        assert_eq!(visible[0].text, "History item 10.");
+        assert_eq!(visible.last().unwrap().text, "History item 3.");
+        assert!(visible.iter().all(|row| !row.clip));
         assert_eq!(history_rows(HistorySeed::Responsive).len(), 4);
     }
 }
