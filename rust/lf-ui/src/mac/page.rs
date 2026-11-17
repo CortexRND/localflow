@@ -149,7 +149,7 @@ impl HubServices {
     /// write it (unless [`Self::memory_only_config`]) and make it current. The
     /// current config is unchanged on error.
     pub fn update_config(&self, update: &Value) -> Result<Config> {
-        let updated = apply_config_update(&self.config.borrow(), update)?;
+        let updated = apply_config_update(&self.latest_config()?, update)?;
         if !self.memory_only_config.get() {
             save_config(&updated, self.config_path.borrow().as_deref())?;
         }
@@ -242,6 +242,118 @@ pub type Flag = Rc<Cell<bool>>;
 mod tests {
     use super::*;
     use crate::backends::{meeting::FakeMeetingClient, prompts::FakePromptQueue};
+    use std::path::Path;
+
+    fn file_services(dir: &Path, path: &Path, config: Config) -> Rc<HubServices> {
+        let services = HubServices::new(
+            config,
+            Rc::new(
+                HistoryStore::open(
+                    Some(dir.join("history.sqlite")),
+                    Some(dir.join("clips")),
+                    true,
+                )
+                .unwrap(),
+            ),
+            Rc::new(DictionaryStore::new(Some(dir.join("dictionary.json")))),
+            Arc::new(FakePromptQueue::default()),
+            Arc::new(FakeMeetingClient::default()),
+        );
+        *services.config_path.borrow_mut() = Some(path.to_path_buf());
+        services
+    }
+
+    #[test]
+    fn config_updates_preserve_external_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::defaults_for(true);
+        config.set_field("dictation_enabled", Value::Bool(true));
+        save_config(&config, Some(&path)).unwrap();
+        let services = file_services(dir.path(), &path, config);
+
+        let normal = services
+            .update_config(&serde_json::json!({"cleanup": {"level": "medium"}}))
+            .unwrap();
+        assert_eq!(normal.field_str("cleanup_level"), Some("medium"));
+        assert_eq!(services.config().field_str("cleanup_level"), Some("medium"));
+        assert_eq!(
+            load_from(&path).unwrap().field_str("cleanup_level"),
+            Some("medium")
+        );
+
+        let mut external = load_from(&path).unwrap();
+        external.set_field("dictation_enabled", Value::Bool(false));
+        save_config(&external, Some(&path)).unwrap();
+
+        let updated = services
+            .update_config(&serde_json::json!({"cleanup": {"level": "light"}}))
+            .unwrap();
+        assert_eq!(updated.field_str("cleanup_level"), Some("light"));
+        assert_eq!(updated.field_bool("dictation_enabled"), Some(false));
+        assert_eq!(
+            services.config().field_bool("dictation_enabled"),
+            Some(false)
+        );
+        let on_disk = load_from(&path).unwrap();
+        assert_eq!(on_disk.field_str("cleanup_level"), Some("light"));
+        assert_eq!(on_disk.field_bool("dictation_enabled"), Some(false));
+    }
+
+    #[test]
+    fn config_updates_preserve_current_config_on_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::defaults_for(true);
+        config.set_field("dictation_enabled", Value::Bool(true));
+        config.set_field("cleanup_level", Value::String("standard".into()));
+        save_config(&config, Some(&path)).unwrap();
+        let services = file_services(dir.path(), &path, config);
+        std::fs::write(&path, "not valid TOML [").unwrap();
+
+        assert!(services
+            .update_config(&serde_json::json!({"cleanup": {"level": "light"}}))
+            .is_err());
+        assert_eq!(
+            services.config().field_str("cleanup_level"),
+            Some("standard")
+        );
+        assert_eq!(
+            services.config().field_bool("dictation_enabled"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn config_updates_preserve_current_config_on_save_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::defaults_for(true);
+        config.set_field("dictation_enabled", Value::Bool(true));
+        config.set_field("cleanup_level", Value::String("standard".into()));
+        save_config(&config, Some(&path)).unwrap();
+        let services = file_services(dir.path(), &path, config);
+
+        let original_permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        let mut read_only = original_permissions.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(dir.path(), read_only).unwrap();
+        let result = services.update_config(&serde_json::json!({"cleanup": {"level": "light"}}));
+        std::fs::set_permissions(dir.path(), original_permissions).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            services.config().field_str("cleanup_level"),
+            Some("standard")
+        );
+        assert_eq!(
+            services.config().field_bool("dictation_enabled"),
+            Some(true)
+        );
+        let on_disk = load_from(&path).unwrap();
+        assert_eq!(on_disk.field_str("cleanup_level"), Some("standard"));
+        assert_eq!(on_disk.field_bool("dictation_enabled"), Some(true));
+    }
 
     #[test]
     fn dictation_updates_reload_disk_and_preserve_config_on_error() {
