@@ -1,9 +1,9 @@
 """Measure the actual AppKit Hub, runtime and same-binary speech helper."""
 
+import argparse
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -14,7 +14,10 @@ REFERENCE = (
 
 
 def validate(result, mode):
-    assert result["transcript"] == REFERENCE, result["transcript"]
+    if mode == "whisper":
+        assert isinstance(result["transcript"], str) and result["transcript"].strip()
+    else:
+        assert result["transcript"] == REFERENCE, result["transcript"]
     rows = {row["stage"]: row for row in result["rows"]}
     assert set(rows) == {
         "idle",
@@ -25,7 +28,11 @@ def validate(result, mode):
         "dictation_off",
     }
     for stage, row in rows.items():
-        expected = mode == "helper" and stage in {"loaded", "transcribed", "reloaded"}
+        expected = mode != "inprocess" and stage in {
+            "loaded",
+            "transcribed",
+            "reloaded",
+        }
         assert bool(row["helper_pid"]) == expected, (mode, stage, row)
         assert (row["helper"] is not None) == expected
         for metric in ("rss", "footprint"):
@@ -33,7 +40,7 @@ def validate(result, mode):
             assert row[f"total_{metric}"] == row["main"][metric] + (
                 row["helper"][metric] if expected else 0
             )
-    if mode == "helper":
+    if mode != "inprocess":
         assert rows["loaded"]["helper_pid"] != rows["reloaded"]["helper_pid"]
         assert (
             rows["unloaded"]["main"]["footprint"] - rows["idle"]["main"]["footprint"]
@@ -44,8 +51,11 @@ def validate(result, mode):
 def run(root, output, mode):
     output.mkdir(parents=True, exist_ok=True)
     config = output / "config.toml"
+    backend, model = (
+        ("auto", "tiny.en") if mode == "whisper" else ("parakeet-onnx", "parakeet")
+    )
     config.write_text(
-        'config_version = 2\n[setup]\nversion = 1\n[stt]\nprovider = "parakeet-onnx"\nmodel = "parakeet"\ndevice = "cpu"\n'
+        f'config_version = 2\n[setup]\nversion = 1\n[stt]\nprovider = "{backend}"\nmodel = "{model}"\ndevice = "cpu"\n'
     )
     config.with_name("runtime.toml").write_text("[stt]\nidle_timeout_seconds = 0\n")
     destination = output / "result.json"
@@ -144,11 +154,48 @@ def report(results):
     return "\n".join(lines) + "\n"
 
 
+def report_whisper(data):
+    lines = [
+        "## Real Whisper helper: auto backend, ggml tiny.en, CPU",
+        "",
+        "| Stage | Helper PID | Main RSS / footprint MiB | Helper RSS / footprint MiB |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for row in data["rows"]:
+        main, child = row["main"], row["helper"]
+        child_text = (
+            "gone"
+            if child is None
+            else f"{child['rss'] / 1024**2:.1f} / {child['footprint'] / 1024**2:.1f}"
+        )
+        lines.append(
+            f"| {row['stage']} | {row['helper_pid'] or 'gone'} | {main['rss'] / 1024**2:.1f} / {main['footprint'] / 1024**2:.1f} | {child_text} |"
+        )
+    return (
+        "\n".join(lines)
+        + "\n\nTranscript (nonempty, stable across warm/reload):\n\n"
+        + data["transcript"]
+        + "\n"
+    )
+
+
 def main():
-    root, output = (Path(arg).resolve() for arg in sys.argv[1:])
-    results = {mode: run(root, output / mode, mode) for mode in ("helper", "inprocess")}
-    text = report(results)
-    (output / "speech-helper.md").write_text(text)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--whisper", action="store_true")
+    args = parser.parse_args()
+    root, output = args.root.resolve(), args.output.resolve()
+    if args.whisper:
+        text = report_whisper(run(root, output / "whisper", "whisper"))
+        destination = output / "whisper-helper.md"
+    else:
+        results = {
+            mode: run(root, output / mode, mode) for mode in ("helper", "inprocess")
+        }
+        text = report(results)
+        destination = output / "speech-helper.md"
+    destination.write_text(text)
     print(text)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:

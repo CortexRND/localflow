@@ -143,6 +143,7 @@ fn release_for_pid(path: &Path, pid: u64) {
 }
 
 /// Only for this process, or an owned helper whose exit has been observed.
+#[cfg(feature = "runtime")]
 pub(crate) fn release_process(pid: u32) {
     if let Ok(entries) = fs::read_dir(lease_dir()) {
         for path in entries.flatten().map(|entry| entry.path()) {

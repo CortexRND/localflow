@@ -20,10 +20,14 @@ stdout descriptor. Load waits for ready or a real model error. Failed requests
 return an error with an 8 KiB stderr tail and discard the child; the next request
 or load respawns it. No transcription is invented or retried behind the caller.
 
-Eviction closes stdin and reaps the child, with a two-second grace period before
-killing a stuck child. A dedicated child input reader exits on EOF even while
+Eviction sends unload and reaps the child, with a two-second grace period before
+killing a stuck child. Stdin stays open during graceful teardown so model leases
+can be released; forced exits are cleaned by the supervisor and dead leases are
+pruned during discovery. A dedicated child input reader exits on EOF even while
 native loading/inference is busy, including when the parent dies. Quit/shutdown
-also evicts retained engines. The existing recording/meeting/inference guards
+drains meeting/server work before evicting retained engines. Speech admission
+closes before shutdown waits for active calls; quit retains its 60-second cap.
+The existing recording/meeting/inference guards
 still defer ordinary idle/off eviction; existing cancellation epochs still
 discard stale results. Setup cancellation releases its proxy when the trial
 returns, including failed or cancelled loads.
@@ -37,6 +41,10 @@ main/helper RSS and kernel footprint, and cold/warm/reload latency. Its explicit
 `LF_HUB_SPEECH_PROFILE` / `LF_HUB_SPEECH_PCM` instrumentation requires an isolated
 `LOCALFLOW_CONFIG`; the probe toggles dictation off in that isolated file.
 Results and the historical 6c comparison are in `memory-measurements` artifacts.
+The same CI driver also runs `--whisper`: backend `auto`, ggml `tiny.en` on CPU,
+real load/transcription/reload, nonempty stable text, and PID-gone assertions
+after unload and dictation-off. Its transcript is recorded independently rather
+than required to match Parakeet's punctuation and spelling.
 
 # Opt-in macOS app packaging
 

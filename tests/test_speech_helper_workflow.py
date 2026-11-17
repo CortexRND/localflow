@@ -2,6 +2,7 @@
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -79,3 +80,34 @@ def test_native_workflow_runs_measurements_after_fixed_clip_and_uploads_evidence
         "LF_HUB_SPEECH_PROFILE"
         in (ROOT / "rust/lf-ui/src/speech_profile.rs").read_text()
     )
+
+
+def test_whisper_smoke_selects_auto_tiny_and_validates_a_real_helper(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(PROBE.os, "environ", {"LOCALFLOW_SPEECH_IN_PROCESS": "1"})
+    data = measurements("helper")
+    data["transcript"] = "A real Whisper transcript, not the Parakeet reference."
+
+    class Process:
+        def __init__(self, command, env, **kwargs):
+            assert command[-2:] == ["--page", "Home"]
+            config = Path(env["LOCALFLOW_CONFIG"]).read_text()
+            assert 'provider = "auto"' in config
+            assert 'model = "tiny.en"' in config
+            assert "LOCALFLOW_SPEECH_IN_PROCESS" not in env
+            Path(env["LF_HUB_SPEECH_PROFILE"]).write_text(json.dumps(data))
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(PROBE.subprocess, "Popen", Process)
+    assert PROBE.run(tmp_path, tmp_path / "whisper", "whisper") == data
+    for bad in ({**data, "transcript": ""}, {**data, "rows": []}):
+        with pytest.raises(AssertionError):
+            PROBE.validate(bad, "whisper")
+    assert "--whisper" in (ROOT / ".github/workflows/rust.yml").read_text()
+    assert data["transcript"] in PROBE.report_whisper(data)
