@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use session::SessionActor;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
     time::Duration,
 };
 use validation::{Body, ResponseResult};
@@ -63,6 +63,7 @@ pub struct MeetingsBackend {
     watcher: Option<Arc<MeetingWatcher>>,
     transcribe_lock: Arc<Mutex<()>>,
     state: Mutex<State>,
+    idle: Condvar,
 }
 impl MeetingsBackend {
     /// Poll the same in-process status as GET /meeting/status using live config snapshots.
@@ -88,6 +89,7 @@ impl MeetingsBackend {
             watcher: None,
             transcribe_lock: Arc::default(),
             state: Mutex::default(),
+            idle: Condvar::new(),
         })
     }
     pub fn with_inner(mut self, inner: Arc<dyn Backend>) -> Self {
@@ -424,6 +426,14 @@ impl Backend for MeetingsBackend {
         if let Some(watcher) = &self.watcher {
             watcher.stop();
         }
+        let mut state = self.state();
+        while state.phase == Phase::Starting || state.phase == Phase::Stopping {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        drop(state);
         if let Err(error) = self.stop(config) {
             anyhow::ensure!(
                 error.status == 409,
@@ -535,6 +545,7 @@ impl Drop for ResetSlot<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.backend.state().phase = Phase::Idle;
+            self.backend.idle.notify_all();
         }
     }
 }

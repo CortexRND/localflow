@@ -509,6 +509,48 @@ async fn server_shutdown_saves_active_meeting_and_is_idle_safe() {
 }
 
 #[tokio::test]
+async fn server_shutdown_waits_for_an_already_stopping_meeting() {
+    let f = Fixture::new();
+    assert_eq!(
+        request(
+            f.app(),
+            "POST",
+            "/meeting/start",
+            Some(json!({"title":"Drain", "auto_title":false}))
+        )
+        .await
+        .0,
+        200
+    );
+    let (entered, summarizing) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.models.gate.lock().unwrap() = Some((entered, released));
+    let backend = f.backend.clone();
+    let config = f.config.clone();
+    let stop = std::thread::spawn(move || {
+        backend.handle(BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/meeting/stop".into(),
+            body: Default::default(),
+            headers: Default::default(),
+            query: Default::default(),
+            config,
+        })
+    });
+    summarizing.recv_timeout(Duration::from_secs(5)).unwrap();
+    let state = ServerState::new(f.config.clone(), "test-token".into(), f.backend.clone());
+    let (finished, done) = mpsc::channel();
+    let shutdown = std::thread::spawn(move || finished.send(state.shutdown().is_ok()).unwrap());
+    assert!(done.recv_timeout(Duration::from_millis(50)).is_err());
+    release.send(()).unwrap();
+    assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
+    let saved = stop.join().unwrap();
+    assert_eq!(saved.status, 200);
+    assert!(Path::new(saved.body["notes_path"].as_str().unwrap()).is_file());
+    shutdown.join().unwrap();
+}
+
+#[tokio::test]
 async fn automatic_titles_fallback_explicit_title_and_current_snapshot() {
     let mut f = Fixture::new();
     for (body, expected, generated) in [
