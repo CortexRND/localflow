@@ -94,6 +94,15 @@ fn assert_setup_workers_and_links(mtm: MainThreadMarker) {
         &setup.content_view(),
         "Background check completed"
     ));
+    setup.seed_snapshot(SetupSnapshotState::Step(2));
+    assert!(has_text(
+        &setup.content_view(),
+        if cfg!(feature = "runtime") {
+            "GGML"
+        } else {
+            "Not built"
+        }
+    ));
     setup.close();
     assert_eq!(setup.drain_requests(), 0);
 
@@ -117,6 +126,142 @@ fn assert_setup_workers_and_links(mtm: MainThreadMarker) {
     println!(
         "Native setup audit: background checks, drained completion and Home/History links passed"
     );
+}
+
+fn assert_setup_model_workers(mtm: MainThreadMarker) {
+    use lf_ui::mac::setup::{SetupContext, SetupServices, SetupWindow};
+    use lf_ui::setup_backend::{ProgressCallback, SetupModelBackend};
+    use lf_ui::setup_flow::{FakeLaunchAgent, FakeSetupPlatform, HardwareInfo, SttModel};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex,
+    };
+    use std::time::{Duration, Instant};
+    struct Models {
+        entered: mpsc::Sender<Arc<AtomicBool>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl SetupModelBackend for Models {
+        fn speech_downloads(
+            &self,
+            _: &[SttModel],
+        ) -> Result<std::collections::HashMap<String, bool>, String> {
+            Err("unused".into())
+        }
+        fn download_speech(
+            &self,
+            _: &SttModel,
+            _: ProgressCallback,
+            _: Arc<AtomicBool>,
+        ) -> Result<(), String> {
+            Err("unused".into())
+        }
+        fn ollama(&self, _: &str) -> Result<(bool, Vec<String>), String> {
+            Err("unused".into())
+        }
+        fn pull_cleanup(
+            &self,
+            _: &str,
+            _: &str,
+            _: ProgressCallback,
+            _: Arc<AtomicBool>,
+        ) -> Result<(), String> {
+            Err("unused".into())
+        }
+        fn try_dictation(
+            &self,
+            _: &SttModel,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<String, String> {
+            panic!("trial must receive cancellation token")
+        }
+        fn try_dictation_cancellable(
+            &self,
+            _: &SttModel,
+            _: Option<&str>,
+            _: Option<&str>,
+            cancel: Arc<AtomicBool>,
+        ) -> Result<String, String> {
+            assert!(MainThreadMarker::new().is_none(), "trial must run off main");
+            self.entered.send(cancel).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            Ok("native worker transcript".into())
+        }
+    }
+    for action in ["complete", "cancel", "skip", "close"] {
+        let (entered, ready) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let platform = FakeSetupPlatform {
+            runtimes: vec!["faster-whisper".into()],
+            ..FakeSetupPlatform::default()
+        };
+        let context = SetupContext::detect(
+            Config::defaults_for(true),
+            HardwareInfo::new("Darwin", "arm64", 16.0, true, 256.0),
+            &platform,
+            &FakeLaunchAgent::new("not installed"),
+        )
+        .unwrap();
+        let setup = SetupWindow::new(
+            mtm,
+            context,
+            SetupServices {
+                models: Arc::new(Models {
+                    entered,
+                    release: Mutex::new(released),
+                }),
+                ..SetupServices::default()
+            },
+        );
+        setup.seed_snapshot(SetupSnapshotState::Step(5));
+        setup.set_snapshot_mode(false);
+        unsafe {
+            named_button(&setup.content_view(), "Record 5 seconds")
+                .unwrap()
+                .performClick(None);
+        }
+        setup.drain_requests();
+        let cancel = ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!named_button(&setup.content_view(), "Cancel recording")
+            .unwrap()
+            .isHidden());
+        match action {
+            "cancel" => unsafe {
+                named_button(&setup.content_view(), "Cancel recording")
+                    .unwrap()
+                    .performClick(None);
+            },
+            "skip" => unsafe {
+                named_button(&setup.content_view(), "Skip dictation trial")
+                    .unwrap()
+                    .performClick(None);
+            },
+            "close" => setup.close(),
+            _ => {}
+        }
+        setup.drain_requests();
+        assert_eq!(
+            cancel.load(Ordering::Acquire),
+            action != "complete",
+            "trial action: {action}"
+        );
+        release.send(()).unwrap();
+        if action == "complete" {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while setup.drain_requests() != 0 {
+                assert!(Instant::now() < deadline, "trial completion not applied");
+                spin_run_loop(0.01);
+            }
+            assert!(has_text(&setup.content_view(), "native worker transcript"));
+        }
+        setup.close();
+    }
+    println!("Native setup model audit: format labels, worker transcript and Cancel/Skip/Close tokens passed");
 }
 
 fn has_text(view: &NSView, text: &str) -> bool {
@@ -682,6 +827,7 @@ pub fn run() {
     hub.shutdown();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert_setup_workers_and_links(mtm);
+    assert_setup_model_workers(mtm);
     let setup = snapshot_fixture(mtm);
     for state in (0..7).map(SetupSnapshotState::Step).chain([
         SetupSnapshotState::ChecksNeedsAction,

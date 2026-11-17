@@ -17,6 +17,110 @@ pub const DEFAULT_NUM_CTX: i64 = 8192;
 pub const HEALTH_TIMEOUT: i64 = 3;
 
 impl OllamaLlm {
+    /// Stream a real pull to completion; EOF without success is an error.
+    pub fn pull(
+        &self,
+        progress: &(dyn Fn(u64, u64, &str) + Send + Sync),
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), ProviderError> {
+        crate::transfer::run(cancel, async {
+            if self.model.trim().is_empty() {
+                return Err("Choose an Ollama model.".into());
+            }
+            let client = crate::transfer::client(&self.base_url)?;
+            let mut response = client
+                .post(format!("{}/api/pull", self.base_url))
+                .json(&json!({"model":self.model,"stream":true}))
+                .send()
+                .await
+                .map_err(|e| {
+                    let detail = crate::transfer::error(&e);
+                    if e.is_connect() {
+                        format!("Ollama not running: {detail}")
+                    } else {
+                        detail
+                    }
+                })?;
+            let status = response.status();
+            if !status.is_success() {
+                let mut body = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|e| crate::transfer::error(&e))?
+                {
+                    body.extend_from_slice(&chunk[..chunk.len().min(8192 - body.len())]);
+                    if body.len() == 8192 {
+                        break;
+                    }
+                }
+                return Err(format!(
+                    "Ollama {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ));
+            }
+            let mut pending = Vec::new();
+            let mut success = false;
+            let mut layers = std::collections::BTreeMap::new();
+            let mut record = |line: &[u8]| -> Result<(), String> {
+                if line.iter().all(u8::is_ascii_whitespace) {
+                    return Ok(());
+                }
+                let data: serde_json::Value = serde_json::from_slice(line)
+                    .map_err(|e| format!("Invalid Ollama progress: {e}"))?;
+                if let Some(error) = data.get("error").and_then(|s| s.as_str()) {
+                    return Err(error.into());
+                }
+                let status = data
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .ok_or("Missing Ollama progress status.")?;
+                success |= status == "success";
+                if let Some(digest) = data.get("digest").and_then(|s| s.as_str()) {
+                    layers.insert(
+                        digest.to_owned(),
+                        (
+                            data.get("completed").and_then(|n| n.as_u64()).unwrap_or(0),
+                            data.get("total").and_then(|n| n.as_u64()).unwrap_or(0),
+                        ),
+                    );
+                }
+                let (done, total) =
+                    layers
+                        .values()
+                        .fold((0_u64, 0_u64), |(d, t), (next_d, next_t)| {
+                            (d.saturating_add(*next_d), t.saturating_add(*next_t))
+                        });
+                progress(done, total, status);
+                Ok(())
+            };
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| crate::transfer::error(&e))?
+            {
+                for byte in chunk {
+                    pending.push(byte);
+                    if pending.len() > 65536 {
+                        return Err("Ollama progress record too large.".into());
+                    }
+                    if byte == b'\n' {
+                        record(&pending)?;
+                        pending.clear();
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                record(&pending)?;
+            }
+            if !success {
+                return Err("Ollama pull ended without success.".into());
+            }
+            Ok(())
+        })
+        .map_err(ProviderError)
+    }
+
     pub fn new(base_url: &str, model: &str, timeout: i64, num_ctx: i64) -> Self {
         OllamaLlm {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -344,5 +448,122 @@ mod tests {
         assert_eq!(client.base_url, "http://h:1");
         assert_eq!(client.id(), "ollama");
         assert!(client.offline());
+    }
+    #[test]
+    fn pull_streams_aggregated_layers_and_requires_success() {
+        let server = crate::testutil::MockServer::start(vec![crate::testutil::MockResponse::json(200,
+            "{\"status\":\"pulling\",\"digest\":\"a\",\"completed\":4,\"total\":4}\n{\"status\":\"pulling\",\"digest\":\"b\",\"completed\":6,\"total\":6}\n{\"status\":\"success\"}")]);
+        let events = std::sync::Mutex::new(Vec::new());
+        OllamaLlm::new(&server.url(), "tiny", 120, 8192)
+            .pull(
+                &|d, t, s| events.lock().unwrap().push((d, t, s.to_owned())),
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                (4, 4, "pulling".into()),
+                (10, 10, "pulling".into()),
+                (10, 10, "success".into())
+            ]
+        );
+        assert_eq!(server.request(0).path, "/api/pull");
+        assert_eq!(
+            server.request(0).json(),
+            serde_json::json!({"model":"tiny","stream":true})
+        );
+    }
+
+    #[test]
+    fn pull_reports_http_protocol_empty_and_remote_errors() {
+        for (code, body, expected) in [
+            (500, "model unavailable", "model unavailable"),
+            (200, "", "without success"),
+            (200, "not json\n", "Invalid Ollama"),
+            (200, "{}\n", "Missing Ollama"),
+            (200, "{\"error\":\"disk full\"}\n", "disk full"),
+            (200, "{\"status\":\"pulling\"}\n", "without success"),
+        ] {
+            let server =
+                crate::testutil::MockServer::start(vec![crate::testutil::MockResponse::json(
+                    code, body,
+                )]);
+            let error = OllamaLlm::new(&server.url(), "tiny", 120, 8192)
+                .pull(&|_, _, _| {}, &std::sync::atomic::AtomicBool::new(false))
+                .unwrap_err();
+            assert!(error.0.contains(expected), "{error}");
+        }
+        let error = OllamaLlm::new(crate::testutil::UNREACHABLE_URL, "tiny", 120, 8192)
+            .pull(&|_, _, _| {}, &std::sync::atomic::AtomicBool::new(false))
+            .unwrap_err();
+        assert!(error.0.contains("Ollama not running"), "{error}");
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        assert!(
+            OllamaLlm::new(crate::testutil::UNREACHABLE_URL, "tiny", 120, 8192)
+                .pull(&|_, _, _| panic!("cancelled"), &cancelled)
+                .unwrap_err()
+                .0
+                .contains("cancelled")
+        );
+    }
+
+    #[test]
+    fn pull_cancel_closes_stalled_headers_and_body() {
+        use std::io::{BufRead, Read, Write};
+        for headers in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let (ready, entered) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                if headers {
+                    reader
+                        .get_mut()
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+                        .unwrap();
+                }
+                ready.send(()).unwrap();
+                assert!(matches!(reader.read(&mut [0]), Ok(0)));
+            });
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = cancel.clone();
+            let (result, done) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                result
+                    .send(OllamaLlm::new(&url, "tiny", 120, 8192).pull(&|_, _, _| {}, &stop))
+                    .unwrap()
+            });
+            entered
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+            assert!(done
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err()
+                .0
+                .contains("cancelled"));
+            worker.join().unwrap();
+            server.join().unwrap();
+        }
     }
 }

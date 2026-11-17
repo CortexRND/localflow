@@ -670,7 +670,7 @@ impl WindowRouter {
                     platform,
                     launch_agent,
                 )),
-                models: Arc::new(FlowModelBackend),
+                models: Arc::new(FlowModelBackend::default()),
                 mic: Some(Arc::new(RecorderMicLevelSource::new())),
                 hooks,
             },

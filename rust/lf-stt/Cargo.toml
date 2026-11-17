@@ -13,6 +13,7 @@ default = ["whisper", "parakeet"]
 whisper = ["dep:whisper-rs"]
 parakeet = ["dep:sherpa-onnx"]
 runtime = ["dep:lf-runtime", "dep:lf-audio"]
+setup = ["dep:lf-providers", "dep:reqwest", "dep:sha2", "dep:fs2"]
 server = ["dep:lf-server", "dep:lf-providers", "dep:lf-audio", "dep:multer", "dep:futures-util", "dep:futures-executor", "dep:wait-timeout"]
 
 [dependencies]
@@ -34,6 +35,9 @@ getrandom.workspace = true
 log.workspace = true
 same-file = "1"
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"] }
+reqwest = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
+fs2 = { version = "0.4", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
 sherpa-onnx = { version = "2.0.1", optional = true, default-features = false, features = ["shared"] }

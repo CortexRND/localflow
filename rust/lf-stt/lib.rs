@@ -8,6 +8,8 @@ pub mod model_storage;
 pub mod runtime;
 #[cfg(feature = "server")]
 pub mod server;
+#[cfg(feature = "setup")]
+pub mod setup_downloads;
 pub mod stt_lease;
 
 pub use engine::{EngineSpec, LoadInfo, SpeechEngine, SttSlot, Timings, Transcript};

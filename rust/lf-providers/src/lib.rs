@@ -18,6 +18,7 @@ pub mod pyfmt;
 pub mod registry;
 mod shlex;
 pub mod store;
+pub mod transfer;
 mod urlcheck;
 
 #[cfg(test)]

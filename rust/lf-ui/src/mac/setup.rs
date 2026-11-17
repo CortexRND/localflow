@@ -41,7 +41,6 @@ use super::style::{
     style_surface, tokens_for_window, ButtonKind, FlippedView, HalftoneView, SurfaceStyle,
 };
 use super::widgets::{button, label, popup, remove_subviews, LabelStyle};
-use crate::models_layout::{ollama_models, OllamaClient};
 use crate::setup_flow::{
     apply as apply_choices, available_stt_models, initial_choices, run_checks, Check,
     FileConfigStore, HardwareInfo, HostPlatform, LaunchAgent, SetupChoices, SetupConfigStore,
@@ -229,98 +228,9 @@ impl ApplyRunner for FlowApplyRunner {
     }
 }
 
-/// A cancellable download progress tick.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DownloadProgress {
-    pub done: u64,
-    pub total: u64,
-    pub status: String,
-}
-
-pub type ProgressCallback = Box<dyn Fn(DownloadProgress) + Send + Sync>;
-
-/// Optional model/runtime operations. They are separate from checks/apply
-/// because `lf-ui` does not itself link a speech runtime or model downloader.
-pub trait SetupModelBackend: Send + Sync {
-    fn speech_downloads(
-        &self,
-        models: &[SttModel],
-    ) -> std::result::Result<HashMap<String, bool>, String>;
-
-    fn download_speech(
-        &self,
-        model: &SttModel,
-        progress: ProgressCallback,
-        cancel: Arc<AtomicBool>,
-    ) -> std::result::Result<(), String>;
-
-    fn ollama(&self, base_url: &str) -> std::result::Result<(bool, Vec<String>), String>;
-
-    fn pull_cleanup(
-        &self,
-        base_url: &str,
-        model_id: &str,
-        progress: ProgressCallback,
-        cancel: Arc<AtomicBool>,
-    ) -> std::result::Result<(), String>;
-
-    fn try_dictation(
-        &self,
-        model: &SttModel,
-        device: Option<&str>,
-        language: Option<&str>,
-    ) -> std::result::Result<String, String>;
-}
-
-/// Honest default: Ollama listing is real and bounded; operations not linked
-/// into `lf-ui` fail with an actionable message instead of simulating success.
-#[derive(Default)]
-pub struct FlowModelBackend;
-
-impl SetupModelBackend for FlowModelBackend {
-    fn speech_downloads(
-        &self,
-        _models: &[SttModel],
-    ) -> std::result::Result<HashMap<String, bool>, String> {
-        Err("Speech download inspection isn't connected in this build.".into())
-    }
-
-    fn download_speech(
-        &self,
-        _model: &SttModel,
-        _progress: ProgressCallback,
-        _cancel: Arc<AtomicBool>,
-    ) -> std::result::Result<(), String> {
-        Err("Speech model downloads aren't connected in this build.".into())
-    }
-
-    fn ollama(&self, base_url: &str) -> std::result::Result<(bool, Vec<String>), String> {
-        let (models, state) = ollama_models(base_url, None::<&dyn OllamaClient>);
-        Ok((
-            state != crate::models_layout::ListState::Unavailable,
-            models,
-        ))
-    }
-
-    fn pull_cleanup(
-        &self,
-        _base_url: &str,
-        _model_id: &str,
-        _progress: ProgressCallback,
-        _cancel: Arc<AtomicBool>,
-    ) -> std::result::Result<(), String> {
-        Err("Ollama model downloads aren't connected in this build.".into())
-    }
-
-    fn try_dictation(
-        &self,
-        _model: &SttModel,
-        _device: Option<&str>,
-        _language: Option<&str>,
-    ) -> std::result::Result<String, String> {
-        Err("The dictation trial requires a recorder and speech runtime.".into())
-    }
-}
+pub use crate::setup_backend::{
+    DownloadProgress, FlowModelBackend, ProgressCallback, SetupModelBackend,
+};
 
 /// Thread-safe live microphone meter. `start` may open audio hardware and is
 /// called on a worker. `level` and `stop` may be called on the main thread.
@@ -359,7 +269,7 @@ impl Default for SetupServices {
         Self {
             checks: Arc::new(FlowChecksRunner::default()),
             apply: Arc::new(FlowApplyRunner::default()),
-            models: Arc::new(FlowModelBackend),
+            models: Arc::new(FlowModelBackend::default()),
             mic: None,
             hooks: SetupHooks::default(),
         }
@@ -559,7 +469,9 @@ impl State {
     }
 
     fn model_busy(&self) -> bool {
-        self.busy_job(JobKind::SpeechDownload) || self.busy_job(JobKind::CleanupDownload)
+        self.busy_job(JobKind::SpeechDownload)
+            || self.busy_job(JobKind::CleanupDownload)
+            || self.busy_job(JobKind::Trial)
     }
 
     fn sync_choices(&mut self) {
@@ -1671,6 +1583,9 @@ impl SetupWindow {
         }
         for (index, model) in models.iter().enumerate() {
             let mut tags = Vec::new();
+            if let Some(format) = self.services.models.speech_format(model) {
+                tags.push(format);
+            }
             if model.id == recommended {
                 tags.push("Recommended");
             }
@@ -1680,7 +1595,9 @@ impl SetupWindow {
             if model.english_only {
                 tags.push("English only");
             }
-            let size = if model.size_mb >= 1000 {
+            let size = if let Some(detail) = self.services.models.speech_detail(model) {
+                detail
+            } else if model.size_mb >= 1000 {
                 format!("{:.1} GB", f64::from(model.size_mb) / 1000.0)
             } else {
                 format!("{} MB", format_model_size_mb(model.size_mb))
@@ -1998,7 +1915,7 @@ impl SetupWindow {
                         .unwrap_or_else(|| palette.success.to_string()),
                     "success",
                 ),
-                "English only" => (palette.surface.to_string(), "muted"),
+                "English only" | "GGML" | "ONNX" => (palette.surface.to_string(), "muted"),
                 _ => (palette.sun.to_string(), SUN_TEXT),
             };
             pill.setWantsLayer(true);
@@ -2383,7 +2300,13 @@ impl SetupWindow {
         self.back_button.setEnabled(!state.model_busy());
         self.primary_button.setEnabled(state.busy.is_empty());
         self.cancel_button
-            .setHidden(state.cancel.is_none() || !matches!(state.step, 2 | 3));
+            .setHidden(state.cancel.is_none() || !matches!(state.step, 2 | 3 | 5));
+        let cancel_title = if state.busy_job(JobKind::Trial) {
+            "Cancel recording"
+        } else {
+            "Cancel download"
+        };
+        accessible_button(&self.cancel_button, cancel_title);
         let primary = if state.saved {
             "Close"
         } else if state.step == 2 {
@@ -2427,7 +2350,7 @@ impl SetupWindow {
         accessible_button(&self.primary_button, primary);
         let status_text = if !state.error_message.is_empty() {
             state.error_message.clone()
-        } else if matches!(state.step, 2 | 3) {
+        } else if matches!(state.step, 2 | 3 | 5) {
             state.status_message.clone()
         } else {
             String::new()
@@ -2449,6 +2372,9 @@ impl SetupWindow {
     // -------------------------------------------------------------- actions ---
 
     fn advance(&self) {
+        if self.state.borrow().busy_job(JobKind::Trial) {
+            self.cancel_download();
+        }
         {
             let mut state = self.state.borrow_mut();
             if state.step >= SETUP_STEPS - 1 {
@@ -2694,12 +2620,13 @@ impl SetupWindow {
             let mut state = self.state.borrow_mut();
             state.busy.remove(JobKind::SpeechDownload.as_str());
             state.busy.remove(JobKind::CleanupDownload.as_str());
+            state.busy.remove(JobKind::Trial.as_str());
             state.operations.retain(|_, operation| *operation != id);
             state.cancel = None;
             state.last_progress = None;
             state.stalled = false;
             state.error_message.clear();
-            state.status_message = "Download cancelled.".into();
+            state.status_message = "Operation cancelled.".into();
         }
         self.stop_monitor_if_closed();
         self.rebuild();
@@ -2717,7 +2644,7 @@ impl SetupWindow {
         state.busy.insert(kind.as_str());
         state.operations.insert(kind.as_str(), id);
         state.error_message.clear();
-        if kind.is_download() {
+        if kind.is_download() || kind == JobKind::Trial {
             let cancel = Arc::new(AtomicBool::new(false));
             state.cancel = Some((id, cancel));
             state.last_progress = Some((Instant::now(), 0));
@@ -2885,9 +2812,9 @@ impl SetupWindow {
             return;
         };
         let backend = self.services.models.clone();
-        self.spawn_job(JobKind::Trial, move |_id, _sender, _cancel| {
+        self.spawn_job(JobKind::Trial, move |_id, _sender, cancel| {
             backend
-                .try_dictation(&model, device.as_deref(), language.as_deref())
+                .try_dictation_cancellable(&model, device.as_deref(), language.as_deref(), cancel)
                 .map(JobOutput::Trial)
         });
         self.state.borrow_mut().status_message = "Loading speech model…".into();
@@ -3077,7 +3004,7 @@ impl SetupWindow {
             }
             state.busy.remove(kind.as_str());
             state.operations.remove(kind.as_str());
-            if kind.is_download() {
+            if kind.is_download() || kind == JobKind::Trial {
                 state.cancel = None;
                 state.last_progress = None;
                 state.stalled = false;
