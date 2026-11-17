@@ -468,7 +468,6 @@ async fn lifecycle_notes_speakers_files_chat_restart_and_errors() {
 async fn server_shutdown_saves_active_meeting_and_is_idle_safe() {
     let f = Fixture::new();
     let state = ServerState::new(f.config.clone(), "test-token".into(), f.backend.clone());
-    state.shutdown().unwrap();
     assert_eq!(
         request(
             f.app(),
@@ -501,6 +500,12 @@ async fn server_shutdown_saves_active_meeting_and_is_idle_safe() {
     assert!(Path::new(saved["notes_path"].as_str().unwrap()).is_file());
     assert_eq!(f.capture.stopped.load(Ordering::SeqCst), 1);
     state.shutdown().unwrap();
+    assert_eq!(
+        request(f.app(), "POST", "/meeting/start", Some(json!({})))
+            .await
+            .0,
+        409
+    );
 }
 
 #[tokio::test]

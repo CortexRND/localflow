@@ -47,6 +47,7 @@ struct Metadata {
 }
 #[derive(Default)]
 struct State {
+    closed: bool,
     phase: Phase,
     session: Option<Arc<SessionActor>>,
     meta: Metadata,
@@ -189,7 +190,7 @@ impl MeetingsBackend {
         }
         {
             let mut state = self.state();
-            if state.phase != Phase::Idle {
+            if state.closed || state.phase != Phase::Idle {
                 return Err(BackendResponse::error(
                     409,
                     "a meeting session is already running",
@@ -237,6 +238,11 @@ impl MeetingsBackend {
         };
         let response = json!({"ok":true,"category":category,"template":template,"system_audio":snapshot.system_audio,"system_audio_error":snapshot.system_audio_error});
         let mut state = self.state();
+        if state.closed {
+            drop(state);
+            let _ = session.stop();
+            return Err(BackendResponse::error(409, "meeting service is stopping"));
+        }
         state.meta = Metadata {
             title: if title.is_empty() {
                 "Meeting".into()
@@ -414,6 +420,7 @@ impl MeetingsBackend {
 }
 impl Backend for MeetingsBackend {
     fn shutdown(&self, config: &Config) -> Result<()> {
+        self.state().closed = true;
         if let Some(watcher) = &self.watcher {
             watcher.stop();
         }

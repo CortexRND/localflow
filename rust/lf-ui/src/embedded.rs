@@ -10,6 +10,8 @@ use lf_runtime::{
 use lf_server::{Server, ServerState};
 use std::sync::{Arc, Mutex};
 
+mod meeting_watch;
+
 #[derive(Clone)]
 struct SharedSpeech(Arc<Mutex<Arc<dyn SpeechEngine>>>);
 
@@ -60,10 +62,12 @@ fn refresh_server_speech(
     Ok(true)
 }
 
-fn watch_server_speech(
+fn watch_server_services(
     config: Config,
     shared: SharedSpeech,
     factory: lf_runtime::worker::SttFactory,
+    update_speech: bool,
+    on_config: Arc<dyn Fn(Config) + Send + Sync>,
 ) -> Result<lf_runtime::live::WatcherGuard> {
     let previous = Mutex::new(config);
     let pending = Arc::new(Mutex::new(None::<Config>));
@@ -82,8 +86,11 @@ fn watch_server_speech(
     });
     let apply_retry = retry.clone();
     let apply: Arc<dyn Fn(Config) + Send + Sync> = Arc::new(move |fresh| {
-        *pending.lock().unwrap() = Some(fresh);
-        apply_retry();
+        on_config(fresh.clone());
+        if update_speech {
+            *pending.lock().unwrap() = Some(fresh);
+            apply_retry();
+        }
     });
     let watch = lf_runtime::live::ConfigWatcher::new(
         lf_core::config::try_config_path()?,
@@ -119,7 +126,8 @@ pub struct EmbeddedRuntime {
     pub runtime: Option<RuntimeHandle>,
     server: Option<ServerHandle>,
     pub speech: Arc<dyn SpeechEngine>,
-    server_speech_watch: Option<lf_runtime::live::WatcherGuard>,
+    server_watch: Option<lf_runtime::live::WatcherGuard>,
+    meeting_watch: Option<meeting_watch::MeetingWatch>,
 }
 
 impl EmbeddedRuntime {
@@ -161,6 +169,7 @@ impl EmbeddedRuntime {
             menu.change(|m| m.input_warning = Some(format!("Dictation unavailable: {e}")));
             None
         });
+        let mut meeting_watch = None;
         let server = (|| -> Result<Option<ServerHandle>> {
             let host = config.field_str("server_host").unwrap_or("127.0.0.1");
             let port = u16::try_from(config.field_i64("server_port").unwrap_or(8756))?;
@@ -170,8 +179,13 @@ impl EmbeddedRuntime {
                 let backend = lf_meetings_backend::MeetingsBackend::new()?
                     .with_inner(Arc::new(dictation))
                     .with_capture(Arc::new(Capture(server_shared.clone())));
+                let watcher = meeting_watch::MeetingWatch::new(config.clone())?;
+                let backend: Arc<dyn lf_server::backend::Backend> =
+                    Arc::new(backend.with_watcher(watcher.watcher.clone()));
+                watcher.attach(&backend);
+                meeting_watch = Some(watcher);
                 Ok(Arc::new(
-                    ServerState::load_with_backend(Arc::new(backend))?
+                    ServerState::load_with_backend(backend)?
                         .with_config_reader(Arc::new(lf_core::config::load_config))
                         .with_config_updater(Arc::new(|update| {
                             crate::config_write::update(None, |fresh| {
@@ -192,12 +206,18 @@ impl EmbeddedRuntime {
             "in-process runtime: ready; speech loaded: {}",
             speech.loaded()
         );
-        let server_speech_watch = if runtime.is_none() && server.is_some() {
-            watch_server_speech(config, server_shared, make_speech)
-                .map_err(|error| {
-                    log::error!("could not watch server speech settings: {error}");
-                })
-                .ok()
+        let server_watch = if let (Some(_), Some(watcher)) = (&server, &meeting_watch) {
+            watch_server_services(
+                config,
+                server_shared,
+                make_speech,
+                runtime.is_none(),
+                watcher.apply_callback(),
+            )
+            .map_err(|error| {
+                log::error!("could not watch server settings: {error}");
+            })
+            .ok()
         } else {
             None
         };
@@ -205,12 +225,16 @@ impl EmbeddedRuntime {
             runtime,
             server,
             speech,
-            server_speech_watch,
+            server_watch,
+            meeting_watch,
         }
     }
 
     pub fn shutdown(&mut self) {
-        self.server_speech_watch.take();
+        self.server_watch.take();
+        if let Some(watcher) = self.meeting_watch.as_mut() {
+            watcher.shutdown();
+        }
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.shutdown();
         }
@@ -276,6 +300,7 @@ impl ServerHandle {
     fn start(host: String, port: u16, state: Arc<ServerState>) -> Result<Self> {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let shutdown_state = state.clone();
+        let (ready, started) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("localflow-server".into())
             .spawn(move || {
@@ -285,8 +310,10 @@ impl ServerHandle {
                         .max_blocking_threads(16)
                         .enable_all()
                         .build()?;
+                    let bound = ready.clone();
                     runtime.block_on(async move {
                         let server = Server::bind_with_state(&host, port, state).await?;
+                        let _ = bound.try_send(Ok(()));
                         eprintln!("in-process server: listening {}", server.local_addr()?);
                         server
                             .run_until(async move {
@@ -296,10 +323,14 @@ impl ServerHandle {
                     })
                 })();
                 if let Err(error) = result {
+                    let _ = ready.try_send(Err(error.to_string()));
                     log::error!("local server stopped: {error}");
                     eprintln!("local server unavailable: {error}");
                 }
             })?;
+        started
+            .recv_timeout(std::time::Duration::from_secs(5))?
+            .map_err(anyhow::Error::msg)?;
         Ok(Self {
             stop: Some(stop),
             state: shutdown_state,
