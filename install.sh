@@ -82,12 +82,12 @@ HAVE_BREW=0
 
 if [[ "$UNINSTALL" == 1 ]]; then
     [[ "$OS" == Darwin ]] || { echo "--uninstall currently supports macOS only." >&2; exit 1; }
-    if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
-        launchctl bootout "gui/$(id -u)/com.cortexrnd.localflow" >/dev/null 2>&1 || true
-    fi
     rm -f "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
     rm -rf "$HOME/Applications/LocalFlow.app" "$HOME/Applications/LocalFlow Setup.app"
     echo "Removed LocalFlow app bundles and autostart; settings, models and agent backups retained."
+    if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
+        launchctl bootout "gui/$(id -u)/com.cortexrnd.localflow" >/dev/null 2>&1 || true
+    fi
     exit 0
 fi
 if [[ "$RUNTIME" == rust && "$OS" != Darwin ]]; then

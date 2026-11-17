@@ -180,6 +180,23 @@ def test_fresh_rust_restore_without_backup_and_uninstall(mac):
         assert not agent(home).exists()
 
 
+@pytest.mark.parametrize("entrypoint", ["helper", "installer"])
+def test_uninstall_removes_agent_before_launchctl_can_kill_caller(mac, entrypoint):
+    home, env = mac
+    agent(home).parent.mkdir(parents=True)
+    agent(home).write_bytes(plistlib.dumps({"Label": LABEL, "ProgramArguments": ["lf-hub"]}))
+    if entrypoint == "helper":
+        result = helper(env, "uninstall")
+    else:
+        result = subprocess.run(
+            [BASH, str(ROOT / "install.sh"), "--uninstall"],
+            env=env, capture_output=True, text=True, check=False,
+        )
+    assert result.returncode == 0, result.stderr
+    snapshots = [json.loads(line) for line in Path(env["CALLS"] + ".agents").read_text().splitlines()]
+    assert snapshots == [["bootout", None]]
+
+
 def test_failed_load_reports_both_errors_and_rolls_back(mac):
     home, env = mac
     rust = executable(home / "Applications/LocalFlow.app/Contents/MacOS/lf-hub")

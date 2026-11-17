@@ -311,14 +311,13 @@ impl LaunchAgent for NativeLaunchAgent {
     }
 
     fn uninstall(&self) -> std::result::Result<(), String> {
-        let _ = Command::new("launchctl")
-            .args(["bootout", &Self::target()])
-            .output();
         let path = Self::plist_path().map_err(|error| error.to_string())?;
-        if path.exists() {
-            std::fs::remove_file(path).map_err(|error| error.to_string())?;
-        }
-        Ok(())
+        crate::launch_agent::uninstall(&path, || {
+            let _ = Command::new("launchctl")
+                .args(["bootout", &Self::target()])
+                .output();
+        })
+        .map_err(|error| error.to_string())
     }
 }
 

@@ -41,8 +41,8 @@ load_agent() {
 
 case "${1:-}" in
     uninstall)
-        bootout
         rm -f "$AGENT"
+        bootout
         exit 0
         ;;
     restore-python)
