@@ -205,12 +205,16 @@ impl HubPage for StylePage {
         }
     }
 
-    fn shutdown(&mut self) {
-        self.flush();
+    fn release_views(&mut self) {
         let mut state = self.state.borrow_mut();
         state.cleanup_segments = None;
         state.style_segments.clear();
         state.services = None;
+    }
+
+    fn shutdown(&mut self) {
+        self.flush();
+        self.release_views();
     }
 
     fn render(&mut self, ctx: &PageCtx, top: f64) -> f64 {

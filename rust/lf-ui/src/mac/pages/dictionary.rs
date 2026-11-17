@@ -349,10 +349,14 @@ impl HubPage for DictionaryPage {
         pull(&self.state);
     }
 
-    fn shutdown(&mut self) {
+    fn release_views(&mut self) {
         // Drop the control references; there is nothing to write (every
         // action saves immediately).
         self.state.borrow_mut().fields = None;
+    }
+
+    fn shutdown(&mut self) {
+        self.release_views();
     }
 
     fn render(&mut self, ctx: &PageCtx, top: f64) -> f64 {

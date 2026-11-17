@@ -997,6 +997,13 @@ impl HubPage for SettingsPage {
         }
     }
 
+    fn release_views(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.visible = false;
+        state.request_view = None;
+        state.manual_controls.clear();
+    }
+
     fn shutdown(&mut self) {
         capture_views(&self.state, true);
         let mut state = self.state.borrow_mut();

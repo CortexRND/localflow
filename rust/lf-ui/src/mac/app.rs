@@ -842,6 +842,7 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
         setup_only || page == Some("Setup"),
         ensure_runtime,
     );
+    let _memory_profile = super::memory_profile::start(router.clone());
     let show: ShowFn = {
         let router = router.clone();
         Rc::new(move || {

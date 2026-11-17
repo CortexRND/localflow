@@ -674,6 +674,33 @@ fn services(root: &std::path::Path) -> Rc<HubServices> {
     )
 }
 
+fn assert_offscreen_views_released(mtm: MainThreadMarker) {
+    let root = tempfile::tempdir().unwrap();
+    let hub = Hub::new(mtm, services(root.path()), "Dictionary");
+    let weak = objc2::rc::autoreleasepool(|_| {
+        let field = editable_field(&hub.content_view(), "Word").unwrap();
+        field.setStringValue(&NSString::from_str("unsaved draft"));
+        let weak = objc2::rc::Weak::new(&*field);
+        hub.show_page("Home");
+        weak
+    });
+    assert!(
+        weak.load().is_none(),
+        "offscreen Dictionary retains its control"
+    );
+    hub.show_page("Dictionary");
+    assert_eq!(
+        editable_field(&hub.content_view(), "Word")
+            .unwrap()
+            .stringValue()
+            .to_string(),
+        "unsaved draft"
+    );
+    hub.shutdown();
+    assert_eq!(hub.body().subviews().count(), 0);
+    println!("Native memory audit: offscreen controls released, draft survives navigation, closed body empty");
+}
+
 pub fn run() {
     let mtm = MainThreadMarker::new().expect("AppKit audit must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -708,6 +735,7 @@ pub fn run() {
     assert_eq!(terminate_calls.get(), 1);
     println!("Native Hub termination audit: AppKit quit invokes the flush callback once");
     assert_dictionary_submissions(mtm);
+    assert_offscreen_views_released(mtm);
     assert_settings_writes(mtm);
     assert_meetings_focus(mtm);
     assert_prompt_rebuild(mtm);

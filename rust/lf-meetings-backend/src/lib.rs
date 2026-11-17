@@ -501,6 +501,14 @@ impl MeetingsBackend {
 }
 
 impl Backend for MeetingsBackend {
+    fn while_idle(&self, action: &mut dyn FnMut()) -> bool {
+        let state = self.state();
+        if state.phase != Phase::Idle || state.closed {
+            return false;
+        }
+        self.inner.while_idle(action)
+    }
+
     fn shutdown(&self, config: &Config) -> Result<()> {
         self.state().closed = true;
         if let Some(watcher) = &self.watcher {
@@ -654,6 +662,22 @@ fn question(request: &BackendRequest, max: usize) -> ResponseResult<String> {
 mod shutdown_tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn maintenance_never_runs_during_start_record_or_finalize() {
+        let backend = MeetingsBackend::new().unwrap();
+        let mut calls = 0;
+        for phase in [Phase::Starting, Phase::Running, Phase::Stopping] {
+            backend.state().phase = phase;
+            assert!(!backend.while_idle(&mut || calls += 1));
+        }
+        assert_eq!(calls, 0);
+        backend.state().phase = Phase::Idle;
+        assert!(backend.while_idle(&mut || calls += 1));
+        assert_eq!(calls, 1);
+        backend.state().closed = true;
+        assert!(!backend.while_idle(&mut || calls += 1));
+    }
 
     #[test]
     fn conflict_after_shutdown_stop_claim_waits_for_persistence() {

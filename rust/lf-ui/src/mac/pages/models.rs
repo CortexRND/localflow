@@ -2949,6 +2949,13 @@ impl HubPage for ModelsPage {
         state.rebuild = None;
     }
 
+    fn release_views(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.visible = false;
+        state.clear_controls();
+        state.rebuild = None;
+    }
+
     fn shutdown(&mut self) {
         let mut state = self.state.borrow_mut();
         state.closed = true;
