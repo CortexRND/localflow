@@ -201,6 +201,10 @@ pub trait HubPage {
         0
     }
 
+    fn pending_requests(&self) -> usize {
+        0
+    }
+
     /// Prepare an isolated native snapshot by its explicit plan identifier.
     /// Unknown identifiers fail loudly; snapshots never fall back to a different
     /// state's screenshot. The fixture root contains only temporary data.

@@ -194,6 +194,10 @@ impl Timer {
         self.timer.invalidate();
     }
 
+    pub fn fire(&self) {
+        self.timer.fire();
+    }
+
     pub fn is_valid(&self) -> bool {
         self.timer.isValid()
     }

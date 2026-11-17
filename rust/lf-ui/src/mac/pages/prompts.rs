@@ -324,6 +324,10 @@ impl HubPage for PromptsPage {
 
     fn drain_requests(&mut self) -> usize {
         self.state.drain();
+        self.pending_requests()
+    }
+
+    fn pending_requests(&self) -> usize {
         usize::from(self.state.busy.get() && !self.state.closed.get())
     }
 

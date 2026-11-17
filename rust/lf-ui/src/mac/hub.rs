@@ -710,19 +710,50 @@ impl Hub {
         self.scroll_to(scroll_y);
     }
 
-    /// Drain request channels, including hidden pages, without depending on
-    /// visibility-owned delivery timers. Repaint only after releasing pages.
+    fn drain_deferred(&self) {
+        let timers = std::mem::take(&mut *self.deferred.borrow_mut());
+        for timer in timers {
+            if timer.is_valid() {
+                timer.fire();
+                timer.invalidate();
+            }
+        }
+    }
+
+    /// Deliver request results and their deferred UI work on the main thread.
+    /// Count pending work after rendering, including requests started by it.
     pub fn drain_requests(&self) -> usize {
-        let pending = self
+        self.drain_deferred();
+        let current = self.current_page();
+        let mut repaint = false;
+        for (name, _) in &self.pages {
+            repaint |= self
+                .with_page(name, |page| {
+                    let before = page.pending_requests();
+                    let after = page.drain_requests();
+                    *name == current && before != after
+                })
+                .unwrap_or(false);
+        }
+        if repaint {
+            self.rebuild_current_page();
+        }
+        self.drain_deferred();
+        let pending: usize = self
             .pages
             .iter()
             .map(|(name, _)| {
-                self.with_page(name, |page| page.drain_requests())
+                self.with_page(name, |page| page.pending_requests())
                     .unwrap_or(1)
             })
             .sum();
-        self.rebuild_current_page();
         pending
+            + self
+                .deferred
+                .borrow()
+                .iter()
+                .filter(|timer| timer.is_valid())
+                .count()
     }
 
     /// Scroll the page canvas, clamped to the rendered document's range.

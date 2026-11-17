@@ -971,6 +971,12 @@ impl HubPage for SettingsPage {
         if state.controller.preview_done() {
             refresh_extended_presentation(&mut state.controller.state);
         }
+        drop(state);
+        self.pending_requests()
+    }
+
+    fn pending_requests(&self) -> usize {
+        let state = self.state.borrow();
         if state.controller.closed {
             return 0;
         }

@@ -18,7 +18,7 @@ use objc2_foundation::{NSRange, NSString};
 
 use lf_ui::backends::ask::FakeAskBackend;
 use lf_ui::backends::meeting::FakeMeetingClient;
-use lf_ui::backends::prompts::{UnavailablePromptQueue, WorkPrompt};
+use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, UnavailablePromptQueue, WorkPrompt};
 use lf_ui::hub_route::HUB_PAGES;
 use lf_ui::mac::hub::Hub;
 use lf_ui::mac::page::HubServices;
@@ -289,6 +289,48 @@ fn assert_dictionary_submissions(mtm: MainThreadMarker) {
     println!("Native Dictionary submission audit: add/edit saves clear only the submitted card; empty and duplicate failures preserve drafts");
 }
 
+fn assert_prompt_rebuild(mtm: MainThreadMarker) {
+    for populated in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let base = services(root.path());
+        let queue = Arc::new(FakePromptQueue::new());
+        if populated {
+            queue
+                .add(
+                    &[WorkPrompt::new("Completed queue result", "Review this")],
+                    &["review.md".into()],
+                    "Meeting",
+                )
+                .unwrap();
+        }
+        let services = HubServices::new(
+            Config::defaults_for(true),
+            base.history.clone(),
+            base.dictionary.clone(),
+            queue.clone(),
+            Arc::new(FakeMeetingClient::new()),
+            Box::new(FakeAskBackend::default()),
+        );
+        services.memory_only_config.set(true);
+        let hub = Hub::new(mtm, services, "Prompts");
+        settle_requests(&hub);
+        let expected = if populated {
+            "Completed queue result"
+        } else {
+            "No prompts to review yet"
+        };
+        assert!(has_text(&hub.content_view(), expected));
+        queue.set_read_failure(Some("Rebuild must not reload the queue"));
+        hub.rebuild_current_page();
+        settle_requests(&hub);
+        assert_eq!(hub.drain_requests(), 0);
+        assert!(has_text(&hub.content_view(), expected));
+        assert!(!has_text(&hub.content_view(), "Can't read the queue"));
+        hub.shutdown();
+    }
+    println!("Native Prompts rebuild audit: completed empty/populated loads survive rebuild without rereading the queue");
+}
+
 fn assert_history_search(hub: &Hub) {
     hub.show_page("History");
     for (query, expected) in [
@@ -303,7 +345,7 @@ fn assert_history_search(hub: &Hub) {
         );
         field.setStringValue(&NSString::from_str(query));
         assert!(unsafe { field.sendAction_to(field.action(), field.target().as_deref()) });
-        spin_run_loop(0.1);
+        settle_requests(hub);
         assert_eq!(
             search_field(&hub.content_view())
                 .unwrap()
@@ -311,7 +353,10 @@ fn assert_history_search(hub: &Hub) {
                 .to_string(),
             query
         );
-        assert!(has_text(&hub.content_view(), expected));
+        assert!(
+            has_text(&hub.content_view(), expected),
+            "History query {query:?} did not render {expected:?}"
+        );
     }
     println!(
         "Native History search audit: explicit submit, matching, empty and cleared queries passed"
@@ -420,6 +465,7 @@ pub fn run() {
     assert_dictionary_submissions(mtm);
     assert_settings_writes(mtm);
     assert_meetings_focus(mtm);
+    assert_prompt_rebuild(mtm);
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
     let mut failures = Vec::new();
