@@ -42,6 +42,20 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    pub fn shutdown(&self) -> anyhow::Result<()> {
+        let config = self
+            .config_reader
+            .as_ref()
+            .and_then(|reader| reader().ok())
+            .unwrap_or_else(|| {
+                self.config
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            });
+        self.backend.shutdown(&config)
+    }
+
     /// In-memory auth scope: replay rotates only this instance's token. For the
     /// standard on-disk token and persistent replay recovery, use `load_with_backend`.
     pub fn new(config: Config, token: String, backend: Arc<dyn Backend>) -> Self {

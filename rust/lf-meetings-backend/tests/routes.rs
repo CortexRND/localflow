@@ -465,6 +465,45 @@ async fn lifecycle_notes_speakers_files_chat_restart_and_errors() {
 }
 
 #[tokio::test]
+async fn server_shutdown_saves_active_meeting_and_is_idle_safe() {
+    let f = Fixture::new();
+    let state = ServerState::new(f.config.clone(), "test-token".into(), f.backend.clone());
+    state.shutdown().unwrap();
+    assert_eq!(
+        request(
+            f.app(),
+            "POST",
+            "/meeting/start",
+            Some(json!({"title":"Quit save", "auto_title":false}))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(
+            f.app(),
+            "POST",
+            "/meeting/notes",
+            Some(json!({"notes":"Unsaved decision"}))
+        )
+        .await
+        .0,
+        200
+    );
+    state.shutdown().unwrap();
+    let status = request(f.app(), "GET", "/meeting/status", None).await.1;
+    assert!(status["session"].is_null());
+    let saved = &status["last_saved"];
+    let log = fs::read_to_string(saved["log_path"].as_str().unwrap()).unwrap();
+    assert!(log.contains("Unsaved decision"));
+    assert!(log.contains("we will launch on March 3"));
+    assert!(Path::new(saved["notes_path"].as_str().unwrap()).is_file());
+    assert_eq!(f.capture.stopped.load(Ordering::SeqCst), 1);
+    state.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn automatic_titles_fallback_explicit_title_and_current_snapshot() {
     let mut f = Fixture::new();
     for (body, expected, generated) in [

@@ -43,6 +43,11 @@ impl BackendResponse {
 pub trait Backend: Send + Sync + 'static {
     fn handle(&self, request: BackendRequest) -> BackendResponse;
 
+    /// Finish owned sessions before stopping the server; runs on a blocking thread.
+    fn shutdown(&self, _config: &Config) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn stt_available(&self, _provider: &str) -> bool {
         false
     }

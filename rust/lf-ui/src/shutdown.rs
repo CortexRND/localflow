@@ -27,12 +27,16 @@ impl PendingWrites {
     }
 
     fn wait(&self, timeout: Duration) -> bool {
+        self.wait_until(timeout, 0)
+    }
+
+    fn wait_until(&self, timeout: Duration, allowed: usize) -> bool {
         let started = Instant::now();
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        while *pending != 0 {
+        while *pending > allowed {
             let remaining = timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return false;
@@ -43,7 +47,7 @@ impl PendingWrites {
                 .unwrap_or_else(|error| error.into_inner());
             pending = next;
             if result.timed_out() {
-                return *pending == 0;
+                return *pending <= allowed;
             }
         }
         true
@@ -58,11 +62,15 @@ impl Drop for PendingWrite {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         *pending -= 1;
-        let idle = *pending == 0;
         drop(pending);
-        if idle {
-            self.tracker.idle.notify_all();
-        }
+        self.tracker.idle.notify_all();
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl PendingWrite {
+    pub(crate) fn wait_for_others(&self, timeout: Duration) -> bool {
+        self.tracker.wait_until(timeout, 1)
     }
 }
 

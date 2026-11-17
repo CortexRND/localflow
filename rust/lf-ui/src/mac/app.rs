@@ -932,14 +932,14 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
         })
     };
     let before_terminate: Rc<dyn Fn()> = Rc::new(move || {
-        #[cfg(feature = "runtime")]
-        quit_menu.shutdown();
         if let Some(hub) = router.hub() {
             hub.shutdown();
         }
         if let Some(setup) = router.setup_window() {
             setup.close();
         }
+        #[cfg(feature = "runtime")]
+        quit_menu.shutdown();
         if !crate::shutdown::wait_for_pending_writes(QUIT_FLUSH_TIMEOUT) {
             log::warn!("timed out waiting for pending writes during quit");
         }

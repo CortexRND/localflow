@@ -413,6 +413,19 @@ impl MeetingsBackend {
     }
 }
 impl Backend for MeetingsBackend {
+    fn shutdown(&self, config: &Config) -> Result<()> {
+        if let Some(watcher) = &self.watcher {
+            watcher.stop();
+        }
+        if let Err(error) = self.stop(config) {
+            anyhow::ensure!(
+                error.status == 409,
+                "could not save meeting during shutdown"
+            );
+        }
+        self.inner.shutdown(config)
+    }
+
     fn handle(&self, request: BackendRequest) -> BackendResponse {
         let result = match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/meeting/templates") => {

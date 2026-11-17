@@ -196,11 +196,13 @@ fn ensure_server(
 
 struct ServerHandle {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
+    state: Arc<ServerState>,
 }
 
 impl ServerHandle {
     fn start(host: String, port: u16, state: Arc<ServerState>) -> Result<Self> {
         let (stop, stopped) = tokio::sync::oneshot::channel();
+        let shutdown_state = state.clone();
         std::thread::Builder::new()
             .name("localflow-server".into())
             .spawn(move || {
@@ -225,16 +227,71 @@ impl ServerHandle {
                     eprintln!("local server unavailable: {error}");
                 }
             })?;
-        Ok(Self { stop: Some(stop) })
+        Ok(Self {
+            stop: Some(stop),
+            state: shutdown_state,
+        })
     }
     fn shutdown(&mut self) {
         if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+            let state = self.state.clone();
+            let pending = crate::shutdown::register_pending_write();
+            if let Err(error) = std::thread::Builder::new()
+                .name("localflow-meeting-save".into())
+                .spawn(move || {
+                    if !pending.wait_for_others(std::time::Duration::from_secs(4)) {
+                        log::warn!("timed out waiting for meeting notes before shutdown");
+                    }
+                    if let Err(error) = state.shutdown() {
+                        log::error!("meeting shutdown failed: {error}");
+                    }
+                    let _ = stop.send(());
+                    drop(pending);
+                })
+            {
+                log::error!("could not start meeting shutdown: {error}");
+            }
         }
     }
 }
 
 struct Capture(Arc<dyn SpeechEngine>);
+
+#[cfg(test)]
+#[test]
+fn shutdown_flushes_notes_before_backend_and_signals_even_on_save_error() {
+    use lf_server::backend::{Backend, BackendRequest, BackendResponse};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Save(Arc<AtomicBool>);
+    impl Backend for Save {
+        fn handle(&self, _: BackendRequest) -> BackendResponse {
+            unreachable!()
+        }
+        fn shutdown(&self, _: &Config) -> Result<()> {
+            self.0.store(true, Ordering::SeqCst);
+            anyhow::bail!("save failed")
+        }
+    }
+    let notes = crate::shutdown::register_pending_write();
+    let saved = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(ServerState::new(
+        Config::default(),
+        String::new(),
+        Arc::new(Save(saved.clone())),
+    ));
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let mut handle = ServerHandle {
+        stop: Some(stop),
+        state,
+    };
+    handle.shutdown();
+    handle.shutdown();
+    assert!(!saved.load(Ordering::SeqCst));
+    drop(notes);
+    stopped.blocking_recv().unwrap();
+    assert!(saved.load(Ordering::SeqCst));
+}
+
 struct MeetingSpeech(Arc<dyn SpeechEngine>);
 impl lf_meetings::Transcriber for MeetingSpeech {
     fn transcribe(&self, audio: &[f32], prompt: Option<&str>) -> Result<String> {
