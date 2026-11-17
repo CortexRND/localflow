@@ -3,6 +3,7 @@
 //! running job always keeps the models it started with.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
@@ -43,9 +44,19 @@ pub struct Worker {
 impl Worker {
     /// Process work until shutdown. The LLM client is built here, on the
     /// worker thread that uses it.
-    pub fn run(mut self, rx: Receiver<WorkItem>) {
+    pub fn run(self, rx: Receiver<WorkItem>) {
+        self.run_until(rx, Arc::new(AtomicBool::new(false)));
+    }
+
+    pub fn run_until(mut self, rx: Receiver<WorkItem>, stop: Arc<AtomicBool>) {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         let mut llm = (self.build_llm)(&(self.config)());
         while let Ok(item) = rx.recv() {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
             match item {
                 WorkItem::Shutdown => return,
                 WorkItem::ReloadLlm(config) => llm = (self.build_llm)(&config),

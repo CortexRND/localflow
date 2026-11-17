@@ -7,6 +7,7 @@ use std::sync::{
     Arc, Mutex, Weak,
 };
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use lf_core::{
@@ -75,6 +76,7 @@ pub struct RuntimeHandle {
     watch: Option<WatcherGuard>,
     consumer: Option<JoinHandle<()>>,
     worker: Option<JoinHandle<()>>,
+    worker_done: Option<std::sync::mpsc::Receiver<()>>,
     listener: Option<JoinHandle<Result<(), String>>>,
     lock: Option<SingleInstance>,
 }
@@ -85,8 +87,15 @@ impl RuntimeHandle {
     }
 
     pub fn shutdown(&mut self) {
+        self.shutdown_with_timeout(Duration::from_millis(250));
+    }
+
+    /// Close capture/listener and release ownership before returning. Queued work is
+    /// discarded; uninterruptible inference may finish after the timeout, but its
+    /// closed controller cannot paste results. Returns whether the worker finished.
+    pub fn shutdown_with_timeout(&mut self, timeout: Duration) -> bool {
         if self.stop.swap(true, Ordering::AcqRel) {
-            return;
+            return self.finish_worker(Duration::ZERO);
         }
         self.controller.shutdown();
         self.watch.take();
@@ -97,8 +106,30 @@ impl RuntimeHandle {
             let _ = thread.join();
         }
         let _ = self.work.send(WorkItem::Shutdown);
-        self.worker.take();
+        let finished = self.finish_worker(timeout);
         self.lock.take();
+        finished
+    }
+
+    fn finish_worker(&mut self, timeout: Duration) -> bool {
+        if self.worker.is_none() {
+            return true;
+        }
+        let finished = self.worker_done.as_ref().is_some_and(|done| {
+            !matches!(
+                done.recv_timeout(timeout),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            )
+        });
+        if finished {
+            if let Some(worker) = self.worker.take() {
+                if worker.join().is_err() {
+                    log::error!("dictation worker panicked during shutdown");
+                }
+            }
+            self.worker_done.take();
+        }
+        finished
     }
 
     pub fn menu_actions(&self, quit: Arc<dyn Fn() + Send + Sync>) -> MenuActions {
@@ -245,6 +276,7 @@ fn start_at(
         watch: None,
         consumer: Some(consumer_thread),
         worker: None,
+        worker_done: None,
         listener: None,
         lock: Some(lock),
     };
@@ -267,13 +299,15 @@ fn start_at(
         }),
         last_text_path: Some(paths.last_text),
     };
-    let lock = handle.lock.take();
+    let worker_stop = handle.stop.clone();
+    let (finished, done) = std::sync::mpsc::channel();
+    handle.worker_done = Some(done);
     handle.worker = Some(
         std::thread::Builder::new()
             .name("localflow-worker".into())
             .spawn(move || {
-                let _lock = lock;
-                worker.run(work_rx);
+                worker.run_until(work_rx, worker_stop);
+                let _ = finished.send(());
             })?,
     );
     let (hub, warnings) = KeyboardHub::new(
@@ -482,6 +516,87 @@ mod tests {
             build_stt: Arc::new(|_| Ok(Arc::new(MissingSpeech))),
             play_sound: Arc::new(|_| {}),
         }
+    }
+
+    #[test]
+    fn bounded_shutdown_releases_ownership_and_discards_queued_reloads() {
+        use std::sync::atomic::AtomicUsize;
+        struct BlockingLoad {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl SpeechEngine for BlockingLoad {
+            fn load(&self) -> Result<(), String> {
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|error| error.to_string())
+            }
+            fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+                unreachable!()
+            }
+            fn unload(&self) {}
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (entered, loading) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let blocked = Arc::new(BlockingLoad {
+            entered,
+            release: Mutex::new(released),
+        });
+        let builds = Arc::new(AtomicUsize::new(0));
+        let count = builds.clone();
+        let (started, _received) = mpsc::channel();
+        let mut opts = options(Box::new(Audio {
+            recording: Arc::new(AtomicBool::new(false)),
+            started,
+        }));
+        opts.build_stt = Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(blocked.clone())
+        });
+        let listener: KeyboardSource = Arc::new(|_, _, _| Err("test listener".into()));
+        let mut runtime = start_at(
+            opts,
+            MenuState::new(None, true),
+            None,
+            paths(root.path()),
+            listener.clone(),
+        )
+        .unwrap()
+        .unwrap();
+        runtime
+            .work
+            .send(WorkItem::ReloadStt(Arc::new(Config::default())))
+            .unwrap();
+        loading.recv_timeout(Duration::from_secs(5)).unwrap();
+        runtime
+            .work
+            .send(WorkItem::ReloadStt(Arc::new(Config::default())))
+            .unwrap();
+        let before = std::time::Instant::now();
+        assert!(!runtime.shutdown_with_timeout(Duration::ZERO));
+        assert!(before.elapsed() < Duration::from_secs(3));
+        let (started, _received) = mpsc::channel();
+        let mut restarted = start_at(
+            options(Box::new(Audio {
+                recording: Arc::new(AtomicBool::new(false)),
+                started,
+            })),
+            MenuState::new(None, true),
+            None,
+            paths(root.path()),
+            listener,
+        )
+        .unwrap()
+        .expect("ownership released even while old native work is blocked");
+        restarted.shutdown();
+        release.send(()).unwrap();
+        assert!(runtime.finish_worker(Duration::from_secs(5)));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(runtime.shutdown_with_timeout(Duration::ZERO));
     }
     #[test]
     fn embedded_start_is_lazy_listener_failure_is_nonfatal_and_shutdown_closes_capture() {
