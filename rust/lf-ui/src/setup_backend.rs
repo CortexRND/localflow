@@ -72,6 +72,36 @@ pub trait SetupModelBackend: Send + Sync {
 pub struct FlowModelBackend {
     details: Mutex<HashMap<String, String>>,
 }
+impl FlowModelBackend {
+    #[cfg(feature = "runtime")]
+    fn inspect_speech_at(
+        &self,
+        models: &[SttModel],
+        root: &std::path::Path,
+    ) -> HashMap<String, bool> {
+        let mut details = HashMap::new();
+        let installed = models
+            .iter()
+            .map(|model| {
+                match lf_stt::setup_downloads::native_model(model.backend, model.model_size) {
+                    Ok(native) => {
+                        let info = native.inspect(root);
+                        if info.installed {
+                            details.insert(model.id.clone(), byte_size(info.bytes));
+                        }
+                        (model.id.clone(), info.installed)
+                    }
+                    Err(_) => {
+                        details.insert(model.id.clone(), "Unavailable".into());
+                        (model.id.clone(), false)
+                    }
+                }
+            })
+            .collect();
+        *self.details.lock().unwrap_or_else(|e| e.into_inner()) = details;
+        installed
+    }
+}
 impl SetupModelBackend for FlowModelBackend {
     fn speech_format(&self, model: &SttModel) -> Option<&'static str> {
         Some(if cfg!(feature = "runtime") {
@@ -91,13 +121,13 @@ impl SetupModelBackend for FlowModelBackend {
             .unwrap_or_else(|e| e.into_inner())
             .get(&model.id)
             .cloned();
-        Some(detail.unwrap_or_else(|| {
+        detail.or_else(|| {
             if cfg!(feature = "runtime") {
-                "Check size".into()
+                None
             } else {
-                "Not built".into()
+                Some("Not built".into())
             }
-        }))
+        })
     }
     fn speech_downloads(&self, models: &[SttModel]) -> Result<HashMap<String, bool>, String> {
         #[cfg(not(feature = "runtime"))]
@@ -108,32 +138,7 @@ impl SetupModelBackend for FlowModelBackend {
         #[cfg(feature = "runtime")]
         {
             let root = lf_stt::model_storage::hf_hub_cache(None);
-            let mut details = HashMap::new();
-            let installed = models
-                .iter()
-                .map(|model| {
-                    match lf_stt::setup_downloads::native_model(model.backend, model.model_size) {
-                        Ok(native) => {
-                            let info = native.inspect(&root);
-                            details.insert(
-                                model.id.clone(),
-                                if info.installed {
-                                    byte_size(info.bytes)
-                                } else {
-                                    "Check size".into()
-                                },
-                            );
-                            (model.id.clone(), info.installed)
-                        }
-                        Err(_) => {
-                            details.insert(model.id.clone(), "Unavailable".into());
-                            (model.id.clone(), false)
-                        }
-                    }
-                })
-                .collect();
-            *self.details.lock().unwrap_or_else(|e| e.into_inner()) = details;
-            Ok(installed)
+            Ok(self.inspect_speech_at(models, &root))
         }
     }
     fn download_speech(
@@ -569,7 +574,47 @@ mod tests {
                 "Not built"
             })
         );
-        assert!(backend.speech_detail(&model).is_some());
+        assert_eq!(
+            backend.speech_detail(&model),
+            if cfg!(feature = "runtime") {
+                None
+            } else {
+                Some("Not built".into())
+            }
+        );
+    }
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn missing_speech_uses_catalog_size_and_inspection_clears_stale_installed_size() {
+        let backend = FlowModelBackend::default();
+        let model = crate::setup_flow::stt_model_by_id("fw-base").unwrap();
+        let models = std::slice::from_ref(&model);
+        let root = tempfile::tempdir().unwrap();
+        assert!(model.size_mb > 0);
+        assert_eq!(backend.speech_detail(&model), None);
+        assert!(!backend.inspect_speech_at(models, root.path())[&model.id]);
+        assert_eq!(backend.speech_detail(&model), None);
+
+        let native =
+            lf_stt::setup_downloads::native_model(model.backend, model.model_size).unwrap();
+        let repo = root
+            .path()
+            .join(format!("models--{}", native.repo.replace('/', "--")));
+        let snapshot = repo.join("snapshots").join("a".repeat(40));
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::write(repo.join("refs/main"), "a".repeat(40)).unwrap();
+        let weights = snapshot.join(&native.files[0]);
+        std::fs::File::create(&weights)
+            .unwrap()
+            .set_len(2_000_000)
+            .unwrap();
+        assert!(backend.inspect_speech_at(models, root.path())[&model.id]);
+        assert_eq!(backend.speech_detail(&model), Some("2 MB".into()));
+
+        std::fs::remove_file(weights).unwrap();
+        assert!(!backend.inspect_speech_at(models, root.path())[&model.id]);
+        assert_eq!(backend.speech_detail(&model), None);
     }
     #[cfg(not(feature = "runtime"))]
     #[test]
