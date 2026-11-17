@@ -129,13 +129,36 @@ pub fn record(
 }
 
 pub fn release(path: &Path) {
+    release_for_pid(path, u64::from(std::process::id()));
+}
+
+fn release_for_pid(path: &Path, pid: u64) {
     if let Ok(bytes) = fs::read(path) {
         if let Ok(data) = serde_json::from_slice::<Value>(&bytes) {
-            if python_integer_eq(&data["pid"], u64::from(std::process::id())) {
+            if python_integer_eq(&data["pid"], pid) {
                 let _ = fs::remove_file(path);
             }
         }
     }
+}
+
+/// Only for this process, or an owned helper whose exit has been observed.
+pub(crate) fn release_process(pid: u32) {
+    if let Ok(entries) = fs::read_dir(lease_dir()) {
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if lease_pid(&path) == Some(u64::from(pid)) {
+                release_for_pid(&path, u64::from(pid));
+            }
+        }
+    }
+}
+
+fn lease_pid(path: &Path) -> Option<u64> {
+    let name = path.file_name()?.to_str()?;
+    let captures = LEASE_NAME.captures(name)?;
+    Some(captures[1].chars().fold(0_u64, |n, c| {
+        n * 10 + u64::from(lf_core::symbols::pycompat::decimal_value(c))
+    }))
 }
 
 pub fn pid_alive(pid: u64) -> bool {
@@ -194,14 +217,14 @@ pub fn live_leases(root: Option<&Path>, alive: impl Fn(u64) -> bool) -> Vec<Leas
     entries.sort();
     entries
         .into_iter()
-        .take(MAX_LEASES * 2)
         .filter_map(|path| {
-            let name = path.file_name()?.to_str()?;
-            let captures = LEASE_NAME.captures(name)?;
-            let pid = captures[1].chars().fold(0_u64, |n, c| {
-                n * 10 + u64::from(lf_core::symbols::pycompat::decimal_value(c))
-            });
-            alive(pid).then(|| read(&path, pid))
+            let pid = lease_pid(&path)?;
+            if alive(pid) {
+                Some(read(&path, pid))
+            } else {
+                let _ = fs::remove_file(path);
+                None
+            }
         })
         .take(MAX_LEASES)
         .collect()
@@ -400,7 +423,22 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_limits_are_applied_before_and_after_filtering() {
+    fn dead_leases_do_not_hide_a_live_model_after_repeated_helper_eviction() {
+        let root = tempfile::tempdir().unwrap();
+        for pid in 1000..1200 {
+            fs::write(root.path().join(format!("{pid}.json")), "{}").unwrap();
+        }
+        let live = root.path().join("9999.json");
+        fs::write(&live, json!({"version":1,"pid":9999,"backend":"whisper-cpp","repo":WHISPER_CPP_REPO,"known":true}).to_string()).unwrap();
+        let leases = live_leases(Some(root.path()), |pid| pid == 9999);
+        assert_eq!(leases.len(), 1, "dead helpers hid the active model lease");
+        assert_eq!(leases[0].repo.as_deref(), Some(WHISPER_CPP_REPO));
+        assert!(live.exists());
+        assert!(!root.path().join("1000.json").exists());
+    }
+
+    #[test]
+    fn only_live_lease_entries_consume_the_enumeration_limit() {
         let root = tempfile::tempdir().unwrap();
         for i in 0..150 {
             fs::write(root.path().join(format!("{i}.json")), "{}").unwrap();
@@ -409,6 +447,6 @@ mod tests {
         for i in 0..128 {
             fs::write(root.path().join(format!("!{i}")), "{}").unwrap();
         }
-        assert!(live_leases(Some(root.path()), |_| true).is_empty());
+        assert_eq!(live_leases(Some(root.path()), |_| true).len(), MAX_LEASES);
     }
 }

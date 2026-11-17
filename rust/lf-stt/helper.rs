@@ -155,6 +155,7 @@ impl Session {
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                crate::stt_lease::release_process(child.id());
                 return Err(format!("capture speech helper stderr: {error}"));
             }
         };
@@ -249,11 +250,19 @@ impl Session {
         }
         self.ready.store(false, Ordering::Release);
         let deadline = Instant::now() + STOP_TIMEOUT;
+        let mut sent = false;
         loop {
-            if let Ok(mut pipes) = self.pipes.try_lock() {
-                if let Some(mut input) = pipes.input.take() {
-                    let _ = write_header(&mut input, &Request::Unload);
-                    let _ = input.flush();
+            if !sent {
+                if let Ok(mut pipes) = self.pipes.try_lock() {
+                    if let Some(input) = pipes.input.as_mut() {
+                        if write_header(input, &Request::Unload)
+                            .and_then(|()| input.flush())
+                            .is_err()
+                        {
+                            pipes.input.take();
+                        }
+                    }
+                    sent = true;
                 }
             }
             let mut child = self.child.lock().unwrap_or_else(|p| p.into_inner());
@@ -274,6 +283,9 @@ impl Session {
             drop(child);
             std::thread::sleep(Duration::from_millis(10));
         }
+        crate::stt_lease::release_process(
+            self.child.lock().unwrap_or_else(|p| p.into_inner()).id(),
+        );
         if let Some(drain) = self.drain.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = drain.join();
         }
@@ -430,10 +442,10 @@ pub fn serve_stdio(
         loop {
             let request: Request = match read_header(&mut input) {
                 Ok(Some(request)) => request,
-                Ok(None) => std::process::exit(0),
+                Ok(None) => exit_helper(0),
                 Err(error) => {
                     eprintln!("speech helper input: {error}");
-                    std::process::exit(1);
+                    exit_helper(1);
                 }
             };
             let pcm = if let Request::Transcribe { samples, .. } = &request {
@@ -441,7 +453,7 @@ pub fn serve_stdio(
                     Ok(pcm) => pcm,
                     Err(error) => {
                         eprintln!("speech helper PCM: {error}");
-                        std::process::exit(1);
+                        exit_helper(1);
                     }
                 }
             } else {
@@ -486,6 +498,11 @@ pub fn serve_stdio(
         }
     }
     Ok(())
+}
+
+fn exit_helper(code: i32) -> ! {
+    crate::stt_lease::release_process(std::process::id());
+    std::process::exit(code)
 }
 
 #[cfg(test)]

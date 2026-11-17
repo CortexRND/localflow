@@ -5,9 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-struct Fake(Config);
+struct Fake(
+    Config,
+    std::sync::Mutex<Option<lf_stt::stt_lease::LeaseGuard>>,
+);
 impl SpeechEngine for Fake {
     fn load(&self) -> Result<(), String> {
+        *self.1.lock().unwrap() = lf_stt::stt_lease::record("whisper-cpp", "tiny", None, true);
         #[cfg(unix)]
         println!("native stdout must not corrupt IPC");
         if self.0.field_str("model_size") == Some("load-error") {
@@ -76,7 +80,7 @@ fn gone(pid: u32) -> bool {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--speech-helper") {
-        serve_stdio(|config| Ok(Arc::new(Fake(config)))).unwrap();
+        serve_stdio(|config| Ok(Arc::new(Fake(config, std::sync::Mutex::new(None))))).unwrap();
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--parent") {
@@ -90,6 +94,12 @@ fn main() {
         return;
     }
     let exe = std::env::current_exe().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: this standalone test sets its isolated home before starting threads.
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
+    }
     let engine = Arc::new(HelperSpeechEngine::new(exe.clone(), &config("normal")));
     assert!(!engine.loaded());
     engine.load().unwrap();
@@ -113,12 +123,14 @@ fn main() {
     }
     engine.unload();
     assert!(gone(pid), "unload left child {pid}");
+    no_leases(pid);
     assert!(!engine.loaded());
     engine.unload();
     engine.transcribe(&[0.5], None).unwrap();
     let pid = engine.child_pid().unwrap();
     drop(engine);
     assert!(gone(pid), "drop left child {pid}");
+    no_leases(pid);
 
     let bad = HelperSpeechEngine::new(exe.clone(), &config("load-error"));
     assert!(bad.load().unwrap_err().contains("fake model load failed"));
@@ -139,6 +151,7 @@ fn main() {
     assert!(error.contains("crash diagnostic tail"), "{error}");
     assert!(error.len() < 9000);
     assert!(gone(pid));
+    no_leases(pid);
     assert_eq!(
         engine.transcribe(&[1.0], Some("retry")).unwrap(),
         "1:1:retry"
@@ -163,6 +176,7 @@ fn main() {
     assert!(start.elapsed() < Duration::from_secs(4));
     assert!(gone(pid));
     assert!(job.join().unwrap().is_err());
+    no_leases(pid);
 
     let pid_file = root.path().join("orphan-pid");
     #[cfg(target_os = "linux")]
@@ -196,5 +210,17 @@ fn main() {
         assert!(Instant::now() < deadline, "orphan helper {pid}");
         std::thread::sleep(Duration::from_millis(10));
     }
+    no_leases(pid);
     println!("Speech helper process tests: ready/load error, serialized PCM, crash diagnostics/respawn, unload/drop, busy shutdown and parent EOF passed");
+}
+
+fn no_leases(pid: u32) {
+    let folder = lf_stt::stt_lease::lease_dir();
+    for entry in std::fs::read_dir(folder).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            name != format!("{pid}.json") && !name.starts_with(&format!("{pid}.")),
+            "helper left lease {name}"
+        );
+    }
 }
