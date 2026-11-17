@@ -820,6 +820,7 @@ impl HubPage for SettingsPage {
         preparation: &str,
         root: &std::path::Path,
     ) -> anyhow::Result<()> {
+        capture_views(&self.state, true);
         let agent = self.install_snapshot_agent(root)?;
         match preparation {
             "empty" => self.seed_snapshot_empty(),

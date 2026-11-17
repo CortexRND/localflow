@@ -1349,6 +1349,7 @@ impl HubPage for MeetingsPage {
                 let path = root.join(format!("{title}.md"));
                 std::fs::write(&path, format!("# {title}\n\n## Summary\n- Decided.\n"))?;
                 snapshot.template = "standup".into();
+                snapshot.notes = "Check launch date".into();
                 if preparation == "saved-generated" {
                     snapshot.recent.insert(
                         0,
@@ -1365,7 +1366,6 @@ impl HubPage for MeetingsPage {
                         },
                     );
                     snapshot.recent.truncate(RECENT_NOTES_LIMIT);
-                    snapshot.notes = "Check launch date".into();
                 }
                 let saved = serde_json::json!({"title": title, "title_generated": preparation == "saved-generated", "enhanced": true, "notes_path": path});
                 snapshot.last_saved = Some(saved.clone());
@@ -2111,6 +2111,7 @@ mod tests {
         for preparation in ["saved", "saved-generated"] {
             page.prepare_snapshot(preparation, root.path()).unwrap();
             let snapshot = page.snapshot();
+            assert_eq!(snapshot.notes, "Check launch date");
             let saved = snapshot.last_saved.unwrap();
             assert!(std::path::Path::new(saved["notes_path"].as_str().unwrap()).is_file());
             assert!(snapshot.answers.is_empty());

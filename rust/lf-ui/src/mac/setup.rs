@@ -1298,6 +1298,8 @@ impl SetupWindow {
         let document_view: &NSView = &document;
         scroll.setDocumentView(Some(document_view));
         self.page.addSubview(&scroll);
+        scroll.tile();
+        scroll.reflectScrolledClipView(&scroll.contentView());
         *self.page_scroll.borrow_mut() = Some(scroll);
         document
     }
@@ -2320,7 +2322,7 @@ impl SetupWindow {
                 state.hardware.system == "Darwin",
             )
         };
-        self.add_text(&summary, &mut cursor, 14.0, true, 26.0);
+        self.add_text(&summary, &mut cursor, 15.0, true, 26.0);
         self.add_text(&mic_hotkey, &mut cursor, 13.0, false, 26.0);
         if darwin {
             let palette = *self.palette.borrow();

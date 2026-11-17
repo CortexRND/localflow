@@ -12,7 +12,7 @@ use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, Message};
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationTerminateReply,
-    NSButton, NSPopUpButton, NSSwitch, NSTextField, NSView,
+    NSButton, NSPopUpButton, NSScrollView, NSScrollerStyle, NSSwitch, NSTextField, NSView,
 };
 use objc2_foundation::NSString;
 
@@ -31,6 +31,22 @@ fn nonempty(text: Option<Retained<NSString>>) -> bool {
 fn walk(view: &NSView, path: &str, page: &str, failures: &mut Vec<String>) {
     for (index, subview) in view.subviews().iter().enumerate() {
         let child_path = format!("{path}/{index}");
+        if page.starts_with("Setup") {
+            if let Some(scroll) = subview.downcast_ref::<NSScrollView>() {
+                assert_eq!(scroll.scrollerStyle(), NSScrollerStyle::Legacy);
+                if scroll.documentView().is_some_and(|document| {
+                    document.frame().size.height > scroll.contentSize().height + 1.0
+                }) {
+                    let scroller = scroll.verticalScroller().expect("overflow scroller");
+                    assert!(!scroller.isHidden());
+                    assert!(scroller.isEnabled());
+                    assert!(scroller.frame().size.width > 0.0);
+                    assert!(scroller.alphaValue() > 0.0);
+                    assert!(scroller.knobProportion() < 1.0);
+                    println!("Native setup overflow audit: visible Legacy scroller for {page}");
+                }
+            }
+        }
         if let Ok(button) = subview.clone().downcast::<NSButton>() {
             if !nonempty(Some(button.title())) && !nonempty(button.accessibilityLabel()) {
                 failures.push(format!(
@@ -73,6 +89,21 @@ fn assert_decorations_hidden(view: &NSView, page: &str, failures: &mut Vec<Strin
     for subview in view.subviews().iter() {
         assert_decorations_hidden(&subview, page, failures);
     }
+}
+
+fn editable_text(view: &NSView, label: &str) -> Option<String> {
+    if let Some(field) = view.downcast_ref::<NSTextField>() {
+        if field.isEditable()
+            && field
+                .accessibilityLabel()
+                .is_some_and(|text| text.to_string() == label)
+        {
+            return Some(field.stringValue().to_string());
+        }
+    }
+    view.subviews()
+        .iter()
+        .find_map(|child| editable_text(&child, label))
 }
 
 fn services(root: &std::path::Path) -> Rc<HubServices> {
@@ -146,6 +177,29 @@ pub fn run() {
         "saved meetings must attach the transcript Ask button"
     );
     walk(&hub.content_view(), "root", "Meetings saved", &mut failures);
+    hub.show_page("Settings");
+    hub.prepare_snapshot("empty", temp.path()).unwrap();
+    hub.rebuild_current_page();
+    assert_eq!(
+        editable_text(&hub.content_view(), "Dictation shortcut").as_deref(),
+        Some("left_option")
+    );
+    hub.prepare_snapshot("manual-error", temp.path()).unwrap();
+    hub.rebuild_current_page();
+    assert_eq!(
+        editable_text(&hub.content_view(), "Dictation shortcut").as_deref(),
+        Some("right_ctrl")
+    );
+    assert_eq!(
+        editable_text(&hub.content_view(), "Prompt shortcut").as_deref(),
+        Some("ctrl+option+1")
+    );
+    walk(
+        &hub.content_view(),
+        "root",
+        "Settings manual error",
+        &mut failures,
+    );
     hub.shutdown();
 
     let setup = snapshot_fixture(mtm);
