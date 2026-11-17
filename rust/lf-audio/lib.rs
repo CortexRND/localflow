@@ -145,10 +145,9 @@ impl Recorder {
 
     /// Only publish the latest RMS; retain no PCM and return no clip on stop.
     pub fn new_meter(device: Option<String>) -> Self {
-        Self {
-            retain_samples: false,
-            ..Self::new(device)
-        }
+        let mut recorder = Self::new(device);
+        recorder.retain_samples = false;
+        recorder
     }
 
     pub fn recording(&self) -> bool {

@@ -625,7 +625,9 @@ mod tests {
         let owner = acquire_main_app_at(temp.path(), None).unwrap().unwrap();
         let requests = RequestFile::new(temp.path());
         assert!(requests.write_request("Home", &now));
-        let error = acquire_main_app_at(temp.path(), Some("Setup")).unwrap_err();
+        let error = acquire_main_app_at(temp.path(), Some("Setup"))
+            .err()
+            .expect("Setup must not be handed off");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(error.to_string().contains("lf setup"));
         assert_eq!(requests.consume_request(&now), Some("Home"));

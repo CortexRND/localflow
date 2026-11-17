@@ -721,7 +721,7 @@ fn meter_cancelled_during_open_closes_before_returning() {
     );
     assert!(result.is_err());
     assert_eq!(mic.stops.load(Ordering::SeqCst), 1);
-    cancelled.store(false, Ordering::Release);
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
     let mut monitor = start_cancellable_capture(
         &cancelled,
         || {
