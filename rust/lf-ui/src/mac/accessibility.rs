@@ -75,15 +75,20 @@ fn named_button(view: &NSView, label: &str) -> Option<Retained<NSButton>> {
 
 fn settle_requests(hub: &Hub) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while has_text(&hub.content_view(), "Loading prompts…")
-        || has_text(&hub.content_view(), "Loading settings…")
-    {
+    loop {
+        let pending = hub.drain_requests();
+        if pending == 0 {
+            break;
+        }
         assert!(
             std::time::Instant::now() < deadline,
-            "prompt worker did not finish"
+            "{}: {pending} page requests did not finish",
+            hub.current_page()
         );
         spin_run_loop(0.02);
     }
+    assert!(!has_text(&hub.content_view(), "Loading prompts…"));
+    assert!(!has_text(&hub.content_view(), "Loading settings…"));
 }
 
 fn assert_meetings_focus(mtm: MainThreadMarker) {

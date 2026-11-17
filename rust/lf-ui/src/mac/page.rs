@@ -195,6 +195,12 @@ pub trait HubPage {
     /// state. Called right before the views are torn down.
     fn capture(&mut self) {}
 
+    /// Deliver queued request results on the main thread for audits/snapshots.
+    /// Return the number of requests still awaiting delivery.
+    fn drain_requests(&mut self) -> usize {
+        0
+    }
+
     /// Prepare an isolated native snapshot by its explicit plan identifier.
     /// Unknown identifiers fail loudly; snapshots never fall back to a different
     /// state's screenshot. The fixture root contains only temporary data.

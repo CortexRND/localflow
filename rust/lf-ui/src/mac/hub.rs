@@ -710,6 +710,21 @@ impl Hub {
         self.scroll_to(scroll_y);
     }
 
+    /// Drain request channels, including hidden pages, without depending on
+    /// visibility-owned delivery timers. Repaint only after releasing pages.
+    pub fn drain_requests(&self) -> usize {
+        let pending = self
+            .pages
+            .iter()
+            .map(|(name, _)| {
+                self.with_page(name, |page| page.drain_requests())
+                    .unwrap_or(1)
+            })
+            .sum();
+        self.rebuild_current_page();
+        pending
+    }
+
     /// Scroll the page canvas, clamped to the rendered document's range.
     pub fn scroll_to(&self, y: f64) {
         let y = restored_scroll(y, self.body.frame().size.height, self.viewport_height());

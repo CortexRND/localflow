@@ -322,6 +322,11 @@ impl HubPage for PromptsPage {
         "Prompts"
     }
 
+    fn drain_requests(&mut self) -> usize {
+        self.state.drain();
+        usize::from(self.state.busy.get() && !self.state.closed.get())
+    }
+
     fn flush(&mut self) {
         self.state.visible.set(false);
         if !self.state.busy.get() {
@@ -678,6 +683,10 @@ mod tests {
         assert!(state.busy.get());
         assert!(state.entries.borrow().is_none());
         assert_eq!(rebuilt.get(), 0);
+        let mut page = PromptsPage {
+            state: state.clone(),
+        };
+        assert_eq!(page.drain_requests(), 1);
         release.send(()).unwrap();
         let completion = receive(&state);
         assert!(state.entries.borrow().is_none());
@@ -723,6 +732,23 @@ mod tests {
             state.start(queue, Some(("missing".into(), action)));
             state.apply(receive(&state));
             assert!(state.error.borrow().as_ref().unwrap().contains("no longer"));
+        }
+    }
+
+    #[test]
+    fn queued_completion_is_delivered_without_a_timer() {
+        for queue in [
+            Arc::new(FakePromptQueue::new()) as Arc<dyn PromptQueue>,
+            Arc::new(UnavailablePromptQueue),
+        ] {
+            let mut page = PromptsPage::new();
+            page.state.start(queue, None);
+            let completion = receive(&page.state);
+            page.state.sender.send(completion).unwrap();
+            assert!(page.state.timer.borrow().is_none());
+            assert!(page.state.busy.get());
+            assert_eq!(page.drain_requests(), 0);
+            assert!(page.state.entries.borrow().is_some());
         }
     }
 

@@ -34,21 +34,17 @@ mod native {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    fn loading_prompts(view: &NSView) -> bool {
-        view.downcast_ref::<NSTextField>().is_some_and(|field| {
-            matches!(
-                field.stringValue().to_string().as_str(),
-                "Loading prompts…" | "Loading settings…"
-            )
-        }) || view.subviews().iter().any(|child| loading_prompts(&child))
-    }
-
     fn settle_requests(hub: &Hub) -> Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while loading_prompts(&hub.content_view()) {
+        loop {
+            let pending = hub.drain_requests();
+            if pending == 0 {
+                break;
+            }
             anyhow::ensure!(
                 std::time::Instant::now() < deadline,
-                "prompt worker did not finish"
+                "{}: {pending} page requests did not finish",
+                hub.current_page()
             );
             spin_run_loop(0.02);
         }

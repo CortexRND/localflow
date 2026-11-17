@@ -380,6 +380,17 @@ fn finish_io(state: &Shared, completion: Completion) {
     state.controller.state.undo_lines = completion.undo;
 }
 
+fn drain_io(state: &Shared) -> bool {
+    let mut changed = false;
+    loop {
+        let completion = state.borrow().io_receiver.try_recv();
+        let Ok(completion) = completion else { break };
+        finish_io(state, completion);
+        changed = true;
+    }
+    changed
+}
+
 fn start_io(state: &Shared, request: Request) {
     let (agent, sender) = {
         let mut state = state.borrow_mut();
@@ -954,6 +965,18 @@ impl HubPage for SettingsPage {
         PAGE
     }
 
+    fn drain_requests(&mut self) -> usize {
+        drain_io(&self.state);
+        let mut state = self.state.borrow_mut();
+        if state.controller.preview_done() {
+            refresh_extended_presentation(&mut state.controller.state);
+        }
+        if state.controller.closed {
+            return 0;
+        }
+        usize::from(state.io_busy) + usize::from(state.controller.state.busy())
+    }
+
     fn capture(&mut self) {
         self.state.borrow_mut().visible = false;
         capture_views(&self.state, false);
@@ -987,19 +1010,13 @@ impl HubPage for SettingsPage {
                 let Some(state) = weak.upgrade() else {
                     return;
                 };
-                loop {
-                    let completion = state.borrow().io_receiver.try_recv();
-                    let Ok(completion) = completion else {
-                        break;
-                    };
-                    finish_io(&state, completion);
-                    let visible = {
-                        let state = state.borrow();
-                        state.visible && !state.controller.closed
-                    };
-                    if visible {
-                        rebuild();
-                    }
+                let changed = drain_io(&state);
+                let visible = {
+                    let state = state.borrow();
+                    state.visible && !state.controller.closed
+                };
+                if changed && visible {
+                    rebuild();
                 }
                 let idle_hidden = {
                     let state = state.borrow();
@@ -1372,6 +1389,27 @@ impl HubPage for SettingsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_io_completion_is_delivered_without_a_timer() {
+        let mut page = SettingsPage::new();
+        page.state.borrow_mut().agent = Some(Arc::new(
+            crate::backends::settings_agent::FakeSettingsAgent::new(),
+        ));
+        start_io(&page.state, Request::Refresh);
+        let completion = page
+            .state
+            .borrow()
+            .io_receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        page.state.borrow().io_sender.send(completion).unwrap();
+        assert!(page.state.borrow().io_delivery.is_none());
+        assert!(page.state.borrow().io_busy);
+        assert_eq!(page.drain_requests(), 0);
+        assert!(page.state.borrow().io_loaded);
+        assert!(!page.state.borrow().io_busy);
+    }
 
     #[test]
     fn extended_changes_keep_native_labels_and_safety_warnings() {
