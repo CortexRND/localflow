@@ -32,6 +32,97 @@ pub enum WorkItem {
     Shutdown,
 }
 
+pub struct Worker {
+    pub config: Arc<dyn Fn() -> Arc<Config> + Send + Sync>,
+    pub vocabulary: VocabularyFn,
+    pub history: Option<HistoryStore>,
+    pub speech: Arc<dyn SpeechEngine>,
+    pub build_llm: LlmFactory,
+    pub build_stt: SttFactory,
+    pub deliver: Deliver,
+    pub last_text_path: Option<PathBuf>,
+}
+
+impl Worker {
+    /// Process work until shutdown. The LLM client is built here, on the
+    /// worker thread that uses it.
+    pub fn run(self, rx: Receiver<WorkItem>) {
+        self.run_until(rx, Arc::new(AtomicBool::new(false)));
+    }
+
+    pub fn run_until(mut self, rx: Receiver<WorkItem>, stop: Arc<AtomicBool>) {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let mut llm = (self.build_llm)(&(self.config)());
+        while let Ok(item) = rx.recv() {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            match item {
+                WorkItem::Shutdown => return,
+                WorkItem::ReloadLlm(config) => llm = (self.build_llm)(&config),
+                WorkItem::ReloadStt(config) => match (self.build_stt)(&config) {
+                    Ok(engine) => match engine.load() {
+                        Ok(()) => {
+                            let old = std::mem::replace(&mut self.speech, engine);
+                            old.unload();
+                            log::info!("speech model reloaded");
+                        }
+                        Err(e) => {
+                            log::error!("speech model failed to load; keeping the old one: {e}")
+                        }
+                    },
+                    Err(e) => {
+                        log::error!("could not build the speech model; keeping the old one: {e}")
+                    }
+                },
+                WorkItem::Job(job) => self.process(job, llm.as_deref(), &stop),
+            }
+        }
+    }
+
+    fn process(&self, job: Job, llm: Option<&dyn LlmProvider>, stop: &AtomicBool) {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let config = (self.config)();
+        let vocab = (self.vocabulary)(&config);
+        let models = Models {
+            speech: self.speech.as_ref(),
+            llm,
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process_job_guarded(
+                &job,
+                &config,
+                &models,
+                &vocab,
+                self.history.as_ref(),
+                || {
+                    let guard = RESULT_COMMIT
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    (!stop.load(Ordering::Acquire)).then_some(guard)
+                },
+            )
+        }));
+        let ((text, error), _commit) = outcome.unwrap_or_else(|_| {
+            log::error!("worker failed to process job");
+            ((None, true), None)
+        });
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        if let (Some(text), Some(path)) = (&text, &self.last_text_path) {
+            if let Err(e) = write_last_text(text, path) {
+                log::error!("could not write last text: {e}");
+            }
+        }
+        (self.deliver)(&job, text, error);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,96 +212,5 @@ mod tests {
         assert_eq!(std::fs::read_to_string(last).unwrap().trim(), "new result");
         assert_eq!(*delivered.lock().unwrap(), vec![Some("new result".into())]);
         assert_eq!(std::fs::read_dir(clips).unwrap().count(), 1);
-    }
-}
-
-pub struct Worker {
-    pub config: Arc<dyn Fn() -> Arc<Config> + Send + Sync>,
-    pub vocabulary: VocabularyFn,
-    pub history: Option<HistoryStore>,
-    pub speech: Arc<dyn SpeechEngine>,
-    pub build_llm: LlmFactory,
-    pub build_stt: SttFactory,
-    pub deliver: Deliver,
-    pub last_text_path: Option<PathBuf>,
-}
-
-impl Worker {
-    /// Process work until shutdown. The LLM client is built here, on the
-    /// worker thread that uses it.
-    pub fn run(self, rx: Receiver<WorkItem>) {
-        self.run_until(rx, Arc::new(AtomicBool::new(false)));
-    }
-
-    pub fn run_until(mut self, rx: Receiver<WorkItem>, stop: Arc<AtomicBool>) {
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
-        let mut llm = (self.build_llm)(&(self.config)());
-        while let Ok(item) = rx.recv() {
-            if stop.load(Ordering::Acquire) {
-                return;
-            }
-            match item {
-                WorkItem::Shutdown => return,
-                WorkItem::ReloadLlm(config) => llm = (self.build_llm)(&config),
-                WorkItem::ReloadStt(config) => match (self.build_stt)(&config) {
-                    Ok(engine) => match engine.load() {
-                        Ok(()) => {
-                            let old = std::mem::replace(&mut self.speech, engine);
-                            old.unload();
-                            log::info!("speech model reloaded");
-                        }
-                        Err(e) => {
-                            log::error!("speech model failed to load; keeping the old one: {e}")
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("could not build the speech model; keeping the old one: {e}")
-                    }
-                },
-                WorkItem::Job(job) => self.process(job, llm.as_deref(), &stop),
-            }
-        }
-    }
-
-    fn process(&self, job: Job, llm: Option<&dyn LlmProvider>, stop: &AtomicBool) {
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
-        let config = (self.config)();
-        let vocab = (self.vocabulary)(&config);
-        let models = Models {
-            speech: self.speech.as_ref(),
-            llm,
-        };
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_job_guarded(
-                &job,
-                &config,
-                &models,
-                &vocab,
-                self.history.as_ref(),
-                || {
-                    let guard = RESULT_COMMIT
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    (!stop.load(Ordering::Acquire)).then_some(guard)
-                },
-            )
-        }));
-        let ((text, error), _commit) = outcome.unwrap_or_else(|_| {
-            log::error!("worker failed to process job");
-            ((None, true), None)
-        });
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
-        if let (Some(text), Some(path)) = (&text, &self.last_text_path) {
-            if let Err(e) = write_last_text(text, path) {
-                log::error!("could not write last text: {e}");
-            }
-        }
-        (self.deliver)(&job, text, error);
     }
 }
