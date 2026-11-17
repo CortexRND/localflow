@@ -8,7 +8,7 @@ pub use providers::{ConfiguredProviders, ProviderFactory, TitleLlm};
 pub use session::{CaptureFactory, UnavailableCapture};
 
 use anyhow::Result;
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 use lf_ask::{Corpus, SearchOptions, Since};
 use lf_core::{config::Config, history::HistoryStore, home::expand_user, symbols::pycompat as py};
 use lf_meetings::{
@@ -16,7 +16,7 @@ use lf_meetings::{
     dispatch::{self, PromptQueue, PromptTransitionError},
     format_transcript, generate_title, latest_transcript_log, read_transcript_log, templates,
     titles::{is_default_title, TITLE_TIMEOUT_SECONDS},
-    MeetingSummarizer, MeetingWatcher, ObsidianWriter, WriteNote,
+    MeetingSummarizer, MeetingWatcher, ObsidianWriter, Segment, WriteNote,
 };
 use lf_runtime::menubar::{MeetingStatusPoller, MenuState};
 use lf_server::backend::{Backend, BackendRequest, BackendResponse, UnavailableBackend};
@@ -36,6 +36,14 @@ enum Phase {
     Starting,
     Running,
     Stopping,
+}
+
+fn remove_recovery(saved: lf_meetings::writer::SavedNote) {
+    for path in [saved.notes_path, saved.log_path] {
+        if let Err(error) = std::fs::remove_file(path) {
+            log::warn!("could not remove completed meeting recovery: {error}");
+        }
+    }
 }
 #[derive(Clone, Default)]
 struct Metadata {
@@ -291,11 +299,36 @@ impl MeetingsBackend {
             backend: self,
             armed: true,
         };
+        let writer = ObsidianWriter::new(
+            Path::new(text(config, "vault_path")),
+            Path::new(text(config, "notes_folder")),
+            Path::new(text(config, "logs_folder")),
+        );
+        let mut recovery = session.snapshot().and_then(|snapshot| {
+            self.checkpoint(
+                &writer,
+                &meta,
+                snapshot.started_at,
+                snapshot.seconds,
+                &snapshot.segments,
+            )
+        });
         let finished = session.stop();
         if let Some(watcher) = &self.watcher {
             watcher.resume();
         }
         let finished = finished.map_err(|_| internal())?;
+        if let Some(saved) = self.checkpoint(
+            &writer,
+            &meta,
+            finished.started_at,
+            finished.seconds,
+            &finished.segments,
+        ) {
+            if let Some(previous) = recovery.replace(saved) {
+                remove_recovery(previous);
+            }
+        }
         let transcript = format_transcript(&finished.segments);
         let template = templates::resolve_template(
             Some(&meta.template),
@@ -342,11 +375,6 @@ impl MeetingsBackend {
                 }
             }
         }
-        let writer = ObsidianWriter::new(
-            Path::new(text(config, "vault_path")),
-            Path::new(text(config, "notes_folder")),
-            Path::new(text(config, "logs_folder")),
-        );
         let saved = writer
             .write(&WriteNote {
                 title: &title,
@@ -360,6 +388,9 @@ impl MeetingsBackend {
                 generated_title: meta.title_auto,
             })
             .map_err(|_| internal())?;
+        if let Some(recovery) = recovery {
+            remove_recovery(recovery);
+        }
         let mut payload = json!({"title":saved.title,"title_generated":generated,"notes_path":saved.notes_path,"log_path":saved.log_path,"segments":finished.segments.len(),"template":template.id,"enhanced":!py::strip(&meta.user_notes).is_empty()});
         payload
             .as_object_mut()
@@ -367,6 +398,38 @@ impl MeetingsBackend {
             .extend(extra.as_object().unwrap().clone());
         self.state().last_saved = Some(payload.clone());
         Ok(payload)
+    }
+    fn checkpoint(
+        &self,
+        writer: &ObsidianWriter,
+        meta: &Metadata,
+        started_at: NaiveDateTime,
+        seconds: f64,
+        segments: &[Segment],
+    ) -> Option<lf_meetings::writer::SavedNote> {
+        let result = writer.write(&WriteNote {
+            title: &format!("{} (recovery)", meta.title),
+            category: &meta.category,
+            started_at,
+            duration_seconds: seconds,
+            notes_md: &meta.user_notes,
+            segments,
+            user_notes: &meta.user_notes,
+            template: &meta.template,
+            generated_title: false,
+        });
+        match result {
+            Ok(saved) => {
+                self.state().last_saved = Some(
+                    json!({"title":saved.title,"notes_path":saved.notes_path,"log_path":saved.log_path,"recovery":true}),
+                );
+                Some(saved)
+            }
+            Err(error) => {
+                log::error!("could not checkpoint meeting: {error}");
+                None
+            }
+        }
     }
     fn chat(&self, request: &BackendRequest) -> ResponseResult<Value> {
         let question = question(request, 2000)?;

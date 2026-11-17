@@ -41,6 +41,7 @@ struct Capture {
     opened: AtomicUsize,
     stopped: Arc<AtomicUsize>,
     gate: Mutex<Option<Gate>>,
+    transcription_gate: Arc<Mutex<Option<Gate>>>,
 }
 struct Device {
     _local: Rc<()>,
@@ -66,9 +67,15 @@ impl AudioSource for Device {
         "synthetic"
     }
 }
-struct Stt;
+struct Stt {
+    gate: Arc<Mutex<Option<Gate>>>,
+}
 impl Transcriber for Stt {
     fn transcribe(&self, audio: &[f32], _: Option<&str>) -> Result<String> {
+        if let Some((entered, release)) = self.gate.lock().unwrap().take() {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
         Ok(if audio[0] < 0.15 {
             "we will launch on March 3"
         } else {
@@ -93,7 +100,9 @@ impl CaptureFactory for Capture {
             entered.send(()).unwrap();
             release.recv_timeout(Duration::from_secs(10)).unwrap();
         }
-        Ok(Arc::new(Stt))
+        Ok(Arc::new(Stt {
+            gate: self.transcription_gate.clone(),
+        }))
     }
     fn microphone(&self, _: &Config) -> Result<Box<dyn AudioSource>> {
         self.opened.fetch_add(1, Ordering::SeqCst);
@@ -506,6 +515,61 @@ async fn server_shutdown_saves_active_meeting_and_is_idle_safe() {
             .0,
         409
     );
+}
+
+#[tokio::test]
+async fn raw_notes_and_transcript_are_durable_before_slow_finalization() {
+    let f = Fixture::new();
+    assert_eq!(
+        request(
+            f.app(),
+            "POST",
+            "/meeting/start",
+            Some(
+                json!({"title":"Recovery", "auto_title":false,"user_notes":"do not lose this note"})
+            )
+        )
+        .await
+        .0,
+        200
+    );
+    let (transcribing, transcribed) = mpsc::channel();
+    let (finish_transcription, transcription) = mpsc::channel();
+    *f.capture.transcription_gate.lock().unwrap() = Some((transcribing, transcription));
+    let (summarizing, summarized) = mpsc::channel();
+    let (finish_summary, summary) = mpsc::channel();
+    *f.models.gate.lock().unwrap() = Some((summarizing, summary));
+    let backend = f.backend.clone();
+    let config = f.config.clone();
+    let stop = std::thread::spawn(move || {
+        backend.handle(BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/meeting/stop".into(),
+            body: Default::default(),
+            headers: Default::default(),
+            query: Default::default(),
+            config,
+        })
+    });
+    transcribed.recv_timeout(Duration::from_secs(5)).unwrap();
+    let before = request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"].clone();
+    assert_eq!(before["recovery"], true);
+    assert!(fs::read_to_string(before["log_path"].as_str().unwrap())
+        .unwrap()
+        .contains("do not lose this note"));
+    finish_transcription.send(()).unwrap();
+    summarized.recv_timeout(Duration::from_secs(5)).unwrap();
+    let during = request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"].clone();
+    let raw = fs::read_to_string(during["log_path"].as_str().unwrap()).unwrap();
+    assert!(raw.contains("we will launch on March 3"));
+    assert!(raw.contains("do not lose this note"));
+    assert!(!Path::new(before["log_path"].as_str().unwrap()).exists());
+    finish_summary.send(()).unwrap();
+    let saved = stop.join().unwrap();
+    assert_eq!(saved.status, 200);
+    assert!(!Path::new(during["log_path"].as_str().unwrap()).exists());
+    assert!(!Path::new(during["notes_path"].as_str().unwrap()).exists());
+    assert!(Path::new(saved.body["log_path"].as_str().unwrap()).is_file());
 }
 
 #[tokio::test]

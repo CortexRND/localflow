@@ -940,7 +940,7 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
         }
         #[cfg(feature = "runtime")]
         quit_menu.shutdown();
-        if !crate::shutdown::wait_for_pending_writes(QUIT_FLUSH_TIMEOUT) {
+        if !crate::shutdown::wait_for_quit(QUIT_FLUSH_TIMEOUT, Duration::from_secs(60)) {
             log::warn!("timed out waiting for pending writes during quit");
         }
     });

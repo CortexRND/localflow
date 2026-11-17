@@ -362,7 +362,7 @@ impl ServerHandle {
     fn shutdown(&mut self) {
         if let Some(stop) = self.stop.take() {
             let state = self.state.clone();
-            let pending = crate::shutdown::register_pending_write();
+            let pending = crate::shutdown::register_pending_meeting_write();
             if let Err(error) = std::thread::Builder::new()
                 .name("localflow-meeting-save".into())
                 .spawn(move || {

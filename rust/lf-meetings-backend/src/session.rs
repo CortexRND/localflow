@@ -28,6 +28,7 @@ impl CaptureFactory for UnavailableCapture {
 }
 
 pub(crate) struct Snapshot {
+    pub started_at: NaiveDateTime,
     pub seconds: f64,
     pub segments: Vec<Segment>,
     pub system_audio: String,
@@ -97,6 +98,7 @@ impl SessionActor {
                     match command {
                         Command::Snapshot(reply) => {
                             let _ = reply.send(Snapshot {
+                                started_at: session.started_at.expect("started session"),
                                 seconds: session.elapsed_seconds(),
                                 segments: session.segments(),
                                 system_audio: session.system_audio_status().into(),

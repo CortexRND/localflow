@@ -1,33 +1,57 @@
 //! Process-wide bounded shutdown flushing. Register before spawning a writer.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 struct PendingWrites {
     pending: Mutex<usize>,
+    meetings: AtomicUsize,
     idle: Condvar,
 }
 
 /// Releases one registered write when dropped, including failed spawns.
 pub struct PendingWrite {
     tracker: Arc<PendingWrites>,
+    meeting: bool,
 }
 
 impl PendingWrites {
     fn register(self: &Arc<Self>) -> PendingWrite {
+        self.register_kind(false)
+    }
+
+    fn register_kind(self: &Arc<Self>, meeting: bool) -> PendingWrite {
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         *pending += 1;
+        if meeting {
+            self.meetings.fetch_add(1, Ordering::AcqRel);
+        }
         PendingWrite {
             tracker: self.clone(),
+            meeting,
         }
     }
 
     fn wait(&self, timeout: Duration) -> bool {
         self.wait_until(timeout, 0)
+    }
+
+    fn wait_for_quit(&self, normal: Duration, cap: Duration) -> bool {
+        let started = Instant::now();
+        if self.wait(normal.min(cap)) {
+            return true;
+        }
+        let remaining = if self.meetings.load(Ordering::Acquire) > 0 {
+            cap.saturating_sub(started.elapsed())
+        } else {
+            Duration::ZERO
+        };
+        self.wait(remaining)
     }
 
     fn wait_until(&self, timeout: Duration, allowed: usize) -> bool {
@@ -62,6 +86,9 @@ impl Drop for PendingWrite {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         *pending -= 1;
+        if self.meeting {
+            self.tracker.meetings.fetch_sub(1, Ordering::AcqRel);
+        }
         drop(pending);
         self.tracker.idle.notify_all();
     }
@@ -86,6 +113,15 @@ pub fn wait_for_pending_writes(timeout: Duration) -> bool {
     pending_writes().wait(timeout)
 }
 
+pub fn wait_for_quit(normal: Duration, cap: Duration) -> bool {
+    pending_writes().wait_for_quit(normal, cap)
+}
+
+#[cfg(feature = "runtime")]
+pub(crate) fn register_pending_meeting_write() -> PendingWrite {
+    pending_writes().register_kind(true)
+}
+
 /// Register a write before starting its worker; retain the guard until it ends.
 pub fn register_pending_write() -> PendingWrite {
     pending_writes().register()
@@ -95,6 +131,33 @@ pub fn register_pending_write() -> PendingWrite {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn meeting_flush_extends_normal_budget_but_never_exceeds_hard_cap() {
+        let writes = Arc::new(PendingWrites::default());
+        let meeting = writes.register_kind(true);
+        let waiter = writes.clone();
+        let (ready, waiting) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            finished
+                .send(waiter.wait_for_quit(Duration::ZERO, Duration::from_secs(5)))
+                .unwrap();
+        });
+        waiting.recv().unwrap();
+        assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(meeting);
+        assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
+        thread.join().unwrap();
+        let _meeting = writes.register_kind(true);
+        let started = Instant::now();
+        assert!(!writes.wait_for_quit(Duration::ZERO, Duration::from_millis(20)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let ordinary = Arc::new(PendingWrites::default());
+        let _write = ordinary.register();
+        assert!(!ordinary.wait_for_quit(Duration::ZERO, Duration::from_secs(5)));
+    }
 
     #[test]
     fn registration_outlives_individual_owners() {
