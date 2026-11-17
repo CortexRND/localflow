@@ -147,6 +147,17 @@ fn assert_meetings_focus(mtm: MainThreadMarker) {
 }
 
 fn assert_settings_writes(mtm: MainThreadMarker) {
+    fn wait_for_sounds(hub: &Hub, services: &HubServices, enabled: bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while services.config().field_bool("sounds_enabled") != Some(enabled) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Settings write did not complete"
+            );
+            spin_run_loop(0.02);
+        }
+        settle_requests(hub);
+    }
     fn request(view: &NSView) -> Option<Retained<NSTextView>> {
         if let Ok(text) = view.retain().downcast::<NSTextView>() {
             if text
@@ -165,8 +176,7 @@ fn assert_settings_writes(mtm: MainThreadMarker) {
     hub.show_page("Settings");
     let apply = named_button(&hub.content_view(), "Apply").expect("Apply preview");
     unsafe { apply.performClick(None) };
-    spin_run_loop(0.1);
-    settle_requests(&hub);
+    wait_for_sounds(&hub, &services, false);
     assert_eq!(services.config().field_bool("sounds_enabled"), Some(false));
     assert_eq!(
         request(&hub.content_view()).unwrap().string().to_string(),
@@ -178,14 +188,15 @@ fn assert_settings_writes(mtm: MainThreadMarker) {
             .isEnabled()
     );
     hub.resize_content(1280.0, 820.0);
+    spin_run_loop(0.1);
+    settle_requests(&hub);
     assert_eq!(
         request(&hub.content_view()).unwrap().string().to_string(),
         ""
     );
     let undo = named_button(&hub.content_view(), lf_ui::hub_settings::UNDO_TITLE).unwrap();
     unsafe { undo.performClick(None) };
-    spin_run_loop(0.1);
-    settle_requests(&hub);
+    wait_for_sounds(&hub, &services, true);
     assert_eq!(services.config().field_bool("sounds_enabled"), Some(true));
     hub.shutdown();
     println!("Native Settings audit: worker Apply/Undo, real undo record and cleared request survive rebuild");
