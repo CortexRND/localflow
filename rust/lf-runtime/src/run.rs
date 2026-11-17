@@ -46,6 +46,7 @@ type KeyboardSource = Arc<
 
 struct RuntimePaths {
     config: PathBuf,
+    config_source: Option<PathBuf>,
     lock: PathBuf,
     status: PathBuf,
     last_text: PathBuf,
@@ -56,6 +57,7 @@ impl RuntimePaths {
     fn user() -> Result<Self> {
         Ok(Self {
             config: lf_core::config::try_config_path()?,
+            config_source: None,
             lock: lock_file_path("localflow"),
             status: status_path(),
             last_text: last_text_path(),
@@ -176,7 +178,7 @@ fn start_at(
     let Some(lock) = acquire_at(&paths.lock)? else {
         return Ok(None);
     };
-    let config = Arc::new(load_runtime_config(Some(&paths.config))?);
+    let config = Arc::new(load_runtime_config(paths.config_source.as_deref())?);
     let history_enabled = bool_field(&config, "history_enabled", true);
     let _ = write_state("idle", &paths.status);
     let (work_tx, work_rx) = work_queue();
@@ -284,11 +286,11 @@ fn start_at(
     live.set_hub(hub.clone());
     let apply_live = live.clone();
     let tick_live = live.clone();
-    let loader_path = paths.config.clone();
+    let loader_path = paths.config_source.clone();
     handle.watch = Some(
         ConfigWatcher::new(
             paths.config.clone(),
-            Arc::new(move || load_runtime_config(Some(&loader_path))),
+            Arc::new(move || load_runtime_config(loader_path.as_deref())),
             Arc::new(move |fresh| {
                 apply_live.apply(&fresh);
             }),
@@ -299,7 +301,7 @@ fn start_at(
         )
         .start(),
     );
-    if let Ok(fresh) = load_runtime_config(Some(&paths.config)) {
+    if let Ok(fresh) = load_runtime_config(paths.config_source.as_deref()) {
         live.apply(&fresh);
     }
     let listener_stop = handle.stop.clone();
@@ -367,6 +369,71 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    #[test]
+    fn deferred_legacy_settings_survive_embedded_start() {
+        const CHILD: &str = "LF_TEST_RUNTIME_LEGACY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "run::tests::deferred_legacy_settings_survive_embedded_start",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("HOME", root.path())
+                .env("USERPROFILE", root.path())
+                .env("XDG_CONFIG_HOME", root.path().join("config"))
+                .env_remove("FIREWORKS_API_KEY")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        struct UnavailableKeyring;
+        impl lf_core::secrets::KeyringBackend for UnavailableKeyring {
+            fn get_password(&self, _: &str, _: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            fn set_password(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+                anyhow::bail!("keychain unavailable")
+            }
+            fn delete_password(&self, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        lf_core::secrets::set_keyring_backend(Some(Arc::new(UnavailableKeyring)));
+        let legacy = lf_core::config::try_legacy_config_path().unwrap();
+        std::fs::write(&legacy, "model_size = 'tiny.en'\nsounds_enabled = false\nfireworks_api_key = 'test-only-migration-key'\n").unwrap();
+        let target = lf_core::config::try_config_path().unwrap();
+        let expected = load_runtime_config(None).unwrap();
+        assert!(!target.exists(), "migration should defer its write");
+        assert_eq!(expected.field_str("model_size"), Some("tiny.en"));
+        let (started, _received) = mpsc::channel();
+        let mut runtime = start_at(
+            options(Box::new(Audio {
+                recording: Arc::new(AtomicBool::new(false)),
+                started,
+            })),
+            MenuState::new(None, true),
+            None,
+            RuntimePaths::user().unwrap(),
+            Arc::new(|_, _, _| Err("test listener".into())),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            runtime.live.config().field_str("model_size"),
+            Some("tiny.en")
+        );
+        assert_eq!(
+            runtime.live.config().field_bool("sounds_enabled"),
+            Some(false)
+        );
+        runtime.shutdown();
+        assert!(legacy.is_file());
+    }
+
     struct Audio {
         recording: Arc<AtomicBool>,
         started: mpsc::Sender<()>,
@@ -401,6 +468,7 @@ mod tests {
     fn paths(root: &std::path::Path) -> RuntimePaths {
         RuntimePaths {
             config: root.join("config.toml"),
+            config_source: Some(root.join("config.toml")),
             lock: root.join("localflow.lock"),
             status: root.join("status"),
             last_text: root.join("last-text"),
