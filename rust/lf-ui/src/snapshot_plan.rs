@@ -1,6 +1,6 @@
-//! Snapshot fixtures for the shell, Home and History only.
+//! Python-aligned snapshot fixtures for the ported Hub pages.
 
-pub const SNAPSHOT_PAGES: [&str; 2] = crate::hub_route::HUB_PAGES;
+pub const SNAPSHOT_PAGES: [&str; 5] = crate::hub_route::HUB_PAGES;
 pub const SNAPSHOT_SIZES: [(&str, f64, f64); 2] = [
     (
         "min",
@@ -23,10 +23,49 @@ pub enum HistorySeed {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DictionarySeed {
+    None,
+    /// `LocalFlow` and `teh -> the`.
+    Hub,
+    /// Eight words and four replacements.
+    Responsive,
+}
+
+/// Prompt queue contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueSeed {
+    Empty,
+    /// One pending prompt and one failed with "Orca is not running".
+    Two,
+    /// Three prompts: distinct from the Python `two` fixture.
+    Three,
+    /// Two failed prompts with different causes.
+    Failures,
+}
+
+/// Interactions run on the Style page before the shot (real handlers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleStep {
+    None,
+    /// Explicitly disable cleanup: a distinct state, not an alias of default.
+    Empty,
+    /// Click cleanup "Medium" and Work "Casual" with writes succeeding.
+    Autosaved,
+    /// Richer saved selections for the required populated state.
+    Populated,
+    /// After [`StyleStep::Autosaved`], click Email "Excited" while the config
+    /// cannot be written.
+    SaveError,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scenario {
     pub page: &'static str,
     pub state: &'static str,
     pub history: HistorySeed,
+    pub dictionary: DictionarySeed,
+    pub queue: QueueSeed,
+    pub style: StyleStep,
     pub dictation_enabled: bool,
     pub error: Option<&'static str>,
 }
@@ -45,11 +84,14 @@ impl Scenario {
     }
 }
 
-pub const SCENARIOS: [Scenario; 6] = [
+pub const SCENARIOS: [Scenario; 19] = [
     Scenario {
         page: "Home",
         state: "empty",
         history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
         dictation_enabled: true,
         error: None,
     },
@@ -57,6 +99,9 @@ pub const SCENARIOS: [Scenario; 6] = [
         page: "Home",
         state: "populated",
         history: HistorySeed::Responsive,
+        dictionary: DictionarySeed::Responsive,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
         dictation_enabled: true,
         error: None,
     },
@@ -64,6 +109,9 @@ pub const SCENARIOS: [Scenario; 6] = [
         page: "Home",
         state: "dictation-off",
         history: HistorySeed::Responsive,
+        dictionary: DictionarySeed::Responsive,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
         dictation_enabled: false,
         error: None,
     },
@@ -71,6 +119,9 @@ pub const SCENARIOS: [Scenario; 6] = [
         page: "History",
         state: "empty",
         history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
         dictation_enabled: true,
         error: None,
     },
@@ -78,6 +129,9 @@ pub const SCENARIOS: [Scenario; 6] = [
         page: "History",
         state: "populated",
         history: HistorySeed::Hub,
+        dictionary: DictionarySeed::Hub,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
         dictation_enabled: true,
         error: None,
     },
@@ -85,8 +139,141 @@ pub const SCENARIOS: [Scenario; 6] = [
         page: "History",
         state: "error",
         history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
         dictation_enabled: true,
         error: Some("History is unavailable."),
+    },
+    Scenario {
+        page: "Dictionary",
+        state: "empty",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Dictionary",
+        state: "populated",
+        history: HistorySeed::Hub,
+        dictionary: DictionarySeed::Hub,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Dictionary",
+        state: "entries",
+        history: HistorySeed::Responsive,
+        dictionary: DictionarySeed::Responsive,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Dictionary",
+        state: "error",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: Some("Unable to load local data."),
+    },
+    Scenario {
+        page: "Style",
+        state: "default",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Style",
+        state: "empty",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::Empty,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Style",
+        state: "populated",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::Populated,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Style",
+        state: "autosaved",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::Autosaved,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Style",
+        state: "save-error",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::SaveError,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Prompts",
+        state: "empty",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Prompts",
+        state: "two",
+        history: HistorySeed::Responsive,
+        dictionary: DictionarySeed::Responsive,
+        queue: QueueSeed::Two,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Prompts",
+        state: "failures",
+        history: HistorySeed::Responsive,
+        dictionary: DictionarySeed::Responsive,
+        queue: QueueSeed::Failures,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Prompts",
+        state: "populated",
+        history: HistorySeed::Responsive,
+        dictionary: DictionarySeed::Responsive,
+        queue: QueueSeed::Three,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
     },
 ];
 
@@ -166,19 +353,149 @@ pub fn history_rows(seed: HistorySeed) -> Vec<SeedEntry> {
     }
 }
 
+/// The vocabulary words of a seed.
+pub fn dictionary_words(seed: DictionarySeed) -> Vec<&'static str> {
+    match seed {
+        DictionarySeed::None => Vec::new(),
+        DictionarySeed::Hub => vec!["LocalFlow"],
+        DictionarySeed::Responsive => vec![
+            "LocalFlow",
+            "Kubernetes",
+            "Fireworks",
+            "Orca",
+            "PyObjC",
+            "Obsidian",
+            "Whisper",
+            "Ollama",
+        ],
+    }
+}
+
+/// The `(from, to)` replacements of a seed.
+pub fn dictionary_replacements(seed: DictionarySeed) -> Vec<(&'static str, &'static str)> {
+    match seed {
+        DictionarySeed::None => Vec::new(),
+        DictionarySeed::Hub => vec![("teh", "the")],
+        DictionarySeed::Responsive => vec![
+            ("teh", "the"),
+            ("my email", "me@example.com"),
+            ("lf", "LocalFlow"),
+            ("k8s", "Kubernetes"),
+        ],
+    }
+}
+
+/// One queued prompt of a [`QueueSeed`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeedPrompt {
+    pub title: &'static str,
+    pub body: &'static str,
+    /// `None`: stays pending; `Some(error)`: marked failed with this error.
+    pub failed_with: Option<&'static str>,
+}
+
+/// The prompts of a queue seed, in queue order.
+pub fn queue_prompts(seed: QueueSeed) -> Vec<SeedPrompt> {
+    const REDIS: &str = "Migrate session storage to Redis";
+    const DOCS: &str = "Update deploy docs for Redis";
+    const FILES: &str = "Replace local files.";
+    const DEPENDENCY: &str = "Document the new dependency.";
+    match seed {
+        QueueSeed::Empty => Vec::new(),
+        QueueSeed::Two => vec![
+            SeedPrompt {
+                title: REDIS,
+                body: FILES,
+                failed_with: None,
+            },
+            SeedPrompt {
+                title: DOCS,
+                body: DEPENDENCY,
+                failed_with: Some("Orca is not running"),
+            },
+        ],
+        QueueSeed::Three => vec![
+            SeedPrompt {
+                title: REDIS,
+                body: FILES,
+                failed_with: None,
+            },
+            SeedPrompt {
+                title: DOCS,
+                body: DEPENDENCY,
+                failed_with: None,
+            },
+            SeedPrompt {
+                title: "Verify the Redis rollback runbook",
+                body: "Capture the rollback owner and test results.",
+                failed_with: None,
+            },
+        ],
+        QueueSeed::Failures => vec![
+            SeedPrompt {
+                title: REDIS,
+                body: FILES,
+                failed_with: Some("Orca app is not running — run `orca open`"),
+            },
+            SeedPrompt {
+                title: DOCS,
+                body: DEPENDENCY,
+                failed_with: Some("orca exited 2: repo not found"),
+            },
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
 
     #[test]
+    fn dictionary_style_and_prompt_fixtures_match_python() {
+        assert_eq!(
+            find("Home", "populated").unwrap().dictionary,
+            DictionarySeed::Responsive
+        );
+        assert_eq!(dictionary_words(DictionarySeed::Responsive).len(), 8);
+        assert_eq!(dictionary_replacements(DictionarySeed::Responsive).len(), 4);
+        assert_eq!(dictionary_words(DictionarySeed::Hub), ["LocalFlow"]);
+        assert_eq!(queue_prompts(QueueSeed::Two).len(), 2);
+        assert_eq!(queue_prompts(QueueSeed::Three).len(), 3);
+        let failures = queue_prompts(QueueSeed::Failures);
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().all(|entry| entry.failed_with.is_some()));
+        assert!(queue_prompts(QueueSeed::Empty).is_empty());
+        assert!(dictionary_words(DictionarySeed::None).is_empty());
+        assert_eq!(
+            find("Style", "autosaved").unwrap().style,
+            StyleStep::Autosaved
+        );
+        assert_eq!(
+            find("Style", "save-error").unwrap().style,
+            StyleStep::SaveError
+        );
+        assert_eq!(
+            find("Dictionary", "entries").unwrap().dictionary,
+            DictionarySeed::Responsive
+        );
+        assert_eq!(find("Prompts", "two").unwrap().queue, QueueSeed::Two);
+    }
+
+    #[test]
     fn only_ported_pages_have_empty_and_populated_snapshots() {
-        assert_eq!(SNAPSHOT_PAGES, ["Home", "History"]);
-        assert_eq!(total_snapshots(), 24);
+        assert_eq!(SNAPSHOT_PAGES, crate::hub_route::HUB_PAGES);
+        assert_eq!(total_snapshots(), 76);
         for page in SNAPSHOT_PAGES {
             assert!(history_rows(find(page, "empty").unwrap().history).is_empty());
-            assert!(!history_rows(find(page, "populated").unwrap().history).is_empty());
-            assert_eq!(scenarios_for(page).len(), 3);
+            let populated = find(page, "populated").unwrap();
+            assert!(
+                populated.history != HistorySeed::None
+                    || populated.dictionary != DictionarySeed::None
+                    || populated.queue != QueueSeed::Empty
+                    || populated.style != StyleStep::None
+            );
+            assert!(scenarios_for(page).len() >= 3);
         }
         assert!(find("Meetings", "populated").is_none());
         assert!(find("Home", "missing").is_none());

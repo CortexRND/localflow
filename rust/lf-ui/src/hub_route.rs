@@ -31,7 +31,7 @@ use serde_json::{json, Map, Value};
 
 use crate::pystr::PyStr;
 
-pub const HUB_PAGES: [&str; 2] = ["Home", "History"];
+pub const HUB_PAGES: [&str; 5] = ["Home", "Dictionary", "Prompts", "History", "Style"];
 
 const KNOWN_PAGES: [&str; 10] = [
     "Home",
@@ -434,13 +434,13 @@ mod tests {
         assert_eq!(plan_reopen(None, None), ReopenPlan::Build { page: "Home" });
         assert_eq!(
             plan_reopen(None, Some("Dictionary")),
-            ReopenPlan::Build { page: "Home" }
+            ReopenPlan::Build { page: "Dictionary" }
         );
         // Not closed, but neither visible nor miniaturized (ordered out).
         let hidden = window(false, false, false, "Home");
         assert_eq!(
             plan_reopen(Some(&hidden), Some("Prompts")),
-            ReopenPlan::Build { page: "Home" }
+            ReopenPlan::Build { page: "Prompts" }
         );
         assert_eq!(
             plan_reopen(Some(&hidden), Some("Nonsense")),
@@ -469,7 +469,7 @@ mod tests {
             plan_reopen(Some(&live), Some("Style")),
             ReopenPlan::Reuse {
                 deminiaturize: false,
-                navigate: None
+                navigate: Some("Style")
             }
         );
         let mini = window(false, true, false, "History");
@@ -564,7 +564,10 @@ mod tests {
     fn page_list_and_default() {
         assert_eq!(HUB_PAGES[0], DEFAULT_PAGE);
         assert_eq!(DEFAULT_PAGE, "Home");
-        assert_eq!(HUB_PAGES, ["Home", "History"]);
+        assert_eq!(
+            HUB_PAGES,
+            ["Home", "Dictionary", "Prompts", "History", "Style"]
+        );
     }
 
     #[test]

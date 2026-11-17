@@ -28,7 +28,10 @@ use objc2_foundation::{NSNotification, NSPoint, NSSize, NSString};
 
 use super::actions::{ActionTarget, Timer};
 use super::page::{HubPage, HubServices, Measure, PageCtx, PageHandle};
-use super::pages::{history::HistoryPage, home::HomePage};
+use super::pages::{
+    dictionary::DictionaryPage, history::HistoryPage, home::HomePage, prompts::PromptsPage,
+    style::StylePage,
+};
 use super::style::{
     boxed_measure, color, hide_from_accessibility, page_title, rect, style_flat_button,
     style_surface, text_measure, tokens_for_window, FlippedView, SurfaceStyle,
@@ -48,7 +51,7 @@ pub const CALLOUT_ADVANCE: f64 = 70.0;
 /// Width reserved at the right of the History title for its action button.
 pub const HISTORY_TITLE_RESERVE: f64 = 140.0;
 /// Pages that show their friendly errors inline instead of the callout.
-pub const INLINE_ERROR_PAGES: [&str; 0] = [];
+pub const INLINE_ERROR_PAGES: [&str; 2] = ["Dictionary", "Prompts"];
 
 // ------------------------------------------------------------ pure helpers ---
 
@@ -205,6 +208,9 @@ fn make_pages() -> Vec<(&'static str, PageHandle)> {
             let page: PageHandle = match name {
                 "Home" => Rc::new(RefCell::new(HomePage::new())),
                 "History" => Rc::new(RefCell::new(HistoryPage::new())),
+                "Dictionary" => Rc::new(RefCell::new(DictionaryPage::new())),
+                "Prompts" => Rc::new(RefCell::new(PromptsPage::new())),
+                "Style" => Rc::new(RefCell::new(StylePage::new())),
                 _ => unreachable!("HUB_PAGES contains only implemented pages"),
             };
             (name, page)
@@ -784,8 +790,8 @@ mod tests {
 
     #[test]
     fn dictionary_and_prompts_show_errors_inline() {
-        assert!(shows_callout("Dictionary"));
-        assert!(shows_callout("Prompts"));
+        assert!(!shows_callout("Dictionary"));
+        assert!(!shows_callout("Prompts"));
         assert!(shows_callout("History"));
     }
 }

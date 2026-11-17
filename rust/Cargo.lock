@@ -2045,8 +2045,10 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-quartz-core",
+ "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 

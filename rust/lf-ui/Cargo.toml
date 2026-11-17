@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "LocalFlow native Hub shell, Home and History"
+description = "LocalFlow native Hub pages and shared UI primitives"
 
 [lib]
 name = "lf_ui"
@@ -20,6 +20,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 caseless = { workspace = true }
 log = { workspace = true }
+sha2 = "0.10"
+regex = "1"
 
 # OS-backed serialization of page-request consumers.
 [target.'cfg(unix)'.dependencies]

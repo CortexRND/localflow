@@ -1,4 +1,4 @@
-//! Offscreen shell, Home and History snapshots; no real user files or services.
+//! Offscreen snapshots of the ported Hub pages; no real user files or services.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -16,16 +16,85 @@ mod native {
     use lf_core::config::Config;
     use lf_core::dictionary::DictionaryStore;
     use lf_core::history::{HistoryStore, NewEntry};
+    use lf_ui::backends::prompts::WorkPrompt;
     use lf_ui::mac::hub::Hub;
     use lf_ui::mac::page::HubServices;
     use lf_ui::mac::snapshot::{set_appearance, snapshot_png, spin_run_loop, SnapshotTarget};
     use lf_ui::snapshot_plan::{
-        history_rows, total_snapshots, SCENARIOS, SNAPSHOT_SIZES, SNAPSHOT_THEMES,
+        dictionary_replacements, dictionary_words, history_rows, queue_prompts, total_snapshots,
+        StyleStep, SCENARIOS, SNAPSHOT_SIZES, SNAPSHOT_THEMES,
     };
+    use objc2::rc::Retained;
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    use objc2_app_kit::{
+        NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSButton, NSView,
+    };
+    use serde_json::{Map, Value};
     use std::path::PathBuf;
     use std::rc::Rc;
+
+    /// Every `NSButton` below `view` (depth first).
+    fn buttons(view: &NSView, out: &mut Vec<Retained<NSButton>>) {
+        for sub in view.subviews().iter() {
+            if let Ok(button) = sub.clone().downcast::<NSButton>() {
+                out.push(button);
+            }
+            buttons(&sub, out);
+        }
+    }
+
+    /// Click the button whose accessibility label is `label`, through its real
+    /// target/action (the Python script calls the same handlers).
+    fn click(hub: &Hub, label: &str) -> Result<()> {
+        let mut all = Vec::new();
+        buttons(&hub.content_view(), &mut all);
+        let button = all
+            .iter()
+            .find(|b| {
+                b.accessibilityLabel()
+                    .is_some_and(|l| l.to_string() == label)
+            })
+            .ok_or_else(|| anyhow!("no button labelled {label:?} on {}", hub.current_page()))?;
+        // SAFETY: a plain click on a live button on the main thread.
+        unsafe { button.performClick(None) };
+        // The page asks for deferred rebuilds; let them run.
+        spin_run_loop(0.1);
+        Ok(())
+    }
+
+    /// The Style interactions of `_style_snapshots`.
+    fn run_style_steps(
+        hub: &Hub,
+        services: &HubServices,
+        step: StyleStep,
+        base: &std::path::Path,
+    ) -> Result<()> {
+        if step == StyleStep::None {
+            return Ok(());
+        }
+        // Writes stay in memory: the real config is never touched.
+        if step == StyleStep::Empty {
+            click(hub, "Cleanup level: None")?;
+            return Ok(());
+        }
+        click(hub, "Cleanup level: Medium")?;
+        click(hub, "Work style: Casual")?;
+        if step == StyleStep::Populated {
+            click(hub, "Email style: Casual")?;
+            click(hub, "Personal style: Excited")?;
+        }
+        if step == StyleStep::SaveError {
+            // A config path below a regular file cannot be created: the write
+            // fails like Python's `OSError("read-only")` patch.
+            let blocker = base.join("not-a-directory");
+            std::fs::write(&blocker, b"x")?;
+            *services.config_path.borrow_mut() = Some(blocker.join("config.toml"));
+            services.memory_only_config.set(false);
+            click(hub, "Email style: Excited")?;
+            services.memory_only_config.set(true);
+        }
+        Ok(())
+    }
 
     pub fn run() -> Result<()> {
         let out: PathBuf = std::env::args_os()
@@ -60,15 +129,48 @@ mod native {
             }
             let mut config = Config::defaults_for(true);
             config.set_field("dictation_enabled", scenario.dictation_enabled.into());
-            let services = HubServices::new_isolated(
-                config,
-                Rc::new(history),
-                Rc::new(DictionaryStore::new(Some(base.join("dictionary.json")))),
-            );
+            let dictionary = DictionaryStore::new(Some(base.join("dictionary.json")));
+            for word in dictionary_words(scenario.dictionary) {
+                dictionary.add_word(word)?;
+            }
+            for (from, to) in dictionary_replacements(scenario.dictionary) {
+                dictionary.add_replacement(from, to)?;
+            }
+            let services = HubServices::new_isolated(config, Rc::new(history), Rc::new(dictionary));
+            let prompts = queue_prompts(scenario.queue);
+            let work: Vec<_> = prompts
+                .iter()
+                .map(|p| WorkPrompt::new(p.title, p.body))
+                .collect();
+            let paths: Vec<_> = (1..=work.len())
+                .map(|n| {
+                    base.join(format!("prompt-{n:02}.md"))
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            let entries = services
+                .prompt_queue
+                .add(&work, &paths, "Weekly planning")?;
+            for (entry, prompt) in entries.iter().zip(&prompts) {
+                if let Some(error) = prompt.failed_with {
+                    let id = entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("queue entry missing id"))?;
+                    let mut fields = Map::new();
+                    fields.insert("repo".into(), "localflow".into());
+                    fields.insert("error".into(), error.into());
+                    services
+                        .prompt_queue
+                        .set_status(id, "failed", None, &fields)?;
+                }
+            }
             let hub = Hub::new(mtm, services.clone(), scenario.page);
             if let Some(error) = scenario.error {
                 services.set_page_error(scenario.page, error);
             }
+            run_style_steps(&hub, &services, scenario.style, &base)?;
             for (size, width, height) in SNAPSHOT_SIZES {
                 hub.resize_content(width, height);
                 for (theme, dark) in SNAPSHOT_THEMES {
