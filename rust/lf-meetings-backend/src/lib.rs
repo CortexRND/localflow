@@ -41,7 +41,7 @@ enum Phase {
 fn remove_recovery(saved: lf_meetings::writer::SavedNote) {
     for path in [saved.notes_path, saved.log_path] {
         if let Err(error) = std::fs::remove_file(path) {
-            log::warn!("could not remove completed meeting recovery: {error}");
+            eprintln!("could not remove completed meeting recovery: {error}");
         }
     }
 }
@@ -426,7 +426,7 @@ impl MeetingsBackend {
                 Some(saved)
             }
             Err(error) => {
-                log::error!("could not checkpoint meeting: {error}");
+                eprintln!("could not checkpoint meeting: {error}");
                 None
             }
         }
@@ -605,45 +605,6 @@ impl Backend for MeetingsBackend {
     }
 }
 
-#[cfg(test)]
-mod shutdown_tests {
-    use super::*;
-    use std::sync::mpsc;
-
-    #[test]
-    fn conflict_after_shutdown_stop_claim_waits_for_persistence() {
-        let backend = Arc::new(MeetingsBackend::new().unwrap());
-        backend.state().phase = Phase::Stopping;
-        let (entered, started) = mpsc::channel();
-        let (finished, done) = mpsc::channel();
-        let closing = backend.clone();
-        let shutdown = std::thread::spawn(move || {
-            entered.send(()).unwrap();
-            finished
-                .send(
-                    closing
-                        .finish_shutdown_stop(Err(BackendResponse::error(
-                            409,
-                            "stop raced shutdown",
-                        )))
-                        .is_ok(),
-                )
-                .unwrap();
-        });
-        started.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
-        backend.state().phase = Phase::Idle;
-        backend.idle.notify_all();
-        assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
-        shutdown.join().unwrap();
-        assert!(backend
-            .finish_shutdown_stop(Err(BackendResponse::error(500, "disk error")))
-            .is_err());
-        assert!(backend
-            .finish_shutdown_stop(Err(BackendResponse::error(409, "already idle")))
-            .is_ok());
-    }
-}
 struct ResetSlot<'a> {
     backend: &'a MeetingsBackend,
     armed: bool,
@@ -687,4 +648,44 @@ fn question(request: &BackendRequest, max: usize) -> ResponseResult<String> {
     let question = body.string("question", None, None);
     body.finish()?;
     checked_question(&question, max)
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn conflict_after_shutdown_stop_claim_waits_for_persistence() {
+        let backend = Arc::new(MeetingsBackend::new().unwrap());
+        backend.state().phase = Phase::Stopping;
+        let (entered, started) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let closing = backend.clone();
+        let shutdown = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            finished
+                .send(
+                    closing
+                        .finish_shutdown_stop(Err(BackendResponse::error(
+                            409,
+                            "stop raced shutdown",
+                        )))
+                        .is_ok(),
+                )
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
+        backend.state().phase = Phase::Idle;
+        backend.idle.notify_all();
+        assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
+        shutdown.join().unwrap();
+        assert!(backend
+            .finish_shutdown_stop(Err(BackendResponse::error(500, "disk error")))
+            .is_err());
+        assert!(backend
+            .finish_shutdown_stop(Err(BackendResponse::error(409, "already idle")))
+            .is_ok());
+    }
 }
