@@ -22,9 +22,14 @@ use lf_runtime::menubar::{MeetingStatusPoller, MenuActions, MenuModel, MenuState
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply,
+};
+use objc2_foundation::NSNotification;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::actions::Timer;
 use super::hub::Hub;
@@ -41,6 +46,8 @@ use crate::setup_flow::{FileConfigStore, LaunchAgent, SetupPlatform};
 
 /// Seconds between page-request polls (`_POLL_SECONDS`).
 pub const POLL_SECONDS: f64 = 0.25;
+
+const QUIT_NOTES_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// The "show a window" action the delegate runs on reopen.
 pub type ShowFn = Rc<dyn Fn()>;
@@ -60,13 +67,19 @@ enum MenuCommand {
     Quit,
 }
 
+pub struct AppDelegateState {
+    show: ShowFn,
+    before_terminate: Rc<dyn Fn()>,
+    termination_started: Cell<bool>,
+}
+
 define_class!(
     /// `MainAppDelegate`: shows a window when the app is reopened with none
     /// visible. `NSApplication` keeps only a weak reference to its delegate, so
     /// [`run_app`] holds the strong one for the life of the run loop.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = ShowFn]
+    #[ivars = AppDelegateState]
     #[name = "LFMainAppDelegate"]
     pub struct AppDelegate;
 
@@ -77,19 +90,50 @@ define_class!(
         fn should_handle_reopen(&self, _app: &NSApplication, has_visible: bool) -> bool {
             if !has_visible {
                 // A panic must not unwind into AppKit.
-                let show = self.ivars().clone();
+                let show = self.ivars().show.clone();
                 let _ = catch_unwind(AssertUnwindSafe(|| show()));
             }
             true
+        }
+
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            self.prepare_to_terminate();
+            NSApplicationTerminateReply::TerminateNow
+        }
+
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _notification: &NSNotification) {
+            self.prepare_to_terminate();
         }
     }
 );
 
 impl AppDelegate {
     pub fn new(mtm: MainThreadMarker, show: ShowFn) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(show);
+        Self::new_with_termination(mtm, show, None)
+    }
+
+    pub fn new_with_termination(
+        mtm: MainThreadMarker,
+        show: ShowFn,
+        before_terminate: Option<Rc<dyn Fn()>>,
+    ) -> Retained<Self> {
+        let this = mtm.alloc::<Self>().set_ivars(AppDelegateState {
+            show,
+            before_terminate: before_terminate.unwrap_or_else(|| Rc::new(|| {})),
+            termination_started: Cell::new(false),
+        });
         // SAFETY: plain `init` on NSObject.
         unsafe { msg_send![super(this), init] }
+    }
+
+    fn prepare_to_terminate(&self) {
+        if self.ivars().termination_started.replace(true) {
+            return;
+        }
+        let before_terminate = self.ivars().before_terminate.clone();
+        let _ = catch_unwind(AssertUnwindSafe(|| before_terminate()));
     }
 }
 
@@ -99,9 +143,18 @@ impl AppDelegate {
 /// run-loop timer for the life of the app and the app is activated whenever it
 /// returns true. Panics inside `poll` are swallowed.
 pub fn run_app(mtm: MainThreadMarker, show: ShowFn, poll: Option<Box<dyn Fn() -> bool>>) {
+    run_app_with_termination(mtm, show, poll, None);
+}
+
+fn run_app_with_termination(
+    mtm: MainThreadMarker,
+    show: ShowFn,
+    poll: Option<Box<dyn Fn() -> bool>>,
+    before_terminate: Option<Rc<dyn Fn()>>,
+) {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    let delegate = AppDelegate::new(mtm, show.clone());
+    let delegate = AppDelegate::new_with_termination(mtm, show.clone(), before_terminate);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     show();
     // Kept alive until the run loop returns; dropping invalidates the timer.
@@ -630,12 +683,6 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
         Box::new(move || {
             for command in menu_commands.try_iter() {
                 if let MenuCommand::Quit = command {
-                    if let Some(hub) = router.hub() {
-                        hub.shutdown();
-                    }
-                    if let Some(setup) = router.setup_window() {
-                        setup.close();
-                    }
                     NSApplication::sharedApplication(mtm).terminate(None);
                     continue;
                 }
@@ -694,6 +741,20 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
             }
         })
     };
-    run_app(mtm, show, Some(poll));
+    let before_terminate: Rc<dyn Fn()> = {
+        let router = router.clone();
+        Rc::new(move || {
+            if let Some(hub) = router.hub() {
+                hub.shutdown();
+            }
+            if let Some(setup) = router.setup_window() {
+                setup.close();
+            }
+            if !super::pages::meetings::wait_for_notes_writes(QUIT_NOTES_TIMEOUT) {
+                log::warn!("timed out waiting for meeting notes writes during quit");
+            }
+        })
+    };
+    run_app_with_termination(mtm, show, Some(poll), Some(before_terminate));
     Ok(())
 }

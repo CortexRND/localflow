@@ -13,7 +13,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -212,6 +212,7 @@ struct Controls {
 
 struct State {
     client: RefCell<Option<Arc<dyn MeetingClient>>>,
+    writer: Arc<MeetingNotesWriter>,
     sender: mpsc::Sender<Event>,
     receiver: mpsc::Receiver<Event>,
     timer: RefCell<Option<Timer>>,
@@ -266,6 +267,7 @@ impl State {
         let (sender, receiver) = mpsc::channel();
         Self {
             client: RefCell::new(None),
+            writer: notes_writer(),
             sender,
             receiver,
             timer: RefCell::new(None),
@@ -400,9 +402,15 @@ impl State {
         };
         let generation = self.generation.get();
         let sender = self.sender.clone();
-        let writer = notes_writer();
+        let writer = self.writer.clone();
         let name = format!("localflow-meeting-{}", kind.name());
+        // Register every notes write before spawning, including autosaves.
+        // The process-wide registry lets application quit wait for writes from
+        // replaced Hub instances as well as the currently displayed one.
+        let notes_write =
+            matches!(&request, Request::Notes { .. }).then(|| notes_write_tracker().register());
         let spawned = thread::Builder::new().name(name).spawn(move || {
+            let _notes_write = notes_write;
             let event_kind = match request {
                 Request::Templates => EventKind::Templates(client.templates()),
                 Request::Status => EventKind::Status(client.status()),
@@ -610,7 +618,7 @@ impl State {
         self.save_in_flight.set(true);
         self.save_kind.set(Some(kind));
         self.set_notes_notice("Saving…");
-        let ticket = notes_writer().ticket();
+        let ticket = self.writer.ticket();
         self.launch(
             match kind {
                 SaveKind::Autosave => RequestKind::NotesAutosave,
@@ -913,7 +921,12 @@ impl State {
         self.visible.set(false);
         let stop = self.stop_flush_pending.get()
             || (self.save_in_flight.get() && self.save_kind.get() == Some(SaveKind::StopFlush));
-        let unsaved = stop || self.notes_due.get().is_some() || self.save_pending.get();
+        // An autosave already on a worker is not yet durable either. Close with
+        // a newer final ticket even when no debounce or pending flag remains.
+        let unsaved = stop
+            || self.save_in_flight.get()
+            || self.notes_due.get().is_some()
+            || self.save_pending.get();
         self.notes_due.set(None);
         self.save_pending.set(false);
         self.stop_flush_pending.set(false);
@@ -931,11 +944,15 @@ impl State {
             log::warn!("meeting notes flush on close failed: no meeting client");
             return;
         };
-        let ticket = notes_writer().ticket();
-        let writer = notes_writer();
+        let ticket = self.writer.ticket();
+        let writer = self.writer.clone();
+        // Increment before spawn so an immediate bounded termination wait can
+        // never observe zero while the final worker is still being created.
+        let notes_write = notes_write_tracker().register();
         let spawned = thread::Builder::new()
             .name("localflow-meeting-close-flush".into())
             .spawn(move || {
+                let _notes_write = notes_write;
                 let result = writer.save(&*client, ticket, &text);
                 match result {
                     Ok(_) if stop => {
@@ -951,6 +968,82 @@ impl State {
             log::warn!("could not start meeting close flush: {error}");
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct NotesWriteTracker {
+    pending: Mutex<usize>,
+    idle: Condvar,
+}
+
+struct NotesWriteGuard {
+    tracker: Arc<NotesWriteTracker>,
+}
+
+impl NotesWriteTracker {
+    fn register(self: &Arc<Self>) -> NotesWriteGuard {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *pending += 1;
+        NotesWriteGuard {
+            tracker: self.clone(),
+        }
+    }
+
+    fn wait(&self, timeout: Duration) -> bool {
+        let started = Instant::now();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *pending != 0 {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, result) = self
+                .idle
+                .wait_timeout(pending, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            pending = next;
+            if result.timed_out() {
+                return *pending == 0;
+            }
+        }
+        true
+    }
+}
+
+impl Drop for NotesWriteGuard {
+    fn drop(&mut self) {
+        let mut pending = self
+            .tracker
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *pending -= 1;
+        let idle = *pending == 0;
+        drop(pending);
+        if idle {
+            self.tracker.idle.notify_all();
+        }
+    }
+}
+
+fn notes_write_tracker() -> Arc<NotesWriteTracker> {
+    // This must have the same process-wide lifetime as `notes_writer`: an old
+    // Hub's close worker can still be running after a replacement Hub exists.
+    static WRITES: OnceLock<Arc<NotesWriteTracker>> = OnceLock::new();
+    WRITES
+        .get_or_init(|| Arc::new(NotesWriteTracker::default()))
+        .clone()
+}
+
+/// Wait for all notes writes registered so far, never longer than `timeout`.
+pub fn wait_for_notes_writes(timeout: Duration) -> bool {
+    notes_write_tracker().wait(timeout)
 }
 
 fn notes_writer() -> Arc<MeetingNotesWriter> {
@@ -2035,6 +2128,64 @@ mod tests {
         chat_thread: Mutex<Option<thread::ThreadId>>,
     }
 
+    struct BlockingFirstSaveClient {
+        inner: FakeMeetingClient,
+        save_calls: Mutex<usize>,
+        first_save_started: mpsc::Sender<()>,
+        release_first: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl MeetingClient for BlockingFirstSaveClient {
+        fn status(&self) -> MeetingResult<Value> {
+            self.inner.status()
+        }
+
+        fn templates(&self) -> MeetingResult<Value> {
+            self.inner.templates()
+        }
+
+        fn start(
+            &self,
+            title: &str,
+            category: &str,
+            template: &str,
+            user_notes: &str,
+            auto_title: Option<bool>,
+        ) -> MeetingResult<Value> {
+            self.inner
+                .start(title, category, template, user_notes, auto_title)
+        }
+
+        fn save_notes(&self, notes: &str) -> MeetingResult<Value> {
+            let call = {
+                let mut calls = self.save_calls.lock().unwrap();
+                *calls += 1;
+                *calls
+            };
+            if call == 1 {
+                self.first_save_started.send(()).unwrap();
+                let (released, idle) = &*self.release_first;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = idle.wait(released).unwrap();
+                }
+            }
+            self.inner.save_notes(notes)
+        }
+
+        fn stop(&self) -> MeetingResult<Value> {
+            self.inner.stop()
+        }
+
+        fn chat(&self, question: &str) -> MeetingResult<Value> {
+            self.inner.chat(question)
+        }
+
+        fn dismiss(&self) -> MeetingResult<()> {
+            self.inner.dismiss()
+        }
+    }
+
     impl MeetingClient for ObservedChatClient {
         fn status(&self) -> MeetingResult<Value> {
             self.inner.status()
@@ -2105,8 +2256,9 @@ mod tests {
         }
     }
 
-    fn page(client: Arc<FakeMeetingClient>, snapshot: MeetingsPageSnapshot) -> MeetingsPage {
-        let page = MeetingsPage::new();
+    fn page(client: Arc<dyn MeetingClient>, snapshot: MeetingsPageSnapshot) -> MeetingsPage {
+        let mut page = MeetingsPage::new();
+        Rc::get_mut(&mut page.state).unwrap().writer = Arc::new(MeetingNotesWriter::new());
         page.state.install_client(client);
         page.seed_snapshot(snapshot);
         page
@@ -2440,5 +2592,81 @@ mod tests {
         assert!(page.state.closed.get());
         assert!(page.state.status.borrow().is_some());
         assert_ne!(page.state.status_value()["session"]["seconds"], 99);
+    }
+
+    #[test]
+    fn shutdown_includes_inflight_autosave_and_waits_for_newest_text() {
+        let (started, first_save_started) = mpsc::channel();
+        let release_first = Arc::new((Mutex::new(false), Condvar::new()));
+        let client = Arc::new(BlockingFirstSaveClient {
+            inner: FakeMeetingClient::new(),
+            save_calls: Mutex::new(0),
+            first_save_started: started,
+            release_first: release_first.clone(),
+        });
+        client
+            .inner
+            .start("Planning", "", "general", "agenda", Some(false))
+            .unwrap();
+        let page = page(client.clone(), active(8));
+        let now = Instant::now();
+        page.state.notes_edited_at("before quit".into(), now);
+        page.state.tick_at(now + NOTES_DEBOUNCE);
+        first_save_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("autosave did not enter the client");
+
+        // Leave only the normal in-flight write set: no debounce, no pending
+        // autosave, and no stop flush. The final draft still has to win.
+        let before = (
+            page.state.save_in_flight.get(),
+            page.state.save_kind.get(),
+            page.state.notes_due.get(),
+            page.state.save_pending.get(),
+            page.state.stop_flush_pending.get(),
+        );
+        *page.state.notes_text.borrow_mut() = "newest text at quit".into();
+        page.state.shutdown();
+
+        {
+            let (released, idle) = &*release_first;
+            *released.lock().unwrap() = true;
+            idle.notify_all();
+        }
+        assert_eq!(before, (true, Some(SaveKind::Autosave), None, false, false));
+        assert!(
+            wait_for_notes_writes(Duration::from_secs(2)),
+            "quit wait returned before both writes completed"
+        );
+        let saves: Vec<String> = client
+            .inner
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                MeetingCall::SaveNotes(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(saves, ["before quit", "newest text at quit"]);
+        assert_eq!(
+            client.status().unwrap()["session"]["user_notes"],
+            "newest text at quit"
+        );
+    }
+
+    #[test]
+    fn notes_write_wait_covers_older_hub_writes_and_stays_bounded() {
+        let tracker = Arc::new(NotesWriteTracker::default());
+        assert!(tracker.wait(Duration::ZERO));
+        let previous_hub_write = tracker.register();
+        let current_hub_write = tracker.register();
+        drop(current_hub_write);
+        assert!(!tracker.wait(Duration::ZERO));
+
+        let started = Instant::now();
+        assert!(!tracker.wait(Duration::from_millis(20)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(previous_hub_write);
+        assert!(tracker.wait(Duration::ZERO));
     }
 }

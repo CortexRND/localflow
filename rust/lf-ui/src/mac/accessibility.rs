@@ -1,5 +1,6 @@
 //! Native AppKit accessibility audits, run by `cargo test -p lf-ui` on macOS.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -8,10 +9,10 @@ use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
 use lf_runtime::menubar::{MenuActions, MenuModel};
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, Message};
+use objc2::{msg_send, MainThreadMarker, Message};
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSButton, NSPopUpButton,
-    NSSwitch, NSTextField, NSView,
+    NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationTerminateReply,
+    NSButton, NSPopUpButton, NSSwitch, NSTextField, NSView,
 };
 use objc2_foundation::NSString;
 
@@ -110,6 +111,20 @@ pub fn run() {
         NSApplicationActivationPolicy::Regular
     );
     println!("Native Hub menu audit: runtime default Accessory, Hub retains Regular/Dock policy");
+    let terminate_calls = Rc::new(Cell::new(0));
+    let count = terminate_calls.clone();
+    let delegate = lf_ui::mac::app::AppDelegate::new_with_termination(
+        mtm,
+        Rc::new(|| {}),
+        Some(Rc::new(move || count.set(count.get() + 1))),
+    );
+    for _ in 0..2 {
+        let reply: NSApplicationTerminateReply =
+            unsafe { msg_send![&*delegate, applicationShouldTerminate: &*app] };
+        assert_eq!(reply, NSApplicationTerminateReply::TerminateNow);
+    }
+    assert_eq!(terminate_calls.get(), 1);
+    println!("Native Hub termination audit: AppKit quit invokes the flush callback once");
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
     let mut failures = Vec::new();
