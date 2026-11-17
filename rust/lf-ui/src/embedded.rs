@@ -39,6 +39,65 @@ struct PublishSpeech {
     destination: SharedSpeech,
 }
 
+fn refresh_server_speech(
+    previous: &Mutex<Config>,
+    shared: &SharedSpeech,
+    fresh: Config,
+    factory: &lf_runtime::worker::SttFactory,
+) -> Result<bool, String> {
+    let mut previous = previous.lock().unwrap();
+    if lf_runtime::live::STT_FIELDS
+        .iter()
+        .any(|field| previous.field(field) != fresh.field(field))
+    {
+        let mut current = shared.0.lock().unwrap();
+        if Arc::strong_count(&current) > 1 {
+            return Ok(false);
+        }
+        *current = factory(&fresh)?;
+    }
+    *previous = fresh;
+    Ok(true)
+}
+
+fn watch_server_speech(
+    config: Config,
+    shared: SharedSpeech,
+    factory: lf_runtime::worker::SttFactory,
+) -> Result<lf_runtime::live::WatcherGuard> {
+    let previous = Mutex::new(config);
+    let pending = Arc::new(Mutex::new(None::<Config>));
+    let retry_pending = pending.clone();
+    let retry: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let mut pending = retry_pending.lock().unwrap();
+        if let Some(fresh) = pending.as_ref() {
+            match refresh_server_speech(&previous, &shared, fresh.clone(), &factory) {
+                Ok(true) => {
+                    pending.take();
+                }
+                Ok(false) => {}
+                Err(error) => log::error!("server speech selection failed: {error}"),
+            }
+        }
+    });
+    let apply_retry = retry.clone();
+    let apply: Arc<dyn Fn(Config) + Send + Sync> = Arc::new(move |fresh| {
+        *pending.lock().unwrap() = Some(fresh);
+        apply_retry();
+    });
+    let watch = lf_runtime::live::ConfigWatcher::new(
+        lf_core::config::try_config_path()?,
+        Arc::new(|| lf_runtime::settings::load_runtime_config(None)),
+        apply.clone(),
+    )
+    .with_tick(retry, lf_runtime::live::DEFAULT_INTERVAL)
+    .start();
+    if let Ok(fresh) = lf_runtime::settings::load_runtime_config(None) {
+        apply(fresh);
+    }
+    Ok(watch)
+}
+
 impl SpeechEngine for PublishSpeech {
     fn loaded(&self) -> bool {
         self.inner.loaded()
@@ -60,6 +119,7 @@ pub struct EmbeddedRuntime {
     pub runtime: Option<RuntimeHandle>,
     server: Option<ServerHandle>,
     pub speech: Arc<dyn SpeechEngine>,
+    server_speech_watch: Option<lf_runtime::live::WatcherGuard>,
 }
 
 impl EmbeddedRuntime {
@@ -70,18 +130,20 @@ impl EmbeddedRuntime {
                 model.input_warning = Some(format!("Speech model unavailable: {error}"))
             })
         });
-        let initial: Arc<dyn SpeechEngine> = Arc::new(lf_runtime::engine::ReportingSpeech::new(
-            Arc::new(lf_stt::runtime::LazySpeechAdapter::new(config.clone())),
-            report.clone(),
-        ));
+        let make_speech: lf_runtime::worker::SttFactory = Arc::new(move |config| {
+            Ok(Arc::new(lf_runtime::engine::ReportingSpeech::new(
+                Arc::new(lf_stt::runtime::LazySpeechAdapter::new(config.clone())),
+                report.clone(),
+            )))
+        });
+        let initial = make_speech(&config).expect("lazy speech construction is infallible");
         let shared = SharedSpeech(Arc::new(Mutex::new(initial.clone())));
         let speech: Arc<dyn SpeechEngine> = Arc::new(shared.clone());
+        let server_shared = shared.clone();
+        let reload_speech = make_speech.clone();
         let build_stt: lf_runtime::worker::SttFactory = Arc::new(move |config| {
             Ok(Arc::new(PublishSpeech {
-                inner: Arc::new(lf_runtime::engine::ReportingSpeech::new(
-                    Arc::new(lf_stt::runtime::LazySpeechAdapter::new(config.clone())),
-                    report.clone(),
-                )),
+                inner: reload_speech(config)?,
                 destination: shared.clone(),
             }) as Arc<dyn SpeechEngine>)
         });
@@ -107,7 +169,7 @@ impl EmbeddedRuntime {
                 let dictation = lf_runtime::server::DictationBackend::new(speech.clone(), &config);
                 let backend = lf_meetings_backend::MeetingsBackend::new()?
                     .with_inner(Arc::new(dictation))
-                    .with_capture(Arc::new(Capture(speech.clone())));
+                    .with_capture(Arc::new(Capture(server_shared.clone())));
                 Ok(Arc::new(
                     ServerState::load_with_backend(Arc::new(backend))?
                         .with_config_reader(Arc::new(lf_core::config::load_config))
@@ -130,14 +192,25 @@ impl EmbeddedRuntime {
             "in-process runtime: ready; speech loaded: {}",
             speech.loaded()
         );
+        let server_speech_watch = if runtime.is_none() && server.is_some() {
+            watch_server_speech(config, server_shared, make_speech)
+                .map_err(|error| {
+                    log::error!("could not watch server speech settings: {error}");
+                })
+                .ok()
+        } else {
+            None
+        };
         Self {
             runtime,
             server,
             speech,
+            server_speech_watch,
         }
     }
 
     pub fn shutdown(&mut self) {
+        self.server_speech_watch.take();
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.shutdown();
         }
@@ -255,7 +328,7 @@ impl ServerHandle {
     }
 }
 
-struct Capture(Arc<dyn SpeechEngine>);
+struct Capture(SharedSpeech);
 
 #[cfg(test)]
 #[test]
@@ -300,7 +373,7 @@ impl lf_meetings::Transcriber for MeetingSpeech {
 }
 impl lf_meetings_backend::CaptureFactory for Capture {
     fn transcriber(&self, _: &Config) -> Result<Arc<dyn lf_meetings::Transcriber>> {
-        Ok(Arc::new(MeetingSpeech(self.0.clone())))
+        Ok(Arc::new(MeetingSpeech(self.0.current())))
     }
     fn microphone(&self, config: &Config) -> Result<Box<dyn lf_meetings::AudioSource>> {
         Ok(Box::new(
@@ -322,6 +395,59 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn server_only_speech_tracks_settings_lazily_after_meeting_borrow_ends() {
+        struct Engine(String);
+        impl SpeechEngine for Engine {
+            fn loaded(&self) -> bool {
+                false
+            }
+            fn load(&self) -> Result<(), String> {
+                panic!("must remain lazy")
+            }
+            fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+                Ok(self.0.clone())
+            }
+            fn unload(&self) {}
+        }
+        let factory: lf_runtime::worker::SttFactory = Arc::new(|config| {
+            let model = config.field_str("model_size").unwrap_or_default();
+            if model == "invalid" {
+                return Err("selection failed".into());
+            }
+            Ok(Arc::new(Engine(model.into())))
+        });
+        let original = Config::default();
+        let shared = SharedSpeech(Arc::new(Mutex::new(factory(&original).unwrap())));
+        let previous = Mutex::new(original.clone());
+        let meeting =
+            lf_meetings_backend::CaptureFactory::transcriber(&Capture(shared.clone()), &original)
+                .unwrap();
+        let mut fresh = original.clone();
+        fresh.set_field("model_size", serde_json::json!("new-model"));
+        assert!(!refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap());
+        assert_eq!(
+            meeting.transcribe(&[], None).unwrap(),
+            original.field_str("model_size").unwrap()
+        );
+        drop(meeting);
+        assert!(refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap());
+        assert_eq!(shared.transcribe(&[], None).unwrap(), "new-model");
+        assert!(!shared.loaded());
+        let same = shared.current();
+        fresh.set_field("sounds_enabled", serde_json::json!(false));
+        assert!(refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap());
+        assert!(Arc::ptr_eq(&same, &shared.current()));
+        drop(same);
+        fresh.set_field("model_size", serde_json::json!("invalid"));
+        assert!(refresh_server_speech(&previous, &shared, fresh, &factory).is_err());
+        assert_eq!(shared.transcribe(&[], None).unwrap(), "new-model");
+        assert_eq!(
+            previous.lock().unwrap().field_str("model_size"),
+            Some("new-model")
+        );
+    }
 
     #[test]
     fn new_server_initializes_only_missing_or_empty_tokens_and_reports_file_errors() {
