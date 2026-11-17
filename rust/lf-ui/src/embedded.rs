@@ -504,6 +504,7 @@ struct Capture(SharedSpeech);
 #[cfg(test)]
 #[test]
 fn stalled_chat_cannot_starve_final_meeting_audio_or_quit() {
+    let _writes = crate::shutdown::TestWrites::new();
     use crate::backends::{
         http::{HttpMeetingClient, HttpTransport},
         meeting::MeetingClient,
@@ -614,6 +615,7 @@ fn stalled_chat_cannot_starve_final_meeting_audio_or_quit() {
 #[cfg(test)]
 #[test]
 fn closing_notes_queued_behind_autosave_are_acknowledged_before_http_stops() {
+    let _writes = crate::shutdown::TestWrites::new();
     use crate::backends::{
         http::{HttpMeetingClient, HttpTransport},
         meeting::MeetingNotesWriter,
@@ -738,6 +740,7 @@ fn closing_notes_queued_behind_autosave_are_acknowledged_before_http_stops() {
 #[test]
 #[cfg(test)]
 fn shutdown_keeps_speech_available_for_final_meeting_audio() {
+    let _writes = crate::shutdown::TestWrites::new();
     use lf_server::backend::{Backend, BackendRequest, BackendResponse};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -821,6 +824,7 @@ fn shutdown_keeps_speech_available_for_final_meeting_audio() {
 #[cfg(test)]
 #[test]
 fn shutdown_flushes_notes_before_backend_and_signals_even_on_save_error() {
+    let _writes = crate::shutdown::TestWrites::new();
     use lf_server::backend::{Backend, BackendRequest, BackendResponse};
     use std::sync::atomic::{AtomicBool, Ordering};
     struct Save(Arc<AtomicBool>);

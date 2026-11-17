@@ -103,10 +103,42 @@ impl PendingWrite {
 }
 
 fn pending_writes() -> Arc<PendingWrites> {
+    #[cfg(test)]
+    if let Some(writes) = TEST_WRITES.with(|writes| writes.borrow().clone()) {
+        return writes;
+    }
     static WRITES: OnceLock<Arc<PendingWrites>> = OnceLock::new();
     WRITES
         .get_or_init(|| Arc::new(PendingWrites::default()))
         .clone()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_WRITES: std::cell::RefCell<Option<Arc<PendingWrites>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestWrites {
+    previous: Option<Arc<PendingWrites>>,
+    thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl TestWrites {
+    pub(crate) fn new() -> Self {
+        Self {
+            previous: TEST_WRITES.with(|writes| writes.replace(Some(Arc::default()))),
+            thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestWrites {
+    fn drop(&mut self) {
+        TEST_WRITES.with(|writes| writes.replace(self.previous.take()));
+    }
 }
 
 /// Wait for all writes registered so far, never longer than `timeout`.
@@ -132,6 +164,45 @@ pub fn register_pending_write() -> PendingWrite {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn isolated_registration_restores_its_owner_and_tracks_spawned_writes() {
+        let global = pending_writes();
+        let scope = TestWrites::new();
+        let outer = pending_writes();
+        assert!(!Arc::ptr_eq(&global, &outer));
+        let write = register_pending_write();
+        {
+            let _nested = TestWrites::new();
+            assert!(!Arc::ptr_eq(&outer, &pending_writes()));
+            assert!(wait_for_pending_writes(Duration::ZERO));
+        }
+        assert!(Arc::ptr_eq(&outer, &pending_writes()));
+        assert!(!wait_for_pending_writes(Duration::ZERO));
+        let worker = std::thread::spawn(move || drop(write));
+        assert!(wait_for_pending_writes(Duration::from_secs(1)));
+        worker.join().unwrap();
+        drop(scope);
+        assert!(Arc::ptr_eq(&global, &pending_writes()));
+    }
+
+    #[test]
+    fn isolated_scopes_do_not_wait_for_other_tests() {
+        let (ready, started) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let _scope = TestWrites::new();
+            let _write = register_pending_write();
+            ready.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+        let _scope = TestWrites::new();
+        let idle = wait_for_pending_writes(Duration::ZERO);
+        release.send(()).unwrap();
+        other.join().unwrap();
+        assert!(idle);
+    }
 
     #[test]
     fn meeting_flush_extends_normal_budget_but_never_exceeds_hard_cap() {
