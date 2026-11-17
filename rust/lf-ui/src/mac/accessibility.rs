@@ -19,14 +19,16 @@ use objc2_foundation::NSString;
 use lf_ui::hub_route::HUB_PAGES;
 use lf_ui::mac::hub::Hub;
 use lf_ui::mac::page::HubServices;
-use lf_ui::mac::style::HalftoneView;
 use lf_ui::mac::snapshot::spin_run_loop;
+use lf_ui::mac::style::HalftoneView;
 
 fn search_field(view: &NSView) -> Option<Retained<NSSearchField>> {
     if let Ok(field) = view.retain().downcast::<NSSearchField>() {
         return Some(field);
     }
-    view.subviews().iter().find_map(|child| search_field(&child))
+    view.subviews()
+        .iter()
+        .find_map(|child| search_field(&child))
 }
 
 fn has_text(view: &NSView, text: &str) -> bool {
@@ -46,14 +48,25 @@ fn assert_history_search(hub: &Hub) {
         ("", "A polished transcript."),
     ] {
         let field = search_field(&hub.content_view()).expect("History search field");
-        assert!(field.sendsWholeSearchString(), "typing must not rebuild the field");
+        assert!(
+            field.sendsWholeSearchString(),
+            "typing must not rebuild the field"
+        );
         field.setStringValue(&NSString::from_str(query));
         assert!(unsafe { field.sendAction_to(field.action(), field.target().as_deref()) });
         spin_run_loop(0.1);
-        assert_eq!(search_field(&hub.content_view()).unwrap().stringValue().to_string(), query);
+        assert_eq!(
+            search_field(&hub.content_view())
+                .unwrap()
+                .stringValue()
+                .to_string(),
+            query
+        );
         assert!(has_text(&hub.content_view(), expected));
     }
-    println!("Native History search audit: explicit submit, matching, empty and cleared queries passed");
+    println!(
+        "Native History search audit: explicit submit, matching, empty and cleared queries passed"
+    );
 }
 
 fn nonempty(text: Option<Retained<NSString>>) -> bool {

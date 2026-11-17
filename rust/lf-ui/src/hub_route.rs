@@ -57,6 +57,30 @@ pub fn lock_dir() -> PathBuf {
     lf_core::home::localflow_dir()
 }
 
+/// Own the shared Python/Rust Hub lock, or hand the page to its current owner.
+pub fn acquire_main_app(
+    page: Option<&str>,
+) -> std::io::Result<Option<lf_runtime::singleinstance::SingleInstance>> {
+    acquire_main_app_at(&lock_dir(), page)
+}
+
+fn acquire_main_app_at(
+    dir: &Path,
+    page: Option<&str>,
+) -> std::io::Result<Option<lf_runtime::singleinstance::SingleInstance>> {
+    let instance = lf_runtime::singleinstance::acquire_at(&dir.join("main-app.lock"))?;
+    if instance.is_none() {
+        if let Some(page) = page {
+            if !RequestFile::new(dir).write_request(page, &system_now) {
+                return Err(std::io::Error::other(
+                    "could not hand the page request to the running LocalFlow",
+                ));
+            }
+        }
+    }
+    Ok(instance)
+}
+
 /// The canonical page name, or `None` when `page` is not a Hub page. Strict:
 /// only surrounding whitespace is ignored (`"hot phrases"` is rejected).
 pub fn validate_page(page: &str) -> Option<&'static str> {
@@ -543,6 +567,82 @@ mod tests {
         assert_eq!(HUB_PAGES[0], DEFAULT_PAGE);
         assert_eq!(DEFAULT_PAGE, "Home");
         assert_eq!(HUB_PAGES, ["Home", "History"]);
+    }
+
+    #[test]
+    fn main_app_owner_excludes_duplicates_and_hands_off_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let requests = RequestFile::new(dir);
+        let owner = acquire_main_app_at(dir, Some("Home")).unwrap().unwrap();
+        assert_eq!(owner.path(), dir.join("main-app.lock"));
+        assert!(requests.consume_request(&now).is_none());
+        assert!(acquire_main_app_at(dir, Some("History")).unwrap().is_none());
+        assert!(acquire_main_app_at(dir, None).unwrap().is_none());
+        assert_eq!(requests.consume_request(&now), Some("History"));
+        assert!(requests.consume_request(&now).is_none());
+        drop(owner);
+        assert!(acquire_main_app_at(dir, None).unwrap().is_some());
+        let (pid, stamp) = lf_runtime::singleinstance::read_holder_at(&dir.join("main-app.lock"));
+        assert_eq!(pid, Some(std::process::id()));
+        assert!(chrono::DateTime::parse_from_rfc3339(&stamp.unwrap()).is_ok());
+    }
+
+    #[test]
+    fn main_app_lock_and_handoff_errors_are_not_treated_as_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("blocked");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert!(acquire_main_app_at(&blocked, None).is_err());
+        let _owner = acquire_main_app_at(temp.path(), None).unwrap().unwrap();
+        fs::create_dir(temp.path().join(REQUEST_NAME)).unwrap();
+        assert!(acquire_main_app_at(temp.path(), Some("History")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_main_app_owner_excludes_rust_and_receives_the_page() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".localflow");
+        let mut python = Command::new("python3")
+            .args([
+                "-c",
+                r#"
+import sys
+sys.path.insert(0, sys.argv[1])
+from localflow.singleinstance import acquire
+lock = acquire('main-app')
+assert lock is not None
+print('locked', flush=True)
+sys.stdin.readline()
+lock.release()
+"#,
+            ])
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .env("HOME", temp.path())
+            .env("LOCALFLOW_PLATFORM", "darwin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(python.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "locked");
+        assert!(acquire_main_app_at(&dir, Some("History"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            RequestFile::new(&dir).consume_request(&now),
+            Some("History")
+        );
+        drop(python.stdin.take());
+        assert!(python.wait().unwrap().success());
+        assert!(acquire_main_app_at(&dir, None).unwrap().is_some());
     }
 
     #[test]

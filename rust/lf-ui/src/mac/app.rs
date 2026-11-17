@@ -22,8 +22,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationTerminateReply,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSRunningApplication,
 };
 use objc2_foundation::NSNotification;
 use std::sync::Arc;
@@ -307,11 +307,21 @@ impl MenuSlot {
 
 /// Run the Hub shell until quit; subsequent stack layers add service adapters.
 pub fn run_hub(initial_page: Option<&str>) -> Result<()> {
-    let mtm =
-        MainThreadMarker::new().ok_or_else(|| anyhow!("the Hub must run on the main thread"))?;
     let page = initial_page
         .and_then(hub_route::canonical_page)
         .map(|name| hub_route::ported_page(Some(name)));
+    let Some(_instance) = hub_route::acquire_main_app(page)? else {
+        let (pid, _) = lf_runtime::singleinstance::read_holder("main-app");
+        if let Some(owner) = pid
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(NSRunningApplication::runningApplicationWithProcessIdentifier)
+        {
+            owner.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+        }
+        return Ok(());
+    };
+    let mtm =
+        MainThreadMarker::new().ok_or_else(|| anyhow!("the Hub must run on the main thread"))?;
     let (commands, menu_commands) = std::sync::mpsc::channel();
     let menu = Rc::new(MenuSlot::default());
     let slot = HubSlot::new(mtm, real_services, page);
