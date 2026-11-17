@@ -29,8 +29,8 @@ use objc2_foundation::{NSNotification, NSPoint, NSSize, NSString};
 use super::actions::{ActionTarget, Timer};
 use super::page::{HubPage, HubServices, Measure, PageCtx, PageHandle};
 use super::pages::{
-    dictionary::DictionaryPage, history::HistoryPage, home::HomePage, prompts::PromptsPage,
-    style::StylePage,
+    ask::AskPage, dictionary::DictionaryPage, history::HistoryPage, home::HomePage,
+    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, prompts::PromptsPage, style::StylePage,
 };
 use super::style::{
     boxed_measure, color, hide_from_accessibility, page_title, rect, style_flat_button,
@@ -206,6 +206,9 @@ fn make_pages() -> Vec<(&'static str, PageHandle)> {
         .iter()
         .map(|&name| {
             let page: PageHandle = match name {
+                "Ask" => Rc::new(RefCell::new(AskPage::new())),
+                "Meetings" => Rc::new(RefCell::new(MeetingsPage::new())),
+                "Hot Phrases" => Rc::new(RefCell::new(HotPhrasesPage::new())),
                 "Home" => Rc::new(RefCell::new(HomePage::new())),
                 "History" => Rc::new(RefCell::new(HistoryPage::new())),
                 "Dictionary" => Rc::new(RefCell::new(DictionaryPage::new())),

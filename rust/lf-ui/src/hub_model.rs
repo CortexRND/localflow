@@ -7,12 +7,18 @@ use crate::backends::prompts::{
 use crate::pystr::PyStr;
 pub use crate::text_wrap::wrap_lines;
 use crate::text_wrap::TextMeasure;
-use crate::tokens::{Weight, HUB_HEADER_OFFSET};
-use chrono::{Datelike, Local, NaiveDateTime, TimeZone, Timelike};
+use crate::tokens::{Weight, HUB_HEADER_OFFSET, INPUT_HEIGHT};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use lf_core::config::Config;
 use lf_core::dictionary::{DictionaryData, DictionaryError, DictionaryStore};
+use lf_core::symbols::pycompat::{is_decimal, is_space, parse_decimal};
 use regex::Regex;
 use serde_json::{json, Map, Value};
+use std::collections::VecDeque;
+use std::fs;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 pub type Frame = (i32, i32, i32, i32);
 
@@ -92,17 +98,6 @@ pub fn stat_layout(width: i32, count: i32) -> (i32, i32) {
 /// [`stat_layout`] for the usual four cards.
 pub fn stat_layout_default(width: i32) -> (i32, i32) {
     stat_layout(width, 4)
-}
-
-fn local_from_timestamp(seconds: f64) -> NaiveDateTime {
-    let whole = seconds.floor();
-    let nanos = ((seconds - whole) * 1e9) as u32;
-    Local
-        .timestamp_opt(whole as i64, nanos.min(999_999_999))
-        .single()
-        .map_or(chrono::DateTime::UNIX_EPOCH.naive_utc(), |t| {
-            t.naive_local()
-        })
 }
 
 // Pure helpers of the Home and History pages (lf-ui `mac::pages::{home,history}`).
@@ -1866,5 +1861,1275 @@ mod dictionary_style_prompt_tests {
             measure(t, 11.0, Weight::Regular)
         });
         assert_eq!(lines.concat(), long);
+    }
+}
+
+/// Height of the meeting notes box: roomy when tall, never below 110.
+pub fn meeting_notes_height(viewport_height: i32, top: i32) -> i32 {
+    110.max(220.min(viewport_height - top - 330))
+}
+
+// ----------------------------------------------------------------- meetings ---
+
+pub const MEETING_SUBTITLE: &str =
+    "Transcribe a meeting, jot notes alongside, and save both to your vault.";
+/// The title field starts blank; this is drawn, never inserted as text.
+pub const MEETING_TITLE_PLACEHOLDER: &str = "Named automatically when saved";
+pub const MEETING_NOTES_PLACEHOLDER: &str = "Type notes while you talk: headings and bullets work. When you stop, LocalFlow fills them in from the transcript.";
+pub const MEETING_FIELD_LABEL_H: i32 = 18;
+pub const MEETING_LABEL_GAP: i32 = 4;
+/// `ui_tokens.INPUT_HEIGHT`, shared by field and picker.
+pub const MEETING_FIELD_H: i32 = INPUT_HEIGHT;
+pub const MEETING_SECTION_GAP: i32 = 14;
+pub const MEETING_HEADING_H: i32 = 22;
+pub const MEETING_NOTES_STATUS_W: i32 = 220;
+/// Notes card -> error (when shown) -> Start button.
+pub const MEETING_ACTION_GAP: i32 = 12;
+
+/// Frames of the Meetings form, from the subtitle down to the Start/Stop
+/// button.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingFormLayout {
+    pub subtitle: Frame,
+    pub title_label: Frame,
+    pub title_field: Frame,
+    pub template_label: Frame,
+    pub template_field: Frame,
+    pub notes_label: Frame,
+    pub notes_status: Frame,
+    pub notes: Frame,
+    pub retry: Frame,
+    /// Only present (and only takes room) when there is an error.
+    pub error: Option<Frame>,
+    /// Top of the Start/Stop button.
+    pub action_y: i32,
+}
+
+impl MeetingFormLayout {
+    /// The named frames that share the page (everything but `retry`, which
+    /// replaces the form while the server is down).
+    pub fn frames(&self) -> Vec<(&'static str, Frame)> {
+        let mut frames = vec![
+            ("subtitle", self.subtitle),
+            ("title_label", self.title_label),
+            ("title_field", self.title_field),
+            ("template_label", self.template_label),
+            ("template_field", self.template_field),
+            ("notes_label", self.notes_label),
+            ("notes_status", self.notes_status),
+            ("notes", self.notes),
+        ];
+        if let Some(error) = self.error {
+            frames.push(("error", error));
+        }
+        frames
+    }
+}
+
+/// Frames of the Meetings form (`meeting_form_layout`).
+///
+/// The title field and the template picker share one row: the same y and the
+/// same height, so they line up exactly. The autosave status sits on the
+/// "Your notes" heading row (no space is reserved for it under the card) and
+/// an error only takes room when there is one (`error_height > 0`).
+pub fn meeting_form_layout(
+    width: i32,
+    top: i32,
+    notes_height: i32,
+    error_height: i32,
+) -> MeetingFormLayout {
+    let title_w = (f64::from(width - 20) * 0.58) as i32;
+    let template_x = title_w + 20;
+    let form_top = top + 28;
+    let field_y = form_top + MEETING_FIELD_LABEL_H + MEETING_LABEL_GAP;
+    let heading_y = field_y + MEETING_FIELD_H + MEETING_SECTION_GAP;
+    let notes_y = heading_y + MEETING_HEADING_H + MEETING_LABEL_GAP;
+    let notes_bottom = notes_y + notes_height;
+    let mut y = notes_bottom + MEETING_ACTION_GAP;
+    let mut error = None;
+    if error_height != 0 {
+        error = Some((0, y, width, error_height));
+        y += error_height + MEETING_ACTION_GAP;
+    }
+    MeetingFormLayout {
+        subtitle: (0, top, width, 20),
+        title_label: (0, form_top, title_w, MEETING_FIELD_LABEL_H),
+        title_field: (0, field_y, title_w, MEETING_FIELD_H),
+        template_label: (
+            template_x,
+            form_top,
+            width - template_x,
+            MEETING_FIELD_LABEL_H,
+        ),
+        template_field: (template_x, field_y, width - template_x, MEETING_FIELD_H),
+        notes_label: (
+            0,
+            heading_y,
+            width - MEETING_NOTES_STATUS_W - 12,
+            MEETING_HEADING_H,
+        ),
+        notes_status: (
+            width - MEETING_NOTES_STATUS_W,
+            heading_y + 3,
+            MEETING_NOTES_STATUS_W,
+            18,
+        ),
+        notes: (0, notes_y, width, notes_height),
+        retry: (0, form_top, 100, 36),
+        error,
+        action_y: y,
+    }
+}
+
+pub const SYSTEM_AUDIO_PERMISSION: &str =
+    "Recording your mic only. Allow system audio to also capture others.";
+pub const SYSTEM_AUDIO_UNAVAILABLE: &str =
+    "Recording your mic only. System audio isn't available on this Mac right now.";
+const PERMISSION_HINTS: [&str; 5] = [
+    "permission",
+    "not authorized",
+    "not permitted",
+    "denied",
+    "tcc",
+];
+
+/// True when a system-audio failure reads as a missing OS permission.
+///
+/// Only the ScreenCaptureKit path reports these; a missing loopback device,
+/// absent bindings or a timeout are not permission problems.
+pub fn system_audio_is_permission_error(error: &str) -> bool {
+    let text = error.to_lowercase();
+    PERMISSION_HINTS.iter().any(|hint| text.contains(hint))
+}
+
+/// One plain sentence about what a running meeting is recording. The mic and
+/// system-audio failure are reported once; the raw error only decides which
+/// sentence is honest. `session` is the server's `session` object.
+pub fn meeting_capture_status(session: &Value) -> String {
+    match session.get("system_audio").and_then(Value::as_str) {
+        Some("on") => "Recording your mic and system audio.".to_string(),
+        Some("error") => {
+            let error = session
+                .get("system_audio_error")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if system_audio_is_permission_error(error) {
+                SYSTEM_AUDIO_PERMISSION.to_string()
+            } else {
+                SYSTEM_AUDIO_UNAVAILABLE.to_string()
+            }
+        }
+        _ => "Recording your mic only.".to_string(),
+    }
+}
+
+/// Python `Path.stem` for a path string.
+fn py_stem(path: &str) -> String {
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let name = path
+        .split(separators)
+        .rfind(|part| !part.is_empty() && *part != ".")
+        .unwrap_or("");
+    match name.rfind('.') {
+        Some(i) if i > 0 && i < name.len() - 1 => name[..i].to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// `'Planning'` from `'.../2026-11-15 1430 Planning.md'` (date prefix dropped).
+pub fn note_title_from_path(path: &str) -> String {
+    let stem = py_stem(path);
+    // `_STAMP_PREFIX.sub("", stem)`: `^\d{4}-\d{2}-\d{2} \d{4}\s+`, with
+    // Python's Unicode `\d` and `\s`.
+    let chars: Vec<char> = stem.chars().collect();
+    let stripped: String = match stamp_digits_end(&chars) {
+        Some(end) => {
+            let spaces = chars[end..].iter().take_while(|c| is_space(**c)).count();
+            if spaces > 0 {
+                chars[end + spaces..].iter().collect()
+            } else {
+                stem.clone()
+            }
+        }
+        None => stem.clone(),
+    };
+    let title = stripped.py_strip();
+    if !title.is_empty() {
+        title.to_string()
+    } else if !stem.is_empty() {
+        stem
+    } else {
+        "Meeting".to_string()
+    }
+}
+
+/// The saved-state line: the note's title, never its raw path. `saved` is the
+/// server's `last_saved` / stop payload.
+pub fn saved_notes_message(saved: &Value) -> String {
+    let title = saved
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .py_strip()
+        .to_string();
+    let title = if title.is_empty() {
+        note_title_from_path(
+            saved
+                .get("notes_path")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        )
+    } else {
+        title
+    };
+    format!("Notes saved: {title}")
+}
+
+/// The newest saved notes shown on the Meetings page.
+pub const RECENT_NOTES_LIMIT: usize = 5;
+/// Files looked at, so a huge folder stays cheap.
+pub const RECENT_NOTES_SCAN_LIMIT: usize = 2000;
+/// `notes_folder/<category>/<file>.md`, with slack.
+pub const RECENT_NOTES_MAX_DEPTH: usize = 3;
+pub const RECENT_NOTES_UNREADABLE: &str = "Couldn't read your meeting notes folder.";
+pub const RECENT_NOTES_OUTSIDE: &str =
+    "Your meeting notes folder is outside your vault, so it isn't listed here.";
+/// Python reads this many *characters* of the note to find its heading.
+const HEAD_CHARS: usize = 4096;
+
+/// Python `re` `\d` is any Unicode decimal digit; `int()` reads them all.
+fn digits_at(chars: &[char], start: usize, count: usize) -> Option<u32> {
+    let run = chars.get(start..start + count)?;
+    if !run.iter().all(|c| is_decimal(*c)) {
+        return None;
+    }
+    parse_decimal(run).map(|value| value as u32)
+}
+
+/// End of `\d{4}-\d{2}-\d{2} \d{4}` at the start of `chars`.
+fn stamp_digits_end(chars: &[char]) -> Option<usize> {
+    let shape = [(4, Some('-')), (2, Some('-')), (2, Some(' ')), (4, None)];
+    let mut at = 0;
+    for (count, sep) in shape {
+        digits_at(chars, at, count)?;
+        at += count;
+        if let Some(sep) = sep {
+            if chars.get(at) != Some(&sep) {
+                return None;
+            }
+            at += 1;
+        }
+    }
+    Some(at)
+}
+
+/// A match of Python's `_FILE_STAMP`:
+/// `^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:\s+(.*))?$`.
+struct FileStamp {
+    /// year, month, day, hour, minute.
+    fields: [u32; 5],
+    /// Group 6: the text after the stamp (`None` when the group did not take part).
+    title: Option<String>,
+}
+
+fn file_stamp(stem: &str) -> Option<FileStamp> {
+    let chars: Vec<char> = stem.chars().collect();
+    let end = stamp_digits_end(&chars)?;
+    let fields = [
+        digits_at(&chars, 0, 4)?,
+        digits_at(&chars, 5, 2)?,
+        digits_at(&chars, 8, 2)?,
+        digits_at(&chars, 11, 2)?,
+        digits_at(&chars, 13, 2)?,
+    ];
+    let rest = &chars[end..];
+    // `$` also matches just before a final "\n".
+    if rest.is_empty() || rest == ['\n'] {
+        return Some(FileStamp {
+            fields,
+            title: None,
+        });
+    }
+    // `\s+` is greedy and backtracks: take the longest whitespace prefix for
+    // which `(.*)$` (no "\n" except one final) still matches.
+    let leading = rest.iter().take_while(|c| is_space(**c)).count();
+    for k in (1..=leading).rev() {
+        let tail = &rest[k..];
+        let body = tail.strip_suffix(&['\n']).unwrap_or(tail);
+        if !body.contains(&'\n') {
+            return Some(FileStamp {
+                fields,
+                title: Some(body.iter().collect()),
+            });
+        }
+    }
+    None
+}
+
+/// Python `str.splitlines()` (without line ends).
+fn py_splitlines(text: &str) -> Vec<&str> {
+    let is_break = |c: char| {
+        matches!(
+            c,
+            '\n' | '\r'
+                | '\u{b}'
+                | '\u{c}'
+                | '\u{1c}'
+                | '\u{1d}'
+                | '\u{1e}'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+    };
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if is_break(c) {
+            lines.push(&text[start..i]);
+            let mut end = i + c.len_utf8();
+            if c == '\r' {
+                if let Some(&(_, '\n')) = chars.peek() {
+                    chars.next();
+                    end += 1;
+                }
+            }
+            start = end;
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+/// The note's `# Title` line (after any frontmatter), or `""`.
+fn note_heading(path: &Path) -> String {
+    let mut raw = Vec::new();
+    // At most four bytes per character: enough to decode HEAD_CHARS of them.
+    let read = fs::File::open(path)
+        .and_then(|file| file.take(HEAD_CHARS as u64 * 4).read_to_end(&mut raw));
+    if read.is_err() {
+        return String::new();
+    }
+    let decoded = String::from_utf8_lossy(&raw);
+    let head: String = decoded.chars().take(HEAD_CHARS).collect();
+    let mut lines = py_splitlines(&head);
+    if lines.first().is_some_and(|line| line.py_strip() == "---") {
+        if let Some(index) = (1..lines.len()).find(|&i| lines[i].py_strip() == "---") {
+            lines = lines[index + 1..].to_vec();
+        }
+    }
+    for line in lines {
+        if let Some(rest) = line.strip_prefix("# ") {
+            return rest.py_strip().to_string();
+        }
+        if !line.py_strip().is_empty() {
+            return String::new();
+        }
+    }
+    String::new()
+}
+
+fn local_from_timestamp(seconds: f64) -> NaiveDateTime {
+    let whole = seconds.floor();
+    let nanos = ((seconds - whole) * 1e9) as u32;
+    Local
+        .timestamp_opt(whole as i64, nanos.min(999_999_999))
+        .single()
+        .map_or(chrono::DateTime::UNIX_EPOCH.naive_utc(), |t| {
+            t.naive_local()
+        })
+}
+
+fn note_when(stem: &str, mtime: f64) -> NaiveDateTime {
+    if let Some(stamp) = file_stamp(stem) {
+        let [y, mo, d, h, mi] = stamp.fields;
+        // Python datetime needs 1 <= year <= 9999; `\d` accepts any Unicode
+        // decimal digit and `int()` reads it, so those names are dated too.
+        if y >= 1 {
+            if let Some(when) =
+                NaiveDate::from_ymd_opt(y as i32, mo, d).and_then(|date| date.and_hms_opt(h, mi, 0))
+            {
+                return when;
+            }
+        }
+    }
+    local_from_timestamp(mtime)
+}
+
+/// `"Today, 3:00 PM"`, `"Nov 14, 2:00 PM"` or `"Nov 14, 2025"` (other year).
+/// `now` defaults to the local clock.
+pub fn note_date_label(when: NaiveDateTime, now: Option<NaiveDateTime>) -> String {
+    let now = now.unwrap_or_else(|| Local::now().naive_local());
+    let (pm, hour12) = when.hour12();
+    let clock = format!(
+        "{hour12}:{:02} {}",
+        when.minute(),
+        if pm { "PM" } else { "AM" }
+    );
+    let month = when.format("%b");
+    if when.date() == now.date() {
+        format!("Today, {clock}")
+    } else if when.year() == now.year() {
+        format!("{month} {}, {clock}", when.day())
+    } else {
+        format!("{month} {}, {}", when.day(), when.year())
+    }
+}
+
+/// One row of the Recent meetings card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentNote {
+    pub title: String,
+    pub date_label: String,
+    pub path: String,
+}
+
+/// Python `Path.resolve()` (non-strict): symlinks of the existing prefix are
+/// followed, the rest is appended lexically. A symlink loop is an error
+/// (Python's `RuntimeError`).
+fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    let mut links = 0;
+    // Owned single-component paths; followed symlink targets are pushed in
+    // front so they are resolved before the rest of the original path.
+    let mut queue: VecDeque<PathBuf> = absolute
+        .components()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    while let Some(piece) = queue.pop_front() {
+        let component = piece.components().next();
+        match component {
+            None | Some(Component::CurDir) => {}
+            Some(Component::ParentDir) => {
+                resolved.pop();
+            }
+            Some(Component::Prefix(_)) | Some(Component::RootDir) => {
+                resolved.push(&piece);
+            }
+            Some(Component::Normal(name)) => {
+                let candidate = resolved.join(name);
+                match fs::symlink_metadata(&candidate) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        links += 1;
+                        if links > 40 {
+                            return Err(std::io::Error::other("symlink loop"));
+                        }
+                        let target = fs::read_link(&candidate)?;
+                        let parts: Vec<PathBuf> = target
+                            .components()
+                            .map(|c| PathBuf::from(c.as_os_str()))
+                            .collect();
+                        for part in parts.into_iter().rev() {
+                            queue.push_front(part);
+                        }
+                    }
+                    _ => resolved = candidate,
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// `os.access(path, R_OK | X_OK)`.
+fn readable_dir(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+            // SAFETY: `c` is a valid NUL-terminated path for the call.
+            Ok(c) => unsafe { libc::access(c.as_ptr(), libc::R_OK | libc::X_OK) == 0 },
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::read_dir(path).is_ok()
+    }
+}
+
+struct NoteWalk<'a> {
+    root: &'a Path,
+    found: Vec<(NaiveDateTime, f64, PathBuf)>,
+    seen: usize,
+    failures: Vec<PathBuf>,
+    /// A failure Python would propagate out of the whole listing.
+    aborted: bool,
+}
+
+impl NoteWalk<'_> {
+    /// `os.walk(root, followlinks=False)` plus the filters of
+    /// `_recent_notes_in`.
+    fn walk(&mut self, dir: &Path, depth: usize) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                self.failures.push(dir.to_path_buf());
+                return;
+            }
+        };
+        let mut subdirs: Vec<(String, PathBuf)> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                self.failures.push(dir.to_path_buf());
+                return;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            // Like DirEntry.is_dir(): follows symlinks, errors mean "not a dir".
+            if fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+                let is_link = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+                if !is_link {
+                    subdirs.push((name, path));
+                }
+            } else {
+                files.push(name);
+            }
+        }
+        if depth >= RECENT_NOTES_MAX_DEPTH {
+            subdirs.clear();
+        }
+        subdirs.retain(|(name, _)| !name.starts_with('.'));
+        for name in files {
+            if !name.to_lowercase().ends_with(".md") || name.ends_with(" (transcript).md") {
+                continue;
+            }
+            self.seen += 1;
+            if self.seen > RECENT_NOTES_SCAN_LIMIT {
+                break;
+            }
+            let path = dir.join(&name);
+            let Ok(link_meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if link_meta.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            match resolve(&path) {
+                Ok(real) if real.starts_with(self.root) => {}
+                Ok(_) => continue,
+                Err(_) => {
+                    self.aborted = true;
+                    return;
+                }
+            }
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let mtime = match modified.duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_secs_f64(),
+                Err(e) => -e.duration().as_secs_f64(),
+            };
+            self.found
+                .push((note_when(&py_stem(&name), mtime), mtime, path));
+        }
+        if self.seen > RECENT_NOTES_SCAN_LIMIT {
+            return;
+        }
+        for (_, sub) in subdirs {
+            self.walk(&sub, depth + 1);
+            if self.seen > RECENT_NOTES_SCAN_LIMIT || self.aborted {
+                return;
+            }
+        }
+    }
+}
+
+/// The newest saved meeting notes: `(rows, error)`.
+///
+/// Same storage the CLI's `lf notes` and recall read: Markdown files under
+/// `<vault>/<notes_folder>/` as `ObsidianWriter` writes them
+/// (`<category>/YYYY-MM-DD HHMM Title.md`, `# Title` after the frontmatter).
+/// Only that folder is walked (never the whole vault), symlinks are not
+/// followed, anything resolving outside it is skipped, transcripts are
+/// excluded, and only the `limit` newest files are opened for their heading.
+/// A missing folder is simply "no notes yet"; an unreadable one is a friendly
+/// error, never a panic. `now` is the clock for the date labels (default: the
+/// local time).
+pub fn recent_notes(
+    vault_path: &str,
+    notes_folder: &str,
+    limit: usize,
+    now: Option<NaiveDateTime>,
+) -> (Vec<RecentNote>, String) {
+    if vault_path.is_empty() || notes_folder.is_empty() {
+        return (Vec::new(), String::new());
+    }
+    let unreadable = || (Vec::new(), RECENT_NOTES_UNREADABLE.to_string());
+    let Ok(expanded) = lf_core::home::expand_user(Path::new(vault_path)) else {
+        return unreadable();
+    };
+    let Ok(vault) = resolve(&expanded) else {
+        return unreadable();
+    };
+    let Ok(root) = resolve(&vault.join(notes_folder)) else {
+        return unreadable();
+    };
+    // An absolute or ../ notes_folder, or a notes folder that is itself a
+    // symlink out of the vault, is never read.
+    if !root.starts_with(&vault) {
+        return (Vec::new(), RECENT_NOTES_OUTSIDE.to_string());
+    }
+    match fs::metadata(&root) {
+        Ok(meta) => {
+            if !meta.is_dir() || !readable_dir(&root) {
+                return unreadable();
+            }
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return (Vec::new(), String::new());
+        }
+        Err(_) => return unreadable(),
+    }
+    let mut walk = NoteWalk {
+        root: &root,
+        found: Vec::new(),
+        seen: 0,
+        failures: Vec::new(),
+        aborted: false,
+    };
+    walk.walk(&root, 0);
+    if walk.aborted || (walk.found.is_empty() && walk.failures.iter().any(|f| f == &root)) {
+        return unreadable();
+    }
+    // Newest first; stable like Python's sort(reverse=True).
+    walk.found.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let notes = walk
+        .found
+        .iter()
+        .take(limit)
+        .map(|(when, _, path)| {
+            let stem = py_stem(&path.to_string_lossy());
+            let fallback = file_stamp(&stem)
+                .and_then(|m| m.title.map(|t| t.py_strip().to_string()))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| stem.clone());
+            let heading = note_heading(path);
+            RecentNote {
+                title: if heading.is_empty() {
+                    fallback
+                } else {
+                    heading
+                },
+                date_label: note_date_label(*when, now),
+                path: path.to_string_lossy().into_owned(),
+            }
+        })
+        .collect();
+    (notes, String::new())
+}
+
+pub const RECENT_ROW_H: i32 = 44;
+pub const RECENT_EMPTY: &str = "No saved meeting notes yet. Notes you save appear here.";
+
+// -------------------------------------------------------------------- style ---
+
+#[cfg(test)]
+mod meeting_tests {
+    use super::*;
+    use crate::tokens::{HUB_CONTENT_X, HUB_MIN_HEIGHT, HUB_MIN_WIDTH};
+    use std::time::{Duration, SystemTime};
+    const WIDTHS: [i32; 5] = [
+        HUB_MIN_WIDTH - HUB_CONTENT_X - 32,
+        640,
+        760,
+        1040 - HUB_CONTENT_X - 32,
+        1400 - HUB_CONTENT_X - 32,
+    ];
+    fn overlaps(a: Frame, b: Frame) -> bool {
+        a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+    }
+    #[test]
+    fn note_stamps_accept_unicode_decimal_digits_like_python() {
+        // Arabic-Indic digits (Nd): Python's `\d` matches and `int()` reads them.
+        let stem = "\u{661}\u{662}\u{663}\u{664}-\u{660}\u{661}-\u{660}\u{662} \u{661}\u{662}\u{663}\u{660} Plan";
+        // 1234-01-02 12:30
+        let expected = NaiveDate::from_ymd_opt(1234, 1, 2)
+            .unwrap()
+            .and_hms_opt(12, 30, 0)
+            .unwrap();
+        assert_eq!(note_when(stem, 0.0), expected);
+        assert_eq!(note_title_from_path(&format!("/v/{stem}.md")), "Plan");
+        let stamp = file_stamp(stem).unwrap();
+        assert_eq!(stamp.fields, [1234, 1, 2, 12, 30]);
+        assert_eq!(stamp.title.as_deref(), Some("Plan"));
+        // Fullwidth digits too.
+        let wide = "２０２６-１１-１５ １４３０ Ａ";
+        assert_eq!(note_title_from_path(wide), "Ａ");
+        assert_eq!(file_stamp(wide).unwrap().fields, [2026, 11, 15, 14, 30]);
+    }
+
+    #[test]
+    fn note_stamp_edge_cases_follow_the_python_regex() {
+        // Information separators are `\s` in Python.
+        let sep = "2026-11-15 1430\u{1c}Plan";
+        assert_eq!(file_stamp(sep).unwrap().title.as_deref(), Some("Plan"));
+        assert_eq!(note_title_from_path(&format!("{sep}.md")), "Plan");
+        // No trailing text: group 6 does not take part.
+        assert!(file_stamp("2026-11-15 1430").unwrap().title.is_none());
+        // `$` matches before a final newline; `.` never matches a newline.
+        assert_eq!(
+            file_stamp("2026-11-15 1430 A\n").unwrap().title.as_deref(),
+            Some("A")
+        );
+        assert!(file_stamp("2026-11-15 1430 A\nB").is_none());
+        // Text glued to the time is not a stamp; neither are short fields.
+        assert!(file_stamp("2026-11-15 1430Plan").is_none());
+        assert!(file_stamp("2026-1-15 1430 Plan").is_none());
+        // Impossible dates and year 0 fall back to the modification time.
+        let fallback = local_from_timestamp(86_400.0 * 400.0);
+        assert_eq!(note_when("2026-13-15 1430 X", 86_400.0 * 400.0), fallback);
+        assert_eq!(note_when("0000-01-01 1200 X", 86_400.0 * 400.0), fallback);
+        assert_eq!(note_when("2026-11-15 2460 X", 86_400.0 * 400.0), fallback);
+        assert_eq!(
+            note_title_from_path("/v/2026-11-15 1430 .md"),
+            "2026-11-15 1430 "
+        );
+    }
+
+    // ---- meetings ---------------------------------------------------------
+
+    #[test]
+    fn meeting_form_layout_has_no_overlaps_and_aligned_inputs() {
+        for width in WIDTHS {
+            for error_height in [0, 34] {
+                let top = HUB_HEADER_OFFSET;
+                let notes = meeting_notes_height(HUB_MIN_HEIGHT - 24, top);
+                let layout = meeting_form_layout(width, top, notes, error_height);
+                let (title, template) = (layout.title_field, layout.template_field);
+                assert_eq!(title.1, template.1);
+                assert_eq!(title.3, INPUT_HEIGHT);
+                assert_eq!(template.3, INPUT_HEIGHT);
+                assert_eq!(layout.title_label.1, layout.template_label.1);
+                assert!(title.0 + title.2 < template.0);
+                assert_eq!(template.0 + template.2, width);
+                let mut boxes = layout.frames();
+                boxes.push(("action", (0, layout.action_y, 250, 36)));
+                for (i, (a, fa)) in boxes.iter().enumerate() {
+                    for (b, fb) in &boxes[i + 1..] {
+                        assert!(!overlaps(*fa, *fb), "{a} {b} at {width}");
+                    }
+                    assert!(fa.0 >= 0 && fa.0 + fa.2 <= width, "{a}");
+                }
+                assert_eq!(layout.subtitle.1, top);
+                let notes_bottom = layout.notes.1 + layout.notes.3;
+                if error_height > 0 {
+                    let error = layout.error.unwrap();
+                    assert_eq!(error.1, notes_bottom + 12);
+                    assert_eq!(layout.action_y, error.1 + error_height + 12);
+                } else {
+                    // No reserved blank band: Start sits 12pt under the card.
+                    assert!(layout.error.is_none());
+                    assert_eq!(layout.action_y, notes_bottom + 12);
+                }
+                assert!(layout.notes_status.1 < layout.notes.1);
+            }
+        }
+    }
+
+    #[test]
+    fn capture_status_is_one_plain_honest_sentence() {
+        let cases: Vec<(Value, &str)> = vec![
+            (
+                json!({"system_audio": "on"}),
+                "Recording your mic and system audio.",
+            ),
+            (json!({"system_audio": "off"}), "Recording your mic only."),
+            (json!({}), "Recording your mic only."),
+            (Value::Null, "Recording your mic only."),
+            (
+                json!({"system_audio": "error", "system_audio_error": "ScreenCaptureKit: no display available — grant Screen Recording permission to this Python binary (None)"}),
+                SYSTEM_AUDIO_PERMISSION,
+            ),
+            (
+                json!({"system_audio": "error", "system_audio_error": "System audio permission unavailable"}),
+                SYSTEM_AUDIO_PERMISSION,
+            ),
+            (
+                json!({"system_audio": "error", "system_audio_error": "no system audio source found: set [meetings] system_audio_device"}),
+                SYSTEM_AUDIO_UNAVAILABLE,
+            ),
+            (
+                json!({"system_audio": "error", "system_audio_error": "ScreenCaptureKit: start timed out"}),
+                SYSTEM_AUDIO_UNAVAILABLE,
+            ),
+            (
+                json!({"system_audio": "error", "system_audio_error": "no input device matching 'X'"}),
+                SYSTEM_AUDIO_UNAVAILABLE,
+            ),
+            (json!({"system_audio": "error"}), SYSTEM_AUDIO_UNAVAILABLE),
+            (
+                json!({"system_audio": "error", "system_audio_error": null}),
+                SYSTEM_AUDIO_UNAVAILABLE,
+            ),
+        ];
+        for (session, expected) in cases {
+            let message = meeting_capture_status(&session);
+            assert_eq!(message, expected, "{session}");
+            // Deduplicated: "mic" once, never the raw error text.
+            assert_eq!(message.to_lowercase().matches("mic").count(), 1);
+            assert!(!message.contains("ScreenCaptureKit") && !message.contains('—'));
+            let error = session
+                .get("system_audio_error")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !error.to_lowercase().contains("permission") {
+                assert!(!message.contains("Allow"), "{session}");
+            }
+        }
+        assert!(system_audio_is_permission_error("TCC denied"));
+        assert!(!system_audio_is_permission_error(""));
+    }
+
+    #[test]
+    fn saved_status_names_the_note_not_its_path() {
+        let cases = [
+            (
+                json!({"notes_path": "/v/notes/meetings/Zoom/2026-11-15 1430 Planning.md"}),
+                "Notes saved: Planning",
+            ),
+            (
+                json!({"notes_path": "/v/notes/meetings/Zoom/2026-11-15 1430 Planning.md", "title": "Q4 Planning", "enhanced": true}),
+                "Notes saved: Q4 Planning",
+            ),
+            (
+                json!({"notes_path": "/v/notes/Retro.md"}),
+                "Notes saved: Retro",
+            ),
+            (json!({"notes_path": ""}), "Notes saved: Meeting"),
+            (json!({}), "Notes saved: Meeting"),
+            (
+                json!({"title": "   ", "notes_path": "/v/x/Standup.md"}),
+                "Notes saved: Standup",
+            ),
+        ];
+        for (saved, expected) in cases {
+            let message = saved_notes_message(&saved);
+            assert_eq!(message, expected);
+            assert!(!message.contains('/') && !message.contains(".md"));
+        }
+        // A stamp-only name keeps its stem (as Python's Path.stem has it).
+        assert_eq!(
+            note_title_from_path("/v/2026-11-15 1430 .md"),
+            "2026-11-15 1430 "
+        );
+        assert_eq!(note_title_from_path("/v/.hidden"), ".hidden");
+    }
+
+    // ---- recent notes ------------------------------------------------------
+
+    fn note(
+        root: &Path,
+        category: &str,
+        stem: &str,
+        heading: Option<&str>,
+        body: &str,
+        mtime: Option<u64>,
+    ) -> PathBuf {
+        let folder = root.join(category);
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join(format!("{stem}.md"));
+        let mut text = String::from("---\ndate: x\ntags: [meeting, localflow]\n---\n\n");
+        if let Some(heading) = heading {
+            text.push_str(&format!("# {heading}\n\n"));
+        }
+        fs::write(&path, text + body).unwrap();
+        if let Some(seconds) = mtime {
+            let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        }
+        path
+    }
+
+    fn vault_fixture(tmp: &Path) -> PathBuf {
+        let vault = tmp.join("vault");
+        let notes = vault.join("notes/meetings");
+        let titles = [
+            "Design review",
+            "Hiring sync",
+            "Customer call",
+            "Standup",
+            "Retro",
+            "Planning",
+        ];
+        for (offset, title) in titles.iter().enumerate() {
+            let day = 10 + offset;
+            note(
+                &notes,
+                "Zoom",
+                &format!("2026-11-{day} 1{offset}00 {title}"),
+                Some(title),
+                "Body.\n",
+                None,
+            );
+        }
+        // Transcripts and files outside notes_folder are never listed.
+        note(
+            &notes,
+            "Zoom",
+            "2026-11-20 0900 Planning (transcript)",
+            Some("T"),
+            "Body.\n",
+            None,
+        );
+        note(
+            &vault.join("notes/transcripts"),
+            "Zoom",
+            "2026-11-21 0900 X (transcript)",
+            None,
+            "Body.\n",
+            None,
+        );
+        fs::write(vault.join("Inbox.md"), "# Not a meeting\n").unwrap();
+        vault
+    }
+
+    fn at(y: i32, m: u32, d: u32, h: u32, mi: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(h, mi, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn recent_notes_lists_the_newest_titles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = vault_fixture(tmp.path());
+        let v = vault.to_str().unwrap();
+        let (notes, error) = recent_notes(v, "notes/meetings", 5, Some(at(2026, 11, 15, 18, 0)));
+        assert_eq!(error, "");
+        let titles: Vec<_> = notes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Planning",
+                "Retro",
+                "Standup",
+                "Customer call",
+                "Hiring sync"
+            ]
+        );
+        assert_eq!(notes[0].date_label, "Today, 3:00 PM");
+        assert_eq!(notes[1].date_label, "Nov 14, 2:00 PM");
+        assert!(notes
+            .iter()
+            .all(|n| n.path.ends_with(".md") && !n.path.contains("(transcript)")));
+        assert_eq!(recent_notes(v, "notes/meetings", 6, None).0.len(), 6);
+        assert_eq!(recent_notes(v, "notes/meetings", 0, None).0.len(), 0);
+    }
+
+    #[test]
+    fn recent_notes_prefers_the_saved_heading_and_strips_the_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("v");
+        let root = vault.join("n");
+        note(
+            &root,
+            "Meet",
+            "2026-11-01 0900 Weekly sync",
+            Some("Weekly sync: Q4 goals"),
+            "Body\n",
+            None,
+        );
+        note(
+            &root,
+            "Meet",
+            "2026-11-02 0900 No heading",
+            None,
+            "Text\n",
+            None,
+        );
+        note(&root, "Other", "Loose note", None, "", Some(1_000_000));
+        let (notes, _) = recent_notes(vault.to_str().unwrap(), "n", 5, None);
+        let titles: Vec<_> = notes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(&titles[..2], ["No heading", "Weekly sync: Q4 goals"]);
+        assert!(titles.contains(&"Loose note"));
+        assert!(!titles.iter().any(|t| t.starts_with("2026-")));
+    }
+
+    #[test]
+    fn recent_notes_handles_unicode_titles_and_long_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("v");
+        let root = vault.join("n");
+        note(
+            &root,
+            "Café",
+            "2026-11-01 0900 Überprüfung 日本語",
+            Some("Überprüfung 日本語 🎉"),
+            "x\n",
+            None,
+        );
+        // A heading after 4096 characters of filler is not found (Python reads
+        // 4096 characters, not bytes): the filename fallback is used.
+        let filler = "日".repeat(4100);
+        let path = root.join("Café/2026-11-02 0900 Late heading.md");
+        fs::write(&path, format!("{filler}\n# Hidden\n")).unwrap();
+        let (notes, _) = recent_notes(vault.to_str().unwrap(), "n", 5, None);
+        assert_eq!(notes[0].title, "Late heading");
+        assert_eq!(notes[1].title, "Überprüfung 日本語 🎉");
+        // A heading inside the first 4096 characters is still found.
+        fs::write(&path, format!("{}\n# Found\n", " ".repeat(3000))).unwrap();
+        let (notes, _) = recent_notes(vault.to_str().unwrap(), "n", 5, None);
+        assert_eq!(notes[0].title, "Found");
+    }
+
+    #[test]
+    fn recent_notes_is_friendly_when_missing_or_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        assert_eq!(
+            recent_notes(t.join("nope").to_str().unwrap(), "notes/meetings", 5, None),
+            (vec![], String::new())
+        );
+        fs::create_dir_all(t.join("v/notes/meetings")).unwrap();
+        let v = t.join("v");
+        assert_eq!(
+            recent_notes(v.to_str().unwrap(), "notes/meetings", 5, None),
+            (vec![], String::new())
+        );
+        assert_eq!(
+            recent_notes("", "notes/meetings", 5, None),
+            (vec![], String::new())
+        );
+        assert_eq!(
+            recent_notes(v.to_str().unwrap(), "", 5, None),
+            (vec![], String::new())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_notes_reports_an_unreadable_folder_without_panicking() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // permission bits are not enforced for root
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("v/notes/meetings");
+        note(&root, "Zoom", "2026-11-01 0900 A", Some("A"), "x\n", None);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = recent_notes(
+            tmp.path().join("v").to_str().unwrap(),
+            "notes/meetings",
+            5,
+            None,
+        );
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(result, (vec![], RECENT_NOTES_UNREADABLE.to_string()));
+    }
+
+    #[test]
+    fn recent_notes_reports_a_notes_folder_that_is_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("v");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("notes"), "not a folder").unwrap();
+        assert_eq!(
+            recent_notes(vault.to_str().unwrap(), "notes", 5, None),
+            (vec![], RECENT_NOTES_UNREADABLE.to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_notes_skips_symlinks_pointing_outside() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("v");
+        let root = vault.join("notes/meetings");
+        let good = note(
+            &root,
+            "Zoom",
+            "2026-11-01 0900 Good",
+            Some("Good"),
+            "x\n",
+            None,
+        );
+        let outside = tmp.path().join("elsewhere");
+        let secret = note(
+            &outside,
+            "Secret",
+            "2026-12-01 0900 Secret",
+            Some("Secret"),
+            "x\n",
+            None,
+        );
+        symlink(outside.join("Secret"), root.join("linked-dir")).unwrap();
+        symlink(&secret, root.join("Zoom/2026-12-02 0900 Link.md")).unwrap();
+        let (notes, error) = recent_notes(vault.to_str().unwrap(), "notes/meetings", 5, None);
+        assert_eq!(error, "");
+        let paths: Vec<_> = notes.iter().map(|n| n.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [good.canonicalize().unwrap().to_string_lossy().into_owned()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_notes_never_reads_a_folder_outside_the_vault() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let outside = tmp.path().join("outside");
+        note(
+            &outside,
+            "Zoom",
+            "2026-11-01 0900 Secret",
+            Some("Secret"),
+            "x\n",
+            None,
+        );
+        let outside_error = (vec![], RECENT_NOTES_OUTSIDE.to_string());
+        let v = vault.to_str().unwrap();
+        // Absolute notes_folder and a ../ escape.
+        assert_eq!(
+            recent_notes(v, outside.to_str().unwrap(), 5, None),
+            outside_error
+        );
+        assert_eq!(recent_notes(v, "../outside", 5, None), outside_error);
+        // The notes folder itself is a symlink pointing out of the vault.
+        symlink(&outside, vault.join("notes")).unwrap();
+        assert_eq!(recent_notes(v, "notes", 5, None), outside_error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_notes_turns_a_symlink_loop_into_a_friendly_message() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("v");
+        fs::create_dir_all(&vault).unwrap();
+        symlink(vault.join("a"), vault.join("b")).unwrap();
+        symlink(vault.join("b"), vault.join("a")).unwrap();
+        assert_eq!(
+            recent_notes(vault.to_str().unwrap(), "a", 5, None),
+            (vec![], RECENT_NOTES_UNREADABLE.to_string())
+        );
+    }
+
+    #[test]
+    fn recent_notes_depth_hidden_folders_and_dates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("v");
+        let root = vault.join("n");
+        note(
+            &root,
+            "a",
+            "2026-11-01 0900 Shallow",
+            Some("Shallow"),
+            "",
+            None,
+        );
+        note(
+            &root,
+            ".hidden",
+            "2026-11-03 0900 Hidden",
+            Some("Hidden"),
+            "",
+            None,
+        );
+        // Files at depth 3 are read; directories below that are not entered.
+        note(
+            &root,
+            "a/b/c/d",
+            "2026-11-04 0900 Too deep",
+            Some("Too deep"),
+            "",
+            None,
+        );
+        note(
+            &root,
+            "a/b",
+            "2026-11-05 0900 Deep enough",
+            Some("Deep enough"),
+            "",
+            None,
+        );
+        // Impossible calendar date -> falls back to the modification time.
+        note(
+            &root,
+            "a",
+            "2026-13-45 2500 Bad stamp",
+            Some("Bad stamp"),
+            "",
+            Some(1_000_000),
+        );
+        let (notes, _) = recent_notes(vault.to_str().unwrap(), "n", 10, Some(at(2027, 1, 1, 0, 0)));
+        let mut titles: Vec<_> = notes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles[0], "Deep enough");
+        titles.sort_unstable();
+        assert_eq!(titles, ["Bad stamp", "Deep enough", "Shallow"]);
+        let shallow = notes.iter().find(|n| n.title == "Shallow").unwrap();
+        assert_eq!(shallow.date_label, "Nov 1, 2026");
+    }
+
+    #[test]
+    fn note_date_label_formats() {
+        let now = at(2026, 11, 15, 18, 0);
+        assert_eq!(
+            note_date_label(at(2026, 11, 15, 0, 5), Some(now)),
+            "Today, 12:05 AM"
+        );
+        assert_eq!(
+            note_date_label(at(2026, 11, 15, 12, 0), Some(now)),
+            "Today, 12:00 PM"
+        );
+        assert_eq!(
+            note_date_label(at(2026, 3, 2, 9, 30), Some(now)),
+            "Mar 2, 9:30 AM"
+        );
+        assert_eq!(
+            note_date_label(at(2025, 12, 31, 23, 59), Some(now)),
+            "Dec 31, 2025"
+        );
+    }
+
+    #[test]
+    fn heading_extraction_edge_cases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("n.md");
+        let cases: [(&str, &str); 8] = [
+            ("---\na: b\n---\n\n# Title\n", "Title"),
+            ("# Plain\n", "Plain"),
+            ("Intro first\n# Late\n", ""),
+            ("---\nunterminated\n# Not frontmatter-skipped\n", ""),
+            ("\n\n# After blanks\n", "After blanks"),
+            ("#NoSpace\n", ""),
+            ("# Padded   \r\nbody", "Padded"),
+            ("", ""),
+        ];
+        for (text, expected) in cases {
+            fs::write(&path, text).unwrap();
+            assert_eq!(note_heading(&path), expected, "{text:?}");
+        }
+        assert_eq!(note_heading(&tmp.path().join("missing.md")), "");
     }
 }

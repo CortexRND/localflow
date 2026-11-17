@@ -167,6 +167,9 @@ mod native {
                 }
             }
             let hub = Hub::new(mtm, services.clone(), scenario.page);
+            hub.prepare_snapshot(scenario.prepare, &base)?;
+            hub.show_page(scenario.page);
+            spin_run_loop(0.05);
             if let Some(error) = scenario.error {
                 services.set_page_error(scenario.page, error);
             }

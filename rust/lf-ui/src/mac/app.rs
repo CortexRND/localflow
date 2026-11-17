@@ -17,7 +17,7 @@ use anyhow::{anyhow, Result};
 use lf_core::config::load_config;
 use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
-use lf_runtime::menubar::{MenuActions, MenuModel, MenuState};
+use lf_runtime::menubar::{MeetingStatusPoller, MenuActions, MenuModel, MenuState};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -32,6 +32,7 @@ use std::time::Duration;
 use super::actions::Timer;
 use super::hub::Hub;
 use super::page::HubServices;
+use crate::backends::http::{HttpAskBackend, HttpMeetingClient, HttpPromptQueue, HttpTransport};
 use crate::hub_route::{self, HubWindowState};
 
 /// Seconds between page-request polls (`_POLL_SECONDS`).
@@ -161,15 +162,31 @@ fn run_app_with_termination(
     drop(delegate);
 }
 
-/// Read the user's config and local stores without starting backend services.
-pub fn real_services() -> Result<Rc<HubServices>> {
+/// Read local stores and prepare the authenticated runtime adapters.
+pub fn real_services() -> Result<(Rc<HubServices>, HttpTransport)> {
+    real_services_using(None)
+}
+
+fn real_services_using(
+    existing_http: Option<HttpTransport>,
+) -> Result<(Rc<HubServices>, HttpTransport)> {
     let config = load_config()?;
     let enabled = config.field_bool("history_enabled").unwrap_or(true);
-    Ok(HubServices::new(
+    let history = Rc::new(HistoryStore::open(None, None, enabled)?);
+    let dictionary = Rc::new(DictionaryStore::new(None));
+    let http = match existing_http {
+        Some(http) => http,
+        None => HttpTransport::from_config(&config)?,
+    };
+    let services = HubServices::new(
         config,
-        Rc::new(HistoryStore::open(None, None, enabled)?),
-        Rc::new(DictionaryStore::new(None)),
-    ))
+        history,
+        dictionary,
+        Arc::new(HttpPromptQueue(http.clone())),
+        Arc::new(HttpMeetingClient(http.clone())),
+        Box::new(HttpAskBackend::new(http.clone())),
+    );
+    Ok((services, http))
 }
 
 /// Owns "the" Hub of the app process and decides, on every launch, reopen and
@@ -256,6 +273,7 @@ impl HubSlot {
 
 struct MenuRuntime {
     menu: MenuState,
+    _poller: MeetingStatusPoller,
 }
 
 #[derive(Default)]
@@ -264,7 +282,11 @@ struct MenuSlot {
 }
 
 impl MenuSlot {
-    fn ensure(&self, commands: &std::sync::mpsc::Sender<MenuCommand>) -> Result<()> {
+    fn ensure(
+        &self,
+        commands: &std::sync::mpsc::Sender<MenuCommand>,
+        transport: &Rc<RefCell<Option<HttpTransport>>>,
+    ) -> Result<()> {
         if self.runtime.borrow().is_some() {
             return Ok(());
         }
@@ -291,8 +313,27 @@ impl MenuSlot {
             },
         )
         .map_err(|error| anyhow!(error))?;
-        eprintln!("menu bar: enabled");
-        *self.runtime.borrow_mut() = Some(MenuRuntime { menu });
+        let mut borrowed = transport.borrow_mut();
+        let http = match borrowed.as_ref() {
+            Some(http) => http.clone(),
+            None => {
+                let http = HttpTransport::from_config(&config)?;
+                *borrowed = Some(http.clone());
+                http
+            }
+        };
+        drop(borrowed);
+        let meeting = HttpMeetingClient(http);
+        let meeting_menu = menu.clone();
+        let poller = MeetingStatusPoller::start(
+            meeting.status_fetch(),
+            Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
+        );
+        eprintln!("menu meeting status poller: enabled");
+        *self.runtime.borrow_mut() = Some(MenuRuntime {
+            menu,
+            _poller: poller,
+        });
         Ok(())
     }
 
@@ -305,7 +346,7 @@ impl MenuSlot {
     }
 }
 
-/// Run the Hub shell until quit; subsequent stack layers add service adapters.
+/// Run the Hub with authenticated runtime services until quit.
 pub fn run_hub(initial_page: Option<&str>) -> Result<()> {
     let page = initial_page
         .and_then(hub_route::canonical_page)
@@ -322,15 +363,28 @@ pub fn run_hub(initial_page: Option<&str>) -> Result<()> {
     };
     let mtm =
         MainThreadMarker::new().ok_or_else(|| anyhow!("the Hub must run on the main thread"))?;
+    let transport = Rc::new(RefCell::new(None::<HttpTransport>));
     let (commands, menu_commands) = std::sync::mpsc::channel();
     let menu = Rc::new(MenuSlot::default());
-    let slot = HubSlot::new(mtm, real_services, page);
+    let service_transport = transport.clone();
+    let slot = HubSlot::new(
+        mtm,
+        move || {
+            let existing = service_transport.borrow().clone();
+            let (services, http) = real_services_using(existing.clone())?;
+            if existing.is_none() {
+                *service_transport.borrow_mut() = Some(http);
+            }
+            Ok(services)
+        },
+        page,
+    );
     let show: ShowFn = {
         let slot = slot.clone();
         let menu = menu.clone();
         let commands = commands.clone();
         Rc::new(move || {
-            if let Err(error) = menu.ensure(&commands) {
+            if let Err(error) = menu.ensure(&commands, &transport) {
                 eprintln!("lf-hub: could not install the native menu: {error:#}");
             }
             if let Err(error) = slot.open(None) {

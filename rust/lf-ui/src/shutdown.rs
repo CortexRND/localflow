@@ -90,13 +90,14 @@ mod tests {
 
     #[test]
     fn registration_outlives_individual_owners() {
-        let old_window_write = register_pending_write();
-        let new_window_write = register_pending_write();
-        assert!(!wait_for_pending_writes(Duration::ZERO));
+        let writes = Arc::new(PendingWrites::default());
+        let old_window_write = writes.register();
+        let new_window_write = writes.register();
+        assert!(!writes.wait(Duration::ZERO));
         drop(old_window_write);
-        assert!(!wait_for_pending_writes(Duration::ZERO));
+        assert!(!writes.wait(Duration::ZERO));
         drop(new_window_write);
-        assert!(wait_for_pending_writes(Duration::ZERO));
+        assert!(writes.wait(Duration::ZERO));
     }
 
     #[test]

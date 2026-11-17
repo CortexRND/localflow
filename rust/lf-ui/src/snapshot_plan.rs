@@ -1,6 +1,6 @@
 //! Python-aligned snapshot fixtures for the ported Hub pages.
 
-pub const SNAPSHOT_PAGES: [&str; 5] = crate::hub_route::HUB_PAGES;
+pub const SNAPSHOT_PAGES: [&str; 8] = crate::hub_route::HUB_PAGES;
 pub const SNAPSHOT_SIZES: [(&str, f64, f64); 2] = [
     (
         "min",
@@ -68,6 +68,7 @@ pub struct Scenario {
     pub style: StyleStep,
     pub dictation_enabled: bool,
     pub error: Option<&'static str>,
+    pub prepare: &'static str,
 }
 
 pub fn slug(page: &str) -> String {
@@ -80,11 +81,15 @@ impl Scenario {
     }
 
     pub fn file_name(&self, size: &str, theme: &str) -> String {
-        format!("hub-{}-{size}-{theme}.png", self.fixture_id())
+        if self.state.is_empty() {
+            format!("hub-{}-{size}-{theme}.png", slug(self.page))
+        } else {
+            format!("hub-{}-{size}-{theme}.png", self.fixture_id())
+        }
     }
 }
 
-pub const SCENARIOS: [Scenario; 19] = [
+pub const SCENARIOS: [Scenario; 39] = [
     Scenario {
         page: "Home",
         state: "empty",
@@ -93,6 +98,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -103,6 +109,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -113,6 +120,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: false,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -123,6 +131,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -133,6 +142,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -143,6 +153,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: Some("History is unavailable."),
     },
     Scenario {
@@ -153,6 +164,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -163,6 +175,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -173,6 +186,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -183,6 +197,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: Some("Unable to load local data."),
     },
     Scenario {
@@ -193,6 +208,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -203,6 +219,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::Empty,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -213,6 +230,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::Populated,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -223,6 +241,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::Autosaved,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -233,6 +252,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::SaveError,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -243,6 +263,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -253,6 +274,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Two,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -263,6 +285,7 @@ pub const SCENARIOS: [Scenario; 19] = [
         queue: QueueSeed::Failures,
         style: StyleStep::None,
         dictation_enabled: true,
+        prepare: "",
         error: None,
     },
     Scenario {
@@ -271,6 +294,227 @@ pub const SCENARIOS: [Scenario; 19] = [
         history: HistorySeed::Responsive,
         dictionary: DictionarySeed::Responsive,
         queue: QueueSeed::Three,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        prepare: "",
+        error: None,
+    },
+    Scenario {
+        page: "Ask",
+        state: "empty",
+        prepare: "empty",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Ask",
+        state: "conversation",
+        prepare: "conversation",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Ask",
+        state: "thinking",
+        prepare: "thinking",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Ask",
+        state: "error",
+        prepare: "error",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Ask",
+        state: "long-conversation",
+        prepare: "long-conversation",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Ask",
+        state: "citations",
+        prepare: "citations",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Hot Phrases",
+        state: "empty",
+        prepare: "empty",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Hot Phrases",
+        state: "",
+        prepare: "empty",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Hot Phrases",
+        state: "populated3-selected",
+        prepare: "populated3-selected",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Hot Phrases",
+        state: "preview-result",
+        prepare: "preview-result",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Hot Phrases",
+        state: "invalid-draft",
+        prepare: "invalid-draft",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Hot Phrases",
+        state: "undo",
+        prepare: "undo",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Hot Phrases",
+        state: "error-and-undo",
+        prepare: "error-and-undo",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Meetings",
+        state: "idle",
+        prepare: "idle",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Meetings",
+        state: "running",
+        prepare: "running",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Meetings",
+        state: "running-no-system-audio",
+        prepare: "running-no-system-audio",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Meetings",
+        state: "saved",
+        prepare: "saved",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Meetings",
+        state: "running-auto",
+        prepare: "running-auto",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Meetings",
+        state: "saved-generated",
+        prepare: "saved-generated",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
+        style: StyleStep::None,
+        dictation_enabled: true,
+        error: None,
+    },
+    Scenario {
+        page: "Meetings",
+        state: "recent-empty",
+        prepare: "recent-empty",
+        history: HistorySeed::None,
+        dictionary: DictionarySeed::None,
+        queue: QueueSeed::Empty,
         style: StyleStep::None,
         dictation_enabled: true,
         error: None,
@@ -485,8 +729,8 @@ mod tests {
     #[test]
     fn only_ported_pages_have_empty_and_populated_snapshots() {
         assert_eq!(SNAPSHOT_PAGES, crate::hub_route::HUB_PAGES);
-        assert_eq!(total_snapshots(), 76);
-        for page in SNAPSHOT_PAGES {
+        assert_eq!(total_snapshots(), 156);
+        for page in ["Home", "History", "Dictionary", "Style", "Prompts"] {
             assert!(history_rows(find(page, "empty").unwrap().history).is_empty());
             let populated = find(page, "populated").unwrap();
             assert!(
@@ -497,7 +741,12 @@ mod tests {
             );
             assert!(scenarios_for(page).len() >= 3);
         }
-        assert!(find("Meetings", "populated").is_none());
+        assert!(find("Models", "populated").is_none());
+        for page in ["Ask", "Meetings", "Hot Phrases"] {
+            let scenarios = scenarios_for(page);
+            assert!(scenarios.len() >= 6);
+            assert!(scenarios.iter().all(|s| !s.prepare.is_empty()));
+        }
         assert!(find("Home", "missing").is_none());
         assert!(!find("Home", "dictation-off").unwrap().dictation_enabled);
         assert!(find("History", "error").unwrap().error.is_some());

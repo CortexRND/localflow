@@ -16,7 +16,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::NSString;
 
-use lf_ui::backends::prompts::WorkPrompt;
+use lf_ui::backends::ask::FakeAskBackend;
+use lf_ui::backends::meeting::FakeMeetingClient;
+use lf_ui::backends::prompts::{UnavailablePromptQueue, WorkPrompt};
 use lf_ui::hub_route::HUB_PAGES;
 use lf_ui::mac::hub::Hub;
 use lf_ui::mac::page::HubServices;
@@ -338,7 +340,32 @@ pub fn run() {
         walk(&hub.content_view(), "populated", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
     }
-    for unavailable in ["Ask", "Meetings", "Models", "Settings", "Hot Phrases"] {
+    for scenario in lf_ui::snapshot_plan::SCENARIOS
+        .iter()
+        .filter(|s| matches!(s.page, "Ask" | "Meetings" | "Hot Phrases"))
+    {
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_hub = Hub::new(mtm, services(fixture.path()), scenario.page);
+        fixture_hub
+            .prepare_snapshot(scenario.prepare, fixture.path())
+            .unwrap();
+        fixture_hub.show_page(scenario.page);
+        if scenario.page == "Meetings" && matches!(scenario.state, "saved" | "saved-generated") {
+            assert!(
+                named_button(&fixture_hub.content_view(), "Ask").is_some(),
+                "meeting chat must include its Ask button"
+            );
+        }
+        walk(
+            &fixture_hub.content_view(),
+            scenario.state,
+            scenario.page,
+            &mut failures,
+        );
+        assert_decorations_hidden(&fixture_hub.content_view(), scenario.page, &mut failures);
+        fixture_hub.shutdown();
+    }
+    for unavailable in ["Models", "Settings"] {
         hub.show_page("History");
         hub.show_page(unavailable);
         assert_eq!(hub.current_page(), "Home");
@@ -347,6 +374,9 @@ pub fn run() {
         Config::defaults_for(true),
         hub.services().history.clone(),
         hub.services().dictionary.clone(),
+        Arc::new(UnavailablePromptQueue),
+        Arc::new(FakeMeetingClient::new()),
+        Box::new(FakeAskBackend::default()),
     );
     let unavailable = Hub::new(mtm, production, "Prompts");
     assert!(has_text(
@@ -363,7 +393,5 @@ pub fn run() {
     unavailable.shutdown();
     hub.shutdown();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    println!(
-        "Native accessibility audit: Home, History, Dictionary, Style, Prompts and shell passed"
-    );
+    println!("Native accessibility audit: all eight ported pages and snapshot states passed");
 }

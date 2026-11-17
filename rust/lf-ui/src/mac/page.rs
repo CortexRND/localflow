@@ -25,7 +25,9 @@ use serde_json::Value;
 
 use super::actions::ActionTarget;
 use super::style::FlippedView;
-use crate::backends::prompts::{FakePromptQueue, PromptQueue, UnavailablePromptQueue};
+use crate::backends::ask::{AskBackend, FakeAskBackend};
+use crate::backends::meeting::{FakeMeetingClient, MeetingClient};
+use crate::backends::prompts::{FakePromptQueue, PromptQueue};
 use crate::tokens::{Palette, Weight};
 
 /// The text-measure closure pages pass to the step-1 layout code.
@@ -43,6 +45,8 @@ pub struct HubServices {
     pub history: Rc<HistoryStore>,
     pub dictionary: Rc<DictionaryStore>,
     pub prompt_queue: Arc<dyn PromptQueue>,
+    pub meeting_client: Arc<dyn MeetingClient>,
+    pub ask_backend: RefCell<Box<dyn AskBackend>>,
     /// Injected by the single native window router. Snapshots leave it unset.
     pub setup_opener: RefCell<Option<Rc<dyn Fn()>>>,
     /// Per-page inline error text (`page_errors` in Python), cleared when the
@@ -57,6 +61,9 @@ impl HubServices {
         config: Config,
         history: Rc<HistoryStore>,
         dictionary: Rc<DictionaryStore>,
+        prompt_queue: Arc<dyn PromptQueue>,
+        meeting_client: Arc<dyn MeetingClient>,
+        ask_backend: Box<dyn AskBackend>,
     ) -> Rc<Self> {
         Rc::new(HubServices {
             config: RefCell::new(config),
@@ -64,7 +71,9 @@ impl HubServices {
             memory_only_config: Cell::new(false),
             history,
             dictionary,
-            prompt_queue: Arc::new(UnavailablePromptQueue),
+            prompt_queue,
+            meeting_client,
+            ask_backend: RefCell::new(ask_backend),
             setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
@@ -78,17 +87,16 @@ impl HubServices {
         history: Rc<HistoryStore>,
         dictionary: Rc<DictionaryStore>,
     ) -> Rc<Self> {
-        Rc::new(HubServices {
-            config: RefCell::new(config),
-            config_path: RefCell::new(None),
-            memory_only_config: Cell::new(true),
+        let services = Self::new(
+            config,
             history,
             dictionary,
-            prompt_queue: Arc::new(FakePromptQueue::new()),
-            setup_opener: RefCell::new(None),
-            page_errors: RefCell::default(),
-            page_notices: RefCell::default(),
-        })
+            Arc::new(FakePromptQueue::new()),
+            Arc::new(FakeMeetingClient::new()),
+            Box::new(FakeAskBackend::default()),
+        );
+        services.memory_only_config.set(true);
+        services
     }
 
     /// A copy of the current config.
@@ -227,7 +235,7 @@ mod tests {
     use std::path::Path;
 
     fn file_services(dir: &Path, path: &Path, config: Config) -> Rc<HubServices> {
-        let services = HubServices::new(
+        let services = HubServices::new_isolated(
             config,
             Rc::new(
                 HistoryStore::open(
@@ -239,6 +247,7 @@ mod tests {
             ),
             Rc::new(DictionaryStore::new(Some(dir.join("dictionary.json")))),
         );
+        services.memory_only_config.set(false);
         *services.config_path.borrow_mut() = Some(path.to_path_buf());
         services
     }
@@ -335,7 +344,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let config = Config::defaults_for(true);
         save_config(&config, Some(&path)).unwrap();
-        let services = HubServices::new(
+        let services = HubServices::new_isolated(
             config.clone(),
             Rc::new(
                 HistoryStore::open(
@@ -349,6 +358,7 @@ mod tests {
                 dir.path().join("dictionary.json"),
             ))),
         );
+        services.memory_only_config.set(false);
         *services.config_path.borrow_mut() = Some(path.clone());
         let mut external = config;
         external.set_field("dictation_enabled", Value::Bool(false));
