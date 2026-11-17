@@ -29,6 +29,9 @@ pub enum WorkItem {
     ReloadLlm(Arc<Config>),
     /// The speech group changed: load the new model, keep the old on failure.
     ReloadStt(Arc<Config>),
+    /// A recording started: load the speech model now if it is not loaded,
+    /// so the job that follows does not pay the load.
+    PrepareSpeech,
     Shutdown,
 }
 
@@ -77,6 +80,13 @@ impl Worker {
                         log::error!("could not build the speech model; keeping the old one: {e}")
                     }
                 },
+                WorkItem::PrepareSpeech => {
+                    if !self.speech.loaded() {
+                        if let Err(e) = self.speech.load() {
+                            log::warn!("speech model preload failed: {e}");
+                        }
+                    }
+                }
                 WorkItem::Job(job) => self.process(job, llm.as_deref(), &stop),
             }
         }

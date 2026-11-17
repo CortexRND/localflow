@@ -35,6 +35,43 @@ fn normal_hold_above_threshold_records_and_queues_clip() {
 }
 
 #[test]
+fn recording_start_hook_fires_only_when_the_mic_opens() {
+    let mut r = rig();
+    // A queued quick tap never opens the mic, so nothing is prepared.
+    r.handle.send(Event::Down(0.0));
+    r.handle.send(Event::Up(0.1));
+    r.controller.drain();
+    assert!(r.recording_starts.lock().unwrap().is_empty());
+    r.set_now(1.0);
+    r.controller.drain();
+    r.handle.send(Event::Down(1.0));
+    r.controller.drain();
+    assert_eq!(*r.recording_starts.lock().unwrap(), vec![JobKind::Dictate]);
+    r.set_now(2.0);
+    r.handle.send(Event::Up(2.0));
+    r.handle.send(Event::CommandDown(3.0));
+    r.controller.drain();
+    assert_eq!(
+        *r.recording_starts.lock().unwrap(),
+        vec![JobKind::Dictate, JobKind::Command]
+    );
+    r.handle.send(Event::CommandCancel(3.5));
+    r.controller.drain();
+
+    r.audio.0.lock().unwrap().fail_start = true;
+    r.handle.send(Event::Down(4.0));
+    r.controller.drain();
+    assert_eq!(r.recording_starts.lock().unwrap().len(), 2);
+
+    let mut off = config();
+    off.set_field("dictation_enabled", serde_json::json!(false));
+    let mut r = rig_with(off);
+    r.handle.send(Event::Down(0.0));
+    r.controller.drain();
+    assert!(r.recording_starts.lock().unwrap().is_empty());
+}
+
+#[test]
 fn live_sounds_setting_suppresses_start_and_stop_cues_without_disabling_capture() {
     let mut r = rig();
     let mut muted = config();

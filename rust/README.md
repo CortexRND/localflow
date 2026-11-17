@@ -421,7 +421,7 @@ cd rust
 cargo run --release -p lf-stt --example stt_bench -- \
   --engines whisper-cpp,parakeet-onnx --model base.en --provider cpu --runs 10 \
   --json bench.json --table bench.md
-# macOS defaults: Whisper Metal, Parakeet CoreML requested (unverified)
+# macOS defaults: Whisper Metal, Parakeet CPU; CoreML (unverified) is opt-in
 cargo run --release -p lf-stt --example stt_bench -- --engines parakeet-onnx --provider coreml
 # Optional local PCM/float WAV, language/prompt, alternate Whisper model:
 cargo run --release -p lf-stt --example stt_bench -- \
