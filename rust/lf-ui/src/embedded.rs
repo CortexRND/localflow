@@ -148,6 +148,7 @@ impl SpeechEngine for PublishSpeech {
 }
 
 pub struct EmbeddedRuntime {
+    shutting_down: bool,
     pub runtime: Option<RuntimeHandle>,
     server: Option<ServerHandle>,
     pub speech: Arc<dyn SpeechEngine>,
@@ -291,6 +292,7 @@ impl EmbeddedRuntime {
             .ok();
         crate::speech_profile::start(speech.clone(), memory.clone());
         Self {
+            shutting_down: false,
             runtime,
             server,
             speech,
@@ -301,6 +303,9 @@ impl EmbeddedRuntime {
     }
 
     pub fn shutdown(&mut self) {
+        if std::mem::replace(&mut self.shutting_down, true) {
+            return;
+        }
         self.server_watch.take();
         if let Some(watcher) = self.meeting_watch.as_mut() {
             watcher.shutdown();
@@ -308,10 +313,12 @@ impl EmbeddedRuntime {
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.shutdown();
         }
+        let memory = self.memory.clone();
         if let Some(server) = self.server.as_mut() {
-            server.shutdown();
+            server.shutdown_then(move || memory.shutdown());
+        } else {
+            finish_services(None, None, move || memory.shutdown());
         }
-        self.memory.shutdown();
     }
 }
 
@@ -365,6 +372,7 @@ fn ensure_server(
 struct ServerHandle {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     state: Arc<ServerState>,
+    drained: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl ServerHandle {
@@ -372,6 +380,7 @@ impl ServerHandle {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let shutdown_state = state.clone();
         let (ready, started) = std::sync::mpsc::sync_channel(1);
+        let (finished, drained) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("localflow-server".into())
             .spawn(move || {
@@ -397,6 +406,7 @@ impl ServerHandle {
                     log::error!("local server stopped: {error}");
                     eprintln!("local server unavailable: {error}");
                 }
+                let _ = finished.send(());
             })?;
         started
             .recv_timeout(std::time::Duration::from_secs(5))?
@@ -404,32 +414,134 @@ impl ServerHandle {
         Ok(Self {
             stop: Some(stop),
             state: shutdown_state,
+            drained: Some(drained),
         })
     }
+    #[cfg(test)]
     fn shutdown(&mut self) {
+        self.shutdown_then(|| {});
+    }
+    fn shutdown_then(&mut self, after: impl FnOnce() + Send + 'static) {
         if let Some(stop) = self.stop.take() {
-            let state = self.state.clone();
-            let pending = crate::shutdown::register_pending_meeting_write();
-            if let Err(error) = std::thread::Builder::new()
-                .name("localflow-meeting-save".into())
-                .spawn(move || {
-                    if !pending.wait_for_others(std::time::Duration::from_secs(4)) {
-                        log::warn!("timed out waiting for meeting notes before shutdown");
-                    }
-                    if let Err(error) = state.shutdown() {
-                        log::error!("meeting shutdown failed: {error}");
-                    }
-                    let _ = stop.send(());
-                    drop(pending);
-                })
-            {
-                log::error!("could not start meeting shutdown: {error}");
-            }
+            let _ = stop.send(());
+            finish_services(Some(self.state.clone()), self.drained.take(), after);
         }
     }
 }
 
+fn finish_services(
+    state: Option<Arc<ServerState>>,
+    drained: Option<std::sync::mpsc::Receiver<()>>,
+    after: impl FnOnce() + Send + 'static,
+) {
+    let pending = crate::shutdown::register_pending_meeting_write();
+    if let Err(error) = std::thread::Builder::new()
+        .name("localflow-meeting-save".into())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            if !pending.wait_for_others(std::time::Duration::from_secs(4)) {
+                log::warn!("timed out waiting for meeting notes before shutdown");
+            }
+            if let Some(state) = state {
+                if let Err(error) = state.shutdown() {
+                    log::error!("meeting shutdown failed: {error}");
+                }
+            }
+            if let Some(drained) = drained {
+                let remaining =
+                    std::time::Duration::from_secs(60).saturating_sub(started.elapsed());
+                if drained.recv_timeout(remaining).is_err() {
+                    log::warn!("timed out draining server requests during quit");
+                }
+            }
+            after();
+            drop(pending);
+        })
+    {
+        log::error!("could not start meeting shutdown: {error}");
+    }
+}
+
 struct Capture(SharedSpeech);
+
+#[test]
+#[cfg(test)]
+fn shutdown_keeps_speech_available_for_final_meeting_audio() {
+    use lf_server::backend::{Backend, BackendRequest, BackendResponse};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct Speech(mpsc::Sender<()>);
+    impl SpeechEngine for Speech {
+        fn load(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+            Ok("final chunk".into())
+        }
+        fn unload(&self) {
+            let _ = self.0.send(());
+        }
+    }
+    struct Meeting {
+        speech: Arc<dyn SpeechEngine>,
+        release: Mutex<mpsc::Receiver<()>>,
+        saved: mpsc::Sender<Result<String, String>>,
+    }
+    impl Backend for Meeting {
+        fn handle(&self, _: BackendRequest) -> BackendResponse {
+            unreachable!()
+        }
+        fn shutdown(&self, _: &Config) -> Result<()> {
+            self.release.lock().unwrap().recv().unwrap();
+            self.saved
+                .send(self.speech.transcribe(&[0.5], None))
+                .unwrap();
+            Ok(())
+        }
+    }
+    let memory = crate::speech_memory::SpeechMemory::new();
+    let (unload, unloaded) = mpsc::channel();
+    let speech = memory.speech(Arc::new(Speech(unload)));
+    let (release, wait) = mpsc::channel();
+    let (save, saved) = mpsc::channel();
+    let state = Arc::new(ServerState::new(
+        Config::default(),
+        String::new(),
+        Arc::new(Meeting {
+            speech: speech.clone(),
+            release: Mutex::new(wait),
+            saved: save,
+        }),
+    ));
+    let (stop, _stopped) = tokio::sync::oneshot::channel();
+    let (finish, drained) = mpsc::channel();
+    let mut runtime = EmbeddedRuntime {
+        shutting_down: false,
+        runtime: None,
+        server: Some(ServerHandle {
+            stop: Some(stop),
+            state,
+            drained: Some(drained),
+        }),
+        speech,
+        memory,
+        server_watch: None,
+        meeting_watch: None,
+    };
+    runtime.shutdown();
+    runtime.shutdown();
+    let premature = unloaded.try_recv().is_ok();
+    release.send(()).unwrap();
+    let result = saved.recv_timeout(Duration::from_secs(6)).unwrap();
+    assert!(!premature, "speech was unloaded before meeting drain");
+    assert_eq!(result.unwrap(), "final chunk");
+    assert!(
+        unloaded.recv_timeout(Duration::from_millis(20)).is_err(),
+        "speech shut down before HTTP drain"
+    );
+    finish.send(()).unwrap();
+    unloaded.recv_timeout(Duration::from_secs(6)).unwrap();
+}
 
 #[cfg(test)]
 #[test]
@@ -453,16 +565,22 @@ fn shutdown_flushes_notes_before_backend_and_signals_even_on_save_error() {
         String::new(),
         Arc::new(Save(saved.clone())),
     ));
-    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let (finished, done) = std::sync::mpsc::channel();
     let mut handle = ServerHandle {
         stop: Some(stop),
         state,
+        drained: None,
     };
-    handle.shutdown();
+    handle.shutdown_then(move || {
+        let _ = finished.send(());
+    });
     handle.shutdown();
     assert!(!saved.load(Ordering::SeqCst));
+    assert!(stopped.try_recv().is_ok());
     drop(notes);
-    stopped.blocking_recv().unwrap();
+    done.recv_timeout(std::time::Duration::from_secs(6))
+        .unwrap();
     assert!(saved.load(Ordering::SeqCst));
 }
 
