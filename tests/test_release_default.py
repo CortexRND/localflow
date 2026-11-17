@@ -27,6 +27,13 @@ def test_release_versions_and_installer_hashes_are_consistent():
         assert f"/v{version}/{filename}" in readme
 
 
+def test_python_switch_back_example_requires_explicit_runtime():
+    readme = (ROOT / "rust/README.md").read_text(encoding="utf-8")
+    example = readme.split("To switch back:", 1)[1].split("If the active agent", 1)[0]
+    assert "LOCALFLOW_RUNTIME=python ./install.sh --no-launch" in example
+    assert "omit LOCALFLOW_RUNTIME" not in example
+
+
 def test_tag_workflow_publishes_complete_release_and_checksums():
     workflow = (ROOT / ".github/workflows/mac-installer.yml").read_text(encoding="utf-8")
     assert "tags:" in workflow and "'v*'" in workflow

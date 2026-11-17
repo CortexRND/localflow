@@ -103,7 +103,7 @@ Backups live alongside the plist in `~/Library/LaunchAgents`:
 installs do not overwrite the Python backup with a Rust plist. To switch back:
 
 ```sh
-LOCALFLOW_RUNTIME=python ./install.sh --no-launch  # or omit LOCALFLOW_RUNTIME
+LOCALFLOW_RUNTIME=python ./install.sh --no-launch
 ```
 
 If the active agent is Rust, this restores the previous Python plist (including
