@@ -36,7 +36,7 @@ for image in "$macos/lf-hub" "$frameworks"/*.dylib; do
     load_commands="$(otool -l "$image")"
     while IFS= read -r rpath; do
         install_name_tool -delete_rpath "$rpath" "$image"
-    done < <(printf '%s\n' "$load_commands" | awk '/cmd LC_RPATH/{r=1;next} r && /path /{sub(/^.*path /, "");sub(/ \(offset.*$/, "");print;r=0}')
+    done < <(printf '%s\n' "$load_commands" | awk '/cmd LC_RPATH/{r=1;next} r && /^[[:space:]]*path /{sub(/^[[:space:]]*path /, "");sub(/ \(offset.*$/, "");print;r=0}')
     if [[ "$image" == "$macos/lf-hub" ]]; then
         install_name_tool -add_rpath '@executable_path/../Frameworks' "$image"
     else

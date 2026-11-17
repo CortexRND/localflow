@@ -8,11 +8,7 @@ TARGET="gui/$(id -u)/$LABEL"
 DOMAIN="gui/$(id -u)"
 
 xml() {
-    local text="$1"
-    text="${text//&/\&amp;}"
-    text="${text//</\&lt;}"
-    text="${text//>/\&gt;}"
-    printf '%s' "$text"
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
 program() {

@@ -58,7 +58,7 @@ elif name == 'cargo' and a[0] == 'build':
         (p / item).write_text('native fixture')
 elif name == 'otool':
     if a[0] == '-l':
-        print('cmd LC_RPATH\n  path /build/native libs (offset 12)')
+        print('cmd LC_RPATH\n  path @loader_path (offset 12)\ncmd LC_RPATH\n  path /build/native libs (offset 12)')
     else:
         dep = '/build/libsherpa-onnx-c-api.dylib' if Path(a[-1]).name == 'lf-hub' else '@rpath/libonnxruntime.dylib'
         if os.environ.get('BAD_DEP'):
@@ -262,6 +262,10 @@ def test_builder_bundles_rewrites_and_verifies_before_replacing(mac, failure):
     )
     assert any(
         call[:3] == ["install_name_tool", "-delete_rpath", "/build/native libs"]
+        for call in calls
+    )
+    assert any(
+        call[:3] == ["install_name_tool", "-delete_rpath", "@loader_path"]
         for call in calls
     )
     assert any(
