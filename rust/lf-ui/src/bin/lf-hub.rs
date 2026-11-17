@@ -3,6 +3,17 @@
 use lf_ui::hub_route::canonical_page;
 use std::process::ExitCode;
 
+const DEFAULT_LOG_FILTER: &str = "warn,lf_=info,localflow=info";
+
+fn init_logging() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER),
+    )
+    .target(env_logger::Target::Stderr)
+    .format_timestamp_millis()
+    .try_init();
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LaunchOptions {
     page: Option<&'static str>,
@@ -47,8 +58,11 @@ fn run(_options: LaunchOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    init_logging();
+    log::info!("starting lf-hub");
     #[cfg(feature = "runtime")]
     if std::env::args().nth(1).as_deref() == Some("--speech-helper") {
+        log::info!("starting speech helper");
         if std::env::args().len() != 2 {
             return ExitCode::from(2);
         }
@@ -79,6 +93,22 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_logging_includes_localflow_info_but_limits_dependencies() {
+        let logger = env_logger::Builder::new()
+            .parse_filters(DEFAULT_LOG_FILTER)
+            .build();
+        let matches = |target, level| {
+            logger.matches(&log::Record::builder().target(target).level(level).build())
+        };
+        assert!(matches("lf_input::hub", log::Level::Info));
+        assert!(matches("lf_stt::helper", log::Level::Info));
+        assert!(matches("lf_hub", log::Level::Info));
+        assert!(!matches("lf_ui", log::Level::Debug));
+        assert!(!matches("reqwest", log::Level::Info));
+        assert!(matches("reqwest", log::Level::Warn));
+    }
 
     #[test]
     fn command_line_routes_only_to_ported_pages() {

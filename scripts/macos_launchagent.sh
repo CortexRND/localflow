@@ -6,6 +6,7 @@ AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGS="$HOME/.localflow"
 TARGET="gui/$(id -u)/$LABEL"
 DOMAIN="gui/$(id -u)"
+restart_rust=0
 
 xml() {
     printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
@@ -39,6 +40,53 @@ load_agent() {
     return 1
 }
 
+rust_pids() {
+    ps -axww -o pid= -o comm= | while read -r pid executable; do
+        if [[ "$executable" == "$EXE" ]]; then printf '%s\n' "$pid"; fi
+    done
+}
+
+stop_rust() {
+    local pid attempt
+    old_rust_pids="$(rust_pids)"
+    for pid in $old_rust_pids; do kill -TERM "$pid" 2>/dev/null || true; done
+    for ((attempt=0; attempt<50; attempt++)); do
+        [[ -z "$(rust_pids)" ]] && return 0
+        sleep 0.1
+    done
+    for pid in $(rust_pids); do kill -KILL "$pid" 2>/dev/null || true; done
+    for ((attempt=0; attempt<20; attempt++)); do
+        [[ -z "$(rust_pids)" ]] && return 0
+        sleep 0.1
+    done
+    echo "Could not stop running Rust LocalFlow processes: $EXE" >&2
+    return 1
+}
+
+verify_rust_pid() {
+    local pid old_pid current_pid attempt fresh
+    for ((attempt=0; attempt<50; attempt++)); do
+        pid="$(launchctl print "$TARGET" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}')" || pid=""
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            fresh=1
+            for old_pid in $old_rust_pids; do
+                if [[ "$pid" == "$old_pid" ]]; then fresh=0; fi
+            done
+            if [[ "$fresh" == 1 ]]; then
+                for current_pid in $(rust_pids); do
+                    if [[ "$current_pid" == "$pid" ]]; then
+                        echo "Restarted Rust LocalFlow (PID $pid)"
+                        return 0
+                    fi
+                done
+            fi
+        fi
+        sleep 0.1
+    done
+    echo "Rust LaunchAgent did not start a new lf-hub process: $EXE" >&2
+    return 1
+}
+
 case "${1:-}" in
     uninstall)
         rm -f "$AGENT"
@@ -51,12 +99,13 @@ case "${1:-}" in
         runtime=python
         ;;
     install-rust) runtime=rust ;;
-    *) echo "Usage: $0 install-rust EXE | restore-python EXE | uninstall" >&2; exit 2 ;;
+    restart-rust) runtime=rust; restart_rust=1 ;;
+    *) echo "Usage: $0 install-rust EXE | restart-rust EXE | restore-python EXE | uninstall" >&2; exit 2 ;;
 esac
 
 EXE="${2:?runtime executable required}"
 [[ "$EXE" == /* && -x "$EXE" ]] || { echo "Runtime executable is missing or not absolute: $EXE" >&2; exit 1; }
-if [[ "$runtime" == rust && -f "$AGENT" && "$(program "$AGENT")" == "$EXE" ]]; then
+if [[ "$runtime" == rust && "$restart_rust" == 0 && -f "$AGENT" && "$(program "$AGENT")" == "$EXE" ]]; then
     # Do not boot out the Hub that is currently enabling its own login agent.
     if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" == 1 ]] || launchctl print "$TARGET" >/dev/null 2>&1; then
         echo "Rust LaunchAgent already installed: $AGENT"
@@ -100,6 +149,7 @@ EOF
 fi
 plutil -lint "$pending"
 bootout
+if [[ "$restart_rust" == 1 && "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then stop_rust; fi
 mv -f "$pending" "$AGENT"
 if ! load_agent; then
     bootout
@@ -110,5 +160,9 @@ if ! load_agent; then
         rm -f "$AGENT"
     fi
     exit 1
+fi
+if [[ "$restart_rust" == 1 && "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
+    launchctl kickstart -k "$TARGET"
+    verify_rust_pid
 fi
 echo "Installed $runtime LaunchAgent: $AGENT"

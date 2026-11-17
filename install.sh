@@ -466,7 +466,7 @@ fi
 if [[ "$RUNTIME" == rust ]]; then
     bash scripts/build_rust_app.sh "$HOME/Applications/LocalFlow.app"
     bash "$HOME/Applications/LocalFlow.app/Contents/Resources/macos_launchagent.sh" \
-        install-rust "$HOME/Applications/LocalFlow.app/Contents/MacOS/lf-hub"
+        restart-rust "$HOME/Applications/LocalFlow.app/Contents/MacOS/lf-hub"
 elif [[ "$OS" == "Linux" ]]; then
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
     ln -sfn "$REPO/.venv/bin/lf" "$HOME/.local/bin/lf"
