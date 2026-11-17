@@ -6,6 +6,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -313,3 +314,22 @@ def test_invalid_runtime_rejected_before_any_install(mac, value):
     assert result.returncode == 2
     assert "Invalid LOCALFLOW_RUNTIME" in result.stderr
     assert not Path(env["CALLS"]).exists()
+
+
+@pytest.mark.parametrize("present", [(), ("sherpa",), ("onnx",), ("sherpa", "onnx")])
+def test_installer_cache_guard_reextracts_only_incomplete_sdk(tmp_path, present):
+    workflow = (ROOT / ".github/workflows/installers.yml").read_text(encoding="utf-8")
+    step = workflow.split("      - name: Restore complete sherpa SDK cache\n", 1)[1].split("\n      - ", 1)[0]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    cache = tmp_path / "rust/target/sherpa-onnx-prebuilt"
+    sdk = cache / "sherpa-onnx-v2.0.1-osx-arm64-shared-lib"
+    lib = sdk / "lib"
+    lib.mkdir(parents=True)
+    archive = cache / "sdk.tar.bz2"
+    archive.touch()
+    for kind, name in (("sherpa", "libsherpa-onnx-c-api.dylib"), ("onnx", "libonnxruntime.dylib")):
+        if kind in present:
+            (lib / name).touch()
+    subprocess.run([BASH, "-eu", "-c", script], cwd=tmp_path, check=True)
+    assert sdk.exists() == (len(present) == 2)
+    assert archive.exists()

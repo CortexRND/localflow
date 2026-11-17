@@ -44,6 +44,16 @@ def test_rust_opt_in_job_checks_signature_agent_and_migration_round_trip() -> No
     assert 'cmp "$RUNNER_TEMP/python-agent.plist" "$agent"' in job
     assert 'cmp "$RUNNER_TEMP/python-agent.plist" "$agent.python.bak"' in job
     assert "DYLD_PRINT_LIBRARIES=1" in job
+    assert 'otool -L "$app/Contents/MacOS/lf-hub"' in job
+    for marker in (
+        "PYTHON_INITIAL_AGENT",
+        "RUST_FIRST_AGENT",
+        "RUST_REPEAT_AGENT",
+        "PYTHON_RESTORED_AGENT",
+        "PYTHON_REPEAT_AGENT",
+        "RUST_REINSTATED_AGENT",
+    ):
+        assert f"echo {marker}\n" in job
     assert "./install.sh --uninstall" in job
 
 

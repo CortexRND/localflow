@@ -58,6 +58,16 @@ jobs:
         with:
           workspaces: rust
           cache-on-failure: true
+      - name: Restore complete sherpa SDK cache
+        shell: bash
+        run: |
+          for sdk in rust/target/sherpa-onnx-prebuilt/*; do
+            [[ -d "$sdk" ]] || continue
+            if [[ ! -f "$sdk/lib/libsherpa-onnx-c-api.dylib" || ! -f "$sdk/lib/libonnxruntime.dylib" ]]; then
+              echo "Removing incomplete sherpa SDK: $sdk"
+              rm -rf "$sdk"
+            fi
+          done
       - name: Install Python and seed its login agent without loading it
         shell: bash
         run: |
@@ -70,14 +80,27 @@ jobs:
           path.write_text(plist_content())
           PY
           cp "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist" "$RUNNER_TEMP/python-agent.plist"
+          echo PYTHON_INITIAL_AGENT
+          plutil -convert json -o - "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          echo
       - name: Opt into Rust twice and verify signed relocatable bundle and agent
         shell: bash
         run: |
-          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
-          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
           app="$HOME/Applications/LocalFlow.app"
           agent="$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          echo RUST_FIRST_AGENT
+          plutil -convert json -o - "$agent"
+          echo
+          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          echo RUST_REPEAT_AGENT
+          plutil -convert json -o - "$agent"
+          echo
           codesign --verify --deep --strict --verbose=2 "$app"
+          echo RUST_BINARY_DEPENDENCIES
+          otool -L "$app/Contents/MacOS/lf-hub"
+          echo RUST_BUNDLE_INFO
+          plutil -p "$app/Contents/Info.plist"
           plutil -lint "$app/Contents/Info.plist" "$agent"
           test "$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")" = lf-hub
           test "$(plutil -extract Label raw -o - "$agent")" = com.cortexrnd.localflow
@@ -86,7 +109,7 @@ jobs:
           relocated="$RUNNER_TEMP/Relocated Rust/LocalFlow.app"
           mkdir -p "$(dirname "$relocated")"
           ditto "$app" "$relocated"
-          codesign --verify --deep --strict "$relocated"
+          codesign --verify --deep --strict --verbose=2 "$relocated"
           status=0
           DYLD_PRINT_LIBRARIES=1 "$relocated/Contents/MacOS/lf-hub" --packaging-smoke-test 2>"$RUNNER_TEMP/rust-dyld.log" || status=$?
           test "$status" = 2
@@ -95,10 +118,16 @@ jobs:
       - name: Restore Python twice and uninstall both runtimes
         shell: bash
         run: |
-          LOCALFLOW_RUNTIME=python ./install.sh --no-launch
-          ./install.sh --no-launch
           app="$HOME/Applications/LocalFlow.app"
           agent="$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          LOCALFLOW_RUNTIME=python ./install.sh --no-launch
+          echo PYTHON_RESTORED_AGENT
+          plutil -convert json -o - "$agent"
+          echo
+          ./install.sh --no-launch
+          echo PYTHON_REPEAT_AGENT
+          plutil -convert json -o - "$agent"
+          echo
           cmp "$RUNNER_TEMP/python-agent.plist" "$agent"
           test "$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")" = launcher
           test ! -e "$app/Contents/MacOS/lf-hub"
@@ -107,13 +136,18 @@ jobs:
           ./install.sh --uninstall
           test ! -e "$agent"
           test ! -d "$app"
+          echo PYTHON_UNINSTALLED_AGENT_ABSENT
           # The same uninstall path removes a Rust-shaped installation, too.
           ditto "$RUNNER_TEMP/Relocated Rust/LocalFlow.app" "$app"
           bash scripts/macos_launchagent.sh install-rust "$app/Contents/MacOS/lf-hub"
+          echo RUST_REINSTATED_AGENT
+          plutil -convert json -o - "$agent"
+          echo
           LOCALFLOW_RUNTIME=rust ./install.sh --uninstall
           LOCALFLOW_RUNTIME=rust ./install.sh --uninstall
           test ! -e "$agent"
           test ! -d "$app"
+          echo RUST_UNINSTALLED_AGENT_ABSENT
 
   # The pinned release tag and its assets only exist after merge, so these
   # checks serve release-shaped assets from a local directory instead
