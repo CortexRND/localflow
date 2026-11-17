@@ -28,6 +28,7 @@ jobs:
             find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
           fi
           cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
 
       - name: Native lf-ui tests
         working-directory: rust
