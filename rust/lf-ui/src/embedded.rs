@@ -94,7 +94,7 @@ fn watch_server_services(
     let previous = Mutex::new(config);
     let pending = Arc::new(Mutex::new(None::<Config>));
     let retry_pending = pending.clone();
-    let retry: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+    let retry: lf_runtime::live::OnTick = Arc::new(move || {
         let mut pending = retry_pending.lock().unwrap();
         if let Some(fresh) = pending.as_ref() {
             match refresh_server_speech(&previous, &shared, fresh.clone(), &factory) {
@@ -105,6 +105,7 @@ fn watch_server_services(
                 Err(error) => log::error!("server speech selection failed: {error}"),
             }
         }
+        pending.is_some()
     });
     let apply_retry = retry.clone();
     let apply: Arc<dyn Fn(Config) + Send + Sync> = Arc::new(move |fresh| {
