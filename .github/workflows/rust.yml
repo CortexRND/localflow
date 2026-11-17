@@ -53,9 +53,8 @@ jobs:
           cp rust/lf-ui/src/mac/memory_profile.rs "$baseline/rust/lf-ui/src/mac/memory_profile.rs"
           cp rust/lf-ui/src/launch_agent.rs "$baseline/rust/lf-ui/src/launch_agent.rs"
           printf '\npub mod launch_agent;\n' >> "$baseline/rust/lf-ui/src/lib.rs"
-          cargo build --manifest-path "$baseline/rust/Cargo.toml" --release -p lf-ui --bin lf-hub --features runtime
-          bash scripts/ci_hub_pages.sh "$PWD/artifacts/memory/before" rust/target/release/lf-hub --page Home
-          cargo clean --manifest-path rust/Cargo.toml --release -p lf-ui -p lf-server -p lf-stt -p lf-meetings-backend
+          CARGO_TARGET_DIR="$baseline/target" cargo build --manifest-path "$baseline/rust/Cargo.toml" --release -p lf-ui --bin lf-hub --features runtime
+          bash scripts/ci_hub_pages.sh "$PWD/artifacts/memory/before" "$baseline/target/release/lf-hub" --page Home
           cargo build --manifest-path rust/Cargo.toml --release -p lf-ui --bin lf-hub --features runtime
           bash scripts/ci_hub_pages.sh "$PWD/artifacts/memory/after" rust/target/release/lf-hub --page Home
           python3 - <<'PY'
