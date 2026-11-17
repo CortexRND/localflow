@@ -483,26 +483,30 @@ impl MeetingsBackend {
         result.map_err(|e| BackendResponse::error(500, format!("recall failed: {e}")))
     }
 }
+impl MeetingsBackend {
+    fn finish_shutdown_stop(&self, result: ResponseResult<Value>) -> Result<()> {
+        if let Err(error) = result {
+            anyhow::ensure!(
+                error.status == 409,
+                "could not save meeting during shutdown"
+            );
+            let state = self.state();
+            let _idle = self
+                .idle
+                .wait_while(state, |state| state.phase != Phase::Idle)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        Ok(())
+    }
+}
+
 impl Backend for MeetingsBackend {
     fn shutdown(&self, config: &Config) -> Result<()> {
         self.state().closed = true;
         if let Some(watcher) = &self.watcher {
             watcher.stop();
         }
-        let mut state = self.state();
-        while state.phase == Phase::Starting || state.phase == Phase::Stopping {
-            state = self
-                .idle
-                .wait(state)
-                .unwrap_or_else(|error| error.into_inner());
-        }
-        drop(state);
-        if let Err(error) = self.stop(config) {
-            anyhow::ensure!(
-                error.status == 409,
-                "could not save meeting during shutdown"
-            );
-        }
+        self.finish_shutdown_stop(self.stop(config))?;
         self.inner.shutdown(config)
     }
 
@@ -598,6 +602,46 @@ impl Backend for MeetingsBackend {
     }
     fn autostart_status(&self) -> String {
         self.inner.autostart_status()
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn conflict_after_shutdown_stop_claim_waits_for_persistence() {
+        let backend = Arc::new(MeetingsBackend::new().unwrap());
+        backend.state().phase = Phase::Stopping;
+        let (entered, started) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let closing = backend.clone();
+        let shutdown = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            finished
+                .send(
+                    closing
+                        .finish_shutdown_stop(Err(BackendResponse::error(
+                            409,
+                            "stop raced shutdown",
+                        )))
+                        .is_ok(),
+                )
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
+        backend.state().phase = Phase::Idle;
+        backend.idle.notify_all();
+        assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
+        shutdown.join().unwrap();
+        assert!(backend
+            .finish_shutdown_stop(Err(BackendResponse::error(500, "disk error")))
+            .is_err());
+        assert!(backend
+            .finish_shutdown_stop(Err(BackendResponse::error(409, "already idle")))
+            .is_ok());
     }
 }
 struct ResetSlot<'a> {
