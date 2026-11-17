@@ -73,6 +73,17 @@ fn named_button(view: &NSView, label: &str) -> Option<Retained<NSButton>> {
         .find_map(|child| named_button(&child, label))
 }
 
+fn settle_prompts(hub: &Hub) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while has_text(&hub.content_view(), "Loading prompts…") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "prompt worker did not finish"
+        );
+        spin_run_loop(0.02);
+    }
+}
+
 fn assert_meetings_focus(mtm: MainThreadMarker) {
     fn notes(view: &NSView) -> Option<Retained<NSTextView>> {
         if let Ok(text) = view.retain().downcast::<NSTextView>() {
@@ -350,6 +361,7 @@ pub fn run() {
     let mut failures = Vec::new();
     for page in HUB_PAGES {
         hub.show_page(page);
+        settle_prompts(&hub);
         assert_eq!(hub.current_page(), page);
         walk(&hub.content_view(), "root", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
@@ -398,6 +410,7 @@ pub fn run() {
         .unwrap();
     for page in HUB_PAGES {
         hub.show_page(page);
+        settle_prompts(&hub);
         walk(&hub.content_view(), "populated", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
     }
@@ -440,6 +453,8 @@ pub fn run() {
         Box::new(FakeAskBackend::default()),
     );
     let unavailable = Hub::new(mtm, production, "Prompts");
+    assert!(has_text(&unavailable.content_view(), "Loading prompts…"));
+    settle_prompts(&unavailable);
     assert!(has_text(
         &unavailable.content_view(),
         "Can't read the queue"

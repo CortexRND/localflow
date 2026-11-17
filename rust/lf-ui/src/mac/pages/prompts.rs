@@ -9,15 +9,22 @@
 //! the top of the page (Prompts never uses the shell callout). Dispatching an
 //! approved prompt is CLI-only in Python and is not offered here either.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::{mpsc, Arc};
+use std::thread;
+
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSAccessibility, NSView};
 use objc2_foundation::{NSPoint, NSString};
 
+use crate::backends::prompts::{PromptEntry, PromptQueue};
 use crate::hub_model::{
     prompt_entries, prompt_row_layout, prompt_rows, prompt_status_pill, review_prompt,
-    shortcut_rows, PromptRow, ReviewAction, PROMPTS_EMPTY,
+    shortcut_rows, PromptRow, ReviewAction, PROMPTS_EMPTY, PROMPTS_UNREADABLE,
 };
+use crate::mac::actions::Timer;
 use crate::mac::page::{HubPage, PageCtx};
 use crate::mac::style::{
     color, hide_from_accessibility, make_pill, rect, style_surface, ButtonKind, FlippedView,
@@ -26,14 +33,124 @@ use crate::mac::style::{
 use crate::mac::widgets::{button, label, LabelStyle};
 use crate::tokens::{Palette, Weight, CARD_PADDING};
 
-/// The Prompts page. Stateless between renders: the queue is re-read on every
-/// render, so Reload is just a rebuild.
-#[derive(Default)]
-pub struct PromptsPage;
+const LOADING: &str = "Loading prompts…";
+
+type Entries = Result<Vec<PromptEntry>, &'static str>;
+
+struct Completion {
+    generation: u64,
+    entries: Entries,
+    error: Option<String>,
+}
+
+struct State {
+    entries: RefCell<Option<Entries>>,
+    error: RefCell<Option<String>>,
+    busy: Cell<bool>,
+    visible: Cell<bool>,
+    closed: Cell<bool>,
+    generation: Cell<u64>,
+    sender: mpsc::Sender<Completion>,
+    receiver: mpsc::Receiver<Completion>,
+    timer: RefCell<Option<Timer>>,
+    rebuild: RefCell<Option<Rc<dyn Fn()>>>,
+}
+
+impl State {
+    fn new() -> Rc<Self> {
+        let (sender, receiver) = mpsc::channel();
+        Rc::new(Self {
+            entries: RefCell::new(None),
+            error: RefCell::new(None),
+            busy: Cell::new(false),
+            visible: Cell::new(false),
+            closed: Cell::new(false),
+            generation: Cell::new(0),
+            sender,
+            receiver,
+            timer: RefCell::new(None),
+            rebuild: RefCell::new(None),
+        })
+    }
+
+    fn start(&self, queue: Arc<dyn PromptQueue>, action: Option<(String, ReviewAction)>) {
+        if self.closed.get() || self.busy.replace(true) {
+            return;
+        }
+        self.entries.borrow_mut().take();
+        self.error.borrow_mut().take();
+        let generation = self.generation.get();
+        let sender = self.sender.clone();
+        let pending_write = action
+            .as_ref()
+            .map(|_| crate::shutdown::register_pending_write());
+        if thread::Builder::new()
+            .name("localflow-prompts".into())
+            .spawn(move || {
+                let error = action.and_then(|(id, action)| review_prompt(&*queue, &id, action));
+                drop(pending_write);
+                let entries = prompt_entries(&*queue);
+                let _ = sender.send(Completion {
+                    generation,
+                    entries,
+                    error,
+                });
+            })
+            .is_err()
+        {
+            self.busy.set(false);
+            *self.entries.borrow_mut() = Some(Err(PROMPTS_UNREADABLE));
+        }
+    }
+
+    fn apply(&self, completion: Completion) {
+        if self.closed.get() || completion.generation != self.generation.get() {
+            return;
+        }
+        self.busy.set(false);
+        *self.entries.borrow_mut() = Some(completion.entries);
+        *self.error.borrow_mut() = completion.error;
+        if self.visible.get() {
+            if let Some(rebuild) = self.rebuild.borrow().as_ref() {
+                rebuild();
+            }
+        }
+    }
+
+    fn drain(&self) {
+        while let Ok(completion) = self.receiver.try_recv() {
+            self.apply(completion);
+        }
+        if !self.visible.get() && !self.busy.get() {
+            self.timer.borrow_mut().take();
+        }
+    }
+
+    fn shutdown(&self) {
+        self.closed.set(true);
+        self.visible.set(false);
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.timer.borrow_mut().take();
+        self.rebuild.borrow_mut().take();
+    }
+}
+
+/// Queue operations run on workers; only completions mutate the rendered state.
+pub struct PromptsPage {
+    state: Rc<State>,
+}
+
+impl Default for PromptsPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PromptsPage {
     pub fn new() -> Self {
-        PromptsPage
+        Self {
+            state: State::new(),
+        }
     }
 }
 
@@ -151,15 +268,15 @@ impl PromptsPage {
                 row.title
             ))));
             let services = ctx.services.clone();
-            let navigate = ctx.navigate.clone();
+            let weak = Rc::downgrade(&self.state);
+            let rebuild = ctx.rebuild.clone();
             let id = row.id.clone();
             ctx.target.on_action(&btn, move || {
-                // The same guarded compare-and-set the server API uses.
-                match review_prompt(&*services.prompt_queue, &id, action) {
-                    Some(error) => services.set_page_error("Prompts", &error),
-                    None => services.clear_page_error("Prompts"),
+                if let Some(state) = weak.upgrade() {
+                    services.clear_page_error("Prompts");
+                    state.start(services.prompt_queue.clone(), Some((id.clone(), action)));
+                    rebuild();
                 }
-                navigate("Prompts");
             });
             listing.addSubview(&btn);
             x += width + 8.0;
@@ -205,7 +322,30 @@ impl HubPage for PromptsPage {
         "Prompts"
     }
 
+    fn flush(&mut self) {
+        self.state.visible.set(false);
+        if !self.state.busy.get() {
+            self.state.timer.borrow_mut().take();
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.state.shutdown();
+    }
+
     fn render(&mut self, ctx: &PageCtx, top: f64) -> f64 {
+        *self.state.rebuild.borrow_mut() = Some(ctx.rebuild.clone());
+        if self.state.timer.borrow().is_none() && !self.state.closed.get() {
+            let weak = Rc::downgrade(&self.state);
+            *self.state.timer.borrow_mut() = Some(Timer::schedule(0.05, true, move || {
+                if let Some(state) = weak.upgrade() {
+                    state.drain();
+                }
+            }));
+        }
+        if !self.state.visible.replace(true) {
+            self.state.start(ctx.services.prompt_queue.clone(), None);
+        }
         let mtm = ctx.mtm;
         let p = ctx.palette;
         let width = ctx.width;
@@ -213,7 +353,13 @@ impl HubPage for PromptsPage {
         let mut cursor = top;
 
         // Inline error from the last approve/reject (never the shell callout).
-        if let Some(error) = ctx.services.page_error("Prompts") {
+        if let Some(error) = self
+            .state
+            .error
+            .borrow()
+            .clone()
+            .or_else(|| ctx.services.page_error("Prompts"))
+        {
             ctx.body.addSubview(&label(
                 mtm,
                 &error,
@@ -322,10 +468,27 @@ impl HubPage for PromptsPage {
             &p,
         ));
         cursor += 22.0 + 8.0;
-        match prompt_entries(&*ctx.services.prompt_queue) {
-            Err(unreadable) => {
+        match self.state.entries.borrow().clone() {
+            None => {
+                ctx.body.addSubview(&label(
+                    mtm,
+                    LOADING,
+                    0.0,
+                    cursor + 58.0,
+                    width,
+                    LabelStyle {
+                        size: 15.0,
+                        height: 28.0,
+                        ..LabelStyle::default()
+                    },
+                    &p,
+                ));
+                cursor += 202.0;
+            }
+            Some(Err(unreadable)) => {
                 let rebuild_services = ctx.services.clone();
-                let navigate = ctx.navigate.clone();
+                let weak = Rc::downgrade(&self.state);
+                let rebuild = ctx.rebuild.clone();
                 empty_state(
                     ctx,
                     cursor,
@@ -336,12 +499,15 @@ impl HubPage for PromptsPage {
                     move || {
                         // reloadPrompts_: drop a stale error and re-read.
                         rebuild_services.clear_page_error("Prompts");
-                        navigate("Prompts");
+                        if let Some(state) = weak.upgrade() {
+                            state.start(rebuild_services.prompt_queue.clone(), None);
+                            rebuild();
+                        }
                     },
                 );
                 cursor += 202.0;
             }
-            Ok(entries) => {
+            Some(Ok(entries)) => {
                 let rows = prompt_rows(&entries);
                 if rows.is_empty() {
                     let navigate = ctx.navigate.clone();
@@ -421,4 +587,162 @@ fn divider(mtm: MainThreadMarker, y: f64, width: f64, palette: &Palette) -> Reta
     }
     hide_from_accessibility(&view);
     view
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::prompts::{
+        FakePromptQueue, QueueError, UnavailablePromptQueue, WorkPrompt,
+    };
+    use serde_json::{Map, Value};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct ObservedQueue {
+        inner: FakePromptQueue,
+        owner: thread::ThreadId,
+        started: mpsc::Sender<thread::ThreadId>,
+        gate: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl ObservedQueue {
+        fn observe(&self) {
+            assert_ne!(thread::current().id(), self.owner);
+        }
+    }
+
+    impl PromptQueue for ObservedQueue {
+        fn add(
+            &self,
+            prompts: &[WorkPrompt],
+            paths: &[String],
+            title: &str,
+        ) -> Result<Vec<PromptEntry>, QueueError> {
+            self.observe();
+            self.inner.add(prompts, paths, title)
+        }
+        fn list(&self, status: Option<&str>) -> Result<Vec<PromptEntry>, QueueError> {
+            self.observe();
+            let _ = self.started.send(thread::current().id());
+            if let Some(gate) = self.gate.lock().unwrap().take() {
+                gate.recv().unwrap();
+            }
+            self.inner.list(status)
+        }
+        fn get(&self, id: &str) -> Result<Option<PromptEntry>, QueueError> {
+            self.observe();
+            self.inner.get(id)
+        }
+        fn set_status(
+            &self,
+            id: &str,
+            status: &str,
+            expect: Option<&[&str]>,
+            fields: &Map<String, Value>,
+        ) -> Result<Option<PromptEntry>, QueueError> {
+            self.observe();
+            self.inner.set_status(id, status, expect, fields)
+        }
+    }
+
+    fn receive(state: &State) -> Completion {
+        state
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queue worker completion")
+    }
+
+    #[test]
+    fn blocked_queue_loading_leaves_the_caller_responsive_and_applies_on_delivery() {
+        let (started, entered) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let queue = Arc::new(ObservedQueue {
+            inner: FakePromptQueue::new(),
+            owner: thread::current().id(),
+            started,
+            gate: Mutex::new(Some(gate)),
+        });
+        let state = State::new();
+        state.visible.set(true);
+        let rebuilt = Rc::new(Cell::new(0));
+        *state.rebuild.borrow_mut() = Some({
+            let rebuilt = rebuilt.clone();
+            Rc::new(move || rebuilt.set(rebuilt.get() + 1))
+        });
+        state.start(queue, None);
+        assert_ne!(
+            entered.recv_timeout(Duration::from_secs(2)).unwrap(),
+            thread::current().id()
+        );
+        assert!(state.busy.get());
+        assert!(state.entries.borrow().is_none());
+        assert_eq!(rebuilt.get(), 0);
+        release.send(()).unwrap();
+        let completion = receive(&state);
+        assert!(state.entries.borrow().is_none());
+        state.apply(completion);
+        assert!(!state.busy.get());
+        assert_eq!(*state.entries.borrow(), Some(Ok(Vec::new())));
+        assert_eq!(rebuilt.get(), 1);
+    }
+
+    #[test]
+    fn approvals_rejections_and_stale_ids_are_guarded_on_the_worker() {
+        for (action, status) in [
+            (ReviewAction::Approve, "approved"),
+            (ReviewAction::Reject, "rejected"),
+        ] {
+            let (started, _) = mpsc::channel();
+            let queue = Arc::new(ObservedQueue {
+                inner: FakePromptQueue::new(),
+                owner: thread::current().id(),
+                started,
+                gate: Mutex::new(None),
+            });
+            let entries = queue
+                .inner
+                .add(
+                    &[WorkPrompt::new("Review", "Review changes")],
+                    &["/notes/prompt.md".into()],
+                    "Meeting",
+                )
+                .unwrap();
+            let id = entries[0]["id"].as_str().unwrap().to_string();
+            let state = State::new();
+            state.start(queue.clone(), Some((id.clone(), action)));
+            state.apply(receive(&state));
+            assert!(state.error.borrow().is_none());
+            assert_eq!(
+                state.entries.borrow().as_ref().unwrap().as_ref().unwrap()[0]["status"],
+                status
+            );
+            state.start(queue.clone(), Some((id, action)));
+            state.apply(receive(&state));
+            assert!(state.error.borrow().as_ref().unwrap().contains("changed"));
+            state.start(queue, Some(("missing".into(), action)));
+            state.apply(receive(&state));
+            assert!(state.error.borrow().as_ref().unwrap().contains("no longer"));
+        }
+    }
+
+    #[test]
+    fn queue_errors_and_closed_or_stale_completions_cannot_rebuild_the_ui() {
+        let state = State::new();
+        state.start(Arc::new(UnavailablePromptQueue), None);
+        state.apply(receive(&state));
+        assert_eq!(*state.entries.borrow(), Some(Err(PROMPTS_UNREADABLE)));
+        state.start(Arc::new(FakePromptQueue::new()), None);
+        let completion = receive(&state);
+        state.shutdown();
+        state.apply(completion);
+        assert!(state.entries.borrow().is_none());
+        let state = State::new();
+        state.apply(Completion {
+            generation: 1,
+            entries: Ok(Vec::new()),
+            error: None,
+        });
+        assert!(state.entries.borrow().is_none());
+    }
 }
