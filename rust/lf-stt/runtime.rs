@@ -126,6 +126,34 @@ pub fn lazy_stt_factory() -> SttFactory {
     Arc::new(|config| Ok(Arc::new(LazySpeechAdapter::new(config.clone())) as Arc<dyn SpeechEngine>))
 }
 
+/// The opt-in native Hub owns the same-executable helper; other runtimes do not.
+pub fn hub_speech(config: &Config) -> Arc<dyn SpeechEngine> {
+    if cfg!(target_os = "macos")
+        && std::env::var("LOCALFLOW_SPEECH_IN_PROCESS").as_deref() != Ok("1")
+    {
+        match std::env::current_exe() {
+            Ok(exe) => Arc::new(crate::helper::HelperSpeechEngine::new(exe, config)),
+            Err(error) => Arc::new(UnavailableSpeech(error.to_string())),
+        }
+    } else {
+        Arc::new(LazySpeechAdapter::new(config.clone()))
+    }
+}
+
+struct UnavailableSpeech(String);
+impl SpeechEngine for UnavailableSpeech {
+    fn loaded(&self) -> bool {
+        false
+    }
+    fn load(&self) -> Result<(), String> {
+        Err(self.0.clone())
+    }
+    fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+        Err(self.0.clone())
+    }
+    fn unload(&self) {}
+}
+
 impl SpeechAdapter {
     pub fn from_config(config: &Config) -> Result<Self> {
         validate_sample_rate(config)?;

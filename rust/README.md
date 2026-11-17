@@ -1,3 +1,56 @@
+# Speech helper (Rust macOS Hub)
+
+The Rust macOS Hub defaults to a same-executable speech child:
+`lf-hub --speech-helper`. This hidden mode runs before AppKit, runtime locks,
+hotkeys or server startup. Dictation, HTTP transcription and meetings share the
+managed proxy; the Setup dictation trial uses its own short-lived proxy. Python
+is unchanged and remains the shipped/default runtime. Other Rust binaries and
+Linux/Windows retain their in-process engines.
+
+Set `LOCALFLOW_SPEECH_IN_PROCESS=1` when launching the Rust Hub to restore the
+in-process fallback. No shared Python config keys were added. The existing
+Rust `runtime.toml` idle timeout and dictation-off eviction apply to the child.
+
+IPC uses stdin/stdout only: a little-endian u32 JSON-header length, the header,
+then the announced number of little-endian f32 mono 16 kHz samples. Headers are
+bounded to 1 MiB and requests to one hour of PCM. Only speech configuration and
+per-request vocabulary prompts cross this channel. Requests are serialized.
+Native stdout is redirected to stderr on macOS; the protocol has a dedicated
+stdout descriptor. Load waits for ready or a real model error. Failed requests
+return an error with an 8 KiB stderr tail and discard the child; the next request
+or load respawns it. No transcription is invented or retried behind the caller.
+
+Eviction sends unload and reaps the child, with a two-second grace period before
+killing a stuck child. Stdin stays open during graceful teardown so model leases
+can be released; forced exits are cleaned by the supervisor and dead leases are
+pruned during discovery. A dedicated child input reader exits on EOF even while
+native loading/inference is busy, including when the parent dies. Quit/shutdown
+drains meeting/server work before evicting retained engines. Speech admission
+closes before shutdown waits for active calls; quit retains its 60-second cap.
+Closing UI writes are acknowledged before HTTP admission stops. Ordinary HTTP
+requests get four seconds before their connections and async tasks are aborted;
+meeting persistence runs concurrently, so a stalled chat cannot consume its budget.
+Already-running blocking providers are detached during runtime teardown rather
+than allowed to delay quitting.
+The existing recording/meeting/inference guards
+still defer ordinary idle/off eviction; existing cancellation epochs still
+discard stale results. Setup cancellation releases its proxy when the trial
+returns, including failed or cancelled loads.
+
+`cargo test -p lf-stt --features runtime --test helper_process` exercises the
+same-executable protocol with a fake engine, including crash recovery and pid
+reaping. macOS CI measures the actual AppKit Hub/runtime/server in helper and
+in-process modes, using the fixed Parakeet int8 clip from the 6c harness.
+`scripts/ci_speech_helper.py` validates the reference transcript, pid disappearance,
+main/helper RSS and kernel footprint, and cold/warm/reload latency. Its explicit
+`LF_HUB_SPEECH_PROFILE` / `LF_HUB_SPEECH_PCM` instrumentation requires an isolated
+`LOCALFLOW_CONFIG`; the probe toggles dictation off in that isolated file.
+Results and the historical 6c comparison are in `memory-measurements` artifacts.
+The same CI driver also runs `--whisper`: backend `auto`, ggml `tiny.en` on CPU,
+real load/transcription/reload, nonempty stable text, and PID-gone assertions
+after unload and dictation-off. Its transcript is recorded independently rather
+than required to match Parakeet's punctuation and spelling.
+
 # Opt-in macOS app packaging
 
 Python remains the default. From a source checkout on macOS:

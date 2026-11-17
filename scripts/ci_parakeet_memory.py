@@ -45,7 +45,7 @@ except Exception as error:
     (output / 'shim-error.txt').write_text(shim_error)
 
 cases = [
-    ('int8-default', [], {}),
+    ('int8-default', ['--pcm-output', str(output / 'clip.f32')], {}),
     ('int8-coreml', ['--provider', 'coreml'], {}),
     ('int8-threads1', ['--threads', '1'], {}),
     ('int8-threads2', ['--threads', '2'], {}),

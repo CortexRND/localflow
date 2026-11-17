@@ -38,7 +38,7 @@ impl PendingWrites {
     }
 
     fn wait(&self, timeout: Duration) -> bool {
-        self.wait_until(timeout, 0)
+        self.wait_until(timeout, || 0)
     }
 
     fn wait_for_quit(&self, normal: Duration, cap: Duration) -> bool {
@@ -54,13 +54,13 @@ impl PendingWrites {
         self.wait(remaining)
     }
 
-    fn wait_until(&self, timeout: Duration, allowed: usize) -> bool {
+    fn wait_until(&self, timeout: Duration, allowed: impl Fn() -> usize) -> bool {
         let started = Instant::now();
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        while *pending > allowed {
+        while *pending > allowed() {
             let remaining = timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return false;
@@ -71,7 +71,7 @@ impl PendingWrites {
                 .unwrap_or_else(|error| error.into_inner());
             pending = next;
             if result.timed_out() {
-                return *pending <= allowed;
+                return *pending <= allowed();
             }
         }
         true
@@ -96,16 +96,49 @@ impl Drop for PendingWrite {
 
 #[cfg(feature = "runtime")]
 impl PendingWrite {
-    pub(crate) fn wait_for_others(&self, timeout: Duration) -> bool {
-        self.tracker.wait_until(timeout, 1)
+    pub(crate) fn wait_for_ui_writes(&self, timeout: Duration) -> bool {
+        self.tracker
+            .wait_until(timeout, || self.tracker.meetings.load(Ordering::Acquire))
     }
 }
 
 fn pending_writes() -> Arc<PendingWrites> {
+    #[cfg(test)]
+    if let Some(writes) = TEST_WRITES.with(|writes| writes.borrow().clone()) {
+        return writes;
+    }
     static WRITES: OnceLock<Arc<PendingWrites>> = OnceLock::new();
     WRITES
         .get_or_init(|| Arc::new(PendingWrites::default()))
         .clone()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_WRITES: std::cell::RefCell<Option<Arc<PendingWrites>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestWrites {
+    previous: Option<Arc<PendingWrites>>,
+    thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl TestWrites {
+    pub(crate) fn new() -> Self {
+        Self {
+            previous: TEST_WRITES.with(|writes| writes.replace(Some(Arc::default()))),
+            thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestWrites {
+    fn drop(&mut self) {
+        TEST_WRITES.with(|writes| writes.replace(self.previous.take()));
+    }
 }
 
 /// Wait for all writes registered so far, never longer than `timeout`.
@@ -133,6 +166,45 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
+    fn isolated_registration_restores_its_owner_and_tracks_spawned_writes() {
+        let global = pending_writes();
+        let scope = TestWrites::new();
+        let outer = pending_writes();
+        assert!(!Arc::ptr_eq(&global, &outer));
+        let write = register_pending_write();
+        {
+            let _nested = TestWrites::new();
+            assert!(!Arc::ptr_eq(&outer, &pending_writes()));
+            assert!(wait_for_pending_writes(Duration::ZERO));
+        }
+        assert!(Arc::ptr_eq(&outer, &pending_writes()));
+        assert!(!wait_for_pending_writes(Duration::ZERO));
+        let worker = std::thread::spawn(move || drop(write));
+        assert!(wait_for_pending_writes(Duration::from_secs(1)));
+        worker.join().unwrap();
+        drop(scope);
+        assert!(Arc::ptr_eq(&global, &pending_writes()));
+    }
+
+    #[test]
+    fn isolated_scopes_do_not_wait_for_other_tests() {
+        let (ready, started) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let _scope = TestWrites::new();
+            let _write = register_pending_write();
+            ready.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+        let _scope = TestWrites::new();
+        let idle = wait_for_pending_writes(Duration::ZERO);
+        release.send(()).unwrap();
+        other.join().unwrap();
+        assert!(idle);
+    }
+
+    #[test]
     fn meeting_flush_extends_normal_budget_but_never_exceeds_hard_cap() {
         let writes = Arc::new(PendingWrites::default());
         let meeting = writes.register_kind(true);
@@ -157,6 +229,23 @@ mod tests {
         let ordinary = Arc::new(PendingWrites::default());
         let _write = ordinary.register();
         assert!(!ordinary.wait_for_quit(Duration::ZERO, Duration::from_secs(5)));
+    }
+
+    #[test]
+    #[cfg(feature = "runtime")]
+    fn shutdown_coordinators_wait_for_ui_guards_not_each_other() {
+        let writes = Arc::new(PendingWrites::default());
+        let first = writes.register_kind(true);
+        let second = writes.register_kind(true);
+        assert!(first.wait_for_ui_writes(Duration::ZERO));
+        let closing = writes.register();
+        assert!(!first.wait_for_ui_writes(Duration::from_millis(20)));
+        drop(closing);
+        assert!(second.wait_for_ui_writes(Duration::ZERO));
+        assert!(!writes.wait(Duration::ZERO));
+        drop(first);
+        drop(second);
+        assert!(writes.wait(Duration::ZERO));
     }
 
     #[test]

@@ -2370,10 +2370,12 @@ mod tests {
         page.state.primary_action();
         let event = receive(&page);
         assert!(matches!(event.kind, EventKind::Start(Ok(_))));
-        page.state.apply_event(event);
+        let calls = client.calls();
         assert!(
-            matches!(client.calls().as_slice(), [MeetingCall::Start { title, template, user_notes, auto_title: Some(false), .. }] if title == "Planning" && template == "general" && user_notes == "agenda")
+            matches!(calls.as_slice(), [MeetingCall::Start { title, template, user_notes, auto_title: Some(false), .. }] if title == "Planning" && template == "general" && user_notes == "agenda"),
+            "unexpected meeting calls: {calls:?}"
         );
+        page.state.apply_event(event);
 
         let status = receive(&page);
         page.state.apply_event(status);
@@ -2635,6 +2637,7 @@ mod tests {
 
     #[test]
     fn shutdown_includes_inflight_autosave_and_waits_for_newest_text() {
+        let _writes = crate::shutdown::TestWrites::new();
         let (started, first_save_started) = mpsc::channel();
         let release_first = Arc::new((Mutex::new(false), Condvar::new()));
         let client = Arc::new(BlockingFirstSaveClient {

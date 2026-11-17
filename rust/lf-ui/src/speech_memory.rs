@@ -1,10 +1,11 @@
 use lf_runtime::engine::{AudioSource, Pcm, SpeechEngine};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 struct State {
+    closed: bool,
     recording: bool,
     active: usize,
     last_use: Instant,
@@ -12,16 +13,20 @@ struct State {
 }
 
 #[derive(Clone)]
-pub(crate) struct SpeechMemory(Arc<Mutex<State>>);
+pub(crate) struct SpeechMemory(Arc<Mutex<State>>, Arc<Condvar>);
 
 impl SpeechMemory {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(State {
-            recording: false,
-            active: 0,
-            last_use: Instant::now(),
-            engines: Vec::new(),
-        })))
+        Self(
+            Arc::new(Mutex::new(State {
+                closed: false,
+                recording: false,
+                active: 0,
+                last_use: Instant::now(),
+                engines: Vec::new(),
+            })),
+            Arc::new(Condvar::new()),
+        )
     }
 
     pub fn speech(&self, inner: Arc<dyn SpeechEngine>) -> Arc<dyn SpeechEngine> {
@@ -39,6 +44,21 @@ impl SpeechMemory {
             inner,
             memory: self.clone(),
         })
+    }
+
+    pub fn shutdown(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        state.closed = true;
+        while state.active != 0 {
+            state = self.1.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+        for engine in state
+            .engines
+            .drain(..)
+            .filter_map(|engine| engine.upgrade())
+        {
+            engine.inner.unload();
+        }
     }
 
     pub fn poll(&self, enabled: bool, timeout: Duration, now: Instant) -> bool {
@@ -77,6 +97,8 @@ impl Drop for Activity {
         let mut state = self.0 .0.lock().unwrap();
         state.active -= 1;
         state.last_use = Instant::now();
+        drop(state);
+        self.0 .1.notify_all();
     }
 }
 
@@ -86,9 +108,13 @@ struct ManagedSpeech {
     retiring: AtomicBool,
 }
 impl ManagedSpeech {
-    fn activity(&self) -> Activity {
-        self.memory.0.lock().unwrap().active += 1;
-        Activity(self.memory.clone())
+    fn activity(&self) -> Result<Activity, String> {
+        let mut state = self.memory.0.lock().unwrap();
+        if state.closed {
+            return Err("speech runtime shut down".into());
+        }
+        state.active += 1;
+        Ok(Activity(self.memory.clone()))
     }
 }
 impl SpeechEngine for ManagedSpeech {
@@ -96,11 +122,11 @@ impl SpeechEngine for ManagedSpeech {
         self.inner.loaded()
     }
     fn load(&self) -> Result<(), String> {
-        let _active = self.activity();
+        let _active = self.activity()?;
         self.inner.load()
     }
     fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> Result<String, String> {
-        let _active = self.activity();
+        let _active = self.activity()?;
         self.inner.transcribe(pcm, prompt)
     }
     fn unload(&self) {
@@ -115,6 +141,9 @@ struct ManagedAudio {
 impl AudioSource for ManagedAudio {
     fn start(&mut self) -> Result<(), String> {
         let mut state = self.memory.0.lock().unwrap();
+        if state.closed {
+            return Err("speech runtime shut down".into());
+        }
         let result = self.inner.start();
         state.recording = self.inner.is_recording();
         state.last_use = Instant::now();
@@ -229,6 +258,57 @@ mod tests {
             loads: AtomicUsize::new(0),
             unloads: AtomicUsize::new(0),
         })
+    }
+    #[test]
+    fn admitted_request_finishes_before_shutdown_unloads_and_returns() {
+        use std::sync::mpsc;
+        let memory = SpeechMemory::new();
+        let fake = engine();
+        let speech = Arc::new(ManagedSpeech {
+            inner: fake.clone(),
+            memory: memory.clone(),
+            retiring: AtomicBool::new(false),
+        });
+        memory
+            .0
+            .lock()
+            .unwrap()
+            .engines
+            .push(Arc::downgrade(&speech));
+        let admitted = speech.activity().unwrap();
+        let closing = memory.clone();
+        let (finish, done) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            closing.shutdown();
+            finish.send(()).unwrap();
+        });
+        while !memory.0.lock().unwrap().closed {
+            std::thread::yield_now();
+        }
+        let premature = done.recv_timeout(Duration::from_millis(20)).is_ok();
+        speech.inner.load().unwrap();
+        drop(admitted);
+        shutdown.join().unwrap();
+        assert!(
+            !premature,
+            "shutdown returned before the admitted inner call"
+        );
+        assert!(!fake.loaded(), "admitted request reloaded after shutdown");
+        assert!(speech.load().is_err());
+    }
+
+    #[test]
+    fn shutdown_releases_loaded_models_even_with_retained_service_handles() {
+        let memory = SpeechMemory::new();
+        let fake = engine();
+        let speech = memory.speech(fake.clone());
+        speech.load().unwrap();
+        memory.shutdown();
+        memory.shutdown();
+        assert!(!speech.loaded());
+        assert_eq!(fake.unloads.load(Ordering::SeqCst), 1);
+        assert!(speech.load().is_err());
+        assert!(speech.transcribe(&[0.5], None).is_err());
     }
     #[test]
     fn disabled_unloads_once_and_enable_is_lazy_idle_zero_is_disabled() {

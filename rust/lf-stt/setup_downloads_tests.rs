@@ -6,7 +6,7 @@ use std::time::Duration;
 
 enum Reply {
     Body(u16, String),
-    Stall(mpsc::Sender<()>, mpsc::Sender<bool>),
+    Stall(mpsc::Sender<bool>),
 }
 fn server(replies: Vec<Reply>) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -43,12 +43,12 @@ fn server(replies: Vec<Reply>) -> (String, std::thread::JoinHandle<()>) {
                 Reply::Body(code, body) => {
                     let _=write!(reader.get_mut(),"HTTP/1.1 {code} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
                 }
-                Reply::Stall(ready, closed) => {
+                Reply::Stall(closed) => {
                     reader
                         .get_mut()
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1001\r\n\r\n")
                         .unwrap();
-                    ready.send(()).unwrap();
+                    reader.get_mut().write_all(&[0; 1000]).unwrap();
                     let _ = closed.send(matches!(reader.read(&mut [0]), Ok(0)));
                 }
             }
@@ -168,7 +168,7 @@ fn cancel_aborts_stalled_download_and_removes_partial_not_cache() {
     let (closed, disconnected) = mpsc::channel();
     let (url, server) = server(vec![
         Reply::Body(200, metadata(&vec![0; 1000])),
-        Reply::Stall(ready, closed),
+        Reply::Stall(closed),
     ]);
     let cancel = Arc::new(AtomicBool::new(false));
     let stop = cancel.clone();
@@ -176,10 +176,22 @@ fn cancel_aborts_stalled_download_and_removes_partial_not_cache() {
     let (reply, done) = mpsc::channel();
     let worker = std::thread::spawn(move || {
         reply
-            .send(model().download(&path, &url, &|_, _| {}, &stop))
+            .send(model().download(
+                &path,
+                &url,
+                &|done, _| {
+                    if done == 1000 {
+                        ready.send(()).unwrap();
+                    }
+                },
+                &stop,
+            ))
             .unwrap()
     });
     entered.recv_timeout(Duration::from_secs(3)).unwrap();
+    let blobs = root.path().join("models--test--native/blobs");
+    let partial = std::fs::read_dir(&blobs).unwrap().next().unwrap().unwrap();
+    assert_eq!(std::fs::read(partial.path()).unwrap(), vec![0; 1000]);
     cancel.store(true, Ordering::Release);
     assert!(done
         .recv_timeout(Duration::from_secs(2))

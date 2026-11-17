@@ -3,6 +3,8 @@ pub mod downloads;
 pub mod engine;
 pub mod engines;
 pub mod factory;
+#[cfg(feature = "runtime")]
+pub mod helper;
 pub mod model_storage;
 #[cfg(feature = "runtime")]
 pub mod runtime;

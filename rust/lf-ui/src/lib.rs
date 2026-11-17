@@ -21,5 +21,7 @@ pub mod shutdown;
 pub mod snapshot_plan;
 #[cfg(feature = "runtime")]
 mod speech_memory;
+#[cfg(feature = "runtime")]
+mod speech_profile;
 pub mod text_wrap;
 pub mod tokens;

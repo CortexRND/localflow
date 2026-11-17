@@ -248,10 +248,9 @@ impl SetupModelBackend for FlowModelBackend {
             config.set_field("stt_backend", serde_json::json!(model.backend));
             config.set_field("model_size", serde_json::json!(model.model_size));
             config.set_field("language", serde_json::json!(language));
-            let engine =
-                lf_stt::runtime::SpeechAdapter::from_config(&config).map_err(|e| e.to_string())?;
+            let engine = lf_stt::runtime::hub_speech(&config);
             let mut audio = lf_audio::Recorder::new(device.map(str::to_owned));
-            run_trial(&mut audio, &engine, &cancel, Duration::from_secs(5))
+            run_trial(&mut audio, engine.as_ref(), &cancel, Duration::from_secs(5))
         }
     }
 }
