@@ -179,6 +179,16 @@ impl SpeechAdapter {
 }
 
 impl SpeechEngine for SpeechAdapter {
+    /// The slot's real state, so the runtime can preload a cold model. A busy
+    /// slot (mid-load or mid-inference) is reported loaded instead of blocking.
+    fn loaded(&self) -> bool {
+        match self.slot.try_lock() {
+            Ok(slot) => slot.loaded(),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner().loaded(),
+        }
+    }
+
     fn load(&self) -> Result<(), String> {
         self.slot
             .lock()
@@ -410,6 +420,47 @@ mod tests {
         drop(speech);
         assert!(crate::stt_lease::live_leases(Some(root.path()), |_| true).is_empty());
         assert_eq!(Arc::strong_count(&counts), 1);
+    }
+
+    #[test]
+    fn cold_adapter_reports_unloaded_through_the_trait_and_prepare_speech_loads_it_once() {
+        use lf_runtime::worker::{WorkItem, Worker};
+        let root = tempfile::tempdir().unwrap();
+        let (adapter, counts) = adapter(root.path(), false);
+        let speech: Arc<dyn SpeechEngine> = adapter.clone();
+        assert!(
+            !speech.loaded(),
+            "a cold adapter must not claim to be loaded"
+        );
+        let worker = Worker {
+            config: Arc::new(|| Arc::new(Config::default())),
+            vocabulary: Arc::new(|_| Default::default()),
+            history: None,
+            speech: speech.clone(),
+            build_llm: Arc::new(|_| None),
+            build_stt: Arc::new(|_| unreachable!()),
+            deliver: Arc::new(|_, _, _| {}),
+            last_text_path: None,
+        };
+        let (work, queue) = std::sync::mpsc::channel();
+        work.send(WorkItem::PrepareSpeech).unwrap();
+        work.send(WorkItem::PrepareSpeech).unwrap();
+        drop(work);
+        worker.run(queue);
+        assert!(speech.loaded());
+        assert_eq!(
+            counts.loads.load(Ordering::SeqCst),
+            1,
+            "preload is idempotent"
+        );
+        assert_eq!(
+            crate::stt_lease::live_leases(Some(root.path()), |_| true).len(),
+            1
+        );
+        // Unload (idle or dictation-off) still releases the model and lease.
+        speech.unload();
+        assert!(!speech.loaded());
+        assert!(crate::stt_lease::live_leases(Some(root.path()), |_| true).is_empty());
     }
 
     #[test]
