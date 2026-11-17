@@ -127,6 +127,10 @@ def test_rust_macos_cmake_preflight(
 
     script = (ROOT / "install.sh").read_text(encoding="utf-8")
     preflight = script.split("\nSCRIPT_SOURCE=", 1)[0]
+    preflight = preflight.replace(
+        "for brew_dir in /opt/homebrew/bin /usr/local/bin; do",
+        "for brew_dir in; do",
+    )
     result = subprocess.run(
         [BASH, "-c", preflight],
         env={

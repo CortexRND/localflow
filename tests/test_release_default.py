@@ -100,6 +100,10 @@ printf '%s\\n' 'echo "$*" > "$HOME/rustup-args"' '[ "$RUST" != install-fail ] ||
         path.write_text(f"#!/bin/sh\n{body}\n")
         path.chmod(0o755)
     script = (ROOT / "install.sh").read_text(encoding="utf-8").split("\nSCRIPT_SOURCE=", 1)[0]
+    script = script.replace(
+        "for brew_dir in /opt/homebrew/bin /usr/local/bin; do",
+        "for brew_dir in; do",
+    )
     result = subprocess.run([BASH, "-c", script], env={"PATH": str(tools), "HOME": str(tmp_path), "CLT": clt, "RUST": rust}, capture_output=True, text=True, check=False)
     assert result.returncode == (1 if expected else 0), result.stderr
     if expected:
