@@ -223,10 +223,12 @@ impl SettingsPage {
 
     fn install_snapshot_agent(&self, root: &std::path::Path) -> anyhow::Result<SharedAgent> {
         let config_path = root.join("config.toml");
-        lf_core::config::save_config(
-            &lf_core::config::Config::defaults_for(true),
-            Some(&config_path),
-        )?;
+        crate::config_write::with_lock(|| {
+            lf_core::config::save_config(
+                &lf_core::config::Config::defaults_for(true),
+                Some(&config_path),
+            )
+        })?;
         let agent: SharedAgent = Arc::new(
             crate::backends::settings_agent_native::NativeSettingsAgent::with_client(
                 OfflineSnapshotChat,

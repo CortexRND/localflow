@@ -230,10 +230,12 @@ where
     }
 
     fn set_setting(&self, key: &str, value: &Value) -> Result<ApplyResult, SettingsAgentError> {
-        self.agent()?
-            .set_setting(key, value.clone())
-            .map(apply_to_ui)
-            .map_err(user_error)
+        crate::config_write::with_lock(|| {
+            self.agent()?
+                .set_setting(key, value.clone())
+                .map(apply_to_ui)
+                .map_err(user_error)
+        })
     }
 
     fn apply(&self, changes: &[Change]) -> Result<ApplyResult, SettingsAgentError> {
@@ -241,21 +243,25 @@ where
             .iter()
             .map(change_from_ui)
             .collect::<Result<Vec<_>, _>>()?;
-        self.agent()?
-            .apply(&native)
-            .map(apply_to_ui)
-            .map_err(user_error)
+        crate::config_write::with_lock(|| {
+            self.agent()?
+                .apply(&native)
+                .map(apply_to_ui)
+                .map_err(user_error)
+        })
     }
 
     fn undo(&self) -> Result<UndoResult, SettingsAgentError> {
-        self.agent()?
-            .undo()
-            .map(|result| UndoResult {
-                reverted: result.lines,
-                skipped: result.skipped,
-                message: result.message,
-            })
-            .map_err(user_error)
+        crate::config_write::with_lock(|| {
+            self.agent()?
+                .undo()
+                .map(|result| UndoResult {
+                    reverted: result.lines,
+                    skipped: result.skipped,
+                    message: result.message,
+                })
+                .map_err(user_error)
+        })
     }
 
     fn model(&self) -> Option<String> {
@@ -316,6 +322,139 @@ mod tests {
     fn adapter_is_send_sync() {
         fn assert_agent<T: SettingsAgent>() {}
         assert_agent::<NativeSettingsAgent<TestChat>>();
+    }
+
+    #[test]
+    fn concurrent_agent_and_home_changes_survive() {
+        use std::sync::{mpsc, Condvar};
+        use std::time::Duration;
+
+        let (dir, _) = setup(Vec::new());
+        let path = dir.path().join("config.toml");
+        let (loaded, loading) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let adapter = {
+            let path = path.clone();
+            let root = dir.path().to_path_buf();
+            let release = release.clone();
+            NativeSettingsAgent::from_factory(Arc::new(move || {
+                let mut agent = lf_agent::SettingsAgent::new(
+                    TestChat { chat: json!({}) },
+                    path.clone(),
+                    root.join("dictionary.json"),
+                    root.join("undo.json"),
+                );
+                let release = release.clone();
+                let loaded = loaded.clone();
+                agent.clock = Box::new(move || {
+                    loaded.send(()).unwrap();
+                    let (lock, wake) = &*release;
+                    let mut ready = lock.lock().unwrap();
+                    while !*ready {
+                        let (next, timeout) =
+                            wake.wait_timeout(ready, Duration::from_secs(5)).unwrap();
+                        ready = next;
+                        assert!(!timeout.timed_out(), "agent write was never released");
+                    }
+                    1.0
+                });
+                Ok(agent)
+            }))
+        };
+        let (sent, received) = mpsc::channel();
+        let worker = crate::backends::settings_worker::dispatch(
+            Arc::new(adapter),
+            crate::backends::settings_worker::Request::Manual {
+                key: "sounds_enabled".into(),
+                value: json!(false),
+                typed: None,
+            },
+            sent,
+        )
+        .unwrap();
+        loading.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (home_starting, home_started) = mpsc::channel();
+        let (home_finished, home_done) = mpsc::channel();
+        let home = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                home_starting.send(()).unwrap();
+                crate::config_write::update(Some(&path), |latest| {
+                    lf_core::config::apply_config_update(
+                        latest,
+                        &json!({"dictation": {"enabled": false}}),
+                    )
+                })
+                .unwrap();
+                home_finished.send(()).unwrap();
+            })
+        };
+        home_started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let home_waited = home_done.recv_timeout(Duration::from_millis(100)).is_err();
+        let (lock, wake) = &*release;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        let completion = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            completion.outcome,
+            crate::backends::settings_worker::Outcome::Manual { result: Ok(_), .. }
+        ));
+        worker.join().unwrap();
+        home.join().unwrap();
+        assert!(
+            home_waited,
+            "Home wrote while the agent held a read/modify/write transaction"
+        );
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_bool("sounds_enabled"), Some(false));
+        assert_eq!(saved.field_bool("dictation_enabled"), Some(false));
+    }
+
+    #[test]
+    fn an_agent_write_waits_for_a_home_transaction() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (dir, adapter) = setup(Vec::new());
+        let path = dir.path().join("config.toml");
+        let (loaded, loading) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let home = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                crate::config_write::update(Some(&path), |latest| {
+                    loaded.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    lf_core::config::apply_config_update(
+                        latest,
+                        &json!({"dictation": {"enabled": false}}),
+                    )
+                })
+                .unwrap();
+            })
+        };
+        loading.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (starting, started) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            starting.send(()).unwrap();
+            let result = adapter.set_setting("sounds_enabled", &json!(false));
+            finished.send(result).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let agent_waited = done.recv_timeout(Duration::from_millis(100)).is_err();
+        release.send(()).unwrap();
+        home.join().unwrap();
+        let result = done.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+        assert!(
+            agent_waited,
+            "agent wrote while Home held a read/modify/write transaction"
+        );
+        result.unwrap();
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_bool("dictation_enabled"), Some(false));
+        assert_eq!(saved.field_bool("sounds_enabled"), Some(false));
     }
 
     #[test]

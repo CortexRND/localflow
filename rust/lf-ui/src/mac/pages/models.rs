@@ -21,7 +21,7 @@ use std::rc::{Rc, Weak};
 use std::sync::{mpsc, Arc};
 
 use anyhow::{anyhow, Result};
-use lf_core::config::{load_config, load_from, save_config, Config};
+use lf_core::config::{load_config, load_from, Config};
 use lf_providers::keys::{
     detect_imports, get_preset, ImportCandidate, KeyStatus, Preset, TEST_UNABLE,
 };
@@ -609,9 +609,9 @@ fn fresh_config(services: &HubServices) -> Result<Config> {
     }
 }
 
-fn persist_config(services: &HubServices, config: &Config) -> Result<()> {
+fn persist_config(services: &HubServices, before: &Config, config: &Config) -> Result<()> {
     if !services.memory_only_config.get() {
-        save_config(config, services.config_path.borrow().as_deref())?;
+        crate::config_write::merge(services.config_path.borrow().as_deref(), before, config)?;
     }
     Ok(())
 }
@@ -1210,7 +1210,7 @@ fn quick_save_cleanup(state: &Shared, model: String) {
         .as_ref()
         .map(|(provider, url)| (provider.as_str(), url.as_str()));
     let saved = set_active_model(&model, &config, expected, &|updated| {
-        persist_config(&services, updated)
+        persist_config(&services, &config, updated)
     });
     match saved {
         Ok(updated) => {
@@ -1285,7 +1285,7 @@ fn quick_save_speech(state: &Shared, provider: &str, model: Option<&str>) {
         model,
         &config,
         &available,
-        &|updated| persist_config(&services, updated),
+        &|updated| persist_config(&services, &config, updated),
         &|updated| {
             if services.memory_only_config.get() {
                 return;
@@ -2412,7 +2412,7 @@ fn provider_action(state: &Shared, provider_id: &str, operation: &str) {
         "activate" => match fresh_config(&services) {
             Ok(config) => backend
                 .activate(provider_id, &url, &model, &config, &|updated| {
-                    persist_config(&services, updated)
+                    persist_config(&services, &config, updated)
                 })
                 .map(Some),
             Err(_) => Err(anyhow!("config could not be loaded")),

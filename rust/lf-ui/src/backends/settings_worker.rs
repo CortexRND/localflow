@@ -49,7 +49,7 @@ pub fn dispatch(
     thread::Builder::new()
         .name("localflow-settings-io".into())
         .spawn(move || {
-            let outcome = match request {
+            let outcome = crate::config_write::with_lock(|| match request {
                 Request::Refresh => Outcome::Refreshed,
                 Request::Apply(changes) => Outcome::Applied(agent.apply(&changes)),
                 Request::Undo => Outcome::Undone(agent.undo()),
@@ -57,7 +57,7 @@ pub fn dispatch(
                     let result = agent.set_setting(&key, &value);
                     Outcome::Manual { key, typed, result }
                 }
-            };
+            });
             drop(write);
             let config = agent.load();
             let rows = config
