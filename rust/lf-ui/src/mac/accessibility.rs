@@ -41,6 +41,118 @@ fn has_text(view: &NSView, text: &str) -> bool {
     view.subviews().iter().any(|child| has_text(&child, text))
 }
 
+fn editable_field(view: &NSView, label: &str) -> Option<Retained<NSTextField>> {
+    if let Ok(field) = view.retain().downcast::<NSTextField>() {
+        if field.isEditable()
+            && field
+                .accessibilityLabel()
+                .is_some_and(|value| value.to_string() == label)
+        {
+            return Some(field);
+        }
+    }
+    view.subviews()
+        .iter()
+        .find_map(|child| editable_field(&child, label))
+}
+
+fn named_button(view: &NSView, label: &str) -> Option<Retained<NSButton>> {
+    if let Ok(button) = view.retain().downcast::<NSButton>() {
+        if button.title().to_string() == label
+            || button
+                .accessibilityLabel()
+                .is_some_and(|value| value.to_string() == label)
+        {
+            return Some(button);
+        }
+    }
+    view.subviews()
+        .iter()
+        .find_map(|child| named_button(&child, label))
+}
+
+fn assert_dictionary_submissions(mtm: MainThreadMarker) {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+    let hub = Hub::new(mtm, services.clone(), "Dictionary");
+    let field = |label| editable_field(&hub.content_view(), label).expect("Dictionary field");
+    let values =
+        || ["Word", "When I say", "Type this"].map(|label| field(label).stringValue().to_string());
+    let click = |label| {
+        let button = named_button(&hub.content_view(), label).expect("Dictionary button");
+        unsafe { button.performClick(None) };
+        spin_run_loop(0.1);
+    };
+
+    field("Word").setStringValue(&NSString::from_str("Kubernetes"));
+    field("When I say").setStringValue(&NSString::from_str("k8s"));
+    field("Type this").setStringValue(&NSString::from_str("Kubernetes"));
+    click("Add word");
+    assert_eq!(services.dictionary.list().words, ["Kubernetes"]);
+    assert_eq!(values(), ["", "k8s", "Kubernetes"]);
+    assert!(services.page_error("Dictionary").is_none());
+
+    click("Add word");
+    assert_eq!(
+        services.page_error("Dictionary").as_deref(),
+        Some("Type a word first.")
+    );
+    assert_eq!(values(), ["", "k8s", "Kubernetes"]);
+    click("Add replacement");
+    assert_eq!(values(), ["", "", ""]);
+    assert!(services.page_error("Dictionary").is_none());
+    let data = services.dictionary.list();
+    assert_eq!(data.replacements.len(), 1);
+    assert_eq!(data.replacements[0].from, "k8s");
+    assert_eq!(data.replacements[0].to, "Kubernetes");
+    click("Add replacement");
+    assert_eq!(
+        services.page_error("Dictionary").as_deref(),
+        Some("Type what you say first.")
+    );
+    assert_eq!(values(), ["", "", ""]);
+
+    click("Edit Kubernetes");
+    assert_eq!(values(), ["Kubernetes", "", ""]);
+    field("Word").setStringValue(&NSString::from_str("Rust"));
+    click("Save word");
+    assert_eq!(services.dictionary.list().words, ["Rust"]);
+    assert_eq!(values(), ["", "", ""]);
+    assert!(named_button(&hub.content_view(), "Add word").is_some());
+
+    click("Edit k8s → Kubernetes");
+    field("Word").setStringValue(&NSString::from_str("unsaved word"));
+    field("When I say").setStringValue(&NSString::from_str("rs"));
+    field("Type this").setStringValue(&NSString::from_str("Rust"));
+    click("Save replacement");
+    assert_eq!(values(), ["unsaved word", "", ""]);
+    let data = services.dictionary.list();
+    assert_eq!(data.replacements.len(), 1);
+    assert_eq!(data.replacements[0].from, "rs");
+    assert_eq!(data.replacements[0].to, "Rust");
+    assert!(named_button(&hub.content_view(), "Add replacement").is_some());
+
+    field("Word").setStringValue(&NSString::from_str("Rust"));
+    click("Add word");
+    assert_eq!(values(), ["Rust", "", ""]);
+    assert!(services
+        .page_error("Dictionary")
+        .unwrap()
+        .contains("already in your dictionary"));
+    field("When I say").setStringValue(&NSString::from_str("unfinished"));
+    click("Add replacement");
+    assert_eq!(values(), ["Rust", "unfinished", ""]);
+    assert_eq!(
+        services.page_error("Dictionary").as_deref(),
+        Some("Type what it should become.")
+    );
+    hub.show_page("History");
+    hub.show_page("Dictionary");
+    assert_eq!(values(), ["Rust", "unfinished", ""]);
+    hub.shutdown();
+    println!("Native Dictionary submission audit: add/edit saves clear only the submitted card; empty and duplicate failures preserve drafts");
+}
+
 fn assert_history_search(hub: &Hub) {
     hub.show_page("History");
     for (query, expected) in [
@@ -169,6 +281,7 @@ pub fn run() {
     }
     assert_eq!(terminate_calls.get(), 1);
     println!("Native Hub termination audit: AppKit quit invokes the flush callback once");
+    assert_dictionary_submissions(mtm);
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
     let mut failures = Vec::new();

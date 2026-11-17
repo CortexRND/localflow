@@ -125,6 +125,7 @@ struct Reload {
 /// the editing id of an entry that no longer exists.
 fn reload(state: &Shared, services: &HubServices, rebuild: &dyn Fn(), change: Reload) {
     pull(state);
+    let mut cleared_fields = Vec::new();
     {
         let mut state = state.borrow_mut();
         match change.error {
@@ -141,6 +142,14 @@ fn reload(state: &Shared, services: &HubServices, rebuild: &dyn Fn(), change: Re
                     .as_ref()
                     .map(|(key, kind)| (key.as_str(), *kind));
                 state.draft.after_success(change.clear, forget);
+                if let (Some(card), Some(fields)) = (change.clear, state.fields.as_ref()) {
+                    match card {
+                        DictionaryCard::Word => cleared_fields.push(fields.word.clone()),
+                        DictionaryCard::Replacement => {
+                            cleared_fields.extend([fields.from.clone(), fields.to.clone()]);
+                        }
+                    }
+                }
                 if let Some(notice) = change.notice {
                     services
                         .page_notices
@@ -149,6 +158,9 @@ fn reload(state: &Shared, services: &HubServices, rebuild: &dyn Fn(), change: Re
                 }
             }
         }
+    }
+    for field in cleared_fields {
+        field.setStringValue(&NSString::from_str(""));
     }
     rebuild();
 }
