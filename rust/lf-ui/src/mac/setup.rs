@@ -668,7 +668,7 @@ fn format_model_size_mb(size_mb: u32) -> String {
     let digits = size_mb.to_string();
     let mut formatted = String::with_capacity(digits.len() + digits.len().saturating_sub(1) / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             formatted.push(',');
         }
         formatted.push(digit);

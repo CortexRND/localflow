@@ -306,7 +306,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut config = Config::defaults_for(true);
         config.set_field("dictation_enabled", Value::Bool(true));
-        config.set_field("cleanup_level", Value::String("standard".into()));
+        config.set_field("cleanup_level", Value::String("medium".into()));
         save_config(&config, Some(&path)).unwrap();
         let services = file_services(dir.path(), &path, config);
         std::fs::write(&path, "not valid TOML [").unwrap();
@@ -314,10 +314,7 @@ mod tests {
         assert!(services
             .update_config(&serde_json::json!({"cleanup": {"level": "light"}}))
             .is_err());
-        assert_eq!(
-            services.config().field_str("cleanup_level"),
-            Some("standard")
-        );
+        assert_eq!(services.config().field_str("cleanup_level"), Some("medium"));
         assert_eq!(
             services.config().field_bool("dictation_enabled"),
             Some(true)
@@ -330,7 +327,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut config = Config::defaults_for(true);
         config.set_field("dictation_enabled", Value::Bool(true));
-        config.set_field("cleanup_level", Value::String("standard".into()));
+        config.set_field("cleanup_level", Value::String("medium".into()));
         save_config(&config, Some(&path)).unwrap();
         let services = file_services(dir.path(), &path, config);
 
@@ -342,16 +339,13 @@ mod tests {
         std::fs::set_permissions(dir.path(), original_permissions).unwrap();
 
         assert!(result.is_err());
-        assert_eq!(
-            services.config().field_str("cleanup_level"),
-            Some("standard")
-        );
+        assert_eq!(services.config().field_str("cleanup_level"), Some("medium"));
         assert_eq!(
             services.config().field_bool("dictation_enabled"),
             Some(true)
         );
         let on_disk = load_from(&path).unwrap();
-        assert_eq!(on_disk.field_str("cleanup_level"), Some("standard"));
+        assert_eq!(on_disk.field_str("cleanup_level"), Some("medium"));
         assert_eq!(on_disk.field_bool("dictation_enabled"), Some(true));
     }
 

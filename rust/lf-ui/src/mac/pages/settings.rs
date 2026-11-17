@@ -1371,6 +1371,6 @@ mod tests {
             Some("ctrl+option+1")
         );
         assert!(error.manual_errors.contains_key("prompt_hotkey"));
-        assert_eq!(error.undo_lines, Some(vec!["Sounds: Off → On".into()]));
+        assert_eq!(error.undo_lines, Some(vec!["Sounds: On → Off".into()]));
     }
 }
