@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use lf_core::config::Config;
 use lf_input::paste::SelectionCapture;
-use lf_runtime::controller::{Controller, ControllerDeps, ControllerHandle, Job};
+use lf_runtime::controller::{Controller, ControllerDeps, ControllerHandle, Job, JobKind};
 use lf_runtime::engine::{AudioSource, Pcm, TextOutput};
 
 #[derive(Default)]
@@ -90,6 +90,8 @@ pub struct Rig {
     pub now: Arc<Mutex<f64>>,
     pub toggles: Arc<Mutex<Vec<bool>>>,
     pub stored_enabled: Arc<Mutex<Result<bool, String>>>,
+    /// Kinds passed to `on_recording_start`, in order.
+    pub recording_starts: Arc<Mutex<Vec<JobKind>>>,
 }
 
 impl Rig {
@@ -135,7 +137,10 @@ pub fn rig_with(config: Config) -> Rig {
         toggles.clone(),
         stored.clone(),
     );
+    let recording_starts: Arc<Mutex<Vec<JobKind>>> = Default::default();
+    let rs = recording_starts.clone();
     let deps = ControllerDeps {
+        on_recording_start: Some(Arc::new(move |kind, _| rs.lock().unwrap().push(kind))),
         audio: Box::new(audio.clone()),
         jobs: Arc::new(move |job| j.lock().unwrap().push(job)),
         output: Arc::new(output.clone()),
@@ -169,6 +174,7 @@ pub fn rig_with(config: Config) -> Rig {
         now,
         toggles,
         stored_enabled: stored,
+        recording_starts,
     }
 }
 

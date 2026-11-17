@@ -37,15 +37,10 @@ impl ParakeetEngine {
         if provider == "coreml" && !cfg!(target_os = "macos") {
             bail!("CoreML requires macOS");
         }
-        let provider = if provider == "auto" {
-            if cfg!(target_os = "macos") {
-                "coreml"
-            } else {
-                "cpu"
-            }
-        } else {
-            provider
-        };
+        // "auto" is CPU everywhere: on Apple Silicon the CoreML request loads
+        // ~6x slower, uses more memory and transcribes slower than CPU for the
+        // int8 model. Explicit "coreml" remains available on macOS.
+        let provider = if provider == "auto" { "cpu" } else { provider };
         Ok(Self {
             provider: provider.into(),
             paths: None,
@@ -227,5 +222,16 @@ mod tests {
         assert!(!engine.loaded());
         assert!(engine.transcribe(&[0.0; 512], None).is_err());
         assert!(ParakeetEngine::new("cuda").is_err());
+    }
+    #[test]
+    fn auto_provider_resolves_to_cpu_on_every_platform() {
+        let engine = ParakeetEngine::new("auto").unwrap();
+        assert_eq!(engine.provider, "cpu");
+        assert_eq!(ParakeetEngine::new("cpu").unwrap().provider, "cpu");
+        if cfg!(target_os = "macos") {
+            assert_eq!(ParakeetEngine::new("coreml").unwrap().provider, "coreml");
+        } else {
+            assert!(ParakeetEngine::new("coreml").is_err());
+        }
     }
 }

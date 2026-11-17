@@ -108,6 +108,8 @@ pub enum Gesture {
 }
 
 pub type StateSink = Arc<dyn Fn(&str) + Send + Sync>;
+/// Called on the consumer thread right after the mic opens; must not block.
+pub type RecordingStartSink = Arc<dyn Fn(JobKind, &Config) + Send + Sync>;
 
 /// Everything the controller talks to.
 pub struct ControllerDeps {
@@ -117,6 +119,8 @@ pub struct ControllerDeps {
     pub play_sound: Arc<dyn Fn(&str) + Send + Sync>,
     pub frontmost: Arc<dyn Fn() -> Option<AppInfo> + Send + Sync>,
     pub on_state: Option<StateSink>,
+    /// Prepare models (speech load, LLM warm-up) while the user is speaking.
+    pub on_recording_start: Option<RecordingStartSink>,
     /// `history_store.latest_text(fallback)` (or the fallback itself).
     pub latest_text: Arc<dyn Fn(&str) -> String + Send + Sync>,
     /// Reload, flip and save `dictation_enabled`; the new value.
@@ -842,6 +846,14 @@ impl Controller {
         self.max_warned = false;
         self.play("start");
         self.publish_state(state);
+        if let Some(hook) = &self.deps.on_recording_start {
+            let kind = if state == "command" {
+                JobKind::Command
+            } else {
+                JobKind::Dictate
+            };
+            hook(kind, &self.config);
+        }
         true
     }
 

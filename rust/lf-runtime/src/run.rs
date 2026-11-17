@@ -29,6 +29,7 @@ use crate::pipeline::Vocabulary;
 use crate::settings::{bool_field, dictation_enabled, load_runtime_config, toggle_dictation};
 use crate::singleinstance::{acquire_at, lock_file_path, SingleInstance};
 use crate::status::{last_text_path, read_last_text, status_path, write_state};
+use crate::warmup::LlmWarmer;
 use crate::worker::{LlmFactory, SttFactory, VocabularyFn, WorkItem, Worker};
 
 pub struct RunOptions {
@@ -222,9 +223,20 @@ fn start_at(
     let toggle = toggle.unwrap_or_else(|| {
         Arc::new(move || toggle_dictation(&toggle_path).map_err(|e| e.to_string()))
     });
+    let prepare = Mutex::new(work_tx.clone());
+    let warmer = LlmWarmer::ollama();
     let deps = ControllerDeps {
         audio: options.audio,
         jobs: job_sink(work_tx.clone()),
+        // Both are asynchronous: the worker loads speech while the user speaks
+        // and the warm-up runs on its own thread.
+        on_recording_start: Some(Arc::new(move |kind, config: &Config| {
+            let _ = prepare
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .send(WorkItem::PrepareSpeech);
+            warmer.on_recording_start(kind, config);
+        })),
         output: Arc::new(Injector::native()),
         play_sound: options.play_sound,
         frontmost: Arc::new(crate::context::frontmost_app),
@@ -494,7 +506,7 @@ mod tests {
             false
         }
         fn load(&self) -> Result<(), String> {
-            panic!("startup must not load speech")
+            Err("model missing".into())
         }
         fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
             Err("model missing".into())
@@ -606,6 +618,8 @@ mod tests {
         let mut config = Config::default();
         config.set_field("command_names", serde_json::json!([]));
         config.set_field("skills_dirs", serde_json::json!([]));
+        // Keep the recording start offline: no Ollama warm-up request.
+        config.set_field("cleanup_enabled", serde_json::json!(false));
         lf_core::config::save_config(&config, Some(&paths(root.path()).config)).unwrap();
         let recording = Arc::new(AtomicBool::new(false));
         let (started, received) = mpsc::channel();
@@ -634,6 +648,50 @@ mod tests {
         runtime.shutdown();
         runtime.shutdown();
         assert!(!recording.load(Ordering::Acquire));
+    }
+    #[test]
+    fn speech_loads_at_recording_start_not_at_startup() {
+        struct SignalLoad(mpsc::Sender<()>);
+        impl SpeechEngine for SignalLoad {
+            fn loaded(&self) -> bool {
+                false
+            }
+            fn load(&self) -> Result<(), String> {
+                let _ = self.0.send(());
+                Err("not provisioned".into())
+            }
+            fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+                Err("not provisioned".into())
+            }
+            fn unload(&self) {}
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.set_field("command_names", serde_json::json!([]));
+        config.set_field("skills_dirs", serde_json::json!([]));
+        config.set_field("cleanup_enabled", serde_json::json!(false));
+        lf_core::config::save_config(&config, Some(&paths(root.path()).config)).unwrap();
+        let (started, received) = mpsc::channel();
+        let (loads, loaded) = mpsc::channel();
+        let mut opts = options(Box::new(Audio {
+            recording: Arc::new(AtomicBool::new(false)),
+            started,
+        }));
+        opts.speech = Arc::new(SignalLoad(loads));
+        let mut runtime = start_at(
+            opts,
+            MenuState::new(None, true),
+            None,
+            paths(root.path()),
+            Arc::new(|_, _, _| Err("test listener".into())),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(loaded.recv_timeout(Duration::from_millis(200)).is_err());
+        runtime.controller.note_start();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        loaded.recv_timeout(Duration::from_secs(3)).unwrap();
+        runtime.shutdown();
     }
     #[test]
     fn existing_owner_skips_audio_speech_and_keyboard_startup() {

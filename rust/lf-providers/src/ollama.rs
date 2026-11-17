@@ -153,6 +153,35 @@ impl OllamaLlm {
         })
     }
 
+    /// The `/api/generate` body that only loads the model: an empty prompt
+    /// with the cleanup `num_ctx` (a different context size would make Ollama
+    /// reload the runner on the real request).
+    pub fn warm_up_body(&self, keep_alive: &str) -> serde_json::Value {
+        json!({
+            "model": self.model,
+            "prompt": "",
+            "options": {"num_ctx": self.num_ctx},
+            "stream": false,
+            "keep_alive": keep_alive,
+        })
+    }
+
+    /// Ask Ollama to load the model into memory without generating anything.
+    pub fn warm_up(&self, keep_alive: &str) -> Result<(), ProviderError> {
+        if self.model.trim().is_empty() {
+            return Err(ProviderError("Choose an Ollama model.".into()));
+        }
+        http::client(self.timeout)
+            .and_then(|client| {
+                http::send_ok(
+                    client
+                        .post(format!("{}/api/generate", self.base_url))
+                        .json(&self.warm_up_body(keep_alive)),
+                )
+            })
+            .map_err(|exc| ProviderError(format!("Ollama warm-up failed: {exc}")))
+    }
+
     fn try_complete(
         &self,
         system: &str,
@@ -440,6 +469,49 @@ mod tests {
             "{}",
             health.detail
         );
+    }
+
+    #[test]
+    fn warm_up_loads_the_model_with_the_cleanup_context() {
+        let server = MockServer::start(vec![MockResponse::json(
+            200,
+            r#"{"model":"llama3.2:3b","response":"","done":true,"done_reason":"load"}"#,
+        )]);
+        llm(&server).warm_up("5m").unwrap();
+        let request = server.request(0);
+        assert_eq!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/api/generate")
+        );
+        assert_eq!(
+            request.json(),
+            json!({
+                "model": "llama3.2:3b",
+                "prompt": "",
+                "options": {"num_ctx": 4096},
+                "stream": false,
+                "keep_alive": "5m",
+            })
+        );
+    }
+
+    #[test]
+    fn warm_up_errors_are_wrapped() {
+        let server = MockServer::start(vec![MockResponse::json(404, r#"{"error":"no model"}"#)]);
+        let err = llm(&server).warm_up("5m").unwrap_err().0;
+        assert!(
+            err.starts_with("Ollama warm-up failed: 404 Client Error"),
+            "{err}"
+        );
+        let err = OllamaLlm::new(crate::testutil::UNREACHABLE_URL, "m", 2, 1)
+            .warm_up("5m")
+            .unwrap_err()
+            .0;
+        assert!(err.starts_with("Ollama warm-up failed: "), "{err}");
+        let err = OllamaLlm::new("http://127.0.0.1:9", " ", 2, 1)
+            .warm_up("5m")
+            .unwrap_err();
+        assert_eq!(err.0, "Choose an Ollama model.");
     }
 
     #[test]

@@ -110,7 +110,8 @@ unloaded `EngineSpec`: `auto`/`faster-whisper`/`mlx`/`whisper-cpp` → whisper.c
 `parakeet`/`parakeet-onnx` → Parakeet ONNX. Unknown providers or disabled features
 error. Keys include model, language and device; leases use the native backend,
 not the aliased Python backend. CPU is the non-macOS default; macOS defaults to
-Metal for Whisper and CoreML for Parakeet. Device overrides are auto/cpu/metal
+Metal for Whisper and CPU for Parakeet (CoreML measured slower to load and
+transcribe, with higher RSS, on Apple Silicon). Device overrides are auto/cpu/metal
 for Whisper and auto/cpu/coreml for Parakeet (accelerators require macOS).
 
 Whisper uses `whisper-rs 0.16` with `log_backend` and once-installed whisper/GGML

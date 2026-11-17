@@ -62,20 +62,31 @@ fn or_config<C: LlmConfig>(value: Option<i64>, config: &C, field: &str, default:
     }
 }
 
+/// The Ollama client `build_llm` would build, or None for other providers.
+pub fn build_ollama<C: LlmConfig>(config: &C, options: &BuildOptions) -> Option<OllamaLlm> {
+    (config.get_str("llm_provider") == "ollama").then(|| {
+        OllamaLlm::new(
+            &config.get_str("llm_base_url"),
+            &config.get_str("llm_model"),
+            or_config(options.timeout, config, "cleanup_timeout", 120),
+            or_config(options.num_ctx, config, "cleanup_num_ctx", 8192),
+        )
+    })
+}
+
 /// Build the configured provider (`build_llm`).
 pub fn build_llm<C: LlmConfig>(
     config: &C,
     options: &BuildOptions,
     secrets: &dyn SecretStore,
 ) -> Result<Box<dyn LlmProvider>, UnknownProvider> {
+    if let Some(ollama) = build_ollama(config, options) {
+        return Ok(Box::new(ollama));
+    }
     let timeout = or_config(options.timeout, config, "cleanup_timeout", 120);
-    let num_ctx = or_config(options.num_ctx, config, "cleanup_num_ctx", 8192);
     let base_url = config.get_str("llm_base_url");
     let model = config.get_str("llm_model");
     match config.get_str("llm_provider").as_str() {
-        "ollama" => Ok(Box::new(OllamaLlm::new(
-            &base_url, &model, timeout, num_ctx,
-        ))),
         "openai-compatible" => {
             let key = if options.with_api_key {
                 llm_api_key(config, secrets)
@@ -246,6 +257,19 @@ mod tests {
             .unwrap();
         assert_eq!(server.request(0).json()["options"]["num_ctx"], 2048);
         assert_eq!(server.request(0).json()["model"], "llama3.2:3b");
+    }
+
+    #[test]
+    fn build_ollama_only_for_the_ollama_provider() {
+        let mut cfg = config_with(&[("llm_base_url", "http://h:1/")]);
+        cfg.insert("cleanup_num_ctx".into(), serde_json::json!(2048));
+        let client = build_ollama(&cfg, &BuildOptions::default()).unwrap();
+        assert_eq!(
+            (client.base_url.as_str(), client.num_ctx, client.timeout),
+            ("http://h:1", 2048, 120)
+        );
+        let other = config_with(&[("llm_provider", "openai-compatible")]);
+        assert!(build_ollama(&other, &BuildOptions::default()).is_none());
     }
 
     #[test]
