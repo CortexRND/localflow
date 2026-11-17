@@ -50,10 +50,11 @@ stop_rust() {
     local pid attempt
     old_rust_pids="$(rust_pids)"
     for pid in $old_rust_pids; do kill -TERM "$pid" 2>/dev/null || true; done
-    for ((attempt=0; attempt<50; attempt++)); do
-        [[ -z "$(rust_pids)" ]] && return 0
-        sleep 0.1
+    for ((attempt=0; attempt<75; attempt++)); do
+        [[ -z "$(rust_pids)" ]] && break
+        sleep 1
     done
+    bootout
     for pid in $(rust_pids); do kill -KILL "$pid" 2>/dev/null || true; done
     for ((attempt=0; attempt<20; attempt++)); do
         [[ -z "$(rust_pids)" ]] && return 0
@@ -148,8 +149,11 @@ else
 EOF
 fi
 plutil -lint "$pending"
-bootout
-if [[ "$restart_rust" == 1 && "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then stop_rust; fi
+if [[ "$restart_rust" == 1 && "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
+    stop_rust
+else
+    bootout
+fi
 mv -f "$pending" "$AGENT"
 if ! load_agent; then
     bootout

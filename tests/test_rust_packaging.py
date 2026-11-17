@@ -304,6 +304,11 @@ def test_restart_stops_external_main_and_helper_before_launching(restart_mac, ru
         assert '5555' in processes
         assert [call[2] for call in kills if call[1] == '-TERM'] == ['1111', '2222']
         assert all(call[2] in ('1111', '2222') for call in kills)
+        if ignore_term:
+            first_kill = next(i for i, call in enumerate(calls) if call[:2] == ['kill', '-KILL'])
+            assert sum(call == ['sleep', '1'] for call in calls[:first_kill]) == 75
+        else:
+            assert not any(call[:2] == ['kill', '-KILL'] for call in calls)
         assert calls.index(kills[-1]) < next(i for i, call in enumerate(calls) if call[:2] == ['launchctl', 'bootstrap'])
     else:
         assert not kills
