@@ -82,6 +82,12 @@ def test_native_workflow_runs_measurements_after_fixed_clip_and_uploads_evidence
     )
 
 
+def test_memory_baseline_includes_signal_module_used_by_profile_driver():
+    workflow = (ROOT / ".github/workflows/rust.yml").read_text()
+    assert 'cp rust/lf-ui/src/termination.rs "$baseline/rust/lf-ui/src/termination.rs"' in workflow
+    assert r"printf '\n#[cfg(unix)]\nmod termination;\n'" in workflow
+
+
 def test_whisper_smoke_selects_auto_tiny_and_validates_a_real_helper(
     tmp_path, monkeypatch
 ):
