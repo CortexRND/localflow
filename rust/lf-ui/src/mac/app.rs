@@ -18,7 +18,7 @@ use anyhow::{anyhow, Result};
 use lf_core::config::load_config;
 use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
-use lf_runtime::menubar::{MeetingStatusPoller, MenuActions, MenuState};
+use lf_runtime::menubar::{MeetingStatusPoller, MenuActions, MenuModel, MenuState};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -44,6 +44,15 @@ pub const POLL_SECONDS: f64 = 0.25;
 
 /// The "show a window" action the delegate runs on reopen.
 pub type ShowFn = Rc<dyn Fn()>;
+
+/// Install the status menu without removing the Hub's Dock/reopen entry point.
+pub fn install_hub_menu_bar(model: MenuModel, actions: MenuActions) -> Result<(), String> {
+    lf_runtime::macos::install_menu_bar(model, actions)?;
+    let mtm = MainThreadMarker::new().ok_or("the Hub menu must run on the main thread")?;
+    NSApplication::sharedApplication(mtm)
+        .setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    Ok(())
+}
 
 enum MenuCommand {
     ToggleDictation,
@@ -366,7 +375,7 @@ impl MenuSlot {
         let toggle = commands.clone();
         let paste = commands.clone();
         let quit = commands.clone();
-        lf_runtime::macos::install_menu_bar(
+        install_hub_menu_bar(
             menu.snapshot(),
             MenuActions {
                 toggle_dictation: Arc::new(move || {

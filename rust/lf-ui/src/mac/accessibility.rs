@@ -6,6 +6,7 @@ use std::sync::Arc;
 use lf_core::config::Config;
 use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
+use lf_runtime::menubar::{MenuActions, MenuModel};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
 use objc2_app_kit::{
@@ -93,7 +94,16 @@ fn services(root: &std::path::Path) -> Rc<HubServices> {
 pub fn run() {
     let mtm = MainThreadMarker::new().expect("AppKit audit must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let actions = MenuActions {
+        toggle_dictation: Arc::new(|| {}),
+        paste_last: Arc::new(|| {}),
+        quit: Arc::new(|| {}),
+    };
+    lf_runtime::macos::install_menu_bar(MenuModel::default(), actions.clone()).unwrap();
+    assert_eq!(app.activationPolicy(), NSApplicationActivationPolicy::Accessory);
+    lf_ui::mac::app::install_hub_menu_bar(MenuModel::default(), actions).unwrap();
+    assert_eq!(app.activationPolicy(), NSApplicationActivationPolicy::Regular);
+    println!("Native Hub menu audit: runtime default Accessory, Hub retains Regular/Dock policy");
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
     let mut failures = Vec::new();
