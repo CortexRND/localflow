@@ -12,7 +12,7 @@ use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, Message};
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationTerminateReply,
-    NSButton, NSPopUpButton, NSSwitch, NSTextField, NSView,
+    NSButton, NSPopUpButton, NSSearchField, NSSwitch, NSTextField, NSView,
 };
 use objc2_foundation::NSString;
 
@@ -20,6 +20,41 @@ use lf_ui::hub_route::HUB_PAGES;
 use lf_ui::mac::hub::Hub;
 use lf_ui::mac::page::HubServices;
 use lf_ui::mac::style::HalftoneView;
+use lf_ui::mac::snapshot::spin_run_loop;
+
+fn search_field(view: &NSView) -> Option<Retained<NSSearchField>> {
+    if let Ok(field) = view.retain().downcast::<NSSearchField>() {
+        return Some(field);
+    }
+    view.subviews().iter().find_map(|child| search_field(&child))
+}
+
+fn has_text(view: &NSView, text: &str) -> bool {
+    if let Ok(field) = view.retain().downcast::<NSTextField>() {
+        if field.stringValue().to_string() == text {
+            return true;
+        }
+    }
+    view.subviews().iter().any(|child| has_text(&child, text))
+}
+
+fn assert_history_search(hub: &Hub) {
+    hub.show_page("History");
+    for (query, expected) in [
+        ("polished", "A polished transcript."),
+        ("not in the transcript", "No matching entries"),
+        ("", "A polished transcript."),
+    ] {
+        let field = search_field(&hub.content_view()).expect("History search field");
+        assert!(field.sendsWholeSearchString(), "typing must not rebuild the field");
+        field.setStringValue(&NSString::from_str(query));
+        assert!(unsafe { field.sendAction_to(field.action(), field.target().as_deref()) });
+        spin_run_loop(0.1);
+        assert_eq!(search_field(&hub.content_view()).unwrap().stringValue().to_string(), query);
+        assert!(has_text(&hub.content_view(), expected));
+    }
+    println!("Native History search audit: explicit submit, matching, empty and cleared queries passed");
+}
 
 fn nonempty(text: Option<Retained<NSString>>) -> bool {
     text.is_some_and(|text| !text.to_string().trim().is_empty())
@@ -141,6 +176,7 @@ pub fn run() {
             .into_owned(),
     );
     hub.services().history.add(&entry).unwrap();
+    assert_history_search(&hub);
     for page in HUB_PAGES {
         hub.show_page(page);
         walk(&hub.content_view(), "populated", page, &mut failures);

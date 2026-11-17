@@ -396,6 +396,7 @@ impl HubPage for HistoryPage {
         // Search row.
         let query = state.query.borrow().clone();
         let field = search_field(mtm, &query, 0.0, top, width - 112.0, "Search transcripts");
+        field.setSendsWholeSearchString(true);
         let search_btn = button(
             mtm,
             "Search",
