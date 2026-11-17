@@ -329,6 +329,7 @@ impl MenuSlot {
             meeting.status_fetch(),
             Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
         );
+        eprintln!("menu bar: enabled");
         eprintln!("menu meeting status poller: enabled");
         *self.runtime.borrow_mut() = Some(MenuRuntime {
             menu,
