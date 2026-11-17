@@ -93,7 +93,7 @@ impl Default for RecorderMicLevelSource {
                             let result = crate::setup_flow::start_cancellable_capture(
                                 &cancelled,
                                 || {
-                                    let mut next = Recorder::new(device);
+                                    let mut next = Recorder::new_meter(device);
                                     next.start().map_err(|error| {
                                         format!("Couldn't open the microphone: {error}")
                                     })?;
