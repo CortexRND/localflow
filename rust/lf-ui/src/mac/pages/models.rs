@@ -200,13 +200,22 @@ impl ConfigStore<Config> for PageConfigStore<'_> {
 /// The production backend: real keyring/config/provider clients and a guarded
 /// Hugging Face speech-model inventory. `cache` and `leases` are injectable
 /// paths so its filesystem tests never inspect the user's cache or processes.
-#[derive(Default)]
 pub struct SystemModelsBackend {
     cache: Option<PathBuf>,
     leases: Option<PathBuf>,
-    /// No optional MLX runtime is linked by this crate. The default false is a
-    /// real capability answer, not an optimistic hardware detection.
+    /// Python's optional MLX runtime may be installed outside this process.
     mlx_available: bool,
+}
+
+impl Default for SystemModelsBackend {
+    fn default() -> Self {
+        Self {
+            cache: None,
+            leases: None,
+            // Keep both auto candidates on Apple Silicon, as lf-stt does.
+            mlx_available: cfg!(target_arch = "aarch64"),
+        }
+    }
 }
 
 impl ModelsBackend for SystemModelsBackend {
@@ -3202,7 +3211,9 @@ fn selected_repos(
         return Err("Your speech provider is a plug-in, so LocalFlow can't tell which model it uses. Nothing was deleted.".to_string());
     }
     let mut repos = BTreeSet::new();
-    if matches!(backend, "auto" | "mlx" | "mlx-whisper") && device == "auto" && mlx_available {
+    if matches!(backend, "mlx" | "mlx-whisper")
+        || (backend == "auto" && device == "auto" && mlx_available)
+    {
         if let Some((_, repo)) = MLX_REPOS.iter().find(|(candidate, _)| *candidate == size) {
             repos.insert((*repo).to_string());
         }
@@ -4008,6 +4019,47 @@ mod tests {
         assert_eq!(format_bytes(10_000), "10 KB");
         assert_eq!(format_bytes(1_000_000), "1.0 MB");
         assert_eq!(format_bytes(10_000_000_000), "10 GB");
+    }
+
+    #[test]
+    fn mlx_storage_capability_protects_both_auto_candidates() {
+        assert_eq!(
+            SystemModelsBackend::default().mlx_available,
+            cfg!(target_arch = "aarch64")
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let mlx = "mlx-community/whisper-small-mlx";
+        let fw = "Systran/faster-whisper-small";
+        for repo in [mlx, fw] {
+            let folder = temp.path().join(repo_folder_name(repo));
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("weights"), b"test").unwrap();
+        }
+        for (provider, available) in [("auto", true), ("mlx", false), ("mlx-whisper", false)] {
+            let backend = SystemModelsBackend {
+                cache: Some(temp.path().to_path_buf()),
+                leases: Some(temp.path().join("no-live-leases")),
+                mlx_available: available,
+            };
+            let config = config(&[
+                ("stt_backend", provider),
+                ("model_size", "small"),
+                ("stt_device", "auto"),
+            ]);
+            let models = backend.inventory(&config).unwrap();
+            assert_eq!(models.len(), 2);
+            assert!(models
+                .iter()
+                .all(|model| model.status == "Selected" && model.protected()));
+            for repo in [mlx, fw] {
+                assert!(backend
+                    .delete_model(repo, &config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("settings"));
+                assert!(temp.path().join(repo_folder_name(repo)).exists());
+            }
+        }
     }
 
     #[test]
