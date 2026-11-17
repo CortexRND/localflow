@@ -54,9 +54,13 @@ fn detected(
     Ok(())
 }
 
-fn sync(watcher: &MeetingWatcher, live: &Mutex<Config>, fresh: Config) {
+fn sync(watcher: &MeetingWatcher, live: &Mutex<Config>, fresh: Config, stopping: &AtomicBool) {
+    let mut live = live.lock().unwrap();
+    if stopping.load(Ordering::Acquire) {
+        return;
+    }
     let watch = enabled(&fresh, "meetings_enabled") && enabled(&fresh, "meeting_watch");
-    *live.lock().unwrap() = fresh;
+    *live = fresh;
     if watch {
         watcher.start();
     } else {
@@ -131,10 +135,12 @@ impl MeetingWatch {
 
     pub fn apply_callback(&self) -> Arc<dyn Fn(Config) + Send + Sync> {
         let (watcher, live) = (self.watcher.clone(), self.live.clone());
-        Arc::new(move |fresh| sync(&watcher, &live, fresh))
+        let stopping = self.stopping.clone();
+        Arc::new(move |fresh| sync(&watcher, &live, fresh, &stopping))
     }
 
     pub fn shutdown(&mut self) {
+        let _live = self.live.lock().unwrap();
         self.stopping.store(true, Ordering::Release);
         self.watcher.stop();
     }
@@ -194,7 +200,7 @@ mod tests {
         let requests = Arc::new(Requests(Mutex::new(vec![]), Some(done)));
         let backend: Arc<dyn Backend> = requests.clone();
         service.attach(&backend);
-        sync(&service.watcher, &service.live, config);
+        service.apply_callback()(config);
         received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(requests.0.lock().unwrap()[0].path, "/meeting/start");
     }
@@ -216,7 +222,7 @@ mod tests {
         let meetings = lf_meetings_backend::MeetingsBackend::new()
             .unwrap()
             .with_watcher(service.watcher.clone());
-        sync(&service.watcher, &service.live, config.clone());
+        service.apply_callback()(config.clone());
         let response = meetings.handle(BackendRequest {
             method: "GET".parse().unwrap(),
             path: "/meeting/status".into(),
@@ -230,11 +236,11 @@ mod tests {
         for field in ["meetings_enabled", "meeting_watch", "meeting_auto_start"] {
             let mut disabled = config.clone();
             disabled.set_field(field, json!(false));
-            sync(&service.watcher, &service.live, disabled);
+            service.apply_callback()(disabled);
             detected(&service.slot, &service.live, &service.stopping, "Zoom").unwrap();
         }
         assert!(requests.0.lock().unwrap().is_empty());
-        sync(&service.watcher, &service.live, config);
+        service.apply_callback()(config.clone());
         for platform in ["Zoom", "Other"] {
             detected(&service.slot, &service.live, &service.stopping, platform).unwrap();
         }
@@ -248,6 +254,7 @@ mod tests {
         }
         drop(recorded);
         service.shutdown();
+        service.apply_callback()(config);
         detected(&service.slot, &service.live, &service.stopping, "Zoom").unwrap();
         assert_eq!(requests.0.lock().unwrap().len(), 2);
         assert!(!service.watcher.status().detected);
