@@ -69,14 +69,12 @@ fn acquire_main_app_at(
     page: Option<&str>,
 ) -> std::io::Result<Option<lf_runtime::singleinstance::SingleInstance>> {
     let instance = lf_runtime::singleinstance::acquire_at(&dir.join("main-app.lock"))?;
-    if instance.is_none() {
-        if let Some(page) = page {
-            if !RequestFile::new(dir).write_request(page, &system_now) {
-                return Err(std::io::Error::other(
-                    "could not hand the page request to the running LocalFlow",
-                ));
-            }
-        }
+    if instance.is_none()
+        && !RequestFile::new(dir).write_request(page.unwrap_or(DEFAULT_PAGE), &system_now)
+    {
+        return Err(std::io::Error::other(
+            "could not hand the page request to the running LocalFlow",
+        ));
     }
     Ok(instance)
 }
@@ -578,7 +576,6 @@ mod tests {
         assert_eq!(owner.path(), dir.join("main-app.lock"));
         assert!(requests.consume_request(&now).is_none());
         assert!(acquire_main_app_at(dir, Some("History")).unwrap().is_none());
-        assert!(acquire_main_app_at(dir, None).unwrap().is_none());
         assert_eq!(requests.consume_request(&now), Some("History"));
         assert!(requests.consume_request(&now).is_none());
         drop(owner);
@@ -586,6 +583,27 @@ mod tests {
         let (pid, stamp) = lf_runtime::singleinstance::read_holder_at(&dir.join("main-app.lock"));
         assert_eq!(pid, Some(std::process::id()));
         assert!(chrono::DateTime::parse_from_rfc3339(&stamp.unwrap()).is_ok());
+    }
+
+    #[test]
+    fn no_page_launch_requests_a_window_from_a_closed_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = acquire_main_app_at(temp.path(), None).unwrap().unwrap();
+        assert!(acquire_main_app_at(temp.path(), None).unwrap().is_none());
+        let request = RequestFile::new(temp.path()).consume_request(&now);
+        assert_eq!(request, Some(DEFAULT_PAGE));
+        let closed = HubWindowState {
+            closed: true,
+            visible: false,
+            miniaturized: false,
+            page: "History".into(),
+        };
+        assert_eq!(
+            plan_reopen(Some(&closed), request),
+            ReopenPlan::Build { page: "Home" }
+        );
+        drop(owner);
+        assert!(acquire_main_app_at(temp.path(), None).unwrap().is_some());
     }
 
     #[test]
