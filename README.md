@@ -1,8 +1,10 @@
 # localflow
 
-Local push-to-talk dictation for macOS. Fully offline STT using Whisper (faster-whisper), optional LLM cleanup, and phone access via Tailscale.
+Local push-to-talk dictation for macOS. Fully offline STT using Whisper or Parakeet, optional LLM cleanup, and phone access via Tailscale.
 
 See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a feature-by-feature overview.
+
+Release maintainers: [v0.2.0 asset build and publishing](docs/releasing.md).
 
 ## Easiest install (no Terminal needed)
 
@@ -10,8 +12,22 @@ See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a featu
 [latest release](https://github.com/CortexRND/localflow/releases/latest) (or from
 the artifacts of a "Mac installer" run on the Actions tab), open it, and
 double-click **Install LocalFlow**. A window installs everything, which takes a
-few minutes, and LocalFlow opens when it is done. Homebrew, git and Python
-are not required.
+several minutes, and LocalFlow opens when it is done. Since v0.2.0, macOS installs
+the native **Rust LocalFlow.app** by default. Rust is installed automatically;
+accept Apple's Command Line Tools installation dialog if prompted. Python and
+its virtual environment are not needed. Missing CMake is installed with Homebrew;
+without Homebrew, install CMake first (https://cmake.org/download/).
+
+Linux and Windows continue to use Python. To choose the Python app on macOS:
+
+```sh
+LOCALFLOW_RUNTIME=python bash install.sh
+```
+
+The Python fallback provisions Python with uv when needed. Both runtimes share
+settings, history and notes. Speech models are downloaded by the selected app's
+setup wizard on first launch, not redundantly by the Rust installer. Ollama is
+optional (`--with-ollama` requires Homebrew on macOS).
 
 The installer puts **LocalFlow** in `~/Applications` (Applications → LocalFlow).
 Double-click it: the first time it opens the native setup window; after setup
@@ -31,7 +47,7 @@ Actions artifact) and double-click it.
 
 An open-source WisprFlow-style dictation app:
 - **Hold left Option** (default) to record — release to transcribe and paste; combo hotkeys toggle instead
-- **Offline transcription** via faster-whisper (no cloud calls)
+- **Offline transcription** via Whisper or Parakeet (no cloud calls)
 - **Optional cleanup** with Ollama (fix punctuation, casing, remove filler words)
 - **Instant paste** into the frontmost app
 - **Server mode** for phone access: record in browser over HTTPS (Tailscale), get transcript, copy to clipboard
@@ -55,7 +71,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.sh && echo "7fc43f686914c5968191011c93f64d9e0f4ddc991ce1ad8992b7727aa4316a2e  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -63,13 +79,13 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.sh && echo "7fc43f686914c5968191011c93f64d9e0f4ddc991ce1ad8992b7727aa4316a2e  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
-The installer is pinned to release `v0.1.0`. Without git it downloads
-`localflow-0.1.0.tar.gz` from that release and verifies it against the
+The installer is pinned to release `v0.2.0`. Without git it downloads
+`localflow-0.2.0.tar.gz` from that release and verifies it against the
 release's `SHA256SUMS` before unpacking; it stops and deletes the download if
-the hash does not match. With git it checks out the `v0.1.0` tag.
+the hash does not match. With git it checks out the `v0.2.0` tag.
 
 Or run from a checkout:
 
@@ -97,15 +113,15 @@ installer prints a warning saying so.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq '7FDA5D436A6DE8D175F5B135914366BF9E20B700A11DB07A62B847FA9E7E442D') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq '20A3A79114D81975422AC7C451AAB21391FBAB2C99B71D03DB136E8E2E007AFC') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
 ```
 
 To install and start Ollama for optional transcript cleanup, add
 `-WithOllama` to the `powershell` command inside the success branch.
 
-Without git, the installer downloads `localflow-0.1.0.zip` from the `v0.1.0`
+Without git, the installer downloads `localflow-0.2.0.zip` from the `v0.2.0`
 release and verifies it against the release's `SHA256SUMS`
-(`Get-FileHash -Algorithm SHA256`); with git it checks out the `v0.1.0` tag.
+(`Get-FileHash -Algorithm SHA256`); with git it checks out the `v0.2.0` tag.
 As on macOS and Linux, `LOCALFLOW_REF` is an unverified override.
 
 Or run from a checkout:

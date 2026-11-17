@@ -75,7 +75,7 @@ cat >"$APP/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 $ICON_XML
@@ -161,8 +161,10 @@ The app is not signed by Apple, so macOS may block it the first time:
   - open System Settings > Privacy & Security, scroll down, and click
     "Open Anyway" next to the Install LocalFlow message.
 
-Nothing needs to be installed beforehand: Homebrew, git and Python are
-optional. Audio and speech recognition stay on your Mac.
+The default app uses Rust, not Python. Rust is provisioned automatically;
+accept the Apple Command Line Tools dialog if prompted. Missing CMake is
+installed using Homebrew; without Homebrew, install CMake first from cmake.org.
+Audio and speech recognition stay on your Mac.
 '
 
 if [[ "$(uname -s)" == "Darwin" ]] && command -v hdiutil >/dev/null 2>&1; then

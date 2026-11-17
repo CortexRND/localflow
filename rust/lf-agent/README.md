@@ -1,6 +1,7 @@
 # lf-agent
 
-Optional Rust port of `localflow/settings_agent.py`. Python remains the default.
+Rust port of `localflow/settings_agent.py`. Rust is the macOS installer default;
+Python remains available through `LOCALFLOW_RUNTIME=python`.
 
 `SettingsAgent<C: ChatClient>` takes explicit config, dictionary and undo paths.
 Use `OllamaClient::new()` for bounded HTTP, or implement `ChatClient` for tests.

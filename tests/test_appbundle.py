@@ -15,7 +15,7 @@ def test_install_writes_bundle(tmp_path):
     assert plist["CFBundleIdentifier"] == "com.cortexrnd.localflow.hotphrases"
     assert plist["CFBundleExecutable"] == "launcher"
     assert plist["CFBundlePackageType"] == "APPL"
-    assert plist["CFBundleShortVersionString"] == "0.1.0"
+    assert plist["CFBundleShortVersionString"] == "0.2.0"
     assert plist["NSHighResolutionCapable"] is True
 
     launcher = bundle / "Contents" / "MacOS" / "launcher"

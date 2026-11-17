@@ -51,16 +51,19 @@ real load/transcription/reload, nonempty stable text, and PID-gone assertions
 after unload and dictation-off. Its transcript is recorded independently rather
 than required to match Parakeet's punctuation and spelling.
 
-# Opt-in macOS app packaging
+# Default macOS app packaging (v0.2.0)
 
-Python remains the default. From a source checkout on macOS:
+Rust is the macOS installer default; Linux and Windows retain Python. From a source checkout on macOS:
 
 ```sh
-LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+./install.sh --no-launch
 ```
 
-This **builds from source**, not a prebuilt download. Install Rust/Cargo and
-Xcode Command Line Tools (`xcode-select --install`) first. Only the current Mac's
+This **builds from source**, not a prebuilt download. The installer provisions
+stable Rust/Cargo with rustup's minimal profile and opens Apple's Xcode Command
+Line Tools installer, waiting up to 30 minutes for you to complete it. Missing
+CMake is installed through Homebrew; without Homebrew, install CMake first.
+Only the current Mac's
 architecture is built; unset `CARGO_BUILD_TARGET`. Network access is needed for
 Cargo and sherpa's native runtime download. Rust installation does not create a
 Python venv or install Python dependencies. Ollama remains optional. To build
@@ -86,7 +89,7 @@ System Settings → Privacy & Security; ad-hoc rebuilds may require reapproval.
 
 ## Login-agent migration and removal
 
-Opting into Rust installs/loads the shared `com.cortexrnd.localflow` LaunchAgent,
+Installing Rust installs/loads the shared `com.cortexrnd.localflow` LaunchAgent,
 replacing a Python agent rather than installing a second label. The Rust Hub's
 start-on-login control uses this same bundled helper, never a PATH Python runtime.
 Each migration unloads the old agent before replacing and loading its plist.
@@ -100,7 +103,7 @@ Backups live alongside the plist in `~/Library/LaunchAgents`:
 installs do not overwrite the Python backup with a Rust plist. To switch back:
 
 ```sh
-LOCALFLOW_RUNTIME=python ./install.sh --no-launch  # or omit LOCALFLOW_RUNTIME
+LOCALFLOW_RUNTIME=python ./install.sh --no-launch
 ```
 
 If the active agent is Rust, this restores the previous Python plist (including

@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# The release a default install downloads and verifies. Bump this, and only
-# this, when cutting a release.
-LOCALFLOW_RELEASE="v0.1.0"
+# The release a default install downloads and verifies. Keep synchronized
+# with package metadata and the other release launchers.
+LOCALFLOW_RELEASE="v0.2.0"
 LOCALFLOW_VERSION="${LOCALFLOW_RELEASE#v}"
 # LOCALFLOW_RELEASE_BASE_URL is for testing only: it points the verified
 # download at another copy of the release assets (e.g. a file:// directory).
@@ -23,7 +23,8 @@ Options:
   -h, --help        Show this help
 
 Environment:
-  LOCALFLOW_RUNTIME       python (default), or rust (macOS; Cargo, CMake and Xcode CLT required)
+  LOCALFLOW_RUNTIME       rust (macOS default), python (Linux default; macOS fallback)
+                           Rust and Xcode CLT are provisioned; CMake uses Homebrew if missing
   LOCALFLOW_WITH_OLLAMA=1  Same as --with-ollama
   LOCALFLOW_NO_LAUNCH=1    Same as --no-launch
   LOCALFLOW_HOME           Install checkout location
@@ -39,8 +40,9 @@ By default the installer checks out tag $LOCALFLOW_RELEASE (git installs) or
 downloads localflow-$LOCALFLOW_VERSION.tar.gz from that GitHub release and
 verifies it against the release's SHA256SUMS before unpacking.
 
-On macOS, Homebrew, git and Python are optional: without them the installer
-uses a uv-managed Python 3.12 and a downloaded source tarball.
+On macOS, the native Rust app needs no Python or virtual environment. Accept
+the Xcode Command Line Tools dialog when prompted. For the Python app, run
+LOCALFLOW_RUNTIME=python bash install.sh; it can provision Python using uv.
 EOF
 }
 
@@ -53,6 +55,8 @@ case "$RUNTIME" in
     python|rust) ;;
     *) echo "Invalid LOCALFLOW_RUNTIME: $RUNTIME (expected python or rust)." >&2; exit 2 ;;
 esac
+OS="$(uname -s)"
+if [[ "${LOCALFLOW_RUNTIME+x}" != x && "$OS" == Darwin ]]; then RUNTIME=rust; fi
 if [[ "${LOCALFLOW_WITH_OLLAMA:-0}" == "1" ]]; then
     WITH_OLLAMA=1
 fi
@@ -75,7 +79,6 @@ if [[ -n "${LOCALFLOW_REF:-}" ]]; then
     echo "Warning: LOCALFLOW_REF=$LOCALFLOW_REF is a custom ref; its source is not checksum-verified." >&2
 fi
 
-OS="$(uname -s)"
 PYTHON=""
 USE_UV=0
 HAVE_BREW=0
@@ -311,27 +314,50 @@ wait_for_ollama() {
     return 0
 }
 
+if [[ "$OS" == Darwin ]]; then
+    for brew_dir in /opt/homebrew/bin /usr/local/bin; do
+        if [[ -x "$brew_dir/brew" ]]; then export PATH="$PATH:$brew_dir"; fi
+    done
+fi
 if [[ "$OS" == "Darwin" && "$RUNTIME" == rust ]]; then
-    command -v cargo >/dev/null 2>&1 || { echo "LOCALFLOW_RUNTIME=rust requires Cargo; install Rust first." >&2; exit 1; }
-    mac_has_clt || { echo "LOCALFLOW_RUNTIME=rust requires Xcode Command Line Tools (xcode-select --install)." >&2; exit 1; }
+    if ! mac_has_clt; then
+        echo "Opening Apple's Xcode Command Line Tools installer. Click Install and accept the license; waiting up to 30 minutes..."
+        if ! xcode-select --install; then
+            echo "Could not start Xcode Command Line Tools installation. Run xcode-select --install, complete installation, then rerun LocalFlow." >&2
+            exit 1
+        fi
+        for ((attempt = 0; attempt < 180; attempt++)); do
+            if mac_has_clt; then break; fi
+            sleep 10
+        done
+        mac_has_clt || { echo "Timed out waiting for Xcode Command Line Tools. Complete the Apple installer, then rerun LocalFlow." >&2; exit 1; }
+    fi
+    export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+    if ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; then
+        echo "Installing Rust (stable, minimal profile) for this user..."
+        rustup_installer="$(mktemp)"
+        if ! curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$rustup_installer" \
+            || ! sh "$rustup_installer" -y --profile minimal --default-toolchain stable; then
+            rm -f "$rustup_installer"
+            echo "Rust installation failed. Check your internet connection and rerun LocalFlow (https://rustup.rs)." >&2
+            exit 1
+        fi
+        rm -f "$rustup_installer"
+        if ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; then
+            echo "Rust installation completed but Cargo is unavailable; check CARGO_HOME and rerun LocalFlow." >&2
+            exit 1
+        fi
+    fi
     if ! command -v cmake >/dev/null 2>&1; then
         if command -v brew >/dev/null 2>&1; then
             echo "Installing CMake..."
-            brew install cmake
+            brew install cmake || { echo "CMake installation failed. Check Homebrew and rerun LocalFlow." >&2; exit 1; }
         else
             echo "LOCALFLOW_RUNTIME=rust requires CMake; install cmake (https://cmake.org/download/) or install Homebrew and rerun." >&2
             exit 1
         fi
     fi
 elif [[ "$OS" == "Darwin" ]]; then
-    for brew_dir in /opt/homebrew/bin /usr/local/bin; do
-        if [[ -x "$brew_dir/brew" ]]; then
-            case ":${PATH}:" in
-                *":$brew_dir:"*) ;;
-                *) PATH="$PATH:$brew_dir" ;;
-            esac
-        fi
-    done
     if command -v brew >/dev/null 2>&1; then
         HAVE_BREW=1
     fi
@@ -444,6 +470,7 @@ fi
 if [[ "$WITH_OLLAMA" -eq 1 ]]; then
     if [[ "$OS" == "Darwin" ]]; then
         if ! command -v ollama >/dev/null 2>&1; then
+            command -v brew >/dev/null 2>&1 || { echo "Installing Ollama requires Homebrew. Install Ollama from https://ollama.com/download/mac or rerun without --with-ollama." >&2; exit 1; }
             brew install ollama
         fi
         if ! pgrep -x ollama >/dev/null 2>&1; then

@@ -1,7 +1,8 @@
 # lf-meetings
 
 Optional Rust port of `localflow/meetings.py`, `system_audio.py`,
-`meeting_templates.py`, and `dispatch.py`. Python remains the default. No
+`meeting_templates.py`, and `dispatch.py`. Rust is the macOS installer default;
+Python remains available through `LOCALFLOW_RUNTIME=python`. No
 server, CLI, or UI integration is installed by this crate.
 
 ## Public API

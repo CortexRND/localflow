@@ -25,6 +25,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build installer disk image
         run: bash scripts/build_mac_installer.sh
       - name: Validate app bundle
@@ -54,7 +56,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            dist/LocalFlow-Installer.dmg \
-            "packaging/windows/Install LocalFlow.cmd" \
-            --clobber
+          scripts/release-assets.sh "$GITHUB_REF_NAME"
+          cp dist/LocalFlow-Installer.dmg dist/release/
+          cp "packaging/windows/Install LocalFlow.cmd" dist/release/
+          (cd dist/release && shasum -a 256 LocalFlow-Installer.dmg "Install LocalFlow.cmd" >> SHA256SUMS)
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/release/* --clobber

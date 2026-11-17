@@ -1,6 +1,7 @@
 # lf-ask
 
-Optional Rust port of `localflow/recall.py`, with Python remaining the default.
+Rust port of `localflow/recall.py`. Rust is the macOS installer default;
+choose the Python fallback with `LOCALFLOW_RUNTIME=python`.
 
 * `Corpus::from_config(&config, store)` locates the existing vault, notes and log
   folders using lf-core config and Python-compatible home expansion. Alternatively
