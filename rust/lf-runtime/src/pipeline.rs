@@ -144,6 +144,17 @@ pub fn process_job(
     vocab: &Vocabulary,
     history: Option<&HistoryStore>,
 ) -> (Option<String>, bool) {
+    process_job_guarded(job, config, models, vocab, history, || Some(())).0
+}
+
+pub(crate) fn process_job_guarded<G>(
+    job: &Job,
+    config: &Config,
+    models: &Models,
+    vocab: &Vocabulary,
+    history: Option<&HistoryStore>,
+    begin_commit: impl FnOnce() -> Option<G>,
+) -> ((Option<String>, bool), Option<G>) {
     let mut raw_text = String::new();
     let mut text: Option<String> = None;
     let mut status = "failed";
@@ -220,6 +231,13 @@ pub fn process_job(
         status = "failed";
         error = true;
     }
+    let commit = begin_commit();
+    if commit.is_none() {
+        if let Some(history) = history {
+            history.delete_clip(audio_path.as_deref());
+        }
+        return ((None, false), None);
+    }
     if let Some(h) = history {
         if status == "silent" {
             h.delete_clip(audio_path.as_deref());
@@ -248,5 +266,5 @@ pub fn process_job(
             Err(e) => log::error!("could not save dictation history: {e}"),
         }
     }
-    (text, error)
+    ((text, error), commit)
 }
