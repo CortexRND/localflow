@@ -196,6 +196,7 @@ class Sandbox:
             "STUB_RELEASE_DIR": str(self.release),
             "STUB_REAL_CURL": str(REAL_CURL),
             "LOCALFLOW_HOME": str(self.dest),
+            "LOCALFLOW_RUNTIME": "python",
             "LOCALFLOW_REPO_URL": "https://example.invalid/localflow.git",
             **(env or {}),
         }

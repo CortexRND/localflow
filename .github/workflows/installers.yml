@@ -71,7 +71,7 @@ jobs:
       - name: Install Python and seed its login agent without loading it
         shell: bash
         run: |
-          ./install.sh --no-launch
+          LOCALFLOW_RUNTIME=python ./install.sh --no-launch
           test ! -f "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
           .venv/bin/python - <<'PY'
           from localflow.launchagent import _plist_path, plist_content
@@ -83,16 +83,16 @@ jobs:
           echo PYTHON_INITIAL_AGENT
           plutil -convert json -o - "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
           echo
-      - name: Opt into Rust twice and verify signed relocatable bundle and agent
+      - name: Install default Rust twice and verify signed relocatable bundle and agent
         shell: bash
         run: |
           app="$HOME/Applications/LocalFlow.app"
           agent="$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
-          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          ./install.sh --no-launch
           echo RUST_FIRST_AGENT
           plutil -convert json -o - "$agent"
           echo
-          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          ./install.sh --no-launch
           echo RUST_REPEAT_AGENT
           plutil -convert json -o - "$agent"
           echo
@@ -124,7 +124,7 @@ jobs:
           echo PYTHON_RESTORED_AGENT
           plutil -convert json -o - "$agent"
           echo
-          ./install.sh --no-launch
+          LOCALFLOW_RUNTIME=python ./install.sh --no-launch
           echo PYTHON_REPEAT_AGENT
           plutil -convert json -o - "$agent"
           echo
@@ -229,7 +229,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          ./install.sh --no-launch
+          LOCALFLOW_RUNTIME=python ./install.sh --no-launch
           test -f "$HOME/Applications/LocalFlow Setup.app/Contents/Info.plist"
           .venv/bin/lf --help
       - name: Install and verify on Windows

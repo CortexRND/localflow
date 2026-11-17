@@ -73,7 +73,7 @@ def test_rust_opt_in_job_checks_signature_agent_and_migration_round_trip() -> No
     job = workflow.split("\n  rust-macos:\n", 1)[1].split("\n  #", 1)[0]
     assert "runs-on: macos-latest" in job
     assert "LOCALFLOW_SKIP_LAUNCHCTL: '1'" in job
-    assert job.count("LOCALFLOW_RUNTIME=rust ./install.sh --no-launch") == 2
+    assert job.count("          ./install.sh --no-launch") == 2
     assert "LOCALFLOW_RUNTIME=python ./install.sh --no-launch" in job
     assert "codesign --verify --deep --strict" in job
     assert "plutil -extract ProgramArguments.0" in job
@@ -93,14 +93,15 @@ def test_rust_opt_in_job_checks_signature_agent_and_migration_round_trip() -> No
     assert "./install.sh --uninstall" in job
 
 
-def test_installer_runtime_defaults_to_python_and_rejects_unknown_values() -> None:
+def test_installer_runtime_defaults_by_platform_and_rejects_unknown_values() -> None:
     script = (ROOT / "install.sh").read_text(encoding="utf-8")
     assert 'RUNTIME="${LOCALFLOW_RUNTIME-python}"' in script
+    assert 'if [[ "${LOCALFLOW_RUNTIME+x}" != x && "$OS" == Darwin ]]; then RUNTIME=rust; fi' in script
     assert "Invalid LOCALFLOW_RUNTIME" in script
     assert "python|rust)" in script
     assert 'if [[ "$RUNTIME" == python ]]; then' in script
     assert "bash scripts/build_rust_app.sh" in script
-    assert "Cargo, CMake and Xcode CLT required" in script
+    assert "rust (macOS default)" in script
 
 
 @pytest.mark.skipif(BASH is None, reason="Bash is not installed")
