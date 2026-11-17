@@ -43,6 +43,12 @@ impl BackendResponse {
 pub trait Backend: Send + Sync + 'static {
     fn handle(&self, request: BackendRequest) -> BackendResponse;
 
+    /// Execute maintenance only while no owned session can start or stop.
+    fn while_idle(&self, action: &mut dyn FnMut()) -> bool {
+        action();
+        true
+    }
+
     /// Finish owned sessions before stopping the server; runs on a blocking thread.
     fn shutdown(&self, _config: &Config) -> anyhow::Result<()> {
         Ok(())

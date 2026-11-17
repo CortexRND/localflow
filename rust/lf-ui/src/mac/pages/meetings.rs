@@ -1388,6 +1388,12 @@ impl HubPage for MeetingsPage {
         self.state.flush();
     }
 
+    fn release_views(&mut self) {
+        self.state.visible.set(false);
+        self.state.controls.borrow_mut().take();
+        self.state.rebuild.borrow_mut().take();
+    }
+
     fn shutdown(&mut self) {
         self.state.shutdown();
     }

@@ -195,6 +195,9 @@ pub trait HubPage {
     /// state. Called right before the views are torn down.
     fn capture(&mut self) {}
 
+    /// Drop native controls after capture without discarding drafts or work.
+    fn release_views(&mut self) {}
+
     /// Deliver queued request results on the main thread for audits/snapshots.
     /// Return the number of requests still awaiting delivery.
     fn drain_requests(&mut self) -> usize {

@@ -42,6 +42,10 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    pub fn while_idle(&self, action: &mut dyn FnMut()) -> bool {
+        self.backend.while_idle(action)
+    }
+
     pub fn shutdown(&self) -> anyhow::Result<()> {
         let config = self
             .config_reader

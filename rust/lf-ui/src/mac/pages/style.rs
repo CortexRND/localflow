@@ -205,12 +205,16 @@ impl HubPage for StylePage {
         }
     }
 
-    fn shutdown(&mut self) {
-        self.flush();
+    fn release_views(&mut self) {
         let mut state = self.state.borrow_mut();
         state.cleanup_segments = None;
         state.style_segments.clear();
-        state.services = None;
+    }
+
+    fn shutdown(&mut self) {
+        self.flush();
+        self.release_views();
+        self.state.borrow_mut().services = None;
     }
 
     fn render(&mut self, ctx: &PageCtx, top: f64) -> f64 {
@@ -357,5 +361,71 @@ impl HubPage for StylePage {
             &p,
         ));
         cursor + 20.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lf_core::config::{load_from, save_config, Config};
+    use lf_core::dictionary::DictionaryStore;
+    use lf_core::history::HistoryStore;
+
+    #[test]
+    fn offscreen_failed_selection_retries_on_shutdown_after_storage_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let mut config = Config::defaults_for(true);
+        config.set_field("cleanup_level", "light".into());
+        config.set_field("style_work", "formal".into());
+        save_config(&config, Some(&path)).unwrap();
+        let services = HubServices::new_isolated(
+            config,
+            Rc::new(
+                HistoryStore::open(
+                    Some(root.path().join("history.sqlite")),
+                    Some(root.path().join("clips")),
+                    true,
+                )
+                .unwrap(),
+            ),
+            Rc::new(DictionaryStore::new(Some(
+                root.path().join("dictionary.json"),
+            ))),
+        );
+        services.memory_only_config.set(false);
+        *services.config_path.borrow_mut() = Some(path.clone());
+        let mut page = StylePage::new();
+        {
+            let mut state = page.state.borrow_mut();
+            state.cleanup = "medium".into();
+            state.styles = vec![("work".into(), "casual".into())];
+            state.services = Some(services.clone());
+        }
+        let original_permissions = std::fs::metadata(root.path()).unwrap().permissions();
+        let mut read_only = original_permissions.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(root.path(), read_only).unwrap();
+        let saved = persist(&page.state, &services);
+        page.flush();
+        page.release_views();
+        std::fs::set_permissions(root.path(), original_permissions).unwrap();
+        assert!(!saved);
+        assert!(page.state.borrow().dirty);
+        assert!(services.page_error(PAGE).is_some());
+        assert_eq!(
+            load_from(&path).unwrap().field_str("cleanup_level"),
+            Some("light")
+        );
+        assert_eq!(
+            load_from(&path).unwrap().field_str("style_work"),
+            Some("formal")
+        );
+        page.shutdown();
+        assert!(!page.state.borrow().dirty);
+        assert!(services.page_error(PAGE).is_none());
+        let saved = load_from(&path).unwrap();
+        assert_eq!(saved.field_str("cleanup_level"), Some("medium"));
+        assert_eq!(saved.field_str("style_work"), Some("casual"));
     }
 }

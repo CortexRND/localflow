@@ -576,6 +576,7 @@ impl Hub {
             self.with_page(&current, |p| p.capture());
             if current != page {
                 self.with_page(&current, |p| p.flush());
+                self.with_page(&current, |p| p.release_views());
             }
         }
 
@@ -784,6 +785,7 @@ impl Hub {
         }
         for (name, _) in &self.pages {
             let _ = catch_unwind(AssertUnwindSafe(|| self.with_page(name, |p| p.shutdown())));
+            self.with_page(name, |p| p.release_views());
         }
         // The run loop retains timers and timers retain closures: stop them so
         // a closed Hub is released instead of lingering.
@@ -792,6 +794,7 @@ impl Hub {
             timer.invalidate();
         }
         self.page_target.clear();
+        remove_subviews(&self.body);
     }
 }
 

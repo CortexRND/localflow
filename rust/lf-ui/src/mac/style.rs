@@ -204,6 +204,7 @@ define_class!(
             color("paper", &state.palette).set();
             NSRectFill(bounds);
             color("sun", &state.palette).set();
+            let dots = NSBezierPath::bezierPath();
             for (x, y, diameter) in halftone_dots(
                 bounds.size.width,
                 bounds.size.height,
@@ -212,8 +213,9 @@ define_class!(
                 state.pad,
                 state.anchor,
             ) {
-                NSBezierPath::bezierPathWithOvalInRect(rect(x, y, diameter, diameter)).fill();
+                dots.appendBezierPathWithOvalInRect(rect(x, y, diameter, diameter));
             }
+            dots.fill();
             NSGraphicsContext::restoreGraphicsState_class();
         }
 

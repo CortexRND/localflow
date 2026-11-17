@@ -807,6 +807,13 @@ impl HubPage for AskPage {
         }
     }
 
+    fn release_views(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.visible = false;
+        state.views = Views::default();
+        state.rebuild = None;
+    }
+
     fn shutdown(&mut self) {
         let timer = {
             let mut state = self.state.borrow_mut();

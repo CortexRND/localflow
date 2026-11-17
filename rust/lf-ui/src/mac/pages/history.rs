@@ -626,8 +626,12 @@ impl HubPage for HistoryPage {
         page_y + 36.0
     }
 
-    fn shutdown(&mut self) {
+    fn release_views(&mut self) {
         // Drop the reference to the (about to be released) search field.
         *self.state.search_field.borrow_mut() = None;
+    }
+
+    fn shutdown(&mut self) {
+        self.release_views();
     }
 }

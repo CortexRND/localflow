@@ -90,11 +90,13 @@ fn watch_server_services(
     factory: lf_runtime::worker::SttFactory,
     update_speech: bool,
     on_config: Arc<dyn Fn(Config) + Send + Sync>,
+    maintenance: lf_runtime::live::OnTick,
 ) -> Result<lf_runtime::live::WatcherGuard> {
     let previous = Mutex::new(config);
     let pending = Arc::new(Mutex::new(None::<Config>));
     let retry_pending = pending.clone();
     let retry: lf_runtime::live::OnTick = Arc::new(move || {
+        maintenance();
         let mut pending = retry_pending.lock().unwrap();
         if let Some(fresh) = pending.as_ref() {
             match refresh_server_speech(&previous, &shared, fresh.clone(), &factory) {
@@ -105,7 +107,7 @@ fn watch_server_services(
                 Err(error) => log::error!("server speech selection failed: {error}"),
             }
         }
-        pending.is_some()
+        true
     });
     let apply_retry = retry.clone();
     let apply: Arc<dyn Fn(Config) + Send + Sync> = Arc::new(move |fresh| {
@@ -155,6 +157,8 @@ pub struct EmbeddedRuntime {
 
 impl EmbeddedRuntime {
     pub fn start(config: Config, menu: MenuState, toggle: ToggleStore) -> Self {
+        let memory = crate::speech_memory::SpeechMemory::new();
+        let model_memory = memory.clone();
         let error_menu = menu.clone();
         let report: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |error| {
             error_menu.change(|model| {
@@ -162,10 +166,12 @@ impl EmbeddedRuntime {
             })
         });
         let make_speech: lf_runtime::worker::SttFactory = Arc::new(move |config| {
-            Ok(Arc::new(lf_runtime::engine::ReportingSpeech::new(
-                Arc::new(lf_stt::runtime::LazySpeechAdapter::new(config.clone())),
-                report.clone(),
-            )))
+            Ok(
+                model_memory.speech(Arc::new(lf_runtime::engine::ReportingSpeech::new(
+                    Arc::new(lf_stt::runtime::LazySpeechAdapter::new(config.clone())),
+                    report.clone(),
+                ))),
+            )
         });
         let initial = make_speech(&config).expect("lazy speech construction is infallible");
         let shared = SharedSpeech(Arc::new(Mutex::new(initial.clone())));
@@ -180,7 +186,9 @@ impl EmbeddedRuntime {
         });
         let runtime = (|| -> Result<Option<RuntimeHandle>> {
             let options = RunOptions {
-                audio: Box::new(lf_stt::runtime::RecorderSource::from_config(&config)?),
+                audio: memory.audio(Box::new(lf_stt::runtime::RecorderSource::from_config(
+                    &config,
+                )?)),
                 speech: initial,
                 build_stt,
                 play_sound: Arc::new(lf_runtime::sounds::play),
@@ -229,21 +237,52 @@ impl EmbeddedRuntime {
             "in-process runtime: ready; speech loaded: {}",
             speech.loaded()
         );
-        let server_watch = if let (Some(_), Some(watcher)) = (&server, &meeting_watch) {
-            watch_server_services(
-                config,
-                server_shared,
-                make_speech,
-                runtime.is_none(),
-                watcher.apply_callback(),
-            )
+        let live = Arc::new(Mutex::new(config.clone()));
+        let apply_live = live.clone();
+        let watcher_callback = meeting_watch
+            .as_ref()
+            .map(|watcher| watcher.apply_callback());
+        let on_config = Arc::new(move |fresh: Config| {
+            *apply_live.lock().unwrap() = fresh.clone();
+            if let Some(callback) = &watcher_callback {
+                callback(fresh);
+            }
+        });
+        let server_state = server.as_ref().map(|server| server.state.clone());
+        let server_watch = lf_core::config::try_config_path()
+            .and_then(|path| {
+                let settings = Mutex::new(crate::speech_memory::RuntimeSettings::new(&path));
+                let maintenance: lf_runtime::live::OnTick = Arc::new(move || {
+                    let mut settings = settings.lock().unwrap();
+                    settings.reload();
+                    let enabled = live
+                        .lock()
+                        .unwrap()
+                        .field_bool("dictation_enabled")
+                        .unwrap_or(true);
+                    let mut unload = || {
+                        memory.poll(enabled, settings.timeout, std::time::Instant::now());
+                    };
+                    if let Some(state) = &server_state {
+                        state.while_idle(&mut unload);
+                    } else {
+                        unload();
+                    }
+                    true
+                });
+                watch_server_services(
+                    config,
+                    server_shared,
+                    make_speech,
+                    runtime.is_none(),
+                    on_config,
+                    maintenance,
+                )
+            })
             .map_err(|error| {
                 log::error!("could not watch server settings: {error}");
             })
-            .ok()
-        } else {
-            None
-        };
+            .ok();
         Self {
             runtime,
             server,
@@ -328,8 +367,7 @@ impl ServerHandle {
             .name("localflow-server".into())
             .spawn(move || {
                 let result = (|| -> Result<()> {
-                    let runtime = tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(2)
+                    let runtime = tokio::runtime::Builder::new_current_thread()
                         .max_blocking_threads(16)
                         .enable_all()
                         .build()?;

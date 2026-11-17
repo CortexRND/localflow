@@ -18,5 +18,7 @@ pub mod setup_backend;
 pub mod setup_flow;
 pub mod shutdown;
 pub mod snapshot_plan;
+#[cfg(feature = "runtime")]
+mod speech_memory;
 pub mod text_wrap;
 pub mod tokens;

@@ -8,6 +8,8 @@ pub mod app;
 #[cfg(target_os = "macos")]
 pub mod hub;
 #[cfg(target_os = "macos")]
+mod memory_profile;
+#[cfg(target_os = "macos")]
 pub mod page;
 #[cfg(target_os = "macos")]
 pub mod pages;

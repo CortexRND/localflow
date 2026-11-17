@@ -1624,6 +1624,16 @@ impl HubPage for HotPhrasesPage {
         self.state.borrow_mut().rebuild = None;
     }
 
+    fn release_views(&mut self) {
+        stop_timer(&self.state);
+        let mut state = self.state.borrow_mut();
+        state.active = false;
+        state.views = None;
+        state.geometry = None;
+        state.action_target = None;
+        state.rebuild = None;
+    }
+
     fn shutdown(&mut self) {
         self.flush();
         if let Some(editor) = self.state.borrow_mut().editor.as_mut() {

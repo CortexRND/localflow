@@ -1,3 +1,61 @@
+# Rust runtime memory settings
+
+The Rust Hub reads `runtime.toml` beside its resolved `config.toml` (including
+`LOCALFLOW_CONFIG` overrides). For a normal macOS installation this is
+`~/Library/Application Support/localflow/runtime.toml`; use the same directory
+as your existing config on other platforms.
+
+```toml
+[stt]
+idle_timeout_seconds = 0
+```
+
+Zero disables idle eviction, matching Python, which has no STT idle-unload
+setting. A positive integer unloads the speech model after that many inactive
+seconds. Dictation off unloads it independently of the timeout; enabling
+dictation does not load weights until speech is requested. Recording, loading,
+transcription and meeting startup/recording/finalization prevent eviction.
+The sidecar is checked every two seconds off the UI thread. Invalid edits retain
+the previous setting; deleting it restores zero. Unknown sidecar keys are ignored
+and the file is never rewritten. Python is unchanged and never reads or writes
+this sidecar: Python's normal config saves discard unknown keys, so putting this
+setting in the shared config would lose it.
+
+The macOS `memory` CI job compares the pre-6c Hub against the current build on
+the same runner, injecting only the identical opt-in profiling driver into the
+baseline. It samples every page, Home after each page, the closed window, and a
+reopened window, with runtime/server running and speech unloaded. The artifact
+contains CSV/Markdown tables and per-state `vmmap --summary` / `heap -s` output.
+`LF_HUB_RSS_PROFILE` is measurement-only instrumentation, unset in normal use.
+
+Parakeet measurements use the cached native int8 and fp32 repositories and their
+fixed `test_wavs/0.wav` clip. Each configuration runs in a fresh process. Exact
+match is measured against the default native int8 CPU transcript, not a
+human-labeled WER. Arena, memory-pattern, graph and intra/inter-op experiments
+use a measurement-only C interposer compiled against the installed ONNX
+Runtime's exact headers; each must verify interception on all three sessions.
+It is **not** linked into production. Native production session defaults remain
+unchanged; no unverified accuracy or provider claims are made. The results
+artifact includes load/transcription RSS, latency, transcripts, exact matches,
+unload RSS and any download/provider/diagnostic-tool errors.
+
+Memory rows include both RSS and the kernel `phys_footprint` ledger, sampled
+with the SDK's `proc_pid_rusage` API. This is the same footprint accounting used
+for Activity Monitor's Memory column; shared clean framework mappings inflate
+RSS without equivalently increasing this ledger. The Python comparison is the
+unchanged standalone Hub UI, **without** the runtime/server included in Rust.
+`scripts/ci_memory_analysis.py` reports first-Ask map and typed heap deltas.
+
+After safe model eviction on macOS, Rust asks all malloc zones to return unused
+pages with `malloc_zone_pressure_relief(NULL, 0)`. It never frees live allocations.
+The benchmark measures recognizer unload, complete engine drop, and allocator
+relief separately, retaining their maps/heap summaries. Sherpa's recognizer and
+stream wrappers own their native handles and destroy them on drop; the native
+NeMo model owns all three sessions and its environment. The measurement-only
+session shim resolves the original ORT export in its loaded Mach-O image to
+avoid recursive dyld interposition. A failed repaired attempt disables further
+shim cases rather than repeatedly crashing or claiming options were measured.
+
 # LocalFlow Rust port (Stage 1, optional)
 
 This directory holds an **optional** Rust implementation of LocalFlow's local

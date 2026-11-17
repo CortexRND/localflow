@@ -15,6 +15,8 @@ pub struct ParakeetEngine {
     paths: Option<Vec<PathBuf>>,
     recognizer: Option<OfflineRecognizer>,
     effective_provider: String,
+    num_threads: i32,
+    explicit_files: bool,
 }
 
 fn provider_report(provider: &str, fallback: bool) -> String {
@@ -49,7 +51,21 @@ impl ParakeetEngine {
             paths: None,
             recognizer: None,
             effective_provider: String::new(),
+            num_threads: super::threads(),
+            explicit_files: false,
         })
+    }
+
+    /// Load an explicitly provisioned native model with a bounded CPU thread count.
+    pub fn with_model_files(provider: &str, paths: Vec<PathBuf>, num_threads: i32) -> Result<Self> {
+        if paths.len() != 4 || num_threads <= 0 {
+            bail!("Parakeet needs four model files and a positive thread count");
+        }
+        let mut engine = Self::new(provider)?;
+        engine.paths = Some(paths);
+        engine.num_threads = num_threads;
+        engine.explicit_files = true;
+        Ok(engine)
     }
 
     fn create(&self, provider: &str) -> Result<OfflineRecognizer> {
@@ -69,7 +85,7 @@ impl ParakeetEngine {
             joiner: Some(path(2)?),
         };
         config.model_config.tokens = Some(path(3)?);
-        config.model_config.num_threads = super::threads();
+        config.model_config.num_threads = self.num_threads;
         config.model_config.provider = Some(provider.into());
         config.model_config.model_type = Some("nemo_transducer".into());
         config.decoding_method = Some("greedy_search".into());
@@ -88,6 +104,9 @@ impl SpeechEngine for ParakeetEngine {
             .is_some_and(|paths| paths.iter().all(|path| downloads::cached_file_exists(path)))
         {
             return Ok(0.0);
+        }
+        if self.explicit_files {
+            bail!("explicit Parakeet model files are missing");
         }
         let start = Instant::now();
         self.paths = Some(
@@ -165,6 +184,27 @@ impl SpeechEngine for ParakeetEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_native_files_validate_without_silent_download_fallback() {
+        assert!(ParakeetEngine::with_model_files("cpu", vec![], 2).is_err());
+        let root = tempfile::tempdir().unwrap();
+        let files: Vec<_> = ["encoder", "decoder", "joiner", "tokens"]
+            .iter()
+            .map(|name| root.path().join(name))
+            .collect();
+        assert!(ParakeetEngine::with_model_files("cpu", files.clone(), 0).is_err());
+        let mut engine = ParakeetEngine::with_model_files("cpu", files.clone(), 2).unwrap();
+        assert!(engine
+            .download()
+            .unwrap_err()
+            .to_string()
+            .contains("explicit Parakeet"));
+        for path in files {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        assert_eq!(engine.download().unwrap(), 0.0);
+        assert!(!engine.loaded());
+    }
     #[test]
     fn provider_reporting_does_not_claim_unobserved_acceleration() {
         assert_eq!(provider_report("cpu", false), "cpu");
