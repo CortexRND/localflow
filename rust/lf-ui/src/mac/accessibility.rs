@@ -16,6 +16,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::NSString;
 
+use lf_ui::backends::prompts::WorkPrompt;
 use lf_ui::hub_route::HUB_PAGES;
 use lf_ui::mac::hub::Hub;
 use lf_ui::mac::page::HubServices;
@@ -190,26 +191,66 @@ pub fn run() {
     );
     hub.services().history.add(&entry).unwrap();
     assert_history_search(&hub);
+    hub.services().dictionary.add_word("LocalFlow").unwrap();
+    hub.services()
+        .dictionary
+        .add_replacement("teh", "the")
+        .unwrap();
+    let prompts = hub
+        .services()
+        .prompt_queue
+        .add(
+            &[
+                WorkPrompt::new("Review the changes", "Check tests"),
+                WorkPrompt::new("Update docs", "Document changes"),
+            ],
+            &["review.md".into(), "docs.md".into()],
+            "Planning",
+        )
+        .unwrap();
+    let id = prompts[1].get("id").unwrap().as_str().unwrap();
+    hub.services()
+        .prompt_queue
+        .set_status(
+            id,
+            "failed",
+            None,
+            serde_json::json!({"error":"Orca is not running"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
     for page in HUB_PAGES {
         hub.show_page(page);
         walk(&hub.content_view(), "populated", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
     }
-    for unavailable in [
-        "Ask",
-        "Dictionary",
-        "Prompts",
-        "Meetings",
-        "Style",
-        "Models",
-        "Settings",
-        "Hot Phrases",
-    ] {
+    for unavailable in ["Ask", "Meetings", "Models", "Settings", "Hot Phrases"] {
         hub.show_page("History");
         hub.show_page(unavailable);
         assert_eq!(hub.current_page(), "Home");
     }
+    let production = HubServices::new(
+        Config::defaults_for(true),
+        hub.services().history.clone(),
+        hub.services().dictionary.clone(),
+    );
+    let unavailable = Hub::new(mtm, production, "Prompts");
+    assert!(has_text(
+        &unavailable.content_view(),
+        "Can't read the queue"
+    ));
+    assert!(has_text(&unavailable.content_view(), "Toggle Dictation"));
+    walk(
+        &unavailable.content_view(),
+        "unavailable",
+        "Prompts",
+        &mut failures,
+    );
+    unavailable.shutdown();
     hub.shutdown();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    println!("Native accessibility audit: Home, History and shell passed");
+    println!(
+        "Native accessibility audit: Home, History, Dictionary, Style, Prompts and shell passed"
+    );
 }

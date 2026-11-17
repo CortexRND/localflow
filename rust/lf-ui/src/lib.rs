@@ -2,6 +2,7 @@
 //!
 //! Pure state and layout helpers are portable; AppKit code is macOS-only.
 
+pub mod backends;
 pub mod hub_model;
 pub mod hub_route;
 pub mod mac;

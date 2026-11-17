@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use lf_core::config::{apply_config_update, load_config, load_from, save_config, Config};
@@ -24,6 +25,7 @@ use serde_json::Value;
 
 use super::actions::ActionTarget;
 use super::style::FlippedView;
+use crate::backends::prompts::{FakePromptQueue, PromptQueue, UnavailablePromptQueue};
 use crate::tokens::{Palette, Weight};
 
 /// The text-measure closure pages pass to the step-1 layout code.
@@ -40,6 +42,7 @@ pub struct HubServices {
     pub memory_only_config: Cell<bool>,
     pub history: Rc<HistoryStore>,
     pub dictionary: Rc<DictionaryStore>,
+    pub prompt_queue: Arc<dyn PromptQueue>,
     /// Injected by the single native window router. Snapshots leave it unset.
     pub setup_opener: RefCell<Option<Rc<dyn Fn()>>>,
     /// Per-page inline error text (`page_errors` in Python), cleared when the
@@ -61,6 +64,7 @@ impl HubServices {
             memory_only_config: Cell::new(false),
             history,
             dictionary,
+            prompt_queue: Arc::new(UnavailablePromptQueue),
             setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
@@ -80,6 +84,7 @@ impl HubServices {
             memory_only_config: Cell::new(true),
             history,
             dictionary,
+            prompt_queue: Arc::new(FakePromptQueue::new()),
             setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
