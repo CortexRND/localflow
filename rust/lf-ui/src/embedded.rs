@@ -151,6 +151,7 @@ pub struct EmbeddedRuntime {
     pub runtime: Option<RuntimeHandle>,
     server: Option<ServerHandle>,
     pub speech: Arc<dyn SpeechEngine>,
+    memory: crate::speech_memory::SpeechMemory,
     server_watch: Option<lf_runtime::live::WatcherGuard>,
     meeting_watch: Option<meeting_watch::MeetingWatch>,
 }
@@ -168,7 +169,7 @@ impl EmbeddedRuntime {
         let make_speech: lf_runtime::worker::SttFactory = Arc::new(move |config| {
             Ok(
                 model_memory.speech(Arc::new(lf_runtime::engine::ReportingSpeech::new(
-                    Arc::new(lf_stt::runtime::LazySpeechAdapter::new(config.clone())),
+                    lf_stt::runtime::hub_speech(config),
                     report.clone(),
                 ))),
             )
@@ -252,6 +253,7 @@ impl EmbeddedRuntime {
         let server_watch = lf_core::config::try_config_path()
             .and_then(|path| {
                 let settings = Mutex::new(crate::speech_memory::RuntimeSettings::new(&path));
+                let maintenance_memory = memory.clone();
                 let maintenance: lf_runtime::live::OnTick = Arc::new(move || {
                     let mut settings = settings.lock().unwrap();
                     settings.reload();
@@ -261,7 +263,11 @@ impl EmbeddedRuntime {
                         .field_bool("dictation_enabled")
                         .unwrap_or(true);
                     let mut unload = || {
-                        memory.poll(enabled, settings.timeout, std::time::Instant::now());
+                        maintenance_memory.poll(
+                            enabled,
+                            settings.timeout,
+                            std::time::Instant::now(),
+                        );
                     };
                     if let Some(state) = &server_state {
                         state.while_idle(&mut unload);
@@ -283,10 +289,12 @@ impl EmbeddedRuntime {
                 log::error!("could not watch server settings: {error}");
             })
             .ok();
+        crate::speech_profile::start(speech.clone(), memory.clone());
         Self {
             runtime,
             server,
             speech,
+            memory,
             server_watch,
             meeting_watch,
         }
@@ -303,6 +311,7 @@ impl EmbeddedRuntime {
         if let Some(server) = self.server.as_mut() {
             server.shutdown();
         }
+        self.memory.shutdown();
     }
 }
 

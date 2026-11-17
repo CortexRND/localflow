@@ -87,6 +87,8 @@ jobs:
         run: cargo build --manifest-path rust/Cargo.toml --release -p lf-stt --example parakeet_memory
       - name: Parakeet variants, real session options, latency and transcript accuracy
         run: python3 scripts/ci_parakeet_memory.py "$PWD" artifacts/memory/parakeet
+      - name: Real Hub speech helper memory, eviction, reload and reference accuracy
+        run: python3 scripts/ci_speech_helper.py "$PWD" artifacts/memory
       - uses: actions/upload-artifact@v4
         if: always()
         with:

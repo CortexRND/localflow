@@ -47,6 +47,26 @@ fn run(_options: LaunchOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    #[cfg(feature = "runtime")]
+    if std::env::args().nth(1).as_deref() == Some("--speech-helper") {
+        if std::env::args().len() != 2 {
+            return ExitCode::from(2);
+        }
+        return match lf_stt::helper::serve_stdio(|config| {
+            lf_stt::runtime::SpeechAdapter::from_config(&config)
+                .map(|engine| {
+                    std::sync::Arc::new(engine)
+                        as std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>
+                })
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("speech helper: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     match parse_args(std::env::args().skip(1)) {
         Ok(page) => run(page),
         Err(message) => {

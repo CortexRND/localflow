@@ -31,6 +31,8 @@ fn main() -> anyhow::Result<()> {
         threads: i32,
         #[arg(long)]
         fp32: bool,
+        #[arg(long)]
+        pcm_output: Option<PathBuf>,
     }
     let args = Args::parse();
     let repo = if args.fp32 {
@@ -59,6 +61,15 @@ fn main() -> anyhow::Result<()> {
         paths
     };
     let clip = support::read_clip(None)?;
+    if let Some(path) = &args.pcm_output {
+        std::fs::write(
+            path,
+            clip.pcm
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )?;
+    }
     let mut footprints = serde_json::Map::new();
     let mut rss = |label: &str| -> anyhow::Result<usize> {
         let mut rss = memory_stats::memory_stats()

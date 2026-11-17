@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 struct State {
+    closed: bool,
     recording: bool,
     active: usize,
     last_use: Instant,
@@ -17,6 +18,7 @@ pub(crate) struct SpeechMemory(Arc<Mutex<State>>);
 impl SpeechMemory {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(State {
+            closed: false,
             recording: false,
             active: 0,
             last_use: Instant::now(),
@@ -39,6 +41,18 @@ impl SpeechMemory {
             inner,
             memory: self.clone(),
         })
+    }
+
+    pub fn shutdown(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        state.closed = true;
+        for engine in state
+            .engines
+            .drain(..)
+            .filter_map(|engine| engine.upgrade())
+        {
+            engine.inner.unload();
+        }
     }
 
     pub fn poll(&self, enabled: bool, timeout: Duration, now: Instant) -> bool {
@@ -86,9 +100,13 @@ struct ManagedSpeech {
     retiring: AtomicBool,
 }
 impl ManagedSpeech {
-    fn activity(&self) -> Activity {
-        self.memory.0.lock().unwrap().active += 1;
-        Activity(self.memory.clone())
+    fn activity(&self) -> Result<Activity, String> {
+        let mut state = self.memory.0.lock().unwrap();
+        if state.closed {
+            return Err("speech runtime shut down".into());
+        }
+        state.active += 1;
+        Ok(Activity(self.memory.clone()))
     }
 }
 impl SpeechEngine for ManagedSpeech {
@@ -96,11 +114,11 @@ impl SpeechEngine for ManagedSpeech {
         self.inner.loaded()
     }
     fn load(&self) -> Result<(), String> {
-        let _active = self.activity();
+        let _active = self.activity()?;
         self.inner.load()
     }
     fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> Result<String, String> {
-        let _active = self.activity();
+        let _active = self.activity()?;
         self.inner.transcribe(pcm, prompt)
     }
     fn unload(&self) {
@@ -115,6 +133,9 @@ struct ManagedAudio {
 impl AudioSource for ManagedAudio {
     fn start(&mut self) -> Result<(), String> {
         let mut state = self.memory.0.lock().unwrap();
+        if state.closed {
+            return Err("speech runtime shut down".into());
+        }
         let result = self.inner.start();
         state.recording = self.inner.is_recording();
         state.last_use = Instant::now();
@@ -229,6 +250,19 @@ mod tests {
             loads: AtomicUsize::new(0),
             unloads: AtomicUsize::new(0),
         })
+    }
+    #[test]
+    fn shutdown_releases_loaded_models_even_with_retained_service_handles() {
+        let memory = SpeechMemory::new();
+        let fake = engine();
+        let speech = memory.speech(fake.clone());
+        speech.load().unwrap();
+        memory.shutdown();
+        memory.shutdown();
+        assert!(!speech.loaded());
+        assert_eq!(fake.unloads.load(Ordering::SeqCst), 1);
+        assert!(speech.load().is_err());
+        assert!(speech.transcribe(&[0.5], None).is_err());
     }
     #[test]
     fn disabled_unloads_once_and_enable_is_lazy_idle_zero_is_disabled() {
