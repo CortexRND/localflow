@@ -2031,6 +2031,7 @@ name = "lf-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "block2",
  "caseless",
  "chrono",
@@ -2038,6 +2039,7 @@ dependencies = [
  "lf-input",
  "lf-providers",
  "lf-runtime",
+ "lf-server",
  "libc",
  "log",
  "objc2",
@@ -2046,10 +2048,15 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
+ "unicode-general-category",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]

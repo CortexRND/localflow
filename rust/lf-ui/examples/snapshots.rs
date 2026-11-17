@@ -27,11 +27,30 @@ mod native {
     use objc2::rc::Retained;
     use objc2::MainThreadMarker;
     use objc2_app_kit::{
-        NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSButton, NSView,
+        NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSButton, NSTextField,
+        NSView,
     };
     use serde_json::{Map, Value};
     use std::path::PathBuf;
     use std::rc::Rc;
+
+    fn loading_prompts(view: &NSView) -> bool {
+        view.downcast_ref::<NSTextField>()
+            .is_some_and(|field| field.stringValue().to_string() == "Loading prompts…")
+            || view.subviews().iter().any(|child| loading_prompts(&child))
+    }
+
+    fn settle_prompts(hub: &Hub) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while loading_prompts(&hub.content_view()) {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "prompt worker did not finish"
+            );
+            spin_run_loop(0.02);
+        }
+        Ok(())
+    }
 
     /// Every `NSButton` below `view` (depth first).
     fn buttons(view: &NSView, out: &mut Vec<Retained<NSButton>>) {
@@ -167,6 +186,10 @@ mod native {
                 }
             }
             let hub = Hub::new(mtm, services.clone(), scenario.page);
+            hub.prepare_snapshot(scenario.prepare, &base)?;
+            hub.show_page(scenario.page);
+            spin_run_loop(0.05);
+            settle_prompts(&hub)?;
             if let Some(error) = scenario.error {
                 services.set_page_error(scenario.page, error);
             }

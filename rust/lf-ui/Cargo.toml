@@ -22,6 +22,10 @@ caseless = { workspace = true }
 log = { workspace = true }
 sha2 = "0.10"
 regex = "1"
+reqwest = { workspace = true }
+uuid = { workspace = true }
+unicode-normalization = "0.1"
+unicode-general-category = "1"
 
 # OS-backed serialization of page-request consumers.
 [target.'cfg(unix)'.dependencies]
@@ -56,3 +60,6 @@ harness = false
 
 [dev-dependencies]
 tempfile = { workspace = true }
+lf-server = { path = "../lf-server" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }

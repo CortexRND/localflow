@@ -58,7 +58,10 @@ mod tests {
         assert_eq!(parse(&["--page=dictionary"]), Ok(Some("Dictionary")));
         assert_eq!(parse(&["--page=style"]), Ok(Some("Style")));
         assert_eq!(parse(&["--page=prompts"]), Ok(Some("Prompts")));
-        assert_eq!(parse(&["--page", "hot phrases"]), Ok(Some("Home")));
+        assert_eq!(parse(&["--page", "hot phrases"]), Ok(Some("Hot Phrases")));
+        assert_eq!(parse(&["--page=ask"]), Ok(Some("Ask")));
+        assert_eq!(parse(&["--page=meetings"]), Ok(Some("Meetings")));
+        assert_eq!(parse(&["--page=models"]), Ok(Some("Home")));
         assert_eq!(parse(&["--page=nope"]), Ok(Some("Home")));
         assert!(parse(&["--page"]).is_err());
         assert!(parse(&["--setup"]).is_err());

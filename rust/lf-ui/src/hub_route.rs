@@ -31,7 +31,16 @@ use serde_json::{json, Map, Value};
 
 use crate::pystr::PyStr;
 
-pub const HUB_PAGES: [&str; 5] = ["Home", "Dictionary", "Prompts", "History", "Style"];
+pub const HUB_PAGES: [&str; 8] = [
+    "Home",
+    "Ask",
+    "Hot Phrases",
+    "Dictionary",
+    "Prompts",
+    "Meetings",
+    "History",
+    "Style",
+];
 
 const KNOWN_PAGES: [&str; 10] = [
     "Home",
@@ -396,7 +405,7 @@ mod tests {
         assert_eq!(ported_page(None), "Home");
         assert_eq!(ported_page(Some("not a page")), "Home");
         assert_eq!(
-            plan_reopen(None, Some("Meetings")),
+            plan_reopen(None, Some("Models")),
             ReopenPlan::Build { page: "Home" }
         );
     }
@@ -566,7 +575,16 @@ mod tests {
         assert_eq!(DEFAULT_PAGE, "Home");
         assert_eq!(
             HUB_PAGES,
-            ["Home", "Dictionary", "Prompts", "History", "Style"]
+            [
+                "Home",
+                "Ask",
+                "Hot Phrases",
+                "Dictionary",
+                "Prompts",
+                "Meetings",
+                "History",
+                "Style"
+            ]
         );
     }
 
