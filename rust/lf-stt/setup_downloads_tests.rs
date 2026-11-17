@@ -191,7 +191,7 @@ fn cancel_aborts_stalled_download_and_removes_partial_not_cache() {
     entered.recv_timeout(Duration::from_secs(3)).unwrap();
     let blobs = root.path().join("models--test--native/blobs");
     let partial = std::fs::read_dir(&blobs).unwrap().next().unwrap().unwrap();
-    assert_eq!(partial.metadata().unwrap().len(), 1000);
+    assert_eq!(std::fs::read(partial.path()).unwrap(), vec![0; 1000]);
     cancel.store(true, Ordering::Release);
     assert!(done
         .recv_timeout(Duration::from_secs(2))
