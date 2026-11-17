@@ -44,7 +44,8 @@ pub const HUB_PAGES: [&str; 10] = [
     "Settings",
 ];
 
-const KNOWN_PAGES: [&str; 10] = [
+const KNOWN_PAGES: [&str; 11] = [
+    "Setup",
     "Home",
     "Ask",
     "Hot Phrases",
@@ -80,6 +81,12 @@ fn acquire_main_app_at(
     page: Option<&str>,
 ) -> std::io::Result<Option<lf_runtime::singleinstance::SingleInstance>> {
     let instance = lf_runtime::singleinstance::acquire_at(&dir.join("main-app.lock"))?;
+    if instance.is_none() && page == Some("Setup") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "LocalFlow is already running; Setup cannot be handed to a possibly Python owner. Run `lf setup` to open standalone setup, or close LocalFlow and retry `lf-hub --setup`.",
+        ));
+    }
     if instance.is_none()
         && !RequestFile::new(dir).write_request(page.unwrap_or(DEFAULT_PAGE), &system_now)
     {
@@ -187,7 +194,9 @@ pub fn plan_initial_route(
         }
         None => None,
     };
-    Ok(if configured {
+    Ok(if page == Some("Setup") {
+        InitialRoute::Setup { desired: None }
+    } else if configured {
         InitialRoute::Hub {
             page: page.unwrap_or(DEFAULT_PAGE),
         }
@@ -611,6 +620,24 @@ mod tests {
     }
 
     #[test]
+    fn setup_refuses_incompatible_handoff_without_overwriting_valid_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = acquire_main_app_at(temp.path(), None).unwrap().unwrap();
+        let requests = RequestFile::new(temp.path());
+        assert!(requests.write_request("Home", &now));
+        let error = acquire_main_app_at(temp.path(), Some("Setup"))
+            .err()
+            .expect("Setup must not be handed off");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("lf setup"));
+        assert_eq!(requests.consume_request(&now), Some("Home"));
+        drop(owner);
+        assert!(acquire_main_app_at(temp.path(), Some("Setup"))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
     fn no_page_launch_requests_a_window_from_a_closed_owner() {
         let temp = tempfile::tempdir().unwrap();
         let owner = acquire_main_app_at(temp.path(), None).unwrap().unwrap();
@@ -876,6 +903,15 @@ lock.release()
 
     #[test]
     fn canonical_page_is_case_and_space_insensitive() {
+        assert_eq!(canonical_page("setup"), Some("Setup"));
+        assert_eq!(
+            plan_initial_route(true, Some("Setup")),
+            Ok(InitialRoute::Setup { desired: None })
+        );
+        assert_eq!(
+            plan_initial_route(false, Some("Setup")),
+            Ok(InitialRoute::Setup { desired: None })
+        );
         assert_eq!(canonical_page("settings"), Some("Settings"));
         assert_eq!(canonical_page("  hot   PHRASES "), Some("Hot Phrases"));
         assert_eq!(canonical_page("MODELS"), Some("Models"));

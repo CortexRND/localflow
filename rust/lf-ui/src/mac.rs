@@ -12,6 +12,10 @@ pub mod page;
 #[cfg(target_os = "macos")]
 pub mod pages;
 #[cfg(target_os = "macos")]
+pub mod setup;
+#[cfg(target_os = "macos")]
+pub mod setup_audio;
+#[cfg(target_os = "macos")]
 pub mod snapshot;
 #[cfg(target_os = "macos")]
 pub mod style;

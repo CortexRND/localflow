@@ -12,17 +12,19 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 mod native {
-    use anyhow::{anyhow, ensure, Context, Result};
+    use anyhow::{anyhow, bail, ensure, Context, Result};
     use lf_core::config::Config;
     use lf_core::dictionary::DictionaryStore;
     use lf_core::history::{HistoryStore, NewEntry};
     use lf_ui::backends::prompts::WorkPrompt;
     use lf_ui::mac::hub::Hub;
     use lf_ui::mac::page::HubServices;
+    use lf_ui::mac::setup::{snapshot_fixture, SetupSnapshotState};
     use lf_ui::mac::snapshot::{set_appearance, snapshot_png, spin_run_loop, SnapshotTarget};
     use lf_ui::snapshot_plan::{
-        dictionary_replacements, dictionary_words, history_rows, queue_prompts, total_snapshots,
-        Scenario, StyleStep, SCENARIOS, SNAPSHOT_SIZES, SNAPSHOT_THEMES,
+        dictionary_replacements, dictionary_words, history_rows, queue_prompts, setup_scenarios,
+        total_setup_snapshots, total_snapshots, Scenario, SetupScenario, StyleStep, SCENARIOS,
+        SNAPSHOT_SIZES, SNAPSHOT_THEMES,
     };
     use objc2::rc::Retained;
     use objc2::MainThreadMarker;
@@ -172,6 +174,24 @@ mod native {
         Ok(())
     }
 
+    fn setup_state(scenario: &SetupScenario) -> Result<SetupSnapshotState> {
+        if let Some(step) = scenario.state.strip_prefix("step-") {
+            let one_based: usize = step.parse().context("setup step number")?;
+            return Ok(SetupSnapshotState::Step(one_based.saturating_sub(1)));
+        }
+        Ok(match (scenario.state, scenario.wide) {
+            ("checks-needs-action", false) => SetupSnapshotState::ChecksNeedsAction,
+            ("checks-all-ready", _) => SetupSnapshotState::ChecksAllReady,
+            ("checks-needs-action", true) => SetupSnapshotState::ChecksNeedsActionWide,
+            ("complete", _) => SetupSnapshotState::Complete,
+            ("cleanup-level-medium", _) => SetupSnapshotState::CleanupLevelMedium,
+            ("non-ollama-provider", _) => SetupSnapshotState::NonOllamaProvider,
+            ("download-progress", _) => SetupSnapshotState::DownloadProgress,
+            ("download-error", _) => SetupSnapshotState::DownloadError,
+            other => bail!("unknown setup snapshot route {other:?}"),
+        })
+    }
+
     pub fn run() -> Result<()> {
         let out: PathBuf = std::env::args_os()
             .nth(1)
@@ -266,8 +286,40 @@ mod native {
             }
             hub.shutdown();
         }
+        let setup = snapshot_fixture(mtm);
+        for scenario in setup_scenarios() {
+            setup.seed_snapshot(setup_state(&scenario)?);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while setup.drain_requests() != 0 {
+                ensure!(
+                    std::time::Instant::now() < deadline,
+                    "setup requests did not finish"
+                );
+                spin_run_loop(0.01);
+            }
+            setup.resize_content(
+                if scenario.wide {
+                    1100.0
+                } else {
+                    f64::from(lf_ui::tokens::WINDOW_MIN_WIDTH)
+                },
+                f64::from(lf_ui::tokens::WINDOW_MIN_HEIGHT),
+            );
+            for (theme, dark) in SNAPSHOT_THEMES {
+                set_appearance(SnapshotTarget::Window(setup.window()), dark)?;
+                setup.rebuild();
+                spin_run_loop(0.05);
+                let name = scenario.file_name(theme);
+                let path = out.join(&name);
+                snapshot_png(SnapshotTarget::Window(setup.window()), &path, dark)
+                    .with_context(|| format!("snapshot {name}"))?;
+                println!("wrote {}", path.display());
+                written += 1;
+            }
+        }
+        setup.close();
         ensure!(
-            written == total_snapshots(),
+            written == total_snapshots() + total_setup_snapshots(),
             "unexpected snapshot count {written}"
         );
         println!("wrote {written} snapshots to {}", out.display());

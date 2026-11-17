@@ -63,6 +63,7 @@ struct CaptureBuffer {
     channels: usize,
     rate: u32,
     pcm: Vec<f32>,
+    retain_samples: bool,
 }
 
 impl CaptureBuffer {
@@ -70,6 +71,22 @@ impl CaptureBuffer {
     where
         f32: FromSample<T>,
     {
+        if !self.retain_samples {
+            let mut sum = 0.0;
+            let mut count = 0;
+            for frame in data.chunks_exact(self.channels) {
+                let sample = f64::from(frame[0].to_sample::<f32>());
+                sum += sample * sample;
+                count += 1;
+            }
+            let dbfs = if count == 0 || sum == 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                10.0 * (sum / f64::from(count)).log10()
+            };
+            level.store(dbfs.to_bits(), Ordering::Relaxed);
+            return;
+        }
         let start = self.pcm.len();
         self.pcm.extend(
             data.chunks_exact(self.channels)
@@ -113,6 +130,7 @@ pub struct Recorder {
     device: Option<String>,
     active: Option<Active>,
     level: Arc<AtomicU64>,
+    retain_samples: bool,
 }
 
 impl Recorder {
@@ -121,7 +139,15 @@ impl Recorder {
             device: device.filter(|s| !s.is_empty()),
             active: None,
             level: Arc::new(AtomicU64::new(f64::NEG_INFINITY.to_bits())),
+            retain_samples: true,
         }
+    }
+
+    /// Only publish the latest RMS; retain no PCM and return no clip on stop.
+    pub fn new_meter(device: Option<String>) -> Self {
+        let mut recorder = Self::new(device);
+        recorder.retain_samples = false;
+        recorder
     }
 
     pub fn recording(&self) -> bool {
@@ -143,8 +169,9 @@ impl Recorder {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let name = self.device.clone();
         let level = Arc::clone(&self.level);
+        let retain_samples = self.retain_samples;
         let thread = thread::spawn(move || {
-            let opened = open_stream(name.as_deref(), level);
+            let opened = open_stream(name.as_deref(), level, retain_samples);
             match opened {
                 Ok((stream, buffer)) => {
                     let _ = ready_tx.send(Ok(()));
@@ -227,6 +254,7 @@ where
 fn open_stream(
     name: Option<&str>,
     level: Arc<AtomicU64>,
+    retain_samples: bool,
 ) -> Result<(cpal::Stream, Arc<Mutex<CaptureBuffer>>)> {
     let host = cpal::default_host();
     let device = if let Some(name) = name {
@@ -245,6 +273,7 @@ fn open_stream(
         channels: config.channels as usize,
         rate: config.sample_rate.0,
         pcm: Vec::new(),
+        retain_samples,
     }));
     macro_rules! build {
         ($t:ty) => {
@@ -278,7 +307,37 @@ mod tests {
             rate,
             channels,
             pcm: Vec::new(),
+            retain_samples: true,
         }
+    }
+
+    #[test]
+    fn level_only_capture_retains_no_pcm_over_many_callbacks() {
+        let level = AtomicU64::new(0);
+        let mut meter = buffer(48000, 2);
+        meter.retain_samples = false;
+        for _ in 0..100_000 {
+            meter.push(&[0.5_f32, 1.0, -0.5, -1.0], &level);
+        }
+        assert_eq!(meter.pcm.len(), 0);
+        assert_eq!(meter.pcm.capacity(), 0);
+        assert_eq!(
+            f64::from_bits(level.load(Ordering::Relaxed)),
+            rms_dbfs(&[0.5])
+        );
+        meter.push::<f32>(&[], &level);
+        assert_eq!(
+            f64::from_bits(level.load(Ordering::Relaxed)),
+            f64::NEG_INFINITY
+        );
+        meter.push(&[0.0_f32, 0.5], &level);
+        assert_eq!(
+            f64::from_bits(level.load(Ordering::Relaxed)),
+            f64::NEG_INFINITY
+        );
+        assert!(meter.finish().unwrap().is_empty());
+        assert!(!Recorder::new_meter(None).retain_samples);
+        assert!(Recorder::new(None).retain_samples);
     }
 
     #[test]
