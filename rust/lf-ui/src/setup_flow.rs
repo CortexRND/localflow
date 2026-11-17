@@ -1275,6 +1275,24 @@ pub fn block_level(samples: &[f32]) -> f64 {
     (sum / samples.len() as f64).sqrt().min(1.0)
 }
 
+pub fn start_cancellable_capture<T>(
+    cancelled: &std::sync::atomic::AtomicBool,
+    open: impl FnOnce() -> std::result::Result<T, String>,
+    close: impl FnOnce(T),
+) -> std::result::Result<T, String> {
+    use std::sync::atomic::Ordering;
+    let cancellation = || "Microphone opening was cancelled.".to_string();
+    if cancelled.load(Ordering::Acquire) {
+        return Err(cancellation());
+    }
+    let capture = open()?;
+    if cancelled.load(Ordering::Acquire) {
+        close(capture);
+        return Err(cancellation());
+    }
+    Ok(capture)
+}
+
 /// An open microphone stream.
 pub trait MicInputStream {
     fn stop(&mut self);

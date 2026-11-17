@@ -327,7 +327,11 @@ impl SetupModelBackend for FlowModelBackend {
 /// Levels are clamped before they reach AppKit; an error is shown, never zeroed
 /// into a misleading successful/silent reading.
 pub trait MicLevelSource: Send + Sync {
-    fn start(&self, device: Option<&str>) -> std::result::Result<(), String>;
+    fn start(
+        &self,
+        device: Option<&str>,
+        cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<(), String>;
     fn level(&self) -> std::result::Result<f64, String>;
     fn stop(&self);
 }
@@ -2921,9 +2925,11 @@ impl SetupWindow {
                 cancelled: cancelled.clone(),
             });
             self.spawn_job(JobKind::Monitor, move |_id, _sender, _cancel| {
-                source.start((!device.is_empty()).then_some(device.as_str()))?;
+                source.start(
+                    (!device.is_empty()).then_some(device.as_str()),
+                    cancelled.clone(),
+                )?;
                 if cancelled.load(Ordering::Acquire) {
-                    // The meter worker processes the queued stop after opening.
                     return Err("Microphone opening was cancelled.".into());
                 }
                 Ok(JobOutput::MonitorStarted)

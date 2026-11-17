@@ -3,6 +3,8 @@
 //! The recorder lives on a worker. AppKit reads only a cached level and queues
 //! stop requests, so opening or closing an audio device cannot block the UI.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use lf_audio::Recorder;
@@ -49,7 +51,11 @@ impl SetupPlatform for NativeSetupPlatform {
 }
 
 enum MeterCommand {
-    Start(Option<String>, std::sync::mpsc::Sender<Result<(), String>>),
+    Start(
+        Option<String>,
+        Arc<AtomicBool>,
+        std::sync::mpsc::Sender<Result<(), String>>,
+    ),
     Stop,
 }
 
@@ -73,26 +79,39 @@ impl Default for RecorderMicLevelSource {
         let result = std::thread::Builder::new()
             .name("setup-meter".into())
             .spawn(move || {
-                let mut recorder: Option<Recorder> = None;
+                let mut recorder: Option<(Recorder, Arc<AtomicBool>)> = None;
                 loop {
                     match receiver.recv_timeout(std::time::Duration::from_millis(50)) {
-                        Ok(MeterCommand::Start(device, reply)) => {
-                            if let Some(mut previous) = recorder.take() {
+                        Ok(MeterCommand::Start(device, cancelled, reply)) => {
+                            if cancelled.load(Ordering::Acquire) {
+                                let _ = reply.send(Err("Microphone opening was cancelled.".into()));
+                                continue;
+                            }
+                            if let Some((mut previous, _)) = recorder.take() {
                                 let _ = previous.stop();
                             }
-                            let mut next = Recorder::new(device);
-                            let result = next
-                                .start()
-                                .map_err(|error| format!("Couldn't open the microphone: {error}"));
+                            let result = crate::setup_flow::start_cancellable_capture(
+                                &cancelled,
+                                || {
+                                    let mut next = Recorder::new(device);
+                                    next.start().map_err(|error| {
+                                        format!("Couldn't open the microphone: {error}")
+                                    })?;
+                                    Ok(next)
+                                },
+                                |mut next| {
+                                    let _ = next.stop();
+                                },
+                            )
+                            .map(|next| {
+                                recorder = Some((next, cancelled.clone()));
+                            });
                             *cached.lock().unwrap_or_else(|error| error.into_inner()) =
                                 result.clone().map(|()| 0.0);
-                            if result.is_ok() {
-                                recorder = Some(next);
-                            }
                             let _ = reply.send(result);
                         }
                         Ok(MeterCommand::Stop) => {
-                            if let Some(mut previous) = recorder.take() {
+                            if let Some((mut previous, _)) = recorder.take() {
                                 let _ = previous.stop();
                             }
                             *cached.lock().unwrap_or_else(|error| error.into_inner()) =
@@ -101,12 +120,20 @@ impl Default for RecorderMicLevelSource {
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
                     }
-                    if let Some(recorder) = &recorder {
+                    if recorder
+                        .as_ref()
+                        .is_some_and(|(_, cancelled)| cancelled.load(Ordering::Acquire))
+                    {
+                        if let Some((mut previous, _)) = recorder.take() {
+                            let _ = previous.stop();
+                        }
+                    }
+                    if let Some((recorder, _)) = &recorder {
                         let measured = normalized_level(recorder.level_dbfs());
                         *cached.lock().unwrap_or_else(|error| error.into_inner()) = measured;
                     }
                 }
-                if let Some(mut recorder) = recorder {
+                if let Some((mut recorder, _)) = recorder {
                     let _ = recorder.stop();
                 }
             });
@@ -118,10 +145,14 @@ impl Default for RecorderMicLevelSource {
 }
 
 impl MicLevelSource for RecorderMicLevelSource {
-    fn start(&self, device: Option<&str>) -> Result<(), String> {
+    fn start(&self, device: Option<&str>, cancelled: Arc<AtomicBool>) -> Result<(), String> {
         let (sender, reply) = std::sync::mpsc::channel();
         self.sender
-            .send(MeterCommand::Start(device.map(str::to_owned), sender))
+            .send(MeterCommand::Start(
+                device.map(str::to_owned),
+                cancelled,
+                sender,
+            ))
             .map_err(|_| "Microphone worker isn't available.".to_string())?;
         reply
             .recv()
@@ -199,8 +230,10 @@ mod tests {
         meter.stop();
         assert!(matches!(receiver.try_recv(), Ok(MeterCommand::Stop)));
         let opening = meter.clone();
-        let worker = std::thread::spawn(move || opening.start(Some("Test mic")));
-        let MeterCommand::Start(device, reply) = receiver
+        let worker = std::thread::spawn(move || {
+            opening.start(Some("Test mic"), Arc::new(AtomicBool::new(false)))
+        });
+        let MeterCommand::Start(device, _, reply) = receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap()
         else {

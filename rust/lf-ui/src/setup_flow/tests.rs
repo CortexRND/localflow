@@ -685,6 +685,63 @@ fn block_level_is_the_capped_rms() {
 }
 
 struct FakeStream(Arc<AtomicUsize>);
+
+#[test]
+fn cancelled_meter_cannot_start_after_stop() {
+    let mic = FakeMic::default();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let mut monitor = MicLevelMonitor::new(None);
+    monitor.stop();
+    cancelled.store(true, Ordering::Release);
+    let result = start_cancellable_capture(
+        &cancelled,
+        || {
+            monitor.start(&mic)?;
+            Ok(monitor)
+        },
+        |mut monitor| monitor.stop(),
+    );
+    assert!(result.is_err());
+    assert!(mic.opened.lock().unwrap().is_empty());
+}
+
+#[test]
+fn meter_cancelled_during_open_closes_before_returning() {
+    let mic = FakeMic::default();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let result = start_cancellable_capture(
+        &cancelled,
+        || {
+            let mut monitor = MicLevelMonitor::new(None);
+            monitor.start(&mic)?;
+            cancelled.store(true, Ordering::Release);
+            Ok(monitor)
+        },
+        |mut monitor| monitor.stop(),
+    );
+    assert!(result.is_err());
+    assert_eq!(mic.stops.load(Ordering::SeqCst), 1);
+    cancelled.store(false, Ordering::Release);
+    let mut monitor = start_cancellable_capture(
+        &cancelled,
+        || {
+            let mut monitor = MicLevelMonitor::new(None);
+            monitor.start(&mic)?;
+            Ok(monitor)
+        },
+        |mut monitor| monitor.stop(),
+    )
+    .unwrap();
+    monitor.stop();
+    assert_eq!(mic.stops.load(Ordering::SeqCst), 2);
+    assert!(start_cancellable_capture::<()>(
+        &cancelled,
+        || Err("denied".into()),
+        |_| panic!("no capture to close")
+    )
+    .is_err());
+}
+
 impl MicInputStream for FakeStream {
     fn stop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);
