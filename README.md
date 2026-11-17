@@ -19,9 +19,10 @@ it starts dictation and the menu bar in the background (reusing the login agent
 if installed, never twice) and opens the native Hub. Opening it again just
 brings the Hub to the front.
 
-The app is unsigned, so macOS may block it the first time. Right-click it and
-choose **Open**, then **Open** again; or go to System Settings > Privacy &
-Security and click **Open Anyway**.
+The app is unsigned and not notarized, so Gatekeeper blocks it the first time
+you open it. To allow it, go to System Settings > Privacy & Security, click
+**Open Anyway** next to the message about LocalFlow, and confirm. (On macOS 15
+and later, right-click > **Open** no longer offers this bypass.)
 
 **Windows:** download `Install LocalFlow.cmd` from the same release (or the
 Actions artifact) and double-click it.
@@ -51,17 +52,24 @@ speech recognition stay local.
 
 ### macOS and Linux
 
-Install with:
+Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/CortexRND/localflow/main/install.sh | bash
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.sh && echo "7fc43f686914c5968191011c93f64d9e0f4ddc991ce1ad8992b7727aa4316a2e  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
-To install and start Ollama for optional transcript cleanup:
+(`sha256sum -c -` works too.) To install and start Ollama for optional
+transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
+the final command:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/CortexRND/localflow/main/install.sh | bash -s -- --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.sh && echo "7fc43f686914c5968191011c93f64d9e0f4ddc991ce1ad8992b7727aa4316a2e  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
+
+The installer is pinned to release `v0.1.0`. Without git it downloads
+`localflow-0.1.0.tar.gz` from that release and verifies it against the
+release's `SHA256SUMS` before unpacking; it stops and deletes the download if
+the hash does not match. With git it checks out the `v0.1.0` tag.
 
 Or run from a checkout:
 
@@ -76,23 +84,29 @@ Homebrew, git and a supported Python are optional (the installer falls back to
 a uv-managed Python 3.12 and a source tarball); its setup app is placed in
 `~/Applications`. Linux installs
 system dependencies and creates `~/.local/bin/lf` plus desktop launchers. When
-piped, the app checkout defaults to `~/.localflow/app`; override it with
-`LOCALFLOW_HOME`.
+run outside a checkout, the app is installed to `~/.localflow/app`; override
+it with `LOCALFLOW_HOME`.
+
+`LOCALFLOW_REF` overrides the pinned release with any branch, tag or commit
+(for example `LOCALFLOW_REF=main bash install.sh`). This is an unverified
+override: the source for a custom ref is not checksum-verified, and the
+installer prints a warning saying so.
 
 ### Windows
 
-Install with:
+Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```powershell
-irm https://raw.githubusercontent.com/CortexRND/localflow/main/install.ps1 | iex
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.1.0/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq '7FDA5D436A6DE8D175F5B135914366BF9E20B700A11DB07A62B847FA9E7E442D') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
 ```
 
-To install and start Ollama for optional transcript cleanup:
+To install and start Ollama for optional transcript cleanup, add
+`-WithOllama` to the `powershell` command inside the success branch.
 
-```powershell
-$env:LOCALFLOW_WITH_OLLAMA=1
-irm https://raw.githubusercontent.com/CortexRND/localflow/main/install.ps1 | iex
-```
+Without git, the installer downloads `localflow-0.1.0.zip` from the `v0.1.0`
+release and verifies it against the release's `SHA256SUMS`
+(`Get-FileHash -Algorithm SHA256`); with git it checks out the `v0.1.0` tag.
+As on macOS and Linux, `LOCALFLOW_REF` is an unverified override.
 
 Or run from a checkout:
 
@@ -103,7 +117,7 @@ cd localflow
 ```
 
 The installer creates a Python environment, Start Menu shortcuts, and the
-`lf` command in `.venv\Scripts`. A piped install uses
+`lf` command in `.venv\Scripts`. Run outside a checkout, it installs to
 `$HOME\.localflow\app` by default; override it with `LOCALFLOW_HOME`.
 
 After installation, reopen setup to switch models at any time:
