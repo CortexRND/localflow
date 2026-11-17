@@ -11,6 +11,7 @@ pub mod hot_phrases_editor;
 pub mod hub_model;
 pub mod hub_route;
 pub mod hub_settings;
+pub mod launch_agent;
 pub mod mac;
 pub mod models_layout;
 pub mod pystr;

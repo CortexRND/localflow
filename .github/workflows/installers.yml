@@ -7,6 +7,12 @@ on:
       - install.ps1
       - pyproject.toml
       - scripts/release-assets.sh
+      - scripts/build_rust_app.sh
+      - scripts/macos_launchagent.sh
+      - rust/lf-ui/src/launch_agent.rs
+      - rust/lf-ui/src/mac/app.rs
+      - tests/test_rust_packaging.py
+      - tests/test_installer_workflow.py
       - tests/test_installer_stubs.py
       - .github/workflows/installers.yml
   pull_request:
@@ -15,6 +21,12 @@ on:
       - install.ps1
       - pyproject.toml
       - scripts/release-assets.sh
+      - scripts/build_rust_app.sh
+      - scripts/macos_launchagent.sh
+      - rust/lf-ui/src/launch_agent.rs
+      - rust/lf-ui/src/mac/app.rs
+      - tests/test_rust_packaging.py
+      - tests/test_installer_workflow.py
       - tests/test_installer_stubs.py
       - .github/workflows/installers.yml
   workflow_dispatch:
@@ -28,7 +40,114 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check install.sh and release-assets.sh
-        run: shellcheck install.sh scripts/release-assets.sh
+        run: shellcheck install.sh scripts/release-assets.sh scripts/build_rust_app.sh scripts/macos_launchagent.sh
+
+  rust-macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      # Headless installer checks must not start TCC-protected dictation/UI services.
+      LOCALFLOW_SKIP_LAUNCHCTL: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          cache-on-failure: true
+      - name: Restore complete sherpa SDK cache
+        shell: bash
+        run: |
+          for sdk in rust/target/sherpa-onnx-prebuilt/*; do
+            [[ -d "$sdk" ]] || continue
+            if [[ ! -f "$sdk/lib/libsherpa-onnx-c-api.dylib" || ! -f "$sdk/lib/libonnxruntime.dylib" ]]; then
+              echo "Removing incomplete sherpa SDK: $sdk"
+              rm -rf "$sdk"
+            fi
+          done
+      - name: Install Python and seed its login agent without loading it
+        shell: bash
+        run: |
+          ./install.sh --no-launch
+          test ! -f "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          .venv/bin/python - <<'PY'
+          from localflow.launchagent import _plist_path, plist_content
+          path = _plist_path()
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(plist_content())
+          PY
+          cp "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist" "$RUNNER_TEMP/python-agent.plist"
+          echo PYTHON_INITIAL_AGENT
+          plutil -convert json -o - "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          echo
+      - name: Opt into Rust twice and verify signed relocatable bundle and agent
+        shell: bash
+        run: |
+          app="$HOME/Applications/LocalFlow.app"
+          agent="$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          echo RUST_FIRST_AGENT
+          plutil -convert json -o - "$agent"
+          echo
+          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          echo RUST_REPEAT_AGENT
+          plutil -convert json -o - "$agent"
+          echo
+          codesign --verify --deep --strict --verbose=2 "$app"
+          echo RUST_BINARY_DEPENDENCIES
+          otool -L "$app/Contents/MacOS/lf-hub"
+          echo RUST_BUNDLE_INFO
+          plutil -p "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist" "$agent"
+          test "$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")" = lf-hub
+          test "$(plutil -extract Label raw -o - "$agent")" = com.cortexrnd.localflow
+          test "$(plutil -extract ProgramArguments.0 raw -o - "$agent")" = "$app/Contents/MacOS/lf-hub"
+          cmp "$RUNNER_TEMP/python-agent.plist" "$agent.python.bak"
+          relocated="$RUNNER_TEMP/Relocated Rust/LocalFlow.app"
+          mkdir -p "$(dirname "$relocated")"
+          ditto "$app" "$relocated"
+          codesign --verify --deep --strict --verbose=2 "$relocated"
+          status=0
+          DYLD_PRINT_LIBRARIES=1 "$relocated/Contents/MacOS/lf-hub" --packaging-smoke-test 2>"$RUNNER_TEMP/rust-dyld.log" || status=$?
+          test "$status" = 2
+          grep -F 'unexpected argument' "$RUNNER_TEMP/rust-dyld.log"
+          grep -F "$relocated/Contents/Frameworks/" "$RUNNER_TEMP/rust-dyld.log"
+      - name: Restore Python twice and uninstall both runtimes
+        shell: bash
+        run: |
+          app="$HOME/Applications/LocalFlow.app"
+          agent="$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          LOCALFLOW_RUNTIME=python ./install.sh --no-launch
+          echo PYTHON_RESTORED_AGENT
+          plutil -convert json -o - "$agent"
+          echo
+          ./install.sh --no-launch
+          echo PYTHON_REPEAT_AGENT
+          plutil -convert json -o - "$agent"
+          echo
+          cmp "$RUNNER_TEMP/python-agent.plist" "$agent"
+          test "$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")" = launcher
+          test ! -e "$app/Contents/MacOS/lf-hub"
+          test ! -d "$app/Contents/Frameworks"
+          test -f "$agent.rust.bak"
+          ./install.sh --uninstall
+          test ! -e "$agent"
+          test ! -d "$app"
+          echo PYTHON_UNINSTALLED_AGENT_ABSENT
+          # The same uninstall path removes a Rust-shaped installation, too.
+          ditto "$RUNNER_TEMP/Relocated Rust/LocalFlow.app" "$app"
+          bash scripts/macos_launchagent.sh install-rust "$app/Contents/MacOS/lf-hub"
+          echo RUST_REINSTATED_AGENT
+          plutil -convert json -o - "$agent"
+          echo
+          LOCALFLOW_RUNTIME=rust ./install.sh --uninstall
+          LOCALFLOW_RUNTIME=rust ./install.sh --uninstall
+          test ! -e "$agent"
+          test ! -d "$app"
+          echo RUST_UNINSTALLED_AGENT_ABSENT
 
   # The pinned release tag and its assets only exist after merge, so these
   # checks serve release-shaped assets from a local directory instead
