@@ -201,8 +201,7 @@ impl<B: Backend> Backend for SttBackend<B> {
         }
     }
     fn stt_available(&self, provider: &str) -> bool {
-        matches!(factory::canonical_backend(provider), Ok("whisper-cpp") if cfg!(feature = "whisper"))
-            || matches!(factory::canonical_backend(provider), Ok("parakeet-onnx") if cfg!(feature = "parakeet"))
+        factory::backend_available(provider)
     }
     fn transcriber_loaded(&self) -> bool {
         self.slot.lock().map(|slot| slot.loaded()).unwrap_or(false)

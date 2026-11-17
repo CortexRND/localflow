@@ -12,6 +12,28 @@ use std::sync::{Arc, Mutex};
 
 mod meeting_watch;
 
+struct NativeCapabilities;
+impl lf_server::backend::Backend for NativeCapabilities {
+    fn handle(
+        &self,
+        request: lf_server::backend::BackendRequest,
+    ) -> lf_server::backend::BackendResponse {
+        lf_server::backend::UnavailableBackend.handle(request)
+    }
+    fn stt_available(&self, provider: &str) -> bool {
+        lf_stt::factory::backend_available(provider)
+    }
+}
+
+fn dictation_backend(
+    speech: Arc<dyn SpeechEngine>,
+    config: &Config,
+) -> lf_runtime::server::DictationBackend {
+    let mut backend = lf_runtime::server::DictationBackend::new(speech, config);
+    backend.fallback = Arc::new(NativeCapabilities);
+    backend
+}
+
 #[derive(Clone)]
 struct SharedSpeech(Arc<Mutex<Arc<dyn SpeechEngine>>>);
 
@@ -175,7 +197,7 @@ impl EmbeddedRuntime {
             let port = u16::try_from(config.field_i64("server_port").unwrap_or(8756))?;
             ensure_server(host, port, || {
                 ensure_server_token(&lf_core::apitoken::try_token_path()?)?;
-                let dictation = lf_runtime::server::DictationBackend::new(speech.clone(), &config);
+                let dictation = dictation_backend(speech.clone(), &config);
                 let backend = lf_meetings_backend::MeetingsBackend::new()?
                     .with_inner(Arc::new(dictation))
                     .with_capture(Arc::new(Capture(server_shared.clone())));
@@ -426,6 +448,33 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn composed_backend_reports_compiled_capabilities_before_loading() {
+        use lf_server::backend::Backend;
+        let config = Config::default();
+        let speech = Arc::new(lf_stt::runtime::LazySpeechAdapter::new(config.clone()));
+        let backend = lf_meetings_backend::MeetingsBackend::new()
+            .unwrap()
+            .with_inner(Arc::new(dictation_backend(speech.clone(), &config)));
+        for provider in [
+            "auto",
+            "faster-whisper",
+            "whisper-cpp",
+            "parakeet",
+            "parakeet-onnx",
+            "",
+            "unsupported",
+        ] {
+            assert_eq!(
+                backend.stt_available(provider),
+                lf_stt::factory::backend_available(provider),
+                "{provider}"
+            );
+        }
+        assert!(!speech.loaded());
+        assert!(!backend.transcriber_loaded());
+    }
 
     #[test]
     fn server_only_speech_tracks_settings_lazily_after_meeting_borrow_ends() {
