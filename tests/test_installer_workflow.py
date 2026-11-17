@@ -1,6 +1,12 @@
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
+BASH = shutil.which("bash") if os.name != "nt" else None
 
 
 def test_piped_installer_home_is_defined_at_step_scope() -> None:
@@ -64,3 +70,50 @@ def test_installer_runtime_defaults_to_python_and_rejects_unknown_values() -> No
     assert "python|rust)" in script
     assert 'if [[ "$RUNTIME" == python ]]; then' in script
     assert "bash scripts/build_rust_app.sh" in script
+    assert "Cargo, CMake and Xcode CLT required" in script
+
+
+@pytest.mark.skipif(BASH is None, reason="Bash is not installed")
+@pytest.mark.parametrize(
+    ("have_cmake", "have_brew", "brew_status"),
+    [(True, False, 0), (True, True, 0), (False, True, 0), (False, False, 0), (False, True, 1)],
+)
+def test_rust_macos_cmake_preflight(
+    tmp_path: Path, have_cmake: bool, have_brew: bool, brew_status: int
+) -> None:
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    brew_log = tmp_path / "brew.log"
+    stubs = {"uname": "echo Darwin", "cargo": "exit 0", "xcode-select": "exit 0"}
+    if have_cmake:
+        stubs["cmake"] = "exit 0"
+    if have_brew:
+        stubs["brew"] = f'printf "%s\\n" "$*" > "$BREW_LOG"\nexit {brew_status}'
+    for name, body in stubs.items():
+        executable = tools / name
+        executable.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        executable.chmod(0o755)
+
+    script = (ROOT / "install.sh").read_text(encoding="utf-8")
+    preflight = script.split("\nSCRIPT_SOURCE=", 1)[0]
+    result = subprocess.run(
+        [BASH, "-c", preflight],
+        env={
+            "PATH": str(tools),
+            "HOME": str(tmp_path),
+            "LOCALFLOW_RUNTIME": "rust",
+            "BREW_LOG": str(brew_log),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    expected_success = have_cmake or (have_brew and brew_status == 0)
+    assert result.returncode == (0 if expected_success else 1), result.stderr
+    if not have_cmake and have_brew:
+        assert brew_log.read_text(encoding="utf-8") == "install cmake\n"
+    else:
+        assert not brew_log.exists()
+    if not have_cmake and not have_brew:
+        assert "requires CMake; install cmake" in result.stderr

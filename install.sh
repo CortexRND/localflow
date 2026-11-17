@@ -23,7 +23,7 @@ Options:
   -h, --help        Show this help
 
 Environment:
-  LOCALFLOW_RUNTIME       python (default), or rust (macOS; Cargo and Xcode CLT required)
+  LOCALFLOW_RUNTIME       python (default), or rust (macOS; Cargo, CMake and Xcode CLT required)
   LOCALFLOW_WITH_OLLAMA=1  Same as --with-ollama
   LOCALFLOW_NO_LAUNCH=1    Same as --no-launch
   LOCALFLOW_HOME           Install checkout location
@@ -314,6 +314,15 @@ wait_for_ollama() {
 if [[ "$OS" == "Darwin" && "$RUNTIME" == rust ]]; then
     command -v cargo >/dev/null 2>&1 || { echo "LOCALFLOW_RUNTIME=rust requires Cargo; install Rust first." >&2; exit 1; }
     mac_has_clt || { echo "LOCALFLOW_RUNTIME=rust requires Xcode Command Line Tools (xcode-select --install)." >&2; exit 1; }
+    if ! command -v cmake >/dev/null 2>&1; then
+        if command -v brew >/dev/null 2>&1; then
+            echo "Installing CMake..."
+            brew install cmake
+        else
+            echo "LOCALFLOW_RUNTIME=rust requires CMake; install cmake (https://cmake.org/download/) or install Homebrew and rerun." >&2
+            exit 1
+        fi
+    fi
 elif [[ "$OS" == "Darwin" ]]; then
     for brew_dir in /opt/homebrew/bin /usr/local/bin; do
         if [[ -x "$brew_dir/brew" ]]; then
