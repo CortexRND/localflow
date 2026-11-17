@@ -34,6 +34,11 @@ impl SetupPlatform for NativeSetupPlatform {
         Ok(lf_audio::list_input_devices())
     }
     fn runtime_available(&self, backend: &str) -> bool {
+        #[cfg(feature = "runtime")]
+        {
+            lf_stt::factory::backend_available(backend)
+        }
+        #[cfg(not(feature = "runtime"))]
         HostPlatform.runtime_available(backend)
     }
     fn mic_authorization(&self) -> Option<MicAuthorization> {

@@ -15,7 +15,7 @@ name = "lf_ui"
 path = "src/lib.rs"
 
 [dependencies]
-lf-stt = { path = "../lf-stt", optional = true, features = ["runtime"] }
+lf-stt = { path = "../lf-stt", optional = true, features = ["runtime", "setup"] }
 lf-server = { path = "../lf-server", optional = true }
 lf-meetings-backend = { path = "../lf-meetings-backend", optional = true }
 lf-meetings = { path = "../lf-meetings", optional = true, features = ["capture"] }
