@@ -23,5 +23,7 @@ pub mod snapshot_plan;
 mod speech_memory;
 #[cfg(feature = "runtime")]
 mod speech_profile;
+#[cfg(all(unix, any(target_os = "macos", test)))]
+mod termination;
 pub mod text_wrap;
 pub mod tokens;

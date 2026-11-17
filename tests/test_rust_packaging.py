@@ -43,6 +43,17 @@ elif name == 'launchctl':
     p = Path(os.environ['HOME']) / 'Library/LaunchAgents/com.cortexrnd.localflow.plist'
     with open(os.environ['CALLS'] + '.agents', 'a') as log:
         log.write(json.dumps([a[0], plistlib.loads(p.read_bytes())['ProgramArguments'][0] if p.exists() else None]) + '\n')
+    if a[0] == 'kickstart' and os.environ.get('PROCESSES'):
+        if os.environ.get('FAIL_KICKSTART'):
+            print('kickstart denied', file=sys.stderr)
+            sys.exit(5)
+        state = Path(os.environ['PROCESSES'])
+        processes = json.loads(state.read_text())
+        exe = plistlib.loads(p.read_bytes())['ProgramArguments'][0]
+        processes['3333'] = exe if not os.environ.get('WRONG_PID_PATH') else exe + '.other'
+        state.write_text(json.dumps(processes))
+    if a[0] == 'print' and os.environ.get('PROCESSES') and not os.environ.get('NO_PID'):
+        print('pid = 3333')
     if os.environ.get('FAIL_BOOTSTRAP_ONLY') and a[0] == 'bootstrap':
         sys.exit(5)
     if os.environ.get('FAIL_LAUNCH') and a[0] in ('bootstrap', 'load'):
@@ -50,6 +61,15 @@ elif name == 'launchctl':
         if p.exists() and str(plistlib.loads(p.read_bytes())['ProgramArguments'][0]).endswith('lf-hub'):
             print('denied by test session', file=sys.stderr)
             sys.exit(5)
+elif name == 'ps':
+    for pid, exe in json.loads(Path(os.environ['PROCESSES']).read_text()).items():
+        print(pid, exe)
+elif name == 'kill':
+    if not os.environ.get('IGNORE_KILL') and not (a[0] == '-TERM' and os.environ.get('IGNORE_TERM')):
+        state = Path(os.environ['PROCESSES'])
+        processes = json.loads(state.read_text())
+        processes.pop(a[1], None)
+        state.write_text(json.dumps(processes))
 elif name == 'cargo' and a[0] == 'build':
     p = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
     p.mkdir(parents=True, exist_ok=True)
@@ -238,6 +258,92 @@ def test_failed_fresh_install_removes_unloadable_agent(mac):
     assert not agent(home).exists()
 
 
+@pytest.fixture
+def restart_mac(mac):
+    home, env = mac
+    tools = Path(env['PATH'].split(os.pathsep)[0])
+    for tool in ('ps', 'kill', 'sleep'):
+        path = tools / tool
+        path.write_text(f'#!{sys.executable}\n' + TOOLS)
+        path.chmod(0o755)
+    bash_env = home / 'bash-env'
+    bash_env.write_text('kill() { "$KILL_STUB" "$@"; }\n')
+    env.update(BASH_ENV=str(bash_env), KILL_STUB=str(tools / 'kill'))
+    rust = executable(home / 'Applications/LocalFlow.app/Contents/MacOS/lf-hub')
+    state = home / 'processes.json'
+    state.write_text(json.dumps({
+        '1111': str(rust), '2222': str(rust),
+        '4444': str(rust) + '.other',
+        '5555': '/Applications/Other.app/Contents/MacOS/lf-hub',
+    }))
+    env['PROCESSES'] = str(state)
+    agent(home).parent.mkdir(parents=True)
+    agent(home).write_bytes(plistlib.dumps({'Label': LABEL, 'ProgramArguments': [str(rust)]}))
+    return home, env, rust, state
+
+
+@pytest.mark.parametrize('running,ignore_term', [(True, False), (False, False), (True, True)])
+def test_restart_stops_external_main_and_helper_before_launching(restart_mac, running, ignore_term):
+    _, env, rust, state = restart_mac
+    if not running:
+        state.write_text('{}')
+    if ignore_term:
+        env['IGNORE_TERM'] = '1'
+    result = helper(env, 'restart-rust', rust)
+    assert result.returncode == 0, result.stderr
+    assert 'Restarted Rust LocalFlow (PID 3333)' in result.stdout
+    processes = json.loads(state.read_text())
+    assert '1111' not in processes and '2222' not in processes
+    assert processes['3333'] == str(rust)
+    calls = [json.loads(line) for line in Path(env['CALLS']).read_text().splitlines()]
+    launches = [call[1] for call in calls if call[0] == 'launchctl']
+    assert launches[:3] == ['bootout', 'bootstrap', 'kickstart']
+    kills = [call for call in calls if call[0] == 'kill']
+    if running:
+        assert processes['4444'] == str(rust) + '.other'
+        assert '5555' in processes
+        assert [call[2] for call in kills if call[1] == '-TERM'] == ['1111', '2222']
+        assert all(call[2] in ('1111', '2222') for call in kills)
+        if ignore_term:
+            first_kill = next(i for i, call in enumerate(calls) if call[:2] == ['kill', '-KILL'])
+            assert sum(call == ['sleep', '1'] for call in calls[:first_kill]) == 75
+        else:
+            assert not any(call[:2] == ['kill', '-KILL'] for call in calls)
+        assert calls.index(kills[-1]) < next(i for i, call in enumerate(calls) if call[:2] == ['launchctl', 'bootstrap'])
+    else:
+        assert not kills
+    assert 'restart-rust "$HOME/Applications/LocalFlow.app/Contents/MacOS/lf-hub"' in (ROOT / 'install.sh').read_text(encoding='utf-8')
+
+
+@pytest.mark.parametrize('mode,skip', [('install-rust', False), ('restart-rust', True)])
+def test_restart_is_not_used_for_self_enabling_or_skip_launchctl(restart_mac, mode, skip):
+    _, env, rust, state = restart_mac
+    before = state.read_bytes()
+    if skip:
+        env['LOCALFLOW_SKIP_LAUNCHCTL'] = '1'
+    result = helper(env, mode, rust)
+    assert result.returncode == 0, result.stderr
+    assert state.read_bytes() == before
+    calls = [json.loads(line) for line in Path(env['CALLS']).read_text().splitlines()]
+    assert not any(call[0] in ('ps', 'kill') for call in calls)
+    assert not any(call[:2] == ['launchctl', 'kickstart'] for call in calls)
+
+
+@pytest.mark.parametrize('failure', ['FAIL_KICKSTART', 'NO_PID', 'WRONG_PID_PATH', 'IGNORE_KILL'])
+def test_restart_reports_failure_instead_of_claiming_success(restart_mac, failure):
+    _, env, rust, _ = restart_mac
+    env[failure] = '1'
+    result = helper(env, 'restart-rust', rust)
+    assert result.returncode != 0
+    assert 'Restarted Rust LocalFlow' not in result.stdout
+    if failure == 'FAIL_KICKSTART':
+        assert 'kickstart denied' in result.stderr
+    elif failure == 'IGNORE_KILL':
+        assert 'Could not stop running Rust LocalFlow' in result.stderr
+    else:
+        assert 'did not start a new lf-hub process' in result.stderr
+
+
 @pytest.mark.parametrize("failure", [None, "MISSING_ORT", "BAD_DEP", "FAIL_VERIFY"])
 def test_builder_bundles_rewrites_and_verifies_before_replacing(mac, failure):
     home, env = mac
@@ -263,6 +369,8 @@ def test_builder_bundles_rewrites_and_verifies_before_replacing(mac, failure):
     plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     assert plist["CFBundleIdentifier"] == "com.cortexrnd.localflow.app"
     assert plist["CFBundleExecutable"] == "lf-hub"
+    assert plist["CFBundleIconFile"] == "LocalFlow.icns"
+    assert (app / "Contents/Resources/LocalFlow.icns").read_bytes() == (ROOT / "packaging/macos/LocalFlow.icns").read_bytes()
     assert plist["LSUIElement"] is False
     for key in (
         "NSMicrophoneUsageDescription",
@@ -287,7 +395,9 @@ def test_builder_bundles_rewrites_and_verifies_before_replacing(mac, failure):
         for call in calls
     )
     assert any(
-        call[:5] == ["codesign", "--force", "--deep", "-s", "-"] for call in calls
+        call[:8] == ["codesign", "--force", "-s", "-", "--identifier", plist["CFBundleIdentifier"],
+                     "--requirements", '=designated => identifier "com.cortexrnd.localflow.app"']
+        for call in calls
     )
     assert any(call[:2] == ["codesign", "--verify"] for call in calls)
 

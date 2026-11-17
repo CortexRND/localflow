@@ -172,6 +172,12 @@ fn run_app_with_termination(
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let delegate = AppDelegate::new_with_termination(mtm, show.clone(), before_terminate);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    let _signals = crate::termination::SignalHandlers::install()
+        .map_err(|error| log::error!("could not install graceful termination handlers: {error}"))
+        .ok();
+    let _signal_poller = Timer::schedule(POLL_SECONDS, true, move || {
+        crate::termination::poll(|| NSApplication::sharedApplication(mtm).terminate(None));
+    });
     show();
     // Kept alive until the run loop returns; dropping invalidates the timer.
     let _poller = poll.map(|poll| {

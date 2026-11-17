@@ -1,5 +1,6 @@
 import os
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,35 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASH = shutil.which("bash") if os.name != "nt" else None
+
+
+def test_rust_bundle_uses_stable_designated_requirement_and_icon() -> None:
+    script = (ROOT / "scripts/build_rust_app.sh").read_text(encoding="utf-8")
+    assert 'bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$plist")"' in script
+    assert r'requirement="designated => identifier \"$bundle_id\""' in script
+    assert '--identifier "$bundle_id" --requirements "=$requirement" "$bundle"' in script
+    assert 'codesign --verify --deep --strict' in script
+    assert '"$ROOT/packaging/macos/LocalFlow.icns" "$resources/LocalFlow.icns"' in script
+    assert 'plutil -insert CFBundleIconFile -string LocalFlow.icns "$plist"' in script
+
+
+def test_committed_icon_has_png_source_and_multiple_icns_sizes() -> None:
+    source = (ROOT / "packaging/macos/LocalFlow.png").read_bytes()
+    assert source[:8] == b"\x89PNG\r\n\x1a\n"
+    assert struct.unpack(">II", source[16:24]) == (1024, 1024)
+    icon = (ROOT / "packaging/macos/LocalFlow.icns").read_bytes()
+    assert icon[:4] == b"icns"
+    assert struct.unpack(">I", icon[4:8])[0] == len(icon)
+    chunks = set()
+    offset = 8
+    while offset < len(icon):
+        kind, length = struct.unpack(">4sI", icon[offset:offset + 8])
+        assert length > 8
+        assert offset + length <= len(icon)
+        chunks.add(kind)
+        offset += length
+    assert offset == len(icon)
+    assert {b"icp4", b"icp5", b"icp6", b"ic07", b"ic08", b"ic09", b"ic10"} <= chunks
 
 
 def test_piped_installer_home_is_defined_at_step_scope() -> None:

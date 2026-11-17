@@ -2049,6 +2049,7 @@ dependencies = [
  "block2",
  "caseless",
  "chrono",
+ "env_logger",
  "lf-agent",
  "lf-audio",
  "lf-core",
