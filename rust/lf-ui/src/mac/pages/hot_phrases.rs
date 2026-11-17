@@ -196,6 +196,12 @@ fn make_editor(services: &HubServices) -> Result<HotPhrasesEditor> {
 fn ensure_editor(state: &Shared) {
     let services = state.borrow().services.clone();
     let Some(services) = services else { return };
+    if let Some(editor) = state.borrow_mut().editor.as_mut() {
+        let settings = PhrasesSettings::from_config(&services.config());
+        editor.model.settings.styles_enabled = settings.styles_enabled;
+        editor.model.settings.style_other = settings.style_other;
+        return;
+    }
     if state.borrow().editor.is_some() || state.borrow().model_error.is_some() {
         return;
     }
@@ -1726,6 +1732,52 @@ mod tests {
         let mut editor = HotPhrasesEditor::new(model);
         editor.on_show();
         editor
+    }
+
+    #[test]
+    fn style_changes_refresh_preview_without_discarding_the_editor_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let services = HubServices::new_isolated(
+            lf_core::config::Config::defaults_for(true),
+            Rc::new(
+                lf_core::history::HistoryStore::open(
+                    Some(root.path().join("history.sqlite")),
+                    Some(root.path().join("clips")),
+                    true,
+                )
+                .unwrap(),
+            ),
+            Rc::new(DictionaryStore::new(Some(
+                root.path().join("dictionary.json"),
+            ))),
+        );
+        let page = HotPhrasesPage::new();
+        page.state.borrow_mut().services = Some(services.clone());
+        ensure_editor(&page.state);
+        {
+            let mut state = page.state.borrow_mut();
+            let editor = state.editor.as_mut().unwrap();
+            editor.edit(Some("my draft"), Some("unsaved text"), None);
+            editor.set_test_input("HELLO THERE.");
+        }
+        services
+            .update_config(
+                &serde_json::json!({"cleanup": {"styles_enabled": true, "style_other": "casual"}}),
+            )
+            .unwrap();
+        ensure_editor(&page.state);
+        let casual = page.state.borrow().editor.as_ref().unwrap().preview().0;
+        services
+            .update_config(&serde_json::json!({"cleanup": {"style_other": "excited"}}))
+            .unwrap();
+        ensure_editor(&page.state);
+        let state = page.state.borrow();
+        let editor = state.editor.as_ref().unwrap();
+        assert_ne!(editor.preview().0, casual);
+        assert_eq!(editor.model.settings.style_other, "excited");
+        assert_eq!(editor.trigger, "my draft");
+        assert_eq!(editor.text, "unsaved text");
+        assert_eq!(editor.test_input, "HELLO THERE.");
     }
 
     #[test]
