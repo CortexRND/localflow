@@ -6,11 +6,20 @@ license.workspace = true
 publish.workspace = true
 description = "LocalFlow native Hub pages and shared UI primitives"
 
+[features]
+default = []
+runtime = ["dep:lf-stt", "dep:lf-server", "dep:lf-meetings-backend", "dep:lf-meetings", "dep:tokio"]
+
 [lib]
 name = "lf_ui"
 path = "src/lib.rs"
 
 [dependencies]
+lf-stt = { path = "../lf-stt", optional = true, features = ["runtime"] }
+lf-server = { path = "../lf-server", optional = true }
+lf-meetings-backend = { path = "../lf-meetings-backend", optional = true }
+lf-meetings = { path = "../lf-meetings", optional = true, features = ["capture"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "time"], optional = true }
 lf-audio = { path = "../lf-audio" }
 lf-agent = { path = "../lf-agent" }
 lf-core = { path = "../lf-core" }

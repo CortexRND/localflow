@@ -25,6 +25,18 @@ pub struct SingleInstance {
 }
 
 impl SingleInstance {
+    pub fn identity(&mut self) -> std::io::Result<String> {
+        use std::io::Read;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("lock was released"))?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut identity = String::new();
+        file.read_to_string(&mut identity)?;
+        Ok(identity)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

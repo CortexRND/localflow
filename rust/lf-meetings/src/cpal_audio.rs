@@ -33,9 +33,20 @@ pub struct CpalSource {
 }
 impl CpalSource {
     pub fn microphone() -> Result<Self, SystemAudioUnavailable> {
-        let device = cpal::default_host()
-            .default_input_device()
-            .ok_or_else(|| unavailable("no default input device"))?;
+        Self::microphone_named(None)
+    }
+    pub fn microphone_named(name: Option<&str>) -> Result<Self, SystemAudioUnavailable> {
+        let host = cpal::default_host();
+        let device = match name.filter(|name| !name.is_empty()) {
+            Some(name) => host
+                .input_devices()
+                .map_err(unavailable)?
+                .find(|device| device.name().is_ok_and(|found| found == name))
+                .ok_or_else(|| unavailable("configured microphone not found"))?,
+            None => host
+                .default_input_device()
+                .ok_or_else(|| unavailable("no default input device"))?,
+        };
         Self::from_device(device, SAMPLE_RATE, true)
     }
     fn from_device(

@@ -8,7 +8,7 @@ pub use providers::{ConfiguredProviders, ProviderFactory, TitleLlm};
 pub use session::{CaptureFactory, UnavailableCapture};
 
 use anyhow::Result;
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 use lf_ask::{Corpus, SearchOptions, Since};
 use lf_core::{config::Config, history::HistoryStore, home::expand_user, symbols::pycompat as py};
 use lf_meetings::{
@@ -16,7 +16,7 @@ use lf_meetings::{
     dispatch::{self, PromptQueue, PromptTransitionError},
     format_transcript, generate_title, latest_transcript_log, read_transcript_log, templates,
     titles::{is_default_title, TITLE_TIMEOUT_SECONDS},
-    MeetingSummarizer, MeetingWatcher, ObsidianWriter, WriteNote,
+    MeetingSummarizer, MeetingWatcher, ObsidianWriter, Segment, WriteNote,
 };
 use lf_runtime::menubar::{MeetingStatusPoller, MenuState};
 use lf_server::backend::{Backend, BackendRequest, BackendResponse, UnavailableBackend};
@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use session::SessionActor;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
     time::Duration,
 };
 use validation::{Body, ResponseResult};
@@ -37,6 +37,14 @@ enum Phase {
     Running,
     Stopping,
 }
+
+fn remove_recovery(saved: lf_meetings::writer::SavedNote) {
+    for path in [saved.notes_path, saved.log_path] {
+        if let Err(error) = std::fs::remove_file(path) {
+            eprintln!("could not remove completed meeting recovery: {error}");
+        }
+    }
+}
 #[derive(Clone, Default)]
 struct Metadata {
     title: String,
@@ -47,6 +55,7 @@ struct Metadata {
 }
 #[derive(Default)]
 struct State {
+    closed: bool,
     phase: Phase,
     session: Option<Arc<SessionActor>>,
     meta: Metadata,
@@ -62,6 +71,7 @@ pub struct MeetingsBackend {
     watcher: Option<Arc<MeetingWatcher>>,
     transcribe_lock: Arc<Mutex<()>>,
     state: Mutex<State>,
+    idle: Condvar,
 }
 impl MeetingsBackend {
     /// Poll the same in-process status as GET /meeting/status using live config snapshots.
@@ -87,6 +97,7 @@ impl MeetingsBackend {
             watcher: None,
             transcribe_lock: Arc::default(),
             state: Mutex::default(),
+            idle: Condvar::new(),
         })
     }
     pub fn with_inner(mut self, inner: Arc<dyn Backend>) -> Self {
@@ -189,7 +200,7 @@ impl MeetingsBackend {
         }
         {
             let mut state = self.state();
-            if state.phase != Phase::Idle {
+            if state.closed || state.phase != Phase::Idle {
                 return Err(BackendResponse::error(
                     409,
                     "a meeting session is already running",
@@ -237,6 +248,11 @@ impl MeetingsBackend {
         };
         let response = json!({"ok":true,"category":category,"template":template,"system_audio":snapshot.system_audio,"system_audio_error":snapshot.system_audio_error});
         let mut state = self.state();
+        if state.closed {
+            drop(state);
+            let _ = session.stop();
+            return Err(BackendResponse::error(409, "meeting service is stopping"));
+        }
         state.meta = Metadata {
             title: if title.is_empty() {
                 "Meeting".into()
@@ -283,11 +299,36 @@ impl MeetingsBackend {
             backend: self,
             armed: true,
         };
+        let writer = ObsidianWriter::new(
+            Path::new(text(config, "vault_path")),
+            Path::new(text(config, "notes_folder")),
+            Path::new(text(config, "logs_folder")),
+        );
+        let mut recovery = session.snapshot().and_then(|snapshot| {
+            self.checkpoint(
+                &writer,
+                &meta,
+                snapshot.started_at,
+                snapshot.seconds,
+                &snapshot.segments,
+            )
+        });
         let finished = session.stop();
         if let Some(watcher) = &self.watcher {
             watcher.resume();
         }
         let finished = finished.map_err(|_| internal())?;
+        if let Some(saved) = self.checkpoint(
+            &writer,
+            &meta,
+            finished.started_at,
+            finished.seconds,
+            &finished.segments,
+        ) {
+            if let Some(previous) = recovery.replace(saved) {
+                remove_recovery(previous);
+            }
+        }
         let transcript = format_transcript(&finished.segments);
         let template = templates::resolve_template(
             Some(&meta.template),
@@ -334,11 +375,6 @@ impl MeetingsBackend {
                 }
             }
         }
-        let writer = ObsidianWriter::new(
-            Path::new(text(config, "vault_path")),
-            Path::new(text(config, "notes_folder")),
-            Path::new(text(config, "logs_folder")),
-        );
         let saved = writer
             .write(&WriteNote {
                 title: &title,
@@ -352,6 +388,9 @@ impl MeetingsBackend {
                 generated_title: meta.title_auto,
             })
             .map_err(|_| internal())?;
+        if let Some(recovery) = recovery {
+            remove_recovery(recovery);
+        }
         let mut payload = json!({"title":saved.title,"title_generated":generated,"notes_path":saved.notes_path,"log_path":saved.log_path,"segments":finished.segments.len(),"template":template.id,"enhanced":!py::strip(&meta.user_notes).is_empty()});
         payload
             .as_object_mut()
@@ -359,6 +398,38 @@ impl MeetingsBackend {
             .extend(extra.as_object().unwrap().clone());
         self.state().last_saved = Some(payload.clone());
         Ok(payload)
+    }
+    fn checkpoint(
+        &self,
+        writer: &ObsidianWriter,
+        meta: &Metadata,
+        started_at: NaiveDateTime,
+        seconds: f64,
+        segments: &[Segment],
+    ) -> Option<lf_meetings::writer::SavedNote> {
+        let result = writer.write(&WriteNote {
+            title: &format!("{} (recovery)", meta.title),
+            category: &meta.category,
+            started_at,
+            duration_seconds: seconds,
+            notes_md: &meta.user_notes,
+            segments,
+            user_notes: &meta.user_notes,
+            template: &meta.template,
+            generated_title: false,
+        });
+        match result {
+            Ok(saved) => {
+                self.state().last_saved = Some(
+                    json!({"title":saved.title,"notes_path":saved.notes_path,"log_path":saved.log_path,"recovery":true}),
+                );
+                Some(saved)
+            }
+            Err(error) => {
+                eprintln!("could not checkpoint meeting: {error}");
+                None
+            }
+        }
     }
     fn chat(&self, request: &BackendRequest) -> ResponseResult<Value> {
         let question = question(request, 2000)?;
@@ -412,7 +483,33 @@ impl MeetingsBackend {
         result.map_err(|e| BackendResponse::error(500, format!("recall failed: {e}")))
     }
 }
+impl MeetingsBackend {
+    fn finish_shutdown_stop(&self, result: ResponseResult<Value>) -> Result<()> {
+        if let Err(error) = result {
+            anyhow::ensure!(
+                error.status == 409,
+                "could not save meeting during shutdown"
+            );
+            let state = self.state();
+            let _idle = self
+                .idle
+                .wait_while(state, |state| state.phase != Phase::Idle)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        Ok(())
+    }
+}
+
 impl Backend for MeetingsBackend {
+    fn shutdown(&self, config: &Config) -> Result<()> {
+        self.state().closed = true;
+        if let Some(watcher) = &self.watcher {
+            watcher.stop();
+        }
+        self.finish_shutdown_stop(self.stop(config))?;
+        self.inner.shutdown(config)
+    }
+
     fn handle(&self, request: BackendRequest) -> BackendResponse {
         let result = match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/meeting/templates") => {
@@ -507,6 +604,7 @@ impl Backend for MeetingsBackend {
         self.inner.autostart_status()
     }
 }
+
 struct ResetSlot<'a> {
     backend: &'a MeetingsBackend,
     armed: bool,
@@ -515,6 +613,7 @@ impl Drop for ResetSlot<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.backend.state().phase = Phase::Idle;
+            self.backend.idle.notify_all();
         }
     }
 }
@@ -549,4 +648,44 @@ fn question(request: &BackendRequest, max: usize) -> ResponseResult<String> {
     let question = body.string("question", None, None);
     body.finish()?;
     checked_question(&question, max)
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn conflict_after_shutdown_stop_claim_waits_for_persistence() {
+        let backend = Arc::new(MeetingsBackend::new().unwrap());
+        backend.state().phase = Phase::Stopping;
+        let (entered, started) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let closing = backend.clone();
+        let shutdown = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            finished
+                .send(
+                    closing
+                        .finish_shutdown_stop(Err(BackendResponse::error(
+                            409,
+                            "stop raced shutdown",
+                        )))
+                        .is_ok(),
+                )
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
+        backend.state().phase = Phase::Idle;
+        backend.idle.notify_all();
+        assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
+        shutdown.join().unwrap();
+        assert!(backend
+            .finish_shutdown_stop(Err(BackendResponse::error(500, "disk error")))
+            .is_err());
+        assert!(backend
+            .finish_shutdown_stop(Err(BackendResponse::error(409, "already idle")))
+            .is_ok());
+    }
 }

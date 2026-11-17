@@ -5,6 +5,8 @@
 pub mod ask_layout;
 pub mod backends;
 pub mod config_write;
+#[cfg(feature = "runtime")]
+pub mod embedded;
 pub mod hot_phrases_editor;
 pub mod hub_model;
 pub mod hub_route;

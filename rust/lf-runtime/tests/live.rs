@@ -16,6 +16,55 @@ use lf_runtime::worker::WorkItem;
 use serde_json::json;
 
 #[test]
+fn disabling_dictation_closes_audio_and_replaces_held_bindings_with_only_toggle() {
+    let mut cfg = config();
+    cfg.set_field("hotkey", json!("f19"));
+    cfg.set_field("dictation_toggle_hotkey", json!("Control+Option+d"));
+    let mut r = rig_with(cfg.clone());
+    let (hub, _) = KeyboardHub::new(&keyboard_bindings(&cfg, &r.handle), hub_actions(&r.handle));
+    let live = LiveSettings::new(Arc::new(cfg.clone()), r.handle.clone(), None, None);
+    live.set_hub(hub.clone());
+    hub.press(Key::from_name("f19").unwrap());
+    r.controller.drain();
+    assert!(r.recording());
+    let mut disabled = cfg.clone();
+    disabled.set_field("dictation_enabled", json!(false));
+    live.apply(&disabled);
+    r.controller.drain();
+    assert!(!r.recording());
+    assert_eq!(r.audio.0.lock().unwrap().stop_calls, 1);
+    assert_eq!(r.jobs(), 0);
+    assert!(!hub.reconfigure_pending());
+    let bindings = keyboard_bindings(&disabled, &r.handle);
+    assert!(bindings.hold_key.is_empty());
+    assert!(bindings.toggle_combo.is_empty());
+    assert!(bindings.command_key.is_empty());
+    assert_eq!(bindings.combos.len(), 1);
+    hub.release(Key::from_name("f19").unwrap());
+    hub.press(Key::from_name("f19").unwrap());
+    r.controller.drain();
+    assert_eq!(r.start_calls(), 1);
+    hub.release(Key::from_name("f19").unwrap());
+    live.apply(&cfg);
+    r.controller.drain();
+    hub.press(Key::from_name("f19").unwrap());
+    r.controller.drain();
+    assert!(r.recording());
+    assert_eq!(r.start_calls(), 2);
+}
+
+#[test]
+fn disabled_without_toggle_chord_registers_nothing() {
+    let mut cfg = config();
+    cfg.set_field("dictation_enabled", json!(false));
+    cfg.set_field("dictation_toggle_hotkey", json!(""));
+    let r = rig_with(cfg.clone());
+    let bindings = keyboard_bindings(&cfg, &r.handle);
+    assert!(bindings.combos.is_empty());
+    assert!(bindings.hold_key.is_empty());
+}
+
+#[test]
 fn merge_live_takes_only_allowlisted_fields() {
     let running = config();
     let mut fresh = running.clone();

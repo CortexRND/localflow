@@ -61,6 +61,22 @@ pub fn install_hub_menu_bar(model: MenuModel, actions: MenuActions) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
+mod runtime_start_tests {
+    use super::*;
+
+    #[test]
+    fn reentrant_start_does_not_install_another_status_item_or_start_services() {
+        let menu = MenuSlot::default();
+        menu.starting.set(true);
+        let (commands, _) = mpsc::channel();
+        let transport = Rc::new(RefCell::new(None));
+        menu.ensure_runtime(&commands, &transport).unwrap();
+        assert!(menu.runtime.borrow().is_none());
+        assert!(menu.starting.get());
+    }
+}
+
 enum MenuCommand {
     ToggleDictation,
     PasteLast,
@@ -404,45 +420,72 @@ impl HubSlot {
 struct MenuRuntime {
     menu: MenuState,
     _poller: MeetingStatusPoller,
+    menu_lock: Option<lf_runtime::singleinstance::SingleInstance>,
+    #[cfg(feature = "runtime")]
+    bootstrap: Option<mpsc::Receiver<crate::embedded::EmbeddedRuntime>>,
+    #[cfg(feature = "runtime")]
+    embedded: Option<crate::embedded::EmbeddedRuntime>,
 }
 
 #[derive(Default)]
 struct MenuSlot {
     runtime: RefCell<Option<MenuRuntime>>,
+    starting: Cell<bool>,
 }
 
 impl MenuSlot {
-    fn ensure(
+    fn actions(commands: &mpsc::Sender<MenuCommand>) -> MenuActions {
+        let toggle = commands.clone();
+        let paste = commands.clone();
+        let quit = commands.clone();
+        MenuActions {
+            toggle_dictation: Arc::new(move || {
+                let _ = toggle.send(MenuCommand::ToggleDictation);
+            }),
+            paste_last: Arc::new(move || {
+                let _ = paste.send(MenuCommand::PasteLast);
+            }),
+            quit: Arc::new(move || {
+                let _ = quit.send(MenuCommand::Quit);
+            }),
+        }
+    }
+    fn ensure_runtime(
         &self,
         commands: &std::sync::mpsc::Sender<MenuCommand>,
         transport: &Rc<RefCell<Option<HttpTransport>>>,
     ) -> Result<()> {
-        if self.runtime.borrow().is_some() {
+        if self.starting.replace(true) {
+            return Ok(());
+        }
+        struct Reset<'a>(&'a Cell<bool>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let _reset = Reset(&self.starting);
+        if let Some(runtime) = self.runtime.borrow_mut().as_mut() {
+            if runtime.menu_lock.is_none() {
+                if let Some(lock) = lf_runtime::singleinstance::acquire("menubar")? {
+                    install_hub_menu_bar(runtime.menu.snapshot(), Self::actions(commands))
+                        .map_err(|error| anyhow!(error))?;
+                    runtime.menu_lock = Some(lock);
+                    eprintln!("menu bar: enabled");
+                }
+            }
             return Ok(());
         }
         let config = load_config()?;
+        let menu_lock = lf_runtime::singleinstance::acquire("menubar")?;
         let menu = MenuState::new(
             lf_runtime::platform_menu_bar(),
             config.field_bool("dictation_enabled").unwrap_or(true),
         );
-        let toggle = commands.clone();
-        let paste = commands.clone();
-        let quit = commands.clone();
-        install_hub_menu_bar(
-            menu.snapshot(),
-            MenuActions {
-                toggle_dictation: Arc::new(move || {
-                    let _ = toggle.send(MenuCommand::ToggleDictation);
-                }),
-                paste_last: Arc::new(move || {
-                    let _ = paste.send(MenuCommand::PasteLast);
-                }),
-                quit: Arc::new(move || {
-                    let _ = quit.send(MenuCommand::Quit);
-                }),
-            },
-        )
-        .map_err(|error| anyhow!(error))?;
+        if menu_lock.is_some() {
+            install_hub_menu_bar(menu.snapshot(), Self::actions(commands))
+                .map_err(|error| anyhow!(error))?;
+        }
         let mut borrowed = transport.borrow_mut();
         let http = match borrowed.as_ref() {
             Some(http) => http.clone(),
@@ -459,20 +502,110 @@ impl MenuSlot {
             meeting.status_fetch(),
             Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
         );
-        eprintln!("menu bar: enabled");
+        if menu_lock.is_some() {
+            eprintln!("menu bar: enabled");
+        } else {
+            eprintln!("menu bar: existing owner");
+        }
         eprintln!("menu meeting status poller: enabled");
+        #[cfg(feature = "runtime")]
+        let bootstrap = {
+            let (send, receive) = mpsc::channel();
+            let runtime_menu = menu.clone();
+            std::thread::Builder::new()
+                .name("localflow-startup".into())
+                .spawn(move || {
+                    let toggle: lf_runtime::run::ToggleStore = Arc::new(|| {
+                        crate::config_write::update(None, |current| {
+                            let mut updated = current.clone();
+                            updated.set_field(
+                                "dictation_enabled",
+                                serde_json::json!(!current
+                                    .field_bool("dictation_enabled")
+                                    .unwrap_or(true)),
+                            );
+                            Ok(updated)
+                        })
+                        .map(|config| config.field_bool("dictation_enabled").unwrap_or(true))
+                        .map_err(|e| e.to_string())
+                    });
+                    let runtime =
+                        crate::embedded::EmbeddedRuntime::start(config, runtime_menu, toggle);
+                    let _ = send.send(runtime);
+                })?;
+            Some(receive)
+        };
         *self.runtime.borrow_mut() = Some(MenuRuntime {
             menu,
             _poller: poller,
+            menu_lock,
+            #[cfg(feature = "runtime")]
+            bootstrap,
+            #[cfg(feature = "runtime")]
+            embedded: None,
         });
         Ok(())
     }
 
     fn update(&self, enabled: bool) {
+        #[cfg(feature = "runtime")]
+        {
+            let mut runtime = self.runtime.borrow_mut();
+            if let Some(runtime) = runtime.as_mut() {
+                if let Some(receiver) = runtime.bootstrap.as_ref() {
+                    match receiver.try_recv() {
+                        Ok(embedded) => {
+                            runtime.embedded = Some(embedded);
+                            runtime.bootstrap = None;
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            log::error!("runtime startup worker stopped");
+                            runtime.bootstrap = None;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+                if runtime
+                    .embedded
+                    .as_ref()
+                    .is_some_and(|embedded| embedded.runtime.is_some())
+                {
+                    return;
+                }
+            }
+        }
         if let Some(runtime) = self.runtime.borrow().as_ref() {
             runtime
                 .menu
                 .change(|model| model.dictation_enabled = enabled);
+        }
+    }
+
+    #[cfg(feature = "runtime")]
+    fn command(&self, command: &MenuCommand) -> bool {
+        let runtime = self.runtime.borrow();
+        let Some(runtime) = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.embedded.as_ref())
+            .and_then(|embedded| embedded.runtime.as_ref())
+        else {
+            return false;
+        };
+        match command {
+            MenuCommand::ToggleDictation => runtime.controller.note_dictation_toggle(),
+            MenuCommand::PasteLast => runtime.controller.note_paste_last(),
+            MenuCommand::Quit => return false,
+        }
+        true
+    }
+
+    #[cfg(feature = "runtime")]
+    fn shutdown(&self) {
+        if let Some(runtime) = self.runtime.borrow_mut().as_mut() {
+            runtime.bootstrap.take();
+            if let Some(embedded) = runtime.embedded.as_mut() {
+                embedded.shutdown();
+            }
         }
     }
 }
@@ -701,7 +834,7 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
     let runtime_menu = menu.clone();
     let runtime_commands = commands.clone();
     let ensure_runtime: Rc<dyn Fn() -> Result<()>> =
-        Rc::new(move || runtime_menu.ensure(&runtime_commands, &transport));
+        Rc::new(move || runtime_menu.ensure_runtime(&runtime_commands, &transport));
     let router = WindowRouter::new(
         mtm,
         slot,
@@ -717,12 +850,30 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
             }
         })
     };
+    #[cfg(feature = "runtime")]
+    let quit_menu = menu.clone();
     let poll: Box<dyn Fn() -> bool> = {
         let router = router.clone();
         Box::new(move || {
+            #[cfg(feature = "runtime")]
+            menu.update(
+                router
+                    .hub()
+                    .map(|hub| {
+                        hub.services()
+                            .config()
+                            .field_bool("dictation_enabled")
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true),
+            );
             for command in menu_commands.try_iter() {
                 if let MenuCommand::Quit = command {
                     NSApplication::sharedApplication(mtm).terminate(None);
+                    continue;
+                }
+                #[cfg(feature = "runtime")]
+                if menu.command(&command) {
                     continue;
                 }
                 if let Some(hub) = router.hub() {
@@ -787,7 +938,9 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
         if let Some(setup) = router.setup_window() {
             setup.close();
         }
-        if !crate::shutdown::wait_for_pending_writes(QUIT_FLUSH_TIMEOUT) {
+        #[cfg(feature = "runtime")]
+        quit_menu.shutdown();
+        if !crate::shutdown::wait_for_quit(QUIT_FLUSH_TIMEOUT, Duration::from_secs(60)) {
             log::warn!("timed out waiting for pending writes during quit");
         }
     });

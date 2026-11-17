@@ -80,8 +80,17 @@ fn acquire_main_app_at(
     dir: &Path,
     page: Option<&str>,
 ) -> std::io::Result<Option<lf_runtime::singleinstance::SingleInstance>> {
-    let instance = lf_runtime::singleinstance::acquire_at(&dir.join("main-app.lock"))?;
-    if instance.is_none() && page == Some("Setup") {
+    let mut instance = lf_runtime::singleinstance::acquire_at(&dir.join("main-app.lock"))?;
+    if let Some(instance) = instance.as_mut() {
+        let identity = instance.identity()?;
+        let marker = dir.join(format!("main-app.rust.{}.tmp", std::process::id()));
+        fs::write(
+            &marker,
+            json!({"protocol":1,"identity":identity}).to_string(),
+        )?;
+        fs::rename(marker, dir.join("main-app.rust.json"))?;
+    }
+    if instance.is_none() && page == Some("Setup") && !rust_owner(dir) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "LocalFlow is already running; Setup cannot be handed to a possibly Python owner. Run `lf setup` to open standalone setup, or close LocalFlow and retry `lf-hub --setup`.",
@@ -95,6 +104,57 @@ fn acquire_main_app_at(
         ));
     }
     Ok(instance)
+}
+
+fn rust_owner(dir: &Path) -> bool {
+    let Some(marker) = fs::read(dir.join("main-app.rust.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return false;
+    };
+    let Ok(identity) = fs::read_to_string(dir.join("main-app.lock")) else {
+        return false;
+    };
+    marker["protocol"] == 1 && marker["identity"].as_str() == Some(identity.as_str())
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod rust_owner_tests {
+    use super::*;
+    #[test]
+    fn setup_handoff_reaches_rust_owner_but_stale_marker_cannot_identify_python() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = acquire_main_app_at(temp.path(), None).unwrap().unwrap();
+        assert!(acquire_main_app_at(temp.path(), Some("Setup"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            RequestFile::new(temp.path()).consume_request(&system_now),
+            Some("Setup")
+        );
+        drop(owner);
+        let _python = lf_runtime::singleinstance::acquire_at(&temp.path().join("main-app.lock"))
+            .unwrap()
+            .unwrap();
+        assert!(!rust_owner(temp.path()));
+        assert_eq!(
+            acquire_main_app_at(temp.path(), Some("Setup"))
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+    #[test]
+    fn corrupt_marker_does_not_grant_setup_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let _owner = lf_runtime::singleinstance::acquire_at(&temp.path().join("main-app.lock"))
+            .unwrap()
+            .unwrap();
+        fs::write(temp.path().join("main-app.rust.json"), "not json").unwrap();
+        assert!(!rust_owner(temp.path()));
+    }
 }
 
 /// The canonical page name, or `None` when `page` is not a Hub page. Strict:
@@ -622,7 +682,9 @@ mod tests {
     #[test]
     fn setup_refuses_incompatible_handoff_without_overwriting_valid_request() {
         let temp = tempfile::tempdir().unwrap();
-        let owner = acquire_main_app_at(temp.path(), None).unwrap().unwrap();
+        let owner = lf_runtime::singleinstance::acquire_at(&temp.path().join("main-app.lock"))
+            .unwrap()
+            .unwrap();
         let requests = RequestFile::new(temp.path());
         assert!(requests.write_request("Home", &now));
         let error = acquire_main_app_at(temp.path(), Some("Setup"))

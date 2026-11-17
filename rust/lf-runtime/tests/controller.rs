@@ -35,6 +35,23 @@ fn normal_hold_above_threshold_records_and_queues_clip() {
 }
 
 #[test]
+fn live_sounds_setting_suppresses_start_and_stop_cues_without_disabling_capture() {
+    let mut r = rig();
+    let mut muted = config();
+    muted.set_field("sounds_enabled", serde_json::json!(false));
+    r.handle.update_config(Arc::new(muted));
+    r.controller.drain();
+    r.handle.send(Event::Down(0.0));
+    r.controller.drain();
+    assert!(r.recording());
+    r.set_now(1.0);
+    r.handle.send(Event::Up(1.0));
+    r.controller.drain();
+    assert_eq!(r.jobs(), 1);
+    assert!(r.sounds.lock().unwrap().is_empty());
+}
+
+#[test]
 fn queued_short_tap_pair_never_opens_microphone() {
     let mut r = rig();
     r.handle.send(Event::Down(0.0));

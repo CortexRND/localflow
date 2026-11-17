@@ -21,9 +21,18 @@ jobs:
         with:
           workspaces: rust
 
+      - name: Refresh cached native speech libraries
+        shell: bash
+        run: |
+          if [ -d rust/target/sherpa-onnx-prebuilt ]; then
+            find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
+
       - name: Native lf-ui tests
         working-directory: rust
-        run: cargo test -p lf-ui
+        run: cargo test -p lf-ui --features runtime
 
       - name: Rust Hub snapshots
         working-directory: rust
@@ -34,8 +43,8 @@ jobs:
           LOCALFLOW_CONFIG: ${{ runner.temp }}/rust-hub-config.toml
         run: |
           printf 'config_version = 2\n\n[setup]\nversion = 1\n' > "$LOCALFLOW_CONFIG"
-          cargo build --manifest-path rust/Cargo.toml -p lf-ui --bin lf-hub --release
-          LF_RSS_EXPECT_RELEASE=1 LF_RSS_REQUIRE_MENU=1 \
+          cargo build --manifest-path rust/Cargo.toml -p lf-ui --bin lf-hub --features runtime --release
+          LF_RSS_EXPECT_RELEASE=1 LF_RSS_REQUIRE_MENU=1 LF_RSS_REQUIRE_RUNTIME=1 \
             bash scripts/ci_hub_rss.sh Rust artifacts/rust-ui/idle-rss.txt rust/target/release/lf-hub --page Home
 
       - name: Empty AppKit window idle RSS

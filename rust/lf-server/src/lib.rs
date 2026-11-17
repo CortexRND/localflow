@@ -31,13 +31,31 @@ pub const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 static STATIC: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../localflow/static");
 static RESOURCES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/resources");
 
+pub type ConfigUpdater = dyn Fn(&Value) -> anyhow::Result<Config> + Send + Sync;
+
 pub struct ServerState {
     config: Mutex<Config>,
     auth: Mutex<auth::Auth>,
     backend: Arc<dyn Backend>,
+    config_updater: Option<Arc<ConfigUpdater>>,
+    config_reader: Option<Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>>,
 }
 
 impl ServerState {
+    pub fn shutdown(&self) -> anyhow::Result<()> {
+        let config = self
+            .config_reader
+            .as_ref()
+            .and_then(|reader| reader().ok())
+            .unwrap_or_else(|| {
+                self.config
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            });
+        self.backend.shutdown(&config)
+    }
+
     /// In-memory auth scope: replay rotates only this instance's token. For the
     /// standard on-disk token and persistent replay recovery, use `load_with_backend`.
     pub fn new(config: Config, token: String, backend: Arc<dyn Backend>) -> Self {
@@ -45,6 +63,8 @@ impl ServerState {
             config: Mutex::new(config),
             auth: Mutex::new(auth::Auth::new(token)),
             backend,
+            config_updater: None,
+            config_reader: None,
         }
     }
 
@@ -59,7 +79,22 @@ impl ServerState {
             config: Mutex::new(config::load_config()?),
             auth: Mutex::new(auth::Auth::load()?),
             backend,
+            config_updater: None,
+            config_reader: None,
         })
+    }
+
+    pub fn with_config_updater(mut self, updater: Arc<ConfigUpdater>) -> Self {
+        self.config_updater = Some(updater);
+        self
+    }
+
+    pub fn with_config_reader(
+        mut self,
+        reader: Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>,
+    ) -> Self {
+        self.config_reader = Some(reader);
+        self
     }
 }
 
@@ -86,6 +121,31 @@ pub struct Server {
 }
 
 impl Server {
+    pub async fn bind_with_state(
+        host: &str,
+        port: u16,
+        state: Arc<ServerState>,
+    ) -> anyhow::Result<Self> {
+        let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+        let host = if host == "*" || host.is_empty() {
+            "0.0.0.0"
+        } else {
+            host
+        };
+        let listener = tokio::net::TcpListener::bind((host, port)).await?;
+        Ok(Self { listener, state })
+    }
+
+    pub async fn run_until(
+        self,
+        stop: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> anyhow::Result<()> {
+        axum::serve(self.listener, router(self.state))
+            .with_graceful_shutdown(stop)
+            .await?;
+        Ok(())
+    }
+
     pub async fn bind(host: &str, port: u16) -> anyhow::Result<Self> {
         let state = Arc::new(ServerState::load()?);
         let host = host.trim().trim_start_matches('[').trim_end_matches(']');
@@ -293,6 +353,12 @@ fn dispatch(
     if path == "/healthz" {
         return Json(json!({"ok": true})).into_response();
     }
+    if let Some(reader) = state.config_reader.as_ref() {
+        match reader() {
+            Ok(config) => *state.config.lock().unwrap() = config,
+            Err(_) => return error(503, "could not load config"),
+        }
+    }
     if path == "/" || path == "/settings" {
         let file = if path == "/" {
             "index.html"
@@ -331,9 +397,17 @@ fn dispatch(
         if let Err(err) = api::validate_runtime(&updated) {
             return error(400, err);
         }
-        if config::save_config(&updated, None).is_err() {
-            return error(500, "could not save config");
-        }
+        let updated = if let Some(updater) = state.config_updater.as_ref() {
+            match updater(&update) {
+                Ok(updated) => updated,
+                Err(_) => return error(500, "could not save config"),
+            }
+        } else {
+            if config::save_config(&updated, None).is_err() {
+                return error(500, "could not save config");
+            }
+            updated
+        };
         *config = updated;
         let mut result = config::config_to_dict(&config);
         result["restart_required"] = json!(api::restart_required(&update));

@@ -191,10 +191,31 @@ fn modifier_mask(code: u16) -> Option<u64> {
 }
 
 pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
+    run_tap_cancellable(
+        hub,
+        warn,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        true,
+    )
+}
+
+pub fn run_tap_cancellable(
+    hub: &KeyboardHub,
+    warn: WarningSink,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    request_permissions: bool,
+) -> Result<(), InputError> {
     let granted = input_monitoring_granted();
-    if !granted {
-        request_input_monitoring();
+    if !request_permissions && !accessibility_trusted() {
         emit(&warn, InputWarning::InputMonitoringDenied);
+        return Err(InputError::TapCreateFailed);
+    }
+    if !granted {
+        emit(&warn, InputWarning::InputMonitoringDenied);
+        if !request_permissions {
+            return Err(InputError::TapCreateFailed);
+        }
+        request_input_monitoring();
     }
     let port = Arc::new(AtomicUsize::new(0));
     let tap_port = port.clone();
@@ -288,7 +309,14 @@ pub fn run_tap(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputError> {
             crate::listener::check_tap_alive(&hub, &warn);
         });
     }
-    CFRunLoop::run_current();
+    while !stop.load(Ordering::Acquire) {
+        CFRunLoop::run_in_mode(
+            unsafe { core_foundation::runloop::kCFRunLoopDefaultMode },
+            std::time::Duration::from_millis(250),
+            true,
+        );
+    }
+    CFRunLoop::get_current().remove_source(&source, unsafe { kCFRunLoopCommonModes });
     log::warn!("keyboard listener exited");
     Ok(())
 }

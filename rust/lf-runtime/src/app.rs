@@ -30,6 +30,19 @@ pub fn keyboard_bindings(config: &Config, controller: &ControllerHandle) -> Shor
     let prompt: Callback = Arc::new(move || c.note_transform("prompt"));
     let c = controller.clone();
     let toggle: Callback = Arc::new(move || c.note_dictation_toggle());
+    if !dictation_enabled(config) {
+        let chord = str_field(config, DICTATION_TOGGLE_HOTKEY);
+        return Shortcuts {
+            hold_key: String::new(),
+            toggle_combo: String::new(),
+            command_key: String::new(),
+            combos: if chord.is_empty() {
+                Vec::new()
+            } else {
+                vec![(chord, toggle)]
+            },
+        };
+    }
     let combos = [
         (str_field(config, "paste_last_hotkey"), paste_last),
         (str_field(config, "polish_hotkey"), polish),
@@ -128,7 +141,11 @@ impl LiveSettings {
         *current = merged.clone();
         drop(current);
         self.controller.update_config(merged.clone());
-        if changed.iter().any(|n| HOTKEY_FIELDS.contains(&n.as_str())) {
+        if changed.contains(crate::settings::DICTATION_ENABLED) {
+            if let Some(hub) = self.hub.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+                hub.reconfigure_now(&keyboard_bindings(&merged, &self.controller));
+            }
+        } else if changed.iter().any(|n| HOTKEY_FIELDS.contains(&n.as_str())) {
             if let Some(hub) = self.hub.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
                 let (now, _) = hub.reconfigure(&keyboard_bindings(&merged, &self.controller));
                 if !now {

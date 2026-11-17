@@ -3,6 +3,11 @@ use lf_core::config::Config;
 
 use crate::EngineSpec;
 
+pub fn backend_available(provider: &str) -> bool {
+    matches!(canonical_backend(provider), Ok("whisper-cpp") if cfg!(feature = "whisper"))
+        || matches!(canonical_backend(provider), Ok("parakeet-onnx") if cfg!(feature = "parakeet"))
+}
+
 /// Python provider ids select their native-Rust counterpart; model size is unchanged.
 pub fn canonical_backend(provider: &str) -> Result<&'static str> {
     match provider {
@@ -53,6 +58,24 @@ fn build_engine(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn availability_uses_compiled_engines_without_constructing_models() {
+        for provider in [
+            "auto",
+            "faster-whisper",
+            "mlx",
+            "mlx-whisper",
+            "whisper-cpp",
+        ] {
+            assert_eq!(backend_available(provider), cfg!(feature = "whisper"));
+        }
+        for provider in ["parakeet", "parakeet-onnx"] {
+            assert_eq!(backend_available(provider), cfg!(feature = "parakeet"));
+        }
+        for provider in ["", "plugin", "unknown"] {
+            assert!(!backend_available(provider));
+        }
+    }
     #[test]
     fn maps_all_provider_ids_and_rejects_plugins() {
         for id in [
