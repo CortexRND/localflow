@@ -122,6 +122,25 @@ struct Session {
     drain: Mutex<Option<JoinHandle<()>>>,
 }
 
+fn drain_stderr(mut input: impl Read, mut output: impl Write, sink: &Mutex<VecDeque<u8>>) {
+    let mut bytes = [0; 1024];
+    loop {
+        let count = match input.read(&mut bytes) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        {
+            let mut tail = sink.lock().unwrap_or_else(|p| p.into_inner());
+            tail.extend(&bytes[..count]);
+            let extra = tail.len().saturating_sub(STDERR_LIMIT);
+            tail.drain(..extra);
+        }
+        let _ = output.write_all(&bytes[..count]);
+    }
+}
+
 impl Session {
     fn spawn(exe: &std::path::Path) -> Result<Self, String> {
         let mut child = Command::new(exe)
@@ -133,23 +152,12 @@ impl Session {
             .map_err(|error| format!("spawn speech helper: {error}"))?;
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().expect("piped stdout"));
-        let mut stderr = child.stderr.take().expect("piped stderr");
+        let stderr = child.stderr.take().expect("piped stderr");
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let sink = tail.clone();
         let drain = std::thread::Builder::new()
             .name("speech-stderr".into())
-            .spawn(move || {
-                let mut bytes = [0; 1024];
-                while let Ok(count) = stderr.read(&mut bytes) {
-                    if count == 0 {
-                        break;
-                    }
-                    let mut tail = sink.lock().unwrap_or_else(|p| p.into_inner());
-                    tail.extend(&bytes[..count]);
-                    let extra = tail.len().saturating_sub(STDERR_LIMIT);
-                    tail.drain(..extra);
-                }
-            });
+            .spawn(move || drain_stderr(stderr, io::stderr(), &sink));
         let drain = match drain {
             Ok(drain) => drain,
             Err(error) => {
@@ -508,6 +516,40 @@ fn exit_helper(code: i32) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_stderr_is_forwarded_verbatim_and_retains_only_bounded_tail() {
+        for input in [
+            vec![],
+            b"warning: h\xc3\xa9llo\npartial".to_vec(),
+            vec![b'x'; 20000],
+        ] {
+            let tail = Mutex::new(VecDeque::new());
+            let mut output = Vec::new();
+            drain_stderr(input.as_slice(), &mut output, &tail);
+            assert_eq!(output, input);
+            let retained: Vec<_> = tail.lock().unwrap().iter().copied().collect();
+            assert_eq!(retained, input[input.len().saturating_sub(STDERR_LIMIT)..]);
+        }
+    }
+
+    #[test]
+    fn helper_stderr_capture_survives_parent_stderr_write_errors() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let input = vec![b'x'; STDERR_LIMIT * 3];
+        let tail = Mutex::new(VecDeque::new());
+        drain_stderr(input.as_slice(), Broken, &tail);
+        assert_eq!(tail.lock().unwrap().len(), STDERR_LIMIT);
+    }
+
     #[test]
     fn frame_round_trip_and_rejects_truncation_limits_and_invalid_samples() {
         let mut bytes = Vec::new();
