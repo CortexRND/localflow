@@ -18,7 +18,7 @@ impl lf_server::backend::Backend for NativeCapabilities {
         &self,
         request: lf_server::backend::BackendRequest,
     ) -> lf_server::backend::BackendResponse {
-        lf_server::backend::UnavailableBackend.handle(request)
+        lf_server::backend::Backend::handle(&lf_server::backend::UnavailableBackend, request)
     }
     fn stt_available(&self, provider: &str) -> bool {
         lf_stt::factory::backend_available(provider)
