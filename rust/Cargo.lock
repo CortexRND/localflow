@@ -2035,6 +2035,7 @@ dependencies = [
  "block2",
  "caseless",
  "chrono",
+ "lf-agent",
  "lf-core",
  "lf-input",
  "lf-providers",

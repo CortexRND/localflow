@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lf_core::config::{apply_config_update, load_config, load_from, save_config, Config};
+use lf_core::config::{apply_config_update, load_config, load_from, Config};
 use lf_core::dictionary::DictionaryStore;
 use lf_core::history::HistoryStore;
 use objc2::rc::Retained;
@@ -28,6 +28,7 @@ use super::style::FlippedView;
 use crate::backends::ask::{AskBackend, FakeAskBackend};
 use crate::backends::meeting::{FakeMeetingClient, MeetingClient};
 use crate::backends::prompts::{FakePromptQueue, PromptQueue};
+use crate::backends::settings_agent::{FakeSettingsAgent, SettingsAgent};
 use crate::tokens::{Palette, Weight};
 
 /// The text-measure closure pages pass to the step-1 layout code.
@@ -47,6 +48,7 @@ pub struct HubServices {
     pub prompt_queue: Arc<dyn PromptQueue>,
     pub meeting_client: Arc<dyn MeetingClient>,
     pub ask_backend: RefCell<Box<dyn AskBackend>>,
+    pub settings_agent: RefCell<Box<dyn SettingsAgent>>,
     /// Injected by the single native window router. Snapshots leave it unset.
     pub setup_opener: RefCell<Option<Rc<dyn Fn()>>>,
     /// Per-page inline error text (`page_errors` in Python), cleared when the
@@ -74,6 +76,7 @@ impl HubServices {
             prompt_queue,
             meeting_client,
             ask_backend: RefCell::new(ask_backend),
+            settings_agent: RefCell::new(Box::new(FakeSettingsAgent::default())),
             setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
@@ -125,25 +128,20 @@ impl HubServices {
     }
 
     pub fn update_dictation(&self, enabled: bool) -> Result<Config> {
-        let updated = apply_config_update(
-            &self.latest_config()?,
-            &serde_json::json!({"dictation": {"enabled": enabled}}),
-        )?;
-        if !self.memory_only_config.get() {
-            save_config(&updated, self.config_path.borrow().as_deref())?;
-        }
-        *self.config.borrow_mut() = updated.clone();
-        Ok(updated)
+        self.update_config(&serde_json::json!({"dictation": {"enabled": enabled}}))
     }
 
     /// Validate and apply a nested config update (`{"section": {"key": v}}`),
     /// write it (unless [`Self::memory_only_config`]) and make it current. The
     /// current config is unchanged on error.
     pub fn update_config(&self, update: &Value) -> Result<Config> {
-        let updated = apply_config_update(&self.latest_config()?, update)?;
-        if !self.memory_only_config.get() {
-            save_config(&updated, self.config_path.borrow().as_deref())?;
-        }
+        let updated = if self.memory_only_config.get() {
+            apply_config_update(&self.config(), update)?
+        } else {
+            crate::config_write::update(self.config_path.borrow().as_deref(), |latest| {
+                apply_config_update(latest, update)
+            })?
+        };
         *self.config.borrow_mut() = updated.clone();
         Ok(updated)
     }
@@ -197,6 +195,16 @@ pub trait HubPage {
     /// state. Called right before the views are torn down.
     fn capture(&mut self) {}
 
+    /// Deliver queued request results on the main thread for audits/snapshots.
+    /// Return the number of requests still awaiting delivery.
+    fn drain_requests(&mut self) -> usize {
+        0
+    }
+
+    fn pending_requests(&self) -> usize {
+        0
+    }
+
     /// Prepare an isolated native snapshot by its explicit plan identifier.
     /// Unknown identifiers fail loudly; snapshots never fall back to a different
     /// state's screenshot. The fixture root contains only temporary data.
@@ -232,6 +240,7 @@ pub type Flag = Rc<Cell<bool>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lf_core::config::save_config;
     use std::path::Path;
 
     fn file_services(dir: &Path, path: &Path, config: Config) -> Rc<HubServices> {

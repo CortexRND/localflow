@@ -397,14 +397,6 @@ fn keys_list_only_shows_masked_values() {
     assert!(!text.contains("very-secret"));
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 #[test]
 fn llm_use_and_unreachable_provider() {
     let sandbox = Sandbox::new();
@@ -413,8 +405,8 @@ fn llm_use_and_unreachable_provider() {
         (code(&unknown), stderr(&unknown)),
         (1, "Error: unknown LLM provider: bogus\n".into())
     );
-    let url = format!("http://127.0.0.1:{}", free_port());
-    let used = sandbox.run(&["llm", "use", "ollama", "--base-url", &url, "--model", "m1"]);
+    let url = "http://127.0.0.1:0";
+    let used = sandbox.run(&["llm", "use", "ollama", "--base-url", url, "--model", "m1"]);
     assert_eq!(code(&used), 0, "{}", stderr(&used));
     assert_eq!(
         stdout(&sandbox.run(&["config", "get", "llm.base_url"])),
@@ -437,9 +429,9 @@ fn llm_use_and_unreachable_provider() {
 #[test]
 fn status_without_server_is_clear_and_never_creates_a_token() {
     let sandbox = Sandbox::new();
-    let port = free_port().to_string();
+    let port = "0";
     assert_eq!(
-        code(&sandbox.run(&["config", "set", "server.port", &port])),
+        code(&sandbox.run(&["config", "set", "server.port", port])),
         0
     );
     let text = sandbox.run(&["status"]);

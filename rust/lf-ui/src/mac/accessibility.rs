@@ -18,7 +18,7 @@ use objc2_foundation::{NSRange, NSString};
 
 use lf_ui::backends::ask::FakeAskBackend;
 use lf_ui::backends::meeting::FakeMeetingClient;
-use lf_ui::backends::prompts::{UnavailablePromptQueue, WorkPrompt};
+use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, UnavailablePromptQueue, WorkPrompt};
 use lf_ui::hub_route::HUB_PAGES;
 use lf_ui::mac::hub::Hub;
 use lf_ui::mac::page::HubServices;
@@ -73,15 +73,22 @@ fn named_button(view: &NSView, label: &str) -> Option<Retained<NSButton>> {
         .find_map(|child| named_button(&child, label))
 }
 
-fn settle_prompts(hub: &Hub) {
+fn settle_requests(hub: &Hub) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while has_text(&hub.content_view(), "Loading prompts…") {
+    loop {
+        let pending = hub.drain_requests();
+        if pending == 0 {
+            break;
+        }
         assert!(
             std::time::Instant::now() < deadline,
-            "prompt worker did not finish"
+            "{}: {pending} page requests did not finish",
+            hub.current_page()
         );
         spin_run_loop(0.02);
     }
+    assert!(!has_text(&hub.content_view(), "Loading prompts…"));
+    assert!(!has_text(&hub.content_view(), "Loading settings…"));
 }
 
 fn assert_meetings_focus(mtm: MainThreadMarker) {
@@ -142,6 +149,62 @@ fn assert_meetings_focus(mtm: MainThreadMarker) {
     }
     hub.shutdown();
     println!("Native Meetings focus audit: notes/title/question focus and selection survive status-style rebuilds");
+}
+
+fn assert_settings_writes(mtm: MainThreadMarker) {
+    fn wait_for_sounds(hub: &Hub, services: &HubServices, enabled: bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while services.config().field_bool("sounds_enabled") != Some(enabled) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Settings write did not complete"
+            );
+            spin_run_loop(0.02);
+        }
+        settle_requests(hub);
+    }
+    fn request(view: &NSView) -> Option<Retained<NSTextView>> {
+        if let Ok(text) = view.retain().downcast::<NSTextView>() {
+            if text
+                .accessibilityLabel()
+                .is_some_and(|label| label.to_string() == lf_ui::hub_settings::HEADING)
+            {
+                return Some(text);
+            }
+        }
+        view.subviews().iter().find_map(|child| request(&child))
+    }
+    let root = tempfile::tempdir().unwrap();
+    let services = services(root.path());
+    let hub = Hub::new(mtm, services.clone(), "Settings");
+    hub.prepare_snapshot("preview", root.path()).unwrap();
+    hub.show_page("Settings");
+    let apply = named_button(&hub.content_view(), "Apply").expect("Apply preview");
+    unsafe { apply.performClick(None) };
+    wait_for_sounds(&hub, &services, false);
+    assert_eq!(services.config().field_bool("sounds_enabled"), Some(false));
+    assert_eq!(
+        request(&hub.content_view()).unwrap().string().to_string(),
+        ""
+    );
+    assert!(
+        named_button(&hub.content_view(), lf_ui::hub_settings::UNDO_TITLE)
+            .unwrap()
+            .isEnabled()
+    );
+    hub.resize_content(1280.0, 820.0);
+    spin_run_loop(0.1);
+    settle_requests(&hub);
+    assert_eq!(
+        request(&hub.content_view()).unwrap().string().to_string(),
+        ""
+    );
+    let undo = named_button(&hub.content_view(), lf_ui::hub_settings::UNDO_TITLE).unwrap();
+    unsafe { undo.performClick(None) };
+    wait_for_sounds(&hub, &services, true);
+    assert_eq!(services.config().field_bool("sounds_enabled"), Some(true));
+    hub.shutdown();
+    println!("Native Settings audit: worker Apply/Undo, real undo record and cleared request survive rebuild");
 }
 
 fn assert_dictionary_submissions(mtm: MainThreadMarker) {
@@ -226,6 +289,48 @@ fn assert_dictionary_submissions(mtm: MainThreadMarker) {
     println!("Native Dictionary submission audit: add/edit saves clear only the submitted card; empty and duplicate failures preserve drafts");
 }
 
+fn assert_prompt_rebuild(mtm: MainThreadMarker) {
+    for populated in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let base = services(root.path());
+        let queue = Arc::new(FakePromptQueue::new());
+        if populated {
+            queue
+                .add(
+                    &[WorkPrompt::new("Completed queue result", "Review this")],
+                    &["review.md".into()],
+                    "Meeting",
+                )
+                .unwrap();
+        }
+        let services = HubServices::new(
+            Config::defaults_for(true),
+            base.history.clone(),
+            base.dictionary.clone(),
+            queue.clone(),
+            Arc::new(FakeMeetingClient::new()),
+            Box::new(FakeAskBackend::default()),
+        );
+        services.memory_only_config.set(true);
+        let hub = Hub::new(mtm, services, "Prompts");
+        settle_requests(&hub);
+        let expected = if populated {
+            "Completed queue result"
+        } else {
+            "No prompts to review yet"
+        };
+        assert!(has_text(&hub.content_view(), expected));
+        queue.set_read_failure(Some("Rebuild must not reload the queue"));
+        hub.rebuild_current_page();
+        settle_requests(&hub);
+        assert_eq!(hub.drain_requests(), 0);
+        assert!(has_text(&hub.content_view(), expected));
+        assert!(!has_text(&hub.content_view(), "Can't read the queue"));
+        hub.shutdown();
+    }
+    println!("Native Prompts rebuild audit: completed empty/populated loads survive rebuild without rereading the queue");
+}
+
 fn assert_history_search(hub: &Hub) {
     hub.show_page("History");
     for (query, expected) in [
@@ -240,7 +345,7 @@ fn assert_history_search(hub: &Hub) {
         );
         field.setStringValue(&NSString::from_str(query));
         assert!(unsafe { field.sendAction_to(field.action(), field.target().as_deref()) });
-        spin_run_loop(0.1);
+        settle_requests(hub);
         assert_eq!(
             search_field(&hub.content_view())
                 .unwrap()
@@ -248,7 +353,10 @@ fn assert_history_search(hub: &Hub) {
                 .to_string(),
             query
         );
-        assert!(has_text(&hub.content_view(), expected));
+        assert!(
+            has_text(&hub.content_view(), expected),
+            "History query {query:?} did not render {expected:?}"
+        );
     }
     println!(
         "Native History search audit: explicit submit, matching, empty and cleared queries passed"
@@ -355,13 +463,15 @@ pub fn run() {
     assert_eq!(terminate_calls.get(), 1);
     println!("Native Hub termination audit: AppKit quit invokes the flush callback once");
     assert_dictionary_submissions(mtm);
+    assert_settings_writes(mtm);
     assert_meetings_focus(mtm);
+    assert_prompt_rebuild(mtm);
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
     let mut failures = Vec::new();
     for page in HUB_PAGES {
         hub.show_page(page);
-        settle_prompts(&hub);
+        settle_requests(&hub);
         assert_eq!(hub.current_page(), page);
         walk(&hub.content_view(), "root", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
@@ -410,14 +520,16 @@ pub fn run() {
         .unwrap();
     for page in HUB_PAGES {
         hub.show_page(page);
-        settle_prompts(&hub);
+        settle_requests(&hub);
         walk(&hub.content_view(), "populated", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
     }
-    for scenario in lf_ui::snapshot_plan::SCENARIOS
-        .iter()
-        .filter(|s| matches!(s.page, "Ask" | "Meetings" | "Hot Phrases"))
-    {
+    for scenario in lf_ui::snapshot_plan::SCENARIOS.iter().filter(|s| {
+        matches!(
+            s.page,
+            "Ask" | "Meetings" | "Hot Phrases" | "Models" | "Settings"
+        )
+    }) {
         let fixture = tempfile::tempdir().unwrap();
         let fixture_hub = Hub::new(mtm, services(fixture.path()), scenario.page);
         fixture_hub
@@ -439,7 +551,7 @@ pub fn run() {
         assert_decorations_hidden(&fixture_hub.content_view(), scenario.page, &mut failures);
         fixture_hub.shutdown();
     }
-    for unavailable in ["Models", "Settings"] {
+    for unavailable in ["Setup", "not a page"] {
         hub.show_page("History");
         hub.show_page(unavailable);
         assert_eq!(hub.current_page(), "Home");
@@ -454,7 +566,7 @@ pub fn run() {
     );
     let unavailable = Hub::new(mtm, production, "Prompts");
     assert!(has_text(&unavailable.content_view(), "Loading prompts…"));
-    settle_prompts(&unavailable);
+    settle_requests(&unavailable);
     assert!(has_text(
         &unavailable.content_view(),
         "Can't read the queue"
@@ -469,5 +581,5 @@ pub fn run() {
     unavailable.shutdown();
     hub.shutdown();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    println!("Native accessibility audit: all eight ported pages and snapshot states passed");
+    println!("Native accessibility audit: all ten ported pages and snapshot states passed");
 }

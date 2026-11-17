@@ -104,11 +104,16 @@ fn runtime_poller_fetches_authenticated_status_and_reports_down() {
     let status = json!({"session": null, "detected": false});
     *server.backend.response.lock().unwrap() = Some(status.clone());
     let client = HttpMeetingClient(server.http());
+    let fetch = Arc::new(Mutex::new(client.status_fetch()));
+    let active_fetch = Arc::clone(&fetch);
     let menu = MenuState::new(None, true);
     let updates = menu.clone();
     let (send, receive) = std::sync::mpsc::channel();
     let _poller = MeetingStatusPoller::start(
-        client.status_fetch(),
+        Arc::new(move || {
+            let fetch = active_fetch.lock().unwrap().clone();
+            fetch()
+        }),
         Arc::new(move |result| {
             updates.change(|model| model.apply_status(&result));
             send.send(result).unwrap();
@@ -132,7 +137,9 @@ fn runtime_poller_fetches_authenticated_status_and_reports_down() {
     _poller.poke();
     assert_eq!(next(), PollResult::Ok(json!({})));
 
-    drop(server);
+    let down =
+        HttpMeetingClient(HttpTransport::new("http://127.0.0.1:0", || Ok(String::new())).unwrap());
+    *fetch.lock().unwrap() = down.status_fetch();
     _poller.poke();
     assert_eq!(next(), PollResult::Down);
 }
@@ -333,10 +340,8 @@ fn token_source_is_read_each_request_without_creation_or_rotation() {
 
 #[test]
 fn disconnected_server_maps_to_python_server_down() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    let client = HttpMeetingClient(HttpTransport::new(&base, || Ok(String::new())).unwrap());
+    let client =
+        HttpMeetingClient(HttpTransport::new("http://127.0.0.1:0", || Ok(String::new())).unwrap());
     assert_eq!(client.status().unwrap_err().0, SERVER_DOWN);
 }
 

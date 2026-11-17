@@ -30,7 +30,8 @@ use super::actions::{ActionTarget, Timer};
 use super::page::{HubPage, HubServices, Measure, PageCtx, PageHandle};
 use super::pages::{
     ask::AskPage, dictionary::DictionaryPage, history::HistoryPage, home::HomePage,
-    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, prompts::PromptsPage, style::StylePage,
+    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, models::ModelsPage, prompts::PromptsPage,
+    settings::SettingsPage, style::StylePage,
 };
 use super::style::{
     boxed_measure, color, hide_from_accessibility, page_title, rect, style_flat_button,
@@ -214,6 +215,8 @@ fn make_pages() -> Vec<(&'static str, PageHandle)> {
                 "Dictionary" => Rc::new(RefCell::new(DictionaryPage::new())),
                 "Prompts" => Rc::new(RefCell::new(PromptsPage::new())),
                 "Style" => Rc::new(RefCell::new(StylePage::new())),
+                "Models" => Rc::new(RefCell::new(ModelsPage::new())),
+                "Settings" => Rc::new(RefCell::new(SettingsPage::new())),
                 _ => unreachable!("HUB_PAGES contains only implemented pages"),
             };
             (name, page)
@@ -705,6 +708,52 @@ impl Hub {
         let scroll_y = self.scroll.contentView().bounds().origin.y;
         self.show_page(&page);
         self.scroll_to(scroll_y);
+    }
+
+    fn drain_deferred(&self) {
+        let timers = std::mem::take(&mut *self.deferred.borrow_mut());
+        for timer in timers {
+            if timer.is_valid() {
+                timer.fire();
+                timer.invalidate();
+            }
+        }
+    }
+
+    /// Deliver request results and their deferred UI work on the main thread.
+    /// Count pending work after rendering, including requests started by it.
+    pub fn drain_requests(&self) -> usize {
+        self.drain_deferred();
+        let current = self.current_page();
+        let mut repaint = false;
+        for (name, _) in &self.pages {
+            repaint |= self
+                .with_page(name, |page| {
+                    let before = page.pending_requests();
+                    let after = page.drain_requests();
+                    *name == current && before != after
+                })
+                .unwrap_or(false);
+        }
+        if repaint {
+            self.rebuild_current_page();
+        }
+        self.drain_deferred();
+        let pending: usize = self
+            .pages
+            .iter()
+            .map(|(name, _)| {
+                self.with_page(name, |page| page.pending_requests())
+                    .unwrap_or(1)
+            })
+            .sum();
+        pending
+            + self
+                .deferred
+                .borrow()
+                .iter()
+                .filter(|timer| timer.is_valid())
+                .count()
     }
 
     /// Scroll the page canvas, clamped to the rendered document's range.

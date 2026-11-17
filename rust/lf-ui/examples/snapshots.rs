@@ -22,7 +22,7 @@ mod native {
     use lf_ui::mac::snapshot::{set_appearance, snapshot_png, spin_run_loop, SnapshotTarget};
     use lf_ui::snapshot_plan::{
         dictionary_replacements, dictionary_words, history_rows, queue_prompts, total_snapshots,
-        StyleStep, SCENARIOS, SNAPSHOT_SIZES, SNAPSHOT_THEMES,
+        Scenario, StyleStep, SCENARIOS, SNAPSHOT_SIZES, SNAPSHOT_THEMES,
     };
     use objc2::rc::Retained;
     use objc2::MainThreadMarker;
@@ -34,20 +34,77 @@ mod native {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    fn loading_prompts(view: &NSView) -> bool {
-        view.downcast_ref::<NSTextField>()
-            .is_some_and(|field| field.stringValue().to_string() == "Loading prompts…")
-            || view.subviews().iter().any(|child| loading_prompts(&child))
-    }
-
-    fn settle_prompts(hub: &Hub) -> Result<()> {
+    fn settle_requests(hub: &Hub) -> Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while loading_prompts(&hub.content_view()) {
+        loop {
+            let pending = hub.drain_requests();
+            if pending == 0 {
+                break;
+            }
             anyhow::ensure!(
                 std::time::Instant::now() < deadline,
-                "prompt worker did not finish"
+                "{}: {pending} page requests did not finish",
+                hub.current_page()
             );
             spin_run_loop(0.02);
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SnapshotScroll {
+        SettingsManual,
+        SettingsRow(&'static str),
+    }
+
+    impl SnapshotScroll {
+        fn for_scenario(scenario: &Scenario) -> Option<Self> {
+            match (scenario.page, scenario.prepare) {
+                ("Settings", "manual" | "switches") => Some(Self::SettingsManual),
+                ("Settings", "manual-error") => Some(Self::SettingsRow("prompt_hotkey")),
+                _ => None,
+            }
+        }
+
+        fn target_y(self, card_y: f64, control_y: f64) -> f64 {
+            match self {
+                Self::SettingsManual => card_y - 12.0,
+                Self::SettingsRow(_) => card_y + control_y - 160.0,
+            }
+        }
+    }
+
+    fn editable_field(card: &NSView, label: &str) -> Option<Retained<NSTextField>> {
+        card.subviews().iter().find_map(|subview| {
+            let field = subview.clone().downcast::<NSTextField>().ok()?;
+            (field.isEditable()
+                && field
+                    .accessibilityLabel()
+                    .is_some_and(|candidate| candidate.to_string() == label))
+            .then_some(field)
+        })
+    }
+
+    fn position_snapshot(hub: &Hub, scenario: &Scenario) -> Result<()> {
+        if let Some(scroll) = SnapshotScroll::for_scenario(scenario) {
+            let subviews = hub.body().subviews();
+            let card = subviews
+                .lastObject()
+                .ok_or_else(|| anyhow!("Settings manual card is missing"))?;
+            let control_y = match scroll {
+                SnapshotScroll::SettingsManual => 0.0,
+                SnapshotScroll::SettingsRow("prompt_hotkey") => {
+                    editable_field(&card, "Prompt shortcut")
+                        .ok_or_else(|| anyhow!("Settings Prompt shortcut control is missing"))?
+                        .frame()
+                        .origin
+                        .y
+                }
+                SnapshotScroll::SettingsRow(other) => {
+                    anyhow::bail!("unknown Settings snapshot row {other:?}")
+                }
+            };
+            hub.scroll_to(scroll.target_y(card.frame().origin.y, control_y));
         }
         Ok(())
     }
@@ -189,7 +246,7 @@ mod native {
             hub.prepare_snapshot(scenario.prepare, &base)?;
             hub.show_page(scenario.page);
             spin_run_loop(0.05);
-            settle_prompts(&hub)?;
+            settle_requests(&hub)?;
             if let Some(error) = scenario.error {
                 services.set_page_error(scenario.page, error);
             }
@@ -200,6 +257,7 @@ mod native {
                     set_appearance(SnapshotTarget::Window(hub.window()), dark)?;
                     hub.rebuild_current_page();
                     spin_run_loop(0.05);
+                    position_snapshot(&hub, &scenario)?;
                     let name = scenario.file_name(size, theme);
                     snapshot_png(SnapshotTarget::Window(hub.window()), &out.join(&name), dark)
                         .with_context(|| format!("snapshot {name}"))?;
@@ -214,5 +272,27 @@ mod native {
         );
         println!("wrote {written} snapshots to {}", out.display());
         Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use lf_ui::snapshot_plan::find;
+
+        #[test]
+        fn settings_scroll_matches_python_geometry() {
+            let scroll = |state| SnapshotScroll::for_scenario(find("Settings", state).unwrap());
+            assert_eq!(scroll("manual"), Some(SnapshotScroll::SettingsManual));
+            assert_eq!(scroll("switches"), Some(SnapshotScroll::SettingsManual));
+            assert_eq!(
+                scroll("manual-error"),
+                Some(SnapshotScroll::SettingsRow("prompt_hotkey"))
+            );
+            assert_eq!(scroll("preview"), None);
+            assert_eq!(SnapshotScroll::SettingsManual.target_y(640.0, 0.0), 628.0);
+            assert_eq!(
+                SnapshotScroll::SettingsRow("prompt_hotkey").target_y(640.0, 280.0),
+                760.0
+            );
+        }
     }
 }
