@@ -676,13 +676,13 @@ fn services(root: &std::path::Path) -> Rc<HubServices> {
 
 fn assert_offscreen_views_released(mtm: MainThreadMarker) {
     let root = tempfile::tempdir().unwrap();
-    let hub = Hub::new(mtm, services(root.path()), "Dictionary");
-    let weak = objc2::rc::autoreleasepool(|_| {
+    let (hub, weak) = objc2::rc::autoreleasepool(|_| {
+        let hub = Hub::new(mtm, services(root.path()), "Dictionary");
         let field = editable_field(&hub.content_view(), "Word").unwrap();
         field.setStringValue(&NSString::from_str("unsaved draft"));
         let weak = objc2::rc::Weak::new(&*field);
         hub.show_page("Home");
-        weak
+        (hub, weak)
     });
     assert!(
         weak.load().is_none(),
