@@ -82,6 +82,13 @@ def test_native_workflow_runs_measurements_after_fixed_clip_and_uploads_evidence
     )
 
 
+def test_memory_baseline_uses_separate_cargo_artifacts():
+    workflow = (ROOT / ".github/workflows/rust.yml").read_text()
+    assert 'CARGO_TARGET_DIR="$baseline/target" cargo build' in workflow
+    assert '"$baseline/target/release/lf-hub" --page Home' in workflow
+    assert '"$PWD/artifacts/memory/after" rust/target/release/lf-hub --page Home' in workflow
+
+
 def test_whisper_smoke_selects_auto_tiny_and_validates_a_real_helper(
     tmp_path, monkeypatch
 ):

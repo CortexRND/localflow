@@ -99,6 +99,7 @@ fn main() {
         play_sound: Arc::new(|_| {}),
         frontmost: Arc::new(|| None),
         on_state: None,
+        on_recording_start: None,
         latest_text: Arc::new(|f| f.to_string()),
         toggle_store: Arc::new(|| Ok(true)),
         clock: Arc::new(|| 0.0),

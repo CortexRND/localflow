@@ -18,6 +18,7 @@ pub mod singleinstance;
 pub mod sounds;
 pub mod status;
 pub mod transform;
+pub mod warmup;
 pub mod worker;
 
 #[cfg(target_os = "macos")]
