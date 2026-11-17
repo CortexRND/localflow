@@ -38,7 +38,7 @@ impl PendingWrites {
     }
 
     fn wait(&self, timeout: Duration) -> bool {
-        self.wait_until(timeout, 0)
+        self.wait_until(timeout, || 0)
     }
 
     fn wait_for_quit(&self, normal: Duration, cap: Duration) -> bool {
@@ -54,13 +54,13 @@ impl PendingWrites {
         self.wait(remaining)
     }
 
-    fn wait_until(&self, timeout: Duration, allowed: usize) -> bool {
+    fn wait_until(&self, timeout: Duration, allowed: impl Fn() -> usize) -> bool {
         let started = Instant::now();
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        while *pending > allowed {
+        while *pending > allowed() {
             let remaining = timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return false;
@@ -71,7 +71,7 @@ impl PendingWrites {
                 .unwrap_or_else(|error| error.into_inner());
             pending = next;
             if result.timed_out() {
-                return *pending <= allowed;
+                return *pending <= allowed();
             }
         }
         true
@@ -96,8 +96,9 @@ impl Drop for PendingWrite {
 
 #[cfg(feature = "runtime")]
 impl PendingWrite {
-    pub(crate) fn wait_for_others(&self, timeout: Duration) -> bool {
-        self.tracker.wait_until(timeout, 1)
+    pub(crate) fn wait_for_ui_writes(&self, timeout: Duration) -> bool {
+        self.tracker
+            .wait_until(timeout, || self.tracker.meetings.load(Ordering::Acquire))
     }
 }
 
@@ -157,6 +158,23 @@ mod tests {
         let ordinary = Arc::new(PendingWrites::default());
         let _write = ordinary.register();
         assert!(!ordinary.wait_for_quit(Duration::ZERO, Duration::from_secs(5)));
+    }
+
+    #[test]
+    #[cfg(feature = "runtime")]
+    fn shutdown_coordinators_wait_for_ui_guards_not_each_other() {
+        let writes = Arc::new(PendingWrites::default());
+        let first = writes.register_kind(true);
+        let second = writes.register_kind(true);
+        assert!(first.wait_for_ui_writes(Duration::ZERO));
+        let closing = writes.register();
+        assert!(!first.wait_for_ui_writes(Duration::from_millis(20)));
+        drop(closing);
+        assert!(second.wait_for_ui_writes(Duration::ZERO));
+        assert!(!writes.wait(Duration::ZERO));
+        drop(first);
+        drop(second);
+        assert!(writes.wait(Duration::ZERO));
     }
 
     #[test]
