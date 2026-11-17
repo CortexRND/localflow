@@ -39,6 +39,23 @@ unchanged; no unverified accuracy or provider claims are made. The results
 artifact includes load/transcription RSS, latency, transcripts, exact matches,
 unload RSS and any download/provider/diagnostic-tool errors.
 
+Memory rows include both RSS and the kernel `phys_footprint` ledger, sampled
+with the SDK's `proc_pid_rusage` API. This is the same footprint accounting used
+for Activity Monitor's Memory column; shared clean framework mappings inflate
+RSS without equivalently increasing this ledger. The Python comparison is the
+unchanged standalone Hub UI, **without** the runtime/server included in Rust.
+`scripts/ci_memory_analysis.py` reports first-Ask map and typed heap deltas.
+
+After safe model eviction on macOS, Rust asks all malloc zones to return unused
+pages with `malloc_zone_pressure_relief(NULL, 0)`. It never frees live allocations.
+The benchmark measures recognizer unload, complete engine drop, and allocator
+relief separately, retaining their maps/heap summaries. Sherpa's recognizer and
+stream wrappers own their native handles and destroy them on drop; the native
+NeMo model owns all three sessions and its environment. The measurement-only
+session shim resolves the original ORT export in its loaded Mach-O image to
+avoid recursive dyld interposition. A failed repaired attempt disables further
+shim cases rather than repeatedly crashing or claiming options were measured.
+
 # LocalFlow Rust port (Stage 1, optional)
 
 This directory holds an **optional** Rust implementation of LocalFlow's local

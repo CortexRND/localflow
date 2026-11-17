@@ -29,7 +29,7 @@ with urlopen(Request('http://127.0.0.1:8756/api/status', headers={'X-Localflow-T
 assert json.loads((root / 'healthz.json').read_text())['ok'] is True
 rows = list(csv.reader((root / 'pages.csv').open()))
 assert len(rows) == 21, rows
-text = '| State | RSS (KiB) |\n| --- | ---: |\n' + ''.join(f'| {name} | {rss} |\n' for name, rss in rows)
+text = '| State | RSS (KiB) | Footprint (KiB) |\n| --- | ---: | ---: |\n' + ''.join(f'| {name} | {rss} | {footprint} |\n' for name, rss, footprint in rows)
 (root / 'pages.md').write_text(text)
 print(text)
 print('All pages sampled; one Hub process; server owned by Hub; health OK; speech unloaded')

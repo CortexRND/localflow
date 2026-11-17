@@ -63,6 +63,10 @@ impl SpeechMemory {
                 false
             }
         });
+        if unloaded {
+            let relieved = lf_stt::release_idle_memory();
+            log::info!("speech allocator pressure relief: {relieved} bytes");
+        }
         unloaded
     }
 }

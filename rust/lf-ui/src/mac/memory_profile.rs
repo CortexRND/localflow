@@ -95,20 +95,22 @@ pub(super) fn start(router: Rc<WindowRouter>) -> Option<Timer> {
                     .unwrap();
                 assert_eq!(status["stt"]["loaded"].as_bool(), Some(false));
                 let pid = std::process::id().to_string();
-                let rss = Command::new("ps")
-                    .args(["-o", "rss=", "-p", &pid])
-                    .output()
-                    .expect("ps RSS");
-                assert!(rss.status.success());
-                let rss = String::from_utf8(rss.stdout).unwrap();
-                let rss: u64 = rss.trim().parse().expect("positive RSS");
-                assert!(rss > 0);
+                let metrics =
+                    Command::new(std::env::var_os("LF_MEMORY_PROBE").expect("memory probe"))
+                        .arg(&pid)
+                        .output()
+                        .expect("process memory probe");
+                assert!(metrics.status.success());
+                let metrics: serde_json::Value = serde_json::from_slice(&metrics.stdout).unwrap();
+                let rss = metrics["rss"].as_u64().unwrap() / 1024;
+                let footprint = metrics["footprint"].as_u64().unwrap() / 1024;
+                assert!(rss > 0 && footprint > 0);
                 let mut report = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&output)
                     .unwrap();
-                writeln!(report, "{name},{rss}").unwrap();
+                writeln!(report, "{name},{rss},{footprint}").unwrap();
                 let prefix = output.parent().unwrap().join(name.replace(' ', "_"));
                 for (tool, args) in [
                     ("vmmap", vec!["--summary", &pid]),
@@ -124,7 +126,7 @@ pub(super) fn start(router: Rc<WindowRouter>) -> Option<Timer> {
                         Err(error) => eprintln!("profile {tool}: {error}"),
                     }
                 }
-                eprintln!("RSS_PROFILE {name}: {rss} KiB");
+                eprintln!("RSS_PROFILE {name}: RSS {rss} KiB; footprint {footprint} KiB");
                 sampling.store(false, Ordering::Release);
             });
             index.set(i + 1);

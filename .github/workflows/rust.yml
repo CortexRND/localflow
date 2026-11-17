@@ -14,6 +14,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       HF_HUB_CACHE: ${{ github.workspace }}/.hf-cache/hub
+      LF_MEMORY_PROBE: ${{ github.workspace }}/artifacts/memory/mac-memory-probe
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +33,12 @@ jobs:
             find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
           fi
           cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
+      - name: Build kernel footprint and RSS probe
+        run: |
+          mkdir -p artifacts/memory
+          cc -O2 -Wall -Werror scripts/mac_memory_probe.c -lproc -o "$LF_MEMORY_PROBE"
+          "$LF_MEMORY_PROBE" $$
+          if "$LF_MEMORY_PROBE" 0; then exit 1; fi
       - name: Same-runner baseline and optimized page RSS
         env:
           LOCALFLOW_CONFIG: ${{ runner.temp }}/memory-config/config.toml
@@ -53,15 +60,27 @@ jobs:
           import csv, os
           from pathlib import Path
           root = Path('artifacts/memory')
-          before = dict(csv.reader((root / 'before/pages.csv').open()))
-          after = dict(csv.reader((root / 'after/pages.csv').open()))
-          text = '| State | Before KiB | After KiB | Change KiB |\n| --- | ---: | ---: | ---: |\n'
-          for key, value in before.items():
-              text += f'| {key} | {value} | {after[key]} | {int(after[key])-int(value):+d} |\n'
+          before = {row[0]: row[1:] for row in csv.reader((root / 'before/pages.csv').open())}
+          after = {row[0]: row[1:] for row in csv.reader((root / 'after/pages.csv').open())}
+          text = '| State | Before RSS KiB | Before footprint KiB | After RSS KiB | After footprint KiB |\n| --- | ---: | ---: | ---: | ---: |\n'
+          for key, values in before.items():
+              text += f'| {key} | {values[0]} | {values[1]} | {after[key][0]} | {after[key][1]} |\n'
           (root / 'comparison.md').write_text(text)
           print(text)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary: summary.write(text)
           PY
+          python3 scripts/ci_memory_analysis.py artifacts/memory/after
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Unchanged Python Hub-only page RSS and footprint
+        env:
+          LOCALFLOW_CONFIG: ${{ runner.temp }}/memory-config/python.toml
+          PYNPUT_BACKEND: dummy
+        run: |
+          pip install -e .
+          printf 'config_version = 2\n\n[setup]\nversion = 1\n' > "$LOCALFLOW_CONFIG"
+          python scripts/ci_python_hub_pages.py artifacts/memory/python
       - name: Build real Parakeet memory benchmark
         run: cargo build --manifest-path rust/Cargo.toml --release -p lf-stt --example parakeet_memory
       - name: Parakeet variants, real session options, latency and transcript accuracy

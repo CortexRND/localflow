@@ -3,6 +3,9 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <mach-o/dyld.h>
+#include <mach-o/nlist.h>
+#include <string.h>
 
 static const OrtApi *original;
 static OrtApi api;
@@ -56,11 +59,43 @@ static const OrtApi *ORT_API_CALL get_api(uint32_t version) {
 }
 
 static void initialize(void) {
-  const OrtApiBase *(*get_base)(void) = dlsym(RTLD_NEXT, "OrtGetApiBase");
-  if (!get_base) abort();
+  const OrtApiBase *(*get_base)(void) = NULL;
+  /* Read the original export rather than a dyld-interposed dlsym result. */
+  for (uint32_t i = 0; i < _dyld_image_count() && !get_base; ++i) {
+    const char *name = _dyld_get_image_name(i);
+    if (!name || !strstr(name, "/libonnxruntime")) continue;
+    const struct mach_header_64 *header = (const void *)_dyld_get_image_header(i);
+    if (header->magic != MH_MAGIC_64) continue;
+    intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+    const struct symtab_command *symbols = NULL;
+    const struct segment_command_64 *linkedit = NULL;
+    const struct load_command *command = (const void *)(header + 1);
+    for (uint32_t j = 0; j < header->ncmds; ++j) {
+      if (command->cmd == LC_SYMTAB) symbols = (const void *)command;
+      if (command->cmd == LC_SEGMENT_64) {
+        const struct segment_command_64 *segment = (const void *)command;
+        if (!strcmp(segment->segname, SEG_LINKEDIT)) linkedit = segment;
+      }
+      command = (const void *)((const char *)command + command->cmdsize);
+    }
+    if (!symbols || !linkedit) continue;
+    uintptr_t mapped = slide + linkedit->vmaddr - linkedit->fileoff;
+    const struct nlist_64 *entries = (const void *)(mapped + symbols->symoff);
+    const char *strings = (const void *)(mapped + symbols->stroff);
+    for (uint32_t j = 0; j < symbols->nsyms; ++j) {
+      if ((entries[j].n_type & N_TYPE) == N_SECT && entries[j].n_un.n_strx < symbols->strsize &&
+          !strcmp(strings + entries[j].n_un.n_strx, "_OrtGetApiBase")) {
+        get_base = (void *)(slide + entries[j].n_value);
+        fprintf(stderr, "ORT_MEMORY_OPTIONS original image: %s\n", name);
+        break;
+      }
+    }
+  }
+  if (!get_base) { fprintf(stderr, "ORT_MEMORY_OPTIONS original export missing\n"); exit(78); }
   base = *get_base();
   original = base.GetApi(ORT_API_VERSION);
-  if (!original) abort();
+  if (!original) { fprintf(stderr, "ORT_MEMORY_OPTIONS API %u unavailable (runtime %s)\n", ORT_API_VERSION, base.GetVersionString()); exit(78); }
+  fprintf(stderr, "ORT_MEMORY_OPTIONS API %u / runtime %s\n", ORT_API_VERSION, base.GetVersionString());
   api = *original;
   api.CreateSession = create;
   api.CreateSessionFromArray = create_array;

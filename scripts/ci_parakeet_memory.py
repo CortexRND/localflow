@@ -72,8 +72,13 @@ for name, args, tuning in cases:
                                 capture_output=True, text=True, timeout=900)
         (output / f'{name}.log').write_text(result.stdout + result.stderr)
         if result.returncode:
+            if tuning:
+                shim_error = f'Shim dropped after first failed repaired attempt: exit {result.returncode}: {result.stderr[-1500:]}'
+                (output / 'shim-dropped.txt').write_text(shim_error)
             raise RuntimeError(f'exit {result.returncode}: ' + result.stderr[-1500:])
         if tuning and result.stderr.count('ORT_MEMORY_OPTIONS applied:') < 3:
+            shim_error = 'Shim dropped: options were NOT verified on all three ONNX sessions'
+            (output / 'shim-dropped.txt').write_text(shim_error)
             raise RuntimeError('Options were NOT verified on all three ONNX sessions')
         entry.update(json.loads(destination.read_text()))
         entry['clip_sha256'] = hashlib.sha256(Path(entry['clip']).read_bytes()).hexdigest()
@@ -85,14 +90,23 @@ for name, args, tuning in cases:
 baseline = next((r.get('transcript') for r in results if r['name'] == 'int8-default'), None)
 hashes = {row['clip_sha256'] for row in results if 'clip_sha256' in row}
 assert len(hashes) <= 1, 'The clip changed during measurement'
-lines = ['| Configuration | Reported provider | Load RSS (MiB) | Transcribed RSS (MiB) | Load ms | Inference ms | Exact vs int8 CPU default |',
-         '| --- | --- | ---: | ---: | ---: | ---: | --- |']
+lines = ['All memory columns are MiB. Footprint is the kernel phys_footprint ledger (proc_pid_rusage), not shared clean RSS.', '',
+         '| Configuration | Provider | Load RSS | Load footprint | Transcribed RSS | Transcribed footprint | Load ms | Inference ms | Exact |',
+         '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |']
 for row in results:
     if 'error' in row:
-        lines.append(f'| {row["name"]} | ERROR (see log/JSON) | — | — | — | — | — |')
+        lines.append(f'| {row["name"]} | ERROR (see log/JSON) | — | — | — | — | — | — | — |')
         continue
     row['exact_match'] = row['transcript'] == baseline if baseline is not None else None
-    lines.append(f'| {row["name"]} | {row["provider"]} | {row["rss_after_load"]/2**20:.1f} | {row["rss_after_transcribe"]/2**20:.1f} | {row["load_ms"]:.1f} | {row["latency_ms"]:.1f} | {row["exact_match"]} |')
+    lines.append(f'| {row["name"]} | {row["provider"]} | {row["rss_after_load"]/2**20:.1f} | {row["footprint_load"]/2**20:.1f} | {row["rss_after_transcribe"]/2**20:.1f} | {row["footprint_transcribe"]/2**20:.1f} | {row["load_ms"]:.1f} | {row["latency_ms"]:.1f} | {row["exact_match"]} |')
+lines += ['', '| Configuration | Unload RSS | Unload footprint | Drop RSS | Drop footprint | Relief RSS | Relief footprint | Allocator bytes relieved (MiB) |',
+          '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+for row in results:
+    if 'error' in row:
+        lines.append(f'| {row["name"]} | ERROR | — | — | — | — | — | — |')
+        continue
+    values = [row[key] / 2**20 for key in ['rss_after_unload', 'footprint_unload', 'rss_after_drop', 'footprint_drop', 'rss_after_relief', 'footprint_relief', 'pressure_relief_bytes']]
+    lines.append('| ' + row['name'] + ' | ' + ' | '.join(f'{value:.1f}' for value in values) + ' |')
 lines += ['', 'Comparison baseline requested: approximately 1.1 GB. RSS includes the process, not just model weights.',
           'Load includes the runtime’s existing one-second silence warmup. Every case uses cached test_wavs/0.wav.',
           'Exact match is relative to the default native int8 CPU transcript, not a human-labeled WER.',
