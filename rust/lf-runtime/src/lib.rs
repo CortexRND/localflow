@@ -15,6 +15,7 @@ pub mod run;
 pub mod server;
 pub mod settings;
 pub mod singleinstance;
+pub mod sounds;
 pub mod status;
 pub mod transform;
 pub mod worker;

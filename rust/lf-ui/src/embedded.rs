@@ -182,7 +182,7 @@ impl EmbeddedRuntime {
                 audio: Box::new(lf_stt::runtime::RecorderSource::from_config(&config)?),
                 speech: initial,
                 build_stt,
-                play_sound: Arc::new(|_| {}),
+                play_sound: Arc::new(lf_runtime::sounds::play),
             };
             lf_runtime::run::start_with_menu(options, menu.clone(), Some(toggle))
         })()
