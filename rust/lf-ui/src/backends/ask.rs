@@ -8,6 +8,7 @@
 //! [`FakeAskBackend`] is the in-memory stand-in for tests.
 
 use std::collections::{BTreeSet, VecDeque};
+use std::path::{Path, PathBuf};
 
 use crate::pystr::PyStr;
 
@@ -134,6 +135,43 @@ pub fn citation_target(citation: &Citation) -> Result<CitationTarget, CitationEr
         )),
         _ => Ok(CitationTarget::File(citation.reference.clone())),
     }
+}
+
+/// Resolve a document citation inside the configured vault, never a launch target.
+pub fn citation_document(path: &str, vault: &str) -> Option<PathBuf> {
+    if vault.py_strip().is_empty() {
+        return None;
+    }
+    let root = lf_core::home::expand_user(Path::new(vault))
+        .ok()?
+        .canonicalize()
+        .ok()?;
+    let path = lf_core::home::expand_user(Path::new(path))
+        .ok()?
+        .canonicalize()
+        .ok()?;
+    if !root.is_dir() || !path.starts_with(&root) || !path.is_file() {
+        return None;
+    }
+    if path.ancestors().any(|part| {
+        part.extension().is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("app") || ext.eq_ignore_ascii_case("bundle")
+        })
+    }) {
+        return None;
+    }
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "md" | "markdown" | "txt" | "pdf" | "rtf") {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if path.metadata().ok()?.permissions().mode() & 0o111 != 0 {
+            return None;
+        }
+    }
+    Some(path)
 }
 
 /// `[n] Source · YYYY-MM-DD · title`; the date is the first 10 characters of
@@ -335,6 +373,48 @@ mod tests {
         );
         assert!(citation_target(&cite("dictation", "abc", "")).is_err());
         assert!(citation_label(&cite("web", "", "")).is_err());
+    }
+
+    #[test]
+    fn citation_documents_reject_launch_targets_and_escape_paths() {
+        let vault = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let document = vault.path().join("notes.md");
+        std::fs::write(&document, "notes").unwrap();
+        let root = vault.path().to_str().unwrap();
+        assert_eq!(
+            citation_document(document.to_str().unwrap(), root),
+            Some(document.canonicalize().unwrap())
+        );
+        for name in ["missing.md", "run.command", "script.sh", "file.webloc", ""] {
+            if name != "missing.md" && !name.is_empty() {
+                std::fs::write(vault.path().join(name), "not a document").unwrap();
+            }
+            assert!(citation_document(vault.path().join(name).to_str().unwrap(), root).is_none());
+        }
+        let app = vault.path().join("Malicious.app");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(app.join("readme.md"), "notes").unwrap();
+        assert!(matches!(
+            citation_target(&cite("notes", app.to_str().unwrap(), "")).unwrap(),
+            CitationTarget::File(_)
+        ));
+        assert!(citation_document(app.to_str().unwrap(), root).is_none());
+        assert!(citation_document(app.join("readme.md").to_str().unwrap(), root).is_none());
+        let other = outside.path().join("secret.md");
+        std::fs::write(&other, "secret").unwrap();
+        assert!(citation_document(other.to_str().unwrap(), root).is_none());
+        assert!(citation_document(document.to_str().unwrap(), "").is_none());
+        assert!(citation_document("https://example.com/file.md", root).is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            let link = vault.path().join("escape.md");
+            symlink(&other, &link).unwrap();
+            assert!(citation_document(link.to_str().unwrap(), root).is_none());
+            std::fs::set_permissions(&document, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(citation_document(document.to_str().unwrap(), root).is_none());
+        }
     }
 
     #[test]

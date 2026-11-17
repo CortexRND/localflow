@@ -24,15 +24,18 @@ use objc2_app_kit::{
     NSScrollerStyle, NSWorkspace,
 };
 use objc2_app_kit::{NSControlStateValueOff, NSControlStateValueOn, NSTextField};
-use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRange, NSString, NSURL};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSDictionary, NSPoint, NSRange, NSString, NSURL,
+};
 
 use crate::ask_layout::{
     at_bottom, clamp_selection, conversation_layout, page_layout, resolve_scroll, ConversationItem,
     Placement, PlacementKind, AT_BOTTOM_SLACK, BODY_FONT, CAPTION_FONT, CHIP_FONT,
 };
 use crate::backends::ask::{
-    citation_label, citation_target, AskBackend, Citation, CitationTarget, FakeAskBackend, Turn,
-    ERROR_GENERIC, ERROR_UNREACHABLE, EXAMPLES, INTRO, PRIVACY, SOURCES, THINKING, TIME_FILTERS,
+    citation_document, citation_label, citation_target, AskBackend, Citation, CitationTarget,
+    FakeAskBackend, Turn, ERROR_GENERIC, ERROR_UNREACHABLE, EXAMPLES, INTRO, PRIVACY, SOURCES,
+    THINKING, TIME_FILTERS,
 };
 use crate::mac::actions::Timer;
 use crate::mac::page::{HubPage, HubServices, PageCtx};
@@ -613,10 +616,15 @@ fn open_citation(mtm: MainThreadMarker, services: &HubServices, citation: &Citat
             alert.runModal();
         }
         Ok(CitationTarget::File(path)) => {
-            let url = NSURL::fileURLWithPath(&NSString::from_str(&path));
-            if !NSWorkspace::sharedWorkspace().openURL(&url) {
+            let config = services.config();
+            let Some(path) = citation_document(&path, config.field_str("vault_path").unwrap_or(""))
+            else {
                 source_open_error(mtm);
-            }
+                return;
+            };
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+            NSWorkspace::sharedWorkspace()
+                .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
         }
         Err(_) => source_open_error(mtm),
     }
