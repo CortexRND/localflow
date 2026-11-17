@@ -8,10 +8,45 @@ use lf_input::paste::{Injector, SelectionCapture};
 pub type Pcm = Vec<f32>;
 
 pub trait SpeechEngine: Send + Sync {
+    fn loaded(&self) -> bool {
+        true
+    }
     fn load(&self) -> Result<(), String>;
     /// `prompt` is the dictionary vocabulary hint (`stt_prompt`), if any.
     fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> Result<String, String>;
     fn unload(&self);
+}
+
+pub struct ReportingSpeech {
+    inner: std::sync::Arc<dyn SpeechEngine>,
+    error: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+impl ReportingSpeech {
+    pub fn new(
+        inner: std::sync::Arc<dyn SpeechEngine>,
+        error: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> Self {
+        Self { inner, error }
+    }
+    fn report<T>(&self, result: Result<T, String>) -> Result<T, String> {
+        result.inspect_err(|error| (self.error)(error))
+    }
+}
+
+impl SpeechEngine for ReportingSpeech {
+    fn loaded(&self) -> bool {
+        self.inner.loaded()
+    }
+    fn load(&self) -> Result<(), String> {
+        self.report(self.inner.load())
+    }
+    fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> Result<String, String> {
+        self.report(self.inner.transcribe(pcm, prompt))
+    }
+    fn unload(&self) {
+        self.inner.unload();
+    }
 }
 
 /// The microphone. `start` opens it; `stop` closes it and returns the clip.

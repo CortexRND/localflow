@@ -32,7 +32,7 @@ pub type Decoder = Arc<dyn Fn(&[u8], i64) -> Result<Vec<f32>, BackendResponse> +
 pub type HistoryFactory = Arc<dyn Fn(&Config) -> Option<HistoryStore> + Send + Sync>;
 
 pub struct DictationBackend {
-    /// A loaded engine; `transcriber_loaded` reports true.
+    /// Shared engine; its loaded state is exposed without loading it.
     pub speech: Arc<dyn SpeechEngine>,
     pub vocabulary: VocabularyFn,
     pub build_llm: LlmFactory,
@@ -172,7 +172,7 @@ impl Backend for DictationBackend {
         self.fallback.stt_available(provider)
     }
     fn transcriber_loaded(&self) -> bool {
-        true
+        self.speech.loaded()
     }
     fn autostart_status(&self) -> String {
         self.fallback.autostart_status()

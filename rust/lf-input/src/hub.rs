@@ -318,6 +318,25 @@ impl KeyboardHub {
         self.lock().pending.is_some()
     }
 
+    /// Replace bindings even during a held gesture, cancelling its key state.
+    pub fn reconfigure_now(&self, shortcuts: &Shortcuts) -> Vec<BindingWarning> {
+        let (bindings, warnings) = build(shortcuts, &self.inner.actions.on_toggle);
+        for warning in &warnings {
+            log::warn!("{warning}");
+        }
+        let mut st = self.lock();
+        st.bindings = bindings;
+        st.pending = None;
+        st.pending_since = None;
+        st.pressed.clear();
+        st.pressed_raw.clear();
+        st.held_key_down = false;
+        st.command_key_down = false;
+        st.command_timer = None;
+        st.timer_generation = st.timer_generation.wrapping_add(1);
+        warnings
+    }
+
     pub fn press(&self, key: Key) {
         {
             let mut st = self.lock();

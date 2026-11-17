@@ -65,6 +65,67 @@ pub struct SpeechAdapter {
     slot: Mutex<SttSlot>,
 }
 
+/// Defers engine construction and weight loading until the first speech request.
+pub struct LazySpeechAdapter {
+    make: Box<dyn Fn() -> Result<SpeechAdapter, String> + Send + Sync>,
+    engine: Mutex<Option<SpeechAdapter>>,
+    loaded: std::sync::atomic::AtomicBool,
+}
+
+impl LazySpeechAdapter {
+    pub fn new(config: Config) -> Self {
+        Self {
+            make: Box::new(move || SpeechAdapter::from_config(&config).map_err(|e| e.to_string())),
+            engine: Mutex::new(None),
+            loaded: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn with_engine<T>(
+        &self,
+        use_engine: impl FnOnce(&SpeechAdapter) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut slot = self
+            .engine
+            .lock()
+            .map_err(|_| "speech engine poisoned".to_string())?;
+        if slot.is_none() {
+            *slot = Some((self.make)()?);
+        }
+        let engine = slot.as_ref().unwrap();
+        if !engine.loaded() {
+            engine.load()?;
+        }
+        self.loaded
+            .store(true, std::sync::atomic::Ordering::Release);
+        use_engine(engine)
+    }
+}
+
+impl SpeechEngine for LazySpeechAdapter {
+    fn loaded(&self) -> bool {
+        self.loaded.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn load(&self) -> Result<(), String> {
+        self.with_engine(|_| Ok(()))
+    }
+    fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> Result<String, String> {
+        self.with_engine(|engine| engine.transcribe(pcm, prompt))
+    }
+    fn unload(&self) {
+        let mut engine = self.engine.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(engine) = engine.take() {
+            engine.unload();
+        }
+        self.loaded
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+pub fn lazy_stt_factory() -> SttFactory {
+    Arc::new(|config| Ok(Arc::new(LazySpeechAdapter::new(config.clone())) as Arc<dyn SpeechEngine>))
+}
+
 impl SpeechAdapter {
     pub fn from_config(config: &Config) -> Result<Self> {
         validate_sample_rate(config)?;
@@ -222,6 +283,65 @@ mod tests {
             )),
             counts,
         )
+    }
+
+    fn lazy(root: &std::path::Path, fail_load: bool) -> (LazySpeechAdapter, Arc<Counts>) {
+        let root = root.to_path_buf();
+        let counts = Arc::new(Counts::default());
+        let engine_counts = counts.clone();
+        (
+            LazySpeechAdapter {
+                make: Box::new(move || {
+                    Ok(SpeechAdapter::with_slot(
+                        SttSlot::with_lease_root(root.clone()),
+                        EngineSpec {
+                            key: "fake".into(),
+                            backend: "whisper-cpp".into(),
+                            model_size: "base".into(),
+                            engine: Box::new(Fake {
+                                counts: engine_counts.clone(),
+                                loaded: Cell::new(false),
+                                fail_load,
+                            }),
+                        },
+                    ))
+                }),
+                engine: Mutex::new(None),
+                loaded: std::sync::atomic::AtomicBool::new(false),
+            },
+            counts,
+        )
+    }
+
+    #[test]
+    fn lazy_speech_defers_load_handles_empty_and_reuses_then_unloads_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let (speech, counts) = lazy(root.path(), false);
+        assert!(!speech.loaded());
+        assert_eq!(counts.loads.load(Ordering::SeqCst), 0);
+        assert_eq!(speech.transcribe(&[], None).unwrap(), "");
+        assert!(speech.loaded());
+        assert_eq!(speech.transcribe(&[0.5], None).unwrap(), "native");
+        assert_eq!(counts.loads.load(Ordering::SeqCst), 1);
+        speech.unload();
+        assert!(!speech.loaded());
+    }
+
+    #[test]
+    fn lazy_speech_load_failure_is_a_recoverable_request_error() {
+        let root = tempfile::tempdir().unwrap();
+        let (speech, counts) = lazy(root.path(), true);
+        assert_eq!(counts.loads.load(Ordering::SeqCst), 0);
+        assert!(speech
+            .transcribe(&[0.5], None)
+            .unwrap_err()
+            .contains("load failed"));
+        assert!(!speech.loaded());
+        let mut invalid = Config::default();
+        invalid.set_field("stt_backend", serde_json::json!("missing-provider"));
+        let missing = LazySpeechAdapter::new(invalid);
+        assert!(!missing.loaded());
+        assert!(missing.load().is_err());
     }
 
     #[test]

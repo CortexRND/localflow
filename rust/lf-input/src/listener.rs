@@ -120,3 +120,20 @@ pub fn input_monitoring_granted() -> Option<bool> {
         None
     }
 }
+
+pub fn run_cancellable(
+    hub: &KeyboardHub,
+    warn: WarningSink,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    request_permissions: bool,
+) -> Result<(), InputError> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos::run_tap_cancellable(hub, warn, stop, request_permissions)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (stop, request_permissions);
+        run_forever(hub, warn)
+    }
+}
