@@ -22,7 +22,7 @@ use std::rc::{Rc, Weak};
 use objc2::rc::Retained;
 use objc2_app_kit::{
     NSAccessibility, NSAutoresizingMaskOptions, NSButton, NSModalResponseOK, NSOpenPanel,
-    NSScrollView, NSTextField, NSView,
+    NSScrollView, NSScrollerStyle, NSTextField, NSView,
 };
 use objc2_foundation::{NSArray, NSString};
 
@@ -744,6 +744,7 @@ impl HubPage for DictionaryPage {
         scroll.setDocumentView(Some(&results));
         scroll.setHasVerticalScroller(listing_height > scroll_height);
         scroll.setAutohidesScrollers(true);
+        scroll.setScrollerStyle(NSScrollerStyle::Legacy);
         scroll.setDrawsBackground(false);
         ctx.body.addSubview(&scroll);
         cursor += scroll_height;

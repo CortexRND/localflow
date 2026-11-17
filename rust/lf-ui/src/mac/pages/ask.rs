@@ -46,6 +46,16 @@ use crate::tokens::{Weight, ASK_BUBBLE_PADDING, ASK_CONTROL_FONT};
 const PAGE: &str = "Ask";
 const POLL_SECONDS: f64 = 0.2;
 const PLACEHOLDER: &str = "Ask a question about your notes or dictations";
+const SNAPSHOT_LONG_ANSWER: &str = concat!(
+    "We agreed to launch on Friday and finish the checklist first [1]. ",
+    "Marketing owns the announcement and engineering owns the rollout plan [2]. ",
+    "We agreed to launch on Friday and finish the checklist first [1]. ",
+    "Marketing owns the announcement and engineering owns the rollout plan [2]. ",
+    "We agreed to launch on Friday and finish the checklist first [1]. ",
+    "Marketing owns the announcement and engineering owns the rollout plan [2]. ",
+    "We agreed to launch on Friday and finish the checklist first [1]. ",
+    "Marketing owns the announcement and engineering owns the rollout plan [2]. "
+);
 
 /// Self-contained states used by native snapshots. Seeding is synchronous and
 /// starts no worker or network request.
@@ -224,33 +234,40 @@ impl AskPage {
             AskSnapshot::LongConversation => (1..=4)
                 .map(|number| Turn {
                     question: format!("Question {number}: what did we decide about the launch?"),
-                    answer: concat!(
-                        "We agreed to launch on Friday and finish the checklist first [1]. ",
-                        "Marketing owns the announcement and engineering owns the rollout plan [2]. ",
-                        "We agreed to launch on Friday and finish the checklist first [1]. ",
-                        "Marketing owns the announcement and engineering owns the rollout plan [2]."
-                    )
-                    .into(),
-                    citations: vec![
-                        fixture_citation(1, "meeting", "Launch planning", "/tmp/localflow-ask-launch.md#01:20"),
-                        fixture_citation(2, "dictation", "Launch marketing", "1"),
-                    ],
+                    answer: SNAPSHOT_LONG_ANSWER.into(),
+                    citations: vec![fixture_citation(
+                        1,
+                        "meeting",
+                        "Launch planning",
+                        "/tmp/localflow-ask-launch.md#01:20",
+                    )],
                     error: String::new(),
                 })
                 .collect(),
             AskSnapshot::Citations => vec![Turn {
                 question: "Where did we talk about the launch?".into(),
-                answer: concat!(
-                    "We agreed to launch on Friday and finish the checklist first [1]. ",
-                    "The plan was refined in the later retrospective [4]."
-                )
-                .into(),
+                answer: SNAPSHOT_LONG_ANSWER.into(),
                 citations: vec![
-                    fixture_citation(1, "meeting", "Launch planning", "/tmp/localflow-ask-launch.md#01:20"),
-                    fixture_citation(2, "dictation", "A long dictation title about launch marketing", "1"),
-                    fixture_citation(3, "notes", "Launch checklist", "/tmp/localflow-ask-checklist.md"),
-                    fixture_citation(4, "meeting", "Rollout retrospective with engineering", "/tmp/localflow-ask-retro.md#02:10"),
-                    fixture_citation(5, "notes", "Marketing announcement plan", "/tmp/localflow-ask-marketing.md"),
+                    fixture_citation(
+                        1,
+                        "meeting",
+                        "Launch planning",
+                        "/tmp/localflow-ask-launch.md#01:20",
+                    ),
+                    fixture_citation(
+                        2,
+                        "dictation",
+                        "A long dictation title about launch marketing",
+                        "1",
+                    ),
+                    fixture_citation(3, "notes", "Launch checklist", "1"),
+                    fixture_citation(
+                        4,
+                        "meeting",
+                        "Rollout retrospective with engineering",
+                        "/tmp/localflow-ask-launch.md#01:20",
+                    ),
+                    fixture_citation(5, "notes", "Marketing announcement plan", "1"),
                 ],
                 error: String::new(),
             }],
@@ -278,7 +295,7 @@ impl AskPage {
         state.selection = None;
         state.scroll_y = None;
         state.was_at_bottom = true;
-        state.follow = snapshot != AskSnapshot::Empty;
+        state.follow = false;
     }
 }
 
@@ -946,7 +963,7 @@ impl HubPage for AskPage {
         let scroll = NSScrollView::initWithFrame(ctx.mtm.alloc(), rect(x, y, width, height));
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);
-        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        scroll.setScrollerStyle(NSScrollerStyle::Legacy);
         scroll.setBorderType(NSBorderType::NoBorder);
         scroll.setDrawsBackground(false);
         scroll.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
@@ -1129,17 +1146,187 @@ mod tests {
         }
     }
 
+    fn assert_snapshot_citation(
+        citation: &Citation,
+        n: i64,
+        source: &str,
+        title: &str,
+        reference: &str,
+    ) {
+        assert_eq!(citation.n, n);
+        assert_eq!(citation.source, source);
+        assert_eq!(citation.title, title);
+        assert_eq!(citation.when, "2026-04-15T12:00");
+        assert_eq!(citation.reference, reference);
+        assert!(citation.app.is_empty() && citation.snippet.is_empty());
+    }
+
     #[test]
     fn empty_fixture_has_intro_examples_and_no_citations() {
         let page = AskPage::new();
         assert_eq!(page.name(), "Ask");
         page.seed_snapshot(AskSnapshot::Empty);
         let state = page.state.borrow();
+        assert!(state.turns.is_empty());
         let (items, citations) = conversation_items(&state.turns, state.busy, &state.pending);
         assert!(citations.is_empty());
         assert!(matches!(&items[0], ConversationItem::Intro(_)));
         assert!(matches!(&items[1], ConversationItem::Examples(labels) if labels.len() == 3));
         assert!(state.draft.is_empty() && !state.follow);
+    }
+
+    #[test]
+    fn long_and_citation_fixtures_match_python_snapshot_content() {
+        let page = AskPage::new();
+        let expected_answer = concat!(
+            "We agreed to launch on Friday and finish the checklist first [1]. ",
+            "Marketing owns the announcement and engineering owns the rollout plan [2]. "
+        )
+        .repeat(4);
+        let meeting_reference = "/tmp/localflow-ask-launch.md#01:20";
+
+        page.seed_snapshot(AskSnapshot::LongConversation);
+        {
+            let state = page.state.borrow();
+            assert_eq!(state.turns.len(), 4);
+            for (index, turn) in state.turns.iter().enumerate() {
+                let number = index + 1;
+                assert_eq!(
+                    turn.question,
+                    format!("Question {number}: what did we decide about the launch?")
+                );
+                assert_eq!(turn.answer, expected_answer);
+                assert!(turn.error.is_empty());
+                assert_eq!(turn.citations.len(), 1);
+                assert_snapshot_citation(
+                    &turn.citations[0],
+                    1,
+                    "meeting",
+                    "Launch planning",
+                    meeting_reference,
+                );
+            }
+        }
+
+        page.seed_snapshot(AskSnapshot::Citations);
+        let state = page.state.borrow();
+        assert_eq!(state.turns.len(), 1);
+        let turn = &state.turns[0];
+        assert_eq!(turn.question, "Where did we talk about the launch?");
+        assert_eq!(turn.answer, expected_answer);
+        assert!(turn.error.is_empty());
+        let expected_citations = [
+            (1, "meeting", "Launch planning", meeting_reference),
+            (
+                2,
+                "dictation",
+                "A long dictation title about launch marketing",
+                "1",
+            ),
+            (3, "notes", "Launch checklist", "1"),
+            (
+                4,
+                "meeting",
+                "Rollout retrospective with engineering",
+                meeting_reference,
+            ),
+            (5, "notes", "Marketing announcement plan", "1"),
+        ];
+        assert_eq!(turn.citations.len(), expected_citations.len());
+        for (citation, (n, source, title, reference)) in
+            turn.citations.iter().zip(expected_citations)
+        {
+            assert_snapshot_citation(citation, n, source, title, reference);
+        }
+    }
+
+    #[test]
+    fn conversation_fixture_matches_python_snapshot_content() {
+        let page = AskPage::new();
+        page.seed_snapshot(AskSnapshot::Conversation);
+        let state = page.state.borrow();
+        assert_eq!(state.turns.len(), 1);
+        let turn = &state.turns[0];
+        assert_eq!(turn.question, "What did we decide about the launch?");
+        assert_eq!(
+            turn.answer,
+            "We agreed to launch on Friday and finish the checklist first [1]."
+        );
+        assert!(turn.error.is_empty());
+        assert_eq!(turn.citations.len(), 1);
+        assert_snapshot_citation(
+            &turn.citations[0],
+            1,
+            "meeting",
+            "Launch planning",
+            "/tmp/localflow-ask-launch.md#01:20",
+        );
+    }
+
+    #[test]
+    fn snapshot_fixtures_match_python_transient_state() {
+        let page = AskPage::new();
+        let sources = SOURCES
+            .iter()
+            .map(|(key, _)| (*key).to_string())
+            .collect::<BTreeSet<_>>();
+        for snapshot in [
+            AskSnapshot::Empty,
+            AskSnapshot::Conversation,
+            AskSnapshot::Thinking,
+            AskSnapshot::Error,
+            AskSnapshot::LongConversation,
+            AskSnapshot::Citations,
+        ] {
+            {
+                let mut state = page.state.borrow_mut();
+                state.draft = "stale draft".into();
+                state.time_filter = TIME_FILTERS[1].0.into();
+                state.sources.clear();
+                state.busy = true;
+                state.pending = "stale pending question".into();
+                state.focus = false;
+                state.selection = Some((1, 2));
+                state.scroll_y = Some(42.0);
+                state.was_at_bottom = false;
+                state.follow = true;
+            }
+
+            page.seed_snapshot(snapshot);
+            let state = page.state.borrow();
+            assert!(state.loaded, "{snapshot:?}");
+            assert_eq!(
+                state.turns.len(),
+                match snapshot {
+                    AskSnapshot::Empty | AskSnapshot::Thinking => 0,
+                    AskSnapshot::LongConversation => 4,
+                    _ => 1,
+                },
+                "{snapshot:?}"
+            );
+            assert!(state.draft.is_empty(), "{snapshot:?}");
+            assert_eq!(state.time_filter, TIME_FILTERS[0].0, "{snapshot:?}");
+            assert_eq!(state.sources, sources, "{snapshot:?}");
+            assert_eq!(
+                state.busy,
+                snapshot == AskSnapshot::Thinking,
+                "{snapshot:?}"
+            );
+            assert_eq!(
+                state.pending,
+                if snapshot == AskSnapshot::Thinking {
+                    "And who owns the rollout checklist?"
+                } else {
+                    ""
+                },
+                "{snapshot:?}"
+            );
+            assert!(state.focus, "{snapshot:?}");
+            assert_eq!(state.selection, None, "{snapshot:?}");
+            assert_eq!(state.scroll_y, None, "{snapshot:?}");
+            assert!(state.was_at_bottom, "{snapshot:?}");
+            assert!(!state.follow, "{snapshot:?}");
+        }
     }
 
     #[test]
@@ -1165,6 +1352,12 @@ mod tests {
         let state = page.state.borrow();
         assert_ne!(generation, state.generation);
         assert_eq!(state.turns.len(), 1);
+        assert_eq!(
+            state.turns[0].question,
+            "What did we decide about the launch?"
+        );
+        assert!(state.turns[0].answer.is_empty());
+        assert!(state.turns[0].citations.is_empty());
         assert_eq!(state.turns[0].error, ERROR_UNREACHABLE);
         let (items, _) = conversation_items(&state.turns, state.busy, &state.pending);
         assert!(items

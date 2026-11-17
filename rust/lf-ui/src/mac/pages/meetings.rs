@@ -30,8 +30,8 @@ use crate::backends::meeting::{
     vault_notes_path, MeetingClient, MeetingNotesWriter, MeetingResult,
 };
 use crate::hub_model::{
-    meeting_capture_status, meeting_form_layout, meeting_notes_height, recent_notes,
-    saved_notes_message, RecentNote, MEETING_NOTES_PLACEHOLDER, MEETING_SUBTITLE,
+    meeting_capture_status, meeting_form_layout, meeting_notes_height, note_date_label,
+    recent_notes, saved_notes_message, RecentNote, MEETING_NOTES_PLACEHOLDER, MEETING_SUBTITLE,
     MEETING_TITLE_PLACEHOLDER, RECENT_EMPTY, RECENT_NOTES_LIMIT, RECENT_ROW_H,
 };
 use crate::mac::actions::Timer;
@@ -1170,23 +1170,27 @@ impl HubPage for MeetingsPage {
         ];
         let mut recent = Vec::new();
         if preparation != "recent-empty" {
-            for (date_label, title) in [
-                ("Nov 10, 2026", "Design review"),
-                ("Nov 11, 2026", "Hiring sync"),
-                ("Nov 12, 2026", "Customer call: Acme"),
-                ("Nov 13, 2026", "Weekly standup"),
-                ("Nov 14, 2026", "Retro"),
-                ("Nov 15, 2026", "Planning"),
+            for (stamp, title) in [
+                ("2026-11-10 0930", "Design review"),
+                ("2026-11-11 1100", "Hiring sync"),
+                ("2026-11-12 1500", "Customer call: Acme"),
+                ("2026-11-13 1000", "Weekly standup"),
+                ("2026-11-14 1600", "Retro"),
+                ("2026-11-15 1430", "Planning"),
             ] {
                 let path = root.join(format!("{title}.md"));
                 std::fs::write(&path, format!("# {title}\n\n## Summary\n- Decided.\n"))?;
                 recent.push(RecentNote {
                     title: title.into(),
-                    date_label: date_label.into(),
+                    date_label: note_date_label(
+                        chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H%M")?,
+                        None,
+                    ),
                     path: path.to_string_lossy().into_owned(),
                 });
             }
             recent.reverse();
+            recent.truncate(RECENT_NOTES_LIMIT);
         }
         let session = |system_audio: &str, system_audio_error: &str, auto: bool| {
             serde_json::json!({
@@ -1200,8 +1204,8 @@ impl HubPage for MeetingsPage {
                     "seconds": 185,
                     "segment_count": 2,
                     "segments": [
-                        {"stamp": "00:04", "source": "me", "text": "Can we lock the launch date?"},
-                        {"stamp": "01:12", "source": "others", "text": "March 3 works for everyone"},
+                        {"stamp": "00:04", "source": "me", "text": if auto { "Can we lock the launch date?" } else { "I can take this" }},
+                        {"stamp": "01:12", "source": "others", "text": if auto { "March 3 works for everyone" } else { "Sounds good" }},
                     ],
                 },
                 "last_saved": null,
@@ -1223,10 +1227,11 @@ impl HubPage for MeetingsPage {
             "running" => {
                 snapshot.status = Some(session(
                     "error",
-                    "ScreenCaptureKit: no display available — grant Screen Recording permission",
+                    "ScreenCaptureKit: no display available — grant Screen Recording permission to this Python binary (None)",
                     false,
                 ));
                 snapshot.notes = "Check launch date".into();
+                snapshot.template = "standup".into();
             }
             "running-no-system-audio" => {
                 snapshot.status = Some(session(
@@ -1235,10 +1240,12 @@ impl HubPage for MeetingsPage {
                     false,
                 ));
                 snapshot.notes = "Check launch date".into();
+                snapshot.template = "standup".into();
             }
             "running-auto" => {
                 snapshot.status = Some(session("ok", "", true));
                 snapshot.notes = "Check launch date".into();
+                snapshot.template = "standup".into();
             }
             "saved" | "saved-generated" => {
                 let title = if preparation == "saved" {
@@ -1246,16 +1253,34 @@ impl HubPage for MeetingsPage {
                 } else {
                     "Launch date review"
                 };
+                let path = root.join(format!("{title}.md"));
+                std::fs::write(&path, format!("# {title}\n\n## Summary\n- Decided.\n"))?;
+                snapshot.template = "standup".into();
+                if preparation == "saved-generated" {
+                    snapshot.recent.insert(
+                        0,
+                        RecentNote {
+                            title: title.into(),
+                            date_label: note_date_label(
+                                chrono::NaiveDateTime::parse_from_str(
+                                    "2026-11-16 1000",
+                                    "%Y-%m-%d %H%M",
+                                )?,
+                                None,
+                            ),
+                            path: path.to_string_lossy().into_owned(),
+                        },
+                    );
+                    snapshot.recent.truncate(RECENT_NOTES_LIMIT);
+                    snapshot.notes = "Check launch date".into();
+                }
+                let saved = serde_json::json!({"title": title, "title_generated": preparation == "saved-generated", "enhanced": true, "notes_path": path});
+                snapshot.last_saved = Some(saved.clone());
                 snapshot.status = Some(serde_json::json!({
                     "session": null,
-                    "last_saved": {"title": title, "title_generated": preparation == "saved-generated", "enhanced": true},
+                    "last_saved": saved,
                     "chat_available": true,
                 }));
-                snapshot.answers = vec![MeetingAnswer {
-                    question: "When is the launch?".into(),
-                    answer: "The launch date is March 3.".into(),
-                    error: false,
-                }];
             }
             other => anyhow::bail!("unknown Meetings snapshot preparation {other:?}"),
         }
@@ -1800,6 +1825,7 @@ impl HubPage for MeetingsPage {
                 move || submit()
             });
             ctx.target.on_action(&ask, move || submit());
+            ctx.body.addSubview(&ask);
 
             let answers = state.answers.borrow().clone();
             if !answers.is_empty() {
@@ -1971,6 +1997,38 @@ mod tests {
     use crate::backends::meeting::{FakeMeetingClient, MeetingCall};
     use crate::hub_model::RECENT_NOTES_LIMIT;
     use std::sync::Mutex;
+
+    #[test]
+    fn snapshots_match_python_meeting_templates_transcripts_and_saved_notes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut page = MeetingsPage::new();
+        for preparation in ["running", "running-no-system-audio", "running-auto"] {
+            page.prepare_snapshot(preparation, root.path()).unwrap();
+            let snapshot = page.snapshot();
+            assert_eq!(snapshot.template, "standup");
+            let status = snapshot.status.unwrap();
+            let expected = if preparation == "running-auto" {
+                "Can we lock the launch date?"
+            } else {
+                "I can take this"
+            };
+            assert_eq!(status["session"]["segments"][0]["text"], expected);
+            assert_eq!(snapshot.recent.len(), RECENT_NOTES_LIMIT);
+        }
+        for preparation in ["saved", "saved-generated"] {
+            page.prepare_snapshot(preparation, root.path()).unwrap();
+            let snapshot = page.snapshot();
+            let saved = snapshot.last_saved.unwrap();
+            assert!(std::path::Path::new(saved["notes_path"].as_str().unwrap()).is_file());
+            assert!(snapshot.answers.is_empty());
+            if preparation == "saved-generated" {
+                assert_eq!(snapshot.recent[0].title, "Launch date review");
+            }
+        }
+        page.prepare_snapshot("recent-empty", root.path()).unwrap();
+        assert!(page.snapshot().recent.is_empty());
+        assert!(page.prepare_snapshot("unknown", root.path()).is_err());
+    }
 
     struct ObservedChatClient {
         inner: FakeMeetingClient,

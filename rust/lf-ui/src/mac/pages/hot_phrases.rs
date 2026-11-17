@@ -24,7 +24,7 @@ use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSAccessibility, NSAutoresizingMaskOptions, NSBorderType, NSButton, NSControlStateValueOff,
-    NSControlStateValueOn, NSScrollView, NSSwitch, NSTextField, NSView,
+    NSControlStateValueOn, NSScrollView, NSScrollerStyle, NSSwitch, NSTextField, NSView,
 };
 use objc2_foundation::{NSPoint, NSSize, NSString};
 
@@ -521,6 +521,7 @@ fn text_area(
         NSScrollView::initWithFrame(ctx.mtm.alloc::<NSScrollView>(), native_rect(frame, 0.0));
     scroll.setHasVerticalScroller(true);
     scroll.setAutohidesScrollers(false);
+    scroll.setScrollerStyle(NSScrollerStyle::Legacy);
     scroll.setBorderType(NSBorderType::BezelBorder);
     scroll.setDrawsBackground(true);
     scroll.setBackgroundColor(&color("surface", &ctx.palette));
@@ -821,6 +822,7 @@ fn render_editor(state: &Shared, ctx: &PageCtx, top: f64, weak: &Weak<RefCell<St
     );
     list_scroll.setHasVerticalScroller(true);
     list_scroll.setAutohidesScrollers(false);
+    list_scroll.setScrollerStyle(NSScrollerStyle::Legacy);
     list_scroll.setBorderType(NSBorderType::NoBorder);
     list_scroll.setDrawsBackground(false);
     list_scroll.setAccessibilityLabel(Some(&NSString::from_str("Hot phrases")));

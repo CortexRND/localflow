@@ -327,7 +327,7 @@ pub const SCENARIOS: [Scenario; 67] = [
     native_scenario("Ask", "long-conversation", "long-conversation"),
     native_scenario("Ask", "citations", "citations"),
     native_scenario("Hot Phrases", "empty", "empty"),
-    native_scenario("Hot Phrases", "", "basic"),
+    native_scenario("Hot Phrases", "", "empty"),
     native_scenario("Hot Phrases", "populated3-selected", "populated3-selected"),
     native_scenario("Hot Phrases", "preview-result", "preview-result"),
     native_scenario("Hot Phrases", "invalid-draft", "invalid-draft"),

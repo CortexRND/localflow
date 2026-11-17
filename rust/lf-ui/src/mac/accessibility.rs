@@ -100,9 +100,15 @@ pub fn run() {
         quit: Arc::new(|| {}),
     };
     lf_runtime::macos::install_menu_bar(MenuModel::default(), actions.clone()).unwrap();
-    assert_eq!(app.activationPolicy(), NSApplicationActivationPolicy::Accessory);
+    assert_eq!(
+        app.activationPolicy(),
+        NSApplicationActivationPolicy::Accessory
+    );
     lf_ui::mac::app::install_hub_menu_bar(MenuModel::default(), actions).unwrap();
-    assert_eq!(app.activationPolicy(), NSApplicationActivationPolicy::Regular);
+    assert_eq!(
+        app.activationPolicy(),
+        NSApplicationActivationPolicy::Regular
+    );
     println!("Native Hub menu audit: runtime default Accessory, Hub retains Regular/Dock policy");
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
@@ -113,6 +119,18 @@ pub fn run() {
         walk(&hub.content_view(), "root", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
     }
+    hub.show_page("Meetings");
+    hub.prepare_snapshot("saved", temp.path()).unwrap();
+    hub.rebuild_current_page();
+    let ask_button = hub.body().subviews().iter().any(|view| {
+        view.downcast_ref::<NSButton>()
+            .is_some_and(|button| button.title().to_string() == "Ask")
+    });
+    assert!(
+        ask_button,
+        "saved meetings must attach the transcript Ask button"
+    );
+    walk(&hub.content_view(), "root", "Meetings saved", &mut failures);
     hub.shutdown();
 
     let setup = snapshot_fixture(mtm);

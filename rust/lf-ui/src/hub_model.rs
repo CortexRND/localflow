@@ -918,7 +918,7 @@ pub struct ShortcutRow {
     pub hotkey: String,
 }
 
-/// The three prompt shortcuts, read from the config's current hotkeys. None of
+/// The dictation shortcuts, read from the config's current hotkeys. None of
 /// them has an enable flag of its own: an empty hotkey disables it.
 pub fn shortcut_rows(config: &Config) -> Vec<ShortcutRow> {
     let hotkey = |field: &str| format_hotkey(config.field_str(field));
@@ -937,6 +937,11 @@ pub fn shortcut_rows(config: &Config) -> Vec<ShortcutRow> {
             name: "Command Mode",
             detail: "Hold the key and speak an instruction to rewrite your selection.",
             hotkey: hotkey("command_hotkey"),
+        },
+        ShortcutRow {
+            name: "Toggle Dictation",
+            detail: "Turn push-to-talk on or off without quitting LocalFlow.",
+            hotkey: hotkey("dictation_toggle_hotkey"),
         },
     ]
 }
@@ -2447,12 +2452,29 @@ mod tests {
         config.set_field("prompt_hotkey", json!("<ctrl>+<alt>+2"));
         config.set_field("polish_hotkey", json!(""));
         config.set_field("command_hotkey", json!("alt_r"));
+        config.set_field("dictation_toggle_hotkey", json!(""));
         let rows = shortcut_rows(&config);
         let names: Vec<_> = rows.iter().map(|r| r.name).collect();
-        assert_eq!(names, ["Prompt Engineer", "Polish", "Command Mode"]);
+        assert_eq!(
+            names,
+            [
+                "Prompt Engineer",
+                "Polish",
+                "Command Mode",
+                "Toggle Dictation"
+            ]
+        );
         let keys: Vec<_> = rows.iter().map(|r| r.hotkey.as_str()).collect();
-        assert_eq!(keys, ["Control + Option + 2", "Off", "Right Option"]);
+        assert_eq!(keys, ["Control + Option + 2", "Off", "Right Option", "Off"]);
         assert!(rows[0].detail.contains("Select rough text"));
+        assert_eq!(
+            rows[3].detail,
+            "Turn push-to-talk on or off without quitting LocalFlow."
+        );
+        config.set_field("dictation_toggle_hotkey", json!("<ctrl>+<alt>+d"));
+        assert_eq!(shortcut_rows(&config)[3].hotkey, "Control + Option + D");
+        config.fields.remove("dictation_toggle_hotkey");
+        assert_eq!(shortcut_rows(&config)[3].hotkey, "Off");
     }
 
     // ---- dictionary -----------------------------------------------------------

@@ -428,6 +428,41 @@ mod tests {
     }
 
     #[test]
+    fn real_apply_immediately_exposes_model_and_undo_summary() {
+        let (dir, adapter) = setup(vec![
+            call(
+                "set_setting",
+                json!({"key": "sounds_enabled", "value": false}),
+            ),
+            call("set_setting", json!({"key": "hotkey", "value": "ctrl_r"})),
+            call("add_dictionary_word", json!({"word": "Kubernetes"})),
+        ]);
+        assert_eq!(adapter.pending_undo(), None);
+        let proposal = adapter
+            .propose("Turn off sounds, dictate with Right Ctrl, learn Kubernetes")
+            .unwrap();
+        assert_eq!(proposal.model, "gemma4:e4b");
+
+        let applied = adapter.apply(&proposal.changes).unwrap();
+        assert_eq!(applied.message, "Applied 3 changes.");
+        assert_eq!(adapter.model().as_deref(), Some("gemma4:e4b"));
+        let expected = Some(vec![
+            "Sounds: Off → On".into(),
+            "Dictation shortcut: Hold Right Ctrl → Hold Left Option".into(),
+            "Remove word “Kubernetes”".into(),
+        ]);
+        // This call creates a new real lf-agent over the same isolated paths,
+        // just as refresh_local does during the rebuild immediately after Apply.
+        assert_eq!(adapter.pending_undo(), expected);
+        assert!(dir.path().join("undo.json").is_file());
+
+        let undone = adapter.undo().unwrap();
+        assert_eq!(undone.reverted.len(), 3);
+        assert_eq!(adapter.pending_undo(), None);
+        assert_eq!(adapter.model().as_deref(), Some("gemma4:e4b"));
+    }
+
+    #[test]
     fn preview_has_no_writes_and_round_trips_dictionary_changes() {
         let (dir, adapter) = setup(vec![
             call("add_dictionary_word", json!({"word": "Kubernetes"})),
