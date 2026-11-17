@@ -244,7 +244,12 @@ fn assert_setup_model_workers(mtm: MainThreadMarker) {
             "close" => setup.close(),
             _ => {}
         }
-        assert_eq!(cancel.load(Ordering::Acquire), action != "complete");
+        setup.drain_requests();
+        assert_eq!(
+            cancel.load(Ordering::Acquire),
+            action != "complete",
+            "trial action: {action}"
+        );
         release.send(()).unwrap();
         if action == "complete" {
             let deadline = Instant::now() + Duration::from_secs(5);

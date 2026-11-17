@@ -2306,8 +2306,6 @@ impl SetupWindow {
         } else {
             "Cancel download"
         };
-        self.cancel_button
-            .setTitle(&NSString::from_str(cancel_title));
         accessible_button(&self.cancel_button, cancel_title);
         let primary = if state.saved {
             "Close"
