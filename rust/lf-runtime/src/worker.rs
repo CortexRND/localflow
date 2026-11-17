@@ -119,6 +119,10 @@ impl Worker {
                 log::error!("could not write last text: {e}");
             }
         }
+        drop(_commit);
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         (self.deliver)(&job, text, error);
     }
 }
@@ -209,6 +213,7 @@ mod tests {
         old.join().unwrap();
         let history = HistoryStore::open(Some(database), Some(clips.clone()), true).unwrap();
         assert_eq!(history.latest_text("").unwrap(), "new result");
+        assert_eq!(history.recent(100, None, 0).unwrap().len(), 1);
         assert_eq!(std::fs::read_to_string(last).unwrap().trim(), "new result");
         assert_eq!(*delivered.lock().unwrap(), vec![Some("new result".into())]);
         assert_eq!(std::fs::read_dir(clips).unwrap().count(), 1);
