@@ -44,7 +44,8 @@ pub const HUB_PAGES: [&str; 10] = [
     "Settings",
 ];
 
-const KNOWN_PAGES: [&str; 10] = [
+const KNOWN_PAGES: [&str; 11] = [
+    "Setup",
     "Home",
     "Ask",
     "Hot Phrases",
@@ -187,7 +188,9 @@ pub fn plan_initial_route(
         }
         None => None,
     };
-    Ok(if configured {
+    Ok(if page == Some("Setup") {
+        InitialRoute::Setup { desired: None }
+    } else if configured {
         InitialRoute::Hub {
             page: page.unwrap_or(DEFAULT_PAGE),
         }
@@ -876,6 +879,15 @@ lock.release()
 
     #[test]
     fn canonical_page_is_case_and_space_insensitive() {
+        assert_eq!(canonical_page("setup"), Some("Setup"));
+        assert_eq!(
+            plan_initial_route(true, Some("Setup")),
+            Ok(InitialRoute::Setup { desired: None })
+        );
+        assert_eq!(
+            plan_initial_route(false, Some("Setup")),
+            Ok(InitialRoute::Setup { desired: None })
+        );
         assert_eq!(canonical_page("settings"), Some("Settings"));
         assert_eq!(canonical_page("  hot   PHRASES "), Some("Hot Phrases"));
         assert_eq!(canonical_page("MODELS"), Some("Models"));

@@ -12,7 +12,8 @@ use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, Message};
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationTerminateReply,
-    NSButton, NSPopUpButton, NSSearchField, NSSwitch, NSTextField, NSTextView, NSView,
+    NSButton, NSPopUpButton, NSScrollView, NSScrollerStyle, NSSearchField, NSSwitch, NSTextField,
+    NSTextView, NSView,
 };
 use objc2_foundation::{NSRange, NSString};
 
@@ -22,6 +23,7 @@ use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, UnavailablePromptQu
 use lf_ui::hub_route::HUB_PAGES;
 use lf_ui::mac::hub::Hub;
 use lf_ui::mac::page::HubServices;
+use lf_ui::mac::setup::{snapshot_fixture, SetupSnapshotState};
 use lf_ui::mac::snapshot::spin_run_loop;
 use lf_ui::mac::style::HalftoneView;
 
@@ -32,6 +34,89 @@ fn search_field(view: &NSView) -> Option<Retained<NSSearchField>> {
     view.subviews()
         .iter()
         .find_map(|child| search_field(&child))
+}
+
+fn assert_setup_workers_and_links(mtm: MainThreadMarker) {
+    use lf_ui::mac::setup::{ChecksRunner, SetupContext, SetupServices, SetupWindow};
+    use lf_ui::setup_flow::{Check, FakeLaunchAgent, FakeSetupPlatform, HardwareInfo};
+    struct Checks;
+    impl ChecksRunner for Checks {
+        fn run(&self, _config: &Config) -> Result<Vec<Check>, String> {
+            assert!(
+                MainThreadMarker::new().is_none(),
+                "checks must run off main"
+            );
+            Ok(vec![Check::new(
+                "worker",
+                "Background check completed",
+                Some(true),
+                "Worker result",
+                "",
+                "",
+            )])
+        }
+    }
+    let platform = FakeSetupPlatform {
+        runtimes: vec!["faster-whisper".into()],
+        ..FakeSetupPlatform::default()
+    };
+    let context = SetupContext::detect(
+        Config::defaults_for(true),
+        HardwareInfo::new("Darwin", "arm64", 16.0, true, 256.0),
+        &platform,
+        &FakeLaunchAgent::new("not installed"),
+    )
+    .unwrap();
+    let setup = SetupWindow::new(
+        mtm,
+        context,
+        SetupServices {
+            checks: Arc::new(Checks),
+            ..SetupServices::default()
+        },
+    );
+    setup.seed_snapshot(SetupSnapshotState::ChecksNeedsAction);
+    setup.set_snapshot_mode(false);
+    unsafe {
+        named_button(&setup.content_view(), "Recheck")
+            .unwrap()
+            .performClick(None)
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while setup.drain_requests() != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "setup worker did not finish"
+        );
+        spin_run_loop(0.01);
+    }
+    assert!(has_text(
+        &setup.content_view(),
+        "Background check completed"
+    ));
+    setup.close();
+    assert_eq!(setup.drain_requests(), 0);
+
+    let root = tempfile::tempdir().unwrap();
+    let services = services(root.path());
+    let count = Rc::new(Cell::new(0));
+    let opened = count.clone();
+    *services.setup_opener.borrow_mut() = Some(Rc::new(move || opened.set(opened.get() + 1)));
+    let hub = Hub::new(mtm, services, "Home");
+    for page in ["Home", "History"] {
+        hub.show_page(page);
+        unsafe {
+            named_button(&hub.content_view(), "Open setup")
+                .unwrap()
+                .performClick(None)
+        };
+        hub.drain_requests();
+    }
+    assert_eq!(count.get(), 2);
+    hub.shutdown();
+    println!(
+        "Native setup audit: background checks, drained completion and Home/History links passed"
+    );
 }
 
 fn has_text(view: &NSView, text: &str) -> bool {
@@ -370,6 +455,21 @@ fn nonempty(text: Option<Retained<NSString>>) -> bool {
 fn walk(view: &NSView, path: &str, page: &str, failures: &mut Vec<String>) {
     for (index, subview) in view.subviews().iter().enumerate() {
         let child_path = format!("{path}/{index}");
+        if page.starts_with("Setup") {
+            if let Some(scroll) = subview.downcast_ref::<NSScrollView>() {
+                assert_eq!(scroll.scrollerStyle(), NSScrollerStyle::Legacy);
+                if scroll.documentView().is_some_and(|document| {
+                    document.frame().size.height > scroll.contentSize().height + 1.0
+                }) {
+                    let scroller = scroll.verticalScroller().expect("overflow scroller");
+                    assert!(!scroller.isHidden());
+                    assert!(scroller.isEnabled());
+                    assert!(scroller.frame().size.width > 0.0);
+                    assert!(scroller.alphaValue() > 0.0);
+                    assert!(scroller.knobProportion() < 1.0);
+                }
+            }
+        }
         if let Ok(button) = subview.clone().downcast::<NSButton>() {
             if !nonempty(Some(button.title())) && !nonempty(button.accessibilityLabel()) {
                 failures.push(format!(
@@ -581,5 +681,32 @@ pub fn run() {
     unavailable.shutdown();
     hub.shutdown();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    println!("Native accessibility audit: all ten ported pages and snapshot states passed");
+    assert_setup_workers_and_links(mtm);
+    let setup = snapshot_fixture(mtm);
+    for state in (0..7).map(SetupSnapshotState::Step).chain([
+        SetupSnapshotState::ChecksNeedsAction,
+        SetupSnapshotState::ChecksAllReady,
+        SetupSnapshotState::ChecksNeedsActionWide,
+        SetupSnapshotState::Complete,
+        SetupSnapshotState::CleanupLevelMedium,
+        SetupSnapshotState::NonOllamaProvider,
+        SetupSnapshotState::DownloadProgress,
+        SetupSnapshotState::DownloadError,
+    ]) {
+        setup.seed_snapshot(state);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while setup.drain_requests() != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setup requests did not finish"
+            );
+            spin_run_loop(0.01);
+        }
+        let page = format!("Setup ({})", state.file_stem());
+        walk(&setup.content_view(), "root", &page, &mut failures);
+        assert_decorations_hidden(&setup.content_view(), &page, &mut failures);
+    }
+    setup.close();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    println!("Native accessibility audit: all ten Hub pages and setup states passed");
 }

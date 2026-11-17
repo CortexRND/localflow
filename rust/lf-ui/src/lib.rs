@@ -12,6 +12,7 @@ pub mod hub_settings;
 pub mod mac;
 pub mod models_layout;
 pub mod pystr;
+pub mod setup_flow;
 pub mod shutdown;
 pub mod snapshot_plan;
 pub mod text_wrap;

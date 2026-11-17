@@ -11,6 +11,7 @@ name = "lf_ui"
 path = "src/lib.rs"
 
 [dependencies]
+lf-audio = { path = "../lf-audio" }
 lf-agent = { path = "../lf-agent" }
 lf-core = { path = "../lf-core" }
 lf-providers = { path = "../lf-providers" }

@@ -862,6 +862,124 @@ pub const SCENARIOS: [Scenario; 70] = [
     },
 ];
 
+/// Setup keeps Python's default-window names and adds wide counterparts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetupScenario {
+    pub state: &'static str,
+    pub wide: bool,
+}
+
+pub const SETUP_SCENARIOS: [SetupScenario; 14] = [
+    SetupScenario {
+        state: "step-1",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-2",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-3",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-4",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-5",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-6",
+        wide: false,
+    },
+    SetupScenario {
+        state: "step-7",
+        wide: false,
+    },
+    SetupScenario {
+        state: "checks-needs-action",
+        wide: false,
+    },
+    SetupScenario {
+        state: "checks-all-ready",
+        wide: false,
+    },
+    SetupScenario {
+        state: "checks-needs-action",
+        wide: true,
+    },
+    SetupScenario {
+        state: "complete",
+        wide: false,
+    },
+    SetupScenario {
+        state: "cleanup-level-medium",
+        wide: false,
+    },
+    SetupScenario {
+        state: "non-ollama-provider",
+        wide: false,
+    },
+    SetupScenario {
+        state: "download-progress",
+        wide: false,
+    },
+    // Error is included separately below so normal/empty/error coverage can be
+    // counted without dropping the 14 fixture entries above.
+];
+
+pub const SETUP_ERROR_SCENARIO: SetupScenario = SetupScenario {
+    state: "download-error",
+    wide: false,
+};
+
+impl SetupScenario {
+    pub fn file_name(&self, theme: &str) -> String {
+        let wide = if self.wide { "-wide" } else { "" };
+        format!("setup-{}{wide}-{theme}.png", self.state)
+    }
+}
+
+pub fn setup_scenarios() -> impl Iterator<Item = SetupScenario> {
+    SETUP_SCENARIOS
+        .iter()
+        .chain(std::iter::once(&SETUP_ERROR_SCENARIO))
+        .filter(|scenario| !scenario.wide)
+        .copied()
+        .flat_map(|scenario| {
+            [
+                scenario,
+                SetupScenario {
+                    wide: true,
+                    ..scenario
+                },
+            ]
+        })
+}
+
+pub fn total_setup_snapshots() -> usize {
+    setup_scenarios().count() * SNAPSHOT_THEMES.len()
+}
+
+#[test]
+fn setup_snapshots_include_all_python_states_light_dark_and_wide() {
+    let names: std::collections::BTreeSet<_> = setup_scenarios()
+        .flat_map(|scenario| SNAPSHOT_THEMES.map(|(theme, _)| scenario.file_name(theme)))
+        .collect();
+    assert_eq!(total_setup_snapshots(), 56);
+    assert_eq!(names.len(), total_setup_snapshots());
+    for name in [
+        "setup-step-1-light.png",
+        "setup-step-7-wide-dark.png",
+        "setup-download-error-dark.png",
+        "setup-checks-all-ready-light.png",
+    ] {
+        assert!(names.contains(name), "{name}");
+    }
+}
+
 pub fn total_snapshots() -> usize {
     SCENARIOS.len() * SNAPSHOT_SIZES.len() * SNAPSHOT_THEMES.len()
 }
