@@ -37,7 +37,7 @@ use objc2_foundation::{NSNotification, NSPoint, NSSize, NSString, NSURL};
 
 use super::actions::{ActionTarget, Timer};
 use super::style::{
-    color, fit_button, font, hide_from_accessibility, make_pill, rect, segmented, style_button,
+    color, fit_button, hide_from_accessibility, make_pill, rect, segmented, style_button,
     style_surface, tokens_for_window, ButtonKind, FlippedView, HalftoneView, SurfaceStyle,
 };
 use super::widgets::{button, label, popup, remove_subviews, LabelStyle};
@@ -654,6 +654,28 @@ fn accessible_button(button: &NSButton, name: &str) {
     button.setAccessibilityLabel(Some(&NSString::from_str(name)));
 }
 
+fn callout_title(error: bool, download_feedback: bool) -> &'static str {
+    match (download_feedback, error) {
+        (true, true) => "Download error",
+        (true, false) => "Download progress",
+        (false, true) => "Setup error",
+        (false, false) => "Progress",
+    }
+}
+
+/// Python's `{size_mb:,}` formatting for model sizes.
+fn format_model_size_mb(size_mb: u32) -> String {
+    let digits = size_mb.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len().saturating_sub(1) / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
+}
+
 // -------------------------------------------------------------- setup view ---
 
 /// One native setup/checkup window. Construct with [`SetupWindow::new`], retain
@@ -782,7 +804,6 @@ impl SetupWindow {
         step_label.setAlignment(NSTextAlignment::Right);
         step_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         root.addSubview(&brand);
-        root.addSubview(&step_label);
         let mut progress = Vec::with_capacity(SETUP_STEPS);
         for index in 0..SETUP_STEPS {
             let segment = NSView::initWithFrame(
@@ -1150,7 +1171,7 @@ impl SetupWindow {
             (width - 26.0).max(0.0),
             LabelStyle {
                 size,
-                color: "muted",
+                color: if bold { "ink" } else { "muted" },
                 height,
                 weight: if bold { Weight::Bold } else { Weight::Regular },
                 wrap: true,
@@ -1194,7 +1215,7 @@ impl SetupWindow {
         button
     }
 
-    fn add_callout(&self, cursor: &mut f64, error: bool) {
+    fn add_callout(&self, cursor: &mut f64, error: bool, download_feedback: bool) {
         let palette = *self.palette.borrow();
         let state = self.state.borrow();
         let message = if error {
@@ -1215,7 +1236,7 @@ impl SetupWindow {
         card.addSubview(&bar);
         card.addSubview(&label(
             self.mtm,
-            if error { "Setup error" } else { "Progress" },
+            callout_title(error, download_feedback),
             16.0,
             8.0,
             width - 40.0,
@@ -1235,7 +1256,7 @@ impl SetupWindow {
             width - 40.0,
             LabelStyle {
                 size: 11.0,
-                color: if error { "red" } else { "muted" },
+                color: "muted",
                 height: 18.0,
                 ..LabelStyle::default()
             },
@@ -1264,8 +1285,8 @@ impl SetupWindow {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         scroll.setHasVerticalScroller(true);
-        scroll.setAutohidesScrollers(true);
-        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        scroll.setAutohidesScrollers(false);
+        scroll.setScrollerStyle(NSScrollerStyle::Legacy);
         scroll.setBorderType(objc2_app_kit::NSBorderType::NoBorder);
         scroll.setDrawsBackground(false);
         let content_width = scroll.contentSize().width;
@@ -1317,8 +1338,8 @@ impl SetupWindow {
                 }
             ),
             &mut cursor,
-            15.0,
-            true,
+            13.0,
+            false,
             26.0,
         );
         self.add_text(
@@ -1596,10 +1617,16 @@ impl SetupWindow {
             false,
             18.0,
         );
-        if !self.state.borrow().status_message.is_empty()
-            || !self.state.borrow().error_message.is_empty()
-        {
-            self.add_callout(&mut cursor, !self.state.borrow().error_message.is_empty());
+        let (has_message, error, download_feedback) = {
+            let state = self.state.borrow();
+            (
+                !state.status_message.is_empty() || !state.error_message.is_empty(),
+                !state.error_message.is_empty(),
+                state.busy_job(JobKind::SpeechDownload) || !state.status_message.is_empty(),
+            )
+        };
+        if has_message {
+            self.add_callout(&mut cursor, error, download_feedback);
         }
         let (models, selected, downloaded, snapshot, checking) = {
             let state = self.state.borrow();
@@ -1650,7 +1677,7 @@ impl SetupWindow {
             let size = if model.size_mb >= 1000 {
                 format!("{:.1} GB", f64::from(model.size_mb) / 1000.0)
             } else {
-                format!("{} MB", model.size_mb)
+                format!("{} MB", format_model_size_mb(model.size_mb))
             };
             self.model_card(
                 &document,
@@ -1734,7 +1761,8 @@ impl SetupWindow {
                 model.label.to_string(),
                 format!(
                     "{} MB  ·  {} GB RAM recommended",
-                    model.size_mb, model.min_ram_gb
+                    format_model_size_mb(model.size_mb),
+                    model.min_ram_gb
                 ),
             )
         }));
@@ -1930,8 +1958,27 @@ impl SetupWindow {
         );
         title_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         card.addSubview(&title_label);
-        let measure =
-            |text: &str| super::style::measure_text(text, &font(10.0, Weight::Bold)) + 16.0;
+        // Match `_add_card_button`: AppKit's label fitting includes the text
+        // cell's metrics that raw NSString measurement omits. Reserve eight
+        // points of horizontal inset on each side for every pill.
+        let measure = |text: &str| {
+            let pill_label = label(
+                self.mtm,
+                text,
+                0.0,
+                0.0,
+                200.0,
+                LabelStyle {
+                    size: 10.0,
+                    height: 16.0,
+                    weight: Weight::Bold,
+                    ..LabelStyle::default()
+                },
+                &palette,
+            );
+            pill_label.sizeToFit();
+            pill_label.frame().size.width + 16.0
+        };
         let total_pills: f64 = tags.iter().map(|tag| measure(tag)).sum::<f64>()
             + 4.0 * tags.len().saturating_sub(1) as f64;
         let mut pill_x = card_width - 12.0 - total_pills;
@@ -2227,30 +2274,15 @@ impl SetupWindow {
 
     fn render_trial(&self) {
         let mut cursor = 8.0;
-        self.add_text(
-            "Record five seconds of speech. Your selected speech model will transcribe it.",
-            &mut cursor,
-            13.0,
-            false,
-            30.0,
-        );
         let (status, error) = {
             let state = self.state.borrow();
             (state.status_message.clone(), state.error_message.clone())
         };
-        self.add_text(
-            if status.is_empty() {
-                "Try a short phrase near your microphone."
-            } else {
-                &status
-            },
-            &mut cursor,
-            14.0,
-            false,
-            30.0,
-        );
+        if !status.is_empty() {
+            self.add_text(&status, &mut cursor, 14.0, false, 30.0);
+        }
         if !error.is_empty() {
-            self.add_callout(&mut cursor, true);
+            self.add_callout(&mut cursor, true, false);
         }
         self.page_button(
             &self.page,
@@ -2288,7 +2320,7 @@ impl SetupWindow {
                 state.hardware.system == "Darwin",
             )
         };
-        self.add_text(&summary, &mut cursor, 15.0, true, 26.0);
+        self.add_text(&summary, &mut cursor, 14.0, true, 26.0);
         self.add_text(&mic_hotkey, &mut cursor, 13.0, false, 26.0);
         if darwin {
             let palette = *self.palette.borrow();
@@ -2317,13 +2349,6 @@ impl SetupWindow {
             cursor += 36.0;
         }
         if state_saved {
-            self.add_text(
-                "You're all set. Run `localflow` whenever you're ready.",
-                &mut cursor,
-                14.0,
-                true,
-                26.0,
-            );
             self.page_button(
                 &self.page,
                 "Launch localflow now",
@@ -3379,35 +3404,81 @@ pub fn snapshot_checks(all_ready: bool) -> Vec<Check> {
         .collect()
 }
 
-/// Fully deterministic setup fixture. Snapshot mode disables all workers and
-/// audio; its fake platform data is never presented as a host check result.
-pub fn snapshot_fixture(mtm: MainThreadMarker) -> Rc<SetupWindow> {
-    use crate::setup_flow::{FakeLaunchAgent, FakeSetupPlatform};
+fn snapshot_page_checks() -> Vec<Check> {
+    vec![
+        Check::new("ffmpeg", "ffmpeg", Some(true), "Installed", "", ""),
+        Check::new(
+            "ollama-installed",
+            "Ollama installed",
+            Some(true),
+            "Installed",
+            "",
+            "",
+        ),
+        Check::new(
+            "ollama-running",
+            "Ollama running",
+            Some(true),
+            "Ready",
+            "",
+            "",
+        ),
+        Check::new(
+            "microphone-device",
+            "Input device",
+            Some(true),
+            "1 input device found",
+            "",
+            "",
+        ),
+    ]
+}
 
-    let hardware = HardwareInfo::new("Darwin", "arm64", 16.0, true, 256.0);
-    let platform = FakeSetupPlatform {
-        system: "Darwin".into(),
-        machine: "arm64".into(),
+/// `models.detect_hardware` reports bytes divided by 1024³. HostPlatform has
+/// already measured the same bytes, but currently reports decimal GB.
+fn python_hardware_units(mut hardware: HardwareInfo) -> HardwareInfo {
+    let decimal_gb_to_gib = 1_000_000_000.0 / 1_073_741_824.0;
+    hardware.ram_gb *= decimal_gb_to_gib;
+    hardware.free_disk_gb *= decimal_gb_to_gib;
+    hardware
+}
+
+fn snapshot_platform(hardware: HardwareInfo) -> crate::setup_flow::FakeSetupPlatform {
+    crate::setup_flow::FakeSetupPlatform {
+        system: hardware.system.clone(),
+        machine: hardware.machine.clone(),
         commands: vec!["ffmpeg".into()],
         ollama_installed: true,
         ollama_running: Some(true),
         input_devices: Ok(vec!["Built-in Microphone".into()]),
-        runtimes: vec![
-            "faster-whisper".into(),
-            "mlx-whisper".into(),
-            "parakeet".into(),
-        ],
-        hardware: Ok(hardware.clone()),
-        ..FakeSetupPlatform::default()
-    };
-    let config = Config::defaults_for(true);
+        // The Python snapshot environment ships faster-whisper; optional MLX
+        // and Parakeet modules are absent. Do not invent those runtimes here.
+        runtimes: vec!["faster-whisper".into()],
+        hardware: Ok(hardware),
+        ..crate::setup_flow::FakeSetupPlatform::default()
+    }
+}
+
+/// Python-compatible setup fixture using the actual host hardware, just like
+/// `SetupWindowController.init()`. Snapshot mode disables all workers and
+/// audio; remaining fake platform data is confined to fixture presentation.
+pub fn snapshot_fixture(mtm: MainThreadMarker) -> Rc<SetupWindow> {
+    use crate::setup_flow::FakeLaunchAgent;
+
+    let hardware = python_hardware_units(
+        HostPlatform
+            .detect_hardware()
+            .expect("setup snapshots must detect the actual host hardware"),
+    );
+    let platform = snapshot_platform(hardware.clone());
+    let config = Config::defaults_for(hardware.system == "Darwin");
     let context = SetupContext::detect(
         config,
         hardware,
         &platform,
         &FakeLaunchAgent::new("not installed"),
     )
-    .expect("the snapshot model runtimes are all available");
+    .expect("the shipped faster-whisper runtime provides a speech catalog");
     let setup = SetupWindow::new(mtm, context, SetupServices::default());
     setup.state.borrow_mut().snapshot_mode = true;
     setup.rebuild();
@@ -3433,7 +3504,7 @@ impl SetupWindow {
             let mut state = self.state.borrow_mut();
             state.step = 0;
             state.saved = false;
-            state.checks = Some(snapshot_checks(false));
+            state.checks = Some(snapshot_page_checks());
             state.check_error = None;
             state.downloaded = state
                 .models
@@ -3443,20 +3514,49 @@ impl SetupWindow {
             state.ollama_checked = true;
             state.ollama_running = true;
             state.ollama_models = vec!["llama3.2:1b".into()];
+            state.stt_id = state.choices.stt_id.clone();
             state.llm_id = Some("llama3.2:1b".into());
+            state.choices.llm_provider = state
+                .config
+                .field_str("llm_provider")
+                .unwrap_or("ollama")
+                .to_string();
+            state.choices.cleanup_level = state
+                .config
+                .field_str("cleanup_level")
+                .unwrap_or("light")
+                .to_string();
+            // The script changes this property before the non-Ollama and
+            // download fixtures and never restores it between those shots.
+            state.cleanup_level = if matches!(
+                fixture,
+                SetupSnapshotState::CleanupLevelMedium
+                    | SetupSnapshotState::NonOllamaProvider
+                    | SetupSnapshotState::DownloadProgress
+                    | SetupSnapshotState::DownloadError
+            ) {
+                "medium".into()
+            } else {
+                state.choices.cleanup_level.clone()
+            };
             state.status_message.clear();
             state.error_message.clear();
             state.busy.clear();
             state.operations.clear();
             state.cancel = None;
+            state.last_progress = None;
+            state.stalled = false;
             state.scroll_y = 0.0;
+            state.mic_level = None;
         }
         match fixture {
             SetupSnapshotState::Step(step) => {
                 self.state.borrow_mut().step = step.min(SETUP_STEPS - 1);
             }
             SetupSnapshotState::ChecksNeedsAction => {
-                self.state.borrow_mut().step = 1;
+                let mut state = self.state.borrow_mut();
+                state.step = 1;
+                state.checks = Some(snapshot_checks(false));
             }
             SetupSnapshotState::ChecksAllReady => {
                 let mut state = self.state.borrow_mut();
@@ -3464,7 +3564,11 @@ impl SetupWindow {
                 state.checks = Some(snapshot_checks(true));
             }
             SetupSnapshotState::ChecksNeedsActionWide => {
-                self.state.borrow_mut().step = 1;
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.step = 1;
+                    state.checks = Some(snapshot_checks(false));
+                }
                 self.rebuild();
                 self.resize_content(1100.0, f64::from(WINDOW_MIN_HEIGHT));
             }
@@ -3524,6 +3628,45 @@ mod tests {
             &FakeLaunchAgent::new("not installed"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn model_sizes_use_python_grouping() {
+        assert_eq!(format_model_size_mb(78), "78");
+        assert_eq!(format_model_size_mb(1000), "1,000");
+        assert_eq!(format_model_size_mb(1321), "1,321");
+        assert_eq!(format_model_size_mb(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn callout_titles_keep_validation_errors_distinct_from_downloads() {
+        assert_eq!(callout_title(false, true), "Download progress");
+        assert_eq!(callout_title(true, true), "Download error");
+        assert_eq!(callout_title(true, false), "Setup error");
+        assert_eq!(callout_title(false, false), "Progress");
+    }
+
+    #[test]
+    fn snapshot_platform_matches_low_memory_python_recommendation() {
+        let hardware =
+            python_hardware_units(HardwareInfo::new("Darwin", "arm64", 8.0, true, 100.0));
+        assert!(hardware.ram_gb < 8.0);
+        assert!((hardware.ram_gb - 7.450_580_596_923_828).abs() < 0.000_001);
+        let platform = snapshot_platform(hardware.clone());
+        let context = SetupContext::detect(
+            Config::defaults_for(true),
+            hardware,
+            &platform,
+            &FakeLaunchAgent::new("not installed"),
+        )
+        .unwrap();
+        assert_eq!(context.choices.stt_id, "fw-tiny");
+        assert_eq!(context.choices.llm_id, None);
+        assert_eq!(context.models.len(), 7);
+        assert!(context
+            .models
+            .iter()
+            .all(|model| model.backend == "faster-whisper"));
     }
 
     #[test]
@@ -3597,6 +3740,11 @@ mod tests {
         for (index, name) in SETUP_SNAPSHOT_NAMES.iter().take(7).enumerate() {
             assert_eq!(SetupSnapshotState::Step(index).file_stem(), *name);
         }
+        assert_eq!(snapshot_page_checks().len(), 4);
+        assert!(snapshot_page_checks()
+            .iter()
+            .all(|check| check.ok == Some(true) && check.fix_label.is_empty()));
+        assert_eq!(snapshot_page_checks()[3].detail, "1 input device found");
         assert_eq!(snapshot_checks(false).len(), 7);
         assert!(snapshot_checks(true)
             .iter()

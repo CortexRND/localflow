@@ -2665,6 +2665,7 @@ fn delete_storage_model(
 impl HubPage for ModelsPage {
     fn prepare_snapshot(&mut self, preparation: &str, root: &std::path::Path) -> Result<()> {
         let mut seed = ModelsSnapshot::default();
+        let keys = preparation.starts_with("keys-");
         let expanded = match preparation {
             "keys-expanded-active" => Some("fireworks"),
             "keys-expanded-inactive" => Some("openai"),
@@ -2702,24 +2703,30 @@ impl HubPage for ModelsPage {
         }
         let saved = matches!(
             preparation,
-            "models-populated"
-                | "keys-saved-active"
+            "keys-saved-active"
                 | "keys-import-results"
                 | "keys-test-success"
                 | "keys-test-failure"
                 | "keys-expanded-active"
                 | "keys-expanded-inactive"
         );
-        if saved {
-            for preset in PRESETS.iter().filter(|preset| preset.needs_key) {
-                seed.statuses.insert(
-                    preset.id.into(),
-                    KeyStatus {
-                        has_key: true,
-                        masked_value: "••••1234".into(),
+        // Python's general, change-model and error snapshots have no saved
+        // keys. Provider snapshots save exactly the two fake import candidates
+        // below, not a key for every provider. Include an explicit status for
+        // every preset, as provider_keys.key_status does in the Python page.
+        for preset in PRESETS {
+            let has_key = saved && matches!(preset.id, "fireworks" | "openai");
+            seed.statuses.insert(
+                preset.id.into(),
+                KeyStatus {
+                    has_key,
+                    masked_value: match (has_key, preset.id) {
+                        (true, "fireworks") => "••••1234".into(),
+                        (true, "openai") => "••••5678".into(),
+                        _ => String::new(),
                     },
-                );
-            }
+                },
+            );
         }
         seed.providers = PRESETS
             .iter()
@@ -2730,17 +2737,15 @@ impl HubPage for ModelsPage {
                 } else {
                     preset.base_url.into()
                 },
-                model: if matches!(preparation, "keys-saved-active" | "keys-expanded-active")
-                    && preset.id == "fireworks"
-                {
-                    "accounts/fireworks/models/kimi-k3".into()
+                model: if saved && preset.id == "fireworks" {
+                    "example-model".into()
                 } else {
                     preset.default_model.into()
                 },
                 models: if preparation == "models-empty" {
                     Vec::new()
                 } else {
-                    vec!["accounts/fireworks/models/kimi-k3".into()]
+                    vec!["example-model".into()]
                 },
                 message: match (preparation, preset.id) {
                     ("keys-test-success", "ollama") => ModelsMessage {
@@ -2759,11 +2764,18 @@ impl HubPage for ModelsPage {
                 },
             })
             .collect();
-        seed.quick_list_state = Some(match preparation {
-            "change-loading" => ListState::Loading,
-            "change-unavailable" => ListState::Unavailable,
-            "change-empty" | "models-empty" => ListState::Empty,
-            _ => ListState::Ready,
+        // provider_snapshot_mode returns after putting Ollama into its initial
+        // loading state. That quick state also survives the intervening cloud
+        // configurations throughout Python's cumulative provider sequence.
+        seed.quick_list_state = Some(if keys {
+            ListState::Loading
+        } else {
+            match preparation {
+                "change-loading" => ListState::Loading,
+                "change-unavailable" => ListState::Unavailable,
+                "change-empty" | "models-empty" => ListState::Empty,
+                _ => ListState::Ready,
+            }
         });
         seed.quick_models = match preparation {
             "change-ollama" => vec!["gemma4:e4b".into(), "llama3.2:3b".into(), "qwen3:4b".into()],
@@ -2771,8 +2783,8 @@ impl HubPage for ModelsPage {
             "models-populated" => {
                 vec!["gemma4:e4b".into(), "llama3.2:3b".into(), "qwen3:4b".into()]
             }
-            "keys-saved-active" | "keys-expanded-active" => {
-                vec!["llama3.2:3b".into()]
+            "models-parakeet" | "models-error" | "storage" | "storage-deleted" => {
+                vec!["gemma4:e4b".into(), "llama3.2:3b".into()]
             }
             _ => Vec::new(),
         };
@@ -2801,7 +2813,16 @@ impl HubPage for ModelsPage {
                     "OPENAI_API_KEY".into(),
                     "snapshot-not-a-real-key-5678".into(),
                 );
-                Some(lf_providers::keys::detect_imports(None, &environment)?)
+                let mut candidates = lf_providers::keys::detect_imports(None, &environment)?;
+                // The Python fixture supplies literal candidates rather than
+                // detecting them: OpenAI came from this shell profile, not the
+                // process environment used to create the private fake value.
+                for candidate in &mut candidates {
+                    if candidate.provider_id == "openai" {
+                        candidate.source = "~/.zshrc: OPENAI_API_KEY".into();
+                    }
+                }
+                Some(candidates)
             } else {
                 None
             };
@@ -2837,17 +2858,21 @@ impl HubPage for ModelsPage {
         {
             let state = self.state.borrow();
             if let Some(services) = &state.services {
-                let mut config = services.config();
-                if matches!(preparation, "keys-saved-active" | "keys-expanded-active") {
+                // Python creates a fresh default provider config for every
+                // specification, instead of carrying earlier LLM or speech
+                // selections into the next fixture.
+                let mut config = if keys {
+                    Config::default()
+                } else {
+                    services.config()
+                };
+                if saved {
                     config.set_field("llm_provider", serde_json::json!("openai-compatible"));
                     config.set_field(
                         "llm_base_url",
                         serde_json::json!("https://api.fireworks.ai/inference/v1"),
                     );
-                    config.set_field(
-                        "llm_model",
-                        serde_json::json!("accounts/fireworks/models/kimi-k3"),
-                    );
+                    config.set_field("llm_model", serde_json::json!("example-model"));
                 }
                 if preparation == "models-parakeet" {
                     config.set_field("stt_backend", serde_json::json!("parakeet"));
@@ -2862,11 +2887,14 @@ impl HubPage for ModelsPage {
                     );
                     config.set_field(
                         "llm_model",
-                        serde_json::json!("accounts/fireworks/models/kimi-k3"),
+                        serde_json::json!("accounts/fireworks/models/example-model"),
                     );
                     config.set_field("stt_backend", serde_json::json!("parakeet"));
                 }
-                if preparation == "change-ollama" || preparation == "change-missing-model" {
+                if matches!(preparation, "change-ollama" | "change-loading") {
+                    config.set_field("llm_model", serde_json::json!("gemma4:e4b"));
+                }
+                if preparation == "change-missing-model" {
                     config.set_field("llm_model", serde_json::json!("llama3.2:3b"));
                 }
                 if preparation == "change-invalid-id" {
@@ -2875,6 +2903,7 @@ impl HubPage for ModelsPage {
                         "llm_base_url",
                         serde_json::json!("https://api.openai.com/v1"),
                     );
+                    config.set_field("llm_model", serde_json::json!("example-model"));
                 }
                 if matches!(preparation, "storage" | "storage-deleted") {
                     config.set_field("stt_backend", serde_json::json!("faster-whisper"));
@@ -3450,7 +3479,11 @@ fn read_lease(path: &Path, pid: i32) -> Option<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lf_providers::keys::mask_key;
+    use crate::backends::meeting::FakeMeetingClient;
+    use crate::backends::prompts::FakePromptQueue;
+    use lf_core::dictionary::DictionaryStore;
+    use lf_core::history::HistoryStore;
+    use lf_providers::keys::{mask_key, TEST_FAILED, TEST_OK};
     use lf_providers::LlmConfig;
     use std::sync::Mutex;
 
@@ -3681,6 +3714,286 @@ mod tests {
         assert!(page
             .prepare_snapshot("not-a-real-state", Path::new("unused"))
             .is_err());
+    }
+
+    #[test]
+    fn snapshot_no_key_states_include_status_for_every_provider() {
+        for preparation in [
+            "models-populated",
+            "models-empty",
+            "models-error",
+            "keys-no-keys",
+            "keys-import-defaults",
+            "keys-expanded-no-key",
+            "keys-expanded-custom",
+            "change-cloud",
+        ] {
+            let mut page = ModelsPage::new();
+            page.prepare_snapshot(preparation, Path::new("unused"))
+                .unwrap();
+            let snapshot = page.snapshot_state();
+            assert_eq!(snapshot.statuses.len(), PRESETS.len(), "{preparation}");
+            for preset in PRESETS {
+                let status = &snapshot.statuses[preset.id];
+                assert!(!status.has_key, "{} / {preparation}", preset.id);
+                assert!(
+                    status.masked_value.is_empty(),
+                    "{} / {preparation}",
+                    preset.id
+                );
+            }
+            if preparation.starts_with("keys-") {
+                assert_eq!(snapshot.quick_list_state, Some(ListState::Loading));
+                assert!(snapshot.quick_models.is_empty(), "{preparation}");
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_default_ollama_lists_include_the_selected_model() {
+        for preparation in ["models-parakeet", "storage", "storage-deleted"] {
+            let mut page = ModelsPage::new();
+            page.prepare_snapshot(preparation, Path::new("unused"))
+                .unwrap();
+            let snapshot = page.snapshot_state();
+            assert_eq!(snapshot.quick_list_state, Some(ListState::Ready));
+            assert_eq!(snapshot.quick_models, ["gemma4:e4b", "llama3.2:3b"]);
+        }
+    }
+
+    #[test]
+    fn snapshot_saved_keys_match_only_the_two_python_imports() {
+        for preparation in [
+            "keys-saved-active",
+            "keys-import-results",
+            "keys-test-success",
+            "keys-test-failure",
+            "keys-expanded-active",
+            "keys-expanded-inactive",
+        ] {
+            let mut page = ModelsPage::new();
+            page.prepare_snapshot(preparation, Path::new("unused"))
+                .unwrap();
+            let snapshot = page.snapshot_state();
+            assert_eq!(snapshot.statuses.len(), PRESETS.len(), "{preparation}");
+            for preset in PRESETS {
+                let status = &snapshot.statuses[preset.id];
+                let expected = match preset.id {
+                    "fireworks" => Some("••••1234"),
+                    "openai" => Some("••••5678"),
+                    _ => None,
+                };
+                assert_eq!(
+                    status.has_key,
+                    expected.is_some(),
+                    "{} / {preparation}",
+                    preset.id
+                );
+                assert_eq!(
+                    status.masked_value,
+                    expected.unwrap_or(""),
+                    "{} / {preparation}",
+                    preset.id
+                );
+            }
+            assert_eq!(snapshot.quick_list_state, Some(ListState::Loading));
+            assert!(snapshot.quick_models.is_empty(), "{preparation}");
+            assert_eq!(
+                snapshot
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == "fireworks")
+                    .unwrap()
+                    .model,
+                "example-model",
+                "{preparation}"
+            );
+            let debug = format!("{snapshot:?}");
+            assert!(!debug.contains("fake-key-1234") && !debug.contains("fake-key-5678"));
+        }
+    }
+
+    #[test]
+    fn snapshot_import_sources_and_defaults_match_python() {
+        for (preparation, selected) in [
+            ("keys-import-results", false),
+            ("keys-import-defaults", true),
+        ] {
+            let mut page = ModelsPage::new();
+            page.prepare_snapshot(preparation, Path::new("unused"))
+                .unwrap();
+            assert_eq!(
+                page.import_snapshot(),
+                vec![
+                    ImportSnapshot {
+                        provider_id: "fireworks".into(),
+                        source: "environment: FIREWORKS_API_KEY".into(),
+                        masked_value: "••••1234".into(),
+                        selected,
+                    },
+                    ImportSnapshot {
+                        provider_id: "openai".into(),
+                        source: "~/.zshrc: OPENAI_API_KEY".into(),
+                        masked_value: "••••5678".into(),
+                        selected,
+                    },
+                ],
+                "{preparation}"
+            );
+            assert_eq!(
+                page.snapshot_state().provider_message,
+                ModelsMessage {
+                    text: "Select the keys to save".into(),
+                    success: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_provider_test_results_match_python() {
+        for (preparation, message) in [
+            ("keys-test-success", TEST_OK),
+            ("keys-test-failure", TEST_FAILED),
+        ] {
+            let mut page = ModelsPage::new();
+            page.prepare_snapshot(preparation, Path::new("unused"))
+                .unwrap();
+            let snapshot = page.snapshot_state();
+            assert_eq!(snapshot.expanded.as_deref(), Some("ollama"));
+            let provider = snapshot
+                .providers
+                .iter()
+                .find(|provider| provider.id == "ollama")
+                .unwrap();
+            assert_eq!(provider.message.text, message);
+            assert_eq!(provider.message.success, preparation == "keys-test-success");
+        }
+    }
+
+    #[test]
+    fn keys_snapshot_configs_reset_then_follow_python_saved_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = HubServices::new_isolated(
+            config(&[("stt_backend", "parakeet"), ("llm_model", "stale-model")]),
+            Rc::new(
+                HistoryStore::open(
+                    Some(temp.path().join("history.sqlite")),
+                    Some(temp.path().join("clips")),
+                    true,
+                )
+                .unwrap(),
+            ),
+            Rc::new(DictionaryStore::new(Some(
+                temp.path().join("dictionary.json"),
+            ))),
+            Arc::new(FakePromptQueue::default()),
+            Arc::new(FakeMeetingClient::default()),
+        );
+        let mut page = ModelsPage::new();
+        page.state.borrow_mut().services = Some(services);
+        for (preparation, saved) in [
+            ("keys-no-keys", false),
+            ("keys-saved-active", true),
+            ("keys-import-results", true),
+            ("keys-import-defaults", false),
+            ("keys-test-success", true),
+            ("keys-test-failure", true),
+            ("keys-expanded-active", true),
+            ("keys-expanded-inactive", true),
+            ("keys-expanded-no-key", false),
+            ("keys-expanded-custom", false),
+        ] {
+            page.prepare_snapshot(preparation, Path::new("unused"))
+                .unwrap();
+            let config = page
+                .state
+                .borrow()
+                .services
+                .as_ref()
+                .expect("isolated services")
+                .config();
+            let expected = if saved {
+                (
+                    "openai-compatible",
+                    "https://api.fireworks.ai/inference/v1",
+                    "example-model",
+                )
+            } else {
+                ("ollama", "http://localhost:11434", "llama3.2:3b")
+            };
+            assert_eq!(
+                config.field_str("llm_provider"),
+                Some(expected.0),
+                "{preparation}"
+            );
+            assert_eq!(
+                config.field_str("llm_base_url"),
+                Some(expected.1),
+                "{preparation}"
+            );
+            assert_eq!(
+                config.field_str("llm_model"),
+                Some(expected.2),
+                "{preparation}"
+            );
+            assert_eq!(
+                config.field_str("stt_backend"),
+                Some("auto"),
+                "{preparation}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_snapshot_uses_python_model_and_computes_statuses_from_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = HubServices::new_isolated(
+            Config::default(),
+            Rc::new(
+                HistoryStore::open(
+                    Some(temp.path().join("history.sqlite")),
+                    Some(temp.path().join("clips")),
+                    true,
+                )
+                .unwrap(),
+            ),
+            Rc::new(DictionaryStore::new(Some(
+                temp.path().join("dictionary.json"),
+            ))),
+            Arc::new(FakePromptQueue::default()),
+            Arc::new(FakeMeetingClient::default()),
+        );
+        let mut page = ModelsPage::new();
+        page.state.borrow_mut().services = Some(services);
+        page.prepare_snapshot("change-cloud", Path::new("unused"))
+            .unwrap();
+        let snapshot = page.snapshot_state();
+        let config = page
+            .state
+            .borrow()
+            .services
+            .as_ref()
+            .expect("isolated services")
+            .config();
+        assert_eq!(
+            config.field_str("llm_model"),
+            Some("accounts/fireworks/models/example-model")
+        );
+        assert!(snapshot.quick_draft.is_none());
+        assert_eq!(
+            provider_status(preset("fireworks"), &config, false),
+            ("Active", ("cobalt", "cobalt"))
+        );
+        assert_eq!(
+            provider_status(preset("ollama"), &config, false),
+            ("Local", ("line", "ink"))
+        );
+        assert_eq!(
+            provider_status(preset("openai"), &config, false),
+            ("No key", ("muted", "muted"))
+        );
+        assert!(page.state.borrow().suspend_workers);
     }
 
     #[test]

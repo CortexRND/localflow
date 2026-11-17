@@ -368,7 +368,7 @@ impl Hub {
         );
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);
-        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        scroll.setScrollerStyle(NSScrollerStyle::Legacy);
         scroll.setDrawsBackground(false);
         let scroll_frame = scroll.frame();
         let body = FlippedView::new(
@@ -709,12 +709,13 @@ impl Hub {
         let page = self.current_page();
         let scroll_y = self.scroll.contentView().bounds().origin.y;
         self.show_page(&page);
-        let limit_y = restored_scroll(
-            scroll_y,
-            self.body.frame().size.height,
-            self.viewport_height(),
-        );
-        self.body.scrollPoint(NSPoint::new(0.0, limit_y));
+        self.scroll_to(scroll_y);
+    }
+
+    /// Scroll the page canvas, clamped to the rendered document's range.
+    pub fn scroll_to(&self, y: f64) {
+        let y = restored_scroll(y, self.body.frame().size.height, self.viewport_height());
+        self.body.scrollPoint(NSPoint::new(0.0, y));
     }
 
     /// Resize the window's content (at least the Hub minimum) and re-lay out

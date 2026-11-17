@@ -47,7 +47,8 @@ mod native {
     use objc2::rc::Retained;
     use objc2::MainThreadMarker;
     use objc2_app_kit::{
-        NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSButton, NSView,
+        NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSButton, NSTextField,
+        NSView,
     };
     use serde_json::{Map, Value};
 
@@ -136,6 +137,74 @@ mod native {
             }
             buttons(&sub, out);
         }
+    }
+
+    /// Python's Settings snapshot scroll destinations. Other pages retain the
+    /// Hub's normal rebuilt scroll position.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SnapshotScroll {
+        SettingsManual,
+        SettingsRow(&'static str),
+    }
+
+    impl SnapshotScroll {
+        fn for_scenario(scenario: &Scenario) -> Option<Self> {
+            match (scenario.page, scenario.prepare) {
+                ("Settings", "manual" | "switches") => Some(Self::SettingsManual),
+                ("Settings", "manual-error") => Some(Self::SettingsRow("prompt_hotkey")),
+                _ => None,
+            }
+        }
+
+        fn target_y(self, card_y: f64, control_y: f64) -> f64 {
+            match self {
+                Self::SettingsManual => card_y - 12.0,
+                Self::SettingsRow(_) => card_y + control_y - 160.0,
+            }
+        }
+    }
+
+    fn editable_field(card: &NSView, label: &str) -> Option<Retained<NSTextField>> {
+        card.subviews().iter().find_map(|subview| {
+            let field = subview.clone().downcast::<NSTextField>().ok()?;
+            (field.isEditable()
+                && field
+                    .accessibilityLabel()
+                    .is_some_and(|candidate| candidate.to_string() == label))
+            .then_some(field)
+        })
+    }
+
+    /// Resolve from the views just rendered by `resize_content`, like Python's
+    /// `_settings_manual_top` and `_settings_row_top`.
+    fn settings_scroll_target(hub: &Hub, scroll: SnapshotScroll) -> Result<f64> {
+        let subviews = hub.body().subviews();
+        let card = subviews
+            .lastObject()
+            .ok_or_else(|| anyhow!("Settings manual card is missing"))?;
+        let card_y = card.frame().origin.y;
+        let control_y = match scroll {
+            SnapshotScroll::SettingsManual => 0.0,
+            SnapshotScroll::SettingsRow(key) => {
+                let label = match key {
+                    "prompt_hotkey" => "Prompt shortcut",
+                    other => bail!("unknown Settings snapshot row {other:?}"),
+                };
+                editable_field(&card, label)
+                    .ok_or_else(|| anyhow!("Settings control {key:?} is missing"))?
+                    .frame()
+                    .origin
+                    .y
+            }
+        };
+        Ok(scroll.target_y(card_y, control_y))
+    }
+
+    fn position_snapshot(hub: &Hub, scenario: &Scenario) -> Result<()> {
+        if let Some(scroll) = SnapshotScroll::for_scenario(scenario) {
+            hub.scroll_to(settings_scroll_target(hub, scroll)?);
+        }
+        Ok(())
     }
 
     /// Click the button whose accessibility label is `label`, through its real
@@ -230,6 +299,9 @@ mod native {
             run_style_steps(&hub, &seeded, scenario.style)?;
             for (size, width, height) in SNAPSHOT_SIZES {
                 hub.resize_content(width, height);
+                // Re-resolve after every width-dependent rebuild; appearance
+                // rebuilds below retain this scroll position.
+                position_snapshot(&hub, scenario)?;
                 for (theme, dark) in SNAPSHOT_THEMES {
                     set_appearance(SnapshotTarget::Window(hub.window()), dark)?;
                     // The palette is re-read on every render: rebuild.
@@ -277,5 +349,32 @@ mod native {
         println!("wrote {written} snapshots to {}", out.display());
         drop(temp);
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use lf_ui::snapshot_plan::find;
+
+        #[test]
+        fn settings_manual_scenarios_use_the_python_scroll_destinations() {
+            let scroll = |state| SnapshotScroll::for_scenario(find("Settings", state).unwrap());
+            assert_eq!(scroll("manual"), Some(SnapshotScroll::SettingsManual));
+            assert_eq!(scroll("switches"), Some(SnapshotScroll::SettingsManual));
+            assert_eq!(
+                scroll("manual-error"),
+                Some(SnapshotScroll::SettingsRow("prompt_hotkey"))
+            );
+            assert_eq!(scroll("preview"), None);
+        }
+
+        #[test]
+        fn settings_scroll_targets_use_only_the_python_insets() {
+            assert_eq!(SnapshotScroll::SettingsManual.target_y(640.0, 0.0), 628.0);
+            assert_eq!(
+                SnapshotScroll::SettingsRow("prompt_hotkey").target_y(640.0, 280.0),
+                760.0
+            );
+        }
     }
 }
