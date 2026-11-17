@@ -27,6 +27,11 @@ pruned during discovery. A dedicated child input reader exits on EOF even while
 native loading/inference is busy, including when the parent dies. Quit/shutdown
 drains meeting/server work before evicting retained engines. Speech admission
 closes before shutdown waits for active calls; quit retains its 60-second cap.
+Closing UI writes are acknowledged before HTTP admission stops. Ordinary HTTP
+requests get four seconds before their connections and async tasks are aborted;
+meeting persistence runs concurrently, so a stalled chat cannot consume its budget.
+Already-running blocking providers are detached during runtime teardown rather
+than allowed to delay quitting.
 The existing recording/meeting/inference guards
 still defer ordinary idle/off eviction; existing cancellation epochs still
 discard stale results. Setup cancellation releases its proxy when the trial
