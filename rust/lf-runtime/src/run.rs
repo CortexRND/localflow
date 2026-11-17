@@ -419,6 +419,7 @@ mod tests {
                 .env("USERPROFILE", root.path())
                 .env("XDG_CONFIG_HOME", root.path().join("config"))
                 .env_remove("FIREWORKS_API_KEY")
+                .env_remove("LOCALFLOW_FIREWORKS_API_KEY")
                 .status()
                 .unwrap();
             assert!(status.success());
