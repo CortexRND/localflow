@@ -28,6 +28,7 @@ use super::style::FlippedView;
 use crate::backends::ask::{AskBackend, FakeAskBackend};
 use crate::backends::meeting::{FakeMeetingClient, MeetingClient};
 use crate::backends::prompts::{FakePromptQueue, PromptQueue};
+use crate::backends::settings_agent::{FakeSettingsAgent, SettingsAgent};
 use crate::tokens::{Palette, Weight};
 
 /// The text-measure closure pages pass to the step-1 layout code.
@@ -47,6 +48,7 @@ pub struct HubServices {
     pub prompt_queue: Arc<dyn PromptQueue>,
     pub meeting_client: Arc<dyn MeetingClient>,
     pub ask_backend: RefCell<Box<dyn AskBackend>>,
+    pub settings_agent: RefCell<Box<dyn SettingsAgent>>,
     /// Injected by the single native window router. Snapshots leave it unset.
     pub setup_opener: RefCell<Option<Rc<dyn Fn()>>>,
     /// Per-page inline error text (`page_errors` in Python), cleared when the
@@ -74,6 +76,7 @@ impl HubServices {
             prompt_queue,
             meeting_client,
             ask_backend: RefCell::new(ask_backend),
+            settings_agent: RefCell::new(Box::new(FakeSettingsAgent::default())),
             setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),

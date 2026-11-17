@@ -186,6 +186,9 @@ fn real_services_using(
         Arc::new(HttpMeetingClient(http.clone())),
         Box::new(HttpAskBackend::new(http.clone())),
     );
+    *services.settings_agent.borrow_mut() =
+        crate::backends::settings_agent_native::native_settings_agent()
+            .map_err(|error| anyhow!(error.0))?;
     Ok((services, http))
 }
 

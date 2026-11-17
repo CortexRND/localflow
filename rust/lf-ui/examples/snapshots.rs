@@ -35,12 +35,15 @@ mod native {
     use std::rc::Rc;
 
     fn loading_prompts(view: &NSView) -> bool {
-        view.downcast_ref::<NSTextField>()
-            .is_some_and(|field| field.stringValue().to_string() == "Loading prompts…")
-            || view.subviews().iter().any(|child| loading_prompts(&child))
+        view.downcast_ref::<NSTextField>().is_some_and(|field| {
+            matches!(
+                field.stringValue().to_string().as_str(),
+                "Loading prompts…" | "Loading settings…"
+            )
+        }) || view.subviews().iter().any(|child| loading_prompts(&child))
     }
 
-    fn settle_prompts(hub: &Hub) -> Result<()> {
+    fn settle_requests(hub: &Hub) -> Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while loading_prompts(&hub.content_view()) {
             anyhow::ensure!(
@@ -189,7 +192,7 @@ mod native {
             hub.prepare_snapshot(scenario.prepare, &base)?;
             hub.show_page(scenario.page);
             spin_run_loop(0.05);
-            settle_prompts(&hub)?;
+            settle_requests(&hub)?;
             if let Some(error) = scenario.error {
                 services.set_page_error(scenario.page, error);
             }

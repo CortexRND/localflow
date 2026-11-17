@@ -30,7 +30,8 @@ use super::actions::{ActionTarget, Timer};
 use super::page::{HubPage, HubServices, Measure, PageCtx, PageHandle};
 use super::pages::{
     ask::AskPage, dictionary::DictionaryPage, history::HistoryPage, home::HomePage,
-    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, prompts::PromptsPage, style::StylePage,
+    hot_phrases::HotPhrasesPage, meetings::MeetingsPage, models::ModelsPage, prompts::PromptsPage,
+    settings::SettingsPage, style::StylePage,
 };
 use super::style::{
     boxed_measure, color, hide_from_accessibility, page_title, rect, style_flat_button,
@@ -214,6 +215,8 @@ fn make_pages() -> Vec<(&'static str, PageHandle)> {
                 "Dictionary" => Rc::new(RefCell::new(DictionaryPage::new())),
                 "Prompts" => Rc::new(RefCell::new(PromptsPage::new())),
                 "Style" => Rc::new(RefCell::new(StylePage::new())),
+                "Models" => Rc::new(RefCell::new(ModelsPage::new())),
+                "Settings" => Rc::new(RefCell::new(SettingsPage::new())),
                 _ => unreachable!("HUB_PAGES contains only implemented pages"),
             };
             (name, page)

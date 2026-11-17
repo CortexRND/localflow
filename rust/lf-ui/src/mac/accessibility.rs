@@ -73,9 +73,11 @@ fn named_button(view: &NSView, label: &str) -> Option<Retained<NSButton>> {
         .find_map(|child| named_button(&child, label))
 }
 
-fn settle_prompts(hub: &Hub) {
+fn settle_requests(hub: &Hub) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while has_text(&hub.content_view(), "Loading prompts…") {
+    while has_text(&hub.content_view(), "Loading prompts…")
+        || has_text(&hub.content_view(), "Loading settings…")
+    {
         assert!(
             std::time::Instant::now() < deadline,
             "prompt worker did not finish"
@@ -142,6 +144,51 @@ fn assert_meetings_focus(mtm: MainThreadMarker) {
     }
     hub.shutdown();
     println!("Native Meetings focus audit: notes/title/question focus and selection survive status-style rebuilds");
+}
+
+fn assert_settings_writes(mtm: MainThreadMarker) {
+    fn request(view: &NSView) -> Option<Retained<NSTextView>> {
+        if let Ok(text) = view.retain().downcast::<NSTextView>() {
+            if text
+                .accessibilityLabel()
+                .is_some_and(|label| label.to_string() == lf_ui::hub_settings::HEADING)
+            {
+                return Some(text);
+            }
+        }
+        view.subviews().iter().find_map(|child| request(&child))
+    }
+    let root = tempfile::tempdir().unwrap();
+    let services = services(root.path());
+    let hub = Hub::new(mtm, services.clone(), "Settings");
+    hub.prepare_snapshot("preview", root.path()).unwrap();
+    hub.show_page("Settings");
+    let apply = named_button(&hub.content_view(), "Apply").expect("Apply preview");
+    unsafe { apply.performClick(None) };
+    spin_run_loop(0.1);
+    settle_requests(&hub);
+    assert_eq!(services.config().field_bool("sounds_enabled"), Some(false));
+    assert_eq!(
+        request(&hub.content_view()).unwrap().string().to_string(),
+        ""
+    );
+    assert!(
+        named_button(&hub.content_view(), lf_ui::hub_settings::UNDO_TITLE)
+            .unwrap()
+            .isEnabled()
+    );
+    hub.resize_content(1280.0, 820.0);
+    assert_eq!(
+        request(&hub.content_view()).unwrap().string().to_string(),
+        ""
+    );
+    let undo = named_button(&hub.content_view(), lf_ui::hub_settings::UNDO_TITLE).unwrap();
+    unsafe { undo.performClick(None) };
+    spin_run_loop(0.1);
+    settle_requests(&hub);
+    assert_eq!(services.config().field_bool("sounds_enabled"), Some(true));
+    hub.shutdown();
+    println!("Native Settings audit: worker Apply/Undo, real undo record and cleared request survive rebuild");
 }
 
 fn assert_dictionary_submissions(mtm: MainThreadMarker) {
@@ -355,13 +402,14 @@ pub fn run() {
     assert_eq!(terminate_calls.get(), 1);
     println!("Native Hub termination audit: AppKit quit invokes the flush callback once");
     assert_dictionary_submissions(mtm);
+    assert_settings_writes(mtm);
     assert_meetings_focus(mtm);
     let temp = tempfile::tempdir().expect("temporary UI fixtures");
     let hub = Hub::new(mtm, services(temp.path()), "Home");
     let mut failures = Vec::new();
     for page in HUB_PAGES {
         hub.show_page(page);
-        settle_prompts(&hub);
+        settle_requests(&hub);
         assert_eq!(hub.current_page(), page);
         walk(&hub.content_view(), "root", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
@@ -410,14 +458,16 @@ pub fn run() {
         .unwrap();
     for page in HUB_PAGES {
         hub.show_page(page);
-        settle_prompts(&hub);
+        settle_requests(&hub);
         walk(&hub.content_view(), "populated", page, &mut failures);
         assert_decorations_hidden(&hub.content_view(), page, &mut failures);
     }
-    for scenario in lf_ui::snapshot_plan::SCENARIOS
-        .iter()
-        .filter(|s| matches!(s.page, "Ask" | "Meetings" | "Hot Phrases"))
-    {
+    for scenario in lf_ui::snapshot_plan::SCENARIOS.iter().filter(|s| {
+        matches!(
+            s.page,
+            "Ask" | "Meetings" | "Hot Phrases" | "Models" | "Settings"
+        )
+    }) {
         let fixture = tempfile::tempdir().unwrap();
         let fixture_hub = Hub::new(mtm, services(fixture.path()), scenario.page);
         fixture_hub
@@ -439,7 +489,7 @@ pub fn run() {
         assert_decorations_hidden(&fixture_hub.content_view(), scenario.page, &mut failures);
         fixture_hub.shutdown();
     }
-    for unavailable in ["Models", "Settings"] {
+    for unavailable in ["Setup", "not a page"] {
         hub.show_page("History");
         hub.show_page(unavailable);
         assert_eq!(hub.current_page(), "Home");
@@ -454,7 +504,7 @@ pub fn run() {
     );
     let unavailable = Hub::new(mtm, production, "Prompts");
     assert!(has_text(&unavailable.content_view(), "Loading prompts…"));
-    settle_prompts(&unavailable);
+    settle_requests(&unavailable);
     assert!(has_text(
         &unavailable.content_view(),
         "Can't read the queue"
@@ -469,5 +519,5 @@ pub fn run() {
     unavailable.shutdown();
     hub.shutdown();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    println!("Native accessibility audit: all eight ported pages and snapshot states passed");
+    println!("Native accessibility audit: all ten ported pages and snapshot states passed");
 }
