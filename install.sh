@@ -11,7 +11,7 @@ RELEASE_BASE_URL="${LOCALFLOW_RELEASE_BASE_URL:-https://github.com/CortexRND/loc
 
 usage() {
     cat <<EOF
-Usage: install.sh [--with-ollama] [--no-launch] [--no-system-deps] [--help]
+Usage: install.sh [--with-ollama] [--no-launch] [--no-system-deps] [--uninstall] [--help]
 
 Install LocalFlow on macOS or Linux. Piped installs use ~/.localflow/app.
 
@@ -19,9 +19,11 @@ Options:
   --with-ollama     Install and start Ollama
   --no-launch       Do not open the setup wizard after installation
   --no-system-deps  Skip Linux package-manager installs
+  --uninstall      On macOS, remove either runtime's app bundles and LaunchAgent
   -h, --help        Show this help
 
 Environment:
+  LOCALFLOW_RUNTIME       python (default), or rust (macOS; Cargo and Xcode CLT required)
   LOCALFLOW_WITH_OLLAMA=1  Same as --with-ollama
   LOCALFLOW_NO_LAUNCH=1    Same as --no-launch
   LOCALFLOW_HOME           Install checkout location
@@ -45,6 +47,12 @@ EOF
 WITH_OLLAMA=0
 NO_LAUNCH=0
 NO_SYSTEM_DEPS=0
+UNINSTALL=0
+RUNTIME="${LOCALFLOW_RUNTIME-python}"
+case "$RUNTIME" in
+    python|rust) ;;
+    *) echo "Invalid LOCALFLOW_RUNTIME: $RUNTIME (expected python or rust)." >&2; exit 2 ;;
+esac
 if [[ "${LOCALFLOW_WITH_OLLAMA:-0}" == "1" ]]; then
     WITH_OLLAMA=1
 fi
@@ -57,6 +65,7 @@ for arg in "$@"; do
         --with-ollama) WITH_OLLAMA=1 ;;
         --no-launch) NO_LAUNCH=1 ;;
         --no-system-deps) NO_SYSTEM_DEPS=1 ;;
+        --uninstall) UNINSTALL=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
@@ -70,6 +79,21 @@ OS="$(uname -s)"
 PYTHON=""
 USE_UV=0
 HAVE_BREW=0
+
+if [[ "$UNINSTALL" == 1 ]]; then
+    [[ "$OS" == Darwin ]] || { echo "--uninstall currently supports macOS only." >&2; exit 1; }
+    if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
+        launchctl bootout "gui/$(id -u)/com.cortexrnd.localflow" >/dev/null 2>&1 || true
+    fi
+    rm -f "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+    rm -rf "$HOME/Applications/LocalFlow.app" "$HOME/Applications/LocalFlow Setup.app"
+    echo "Removed LocalFlow app bundles and autostart; settings, models and agent backups retained."
+    exit 0
+fi
+if [[ "$RUNTIME" == rust && "$OS" != Darwin ]]; then
+    echo "LOCALFLOW_RUNTIME=rust currently supports macOS only." >&2
+    exit 1
+fi
 
 install_linux_system_deps() {
     local -a wayland_packages=()
@@ -287,7 +311,10 @@ wait_for_ollama() {
     return 0
 }
 
-if [[ "$OS" == "Darwin" ]]; then
+if [[ "$OS" == "Darwin" && "$RUNTIME" == rust ]]; then
+    command -v cargo >/dev/null 2>&1 || { echo "LOCALFLOW_RUNTIME=rust requires Cargo; install Rust first." >&2; exit 1; }
+    mac_has_clt || { echo "LOCALFLOW_RUNTIME=rust requires Xcode Command Line Tools (xcode-select --install)." >&2; exit 1; }
+elif [[ "$OS" == "Darwin" ]]; then
     for brew_dir in /opt/homebrew/bin /usr/local/bin; do
         if [[ -x "$brew_dir/brew" ]]; then
             case ":${PATH}:" in
@@ -375,6 +402,7 @@ elif [[ "$FROM_CHECKOUT" -eq 0 ]]; then
 fi
 
 cd "$REPO"
+if [[ "$RUNTIME" == python ]]; then
 EXTRAS=""
 if [[ "$OS" == "Darwin" ]]; then
     if [[ "$(uname -m)" == "arm64" ]]; then
@@ -402,6 +430,7 @@ else
     .venv/bin/python -m pip install --upgrade pip
     .venv/bin/pip install -e ".${EXTRAS}"
 fi
+fi
 
 if [[ "$WITH_OLLAMA" -eq 1 ]]; then
     if [[ "$OS" == "Darwin" ]]; then
@@ -425,7 +454,11 @@ if [[ "$WITH_OLLAMA" -eq 1 ]]; then
     wait_for_ollama
 fi
 
-if [[ "$OS" == "Linux" ]]; then
+if [[ "$RUNTIME" == rust ]]; then
+    bash scripts/build_rust_app.sh "$HOME/Applications/LocalFlow.app"
+    bash "$HOME/Applications/LocalFlow.app/Contents/Resources/macos_launchagent.sh" \
+        install-rust "$HOME/Applications/LocalFlow.app/Contents/MacOS/lf-hub"
+elif [[ "$OS" == "Linux" ]]; then
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
     ln -sfn "$REPO/.venv/bin/lf" "$HOME/.local/bin/lf"
     case ":${PATH}:" in
@@ -453,6 +486,14 @@ if [[ "$OS" == "Linux" ]]; then
         update-desktop-database "$HOME/.local/share/applications"
     fi
 elif [[ "$OS" == "Darwin" ]]; then
+    if [[ -f scripts/macos_launchagent.sh ]]; then
+        bash scripts/macos_launchagent.sh restore-python "$REPO/.venv/bin/localflow"
+    fi
+    app="$HOME/Applications/LocalFlow.app"
+    if [[ -f "$app/Contents/Info.plist" ]] \
+        && [[ "$(plutil -extract LocalFlowRuntime raw -o - "$app/Contents/Info.plist" 2>/dev/null || true)" == rust ]]; then
+        rm -rf "$app"
+    fi
     .venv/bin/lf setup install-app
 fi
 

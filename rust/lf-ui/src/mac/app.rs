@@ -233,6 +233,23 @@ impl LaunchAgent for NativeLaunchAgent {
     }
 
     fn install(&self) -> std::result::Result<(), String> {
+        let current = std::env::current_exe().map_err(|error| error.to_string())?;
+        if let Some(helper) = crate::launch_agent::bundled_helper(&current) {
+            let result = Command::new("/bin/bash")
+                .arg(helper)
+                .arg("install-rust")
+                .arg(&current)
+                .output()
+                .map_err(|error| error.to_string())?;
+            return if result.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Rust LaunchAgent install failed: {}",
+                    String::from_utf8_lossy(&result.stderr).trim()
+                ))
+            };
+        }
         let path = Self::plist_path().map_err(|error| error.to_string())?;
         let parent = path
             .parent()

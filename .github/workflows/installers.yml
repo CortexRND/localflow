@@ -7,6 +7,12 @@ on:
       - install.ps1
       - pyproject.toml
       - scripts/release-assets.sh
+      - scripts/build_rust_app.sh
+      - scripts/macos_launchagent.sh
+      - rust/lf-ui/src/launch_agent.rs
+      - rust/lf-ui/src/mac/app.rs
+      - tests/test_rust_packaging.py
+      - tests/test_installer_workflow.py
       - tests/test_installer_stubs.py
       - .github/workflows/installers.yml
   pull_request:
@@ -15,6 +21,12 @@ on:
       - install.ps1
       - pyproject.toml
       - scripts/release-assets.sh
+      - scripts/build_rust_app.sh
+      - scripts/macos_launchagent.sh
+      - rust/lf-ui/src/launch_agent.rs
+      - rust/lf-ui/src/mac/app.rs
+      - tests/test_rust_packaging.py
+      - tests/test_installer_workflow.py
       - tests/test_installer_stubs.py
       - .github/workflows/installers.yml
   workflow_dispatch:
@@ -28,7 +40,80 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check install.sh and release-assets.sh
-        run: shellcheck install.sh scripts/release-assets.sh
+        run: shellcheck install.sh scripts/release-assets.sh scripts/build_rust_app.sh scripts/macos_launchagent.sh
+
+  rust-macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      # Headless installer checks must not start TCC-protected dictation/UI services.
+      LOCALFLOW_SKIP_LAUNCHCTL: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          cache-on-failure: true
+      - name: Install Python and seed its login agent without loading it
+        shell: bash
+        run: |
+          ./install.sh --no-launch
+          test ! -f "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          .venv/bin/python - <<'PY'
+          from localflow.launchagent import _plist_path, plist_content
+          path = _plist_path()
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(plist_content())
+          PY
+          cp "$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist" "$RUNNER_TEMP/python-agent.plist"
+      - name: Opt into Rust twice and verify signed relocatable bundle and agent
+        shell: bash
+        run: |
+          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+          app="$HOME/Applications/LocalFlow.app"
+          agent="$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          plutil -lint "$app/Contents/Info.plist" "$agent"
+          test "$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")" = lf-hub
+          test "$(plutil -extract Label raw -o - "$agent")" = com.cortexrnd.localflow
+          test "$(plutil -extract ProgramArguments.0 raw -o - "$agent")" = "$app/Contents/MacOS/lf-hub"
+          cmp "$RUNNER_TEMP/python-agent.plist" "$agent.python.bak"
+          relocated="$RUNNER_TEMP/Relocated Rust/LocalFlow.app"
+          mkdir -p "$(dirname "$relocated")"
+          ditto "$app" "$relocated"
+          codesign --verify --deep --strict "$relocated"
+          status=0
+          DYLD_PRINT_LIBRARIES=1 "$relocated/Contents/MacOS/lf-hub" --packaging-smoke-test 2>"$RUNNER_TEMP/rust-dyld.log" || status=$?
+          test "$status" = 2
+          grep -F 'unexpected argument' "$RUNNER_TEMP/rust-dyld.log"
+          grep -F "$relocated/Contents/Frameworks/" "$RUNNER_TEMP/rust-dyld.log"
+      - name: Restore Python twice and uninstall both runtimes
+        shell: bash
+        run: |
+          LOCALFLOW_RUNTIME=python ./install.sh --no-launch
+          ./install.sh --no-launch
+          app="$HOME/Applications/LocalFlow.app"
+          agent="$HOME/Library/LaunchAgents/com.cortexrnd.localflow.plist"
+          cmp "$RUNNER_TEMP/python-agent.plist" "$agent"
+          test "$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")" = launcher
+          test ! -e "$app/Contents/MacOS/lf-hub"
+          test ! -d "$app/Contents/Frameworks"
+          test -f "$agent.rust.bak"
+          ./install.sh --uninstall
+          test ! -e "$agent"
+          test ! -d "$app"
+          # The same uninstall path removes a Rust-shaped installation, too.
+          ditto "$RUNNER_TEMP/Relocated Rust/LocalFlow.app" "$app"
+          bash scripts/macos_launchagent.sh install-rust "$app/Contents/MacOS/lf-hub"
+          LOCALFLOW_RUNTIME=rust ./install.sh --uninstall
+          LOCALFLOW_RUNTIME=rust ./install.sh --uninstall
+          test ! -e "$agent"
+          test ! -d "$app"
 
   # The pinned release tag and its assets only exist after merge, so these
   # checks serve release-shaped assets from a local directory instead

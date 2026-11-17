@@ -1,3 +1,79 @@
+# Opt-in macOS app packaging
+
+Python remains the default. From a source checkout on macOS:
+
+```sh
+LOCALFLOW_RUNTIME=rust ./install.sh --no-launch
+```
+
+This **builds from source**, not a prebuilt download. Install Rust/Cargo and
+Xcode Command Line Tools (`xcode-select --install`) first. Only the current Mac's
+architecture is built; unset `CARGO_BUILD_TARGET`. Network access is needed for
+Cargo and sherpa's native runtime download. Rust installation does not create a
+Python venv or install Python dependencies. Ollama remains optional. To build
+without installing or changing autostart:
+
+```sh
+bash scripts/build_rust_app.sh  # dist/LocalFlow.app
+```
+
+Like Python's `lf setup install-app`, installation uses
+`~/Applications/LocalFlow.app` and `com.cortexrnd.localflow.app`. The Rust bundle
+contains `Contents/MacOS/lf-hub`, sherpa/ONNX Runtime dylibs in
+`Contents/Frameworks`, and the login-agent helper in `Contents/Resources`.
+Build-machine rpaths are removed, dependencies are rewritten to `@rpath`, and
+the executable searches `@executable_path/../Frameworks`. The builder rejects
+unbundled non-system dependencies, signs dylibs and the app ad-hoc, and verifies
+the signature. This is **not** Developer ID signing or notarization. The app is
+a regular application (`LSUIElement=false`, matching Python); the runtime manages
+its menu-bar-only state when the Hub closes. Purpose strings cover microphone,
+Accessibility/paste, and keyboard/input monitoring; Python's current launcher
+plist does not provide those strings. Grant the Rust app its own permissions in
+System Settings → Privacy & Security; ad-hoc rebuilds may require reapproval.
+
+## Login-agent migration and removal
+
+Opting into Rust installs/loads the shared `com.cortexrnd.localflow` LaunchAgent,
+replacing a Python agent rather than installing a second label. The Rust Hub's
+start-on-login control uses this same bundled helper, never a PATH Python runtime.
+Each migration unloads the old agent before replacing and loading its plist.
+Reinstalling an already loaded Rust target leaves that service running (and does
+not kill the Hub enabling its own login agent); restart the app to use a new build.
+Loading falls back from `bootstrap` to `load -w`; if both fail, installation
+reports both errors and restores the prior plist, attempting to reload it.
+
+Backups live alongside the plist in `~/Library/LaunchAgents`:
+`com.cortexrnd.localflow.plist.python.bak` and `.plist.rust.bak`. Repeated Rust
+installs do not overwrite the Python backup with a Rust plist. To switch back:
+
+```sh
+LOCALFLOW_RUNTIME=python ./install.sh --no-launch  # or omit LOCALFLOW_RUNTIME
+```
+
+If the active agent is Rust, this restores the previous Python plist (including
+custom launchd options) when its executable still exists; otherwise it generates
+one pointing at the newly installed Python venv. Rust-only bundle files and its
+old signature are removed before rebuilding the Python launcher. A normal Python
+installation with no Rust agent still leaves autostart unchanged. Any runtime
+value other than `python` or `rust` is rejected (including an explicitly empty
+value). `--no-launch` suppresses opening Setup/Hub, not restarting a migrated
+login agent. Manually started copies still obey the existing runtime lock; the
+installer does not kill them.
+
+```sh
+./install.sh --uninstall
+```
+
+This macOS-only removal works for either runtime, unloads/removes the shared
+agent, and removes LocalFlow/LocalFlow Setup apps. It retains the checkout/venv,
+settings, models, logs and agent backups. Python's existing bundle-removal CLI
+is unchanged; use the command above to remove autostart as well.
+
+Installer CI uses `LOCALFLOW_SKIP_LAUNCHCTL=1` **only for testing** so a headless
+runner can verify signed bundles and the Python → Rust → Python plist round-trip
+without launching TCC-protected services. Shell-helper tests separately exercise
+unload/load ordering, fallback errors and rollback with a fake `launchctl`.
+
 # Rust runtime memory settings
 
 The Rust Hub reads `runtime.toml` beside its resolved `config.toml` (including
