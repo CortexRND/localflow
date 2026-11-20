@@ -551,6 +551,11 @@ impl SetupFlow {
         }
         self.mic_generation += 1;
         self.mic = MicTest::Opening;
+        // A new attempt: nothing a previous test heard (or when it began)
+        // may count for this one, whether its open succeeds, fails or is
+        // superseded.
+        self.mic_started = None;
+        self.mic_heard_at = None;
         Some((
             self.mic_generation,
             Some(self.choices.input_device.clone()).filter(|d| !d.is_empty()),
@@ -573,6 +578,7 @@ impl SetupFlow {
                 }
                 self.mic_stream = Some(stream);
                 self.mic_started = Some(now);
+                self.mic_heard_at = None;
                 self.mic = MicTest::Testing {
                     level: 0,
                     heard: false,
@@ -602,7 +608,9 @@ impl SetupFlow {
             if let Some(mut stream) = self.mic_stream.take() {
                 stream.stop();
             }
+            // The verdict now lives in `mic`; the evidence ends with it.
             self.mic_started = None;
+            self.mic_heard_at = None;
             self.mic = if heard {
                 MicTest::Heard
             } else {
@@ -1827,6 +1835,64 @@ mod tests {
         assert!(!flow.tick_mic(start + MIC_TEST));
         assert_eq!(flow.mic, MicTest::Heard);
         assert_eq!(loud.0.lock().unwrap().0, 1);
+    }
+
+    #[test]
+    fn a_silent_retest_after_a_heard_test_is_silent() {
+        let mut flow = new_flow(&Config::defaults_for(false));
+        walk_to(&mut flow, Step::Microphone);
+        let t0 = Instant::now();
+        let heard_once = |flow: &mut SetupFlow, at: Instant| {
+            let loud = Counter::default();
+            loud.0.lock().unwrap().1 = 0.5;
+            let (g, _) = flow.begin_mic_test().unwrap();
+            flow.mic_opened(g, Ok(Box::new(FakeMeter(loud))), at);
+            assert!(flow.tick_mic(at + Duration::from_secs(1)));
+            assert!(!flow.tick_mic(at + MIC_TEST));
+            assert_eq!(flow.mic, MicTest::Heard);
+        };
+        let silent_stream = |flow: &mut SetupFlow, g: u64, at: Instant| {
+            let quiet = Counter::default();
+            flow.mic_opened(g, Ok(Box::new(FakeMeter(quiet.clone()))), at);
+            assert_eq!(
+                flow.mic,
+                MicTest::Testing {
+                    level: 0,
+                    heard: false
+                },
+                "a fresh attempt starts unheard"
+            );
+            assert!(!flow.tick_mic(at + SILENT_AFTER));
+            assert_eq!(quiet.0.lock().unwrap().0, 1, "stream released");
+        };
+
+        // Heard, then a retest on the same device (no step change) is silent.
+        heard_once(&mut flow, t0);
+        let t1 = t0 + Duration::from_secs(30);
+        let (g, _) = flow.begin_mic_test().unwrap();
+        silent_stream(&mut flow, g, t1);
+        assert_eq!(flow.mic, MicTest::Silent, "never the earlier success");
+
+        // Heard, then the retest's open fails: a failure, not the old pass.
+        let t2 = t1 + Duration::from_secs(30);
+        heard_once(&mut flow, t2);
+        let (g, _) = flow.begin_mic_test().unwrap();
+        flow.mic_opened(g, Err("device busy".into()), t2);
+        assert_eq!(flow.mic, MicTest::Failed("device busy".into()));
+
+        // A stale completion of an earlier attempt can't revive a success:
+        // it is closed, and the current attempt still decides by itself.
+        let t3 = t2 + Duration::from_secs(30);
+        let (stale, _) = flow.begin_mic_test().unwrap();
+        flow.mic_opened(stale, Err("timed out".into()), t3);
+        let (g, _) = flow.begin_mic_test().unwrap();
+        let late = Counter::default();
+        late.0.lock().unwrap().1 = 0.9;
+        flow.mic_opened(stale, Ok(Box::new(FakeMeter(late.clone()))), t3);
+        assert_eq!(late.0.lock().unwrap().0, 1, "stale stream closed at once");
+        assert_eq!(flow.mic, MicTest::Opening);
+        silent_stream(&mut flow, g, t3);
+        assert_eq!(flow.mic, MicTest::Silent);
     }
 
     #[test]
