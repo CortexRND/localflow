@@ -188,6 +188,11 @@ mod native {
             ("non-ollama-provider", _) => SetupSnapshotState::NonOllamaProvider,
             ("download-progress", _) => SetupSnapshotState::DownloadProgress,
             ("download-error", _) => SetupSnapshotState::DownloadError,
+            ("cleanup-off-ollama-unavailable", _) => {
+                SetupSnapshotState::CleanupOffOllamaUnavailable
+            }
+            ("cleanup-ollama-unavailable", _) => SetupSnapshotState::CleanupOllamaUnavailable,
+            ("speech-download-required", _) => SetupSnapshotState::SpeechDownloadRequired,
             other => bail!("unknown setup snapshot route {other:?}"),
         })
     }

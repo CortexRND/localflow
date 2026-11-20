@@ -119,6 +119,8 @@ def test_mac_installer_workflow_builds_validates_and_publishes() -> None:
     assert "test -x" in workflow
     assert "LocalFlow-Installer.dmg" in workflow
     assert "Install LocalFlow.cmd" in workflow
+    # Published under the dotted name GitHub gives uploaded assets with spaces.
+    assert "dist/release/Install.LocalFlow.cmd" in workflow
     assert "'v*'" in workflow
     assert "gh release upload" in workflow
     assert "secrets.GITHUB_TOKEN" in workflow

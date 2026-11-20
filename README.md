@@ -4,17 +4,37 @@ Local push-to-talk dictation for macOS, with best-effort Linux and Windows suppo
 
 See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a feature-by-feature overview.
 
-Release maintainers: [v0.2.0 asset build and publishing](docs/releasing.md).
+Release maintainers: [v0.2.1 asset build and publishing](docs/releasing.md).
 
 ## Easiest install (no Terminal needed)
 
 **macOS:** download `LocalFlow-Installer.dmg` from the
 [latest release](https://github.com/CortexRND/localflow/releases/latest) (or from
-the artifacts of a "Mac installer" run on the Actions tab), open it, and
-double-click **Install LocalFlow**. A window installs everything, which takes
-several minutes, and LocalFlow opens when it is done. Since v0.2.0, macOS installs
-the native **Rust LocalFlow.app** by default. Rust is installed automatically;
-accept Apple's Command Line Tools installation dialog if prompted. Python and
+the artifacts of a "Mac installer" run on the Actions tab).
+
+The DMG is unsigned and not notarized. On macOS 15 and later (including macOS
+26), opening the downloaded DMG may show a dialog saying it "is damaged and
+can't be opened", with only **Cancel** and **Move to Trash**. There is no
+**Open Anyway** for this dialog, and Privacy & Security does not fix it. Click
+**Cancel**, not **Move to Trash**, then either:
+
+- use the verified one-line Terminal install under
+  [macOS and Linux](#macos-and-linux) (recommended; it does not need the DMG), or
+- remove the download quarantine from the DMG you got from the official
+  release:
+
+  ```sh
+  xattr -d com.apple.quarantine ~/Downloads/LocalFlow-Installer.dmg
+  ```
+
+  Then open the DMG again and double-click **Install LocalFlow**. A window
+  installs everything, which takes several minutes, and LocalFlow opens when it
+  is done.
+
+Whichever installation method you use (Terminal or DMG), since v0.2.0 macOS
+installs the native **Rust LocalFlow.app** by default. Rust
+is installed automatically; accept Apple's Command Line Tools installation
+dialog if prompted. Python and
 its virtual environment are not needed. Missing CMake is installed with Homebrew;
 without Homebrew, install CMake first (https://cmake.org/download/).
 
@@ -35,8 +55,8 @@ it starts dictation and the menu bar in the background (reusing the login agent
 if installed, never twice) and opens the native Hub. Opening it again just
 brings the Hub to the front.
 
-**Install LocalFlow** and the app are unsigned and not notarized, so Gatekeeper
-blocks each the first time you open it. Close the warning, go to System
+Once the DMG opens, **Install LocalFlow** and the app are still unsigned, so
+Gatekeeper blocks each the first time you open it. Close the warning, go to System
 Settings > Privacy & Security, scroll down to Security, click **Open Anyway**
 next to the message about the app, and confirm with **Open Anyway** and your
 password or Touch ID. (On macOS 15 and later, right-click > **Open** no longer
@@ -74,7 +94,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "57877e13568025d8343290defd54d3146915b021d8e51b57808b74b5c087d52d  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -82,15 +102,26 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "57877e13568025d8343290defd54d3146915b021d8e51b57808b74b5c087d52d  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
-The installer is pinned to release `v0.2.0`. Without git it downloads
-`localflow-0.2.0.tar.gz` from that release and verifies it against the
-release's `SHA256SUMS` before unpacking; it stops and deletes the download if
-the hash does not match. With git it checks out the `v0.2.0` tag and stops
-unless the tag and the checked-out `HEAD` are the pinned release commit
-`ab33fac896af9f10c31bc76c0f08be396a51eb68` (a commit check, not `SHA256SUMS`).
+The installer is pinned to release `v0.2.1`. Whether or not git is installed,
+it downloads `localflow-0.2.1.tar.gz` from that release and verifies it against
+the release's `SHA256SUMS` before unpacking; it stops and deletes the download
+if the checksum file or hash is missing or does not match. An existing install
+in `~/.localflow/app` (including an older git checkout made by a previous
+installer) is replaced by the verified archive only after verification
+succeeds, keeping its `.venv`; a destination that is not a LocalFlow install is
+never overwritten. A replaced git checkout is never deleted, even a clean one:
+it is moved as is (uncommitted, staged and untracked files, unpushed commits,
+stashes and all git metadata) to a sibling backup such as
+`~/.localflow/app.git-backup-20261120-101500-4242`, and the installer prints
+the exact path. Delete the backup yourself once you have recovered anything
+you need from it. A linked git worktree or submodule (whose `.git` is a file)
+is never replaced: moving it would break its repository's bookkeeping, so the
+installer stops with an explanation and changes nothing. The installer does not pin a git commit: the release tag
+points at the merge commit that contains `install.sh`, and a file cannot embed
+the hash of a commit that includes it.
 
 Or run from a checkout:
 
@@ -102,14 +133,28 @@ cd localflow
 
 The installer creates a Python environment and installs LocalFlow. On macOS,
 Homebrew, git and a supported Python are optional (the installer falls back to
-a uv-managed Python 3.12 and a source tarball); its setup app is placed in
+a uv-managed Python 3.12, and default installs use the release archive rather
+than git); its setup app is placed in
 `~/Applications`. Linux installs
 system dependencies and creates `~/.local/bin/lf` plus desktop launchers. When
 run outside a checkout, the app is installed to `~/.localflow/app`; override
 it with `LOCALFLOW_HOME`.
 
 `LOCALFLOW_REF` overrides the pinned release with any branch, tag or commit
-(for example `LOCALFLOW_REF=main bash install.sh`). This is an unverified
+(for example `LOCALFLOW_REF=main bash install.sh`). When git is usable, a
+branch (`main`, `refs/heads/main` or `origin/main`), tag or full commit SHA
+works: a fresh install clones `LOCALFLOW_REPO_URL` (default: this repository),
+and every install, fresh or existing, then fetches the ref from origin and
+checks out the fetched commit detached, so a rerun always picks up the latest
+commit of a branch rather than a stale local copy (`origin/main` and
+`refs/remotes/origin/main` are fetched as origin's branch `main`). An existing archive
+install is switched to git too: the clone, fetch and checkout happen in a
+temporary directory next to it, and the archive install (and its `.venv`, which
+is kept) is replaced only once they succeed. If any git step fails the existing
+install is left as is and the installer stops; it does not fall back to an
+archive. Only without a usable git does the installer download GitHub's
+archive for the ref, with a warning (such archives cannot resolve names like
+`origin/main`). This is an unverified
 override: the source for a custom ref is not checksum-verified, and the
 installer prints a warning saying so.
 
@@ -118,15 +163,15 @@ installer prints a warning saying so.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq '20A3A79114D81975422AC7C451AAB21391FBAB2C99B71D03DB136E8E2E007AFC') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq 'E26033D73C1266E813BE1C56666898D5732437627E4302679FAA6F75E2EBC236') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
 ```
 
 To install and start Ollama for optional transcript cleanup, add
 `-WithOllama` to the `powershell` command inside the success branch.
 
-Without git, the installer downloads `localflow-0.2.0.zip` from the `v0.2.0`
+Without git, the installer downloads `localflow-0.2.1.zip` from the `v0.2.1`
 release and verifies it against the release's `SHA256SUMS`
-(`Get-FileHash -Algorithm SHA256`); with git it checks out the `v0.2.0` tag.
+(`Get-FileHash -Algorithm SHA256`); with git it checks out the `v0.2.1` tag.
 As on macOS and Linux, `LOCALFLOW_REF` is an unverified override.
 
 Or run from a checkout:

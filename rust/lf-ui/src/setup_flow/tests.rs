@@ -1028,3 +1028,156 @@ fn try_dictation_stops_the_recorder_even_if_waiting_panics() {
     assert_eq!(entries.last().map(String::as_str), Some("stop"));
     assert!(!entries.iter().any(|e| e.starts_with("transcribe")));
 }
+
+// ------------------------------------------------- setup footer and errors ---
+
+const OLLAMA_DOWN: &str = "Could not reach Ollama at http://127.0.0.1:11434: connection refused";
+
+/// Deterministic stand-in for 13pt semibold / 11pt regular AppKit text.
+fn wide_chars(text: &str) -> f64 {
+    text.chars().count() as f64 * 7.5
+}
+
+fn caption_chars(text: &str) -> f64 {
+    text.chars().count() as f64 * 6.0
+}
+
+#[test]
+fn cleanup_off_never_shows_an_ollama_error() {
+    assert!(!cleanup_requires_ollama("ollama", None));
+    assert_eq!(
+        visible_ollama_error(SETUP_CLEANUP_STEP, "ollama", None, Some(OLLAMA_DOWN)),
+        None
+    );
+    let status = footer_status(SETUP_CLEANUP_STEP, "", None, "");
+    assert_eq!(status.text, "");
+    assert!(!status.error);
+}
+
+#[test]
+fn selected_ollama_model_shows_the_unavailable_error() {
+    assert!(cleanup_requires_ollama("ollama", Some("llama3.2:1b")));
+    let visible = visible_ollama_error(
+        SETUP_CLEANUP_STEP,
+        "ollama",
+        Some("llama3.2:1b"),
+        Some(OLLAMA_DOWN),
+    );
+    assert_eq!(visible, Some(OLLAMA_DOWN));
+    let status = footer_status(SETUP_CLEANUP_STEP, "", visible, "");
+    assert_eq!(status.text, OLLAMA_DOWN);
+    assert!(status.error);
+}
+
+#[test]
+fn non_ollama_provider_and_other_pages_hide_ollama_errors() {
+    for provider in ["openai-compatible", "openai", ""] {
+        assert!(!cleanup_requires_ollama(provider, Some("gpt-4o-mini")));
+        assert_eq!(
+            visible_ollama_error(
+                SETUP_CLEANUP_STEP,
+                provider,
+                Some("gpt-4o-mini"),
+                Some(OLLAMA_DOWN)
+            ),
+            None
+        );
+    }
+    for step in [0, 1, 2, 4, 5, 6] {
+        assert_eq!(
+            visible_ollama_error(step, "ollama", Some("llama3.2:1b"), Some(OLLAMA_DOWN)),
+            None
+        );
+    }
+    assert_eq!(
+        visible_ollama_error(SETUP_CLEANUP_STEP, "ollama", Some("llama3.2:1b"), Some("")),
+        None
+    );
+}
+
+#[test]
+fn late_ollama_error_is_gated_by_the_current_selection() {
+    // A check started while a model was selected fails after the user picked
+    // "No cleanup": the stored error stays hidden until a model is selected.
+    let stored = Some(OLLAMA_DOWN);
+    assert_eq!(
+        visible_ollama_error(SETUP_CLEANUP_STEP, "ollama", None, stored),
+        None
+    );
+    assert_eq!(
+        visible_ollama_error(SETUP_CLEANUP_STEP, "ollama", Some("qwen2.5:3b"), stored),
+        Some(OLLAMA_DOWN)
+    );
+}
+
+#[test]
+fn footer_status_prefers_page_errors_then_ollama_then_status() {
+    let page = footer_status(
+        2,
+        "Network connection interrupted.",
+        None,
+        "Download failed.",
+    );
+    assert_eq!(page.text, "Network connection interrupted.");
+    assert!(page.error);
+    let both = footer_status(SETUP_CLEANUP_STEP, "Save failed.", Some(OLLAMA_DOWN), "");
+    assert_eq!(both.text, "Save failed.");
+    let progress = footer_status(2, "", None, "43 / 78 MB");
+    assert_eq!(progress.text, "43 / 78 MB");
+    assert!(!progress.error);
+    assert_eq!(footer_status(4, "", None, "stale").text, "");
+}
+
+#[test]
+fn download_and_continue_fits_without_overlap() {
+    for width in [800.0, 1100.0] {
+        for cancel_visible in [false, true] {
+            let layout = setup_footer_layout(
+                width,
+                wide_chars("Download & continue"),
+                cancel_visible,
+                wide_chars("Cancel"),
+            );
+            let needed = wide_chars("Download & continue") + 2.0 * FOOTER_BUTTON_PADDING;
+            assert!(layout.primary.width >= needed, "{layout:?}");
+            assert_eq!(layout.primary.right(), width - FOOTER_MARGIN);
+            assert!(layout.cancel.right() + FOOTER_GAP <= layout.primary.x);
+            let leftmost = if cancel_visible {
+                layout.cancel.x
+            } else {
+                layout.primary.x
+            };
+            assert!(layout.status.right() + FOOTER_GAP <= leftmost, "{layout:?}");
+            assert!(layout.status.x >= FOOTER_STATUS_X);
+            assert!(layout.status.width > 200.0, "{layout:?}");
+        }
+    }
+}
+
+#[test]
+fn short_footer_titles_keep_the_original_widths() {
+    let layout = setup_footer_layout(800.0, wide_chars("Continue"), true, wide_chars("Cancel"));
+    assert_eq!(layout.primary.width, FOOTER_PRIMARY_MIN_WIDTH);
+    assert_eq!(layout.primary.x, 800.0 - 164.0);
+    assert_eq!(layout.cancel.width, FOOTER_CANCEL_MIN_WIDTH);
+    assert_eq!(layout.cancel.x, 800.0 - 280.0);
+    // The status line no longer runs underneath the Cancel button.
+    assert_eq!(layout.status.right(), layout.cancel.x - FOOTER_GAP);
+}
+
+#[test]
+fn long_footer_errors_wrap_within_the_footer() {
+    let layout = setup_footer_layout(800.0, wide_chars("Continue"), false, 0.0);
+    let long = format!("{OLLAMA_DOWN}. Start Ollama, or choose No cleanup to continue without it.");
+    let (lines, y, height) = footer_status_frame(&long, layout.status.width, 700.0, &caption_chars);
+    assert!((2..=FOOTER_STATUS_MAX_LINES).contains(&lines), "{lines}");
+    // Stays between the divider (height - 58) and the window bottom.
+    assert!(y > 700.0 - 58.0, "{y}");
+    assert!(y + height < 700.0, "{y} {height}");
+    let (one, _, single) =
+        footer_status_frame("43 / 78 MB", layout.status.width, 700.0, &caption_chars);
+    assert_eq!(one, 1);
+    assert!(single < height);
+    let (empty, _, _) = footer_status_frame("", layout.status.width, 700.0, &caption_chars);
+    assert_eq!(empty, 1);
+}

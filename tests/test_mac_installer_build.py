@@ -26,6 +26,22 @@ pytestmark = pytest.mark.skipif(
 APP = "Install LocalFlow.app"
 BANNER = "Installing LocalFlow — this takes a few minutes; LocalFlow will open when done."
 BANNER_HINT = "Afterwards, find it in Applications → LocalFlow."
+XATTR = "xattr -d com.apple.quarantine ~/Downloads/LocalFlow-Installer.dmg"
+
+
+def _prose(text: str) -> str:
+    """Collapse line wraps and Markdown blockquote markers into single spaces."""
+    lines = (line.removeprefix(">").strip() for line in text.splitlines())
+    return " ".join(" ".join(lines).split())
+
+
+def _assert_damaged_dmg_guidance(readme: str) -> None:
+    prose = _prose(readme)
+    assert '"is damaged and can\'t be opened"' in prose
+    assert "the right choice was Cancel, not Move to Trash" in prose
+    assert "verified one-line Terminal install in the LocalFlow README (recommended)" in prose
+    # The exact command sits on its own line so it can be copied whole.
+    assert any(line.strip() == XATTR for line in readme.splitlines())
 
 
 def _build(tmp_path: Path, ref: str | None) -> Path:
@@ -81,6 +97,18 @@ def test_build_creates_zip_with_valid_bundle(tmp_path: Path) -> None:
     assert "Open Anyway" in readme
     assert "macOS 15 and later, right-click > Open no longer" in readme
     assert "choose Open, then" not in readme  # the removed pre-15 bypass
+    _assert_damaged_dmg_guidance(readme)
+
+
+@pytest.mark.parametrize("doc", ["README.md", "docs/releasing.md"])
+def test_source_docs_explain_the_damaged_dmg_dialog(doc: str) -> None:
+    text = (ROOT / doc).read_text(encoding="utf-8")
+    prose = _prose(text)
+
+    assert "**Cancel**, not **Move to Trash**" in prose
+    assert "verified one-line Terminal install" in prose
+    assert "(recommended" in prose
+    assert XATTR in text
 
 
 def test_launcher_is_valid_bash_with_pinned_ref(tmp_path: Path) -> None:
@@ -297,7 +325,9 @@ def test_macos_build_uses_a_universal_native_launcher(tmp_path: Path) -> None:
     assert signed and signed[-1][-1] == str(app)
     assert logged.index(clang) < logged.index(signed[-1])
     assert (project / "dist" / "LocalFlow-Installer.dmg").read_text() == "dmg fixture"
-    assert "Open Anyway" in Path(str(calls) + ".readme").read_text(encoding="utf-8")
+    dmg_readme = Path(str(calls) + ".readme").read_text(encoding="utf-8")
+    assert "Open Anyway" in dmg_readme
+    _assert_damaged_dmg_guidance(dmg_readme)
     assert not (project / "dist" / "LocalFlow-Installer-mac.zip").exists()
 
 

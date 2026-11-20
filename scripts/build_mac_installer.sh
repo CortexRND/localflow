@@ -125,7 +125,7 @@ cat >"$APP/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>0.2.1</string>
     <key>LSArchitecturePriority</key>
     <array>
         <string>arm64</string>
@@ -269,8 +269,16 @@ README_TEXT='Install LocalFlow
    LocalFlow opens when it is done. Afterwards, find it in Applications >
    LocalFlow (the Applications folder inside your home folder).
 
-The app is not signed or notarized by Apple, so macOS blocks it the first
-time you open it. To allow it:
+If macOS said the DMG "is damaged and can'"'"'t be opened" (macOS 15 and
+later, with only Cancel and Move to Trash), the right choice was Cancel, not
+Move to Trash. Privacy & Security has no Open Anyway for that dialog. Either
+use the verified one-line Terminal install in the LocalFlow README
+(recommended), or run
+  xattr -d com.apple.quarantine ~/Downloads/LocalFlow-Installer.dmg
+on the DMG downloaded from the official release, then open it again.
+
+Install LocalFlow is not signed or notarized by Apple, so macOS blocks it
+the first time you open it. To allow it:
   1. Double-click "Install LocalFlow" and close the warning (Done or OK).
   2. Open System Settings > Privacy & Security and scroll down to Security.
   3. Click "Open Anyway" next to the message about Install LocalFlow, then
