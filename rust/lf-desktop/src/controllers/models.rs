@@ -57,6 +57,10 @@ pub struct ProviderRow {
     /// provider, when it is set (`LOCALFLOW_PROVIDER_KEY_<ID>`). Saving or
     /// removing a keyring entry would have no effect while it is set.
     pub env_override: Option<String>,
+    /// Active provider whose saved key is newer than the key cleanup and Ask
+    /// actually use (activation snapshots are immutable): Use must stay
+    /// available to switch to it.
+    pub needs_reactivation: bool,
 }
 
 /// `LOCALFLOW_PROVIDER_KEY_<ID>`: the variable `lf_core::secrets` reads first.
@@ -81,13 +85,19 @@ pub fn provider_rows(
                 .map(|s| s.has_key)
                 .unwrap_or(false);
             let (status, _) = models_layout::provider_status(preset, config, has_key);
+            let active = models_layout::is_active(preset, config, None);
+            let needs_reactivation = active
+                && keys
+                    .key_needs_activation(preset.id, Some(config))
+                    .unwrap_or(false);
             ProviderRow {
                 id: preset.id,
                 label: preset.label,
                 base_url: preset.base_url,
                 needs_key: preset.needs_key,
                 has_key,
-                active: models_layout::is_active(preset, config, None),
+                active,
+                needs_reactivation,
                 status,
                 remote: preset.needs_key,
                 env_override: (preset.needs_key && env_set(&key_env_var(preset.id)))
@@ -104,6 +114,51 @@ pub fn save_key(
     key: &str,
 ) -> Result<()> {
     ProviderKeys::new(secrets, file).save_key(provider, key)
+}
+
+/// What happened to a saved key.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KeySaved {
+    /// Saved; the provider isn't the active one, so nothing else changed.
+    Saved,
+    /// Saved, and the active provider was re-activated with it (endpoint and
+    /// model kept), so cleanup and Ask use the new key now.
+    Activated(Config),
+    /// Saved, but switching the active provider to it failed; the previous
+    /// key stays in use. The message says why.
+    NotActivated(String),
+}
+
+/// Save a key and, when its provider is the active one, switch to it at
+/// once: `ProviderKeys::save_key` alone leaves the active (immutable)
+/// activation snapshot on the old key.
+pub fn save_key_and_apply(
+    secrets: &dyn SecretStore,
+    file: &ConfigFile,
+    provider: &str,
+    key: &str,
+) -> Result<KeySaved> {
+    save_key(secrets, file, provider, key)?;
+    let config = file.load()?;
+    let preset = lf_providers::keys::get_preset(provider)?;
+    if !models_layout::is_active(preset, &config, None) {
+        return Ok(KeySaved::Saved);
+    }
+    let base_url = config.field_str("llm_base_url").unwrap_or("").to_string();
+    let model = config.field_str("llm_model").unwrap_or("").to_string();
+    let url = (preset.id == "custom").then_some(base_url.as_str());
+    Ok(
+        match activate(
+            secrets,
+            file,
+            provider,
+            url,
+            Some(model.as_str()).filter(|m| !m.is_empty()),
+        ) {
+            Ok(saved) => KeySaved::Activated(saved),
+            Err(err) => KeySaved::NotActivated(error_text(&err)),
+        },
+    )
 }
 
 pub fn remove_key(secrets: &dyn SecretStore, file: &ConfigFile, provider: &str) -> Result<()> {
@@ -236,5 +291,87 @@ mod tests {
             .unwrap()
             .env_override
             .is_none());
+    }
+
+    /// The key cleanup and Ask really send for `config`.
+    fn active_key(secrets: &MemorySecrets, config: &Config) -> String {
+        lf_providers::factory::llm_api_key(config, secrets)
+    }
+
+    #[test]
+    fn replacing_the_active_key_switches_to_it_and_keeps_endpoint_and_model() {
+        let (_d, file, secrets) = setup();
+        save_key(&secrets, &file, "openai", "sk-old").unwrap();
+        let first = activate(&secrets, &file, "openai", None, Some("gpt-5-mini")).unwrap();
+        assert_eq!(active_key(&secrets, &first), "sk-old");
+
+        // The old path: saving alone leaves the runtime on the old snapshot,
+        // and the row must keep a way to switch.
+        save_key(&secrets, &file, "openai", "sk-new").unwrap();
+        let config = file.load().unwrap();
+        assert_eq!(active_key(&secrets, &config), "sk-old");
+        let rows = provider_rows(&secrets, &file, &config, &|_| false);
+        let row = rows.iter().find(|r| r.id == "openai").unwrap();
+        assert!(row.active && row.needs_reactivation);
+
+        // Saving through the page's path re-activates with the new key.
+        let outcome = save_key_and_apply(&secrets, &file, "openai", "sk-newer").unwrap();
+        let KeySaved::Activated(saved) = outcome else {
+            panic!("expected activation, got {outcome:?}");
+        };
+        assert_eq!(active_key(&secrets, &saved), "sk-newer");
+        assert_eq!(saved.field_str("llm_model"), Some("gpt-5-mini"));
+        assert_eq!(
+            saved.field_str("llm_base_url"),
+            first.field_str("llm_base_url")
+        );
+        let reloaded = file.load().unwrap();
+        assert_eq!(active_key(&secrets, &reloaded), "sk-newer");
+        let rows = provider_rows(&secrets, &file, &reloaded, &|_| false);
+        assert!(
+            !rows
+                .iter()
+                .find(|r| r.id == "openai")
+                .unwrap()
+                .needs_reactivation
+        );
+        assert!(!std::fs::read_to_string(file.path())
+            .unwrap()
+            .contains("sk-"));
+
+        // A key for a provider that isn't active is only saved.
+        assert_eq!(
+            save_key_and_apply(&secrets, &file, "groq", "gsk-1").unwrap(),
+            KeySaved::Saved
+        );
+        assert_eq!(active_key(&secrets, &file.load().unwrap()), "sk-newer");
+    }
+
+    #[test]
+    fn failed_reactivation_keeps_the_old_key_in_use_and_says_so() {
+        let (_d, file, secrets) = setup();
+        save_key(&secrets, &file, "openai", "sk-old").unwrap();
+        activate(&secrets, &file, "openai", None, Some("gpt-5-mini")).unwrap();
+        // Make activation impossible: no model to keep (choose_model refuses).
+        let mut broken = file.load().unwrap();
+        broken.set_field("llm_model", serde_json::json!(""));
+        lf_core::config::save_config(&broken, Some(file.path())).unwrap();
+        let outcome = save_key_and_apply(&secrets, &file, "openai", "sk-new").unwrap();
+        let KeySaved::NotActivated(message) = outcome else {
+            panic!("expected a reported failure, got {outcome:?}");
+        };
+        assert!(!message.is_empty());
+        let config = file.load().unwrap();
+        assert_eq!(
+            active_key(&secrets, &config),
+            "sk-old",
+            "runtime key unchanged"
+        );
+        let rows = provider_rows(&secrets, &file, &config, &|_| false);
+        let row = rows.iter().find(|r| r.id == "openai").unwrap();
+        assert!(
+            row.has_key && row.needs_reactivation,
+            "the switch stays offered"
+        );
     }
 }

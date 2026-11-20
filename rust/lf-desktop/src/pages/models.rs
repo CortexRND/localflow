@@ -278,8 +278,34 @@ impl ModelsPage {
         self.key_input.update(cx, |i, cx| i.clear(cx));
         let services = &self.pcx.services;
         self.provider_message = Some(
-            match ctl::save_key(services.secrets.as_ref(), &services.config_file, id, &key) {
-                Ok(()) => {
+            match ctl::save_key_and_apply(
+                services.secrets.as_ref(),
+                &services.config_file,
+                id,
+                &key,
+            ) {
+                Ok(ctl::KeySaved::Activated(saved)) => {
+                    self.editing = None;
+                    self.pcx.services.set_cached_config(saved.clone());
+                    self.pcx.config_changed(cx);
+                    (
+                        Tone::Success,
+                        format!(
+                            "New key saved and in use: cleanup and Ask now use {} with it.",
+                            lf_ui::models_layout::summary_values(&saved).1
+                        ),
+                    )
+                }
+                Ok(ctl::KeySaved::NotActivated(reason)) => {
+                    self.editing = None;
+                    (
+                        Tone::Warning,
+                        format!(
+                            "New key saved, but cleanup and Ask still use the previous key: {reason} Use “Use new key” to try again."
+                        ),
+                    )
+                }
+                Ok(ctl::KeySaved::Saved) => {
                     self.editing = None;
                     (Tone::Success, "Key saved to your system keyring. Use the provider to switch cleanup to it.".into())
                 }
@@ -492,19 +518,26 @@ impl ModelsPage {
                 _ => Tone::Neutral,
             };
             let mut actions = div().flex().items_center().gap(space::s3());
-            if !row.active || id == "custom" {
+            if !row.active || id == "custom" || row.needs_reactivation {
                 actions = actions.child(
-                    Button::new(("use", i as u64), "Use")
-                        .small()
-                        .disabled(row.needs_key && !row.has_key)
-                        .tooltip(if row.needs_key && !row.has_key {
-                            "Add a key first"
+                    Button::new(
+                        ("use", i as u64),
+                        if row.needs_reactivation {
+                            "Use new key"
                         } else {
-                            "Use this provider for cleanup and Ask"
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.start_edit(Editing::Use(id), window, cx)
-                        })),
+                            "Use"
+                        },
+                    )
+                    .small()
+                    .disabled(row.needs_key && !row.has_key)
+                    .tooltip(if row.needs_key && !row.has_key {
+                        "Add a key first"
+                    } else {
+                        "Use this provider for cleanup and Ask"
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_edit(Editing::Use(id), window, cx)
+                    })),
                 );
             }
             if row.needs_key && row.env_override.is_none() {
@@ -563,6 +596,12 @@ impl ModelsPage {
                                         .child(ui::label(&t, label))
                                         .child(ui::token(&t, tone, row.status)),
                                 )
+                                .when(row.needs_reactivation, |d| {
+                                    d.child(ui::supporting(
+                                        &t,
+                                        "A newer key is saved but cleanup and Ask still use the previous one. Choose “Use new key” to switch.",
+                                    ))
+                                })
                                 .when_some(row.env_override.clone(), |d, var| {
                                     d.child(ui::supporting(
                                         &t,
