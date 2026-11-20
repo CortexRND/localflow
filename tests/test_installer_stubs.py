@@ -110,7 +110,7 @@ elif name == "curl":
         shutil.copy(asset, args[args.index("-o") + 1])
 elif name == "git":
     # STUB_GIT_FAIL lists git subcommands that exit 128. Every rev-parse is an
-    # unknown revision, so a custom LOCALFLOW_REF is fetched explicitly.
+    # unknown revision.
     command = args[2] if args[:1] == ["-C"] else (args[0] if args else "")
     if command in os.environ.get("STUB_GIT_FAIL", "").split(","):
         print("fatal: stubbed git failure", file=sys.stderr)
@@ -506,7 +506,8 @@ def test_macos_without_clt_still_uses_non_usr_bin_git(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = sandbox.calls()
     assert any(call.startswith("git clone https://example.invalid/") for call in calls)
-    assert f"git -C {sandbox.dest} checkout v9.9.9" in calls
+    assert f"git -C {sandbox.dest} fetch origin v9.9.9" in calls
+    assert f"git -C {sandbox.dest} checkout --detach FETCH_HEAD" in calls
     assert "codeload.github.com" not in _hosts(calls)
     assert "github.com" not in _hosts(calls)
 
@@ -764,7 +765,7 @@ def test_archive_failure_with_git_fails_closed(
 
 REAL_GIT = shutil.which("git")
 needs_real_git = pytest.mark.skipif(REAL_GIT is None, reason="git is not installed")
-GIT_CASES = ("clean", "unpushed", "dirty", "worktree")
+GIT_CASES = ("clean", "unpushed", "dirty")
 
 
 def _fixture_git_env(tmp_path: Path) -> dict[str, str]:
@@ -896,12 +897,7 @@ def test_replaced_real_git_checkout_is_backed_up_intact(
     backup = _reported_backup(sandbox, result)
     assert f"to {backup} (its .venv is reused" in result.stdout
     assert not (backup / ".venv").exists()
-    if case == "worktree":
-        assert (backup / ".git").is_file()
-        assert "worktree repair" in result.stdout
-        _git(env, backup, "worktree", "repair")
-    else:
-        assert (backup / ".git").is_dir()
+    assert (backup / ".git").is_dir()
     assert _git_state(env, backup) == before
 
     # A rerun replaces the archive install without touching the backup.
@@ -910,6 +906,53 @@ def test_replaced_real_git_checkout_is_backed_up_intact(
     assert _backups(sandbox) == [backup]
     assert "Previous git checkout preserved" not in rerun.stdout
     assert _git_state(env, backup) == before
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+@needs_real_git
+@pytest.mark.parametrize("git_stub", [True, False], ids=["git", "no-git"])
+def test_linked_worktree_is_refused_unchanged(tmp_path: Path, git_stub: bool) -> None:
+    # A .git file means a linked worktree (or submodule): moving it would break
+    # its repository's bookkeeping, so a default install refuses to replace it.
+    sandbox = _real_git_sandbox(tmp_path, git_stub=git_stub)
+    if not git_stub:
+        sandbox.add("brew")
+        sandbox.add("python3", "3.12.4")
+    env = _make_real_checkout(tmp_path, sandbox.dest, "worktree")
+    (sandbox.dest / "staged.txt").write_text("staged\n")
+    _git(env, sandbox.dest, "add", "staged.txt")
+    before = _git_state(env, sandbox.dest)
+    assert before["staged"] and before["diff"]
+    main = tmp_path / "main-checkout"
+    gitfile = (sandbox.dest / ".git").read_text()
+    bookkeeping = _tree_bytes(main / ".git" / "worktrees")
+    assert bookkeeping  # the worktree's index, HEAD and gitdir link live here
+    worktrees = _git(env, main, "worktree", "list", "--porcelain")
+    tree = _tree_bytes(sandbox.dest)
+
+    result = sandbox.run()
+
+    assert result.returncode == 1
+    assert "linked git worktree or submodule" in result.stderr
+    assert f"{sandbox.dest} was left unchanged" in result.stderr
+    assert "worktree repair" not in result.stdout + result.stderr
+    calls = sandbox.calls()
+    assert not _urls(calls) and not _git_calls(calls)  # refused before downloading
+    assert not _install_work(calls)
+    assert not _backups(sandbox)
+    assert _no_leftover_downloads(sandbox)
+    assert (sandbox.dest / ".git").read_text() == gitfile
+    assert _tree_bytes(sandbox.dest) == tree  # files and .venv untouched
+    assert _tree_bytes(main / ".git" / "worktrees") == bookkeeping
+    assert _git(env, main, "worktree", "list", "--porcelain") == worktrees
+    assert _git_state(env, sandbox.dest) == before
 
 
 MV_FAILURE = r'''#!/bin/sh
@@ -980,9 +1023,11 @@ def test_existing_git_checkout_honours_localflow_ref(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     calls = sandbox.calls()
-    assert f"git -C {sandbox.dest} fetch origin" in calls
-    assert f"git -C {sandbox.dest} fetch origin v1.0.0" in calls
-    assert f"git -C {sandbox.dest} checkout v1.0.0" in calls
+    # Always the requested ref, freshly fetched, then its FETCH_HEAD detached.
+    assert _git_calls(calls) == [
+        f"git -C {sandbox.dest} fetch origin v1.0.0",
+        f"git -C {sandbox.dest} checkout --detach FETCH_HEAD",
+    ]
     assert "LOCALFLOW_REF=v1.0.0 is a custom ref; its source is not checksum-verified" in result.stderr
     assert not any(f"refs/tags/{RELEASE}" in call for call in calls)
     assert "github.com" not in _hosts(calls) and "codeload.github.com" not in _hosts(calls)
@@ -1010,8 +1055,9 @@ def test_custom_ref_fresh_install_with_git_clones_and_checks_out(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     calls = sandbox.calls()
     clone = calls.index(f"git clone https://example.invalid/localflow.git {sandbox.dest}")
-    checkout = calls.index(f"git -C {sandbox.dest} checkout feature/x")
-    assert clone < checkout < min(_install_work(calls))
+    fetch = calls.index(f"git -C {sandbox.dest} fetch origin feature/x")
+    checkout = calls.index(f"git -C {sandbox.dest} checkout --detach FETCH_HEAD")
+    assert clone < fetch < checkout < min(_install_work(calls))
     assert "github.com" not in _hosts(calls)  # no release archive or SHA256SUMS
     assert "LOCALFLOW_REF=feature/x is a custom ref; its source is not checksum-verified" in result.stderr
     assert "Verified SHA-256" not in result.stdout
@@ -1058,9 +1104,8 @@ def test_archive_install_then_custom_ref_uses_staged_git(tmp_path: Path) -> None
     staged = _staged_src(git[0])
     assert Path(staged).parent.parent == sandbox.dest.parent
     assert git[1:] == [
-        f"git -C {staged} rev-parse --verify --quiet origin/main^{{commit}}",
-        f"git -C {staged} fetch origin origin/main",
-        f"git -C {staged} checkout origin/main",
+        f"git -C {staged} fetch origin main",  # origin/main is origin's branch main
+        f"git -C {staged} checkout --detach FETCH_HEAD",
     ]  # all git work is staged; nothing re-fetches the published install
     assert calls.index(git[-1]) < min(_install_work(calls))
     assert not _hosts(calls) & {"codeload.github.com", "github.com"}  # no archive at all
@@ -1155,16 +1200,77 @@ def _real_ref_env(origin: Path, ref: str) -> dict[str, str]:
 
 
 @needs_real_git
-def test_archive_install_then_origin_main_with_real_git(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "ref", ["origin/main", "refs/remotes/origin/main", "refs/heads/main", "main"]
+)
+def test_archive_install_then_origin_main_with_real_git(tmp_path: Path, ref: str) -> None:
+    # The fresh clone has only a local "release" branch: every spelling of main
+    # must be fetched from origin (origin/main is origin's branch main).
     sandbox, env, origin, main = _real_ref_sandbox(tmp_path)
 
-    result = sandbox.run(env=_real_ref_env(origin, "origin/main"))
+    result = sandbox.run(env=_real_ref_env(origin, ref))
 
     assert result.returncode == 0, result.stderr
     assert "codeload.github.com" not in _hosts(sandbox.calls())
     assert (sandbox.dest / "version.txt").read_text() == "main"  # not the default branch
     assert _git(env, sandbox.dest, "rev-parse", "HEAD").strip() == main
     assert not (sandbox.dest / ".localflow-tarball").exists()
+    assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
+    assert not _backups(sandbox)
+    assert _no_leftover_downloads(sandbox)
+
+
+@needs_real_git
+def test_existing_git_install_fetches_advanced_main_not_stale_branch(tmp_path: Path) -> None:
+    sandbox, env, origin, first = _real_ref_sandbox(tmp_path)
+    assert sandbox.run(env=_real_ref_env(origin, "main")).returncode == 0
+    assert _git(env, sandbox.dest, "rev-parse", "HEAD").strip() == first
+    # A stale local branch named main must not win over origin's newer main.
+    _git(env, sandbox.dest, "branch", "-f", "main", first)
+    seed = tmp_path / "seed"
+    (seed / "version.txt").write_text("main-2")
+    _git(env, seed, "commit", "-am", "main 2")
+    _git(env, seed, "push", str(origin), "main")
+    second = _git(env, seed, "rev-parse", "HEAD").strip()
+
+    result = sandbox.run(env=_real_ref_env(origin, "main"))
+
+    assert result.returncode == 0, result.stderr
+    assert _git(env, sandbox.dest, "rev-parse", "HEAD").strip() == second
+    assert (sandbox.dest / "version.txt").read_text() == "main-2"
+    assert _git(env, sandbox.dest, "rev-parse", "refs/heads/main").strip() == first
+    assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
+    assert not _backups(sandbox)
+    assert _no_leftover_downloads(sandbox)
+
+
+def _push_tagged_commit(env: dict[str, str], tmp_path: Path, origin: Path) -> str:
+    """Push an annotated tag v9.9.9 on a commit no branch contains."""
+    seed = tmp_path / "seed"
+    _git(env, seed, "checkout", "-q", "--detach")
+    (seed / "version.txt").write_text("tagged")
+    _git(env, seed, "commit", "-am", "tagged")
+    _git(env, seed, "tag", "-a", "-m", "tagged", "v9.9.9")
+    _git(env, seed, "push", str(origin), "refs/tags/v9.9.9")
+    return _git(env, seed, "rev-parse", "HEAD").strip()
+
+
+@needs_real_git
+@pytest.mark.parametrize("kind", ["tag", "sha"])
+@pytest.mark.parametrize("existing_git", [False, True], ids=["archive", "git"])
+def test_custom_ref_tag_and_sha_with_real_git(
+    tmp_path: Path, kind: str, existing_git: bool
+) -> None:
+    sandbox, env, origin, _ = _real_ref_sandbox(tmp_path)
+    if existing_git:
+        assert sandbox.run(env=_real_ref_env(origin, "origin/main")).returncode == 0
+    tagged = _push_tagged_commit(env, tmp_path, origin)
+
+    result = sandbox.run(env=_real_ref_env(origin, "v9.9.9" if kind == "tag" else tagged))
+
+    assert result.returncode == 0, result.stderr
+    assert _git(env, sandbox.dest, "rev-parse", "HEAD").strip() == tagged
+    assert (sandbox.dest / "version.txt").read_text() == "tagged"
     assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
     assert not _backups(sandbox)
     assert _no_leftover_downloads(sandbox)

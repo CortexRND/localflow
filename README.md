@@ -74,7 +74,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "993649d693952bd874184791eebdd5d847f88bb14e5bc6b9b311688ae5adb612  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "57877e13568025d8343290defd54d3146915b021d8e51b57808b74b5c087d52d  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -82,7 +82,7 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "993649d693952bd874184791eebdd5d847f88bb14e5bc6b9b311688ae5adb612  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "57877e13568025d8343290defd54d3146915b021d8e51b57808b74b5c087d52d  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
 The installer is pinned to release `v0.2.1`. Whether or not git is installed,
@@ -97,7 +97,9 @@ it is moved as is (uncommitted, staged and untracked files, unpushed commits,
 stashes and all git metadata) to a sibling backup such as
 `~/.localflow/app.git-backup-20261120-101500-4242`, and the installer prints
 the exact path. Delete the backup yourself once you have recovered anything
-you need from it. The installer does not pin a git commit: the release tag
+you need from it. A linked git worktree or submodule (whose `.git` is a file)
+is never replaced: moving it would break its repository's bookkeeping, so the
+installer stops with an explanation and changes nothing. The installer does not pin a git commit: the release tag
 points at the merge commit that contains `install.sh`, and a file cannot embed
 the hash of a commit that includes it.
 
@@ -119,10 +121,13 @@ run outside a checkout, the app is installed to `~/.localflow/app`; override
 it with `LOCALFLOW_HOME`.
 
 `LOCALFLOW_REF` overrides the pinned release with any branch, tag or commit
-(for example `LOCALFLOW_REF=main bash install.sh`). When git is usable, any
-git ref works, including remote-tracking names such as `origin/main`: a fresh
-install clones `LOCALFLOW_REPO_URL` (default: this repository) and an existing
-git install fetches; either then checks out the ref. An existing archive
+(for example `LOCALFLOW_REF=main bash install.sh`). When git is usable, a
+branch (`main`, `refs/heads/main` or `origin/main`), tag or full commit SHA
+works: a fresh install clones `LOCALFLOW_REPO_URL` (default: this repository),
+and every install, fresh or existing, then fetches the ref from origin and
+checks out the fetched commit detached, so a rerun always picks up the latest
+commit of a branch rather than a stale local copy (`origin/main` and
+`refs/remotes/origin/main` are fetched as origin's branch `main`). An existing archive
 install is switched to git too: the clone, fetch and checkout happen in a
 temporary directory next to it, and the archive install (and its `.venv`, which
 is kept) is replaced only once they succeed. If any git step fails the existing

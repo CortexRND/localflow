@@ -19,16 +19,19 @@ it unless it matches the release's `SHA256SUMS`. Fresh installs, earlier archive
 installs and earlier managed git checkouts (from installers before v0.2.1) are
 all handled the same way: the existing directory is replaced only after the
 download verifies, its `.venv` is kept, and a failed download or checksum leaves
-it untouched. A replaced directory that contains `.git` (a directory, or a
-`.git` file for a worktree or submodule) is never deleted, even when it is
-clean: it is renamed intact to a sibling `<name>.git-backup-<YYYYmmdd-HHMMSS>-<pid>`
+it untouched. A replaced checkout whose `.git` is a directory is never
+deleted, even when it is clean: it is renamed intact to a sibling `<name>.git-backup-<YYYYmmdd-HHMMSS>-<pid>`
 directory (for example `~/.localflow/app.git-backup-20261120-101500-4242`),
 outside the temporary download directory, and the installer prints the exact
 path. Uncommitted, staged and untracked files, unpushed commits, branches,
 stashes, hooks and other git metadata therefore survive; only `.venv` moves to
 the new install for reuse. The backup is a plain rename, so it needs no git. If
 the swap fails, the previous directory and its `.venv` are restored and no
-backup is left behind. A destination that is not recognisably a LocalFlow install is
+backup is left behind. A destination whose `.git` is a file (a linked git
+worktree or submodule) is refused before anything is downloaded or moved:
+renaming it would break the bookkeeping its parent repository keeps about it,
+so its files, index, `.venv` and git metadata are left exactly as they were.
+A destination that is not recognisably a LocalFlow install is
 refused, never overwritten. Running `install.sh` from inside a developer
 checkout installs that checkout as is; `LOCALFLOW_REF` remains an explicitly
 unverified git/codeload override. With a usable git, a custom ref always uses
@@ -36,7 +39,12 @@ git, even over an existing archive install: it is cloned from
 `LOCALFLOW_REPO_URL`, fetched and checked out in a sibling staging directory,
 and swapped in (keeping `.venv`) only after every git step succeeds; a git
 failure leaves the existing install untouched and never falls back to an
-archive. Codeload is used only when no usable git is found, with a warning.
+archive. Fresh and existing git installs alike always run
+`git fetch origin <ref>` and `git checkout --detach FETCH_HEAD`, so the
+requested ref is never satisfied by a stale local branch; `origin/<name>` and
+`refs/remotes/origin/<name>` are fetched as origin's branch `<name>`, while
+branch names, `refs/heads/<name>`, tags and full commit SHAs are fetched as
+given. Codeload is used only when no usable git is found, with a warning.
 
 The installer intentionally pins no git commit. The release tag is placed on
 the merge commit of the release branch, and that commit contains `install.sh`;

@@ -35,10 +35,13 @@ Environment:
   LOCALFLOW_HOME           Install location
   LOCALFLOW_REPO_URL       Git repository URL or local path (LOCALFLOW_REF git
                            installs only)
-  LOCALFLOW_REF            Git ref to check out (e.g. origin/main) instead of
-                           the pinned release $LOCALFLOW_RELEASE; uses git when
-                           usable (an archive install is replaced only after
-                           clone/fetch/checkout succeed), else a codeload
+  LOCALFLOW_REF            Git ref to install instead of the pinned release
+                           $LOCALFLOW_RELEASE: a branch (main, origin/main,
+                           refs/heads/main), tag or full commit SHA. With
+                           usable git it is always fetched from origin and
+                           checked out detached at the fetched commit (an
+                           archive install is replaced only after
+                           clone/fetch/checkout succeed); else a codeload
                            tarball. A custom ref is NOT checksum-verified.
   LOCALFLOW_RELEASE_BASE_URL
                            Testing only: alternative location of the release
@@ -49,9 +52,11 @@ localflow-$LOCALFLOW_VERSION.tar.gz from the $LOCALFLOW_RELEASE GitHub release a
 verifies it against the release's SHA256SUMS before unpacking. An existing
 LocalFlow install at the destination, including an older git checkout, is
 replaced only after verification succeeds; its .venv is kept. A replaced
-directory that contains .git is never deleted: it is moved, with all local
+checkout with a .git directory is never deleted: it is moved, with all local
 changes, commits and stashes, to a sibling <name>.git-backup-<time>-<pid>
-directory whose path is printed. Git commits are
+directory whose path is printed. A linked git worktree or submodule (.git is
+a file) is never replaced: the installer stops and leaves it unchanged.
+Git commits are
 not pinned: the release tag points at the merge commit that contains this
 script, whose hash cannot be known when the script is written.
 Running install.sh from inside a git checkout installs that checkout as is.
@@ -290,13 +295,28 @@ git_backup_path() {
     printf '%s\n' "$candidate"
 }
 
+# Exit with an explanation, removing staging directory $1 if given, when $REPO
+# has a .git FILE: it is a linked worktree or submodule whose git metadata and
+# bookkeeping live elsewhere, so moving it aside would break both. Nothing in
+# $REPO (files, index, .venv) or its repository is changed.
+refuse_linked_git_replacement() {
+    [[ -f "$REPO/.git" ]] || return 0
+    if [[ -n "${1:-}" ]]; then rm -rf "$1"; fi
+    echo "Refusing to replace $REPO: its .git is a file, so it is a linked git worktree or submodule." >&2
+    echo "Moving it would break its repository's worktree/submodule bookkeeping; $REPO was left unchanged." >&2
+    echo "Save your work, then remove it with git (git worktree remove, or git submodule deinit), or set LOCALFLOW_HOME to another directory." >&2
+    exit 1
+}
+
 # Replace $REPO with the fully prepared source in $1/src (staging directory $1,
 # a sibling of $REPO), keeping the existing .venv, then remove $1.
-# A replaced directory containing .git (a checkout, worktree or submodule) is
-# never deleted: it is renamed, intact, to a sibling backup whose path is
-# printed. A failed replacement restores the previous directory and its .venv.
+# A replaced checkout with a .git directory is never deleted: it is renamed,
+# intact, to a sibling backup whose path is printed. A linked worktree or
+# submodule (.git file) is refused before anything is moved. A failed
+# replacement restores the previous directory and its .venv.
 publish_staged_source() {
     local tmp="$1" previous backup="" venv_moved=0
+    refuse_linked_git_replacement "$tmp"
     if [[ -e "$REPO" ]]; then
         previous="$tmp/previous"
         if [[ -e "$REPO/.git" || -L "$REPO/.git" ]]; then
@@ -348,9 +368,6 @@ publish_staged_source() {
         fi
         if [[ -n "$backup" ]]; then
             echo "Previous git checkout preserved at: $backup"
-            if [[ -f "$backup/.git" ]]; then
-                echo "Its .git is a gitdir link; run 'git -C \"$backup\" worktree repair' if git reports it as missing."
-            fi
         fi
     else
         mv "$tmp/src" "$REPO"
@@ -361,9 +378,10 @@ publish_staged_source() {
 # Download the source tarball into $REPO, replacing older source but keeping .venv.
 # Without LOCALFLOW_REF this is the pinned release asset, verified against the
 # release's SHA256SUMS; a custom LOCALFLOW_REF uses GitHub's unverified codeload.
-# A replaced directory containing .git (a checkout, worktree or submodule) is
-# never deleted: it is renamed, intact, to a sibling backup whose path is
-# printed. Everything is downloaded and verified before $REPO is touched, and
+# A replaced checkout with a .git directory is never deleted: it is renamed,
+# intact, to a sibling backup whose path is printed; a linked worktree or
+# submodule (.git file) is refused. Everything is downloaded and verified
+# before $REPO is touched, and
 # a failed replacement restores the previous directory and its .venv.
 install_tarball() {
     local parent tmp url asset=""
@@ -422,20 +440,36 @@ install_git_ref() {
         echo "Could not clone $url; $REPO was left unchanged." >&2
         exit 1
     fi
-    if ! git -C "$tmp/src" rev-parse --verify --quiet \
-        "${LOCALFLOW_REF}^{commit}" >/dev/null \
-        && ! git -C "$tmp/src" fetch origin "$LOCALFLOW_REF"; then
+    local status=0
+    fetch_and_checkout_ref "$tmp/src" || status=$?
+    if [[ "$status" == 1 ]]; then
         rm -rf "$tmp"
         echo "Could not fetch $LOCALFLOW_REF from $url; $REPO was left unchanged." >&2
         exit 1
     fi
-    if ! git -C "$tmp/src" checkout "$LOCALFLOW_REF" || [[ ! -f "$tmp/src/pyproject.toml" ]]; then
+    if [[ "$status" != 0 || ! -f "$tmp/src/pyproject.toml" ]]; then
         rm -rf "$tmp"
         echo "Could not check out $LOCALFLOW_REF from $url; $REPO was left unchanged." >&2
         exit 1
     fi
     publish_staged_source "$tmp"
     GIT_REF_INSTALLED=1
+}
+
+# In git checkout $1, always fetch LOCALFLOW_REF from origin and check out the
+# freshly fetched commit detached (FETCH_HEAD), never a stale local branch or
+# remote-tracking ref. origin/<name> and refs/remotes/origin/<name> name
+# origin's own branch <name>, so that is what is fetched; branch names,
+# refs/heads/<name>, tags and full commit SHAs are fetched as given.
+# Returns 1 if the fetch fails and 2 if the checkout fails.
+fetch_and_checkout_ref() {
+    local ref="$LOCALFLOW_REF"
+    case "$ref" in
+        refs/remotes/origin/?*) ref="${ref#refs/remotes/origin/}" ;;
+        origin/?*) ref="${ref#origin/}" ;;
+    esac
+    git -C "$1" fetch origin "$ref" || return 1
+    git -C "$1" checkout --detach FETCH_HEAD || return 2
 }
 
 wait_for_ollama() {
@@ -565,7 +599,9 @@ else
         # Default installs never trust git: an older managed git checkout is
         # replaced by the verified release archive (keeping .venv), and only
         # after the download passes its SHA256SUMS check. The checkout itself
-        # is moved to a sibling backup, never deleted.
+        # is moved to a sibling backup, never deleted. A linked worktree or
+        # submodule is refused before anything is downloaded.
+        refuse_linked_git_replacement
         echo "Existing git checkout at $REPO will be replaced by the $LOCALFLOW_RELEASE release archive once it passes SHA256SUMS verification (.venv is kept; the checkout is backed up next to it)."
         install_tarball
     elif [[ -e "$REPO" ]]; then
@@ -587,12 +623,15 @@ elif [[ -z "${LOCALFLOW_REF:-}" && "$FROM_CHECKOUT" -ne 1 ]]; then
 elif ! find_git; then
     echo "Note: no usable git found; keeping the existing checkout at $REPO as is."
 elif [[ -n "${LOCALFLOW_REF:-}" ]]; then
-    git -C "$REPO" fetch origin
-    if ! git -C "$REPO" rev-parse --verify --quiet \
-        "${LOCALFLOW_REF}^{commit}" >/dev/null; then
-        git -C "$REPO" fetch origin "$LOCALFLOW_REF"
+    ref_status=0
+    fetch_and_checkout_ref "$REPO" || ref_status=$?
+    if [[ "$ref_status" == 1 ]]; then
+        echo "Could not fetch $LOCALFLOW_REF from origin into $REPO." >&2
+        exit 1
+    elif [[ "$ref_status" != 0 ]]; then
+        echo "Could not check out $LOCALFLOW_REF in $REPO (commit or stash conflicting local changes and rerun)." >&2
+        exit 1
     fi
-    git -C "$REPO" checkout "$LOCALFLOW_REF"
 fi
 
 cd "$REPO"
