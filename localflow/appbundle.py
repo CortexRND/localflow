@@ -23,7 +23,7 @@ _PLIST = {
     "CFBundleIdentifier": BUNDLE_ID,
     "CFBundleExecutable": "launcher",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.2.1",
+    "CFBundleShortVersionString": "0.2.2",
     "NSHighResolutionCapable": True,
 }
 
@@ -32,7 +32,7 @@ def _version() -> str:
     try:
         return metadata.version("localflow")
     except metadata.PackageNotFoundError:
-        return "0.2.1"
+        return "0.2.2"
 
 
 def _png(size: int) -> bytes:

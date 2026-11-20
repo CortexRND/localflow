@@ -11,21 +11,42 @@ from pathlib import Path
 
 import pytest
 
+from localflow import appbundle
+
 ROOT = Path(__file__).resolve().parents[1]
 BASH = shutil.which("bash") if os.name != "nt" else None
 
 
 def test_release_versions_and_installer_hashes_are_consistent():
     version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-    assert version == "0.2.1"
+    assert version == "0.2.2"
     assert f'LOCALFLOW_RELEASE="v{version}"' in (ROOT / "install.sh").read_text(encoding="utf-8")
     assert f"$LocalflowRelease = 'v{version}'" in (ROOT / "install.ps1").read_text(encoding="utf-8")
-    assert f'LF_REF=v{version}' in (ROOT / "packaging/windows/Install LocalFlow.cmd").read_text(encoding="utf-8")
+    cmd = (ROOT / "packaging/windows/Install LocalFlow.cmd").read_bytes()
+    assert f'set "LF_REF=v{version}"\r\n'.encode() in cmd
+    assert b"\n" not in cmd.replace(b"\r\n", b""), "Install LocalFlow.cmd must keep CRLF line endings"
     assert tomllib.loads((ROOT / "rust/Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"] == version
     assert f"<string>{version}</string>" in (ROOT / "scripts/build_mac_installer.sh").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for filename in ("install.sh", "install.ps1"):
         assert f"/v{version}/{filename}" in readme
+    assert f"pinned to release `v{version}`" in readme
+    assert f"`localflow-{version}.tar.gz`" in readme and f"`localflow-{version}.zip`" in readme
+
+
+def test_python_package_metadata_and_lock_share_the_release_version(monkeypatch: pytest.MonkeyPatch):
+    version = _release_version()
+    assert appbundle._PLIST["CFBundleShortVersionString"] == version
+
+    def missing_metadata(_name: str) -> str:
+        raise appbundle.metadata.PackageNotFoundError("localflow")
+
+    monkeypatch.setattr(appbundle.metadata, "version", missing_metadata)
+    assert appbundle._version() == version
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    local = [p for p in lock["package"] if p["name"] == "localflow"]
+    assert len(local) == 1 and local[0]["source"] == {"editable": "."}
+    assert local[0]["version"] == version
 
 
 def test_rust_workspace_crates_share_the_release_version():
@@ -265,7 +286,16 @@ def test_standalone_desktop_lock_matches_local_manifest_versions():
     assert set(locked) <= set(local), f"unknown path packages in lock: {set(locked) - set(local)}"
     stale = {name: (version, local[name]) for name, version in locked.items() if version != local[name]}
     assert not stale, f"rust/lf-desktop/Cargo.lock is stale (locked, manifest): {stale}"
-    assert locked["lf-core"] == _release_version()
+    # Every LocalFlow crate, including the standalone desktop app, carries the
+    # release version; vendored third-party shims keep their upstream versions.
+    vendored = {
+        tomllib.loads(m.read_text(encoding="utf-8"))["package"]["name"]
+        for m in (desktop / "vendor").glob("*/Cargo.toml")
+    }
+    release = _release_version()
+    assert manifest["package"]["version"] == release
+    off_release = {name: v for name, v in locked.items() if name not in vendored and v != release}
+    assert not off_release, f"LocalFlow path packages not at {release}: {off_release}"
 
 
 @pytest.mark.skipif(BASH is None, reason="requires Bash")

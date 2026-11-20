@@ -3754,7 +3754,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lf-agent"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "caseless",
@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "lf-audio"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "cpal 0.15.3",
@@ -3793,7 +3793,7 @@ dependencies = [
 
 [[package]]
 name = "lf-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3817,7 +3817,7 @@ dependencies = [
 
 [[package]]
 name = "lf-desktop"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3843,7 +3843,7 @@ dependencies = [
 
 [[package]]
 name = "lf-input"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "core-foundation 0.10.0",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "lf-providers"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "lf-core",
@@ -3911,7 +3911,7 @@ dependencies = [
 
 [[package]]
 name = "lf-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "caseless",
@@ -3938,7 +3938,7 @@ dependencies = [
 
 [[package]]
 name = "lf-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3981,7 +3981,7 @@ dependencies = [
 
 [[package]]
 name = "lf-ui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "block2",
