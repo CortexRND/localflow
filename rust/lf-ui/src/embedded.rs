@@ -532,25 +532,34 @@ impl EmbeddedRuntime {
                 let settings = Mutex::new(crate::speech_memory::RuntimeSettings::new(&path));
                 let maintenance_memory = memory.clone();
                 let maintenance: lf_runtime::live::OnTick = Arc::new(move || {
-                    let mut settings = settings.lock().unwrap();
-                    settings.reload();
-                    let enabled = live
-                        .lock()
-                        .unwrap()
-                        .field_bool("dictation_enabled")
-                        .unwrap_or(true);
-                    let mut unload = || {
-                        maintenance_memory.poll(
-                            enabled,
-                            settings.timeout,
-                            std::time::Instant::now(),
-                        );
-                    };
-                    if let Some(state) = &server_state {
-                        state.while_idle(&mut unload);
-                    } else {
-                        unload();
+                    let mut inspected = crate::speech_memory::Inspected::default();
+                    {
+                        let mut settings = settings.lock().unwrap();
+                        settings.reload();
+                        let enabled = live
+                            .lock()
+                            .unwrap()
+                            .field_bool("dictation_enabled")
+                            .unwrap_or(true);
+                        let mut unload = || {
+                            maintenance_memory.poll_holding(
+                                enabled,
+                                settings.timeout,
+                                std::time::Instant::now(),
+                                &mut inspected,
+                            );
+                        };
+                        // `while_idle` holds the meetings state lock around
+                        // the poll (and the poll holds the memory lock).
+                        if let Some(state) = &server_state {
+                            state.while_idle(&mut unload);
+                        } else {
+                            unload();
+                        }
                     }
+                    // An engine retired meanwhile may be destroyed here, after
+                    // every lock above is released.
+                    drop(inspected);
                     true
                 });
                 watch_server_services(

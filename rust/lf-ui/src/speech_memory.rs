@@ -52,16 +52,41 @@ impl SpeechMemory {
         while state.active != 0 {
             state = self.1.wait(state).unwrap_or_else(|p| p.into_inner());
         }
-        for engine in state
+        // Unloading stays under the lock, but the upgraded references may be
+        // the last ones (their owner released them meanwhile): an engine's
+        // destructor can wait for a helper process, so drop them after it.
+        let engines: Vec<_> = state
             .engines
             .drain(..)
             .filter_map(|engine| engine.upgrade())
-        {
+            .collect();
+        for engine in &engines {
             engine.inner.unload();
         }
+        drop(state);
+        drop(engines);
     }
 
+    /// [`Self::poll_holding`], dropping the inspected engines after the
+    /// memory lock is released.
     pub fn poll(&self, enabled: bool, timeout: Duration, now: Instant) -> bool {
+        let mut inspected = Inspected::default();
+        self.poll_holding(enabled, timeout, now, &mut inspected)
+    }
+
+    /// Unload idle (or retiring) engines while no recording or inference is
+    /// running. The strong references taken to inspect engines go into
+    /// `inspected` instead of being dropped under the memory lock: one may be
+    /// the last (its owner retired it concurrently), and dropping that can
+    /// block on a helper process exit. Callers that poll under another lock
+    /// should drop `inspected` only after releasing that lock too.
+    pub fn poll_holding(
+        &self,
+        enabled: bool,
+        timeout: Duration,
+        now: Instant,
+        inspected: &mut Inspected,
+    ) -> bool {
         let Ok(mut state) = self.0.try_lock() else {
             return false;
         };
@@ -72,16 +97,16 @@ impl SpeechMemory {
             || (!timeout.is_zero() && now.saturating_duration_since(state.last_use) >= timeout);
         let mut unloaded = false;
         state.engines.retain(|engine| {
-            if let Some(engine) = engine.upgrade() {
-                if (due || engine.retiring.load(Ordering::Acquire)) && engine.inner.loaded() {
-                    engine.inner.unload();
-                    unloaded = true;
-                    log::info!("unloaded idle speech model");
-                }
-                true
-            } else {
-                false
+            let Some(engine) = engine.upgrade() else {
+                return false;
+            };
+            if (due || engine.retiring.load(Ordering::Acquire)) && engine.inner.loaded() {
+                engine.inner.unload();
+                unloaded = true;
+                log::info!("unloaded idle speech model");
             }
+            inspected.0.push(engine);
+            true
         });
         if unloaded {
             let relieved = lf_stt::release_idle_memory();
@@ -90,6 +115,12 @@ impl SpeechMemory {
         unloaded
     }
 }
+
+/// Strong references [`SpeechMemory::poll_holding`] took to the engines it
+/// inspected. Dropping this may destroy engines, so drop it only once no
+/// speech, meeting or server lock is held.
+#[derive(Default)]
+pub(crate) struct Inspected(Vec<Arc<ManagedSpeech>>);
 
 struct Activity(SpeechMemory);
 impl Drop for Activity {
@@ -442,6 +473,157 @@ mod tests {
             assert!(!speech.loaded());
         }
     }
+    /// A loaded fake engine that pauses (reporting `pause_on`) inside the
+    /// memory's critical section, and whose destructor blocks like a helper
+    /// process waiting to exit. Each pause and the destructor wait for one
+    /// resume; waits time out so a broken run cannot hang the suite.
+    struct Doomed {
+        events: std::sync::mpsc::Sender<&'static str>,
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
+        pause_on: &'static str,
+    }
+    impl Doomed {
+        fn wait(&self) {
+            let _ = self
+                .resume
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5));
+        }
+        fn pause(&self, at: &'static str) {
+            if self.pause_on == at {
+                let _ = self.events.send(at);
+                self.wait();
+            }
+        }
+    }
+    impl SpeechEngine for Doomed {
+        fn loaded(&self) -> bool {
+            self.pause("loaded");
+            true
+        }
+        fn load(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+            Ok(String::new())
+        }
+        fn unload(&self) {
+            self.pause("unload");
+        }
+    }
+    impl Drop for Doomed {
+        fn drop(&mut self) {
+            let _ = self.events.send("dropping");
+            self.wait();
+            let _ = self.events.send("dropped");
+        }
+    }
+
+    /// Resumes the fake; on drop (including a failing test's unwind) it
+    /// releases any pause or destructor still waiting.
+    struct Resume(std::sync::mpsc::Sender<()>);
+    impl Resume {
+        fn go(&self) {
+            self.0.send(()).unwrap();
+        }
+    }
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+            let _ = self.0.send(());
+        }
+    }
+
+    fn doomed(
+        pause_on: &'static str,
+    ) -> (
+        Arc<dyn SpeechEngine>,
+        std::sync::mpsc::Receiver<&'static str>,
+        Resume,
+    ) {
+        let (events, received) = std::sync::mpsc::channel();
+        let (resume, waiting) = std::sync::mpsc::channel();
+        let engine = Arc::new(Doomed {
+            events,
+            resume: Mutex::new(waiting),
+            pause_on,
+        });
+        (engine, received, Resume(resume))
+    }
+
+    fn next(events: &std::sync::mpsc::Receiver<&'static str>) -> &'static str {
+        events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the fake engine never reported")
+    }
+
+    /// Runs `access` on another thread; fails instead of hanging if it blocks.
+    fn returns<T: Send + 'static>(access: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(access());
+        });
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("speech memory stayed locked while an engine was destroyed")
+    }
+
+    #[test]
+    fn poll_drops_a_concurrently_retired_engine_outside_the_memory_lock() {
+        let memory = SpeechMemory::new();
+        let (inner, events, resume) = doomed("loaded");
+        let speech = memory.speech(inner);
+        let other = memory.speech(engine());
+        let polling = memory.clone();
+        let poller =
+            std::thread::spawn(move || polling.poll(false, Duration::ZERO, Instant::now()));
+        // The poll holds its upgraded reference under the memory lock...
+        assert_eq!(next(&events), "loaded");
+        // ...while the server's reaper releases the only other reference.
+        drop(speech);
+        resume.go();
+        // The poll's reference was the last one: the destructor now blocks.
+        assert_eq!(next(&events), "dropping");
+        let audio_memory = memory.clone();
+        returns(move || {
+            let mut audio = audio_memory.audio(Box::new(Audio(false)));
+            audio.start().unwrap();
+            audio.stop();
+        });
+        let inference = other.clone();
+        assert_eq!(
+            returns(move || inference.transcribe(&[0.5], None)),
+            Ok("hello".into())
+        );
+        resume.go();
+        assert_eq!(next(&events), "dropped");
+        assert!(poller.join().unwrap(), "the idle model was unloaded");
+    }
+
+    #[test]
+    fn shutdown_drops_a_concurrently_retired_engine_outside_the_memory_lock() {
+        let memory = SpeechMemory::new();
+        let (inner, events, resume) = doomed("unload");
+        let speech = memory.speech(inner);
+        let closing = memory.clone();
+        let shutdown = std::thread::spawn(move || closing.shutdown());
+        // Shutdown unloads under the lock through its upgraded reference...
+        assert_eq!(next(&events), "unload");
+        // ...while the other reference is released concurrently.
+        drop(speech);
+        resume.go();
+        assert_eq!(next(&events), "dropping");
+        // The lock is free: late audio and inference are refused, not stuck.
+        let audio_memory = memory.clone();
+        assert!(returns(move || audio_memory.audio(Box::new(Audio(false))).start()).is_err());
+        let late = memory.clone();
+        assert!(returns(move || late.speech(engine()).transcribe(&[0.5], None)).is_err());
+        resume.go();
+        assert_eq!(next(&events), "dropped");
+        shutdown.join().unwrap();
+    }
+
     #[test]
     fn sidecar_missing_changed_deleted_invalid_and_unknown_keys() {
         let dir = tempfile::tempdir().unwrap();
