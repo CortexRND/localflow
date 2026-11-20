@@ -87,7 +87,9 @@ curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install
 The installer is pinned to release `v0.2.0`. Without git it downloads
 `localflow-0.2.0.tar.gz` from that release and verifies it against the
 release's `SHA256SUMS` before unpacking; it stops and deletes the download if
-the hash does not match. With git it checks out the `v0.2.0` tag.
+the hash does not match. With git it checks out the `v0.2.0` tag and stops
+unless the tag and the checked-out `HEAD` are the pinned release commit
+`ab33fac896af9f10c31bc76c0f08be396a51eb68` (a commit check, not `SHA256SUMS`).
 
 Or run from a checkout:
 

@@ -37,6 +37,23 @@ PUBLISHED_INSTALLER_SHA256 = {
         "install.ps1": "20a3a79114d81975422ac7c451aab21391fbab2c99b71d03db136e8e2e007afc",
     },
 }
+# Commit each published release tag peels to (git ls-remote origin
+# refs/tags/<tag>^{}), verified out of band. Git installs trust only this
+# commit, so the pin in install.sh must never be taken from HEAD or a fetch.
+PUBLISHED_RELEASE_COMMITS = {
+    "v0.2.0": "ab33fac896af9f10c31bc76c0f08be396a51eb68",
+}
+
+
+def test_install_sh_release_commit_pin_matches_published_tag():
+    script = (ROOT / "install.sh").read_text(encoding="utf-8")
+    release = re.search(r'^LOCALFLOW_RELEASE="(v[^"]+)"$', script, re.MULTILINE).group(1)
+    pins = re.findall(r'^LOCALFLOW_RELEASE_COMMIT="([^"]*)"$', script, re.MULTILINE)
+    assert pins == [PUBLISHED_RELEASE_COMMITS[release]]
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"`{PUBLISHED_RELEASE_COMMITS[release]}`" in readme
+
+
 # Number of README one-liners expected per installer (install.sh has a plain
 # and a --with-ollama variant).
 README_INSTALLER_COMMANDS = {"install.sh": 2, "install.ps1": 1}
