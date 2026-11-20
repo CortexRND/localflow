@@ -21,15 +21,18 @@ can't be opened", with only **Cancel** and **Move to Trash**. There is no
 - use the verified one-line Terminal install under
   [macOS and Linux](#macos-and-linux) (recommended; it does not need the DMG), or
 - remove the download quarantine from the DMG you got from the official
-  release, then open it again:
+  release:
 
   ```sh
   xattr -d com.apple.quarantine ~/Downloads/LocalFlow-Installer.dmg
   ```
 
-Then open the DMG and double-click **Install LocalFlow**. A window installs
-everything, which takes several minutes, and LocalFlow opens when it is done.
-Since v0.2.0, macOS installs the native **Rust LocalFlow.app** by default. Rust
+  Then open the DMG again and double-click **Install LocalFlow**. A window
+  installs everything, which takes several minutes, and LocalFlow opens when it
+  is done.
+
+Whichever installation method you use (Terminal or DMG), since v0.2.0 macOS
+installs the native **Rust LocalFlow.app** by default. Rust
 is installed automatically; accept Apple's Command Line Tools installation
 dialog if prompted. Python and
 its virtual environment are not needed. Missing CMake is installed with Homebrew;
