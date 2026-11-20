@@ -47,13 +47,18 @@ jobs:
           printf 'config_version = 2\n\n[setup]\nversion = 1\n' > "$LOCALFLOW_CONFIG"
           export CARGO_TARGET_DIR="$PWD/rust/target"
           baseline="$RUNNER_TEMP/localflow-memory-baseline"
-          git diff 991677fc -- rust/lf-ui/src/mac/app.rs rust/lf-ui/src/mac.rs > "$RUNNER_TEMP/profile-driver.patch"
+          # The baseline profile driver is pinned to the last known-compatible
+          # revision (PR54 on main, green memory CI). Overlaying HEAD drags in
+          # newer app APIs (Setup, hub_route window planning, launch agent)
+          # that the 991677fc baseline lacks, and would distort the baseline.
+          profile_driver_rev=ce56b6130c4289f89a4d13dbc4aa1ddb78befc18
+          git diff 991677fc "$profile_driver_rev" -- rust/lf-ui/src/mac/app.rs rust/lf-ui/src/mac.rs > "$RUNNER_TEMP/profile-driver.patch"
           git worktree add --detach "$baseline" 991677fc
           git -C "$baseline" apply "$RUNNER_TEMP/profile-driver.patch"
-          cp rust/lf-ui/src/mac/memory_profile.rs "$baseline/rust/lf-ui/src/mac/memory_profile.rs"
-          cp rust/lf-ui/src/launch_agent.rs "$baseline/rust/lf-ui/src/launch_agent.rs"
+          git show "$profile_driver_rev:rust/lf-ui/src/mac/memory_profile.rs" > "$baseline/rust/lf-ui/src/mac/memory_profile.rs"
+          git show "$profile_driver_rev:rust/lf-ui/src/launch_agent.rs" > "$baseline/rust/lf-ui/src/launch_agent.rs"
           printf '\npub mod launch_agent;\n' >> "$baseline/rust/lf-ui/src/lib.rs"
-          cp rust/lf-ui/src/termination.rs "$baseline/rust/lf-ui/src/termination.rs"
+          git show "$profile_driver_rev:rust/lf-ui/src/termination.rs" > "$baseline/rust/lf-ui/src/termination.rs"
           printf '\n#[cfg(unix)]\nmod termination;\n' >> "$baseline/rust/lf-ui/src/lib.rs"
           CARGO_TARGET_DIR="$baseline/target" cargo build --manifest-path "$baseline/rust/Cargo.toml" --release -p lf-ui --bin lf-hub --features runtime
           bash scripts/ci_hub_pages.sh "$PWD/artifacts/memory/before" "$baseline/target/release/lf-hub" --page Home

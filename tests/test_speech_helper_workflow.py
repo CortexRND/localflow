@@ -82,10 +82,44 @@ def test_native_workflow_runs_measurements_after_fixed_clip_and_uploads_evidence
     )
 
 
+PROFILE_DRIVER_REV = "ce56b6130c4289f89a4d13dbc4aa1ddb78befc18"
+
+
 def test_memory_baseline_includes_signal_module_used_by_profile_driver():
     workflow = (ROOT / ".github/workflows/rust.yml").read_text()
-    assert 'cp rust/lf-ui/src/termination.rs "$baseline/rust/lf-ui/src/termination.rs"' in workflow
+    assert (
+        'git show "$profile_driver_rev:rust/lf-ui/src/termination.rs"'
+        ' > "$baseline/rust/lf-ui/src/termination.rs"'
+    ) in workflow
     assert r"printf '\n#[cfg(unix)]\nmod termination;\n'" in workflow
+
+
+def test_memory_baseline_pins_whole_profile_driver_to_one_revision():
+    workflow = (ROOT / ".github/workflows/rust.yml").read_text()
+    step = workflow[
+        workflow.index("name: Same-runner baseline") : workflow.index("python3 - <<'PY'")
+    ]
+    assert f"profile_driver_rev={PROFILE_DRIVER_REV}\n" in step
+    assert "git worktree add --detach \"$baseline\" 991677fc\n" in step
+    assert (
+        'git diff 991677fc "$profile_driver_rev" --'
+        " rust/lf-ui/src/mac/app.rs rust/lf-ui/src/mac.rs"
+    ) in step
+    for module in ("mac/memory_profile.rs", "launch_agent.rs", "termination.rs"):
+        assert (
+            f'git show "$profile_driver_rev:rust/lf-ui/src/{module}"'
+            f' > "$baseline/rust/lf-ui/src/{module}"'
+        ) in step
+    # No baseline input may come from the moving working tree / HEAD.
+    assert "cp rust/lf-ui/src/" not in step
+    assert "git diff 991677fc --" not in step
+    assert step.index("profile_driver_rev=") < step.index("git diff 991677fc")
+    # The optimized build is still the current tree, unpinned.
+    assert (
+        "cargo build --manifest-path rust/Cargo.toml --release -p lf-ui"
+        " --bin lf-hub --features runtime\n"
+    ) in step
+    assert '"$PWD/artifacts/memory/after" rust/target/release/lf-hub --page Home' in step
 
 
 def test_memory_baseline_uses_separate_cargo_artifacts():
