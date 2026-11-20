@@ -122,6 +122,22 @@ Before announcing the release, confirm that the published
 `raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh` and
 `install.ps1` hash to the README digests.
 
+### macOS DMG note for release notes
+
+`--generate-notes` does not explain the unsigned DMG, so add this to the
+release notes:
+
+> **macOS:** `LocalFlow-Installer.dmg` is unsigned and not notarized. On macOS
+> 15 and later (including macOS 26), opening it may say the DMG "is damaged and
+> can't be opened", offering only **Cancel** and **Move to Trash**. Click
+> **Cancel**, not **Move to Trash**. Privacy & Security has no **Open Anyway**
+> for this dialog. Either use the verified one-line Terminal install from the
+> README (recommended), or remove the quarantine from the DMG downloaded from
+> this release and open it again:
+> `xattr -d com.apple.quarantine ~/Downloads/LocalFlow-Installer.dmg`.
+> After the DMG opens, allow **Install LocalFlow** and the app under System
+> Settings > Privacy & Security > **Open Anyway**, as described in the README.
+
 For a manual build on a Mac, check out the tag in a clean checkout, then:
 
 ```sh

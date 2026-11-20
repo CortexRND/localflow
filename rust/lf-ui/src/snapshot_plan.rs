@@ -869,7 +869,7 @@ pub struct SetupScenario {
     pub wide: bool,
 }
 
-pub const SETUP_SCENARIOS: [SetupScenario; 14] = [
+pub const SETUP_SCENARIOS: [SetupScenario; 17] = [
     SetupScenario {
         state: "step-1",
         wide: false,
@@ -926,8 +926,22 @@ pub const SETUP_SCENARIOS: [SetupScenario; 14] = [
         state: "download-progress",
         wide: false,
     },
+    // Rust-only states: cleanup off/required with Ollama unavailable, and the
+    // full "Download & continue" footer title.
+    SetupScenario {
+        state: "cleanup-off-ollama-unavailable",
+        wide: false,
+    },
+    SetupScenario {
+        state: "cleanup-ollama-unavailable",
+        wide: false,
+    },
+    SetupScenario {
+        state: "speech-download-required",
+        wide: false,
+    },
     // Error is included separately below so normal/empty/error coverage can be
-    // counted without dropping the 14 fixture entries above.
+    // counted without dropping the fixture entries above.
 ];
 
 pub const SETUP_ERROR_SCENARIO: SetupScenario = SetupScenario {
@@ -968,13 +982,16 @@ fn setup_snapshots_include_all_python_states_light_dark_and_wide() {
     let names: std::collections::BTreeSet<_> = setup_scenarios()
         .flat_map(|scenario| SNAPSHOT_THEMES.map(|(theme, _)| scenario.file_name(theme)))
         .collect();
-    assert_eq!(total_setup_snapshots(), 56);
+    assert_eq!(total_setup_snapshots(), 68);
     assert_eq!(names.len(), total_setup_snapshots());
     for name in [
         "setup-step-1-light.png",
         "setup-step-7-wide-dark.png",
         "setup-download-error-dark.png",
         "setup-checks-all-ready-light.png",
+        "setup-cleanup-off-ollama-unavailable-light.png",
+        "setup-cleanup-ollama-unavailable-wide-dark.png",
+        "setup-speech-download-required-light.png",
     ] {
         assert!(names.contains(name), "{name}");
     }
