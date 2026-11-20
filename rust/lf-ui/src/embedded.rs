@@ -35,72 +35,248 @@ fn dictation_backend(
     backend
 }
 
+type Engine = Arc<dyn SpeechEngine>;
+
 /// The server's speech selection. A newly selected engine waits as `pending`
 /// while any request still borrows `current`, and is promoted on the first
 /// access after that borrow ends, so two engines are never selected at once
 /// and nothing has to load either engine for the handoff to happen.
+///
+/// Engines leave the slot only by being moved into a `retired` list; they are
+/// never dropped while the slot lock is held.
 struct SpeechSlot {
-    current: Arc<dyn SpeechEngine>,
-    pending: Option<Arc<dyn SpeechEngine>>,
+    current: Engine,
+    pending: Option<Engine>,
 }
 
 impl SpeechSlot {
-    fn settle(&mut self) {
+    /// Promote `pending` once nothing but the slot references `current`.
+    fn settle(&mut self, retired: &mut Vec<Engine>) {
         if Arc::strong_count(&self.current) == 1 {
             if let Some(pending) = self.pending.take() {
-                self.current = pending;
+                retired.push(std::mem::replace(&mut self.current, pending));
             }
+        }
+    }
+
+    fn holds(&self, engine: &Engine) -> bool {
+        Arc::ptr_eq(&self.current, engine)
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| Arc::ptr_eq(pending, engine))
+    }
+}
+
+/// Drops replaced engines on one cleanup thread per holder, started on the
+/// first retirement: an engine's destructor may wait for a helper process to
+/// exit, which must never stall a request (such as status) or a lock holder.
+#[derive(Default)]
+struct Reaper {
+    sender: Option<std::sync::mpsc::Sender<Engine>>,
+    /// Engines the cleanup thread could not take yet. They are kept, never
+    /// dropped here, and handed over with the next retirement.
+    parked: Vec<Engine>,
+}
+
+impl Reaper {
+    fn retire(&mut self, retired: Vec<Engine>) {
+        self.parked.extend(retired);
+        // A stopped cleanup thread is restarted at most once per retirement.
+        for _ in 0..2 {
+            if self.parked.is_empty() {
+                return;
+            }
+            let sender = match self.sender.take() {
+                Some(sender) => sender,
+                None => match spawn_reaper() {
+                    Ok(sender) => sender,
+                    Err(error) => {
+                        log::error!("could not start speech cleanup: {error}");
+                        return;
+                    }
+                },
+            };
+            while let Some(engine) = self.parked.pop() {
+                if let Err(std::sync::mpsc::SendError(engine)) = sender.send(engine) {
+                    self.parked.push(engine);
+                    break;
+                }
+            }
+            if self.parked.is_empty() {
+                self.sender = Some(sender);
+                return;
+            }
+            log::error!("speech cleanup stopped; restarting it");
         }
     }
 }
 
+fn spawn_reaper() -> std::io::Result<std::sync::mpsc::Sender<Engine>> {
+    let (sender, retired) = std::sync::mpsc::channel::<Engine>();
+    std::thread::Builder::new()
+        .name("localflow-speech-cleanup".into())
+        .spawn(move || {
+            for engine in retired {
+                let release = std::panic::AssertUnwindSafe(|| drop(engine));
+                if std::panic::catch_unwind(release).is_err() {
+                    log::error!("releasing a replaced speech engine panicked");
+                }
+            }
+        })?;
+    Ok(sender)
+}
+
+struct SpeechHolder {
+    slot: Mutex<SpeechSlot>,
+    reaper: Mutex<Reaper>,
+}
+
 #[derive(Clone)]
-struct SharedSpeech(Arc<Mutex<SpeechSlot>>);
+struct SharedSpeech(Arc<SpeechHolder>);
 
 impl SharedSpeech {
-    fn new(engine: Arc<dyn SpeechEngine>) -> Self {
-        Self(Arc::new(Mutex::new(SpeechSlot {
-            current: engine,
-            pending: None,
-        })))
+    fn new(engine: Engine) -> Self {
+        Self(Arc::new(SpeechHolder {
+            slot: Mutex::new(SpeechSlot {
+                current: engine,
+                pending: None,
+            }),
+            reaper: Mutex::default(),
+        }))
     }
 
-    fn slot(&self) -> std::sync::MutexGuard<'_, SpeechSlot> {
-        let mut slot = self.0.lock().unwrap();
-        slot.settle();
-        slot
+    fn lock(&self) -> std::sync::MutexGuard<'_, SpeechSlot> {
+        // Also taken from `Held::drop`, which must not panic on poison.
+        self.0
+            .slot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Apply `change` to the settled slot. Everything it (or a promotion)
+    /// retires goes to the reaper after the slot lock is released.
+    fn update<T>(&self, change: impl FnOnce(&mut SpeechSlot, &mut Vec<Engine>) -> T) -> T {
+        let mut retired = Vec::new();
+        let value = {
+            let mut slot = self.lock();
+            slot.settle(&mut retired);
+            let value = change(&mut slot, &mut retired);
+            slot.settle(&mut retired);
+            value
+        };
+        self.retire(retired);
+        value
+    }
+
+    fn retire(&self, retired: Vec<Engine>) {
+        if !retired.is_empty() {
+            self.0
+                .reaper
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .retire(retired);
+        }
+    }
+
+    fn hold(&self, engine: Engine) -> Held {
+        Held {
+            engine: Some(engine),
+            owner: self.clone(),
+        }
     }
 
     /// The engine requests use now (promoting a released pending selection).
-    fn current(&self) -> Arc<dyn SpeechEngine> {
-        self.slot().current.clone()
+    fn current(&self) -> Held {
+        self.hold(self.update(|slot, _| slot.current.clone()))
     }
 
     /// The newest selection: pending if one waits, otherwise current.
-    fn latest(&self) -> Arc<dyn SpeechEngine> {
-        let slot = self.slot();
-        slot.pending.as_ref().unwrap_or(&slot.current).clone()
+    fn latest(&self) -> Held {
+        self.hold(self.update(|slot, _| slot.pending.as_ref().unwrap_or(&slot.current).clone()))
     }
 
     /// Select `engine`, immediately if `current` is unborrowed; otherwise it
-    /// replaces any older pending selection and waits for the borrow to end.
-    fn publish(&self, engine: Arc<dyn SpeechEngine>) {
-        let mut slot = self.0.lock().unwrap();
-        slot.pending = Some(engine);
-        slot.settle();
+    /// replaces (retires) any older pending selection and waits for the
+    /// borrow to end.
+    fn publish(&self, engine: Engine) {
+        self.update(|slot, retired| {
+            retired.extend(slot.pending.take());
+            if Arc::ptr_eq(&slot.current, &engine) {
+                retired.push(engine);
+            } else {
+                slot.pending = Some(engine);
+            }
+        });
     }
 
-    /// Use `engine` now (a dictation reload that already loaded it); an older
-    /// pending selection is discarded so it can never be promoted over it.
-    fn set(&self, engine: Arc<dyn SpeechEngine>) {
-        let mut slot = self.0.lock().unwrap();
-        slot.pending = None;
-        slot.current = engine;
+    /// Use `engine` now (a dictation reload that already loaded it); the old
+    /// engine and an older pending selection are retired, so the latter can
+    /// never be promoted over it.
+    fn set(&self, engine: Engine) {
+        self.update(|slot, retired| {
+            retired.extend(slot.pending.take());
+            retired.push(std::mem::replace(&mut slot.current, engine));
+        });
     }
 
     /// Promote a pending selection whose predecessor has been released.
     fn settle(&self) {
-        drop(self.slot());
+        self.update(|_, _| ());
+    }
+
+    /// Take back a reference handed out by [`Held`]. One the slot still holds
+    /// cannot be the last and is dropped under the lock (so the slot cannot
+    /// retire it meanwhile); any other may be the last and goes to the reaper.
+    fn release(&self, engine: Engine) {
+        let mut retired = Vec::new();
+        {
+            let mut slot = self.lock();
+            if slot.holds(&engine) {
+                drop(engine);
+            } else {
+                retired.push(engine);
+            }
+            slot.settle(&mut retired);
+        }
+        self.retire(retired);
+    }
+}
+
+/// A reference to one of `owner`'s engines. Dropping it hands the reference
+/// back, so the last reference to a replaced engine is always dropped by the
+/// reaper, never by the request, meeting or runtime that used it.
+struct Held {
+    engine: Option<Engine>,
+    owner: SharedSpeech,
+}
+
+impl Held {
+    fn engine(&self) -> &Engine {
+        self.engine.as_ref().expect("an engine is held until drop")
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            self.owner.release(engine);
+        }
+    }
+}
+
+impl SpeechEngine for Held {
+    fn loaded(&self) -> bool {
+        self.engine().loaded()
+    }
+    fn load(&self) -> std::result::Result<(), String> {
+        self.engine().load()
+    }
+    fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> std::result::Result<String, String> {
+        self.engine().transcribe(pcm, prompt)
+    }
+    fn unload(&self) {
+        self.engine().unload();
     }
 }
 
@@ -120,10 +296,7 @@ impl SpeechEngine for SharedSpeech {
 }
 
 /// A dictation reload's engine; publishes itself to the server once loaded.
-struct PublishSpeech {
-    inner: Arc<dyn SpeechEngine>,
-    destination: SharedSpeech,
-}
+struct PublishSpeech(Held);
 
 #[cfg(test)]
 fn refresh_server_speech(
@@ -228,18 +401,18 @@ fn server_speech_updates(
 
 impl SpeechEngine for PublishSpeech {
     fn loaded(&self) -> bool {
-        self.inner.loaded()
+        self.0.loaded()
     }
     fn load(&self) -> std::result::Result<(), String> {
-        self.inner.load()?;
-        self.destination.set(self.inner.clone());
+        self.0.load()?;
+        self.0.owner.set(self.0.engine().clone());
         Ok(())
     }
     fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> std::result::Result<String, String> {
-        self.inner.transcribe(pcm, prompt)
+        self.0.transcribe(pcm, prompt)
     }
     fn unload(&self) {
-        self.inner.unload();
+        self.0.unload();
     }
 }
 
@@ -471,15 +644,15 @@ impl EmbeddedRuntime {
                     &dictation.make_speech,
                 )
                 .map_err(anyhow::Error::msg)?;
-                dictation.shared.latest()
+                Arc::new(dictation.shared.latest())
             };
             let reload_speech = dictation.make_speech.clone();
             let destination = dictation.shared.clone();
             let build_stt: lf_runtime::worker::SttFactory = Arc::new(move |config| {
-                Ok(Arc::new(PublishSpeech {
-                    inner: reload_speech(config)?,
-                    destination: destination.clone(),
-                }) as Arc<dyn SpeechEngine>)
+                Ok(
+                    Arc::new(PublishSpeech(destination.hold(reload_speech(config)?)))
+                        as Arc<dyn SpeechEngine>,
+                )
             });
             let options = RunOptions {
                 audio: memory.audio(open_audio(&config)?),
@@ -1096,7 +1269,7 @@ fn shutdown_flushes_notes_before_backend_and_signals_even_on_save_error() {
     assert!(saved.load(Ordering::SeqCst));
 }
 
-struct MeetingSpeech(Arc<dyn SpeechEngine>);
+struct MeetingSpeech(Held);
 impl lf_meetings::Transcriber for MeetingSpeech {
     fn transcribe(&self, audio: &[f32], prompt: Option<&str>) -> Result<String> {
         self.0.transcribe(audio, prompt).map_err(anyhow::Error::msg)
@@ -1202,7 +1375,7 @@ mod tests {
         let same = shared.current();
         fresh.set_field("sounds_enabled", serde_json::json!(false));
         refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap();
-        assert!(Arc::ptr_eq(&same, &shared.current()));
+        assert!(Arc::ptr_eq(same.engine(), shared.current().engine()));
         drop(same);
         fresh.set_field("model_size", serde_json::json!("invalid"));
         assert!(refresh_server_speech(&previous, &shared, fresh, &factory).is_err());
@@ -1261,18 +1434,14 @@ mod tests {
         let shared = SharedSpeech::new(old.clone());
         assert!(!shared.loaded());
         assert_eq!(shared.transcribe(&[], None).unwrap(), "old");
-        let replacement = PublishSpeech {
-            inner: Arc::new(Engine("new", false, AtomicBool::new(false))),
-            destination: shared.clone(),
-        };
+        let replacement =
+            PublishSpeech(shared.hold(Arc::new(Engine("new", false, AtomicBool::new(false)))));
         replacement.load().unwrap();
         old.unload();
         assert!(shared.loaded());
         assert_eq!(shared.transcribe(&[0.1], None).unwrap(), "new");
-        let failed = PublishSpeech {
-            inner: Arc::new(Engine("bad", true, AtomicBool::new(false))),
-            destination: shared.clone(),
-        };
+        let failed =
+            PublishSpeech(shared.hold(Arc::new(Engine("bad", true, AtomicBool::new(false)))));
         assert!(failed.load().is_err());
         assert!(shared.loaded());
         assert_eq!(shared.transcribe(&[], None).unwrap(), "new");
@@ -1733,28 +1902,183 @@ mod tests {
         assert_eq!(built.load(Ordering::SeqCst), 2);
     }
 
+    /// (engine, finished): `false` when its destructor starts, `true` when done.
+    type DropEvents = mpsc::Receiver<(&'static str, bool)>;
+
+    /// A lazy fake engine that reports its destruction; with a gate, the
+    /// destructor blocks until the gate is released, like a helper process
+    /// that takes a while to exit.
+    struct Tracked {
+        name: &'static str,
+        events: mpsc::Sender<(&'static str, bool)>,
+        gate: Option<Mutex<mpsc::Receiver<()>>>,
+    }
+
+    impl SpeechEngine for Tracked {
+        fn loaded(&self) -> bool {
+            false
+        }
+        fn load(&self) -> Result<(), String> {
+            panic!("retirement must not load speech")
+        }
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+            Ok(self.name.into())
+        }
+        fn unload(&self) {}
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            let _ = self.events.send((self.name, false));
+            if let Some(gate) = &self.gate {
+                let _ = gate.lock().unwrap().recv();
+            }
+            let _ = self.events.send((self.name, true));
+        }
+    }
+
+    fn tracked(
+        events: &mpsc::Sender<(&'static str, bool)>,
+        name: &'static str,
+    ) -> Arc<dyn SpeechEngine> {
+        Arc::new(Tracked {
+            name,
+            events: events.clone(),
+            gate: None,
+        })
+    }
+
+    fn next_event(events: &DropEvents) -> (&'static str, bool) {
+        events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a retired engine was never released")
+    }
+
+    /// Waits until `names` have all been fully destroyed (in any order).
+    fn expect_destroyed(events: &DropEvents, names: &[&'static str]) {
+        let mut remaining: Vec<_> = names.to_vec();
+        while !remaining.is_empty() {
+            if let (name, true) = next_event(events) {
+                let index = remaining
+                    .iter()
+                    .position(|expected| *expected == name)
+                    .unwrap_or_else(|| panic!("unexpected destruction of {name}"));
+                remaining.remove(index);
+            }
+        }
+    }
+
+    /// Runs `access` on another thread; fails instead of hanging if it blocks.
+    fn returns<T: Send + 'static>(access: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(access());
+        });
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("speech access blocked behind a retiring engine")
+    }
+
     #[test]
     fn newer_selections_supersede_pending_ones_and_reloads_drop_stale_pending() {
-        let engine = |name: &str| -> Arc<dyn SpeechEngine> { Arc::new(ModelEngine(name.into())) };
-        let shared = SharedSpeech::new(engine("old"));
+        let (sender, events) = mpsc::channel();
+        let shared = SharedSpeech::new(tracked(&sender, "old"));
         let in_flight = shared.current();
-        let first = engine("first");
-        shared.publish(first.clone());
-        shared.publish(engine("second"));
-        assert_eq!(
-            Arc::strong_count(&first),
-            1,
-            "superseded pending is dropped"
-        );
+        let first = tracked(&sender, "first");
+        let first_weak = Arc::downgrade(&first);
+        shared.publish(first);
+        shared.publish(tracked(&sender, "second"));
+        // The superseded pending engine is destroyed by the cleanup thread.
+        expect_destroyed(&events, &["first"]);
+        assert!(first_weak.upgrade().is_none());
         assert_eq!(shared.latest().transcribe(&[], None).unwrap(), "second");
         assert_eq!(shared.current().transcribe(&[], None).unwrap(), "old");
         // A dictation reload loads its engine and sets it, even while borrowed;
         // the older pending server selection must never be promoted over it.
-        shared.set(engine("reloaded"));
+        shared.set(tracked(&sender, "reloaded"));
+        expect_destroyed(&events, &["second"]);
+        // The request's reference to the replaced engine is the last one; it
+        // goes to the cleanup thread too.
         drop(in_flight);
+        expect_destroyed(&events, &["old"]);
         shared.settle();
         assert_eq!(shared.current().transcribe(&[], None).unwrap(), "reloaded");
         assert_eq!(shared.latest().transcribe(&[], None).unwrap(), "reloaded");
+        assert!(events.try_recv().is_err(), "the selection was retired");
+    }
+
+    #[test]
+    fn promotion_on_status_returns_while_old_engine_destructor_blocks() {
+        let (sender, events) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let shared = SharedSpeech::new(Arc::new(Tracked {
+            name: "old",
+            events: sender.clone(),
+            gate: Some(Mutex::new(gate)),
+        }));
+        // A borrow outside the holder (as a long upload would) defers the
+        // new selection; ending it does not promote by itself.
+        let borrowed = shared.current().engine().clone();
+        shared.publish(tracked(&sender, "new"));
+        drop(borrowed);
+        assert!(events.try_recv().is_err());
+        // Status (`loaded`) promotes; it must not wait for the old destructor.
+        let status = shared.clone();
+        assert!(!returns(move || status.loaded()));
+        assert_eq!(next_event(&events), ("old", false), "destructor started");
+        // Other speech access proceeds while the destructor is still blocked.
+        let request = shared.clone();
+        assert_eq!(
+            returns(move || request.transcribe(&[], None).unwrap()),
+            "new"
+        );
+        let selection = shared.clone();
+        let replacement = tracked(&sender, "newer");
+        returns(move || selection.publish(replacement));
+        let request = shared.clone();
+        assert_eq!(
+            returns(move || request.transcribe(&[], None).unwrap()),
+            "newer"
+        );
+        assert!(events.try_recv().is_err(), "old destructor still blocked");
+        release.send(()).unwrap();
+        assert_eq!(next_event(&events), ("old", true));
+        // The cleanup thread then continues with later retirements.
+        expect_destroyed(&events, &["new"]);
+    }
+
+    #[test]
+    fn speech_access_without_replacement_retires_nothing() {
+        let (sender, events) = mpsc::channel();
+        let shared = SharedSpeech::new(tracked(&sender, "only"));
+        let meeting = shared.current();
+        let dictation = shared.latest();
+        assert!(!shared.loaded());
+        assert_eq!(shared.transcribe(&[], None).unwrap(), "only");
+        shared.settle();
+        drop(meeting);
+        drop(dictation);
+        shared.settle();
+        assert_eq!(shared.current().transcribe(&[], None).unwrap(), "only");
+        assert!(events.try_recv().is_err(), "nothing was destroyed");
+        assert!(
+            shared.0.reaper.lock().unwrap().sender.is_none(),
+            "no cleanup thread without a retirement"
+        );
+    }
+
+    #[test]
+    fn stopped_cleanup_thread_is_restarted_without_dropping_inline() {
+        let (sender, events) = mpsc::channel();
+        let shared = SharedSpeech::new(tracked(&sender, "old"));
+        let (dead, receiver) = mpsc::channel();
+        drop(receiver);
+        shared.0.reaper.lock().unwrap().sender = Some(dead);
+        shared.publish(tracked(&sender, "new"));
+        expect_destroyed(&events, &["old"]);
+        let reaper = shared.0.reaper.lock().unwrap();
+        assert!(reaper.parked.is_empty());
+        assert!(reaper.sender.is_some());
     }
 
     #[test]
@@ -1829,7 +2153,7 @@ mod tests {
         let dictation_model = dictation_speech.transcribe(&[], None).unwrap();
         assert_eq!(dictation_model, "new#2");
         // The request finishes; the watcher's next tick runs.
-        assert_eq!(Arc::strong_count(&in_flight), 2);
+        assert_eq!(Arc::strong_count(in_flight.engine()), 2);
         drop(in_flight);
         assert!(tick());
         assert_eq!(
