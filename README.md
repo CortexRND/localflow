@@ -10,11 +10,31 @@ Release maintainers: [v0.2.1 asset build and publishing](docs/releasing.md).
 
 **macOS:** download `LocalFlow-Installer.dmg` from the
 [latest release](https://github.com/CortexRND/localflow/releases/latest) (or from
-the artifacts of a "Mac installer" run on the Actions tab), open it, and
-double-click **Install LocalFlow**. A window installs everything, which takes
-several minutes, and LocalFlow opens when it is done. Since v0.2.0, macOS installs
-the native **Rust LocalFlow.app** by default. Rust is installed automatically;
-accept Apple's Command Line Tools installation dialog if prompted. Python and
+the artifacts of a "Mac installer" run on the Actions tab).
+
+The DMG is unsigned and not notarized. On macOS 15 and later (including macOS
+26), opening the downloaded DMG may show a dialog saying it "is damaged and
+can't be opened", with only **Cancel** and **Move to Trash**. There is no
+**Open Anyway** for this dialog, and Privacy & Security does not fix it. Click
+**Cancel**, not **Move to Trash**, then either:
+
+- use the verified one-line Terminal install under
+  [macOS and Linux](#macos-and-linux) (recommended; it does not need the DMG), or
+- remove the download quarantine from the DMG you got from the official
+  release:
+
+  ```sh
+  xattr -d com.apple.quarantine ~/Downloads/LocalFlow-Installer.dmg
+  ```
+
+  Then open the DMG again and double-click **Install LocalFlow**. A window
+  installs everything, which takes several minutes, and LocalFlow opens when it
+  is done.
+
+Whichever installation method you use (Terminal or DMG), since v0.2.0 macOS
+installs the native **Rust LocalFlow.app** by default. Rust
+is installed automatically; accept Apple's Command Line Tools installation
+dialog if prompted. Python and
 its virtual environment are not needed. Missing CMake is installed with Homebrew;
 without Homebrew, install CMake first (https://cmake.org/download/).
 
@@ -35,8 +55,8 @@ it starts dictation and the menu bar in the background (reusing the login agent
 if installed, never twice) and opens the native Hub. Opening it again just
 brings the Hub to the front.
 
-**Install LocalFlow** and the app are unsigned and not notarized, so Gatekeeper
-blocks each the first time you open it. Close the warning, go to System
+Once the DMG opens, **Install LocalFlow** and the app are still unsigned, so
+Gatekeeper blocks each the first time you open it. Close the warning, go to System
 Settings > Privacy & Security, scroll down to Security, click **Open Anyway**
 next to the message about the app, and confirm with **Open Anyway** and your
 password or Touch ID. (On macOS 15 and later, right-click > **Open** no longer

@@ -1432,6 +1432,156 @@ pub fn try_dictation(
     transcriber.transcribe(&audio)
 }
 
+// ------------------------------------------------- setup footer and errors ---
+
+/// Setup wizard index of the cleanup-model page.
+pub const SETUP_CLEANUP_STEP: usize = 3;
+
+/// Whether the current cleanup selection needs a running Ollama: the provider
+/// is Ollama and a cleanup model (not "No cleanup") is selected.
+pub fn cleanup_requires_ollama(provider: &str, llm_id: Option<&str>) -> bool {
+    provider == "ollama" && llm_id.is_some()
+}
+
+/// The stored Ollama check error to show for the *current* selection. It is
+/// re-evaluated on every render, so a late check reply never surfaces for
+/// "No cleanup", a non-Ollama provider or another page.
+pub fn visible_ollama_error<'a>(
+    step: usize,
+    provider: &str,
+    llm_id: Option<&str>,
+    error: Option<&'a str>,
+) -> Option<&'a str> {
+    if step != SETUP_CLEANUP_STEP || !cleanup_requires_ollama(provider, llm_id) {
+        return None;
+    }
+    error.filter(|error| !error.is_empty())
+}
+
+/// What the setup footer status line shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FooterStatus {
+    pub text: String,
+    pub error: bool,
+}
+
+/// Footer status: a page error first, then a visible Ollama error, then
+/// progress/status text on the speech, cleanup and trial pages.
+pub fn footer_status(
+    step: usize,
+    error_message: &str,
+    ollama_error: Option<&str>,
+    status_message: &str,
+) -> FooterStatus {
+    if !error_message.is_empty() {
+        return FooterStatus {
+            text: error_message.to_string(),
+            error: true,
+        };
+    }
+    if let Some(error) = ollama_error.filter(|error| !error.is_empty()) {
+        return FooterStatus {
+            text: error.to_string(),
+            error: true,
+        };
+    }
+    FooterStatus {
+        text: if matches!(step, 2 | 3 | 5) {
+            status_message.to_string()
+        } else {
+            String::new()
+        },
+        error: false,
+    }
+}
+
+/// Horizontal frame (`x`, `width`) of one footer control.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FooterFrame {
+    pub x: f64,
+    pub width: f64,
+}
+
+impl FooterFrame {
+    pub fn right(self) -> f64 {
+        self.x + self.width
+    }
+}
+
+/// Footer frames for a content width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FooterLayout {
+    pub primary: FooterFrame,
+    pub cancel: FooterFrame,
+    pub status: FooterFrame,
+}
+
+pub const FOOTER_MARGIN: f64 = 32.0;
+pub const FOOTER_GAP: f64 = 16.0;
+/// Horizontal title padding inside each footer button.
+pub const FOOTER_BUTTON_PADDING: f64 = 20.0;
+pub const FOOTER_PRIMARY_MIN_WIDTH: f64 = 132.0;
+pub const FOOTER_CANCEL_MIN_WIDTH: f64 = 100.0;
+/// The status line starts after the Back button (32 + 100 + 20).
+pub const FOOTER_STATUS_X: f64 = 152.0;
+pub const FOOTER_STATUS_LINE_HEIGHT: f64 = 14.0;
+pub const FOOTER_STATUS_MAX_LINES: usize = 3;
+/// Distance from the window bottom to the footer button row's vertical center.
+pub const FOOTER_CENTER_FROM_BOTTOM: f64 = 29.0;
+
+/// Size the primary and cancel buttons to their measured titles (never below
+/// the original fixed widths), right-align them, and give the status line the
+/// space between Back and the leftmost visible button.
+pub fn setup_footer_layout(
+    width: f64,
+    primary_title_width: f64,
+    cancel_visible: bool,
+    cancel_title_width: f64,
+) -> FooterLayout {
+    let primary_width =
+        (primary_title_width.ceil() + 2.0 * FOOTER_BUTTON_PADDING).max(FOOTER_PRIMARY_MIN_WIDTH);
+    let primary = FooterFrame {
+        x: width - FOOTER_MARGIN - primary_width,
+        width: primary_width,
+    };
+    let cancel_width =
+        (cancel_title_width.ceil() + 2.0 * FOOTER_BUTTON_PADDING).max(FOOTER_CANCEL_MIN_WIDTH);
+    let cancel = FooterFrame {
+        x: primary.x - FOOTER_GAP - cancel_width,
+        width: cancel_width,
+    };
+    let right = if cancel_visible { cancel.x } else { primary.x } - FOOTER_GAP;
+    let status = FooterFrame {
+        x: FOOTER_STATUS_X,
+        width: (right - FOOTER_STATUS_X).max(0.0),
+    };
+    FooterLayout {
+        primary,
+        cancel,
+        status,
+    }
+}
+
+/// Wrapped status lines (at most [`FOOTER_STATUS_MAX_LINES`]) and the frame
+/// `(y, height)` that centers them on the button row of a window of `height`.
+pub fn footer_status_frame(
+    text: &str,
+    status_width: f64,
+    window_height: f64,
+    measure_line: &dyn Fn(&str) -> f64,
+) -> (usize, f64, f64) {
+    let lines = if text.is_empty() {
+        1
+    } else {
+        crate::text_wrap::wrap_lines(text, status_width, measure_line)
+            .len()
+            .clamp(1, FOOTER_STATUS_MAX_LINES)
+    };
+    let height = lines as f64 * FOOTER_STATUS_LINE_HEIGHT + 6.0;
+    let y = window_height - FOOTER_CENTER_FROM_BOTTOM - height / 2.0;
+    (lines, y, height)
+}
+
 #[cfg(test)]
 #[path = "setup_flow/tests.rs"]
 mod tests;

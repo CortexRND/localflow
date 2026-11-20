@@ -37,14 +37,17 @@ use objc2_foundation::{NSNotification, NSPoint, NSSize, NSString, NSURL};
 
 use super::actions::{ActionTarget, Timer};
 use super::style::{
-    color, fit_button, hide_from_accessibility, make_pill, rect, segmented, style_button,
-    style_surface, tokens_for_window, ButtonKind, FlippedView, HalftoneView, SurfaceStyle,
+    color, fit_button, font, hide_from_accessibility, make_pill, measure_text, rect, segmented,
+    style_button, style_surface, tokens_for_window, ButtonKind, FlippedView, HalftoneView,
+    SurfaceStyle,
 };
 use super::widgets::{button, label, popup, remove_subviews, LabelStyle};
 use crate::setup_flow::{
-    apply as apply_choices, available_stt_models, initial_choices, run_checks, Check,
-    FileConfigStore, HardwareInfo, HostPlatform, LaunchAgent, SetupChoices, SetupConfigStore,
-    SetupError, SetupPlatform, SttModel, UnavailableLaunchAgent, HOTKEY_OPTIONS, LLM_MODELS,
+    apply as apply_choices, available_stt_models, footer_status, footer_status_frame,
+    initial_choices, run_checks, setup_footer_layout, visible_ollama_error, Check, FileConfigStore,
+    HardwareInfo, HostPlatform, LaunchAgent, SetupChoices, SetupConfigStore, SetupError,
+    SetupPlatform, SttModel, UnavailableLaunchAgent, FOOTER_STATUS_MAX_LINES, HOTKEY_OPTIONS,
+    LLM_MODELS,
 };
 use crate::tokens::{
     check_status as token_status, surface_tint, Palette, Weight, ACTION_HEIGHT, CALLOUT_HEIGHT,
@@ -401,6 +404,9 @@ struct State {
     ollama_running: bool,
     ollama_models: Vec<String>,
     ollama_checked: bool,
+    /// Last failed Ollama check. Kept apart from `error_message` so it only
+    /// shows while the current cleanup selection needs Ollama.
+    ollama_error: Option<String>,
     status_message: String,
     error_message: String,
     busy: BTreeSet<&'static str>,
@@ -449,6 +455,7 @@ impl State {
             ollama_running: false,
             ollama_models: Vec::new(),
             ollama_checked: false,
+            ollama_error: None,
             status_message: String::new(),
             error_message: device_error.unwrap_or_default(),
             busy: BTreeSet::new(),
@@ -829,10 +836,14 @@ impl SetupWindow {
                 size: 11.0,
                 color: "muted",
                 height: 20.0,
+                wrap: true,
                 ..LabelStyle::default()
             },
             &palette,
         );
+        // Long errors wrap; `layout_footer` sizes the frame for these lines
+        // and the tooltip keeps the full text.
+        status.setMaximumNumberOfLines(FOOTER_STATUS_MAX_LINES as isize);
         status.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
@@ -2348,25 +2359,64 @@ impl SetupWindow {
         };
         self.primary_button.setTitle(&NSString::from_str(primary));
         accessible_button(&self.primary_button, primary);
-        let status_text = if !state.error_message.is_empty() {
-            state.error_message.clone()
-        } else if matches!(state.step, 2 | 3 | 5) {
-            state.status_message.clone()
-        } else {
-            String::new()
-        };
+        let ollama_error = visible_ollama_error(
+            state.step,
+            &state.choices.llm_provider,
+            state.llm_id.as_deref(),
+            state.ollama_error.as_deref(),
+        );
+        let status = footer_status(
+            state.step,
+            &state.error_message,
+            ollama_error,
+            &state.status_message,
+        );
+        let cancel_visible = !self.cancel_button.isHidden();
+        drop(state);
+        self.layout_footer(&status.text, cancel_visible);
         self.status
-            .setStringValue(&NSString::from_str(&status_text));
+            .setStringValue(&NSString::from_str(&status.text));
         self.status.setTextColor(Some(&color(
-            if state.error_message.is_empty() {
-                "muted"
-            } else {
-                "red"
-            },
+            if status.error { "red" } else { "muted" },
             &palette,
         )));
-        let tooltip = (!status_text.is_empty()).then(|| NSString::from_str(&status_text));
+        let tooltip = (!status.text.is_empty()).then(|| NSString::from_str(&status.text));
         self.status.setToolTip(tooltip.as_deref());
+    }
+
+    /// Fit the footer buttons to their titles and wrap the status line in the
+    /// space left of them, so long titles and errors never overlap or clip.
+    fn layout_footer(&self, status_text: &str, cancel_visible: bool) {
+        let size = self.root.bounds().size;
+        let title_width = |button: &NSButton| {
+            let title_font = button
+                .font()
+                .unwrap_or_else(|| font(13.0, Weight::Semibold));
+            measure_text(&button.title().to_string(), &title_font)
+        };
+        let layout = setup_footer_layout(
+            size.width,
+            title_width(&self.primary_button),
+            cancel_visible,
+            title_width(&self.cancel_button),
+        );
+        let button_y = size.height - 46.0;
+        self.primary_button
+            .setFrame(rect(layout.primary.x, button_y, layout.primary.width, 34.0));
+        self.cancel_button
+            .setFrame(rect(layout.cancel.x, button_y, layout.cancel.width, 34.0));
+        let status_font = self
+            .status
+            .font()
+            .unwrap_or_else(|| font(TYPE_CAPTION.size, Weight::Regular));
+        let (_, y, height) = footer_status_frame(
+            status_text,
+            layout.status.width,
+            size.height,
+            &|line: &str| measure_text(line, &status_font),
+        );
+        self.status
+            .setFrame(rect(layout.status.x, y, layout.status.width, height));
     }
 
     // -------------------------------------------------------------- actions ---
@@ -2557,6 +2607,7 @@ impl SetupWindow {
             state.operations.remove("ollama-check");
             state.busy.remove("ollama-check");
             state.ollama_checked = false;
+            state.ollama_error = None;
             state.error_message.clear();
         }
         self.start_ollama_check();
@@ -3028,13 +3079,18 @@ impl SetupWindow {
                             .iter()
                             .map(|model| (model.id.clone(), false))
                             .collect();
-                    } else if kind == JobKind::OllamaCheck {
-                        state.ollama_checked = true;
-                        state.ollama_running = false;
                     } else if kind == JobKind::Monitor {
                         state.mic_level = None;
                     }
-                    state.error_message = error;
+                    if kind == JobKind::OllamaCheck {
+                        // Shown by the footer only while the selection needs
+                        // Ollama (see `visible_ollama_error`).
+                        state.ollama_checked = true;
+                        state.ollama_running = false;
+                        state.ollama_error = Some(error);
+                    } else {
+                        state.error_message = error;
+                    }
                 }
                 self.rebuild();
             }
@@ -3055,6 +3111,7 @@ impl SetupWindow {
                             state.ollama_running = running;
                             state.ollama_models = models;
                             state.ollama_checked = true;
+                            state.ollama_error = None;
                         }
                         (JobKind::SpeechDownload, JobOutput::Downloaded) => {
                             if let Some(model) = model_ticket {
@@ -3244,7 +3301,7 @@ fn or_disabled(value: &str) -> &str {
 
 /// Names match `scripts/mac_ui_snapshots.py`; the renderer adds the same
 /// `-light` / `-dark` suffix and `.png` extension.
-pub const SETUP_SNAPSHOT_NAMES: [&str; 15] = [
+pub const SETUP_SNAPSHOT_NAMES: [&str; 18] = [
     "setup-step-1",
     "setup-step-2",
     "setup-step-3",
@@ -3260,7 +3317,14 @@ pub const SETUP_SNAPSHOT_NAMES: [&str; 15] = [
     "setup-non-ollama-provider",
     "setup-download-progress",
     "setup-download-error",
+    "setup-cleanup-off-ollama-unavailable",
+    "setup-cleanup-ollama-unavailable",
+    "setup-speech-download-required",
 ];
+
+/// Long, realistic Ollama check failure used to show the footer wrapping.
+const SNAPSHOT_OLLAMA_ERROR: &str = "Ollama isn't reachable at http://127.0.0.1:11434 \
+    (connection refused). Start Ollama, or choose No cleanup to continue without it.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetupSnapshotState {
@@ -3273,6 +3337,12 @@ pub enum SetupSnapshotState {
     NonOllamaProvider,
     DownloadProgress,
     DownloadError,
+    /// "No cleanup" with a failed Ollama check: no error is shown.
+    CleanupOffOllamaUnavailable,
+    /// An Ollama model selected while Ollama is unavailable: wrapped error.
+    CleanupOllamaUnavailable,
+    /// Speech model not yet downloaded: full "Download & continue" title.
+    SpeechDownloadRequired,
 }
 
 impl SetupSnapshotState {
@@ -3288,6 +3358,9 @@ impl SetupSnapshotState {
             Self::NonOllamaProvider => "setup-non-ollama-provider",
             Self::DownloadProgress => "setup-download-progress",
             Self::DownloadError => "setup-download-error",
+            Self::CleanupOffOllamaUnavailable => "setup-cleanup-off-ollama-unavailable",
+            Self::CleanupOllamaUnavailable => "setup-cleanup-ollama-unavailable",
+            Self::SpeechDownloadRequired => "setup-speech-download-required",
         }
     }
 }
@@ -3484,6 +3557,7 @@ impl SetupWindow {
                 .collect();
             state.ollama_checked = true;
             state.ollama_running = true;
+            state.ollama_error = None;
             state.ollama_models = vec!["llama3.2:1b".into()];
             state.stt_id = state.choices.stt_id.clone();
             state.llm_id = Some("llama3.2:1b".into());
@@ -3557,6 +3631,32 @@ impl SetupWindow {
                 let mut state = self.state.borrow_mut();
                 state.step = 3;
                 state.choices.llm_provider = "openai-compatible".into();
+                // A stored Ollama failure must stay hidden for this provider.
+                state.ollama_error = Some(SNAPSHOT_OLLAMA_ERROR.into());
+            }
+            SetupSnapshotState::CleanupOffOllamaUnavailable => {
+                let mut state = self.state.borrow_mut();
+                state.step = 3;
+                state.choices.llm_provider = "ollama".into();
+                state.llm_id = None;
+                state.ollama_running = false;
+                state.ollama_models.clear();
+                state.ollama_error = Some(SNAPSHOT_OLLAMA_ERROR.into());
+            }
+            SetupSnapshotState::CleanupOllamaUnavailable => {
+                let mut state = self.state.borrow_mut();
+                state.step = 3;
+                state.choices.llm_provider = "ollama".into();
+                state.ollama_running = false;
+                state.ollama_models.clear();
+                state.ollama_error = Some(SNAPSHOT_OLLAMA_ERROR.into());
+            }
+            SetupSnapshotState::SpeechDownloadRequired => {
+                let mut state = self.state.borrow_mut();
+                state.step = 2;
+                state.choices.llm_provider = "ollama".into();
+                let stt_id = state.stt_id.clone();
+                state.downloaded.insert(stt_id, false);
             }
             SetupSnapshotState::DownloadProgress => {
                 let mut state = self.state.borrow_mut();
@@ -3707,7 +3807,17 @@ mod tests {
 
     #[test]
     fn snapshot_names_and_seeds_match_the_script() {
-        assert_eq!(SETUP_SNAPSHOT_NAMES.len(), 15);
+        assert_eq!(SETUP_SNAPSHOT_NAMES.len(), 18);
+        for state in [
+            SetupSnapshotState::CleanupOffOllamaUnavailable,
+            SetupSnapshotState::CleanupOllamaUnavailable,
+            SetupSnapshotState::SpeechDownloadRequired,
+        ] {
+            assert!(
+                SETUP_SNAPSHOT_NAMES.contains(&state.file_stem()),
+                "{state:?}"
+            );
+        }
         for (index, name) in SETUP_SNAPSHOT_NAMES.iter().take(7).enumerate() {
             assert_eq!(SetupSnapshotState::Step(index).file_stem(), *name);
         }

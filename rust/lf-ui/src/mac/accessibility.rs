@@ -866,6 +866,9 @@ pub fn run() {
         SetupSnapshotState::NonOllamaProvider,
         SetupSnapshotState::DownloadProgress,
         SetupSnapshotState::DownloadError,
+        SetupSnapshotState::CleanupOffOllamaUnavailable,
+        SetupSnapshotState::CleanupOllamaUnavailable,
+        SetupSnapshotState::SpeechDownloadRequired,
     ]) {
         setup.seed_snapshot(state);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
