@@ -712,7 +712,9 @@ impl Shell {
                 }
                 View::Meetings(v) => {
                     let threads = threads.clone();
-                    v.update(cx, |p, cx| p.flush_for_close(threads, cx));
+                    if let Err(e) = v.update(cx, |p, cx| p.flush_for_close(threads, cx)) {
+                        failures.push(e);
+                    }
                 }
                 _ => {}
             }

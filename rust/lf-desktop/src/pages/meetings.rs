@@ -11,7 +11,7 @@ use lf_ui::hub_model::{self, RecentNote};
 use serde_json::json;
 
 use crate::app::PageCx;
-use crate::controllers::meetings::{self as ctl, NotesSync, Phase, Template};
+use crate::controllers::meetings::{self as ctl, NotesSync, Phase, Reconcile, Template};
 use crate::page::Page;
 use crate::pages::{header, page, sandbox_note, service_banner, split};
 use crate::remote::Health;
@@ -138,7 +138,9 @@ impl MeetingsPage {
                 .spawn(async move { ctl::poll(client.as_ref(), with_templates) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.busy {
+                // Ignore answers that arrive mid-action, and whole snapshots
+                // sent before the latest Start/Stop finished.
+                if this.busy || !this.sync.is_current(sent) {
                     return;
                 }
                 let keep = matches!(this.phase, Phase::Saved { .. } | Phase::Error(_))
@@ -148,13 +150,13 @@ impl MeetingsPage {
                 }
                 if matches!(this.phase, Phase::Recording { .. }) {
                     let local = this.notes.read(cx).text().to_string();
-                    if let Some(server) = this.sync.adopt(sent, &local, snap.notes.as_deref()) {
-                        this.notes.update(cx, |i, cx| i.set_text(server, cx));
-                    } else if this.sync.is_dirty() && snap.notes.as_deref() != Some(local.as_str())
-                    {
-                        // Local edits the server hasn't got yet (e.g. typed
-                        // before this meeting was found running): send them.
-                        this.schedule_notes_save(cx);
+                    match this.sync.reconcile(sent, &local, snap.notes.as_deref()) {
+                        Reconcile::Adopt(server) => {
+                            this.notes.update(cx, |i, cx| i.set_text(server, cx));
+                        }
+                        // Local edits the server hasn't acknowledged: send them.
+                        Reconcile::Resend => this.schedule_notes_save(cx),
+                        Reconcile::Keep => {}
                     }
                 }
                 this.chat_available = snap.chat_available;
@@ -187,6 +189,8 @@ impl MeetingsPage {
             .meetings(&self.pcx.services.config());
         let title = self.title.read(cx).text().to_string();
         let notes = self.notes.read(cx).text().to_string();
+        // Start writes these notes: acknowledge exactly this text on success.
+        let token = self.sync.begin_write();
         let template = self
             .template
             .read(cx)
@@ -197,13 +201,20 @@ impl MeetingsPage {
         self.phase = Phase::Starting;
         self.busy = true;
         self.answers.clear();
+        // Start writes the notes: a close waits for the server request itself.
+        let guard = lf_ui::shutdown::register_pending_write();
         cx.spawn(async move |this, cx| {
             let phase = cx
                 .background_executor()
-                .spawn(async move { ctl::start(client.as_ref(), &title, &template, &notes) })
+                .spawn(async move {
+                    let _guard = guard;
+                    ctl::start(client.as_ref(), &title, &template, &notes)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
+                let started = matches!(phase, Phase::Recording { .. });
+                this.sync.action_finished(token, started);
                 this.phase = phase;
                 cx.notify();
             });
@@ -234,7 +245,7 @@ impl MeetingsPage {
                 let writer = this.writer.clone();
                 let ticket = writer.ticket();
                 let text = this.notes.read(cx).text().to_string();
-                let token = this.sync.edited_token();
+                let token = this.sync.begin_write();
                 // Registered so a close or quit waits for this save.
                 let guard = lf_ui::shutdown::register_pending_write();
                 cx.spawn(async move |this, cx| {
@@ -245,7 +256,7 @@ impl MeetingsPage {
                             writer.save(client.as_ref(), ticket, &text).is_ok()
                         })
                         .await;
-                    let _ = this.update(cx, |this, _| this.sync.save_finished(token, ok));
+                    let _ = this.update(cx, |this, _| this.sync.write_finished(token, ok));
                 })
                 .detach();
             });
@@ -263,15 +274,27 @@ impl MeetingsPage {
         let ticket = writer.ticket();
         self.notes_ticket += 1; // cancel any pending debounce
         let notes = self.notes.read(cx).text().to_string();
+        // Stop writes these notes first: acknowledge exactly this text.
+        let token = self.sync.begin_write();
+        // Read-only until Stop returns: later typing would be lost.
+        self.notes.update(cx, |i, cx| i.set_disabled(true, cx));
         self.phase = Phase::Stopping;
         self.busy = true;
+        // A close waits for the notes write and stop request themselves.
+        let guard = lf_ui::shutdown::register_pending_write();
         cx.spawn(async move |this, cx| {
             let phase = cx
                 .background_executor()
-                .spawn(async move { ctl::stop(client.as_ref(), &writer, ticket, &notes) })
+                .spawn(async move {
+                    let _guard = guard;
+                    ctl::stop(client.as_ref(), &writer, ticket, &notes)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
+                this.notes.update(cx, |i, cx| i.set_disabled(false, cx));
+                this.sync
+                    .action_finished(token, matches!(phase, Phase::Saved { .. }));
                 if matches!(phase, Phase::Saved { .. }) {
                     this.chat_available = true;
                     this.sync.reset();
@@ -320,25 +343,30 @@ impl MeetingsPage {
         &mut self,
         failures: crate::controllers::shutdown::Failures,
         cx: &mut Context<Self>,
-    ) {
-        if !matches!(self.phase, Phase::Recording { .. }) || !self.sync.is_dirty() {
-            return;
+    ) -> Result<(), String> {
+        let composer_empty = self.notes.read(cx).is_empty();
+        match ctl::close_notes(&self.phase, self.sync.is_dirty(), composer_empty) {
+            ctl::CloseNotes::Nothing => Ok(()),
+            ctl::CloseNotes::Blocked(reason) => Err(reason),
+            ctl::CloseNotes::Send => {
+                self.notes_ticket += 1; // cancel the pending debounce
+                let client = self
+                    .pcx
+                    .services
+                    .remote
+                    .meetings(&self.pcx.services.config());
+                let ticket = self.writer.ticket();
+                let text = self.notes.read(cx).text().to_string();
+                crate::controllers::shutdown::send_meeting_notes(
+                    client,
+                    self.writer.clone(),
+                    ticket,
+                    text,
+                    failures,
+                );
+                Ok(())
+            }
         }
-        self.notes_ticket += 1; // cancel the pending debounce
-        let client = self
-            .pcx
-            .services
-            .remote
-            .meetings(&self.pcx.services.config());
-        let ticket = self.writer.ticket();
-        let text = self.notes.read(cx).text().to_string();
-        crate::controllers::shutdown::send_meeting_notes(
-            client,
-            self.writer.clone(),
-            ticket,
-            text,
-            failures,
-        );
     }
 
     fn new_meeting(&mut self, cx: &mut Context<Self>) {

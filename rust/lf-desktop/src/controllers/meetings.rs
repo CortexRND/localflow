@@ -50,64 +50,168 @@ pub struct Snapshot {
 ///   the page during a meeting (or after a restart) shows them and Stop never
 ///   overwrites them with an empty composer.
 /// * Local edits are **never clobbered**: once the user types, the composer is
-///   dirty until a save of that exact edit is confirmed.
-/// * Poll/save races: every edit and every finished save bumps an epoch. A
+///   dirty until a write carrying that exact edit is confirmed.
+/// * One acknowledgement boundary for every write of the composer text to the
+///   server, autosave and meeting start alike: [`Self::begin_write`] captures
+///   the token of the text being sent and [`Self::write_finished`] acknowledges
+///   it. Only a successful write of the newest edit makes the composer clean;
+///   edits typed while the write was in flight, and failed writes, stay dirty.
+/// * Poll/write races: every edit and every finished write bumps an epoch. A
 ///   poll result is adopted only if the epoch is unchanged since the poll was
-///   sent, so a status read that left before a save finished cannot roll the
+///   sent, so a status read that left before a write finished cannot roll the
 ///   composer back to older server text.
+/// * Lifecycle races: Start and Stop are acknowledged with
+///   [`Self::action_finished`], which also advances a lifecycle generation. A
+///   whole status snapshot from a poll sent before the latest Start/Stop
+///   finished is obsolete ([`Self::is_current`]) and must not be applied, so a
+///   pre-start "idle" or pre-stop "recording" answer cannot change the phase.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotesSync {
     epoch: u64,
     dirty: bool,
     /// Epoch of the newest local edit.
     edit_epoch: u64,
+    /// Advanced by every finished Start/Stop (and by `reset`).
+    generation: u64,
+}
+
+/// What a status poll was sent against (see [`NotesSync::poll_started`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PollTicket {
+    epoch: u64,
+    generation: u64,
+}
+
+/// The edit a write of the composer text covers (see [`NotesSync::begin_write`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteToken(u64);
+
+/// What a window close must do about the meeting notes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloseNotes {
+    /// Nothing unsaved.
+    Nothing,
+    /// A meeting is recording and the composer has unsent edits: send them.
+    Send,
+    /// The notes can't be made safe right now; keep the window open with
+    /// this reason (the user may still close anyway).
+    Blocked(String),
+}
+
+/// Decide what closing means for the notes in `phase`.
+///
+/// Start and Stop are in flight while `Starting`/`Stopping`; their completion
+/// callbacks cannot run during a synchronous close wait, so a close then is
+/// refused with the reason instead of guessing (notes typed during Start are
+/// flushed by a close retried after it finished). Unsent notes outside a
+/// recording have nowhere to go and are reported, never dropped silently.
+pub fn close_notes(phase: &Phase, dirty: bool, composer_empty: bool) -> CloseNotes {
+    match phase {
+        Phase::Starting => CloseNotes::Blocked(
+            "A meeting is still starting. Wait until it's recording, then close again so your notes are saved.".into(),
+        ),
+        Phase::Stopping => CloseNotes::Blocked(
+            "Your meeting is still being saved. Wait until it finishes, then close again.".into(),
+        ),
+        Phase::Recording { .. } if dirty => CloseNotes::Send,
+        Phase::Recording { .. } => CloseNotes::Nothing,
+        _ if dirty && !composer_empty => CloseNotes::Blocked(
+            "Meeting notes you typed weren't saved because no meeting is recording.".into(),
+        ),
+        _ => CloseNotes::Nothing,
+    }
+}
+
+/// What a status poll means for the composer during a meeting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reconcile {
+    /// Load the server's notes into the clean composer.
+    Adopt(String),
+    /// The composer has edits the server doesn't have: send them.
+    Resend,
+    /// Nothing to do.
+    Keep,
 }
 
 impl NotesSync {
-    /// Call when sending a status poll; pass the result to [`Self::adopt`].
-    pub fn poll_started(&self) -> u64 {
-        self.epoch
+    /// Call when sending a status poll; check the result with
+    /// [`Self::is_current`] and pass it to [`Self::reconcile`].
+    pub fn poll_started(&self) -> PollTicket {
+        PollTicket {
+            epoch: self.epoch,
+            generation: self.generation,
+        }
     }
 
-    /// The user changed the composer. Returns the edit's token for the save.
-    pub fn edited(&mut self) -> u64 {
+    /// False when a Start/Stop finished (or the meeting was reset) after the
+    /// poll was sent: the whole snapshot is obsolete.
+    pub fn is_current(&self, ticket: PollTicket) -> bool {
+        ticket.generation == self.generation
+    }
+
+    /// The user changed the composer.
+    pub fn edited(&mut self) {
         self.epoch += 1;
         self.dirty = true;
         self.edit_epoch = self.epoch;
-        self.edit_epoch
     }
 
-    /// A save of edit `token` finished. Only a successful save of the newest
-    /// edit makes the composer clean; a failed or superseded one keeps it dirty.
-    pub fn save_finished(&mut self, token: u64, ok: bool) {
+    /// Call in the same step that reads the composer text for a write (an
+    /// autosave or the notes sent with meeting start): the token names exactly
+    /// the edits that text contains.
+    pub fn begin_write(&self) -> WriteToken {
+        WriteToken(self.edit_epoch)
+    }
+
+    /// A write started with [`Self::begin_write`] finished. A success clears
+    /// the dirty state only if no edit happened since the write began; a
+    /// failure never does.
+    pub fn write_finished(&mut self, token: WriteToken, ok: bool) {
         self.epoch += 1;
-        if ok && token == self.edit_epoch {
+        if ok && token.0 == self.edit_epoch {
             self.dirty = false;
         }
     }
 
-    /// Token of the newest local edit (what a save sent now covers).
-    pub fn edited_token(&self) -> u64 {
-        self.edit_epoch
+    /// A Start or Stop (which both write the composer text) finished:
+    /// acknowledge its write like any other, and make every status poll sent
+    /// before it obsolete.
+    pub fn action_finished(&mut self, token: WriteToken, ok: bool) {
+        self.write_finished(token, ok);
+        self.generation += 1;
     }
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
 
-    /// The text to load into the composer from a poll sent at `poll_epoch`,
-    /// or `None` to keep the composer as it is.
-    pub fn adopt(&self, poll_epoch: u64, local: &str, server: Option<&str>) -> Option<String> {
+    /// The text to load into the composer from a poll sent with `ticket`, or
+    /// `None` to keep the composer as it is.
+    pub fn adopt(&self, ticket: PollTicket, local: &str, server: Option<&str>) -> Option<String> {
         let server = server?;
-        if self.dirty || poll_epoch != self.epoch || local == server {
+        if self.dirty || ticket != self.poll_started() || local == server {
             return None;
         }
         Some(server.to_string())
     }
 
+    /// Decide what a poll sent with `ticket` means for the composer: adopt
+    /// newer server notes into a clean composer, resend local edits the server
+    /// lacks, or leave both alone.
+    pub fn reconcile(&self, ticket: PollTicket, local: &str, server: Option<&str>) -> Reconcile {
+        if let Some(text) = self.adopt(ticket, local, server) {
+            return Reconcile::Adopt(text);
+        }
+        if self.dirty && server.is_some_and(|s| s != local) {
+            return Reconcile::Resend;
+        }
+        Reconcile::Keep
+    }
+
     /// A new meeting (or no meeting): forget all state.
     pub fn reset(&mut self) {
         self.epoch += 1;
+        self.generation += 1;
         self.dirty = false;
     }
 }
@@ -364,7 +468,8 @@ mod tests {
         let mut sync = NotesSync::default();
 
         // Dirty local text wins over whatever the server reports.
-        let token = sync.edited();
+        sync.edited();
+        let token = sync.begin_write();
         let sent = sync.poll_started();
         let server = poll(&client, false).notes;
         assert_eq!(sync.adopt(sent, "local draft", server.as_deref()), None);
@@ -377,7 +482,7 @@ mod tests {
         writer
             .save(&client, writer.ticket(), "local draft")
             .unwrap();
-        sync.save_finished(token, true);
+        sync.write_finished(token, true);
         assert!(!sync.is_dirty());
         assert_eq!(
             sync.adopt(stale_poll, "local draft", stale.as_deref()),
@@ -400,17 +505,256 @@ mod tests {
             Some("edited on another device")
         );
 
-        // Only a successful save of the newest edit clears the dirty flag.
-        let first = sync.edited();
-        let second = sync.edited();
-        sync.save_finished(first, true);
-        assert!(sync.is_dirty(), "older save must not clean a newer edit");
-        sync.save_finished(second, false);
-        assert!(sync.is_dirty(), "failed save keeps the edit dirty");
-        sync.save_finished(second, true);
+        // Only a successful write of the newest edit clears the dirty flag.
+        sync.edited();
+        let first = sync.begin_write();
+        sync.edited();
+        let second = sync.begin_write();
+        sync.write_finished(first, true);
+        assert!(sync.is_dirty(), "older write must not clean a newer edit");
+        sync.write_finished(second, false);
+        assert!(sync.is_dirty(), "failed write keeps the edit dirty");
+        sync.write_finished(second, true);
         assert!(!sync.is_dirty());
         sync.reset();
         assert!(!sync.is_dirty());
+    }
+
+    /// Draft typed before Start: Start writes it, so a successful start
+    /// acknowledges it. Newer notes written by another frontend are then
+    /// adopted and the stale draft is never resent.
+    #[test]
+    fn a_draft_saved_by_start_is_acknowledged_so_newer_server_notes_win() {
+        let client = FakeMeetingClient::new();
+        let mut sync = NotesSync::default();
+        sync.edited(); // typed while idle
+        let token = sync.begin_write(); // read with the notes for start
+        let phase = start(&client, "", "general", "draft");
+        assert!(matches!(phase, Phase::Recording { .. }));
+        sync.action_finished(token, matches!(phase, Phase::Recording { .. }));
+        assert!(!sync.is_dirty(), "start saved the draft");
+
+        client.save_notes("newer, from another frontend").unwrap();
+        let sent = sync.poll_started();
+        let snap = poll(&client, false);
+        assert_eq!(
+            sync.reconcile(sent, "draft", snap.notes.as_deref()),
+            Reconcile::Adopt("newer, from another frontend".into())
+        );
+        let saves = client
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, MeetingCall::SaveNotes(_)))
+            .count();
+        assert_eq!(
+            saves, 1,
+            "only the other frontend's write; no resend of the draft"
+        );
+    }
+
+    /// Typing while Start is in flight: the start acknowledges only what it
+    /// sent; the newer local edit stays dirty, is resent, and is never
+    /// replaced by server text (neither its own older copy nor a third
+    /// party's).
+    #[test]
+    fn an_edit_typed_during_start_stays_dirty_and_is_resent() {
+        let client = FakeMeetingClient::new();
+        let mut sync = NotesSync::default();
+        sync.edited();
+        let token = sync.begin_write();
+        let phase = start(&client, "", "", "draft");
+        sync.edited(); // "draft + more" typed before the start returned
+        sync.action_finished(token, matches!(phase, Phase::Recording { .. }));
+        assert!(sync.is_dirty());
+
+        let sent = sync.poll_started();
+        let snap = poll(&client, false);
+        assert_eq!(snap.notes.as_deref(), Some("draft"));
+        assert_eq!(
+            sync.reconcile(sent, "draft + more", snap.notes.as_deref()),
+            Reconcile::Resend
+        );
+        client.save_notes("someone else's notes").unwrap();
+        let sent = sync.poll_started();
+        let snap = poll(&client, false);
+        assert_eq!(
+            sync.reconcile(sent, "draft + more", snap.notes.as_deref()),
+            Reconcile::Resend,
+            "dirty local text is never clobbered"
+        );
+        // The resend is acknowledged through the same boundary.
+        let resend = sync.begin_write();
+        let writer = MeetingNotesWriter::new();
+        writer
+            .save(&client, writer.ticket(), "draft + more")
+            .unwrap();
+        sync.write_finished(resend, true);
+        assert!(!sync.is_dirty());
+        let sent = sync.poll_started();
+        let snap = poll(&client, false);
+        assert_eq!(
+            sync.reconcile(sent, "draft + more", snap.notes.as_deref()),
+            Reconcile::Keep
+        );
+    }
+
+    /// A failed start saved nothing: the draft stays dirty and is not
+    /// replaced when a meeting later turns up with other notes.
+    #[test]
+    fn a_failed_start_keeps_the_draft_dirty() {
+        let client = FakeMeetingClient::new();
+        let mut sync = NotesSync::default();
+        sync.edited();
+        let token = sync.begin_write();
+        client.set_down(Some(SERVER_DOWN));
+        let phase = start(&client, "", "", "draft");
+        assert!(matches!(phase, Phase::Error(_)));
+        sync.action_finished(token, matches!(phase, Phase::Recording { .. }));
+        assert!(sync.is_dirty());
+
+        client.set_down(None);
+        client.start("", "", "", "started elsewhere", None).unwrap();
+        let sent = sync.poll_started();
+        let snap = poll(&client, false);
+        assert_eq!(
+            sync.reconcile(sent, "draft", snap.notes.as_deref()),
+            Reconcile::Resend
+        );
+        // A poll that left before the failed start finished is never adopted.
+        let mut clean = NotesSync::default();
+        let stale = clean.poll_started();
+        let token = clean.begin_write();
+        clean.write_finished(token, false);
+        assert_eq!(clean.reconcile(stale, "", Some("server")), Reconcile::Keep);
+    }
+
+    /// A poll sent before Start (answering "idle") that returns after Start
+    /// finished is obsolete, so the phase can't flip back to Idle. Autosave
+    /// acknowledgements don't invalidate snapshots.
+    #[test]
+    fn a_pre_start_poll_cannot_reset_the_phase() {
+        let client = FakeMeetingClient::new();
+        let mut sync = NotesSync::default();
+        let before = sync.poll_started();
+        let stale = poll(&client, false);
+        assert_eq!(stale.phase, Phase::Idle);
+        let token = sync.begin_write();
+        let phase = start(&client, "", "", "");
+        sync.action_finished(token, matches!(phase, Phase::Recording { .. }));
+        assert!(!sync.is_current(before), "pre-start snapshot rejected");
+
+        // A failed start also ends the lifecycle step.
+        let mut failed = NotesSync::default();
+        let ticket = failed.poll_started();
+        let token = failed.begin_write();
+        failed.action_finished(token, false);
+        assert!(!failed.is_current(ticket));
+
+        // Polls during the meeting stay current across autosaves.
+        let during = sync.poll_started();
+        sync.edited();
+        let save = sync.begin_write();
+        sync.write_finished(save, true);
+        assert!(sync.is_current(during));
+        assert_eq!(sync.reconcile(during, "x", Some("y")), Reconcile::Keep);
+    }
+
+    /// Stop uses the same acknowledgement pair: a poll that still saw the
+    /// meeting recording before Stop finished can't change state afterwards,
+    /// and Stop's notes write acknowledges the composer.
+    #[test]
+    fn a_pre_stop_poll_cannot_revive_the_recording() {
+        let client = FakeMeetingClient::new();
+        let mut sync = NotesSync::default();
+        let token = sync.begin_write();
+        let phase = start(&client, "", "", "");
+        sync.action_finished(token, matches!(phase, Phase::Recording { .. }));
+        sync.edited();
+        let before = sync.poll_started();
+        let stale = poll(&client, false);
+        assert!(matches!(stale.phase, Phase::Recording { .. }));
+
+        let token = sync.begin_write();
+        let writer = MeetingNotesWriter::new();
+        let phase = stop(&client, &writer, writer.ticket(), "final notes");
+        let saved = matches!(phase, Phase::Saved { .. });
+        assert!(saved);
+        sync.action_finished(token, saved);
+        assert!(!sync.is_current(before), "pre-stop snapshot rejected");
+        assert!(!sync.is_dirty(), "stop wrote the composer text");
+
+        // A failed stop keeps the notes dirty for the next attempt.
+        let mut failing = NotesSync::default();
+        failing.edited();
+        let token = failing.begin_write();
+        client.set_down(Some(SERVER_DOWN));
+        let phase = stop(&client, &writer, writer.ticket(), "notes");
+        assert!(matches!(phase, Phase::Error(_)));
+        failing.action_finished(token, false);
+        assert!(failing.is_dirty());
+    }
+
+    /// Closing while Start/Stop is in flight keeps the window open with the
+    /// reason; notes typed during Start are flushed by a close retried after
+    /// Start finished; unsent notes outside a recording are reported.
+    #[test]
+    fn close_during_busy_actions_and_newer_notes() {
+        assert!(
+            matches!(close_notes(&Phase::Starting, true, false), CloseNotes::Blocked(r) if r.contains("still starting"))
+        );
+        assert!(
+            matches!(close_notes(&Phase::Stopping, false, true), CloseNotes::Blocked(r) if r.contains("still being saved"))
+        );
+
+        let client = std::sync::Arc::new(FakeMeetingClient::new());
+        let mut sync = NotesSync::default();
+        sync.edited();
+        let token = sync.begin_write();
+        let phase = start(client.as_ref(), "", "", "draft");
+        sync.edited(); // "draft + typed during start"
+        sync.action_finished(token, matches!(phase, Phase::Recording { .. }));
+        assert_eq!(
+            close_notes(&phase, sync.is_dirty(), false),
+            CloseNotes::Send
+        );
+        let writer = std::sync::Arc::new(MeetingNotesWriter::new());
+        let found = crate::controllers::shutdown::failures();
+        let ticket = writer.ticket();
+        crate::controllers::shutdown::send_meeting_notes(
+            client.clone(),
+            writer,
+            ticket,
+            "draft + typed during start".into(),
+            found.clone(),
+        );
+        let check = crate::controllers::shutdown::finish(
+            Vec::new(),
+            &found,
+            crate::controllers::shutdown::CLOSE_WAIT,
+        );
+        assert!(check.ok(), "{check:?}");
+        assert!(client
+            .calls()
+            .contains(&MeetingCall::SaveNotes("draft + typed during start".into())));
+
+        // Clean recording: nothing to send. Failed start with typed notes:
+        // reported. Idle with an empty composer: nothing.
+        assert_eq!(
+            close_notes(
+                &Phase::Recording {
+                    seconds: 1,
+                    capture: String::new()
+                },
+                false,
+                false
+            ),
+            CloseNotes::Nothing
+        );
+        assert!(
+            matches!(close_notes(&Phase::Error("down".into()), true, false), CloseNotes::Blocked(r) if r.contains("weren't saved"))
+        );
+        assert_eq!(close_notes(&Phase::Idle, true, true), CloseNotes::Nothing);
+        assert_eq!(close_notes(&Phase::Idle, false, false), CloseNotes::Nothing);
     }
 
     #[test]
