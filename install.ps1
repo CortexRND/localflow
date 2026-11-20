@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 # The release a default install downloads and verifies. Bump this, and only
 # this, when cutting a release.
-$LocalflowRelease = 'v0.2.1'
+$LocalflowRelease = 'v0.2.2'
 $LocalflowVersion = $LocalflowRelease -replace '^v', ''
 # LOCALFLOW_RELEASE_BASE_URL is for testing only: it points the verified
 # download at another copy of the release assets (e.g. a local HTTP server).

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # The release a default install downloads and verifies. Keep synchronized
 # with package metadata and the other release launchers.
-LOCALFLOW_RELEASE="v0.2.1"
+LOCALFLOW_RELEASE="v0.2.2"
 LOCALFLOW_VERSION="${LOCALFLOW_RELEASE#v}"
 # Default installs trust only the release's source archive, checked against the
 # release's SHA256SUMS. There is deliberately no pinned git commit: a release is
