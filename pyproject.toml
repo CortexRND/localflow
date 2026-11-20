@@ -44,6 +44,7 @@ macos-permissions = [
 localflow = "localflow.app:main"
 localflow-server = "localflow.server:main"
 lf = "localflow.cli:main"
+localflow-mcp = "localflow.mcp_server:main"
 
 [project.entry-points."localflow.stt_providers"]
 faster-whisper = "localflow.providers.stt_faster_whisper:FasterWhisperSTT"

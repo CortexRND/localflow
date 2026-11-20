@@ -3,8 +3,9 @@
 The Rust macOS Hub defaults to a same-executable speech child:
 `lf-hub --speech-helper`. This hidden mode runs before AppKit, runtime locks,
 hotkeys or server startup. Dictation, HTTP transcription and meetings share the
-managed proxy; the Setup dictation trial uses its own short-lived proxy. Python
-is unchanged and remains the shipped/default runtime. Other Rust binaries and
+managed proxy; the Setup dictation trial uses its own short-lived proxy. Rust is
+the default macOS runtime since v0.2.0; the Python runtime is unchanged and
+remains the default on Linux and Windows. Other Rust binaries and
 Linux/Windows retain their in-process engines.
 
 Set `LOCALFLOW_SPEECH_IN_PROCESS=1` when launching the Rust Hub to restore the

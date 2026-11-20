@@ -25,6 +25,7 @@ VISIBLE_TOP = [
     "hub",
     "keys",
     "llm",
+    "mcp",
     "meeting",
     "menubar",
     "open",

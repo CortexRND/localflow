@@ -1133,6 +1133,13 @@ def dictate() -> None:
     app_main()
 
 
+@cli.command("mcp")
+def mcp_command() -> None:
+    """Run the MCP server for agents (stdio)."""
+    from localflow.mcp_server import main as mcp_main
+    mcp_main()
+
+
 @cli.command(hidden=True)
 def ui() -> None:
     """Open the web UI in the default browser."""
