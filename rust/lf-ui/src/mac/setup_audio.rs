@@ -36,7 +36,11 @@ impl SetupPlatform for NativeSetupPlatform {
     fn runtime_available(&self, backend: &str) -> bool {
         #[cfg(feature = "runtime")]
         {
-            lf_stt::factory::backend_available(backend)
+            crate::setup_flow::native_backend_available(
+                backend,
+                lf_stt::factory::backend_available("whisper-cpp"),
+                lf_stt::factory::backend_available("parakeet-onnx"),
+            )
         }
         #[cfg(not(feature = "runtime"))]
         HostPlatform.runtime_available(backend)

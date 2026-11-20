@@ -5,6 +5,10 @@ set -euo pipefail
 # with package metadata and the other release launchers.
 LOCALFLOW_RELEASE="v0.2.0"
 LOCALFLOW_VERSION="${LOCALFLOW_RELEASE#v}"
+# The commit the published $LOCALFLOW_RELEASE tag points to (peeled), verified
+# out of band. Git installs refuse a tag or checkout that resolves elsewhere.
+# Update together with LOCALFLOW_RELEASE; never derive it from a fetch.
+LOCALFLOW_RELEASE_COMMIT="ab33fac896af9f10c31bc76c0f08be396a51eb68"
 # LOCALFLOW_RELEASE_BASE_URL is for testing only: it points the verified
 # download at another copy of the release assets (e.g. a file:// directory).
 RELEASE_BASE_URL="${LOCALFLOW_RELEASE_BASE_URL:-https://github.com/CortexRND/localflow/releases/download/$LOCALFLOW_RELEASE}"
@@ -31,14 +35,16 @@ Environment:
   LOCALFLOW_REPO_URL       Git repository URL or local path (git installs only)
   LOCALFLOW_REF            Git ref to check out, or tarball ref, instead of the
                            pinned release $LOCALFLOW_RELEASE. A custom ref is NOT
-                           checksum-verified.
+                           checksum- or commit-verified.
   LOCALFLOW_RELEASE_BASE_URL
                            Testing only: alternative location of the release
                            assets (localflow-$LOCALFLOW_VERSION.tar.gz and SHA256SUMS)
 
-By default the installer checks out tag $LOCALFLOW_RELEASE (git installs) or
-downloads localflow-$LOCALFLOW_VERSION.tar.gz from that GitHub release and
-verifies it against the release's SHA256SUMS before unpacking.
+By default git installs check out tag $LOCALFLOW_RELEASE and verify that it
+resolves to the pinned release commit $LOCALFLOW_RELEASE_COMMIT
+(no SHA256SUMS check). Without git the installer downloads
+localflow-$LOCALFLOW_VERSION.tar.gz from that GitHub release and verifies it
+against the release's SHA256SUMS before unpacking.
 
 On macOS, the native Rust app needs no Python or virtual environment. Accept
 the Xcode Command Line Tools dialog when prompted. For the Python app, run
@@ -241,6 +247,20 @@ verify_sha256() {
     echo "Verified SHA-256 of $name."
 }
 
+# Exit unless git revision $1 in $REPO resolves to exactly the pinned
+# LOCALFLOW_RELEASE_COMMIT; an empty or failed resolution also fails closed.
+require_release_commit() {
+    local rev="$1" what="$2" actual=""
+    if ! actual="$(git -C "$REPO" rev-parse --verify --quiet "$rev")" || [[ -z "$actual" ]]; then
+        echo "$what could not be resolved in $REPO; refusing to install unverified source." >&2
+        exit 1
+    fi
+    if [[ "$actual" != "$LOCALFLOW_RELEASE_COMMIT" ]]; then
+        echo "$what resolves to $actual, not the pinned release commit $LOCALFLOW_RELEASE_COMMIT; refusing to install." >&2
+        exit 1
+    fi
+}
+
 # Download the source tarball into $REPO, replacing older source but keeping .venv.
 # Without LOCALFLOW_REF this is the pinned release asset, verified against the
 # release's SHA256SUMS; a custom LOCALFLOW_REF uses GitHub's unverified codeload.
@@ -433,7 +453,12 @@ elif [[ "$FROM_CHECKOUT" -eq 0 ]]; then
     # Fresh clone or existing install: pin to the release tag. Fetching the
     # tag without '+' refuses to move a local tag that changed upstream.
     git -C "$REPO" fetch origin "refs/tags/$LOCALFLOW_RELEASE:refs/tags/$LOCALFLOW_RELEASE"
+    # The tag itself is not the trust root: it must resolve to the pinned
+    # release commit before anything is checked out, built or installed.
+    require_release_commit "refs/tags/$LOCALFLOW_RELEASE^{commit}" "Release tag $LOCALFLOW_RELEASE"
     git -C "$REPO" -c advice.detachedHead=false checkout "refs/tags/$LOCALFLOW_RELEASE"
+    require_release_commit HEAD "Checked-out HEAD"
+    echo "Verified LocalFlow $LOCALFLOW_RELEASE at pinned release commit $LOCALFLOW_RELEASE_COMMIT (git checkout; SHA256SUMS applies only to tarball installs)."
 fi
 
 cd "$REPO"
@@ -539,9 +564,21 @@ if [[ "$NO_LAUNCH" -eq 1 ]]; then
 fi
 
 if [[ "$OS" == "Darwin" ]]; then
-    # First run routes to the setup window; later runs open the Hub.
+    # First run routes to the setup window; later runs open the Hub. The
+    # install already succeeded (build and setup failures exited above), so a
+    # failed open -- e.g. LaunchServices error -600 while the login agent's copy
+    # is still starting -- is retried briefly, then only reported.
     echo "Opening LocalFlow..."
-    exec open "$HOME/Applications/LocalFlow.app"
+    open_error=""
+    for ((attempt = 1; attempt <= 5; attempt++)); do
+        if open_error="$(open "$HOME/Applications/LocalFlow.app" 2>&1)"; then
+            exit 0
+        fi
+        if ((attempt < 5)); then sleep 2; fi
+    done
+    echo "Warning: LocalFlow is installed but could not be opened automatically${open_error:+ ($open_error)}." >&2
+    echo "Open it from Applications → LocalFlow (in your home folder)." >&2
+    exit 0
 fi
 
 echo "Opening LocalFlow Setup..."

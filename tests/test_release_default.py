@@ -1,7 +1,7 @@
 """Release pins and isolated, network-free macOS prerequisite provisioning."""
 
-import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -20,11 +20,65 @@ def test_release_versions_and_installer_hashes_are_consistent():
     assert f"$LocalflowRelease = 'v{version}'" in (ROOT / "install.ps1").read_text(encoding="utf-8")
     assert f'LF_REF=v{version}' in (ROOT / "packaging/windows/Install LocalFlow.cmd").read_text(encoding="utf-8")
     assert tomllib.loads((ROOT / "rust/Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"] == version
+    assert f"v{version}" in PUBLISHED_INSTALLER_SHA256
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for filename in ("install.sh", "install.ps1"):
-        digest = hashlib.sha256((ROOT / filename).read_bytes()).hexdigest()
-        assert digest in readme.lower()
         assert f"/v{version}/{filename}" in readme
+
+
+# SHA-256 of the installer bytes actually published at each immutable release
+# tag (raw.githubusercontent.com/CortexRND/localflow/<tag>/<file>), verified
+# out of band against the network. These are deliberately NOT derived from the
+# working tree: README one-liners download the tagged release, so their pinned
+# digests must match the published bytes even after HEAD's installers change.
+PUBLISHED_INSTALLER_SHA256 = {
+    "v0.2.0": {
+        "install.sh": "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab",
+        "install.ps1": "20a3a79114d81975422ac7c451aab21391fbab2c99b71d03db136e8e2e007afc",
+    },
+}
+# Commit each published release tag peels to (git ls-remote origin
+# refs/tags/<tag>^{}), verified out of band. Git installs trust only this
+# commit, so the pin in install.sh must never be taken from HEAD or a fetch.
+PUBLISHED_RELEASE_COMMITS = {
+    "v0.2.0": "ab33fac896af9f10c31bc76c0f08be396a51eb68",
+}
+
+
+def test_install_sh_release_commit_pin_matches_published_tag():
+    script = (ROOT / "install.sh").read_text(encoding="utf-8")
+    release = re.search(r'^LOCALFLOW_RELEASE="(v[^"]+)"$', script, re.MULTILINE).group(1)
+    pins = re.findall(r'^LOCALFLOW_RELEASE_COMMIT="([^"]*)"$', script, re.MULTILINE)
+    assert pins == [PUBLISHED_RELEASE_COMMITS[release]]
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"`{PUBLISHED_RELEASE_COMMITS[release]}`" in readme
+
+
+# Number of README one-liners expected per installer (install.sh has a plain
+# and a --with-ollama variant).
+README_INSTALLER_COMMANDS = {"install.sh": 2, "install.ps1": 1}
+
+
+def test_readme_installer_one_liners_pin_published_release_digests():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    url_re = re.compile(
+        r"https://raw\.githubusercontent\.com/CortexRND/localflow/(?P<tag>[^/\s]+)/(?P<file>install\.(?:sh|ps1))\b"
+    )
+    digest_re = re.compile(r"\b[0-9a-fA-F]{64}\b")
+    seen = {name: 0 for name in README_INSTALLER_COMMANDS}
+    for lineno, line in enumerate(readme.splitlines(), 1):
+        urls = list(url_re.finditer(line))
+        if not urls:
+            continue
+        assert len(urls) == 1, f"README:{lineno}: expected one installer URL per command"
+        tag, filename = urls[0]["tag"], urls[0]["file"]
+        assert tag in PUBLISHED_INSTALLER_SHA256, f"README:{lineno}: no known published digests for {tag}"
+        digests = [d.lower() for d in digest_re.findall(line)]
+        assert digests == [PUBLISHED_INSTALLER_SHA256[tag][filename]], (
+            f"README:{lineno}: {tag}/{filename} must be paired with its published digest on the same line"
+        )
+        seen[filename] += 1
+    assert seen == README_INSTALLER_COMMANDS
 
 
 def test_python_switch_back_example_requires_explicit_runtime():

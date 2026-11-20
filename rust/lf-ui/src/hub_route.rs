@@ -265,6 +265,172 @@ pub fn plan_initial_route(
     })
 }
 
+/// What the native router does for one show request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowAction {
+    /// An explicit Setup page request: show setup, route state untouched.
+    OpenSetup,
+    /// `--setup` launch: show setup; saving it does not auto-open the Hub.
+    SetupOnly,
+    /// First run: show setup, then the Hub (at `desired`) once configured.
+    FirstRun {
+        desired: Option<&'static str>,
+    },
+    Hub {
+        page: &'static str,
+    },
+}
+
+/// How much of the one in-process runtime a window needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeStart {
+    /// Only the local HTTP server (`/healthz`, setup/Hub APIs). No keyboard
+    /// listener, recorder, status menu, dictation toggle or meeting capture:
+    /// first-run setup has not granted permissions or saved a microphone yet.
+    ServerOnly,
+    /// The server plus dictation, the status menu and meeting capture.
+    Full,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowPlan {
+    pub action: WindowAction,
+    /// What the one in-process runtime must be running for this window.
+    /// Every window starts the server; dictation and the menu start only once
+    /// the app is configured (for first run: after Finish saved the config).
+    /// Requests are idempotent and only ever upgrade, see [`RuntimeLifecycle`].
+    pub runtime: RuntimeStart,
+}
+
+pub fn plan_window(
+    setup_page: bool,
+    setup_only: bool,
+    configured: bool,
+    requested: Option<&str>,
+) -> Result<WindowPlan, String> {
+    let action = if setup_page {
+        WindowAction::OpenSetup
+    } else if setup_only {
+        WindowAction::SetupOnly
+    } else {
+        match plan_initial_route(configured, requested)? {
+            InitialRoute::Setup { desired } => WindowAction::FirstRun { desired },
+            InitialRoute::Hub { page } => WindowAction::Hub { page },
+        }
+    };
+    Ok(WindowPlan {
+        action,
+        runtime: if configured {
+            RuntimeStart::Full
+        } else {
+            RuntimeStart::ServerOnly
+        },
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Phase {
+    #[default]
+    Idle,
+    Starting,
+    Ready,
+}
+
+/// The work one [`RuntimeLifecycle`] transition asks the app to do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeSteps {
+    /// Start the (single) server off the main thread.
+    pub start_server: bool,
+    /// Install the status menu and its meeting poller.
+    pub install_menu: bool,
+    /// Activate dictation on the running server with freshly loaded config.
+    pub activate_dictation: bool,
+}
+
+/// The single in-process runtime across setup and Hub windows: the server
+/// starts once, the menu installs once, and dictation activates once on that
+/// same server, only after a [`RuntimeStart::Full`] request *and* the server
+/// startup finished (a Finish that races a pending server start is deferred,
+/// not lost). A failed server startup or dictation activation returns to idle
+/// so a later request retries; nothing is ever started twice concurrently.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeLifecycle {
+    server: Phase,
+    menu: bool,
+    dictation: Phase,
+    wants_dictation: bool,
+    stopped: bool,
+}
+
+impl RuntimeLifecycle {
+    pub fn request(&mut self, start: RuntimeStart) -> RuntimeSteps {
+        let mut steps = RuntimeSteps::default();
+        if self.stopped {
+            return steps;
+        }
+        if self.server == Phase::Idle {
+            self.server = Phase::Starting;
+            steps.start_server = true;
+        }
+        if start == RuntimeStart::Full {
+            steps.install_menu = !std::mem::replace(&mut self.menu, true);
+            if self.dictation == Phase::Idle {
+                self.wants_dictation = true;
+            }
+        }
+        steps.activate_dictation = self.next_activation();
+        steps
+    }
+
+    /// The server startup finished (even if it found another healthy owner);
+    /// returns whether a deferred dictation activation must start now.
+    pub fn server_started(&mut self) -> bool {
+        if self.stopped || self.server != Phase::Starting {
+            return false;
+        }
+        self.server = Phase::Ready;
+        self.next_activation()
+    }
+
+    /// The runtime is gone (its startup or activation worker died); the next
+    /// request starts the server again and a Full one re-activates dictation.
+    pub fn server_failed(&mut self) {
+        self.server = Phase::Idle;
+        self.dictation = Phase::Idle;
+        self.wants_dictation = false;
+    }
+
+    /// A dictation activation ended; a failure is retried by the next Full
+    /// request, never automatically in a loop.
+    pub fn dictation_finished(&mut self, ok: bool) {
+        if self.dictation == Phase::Starting {
+            self.dictation = if ok { Phase::Ready } else { Phase::Idle };
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        self.wants_dictation = false;
+    }
+
+    pub fn full(&self) -> bool {
+        self.menu
+    }
+
+    fn next_activation(&mut self) -> bool {
+        if self.stopped
+            || !self.wants_dictation
+            || self.server != Phase::Ready
+            || self.dictation != Phase::Idle
+        {
+            return false;
+        }
+        self.wants_dictation = false;
+        self.dictation = Phase::Starting;
+        true
+    }
+}
+
 /// Seconds since the Unix epoch (`time.time()`).
 pub fn system_now() -> f64 {
     SystemTime::now()
@@ -454,6 +620,75 @@ pub fn plan_reopen(existing: Option<&HubWindowState>, requested: Option<&str>) -
     }
 }
 
+/// What one [`DictationStatusSync::poll`] asks the Hub to do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DictationSyncSteps {
+    /// Set only `dictation_enabled` in the Hub's in-memory config to this
+    /// (nothing is written to disk; every other setting is left alone).
+    pub adopt: Option<bool>,
+    /// Re-render the Home page now (it is current, visible and not closed).
+    pub rebuild_home: bool,
+}
+
+/// Keeps the Hub's dictation status in step with the running dictation
+/// runtime, whatever toggled it (status menu, keyboard hotkey, Hub switch).
+///
+/// `runtime` is the running dictation runtime's value, or `None` while none
+/// runs (setup's server-only phase, a failed or foreign activation, builds
+/// without the runtime): then nothing is fabricated and the Hub keeps what it
+/// shows. While runtime and Hub agree nothing is read. On any disagreement
+/// (including the very first poll) the persisted value decides, since every
+/// toggle saves before the runtime or Hub shows it:
+/// - persisted == runtime: the runtime toggled (menu, hotkey); the Hub adopts
+///   it, even if the runtime value never changed between polls (a hotkey
+///   flip landing on a Hub save the runtime had not picked up yet);
+/// - persisted == Hub: the Hub saved and the runtime is still catching up;
+///   the Hub keeps its value;
+/// - unreadable or not a bool: the Hub keeps its value and the next poll
+///   retries.
+///
+/// Home re-renders once per adopted change, as soon as it is visible. Other
+/// pages are never re-rendered: navigating to Home renders it fresh.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DictationStatusSync {
+    stale_home: bool,
+}
+
+impl DictationStatusSync {
+    /// `cached` is the Hub's in-memory `dictation_enabled` and `hub` its window
+    /// state (`None`: no Hub). `persisted` reads the saved value; it is called
+    /// only when runtime and Hub disagree.
+    pub fn poll(
+        &mut self,
+        runtime: Option<bool>,
+        cached: Option<bool>,
+        hub: Option<&HubWindowState>,
+        persisted: impl FnOnce() -> Option<bool>,
+    ) -> DictationSyncSteps {
+        let mut steps = DictationSyncSteps::default();
+        if let Some(now) = runtime.filter(|now| hub.is_some() && cached != Some(*now)) {
+            if persisted() == Some(now) {
+                steps.adopt = Some(now);
+                self.stale_home = true;
+            }
+        }
+        if self.stale_home {
+            match hub {
+                Some(hub) if !hub.closed && hub.page == "Home" => {
+                    if hub.visible && !hub.miniaturized {
+                        steps.rebuild_home = true;
+                        self.stale_home = false;
+                    }
+                }
+                // No Hub, a closed one (its successor loads fresh config) or
+                // another page (Home renders fresh when navigated to).
+                _ => self.stale_home = false,
+            }
+        }
+        steps
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +846,169 @@ mod tests {
         );
         assert!(plan_initial_route(true, Some("not-a-page")).is_err());
         assert!(plan_initial_route(false, Some("not-a-page")).is_err());
+    }
+
+    #[test]
+    fn unconfigured_setup_starts_only_the_server_and_configured_windows_start_full() {
+        use RuntimeStart::{Full, ServerOnly};
+        let plan =
+            |setup_page: bool, setup_only: bool, configured: bool, requested: Option<&str>| {
+                plan_window(setup_page, setup_only, configured, requested).unwrap()
+            };
+        let cases = [
+            (
+                plan(false, false, false, None),
+                WindowAction::FirstRun { desired: None },
+                ServerOnly,
+            ),
+            (
+                plan(false, false, false, Some("History")),
+                WindowAction::FirstRun {
+                    desired: Some("History"),
+                },
+                ServerOnly,
+            ),
+            (
+                plan(false, true, false, None),
+                WindowAction::SetupOnly,
+                ServerOnly,
+            ),
+            (
+                plan(false, true, true, Some("History")),
+                WindowAction::SetupOnly,
+                Full,
+            ),
+            (plan(true, false, true, None), WindowAction::OpenSetup, Full),
+            (
+                plan(true, false, false, None),
+                WindowAction::OpenSetup,
+                ServerOnly,
+            ),
+            (
+                plan(false, false, true, None),
+                WindowAction::Hub { page: "Home" },
+                Full,
+            ),
+            (
+                plan(false, false, true, Some("Models")),
+                WindowAction::Hub { page: "Models" },
+                Full,
+            ),
+        ];
+        for (plan, action, runtime) in cases {
+            assert_eq!(plan.action, action);
+            assert_eq!(plan.runtime, runtime, "{action:?}");
+        }
+        // Errors still surface instead of opening a window.
+        assert!(plan_window(false, false, true, Some("not-a-page")).is_err());
+        assert!(plan_window(false, false, false, Some("not-a-page")).is_err());
+    }
+
+    fn steps(server: bool, menu: bool, dictation: bool) -> RuntimeSteps {
+        RuntimeSteps {
+            start_server: server,
+            install_menu: menu,
+            activate_dictation: dictation,
+        }
+    }
+
+    #[test]
+    fn first_run_starts_server_once_and_activates_dictation_only_after_finish() {
+        let mut life = RuntimeLifecycle::default();
+        // Setup window: the server alone, once, however often setup is shown.
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(true, false, false)
+        );
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert!(!life.server_started());
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert!(!life.full());
+        // Finish saved the config: menu and dictation on the same server.
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, true, true));
+        assert!(life.full());
+        // Repeated Finish / Hub reopen / re-run Setup while activating or after.
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        life.dictation_finished(true);
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert!(!life.server_started());
+    }
+
+    #[test]
+    fn finish_racing_a_pending_server_start_defers_activation_until_it_lands() {
+        let mut life = RuntimeLifecycle::default();
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(true, false, false)
+        );
+        // Finish arrives while the server bootstrap channel is still pending.
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, true, false));
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert!(life.server_started(), "deferred activation was lost");
+        assert!(!life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+    }
+
+    #[test]
+    fn configured_launch_starts_server_before_dictation_and_menu_once() {
+        let mut life = RuntimeLifecycle::default();
+        assert_eq!(life.request(RuntimeStart::Full), steps(true, true, false));
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert!(life.server_started());
+        life.dictation_finished(true);
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+    }
+
+    #[test]
+    fn failed_startups_retry_on_the_next_request_never_in_a_loop() {
+        let mut life = RuntimeLifecycle::default();
+        assert!(life.request(RuntimeStart::ServerOnly).start_server);
+        life.server_failed();
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(true, false, false)
+        );
+        assert!(!life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, true, true));
+        life.dictation_finished(false);
+        // No automatic retry: only another Full request (Finish/Hub) retries.
+        assert!(!life.server_started());
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, true));
+        life.dictation_finished(true);
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        // The runtime died during/after activation: restart, then re-activate.
+        life.server_failed();
+        assert_eq!(life.request(RuntimeStart::Full), steps(true, false, false));
+        assert!(life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+    }
+
+    #[test]
+    fn stopped_lifecycle_starts_nothing() {
+        let mut life = RuntimeLifecycle::default();
+        assert!(life.request(RuntimeStart::ServerOnly).start_server);
+        life.request(RuntimeStart::Full);
+        life.stop();
+        assert!(!life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
     }
 
     fn file() -> (tempfile::TempDir, RequestFile) {
@@ -979,6 +1377,197 @@ lock.release()
         assert_eq!(canonical_page("MODELS"), Some("Models"));
         assert_eq!(canonical_page("nope"), None);
         assert_eq!(canonical_page(""), None);
+    }
+
+    fn home(visible: bool) -> HubWindowState {
+        HubWindowState {
+            closed: false,
+            miniaturized: false,
+            visible,
+            page: "Home".into(),
+        }
+    }
+
+    fn adopt(value: bool) -> DictationSyncSteps {
+        DictationSyncSteps {
+            adopt: Some(value),
+            rebuild_home: true,
+        }
+    }
+
+    /// The persisted value must not be read while runtime and Hub agree.
+    fn unread() -> Option<bool> {
+        panic!("dictation sync read the config without a mismatch")
+    }
+
+    #[test]
+    fn dictation_sync_follows_runtime_on_off_on() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&hub), || Some(false)),
+            adopt(false)
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&hub), unread),
+            idle
+        );
+        assert_eq!(
+            sync.poll(Some(true), Some(false), Some(&hub), || Some(true)),
+            adopt(true)
+        );
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+    }
+
+    #[test]
+    fn dictation_sync_steady_state_never_reads_or_rebuilds() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        for _ in 0..5 {
+            assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+        }
+        // No dictation runtime: nothing is fabricated or read, whatever the
+        // Hub shows; without a Hub there is nothing to reconcile.
+        assert_eq!(sync.poll(None, Some(true), Some(&hub), unread), idle);
+        assert_eq!(sync.poll(None, Some(false), Some(&hub), unread), idle);
+        assert_eq!(sync.poll(Some(false), None, None, unread), idle);
+        assert_eq!(sync.poll(None, None, None, unread), idle);
+    }
+
+    #[test]
+    fn dictation_sync_first_poll_mismatch_adopts_when_persisted_agrees_with_runtime() {
+        // E.g. the hotkey toggled right after activation, before any poll.
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&hub), || Some(false)),
+            adopt(false)
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&hub), unread),
+            DictationSyncSteps::default()
+        );
+    }
+
+    #[test]
+    fn dictation_sync_pending_hub_save_is_not_undone_by_the_old_runtime_value() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        // The Hub saved Off; the runtime shows On until its watcher applies it.
+        for _ in 0..3 {
+            assert_eq!(
+                sync.poll(Some(true), Some(false), Some(&hub), || Some(false)),
+                idle
+            );
+        }
+        // The runtime caught up: nothing to show, nothing to read.
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&hub), unread),
+            idle
+        );
+    }
+
+    #[test]
+    fn dictation_sync_hotkey_after_rapid_hub_save_is_adopted_with_unchanged_runtime() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+        // The Hub saves Off; the runtime has not picked it up yet.
+        assert_eq!(
+            sync.poll(Some(true), Some(false), Some(&hub), || Some(false)),
+            idle
+        );
+        // The hotkey re-reads the saved Off, flips it and saves On: the
+        // runtime value stays On throughout, yet the Hub must show On.
+        assert_eq!(
+            sync.poll(Some(true), Some(false), Some(&hub), || Some(true)),
+            adopt(true)
+        );
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+    }
+
+    #[test]
+    fn dictation_sync_unreadable_config_keeps_the_hub_value_and_retries() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        let reads = std::cell::Cell::new(0);
+        let failed = || {
+            reads.set(reads.get() + 1);
+            None
+        };
+        // Read error or a missing/non-bool field: the Hub keeps showing On.
+        assert_eq!(sync.poll(Some(false), Some(true), Some(&hub), failed), idle);
+        assert_eq!(sync.poll(Some(false), Some(true), Some(&hub), failed), idle);
+        assert_eq!(reads.get(), 2);
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&hub), || Some(false)),
+            adopt(false)
+        );
+    }
+
+    #[test]
+    fn dictation_sync_rebuilds_home_only_when_visible_and_open() {
+        let idle = DictationSyncSteps::default();
+        let adopted_only = DictationSyncSteps {
+            adopt: Some(false),
+            rebuild_home: false,
+        };
+        let off = || Some(false);
+        // Another page: adopt, never rebuild, and no rebuild later either.
+        let mut sync = DictationStatusSync::default();
+        let mut settings = home(true);
+        settings.page = "Settings".into();
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&settings), off),
+            adopted_only
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            idle
+        );
+
+        // Hidden or miniaturized Home: rebuild once it is visible again.
+        let mut sync = DictationStatusSync::default();
+        let mut mini = home(false);
+        mini.miniaturized = true;
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&mini), off),
+            adopted_only
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(false)), unread),
+            idle
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            DictationSyncSteps {
+                adopt: None,
+                rebuild_home: true
+            }
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            idle
+        );
+
+        // Closed Hub (its successor loads fresh config): nothing to rebuild.
+        let mut sync = DictationStatusSync::default();
+        let mut closed = home(true);
+        closed.closed = true;
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&closed), off),
+            adopted_only
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            idle
+        );
     }
 
     #[test]

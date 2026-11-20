@@ -52,8 +52,15 @@ elif name == 'launchctl':
         exe = plistlib.loads(p.read_bytes())['ProgramArguments'][0]
         processes['3333'] = exe if not os.environ.get('WRONG_PID_PATH') else exe + '.other'
         state.write_text(json.dumps(processes))
-    if a[0] == 'print' and os.environ.get('PROCESSES') and not os.environ.get('NO_PID'):
+    if a[0] == 'print' and os.environ.get('NOT_LOADED'):
+        sys.exit(113)
+    if a[0] == 'print' and os.environ.get('JOB_PID'):
+        print('pid = ' + os.environ['JOB_PID'])
+    elif a[0] == 'print' and os.environ.get('PROCESSES') and not os.environ.get('NO_PID'):
         print('pid = 3333')
+    if a[0] in ('enable', 'disable') and os.environ.get('FAIL_' + a[0].upper()):
+        print(a[0] + ' denied by test session', file=sys.stderr)
+        sys.exit(5)
     if os.environ.get('FAIL_BOOTSTRAP_ONLY') and a[0] == 'bootstrap':
         sys.exit(5)
     if os.environ.get('FAIL_LAUNCH') and a[0] in ('bootstrap', 'load'):
@@ -177,14 +184,17 @@ def test_python_rust_python_round_trip_idempotent_and_ordered(mac):
     launches = [
         call[1] for call in calls if call[0] == "launchctl" and call[1] != "print"
     ]
-    assert launches == ["bootout", "bootstrap"] * 2
+    # Every load first clears a `launchctl disable` override.
+    assert launches == ["bootout", "enable", "bootstrap"] * 2
     snapshots = [
         json.loads(line)
         for line in Path(env["CALLS"] + ".agents").read_text().splitlines()
     ]
     assert snapshots[0] == ["bootout", str(py)]
-    assert snapshots[1] == ["bootstrap", str(rust)]
-    assert snapshots[-2:] == [["bootout", str(rust)], ["bootstrap", str(py)]]
+    assert snapshots[1:3] == [["enable", str(rust)], ["bootstrap", str(rust)]]
+    assert snapshots[-3:] == [
+        ["bootout", str(rust)], ["enable", str(py)], ["bootstrap", str(py)]
+    ]
     assert Path(str(agent(home)) + ".rust.bak").is_file()
 
 
@@ -258,6 +268,120 @@ def test_failed_fresh_install_removes_unloadable_agent(mac):
     assert not agent(home).exists()
 
 
+def launchctl_calls(env):
+    calls = Path(env["CALLS"])
+    if not calls.exists():
+        return []
+    return [
+        call[1:] for call in map(json.loads, calls.read_text().splitlines())
+        if call[0] == "launchctl"
+    ]
+
+
+def target():
+    return f"gui/{os.getuid()}/{LABEL}"
+
+
+def test_disable_autostart_removes_agent_and_disables_without_bootout(mac):
+    home, env = mac
+    rust = executable(home / "Applications/LocalFlow.app/Contents/MacOS/lf-hub")
+    agent(home).parent.mkdir(parents=True)
+    agent(home).write_bytes(plistlib.dumps({"Label": LABEL, "ProgramArguments": [str(rust)]}))
+    for _ in range(2):
+        result = helper(env, "disable-autostart")
+        assert result.returncode == 0, result.stderr
+        assert not agent(home).exists()
+    # The running job (possibly the caller) is never booted out.
+    assert launchctl_calls(env) == [["disable", target()]] * 2
+
+
+def test_disable_autostart_failure_still_removes_agent_and_warns(mac):
+    home, env = mac
+    agent(home).parent.mkdir(parents=True)
+    agent(home).write_bytes(plistlib.dumps({"Label": LABEL, "ProgramArguments": ["lf-hub"]}))
+    env["FAIL_DISABLE"] = "1"
+    result = helper(env, "disable-autostart")
+    assert result.returncode == 0, result.stderr
+    assert "launchctl disable failed" in result.stderr
+    assert not agent(home).exists()
+    assert [call[0] for call in launchctl_calls(env)] == ["disable"]
+
+
+def test_disable_autostart_skip_launchctl_touches_only_the_file(mac):
+    home, env = mac
+    agent(home).parent.mkdir(parents=True)
+    agent(home).write_bytes(plistlib.dumps({"Label": LABEL, "ProgramArguments": ["lf-hub"]}))
+    env["LOCALFLOW_SKIP_LAUNCHCTL"] = "1"
+    assert helper(env, "disable-autostart").returncode == 0
+    assert not agent(home).exists()
+    assert launchctl_calls(env) == []
+
+
+def test_reenabling_from_running_app_keeps_its_job_and_defers_load(mac):
+    home, env = mac
+    rust = executable(home / "Applications/LocalFlow.app/Contents/MacOS/lf-hub")
+    env["JOB_PID"] = "4242"  # the loaded job is running the caller
+    assert helper(env, "disable-autostart").returncode == 0
+    result = helper(env, "install-rust", rust, 4242)
+    assert result.returncode == 0, result.stderr
+    assert read_agent(home)["ProgramArguments"] == [str(rust)]
+    assert read_agent(home)["RunAtLoad"] is True
+    # Disabled, then re-enabled for the next login; never stopped or doubled.
+    assert launchctl_calls(env) == [
+        ["disable", target()], ["print", target()], ["enable", target()]
+    ]
+
+
+@pytest.mark.parametrize("state", ["other-runtime", "not-loaded"])
+def test_enabling_from_running_app_stops_only_other_jobs_and_never_loads(mac, state):
+    home, env = mac
+    rust = executable(home / "Applications/LocalFlow.app/Contents/MacOS/lf-hub")
+    py = executable(home / "venv/bin/localflow")
+    agent(home).parent.mkdir(parents=True)
+    agent(home).write_bytes(plistlib.dumps({"Label": LABEL, "ProgramArguments": [str(py)]}))
+    if state == "other-runtime":
+        env["JOB_PID"] = "999"
+    else:
+        env["NOT_LOADED"] = "1"
+    result = helper(env, "install-rust", rust, 4242)
+    assert result.returncode == 0, result.stderr
+    assert read_agent(home)["ProgramArguments"] == [str(rust)]
+    assert Path(str(agent(home)) + ".python.bak").is_file()
+    kinds = [call[0] for call in launchctl_calls(env)]
+    # Loading now would start a second LocalFlow (RunAtLoad) next to the caller.
+    assert kinds == ["print", "bootout", "enable"]
+
+
+@pytest.mark.parametrize("had_agent", [False, True])
+def test_failed_enable_from_running_app_restores_without_stopping_it(mac, had_agent):
+    home, env = mac
+    rust = executable(home / "Applications/LocalFlow.app/Contents/MacOS/lf-hub")
+    agent(home).parent.mkdir(parents=True)
+    original = plistlib.dumps({"Label": LABEL, "ProgramArguments": ["/old/lf-hub"]})
+    if had_agent:
+        agent(home).write_bytes(original)
+    env.update(JOB_PID="4242", FAIL_ENABLE="1")
+    result = helper(env, "install-rust", rust, 4242)
+    assert result.returncode == 1
+    assert "launchctl enable failed: enable denied by test session" in result.stderr
+    if had_agent:
+        assert agent(home).read_bytes() == original
+    else:
+        assert not agent(home).exists()
+    assert [call[0] for call in launchctl_calls(env)] == ["print", "enable"]
+
+
+@pytest.mark.parametrize("mode,pid", [("install-rust", "abc"), ("restart-rust", "4242")])
+def test_running_pid_is_only_accepted_numerically_for_install_rust(mac, mode, pid):
+    home, env = mac
+    rust = executable(home / "Applications/LocalFlow.app/Contents/MacOS/lf-hub")
+    result = helper(env, mode, rust, pid)
+    assert result.returncode == 2
+    assert "RUNNING_PID" in result.stderr
+    assert not agent(home).exists()
+    assert launchctl_calls(env) == []
+
+
 @pytest.fixture
 def restart_mac(mac):
     home, env = mac
@@ -297,7 +421,7 @@ def test_restart_stops_external_main_and_helper_before_launching(restart_mac, ru
     assert processes['3333'] == str(rust)
     calls = [json.loads(line) for line in Path(env['CALLS']).read_text().splitlines()]
     launches = [call[1] for call in calls if call[0] == 'launchctl']
-    assert launches[:3] == ['bootout', 'bootstrap', 'kickstart']
+    assert launches[:4] == ['bootout', 'enable', 'bootstrap', 'kickstart']
     kills = [call for call in calls if call[0] == 'kill']
     if running:
         assert processes['4444'] == str(rust) + '.other'

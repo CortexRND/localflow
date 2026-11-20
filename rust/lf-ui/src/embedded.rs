@@ -8,6 +8,7 @@ use lf_runtime::{
     run::{RunOptions, RuntimeHandle, ToggleStore},
 };
 use lf_server::{Server, ServerState};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod meeting_watch;
@@ -34,12 +35,248 @@ fn dictation_backend(
     backend
 }
 
+type Engine = Arc<dyn SpeechEngine>;
+
+/// The server's speech selection. A newly selected engine waits as `pending`
+/// while any request still borrows `current`, and is promoted on the first
+/// access after that borrow ends, so two engines are never selected at once
+/// and nothing has to load either engine for the handoff to happen.
+///
+/// Engines leave the slot only by being moved into a `retired` list; they are
+/// never dropped while the slot lock is held.
+struct SpeechSlot {
+    current: Engine,
+    pending: Option<Engine>,
+}
+
+impl SpeechSlot {
+    /// Promote `pending` once nothing but the slot references `current`.
+    fn settle(&mut self, retired: &mut Vec<Engine>) {
+        if Arc::strong_count(&self.current) == 1 {
+            if let Some(pending) = self.pending.take() {
+                retired.push(std::mem::replace(&mut self.current, pending));
+            }
+        }
+    }
+
+    fn holds(&self, engine: &Engine) -> bool {
+        Arc::ptr_eq(&self.current, engine)
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| Arc::ptr_eq(pending, engine))
+    }
+}
+
+/// Drops replaced engines on one cleanup thread per holder, started on the
+/// first retirement: an engine's destructor may wait for a helper process to
+/// exit, which must never stall a request (such as status) or a lock holder.
+#[derive(Default)]
+struct Reaper {
+    sender: Option<std::sync::mpsc::Sender<Engine>>,
+    /// Engines the cleanup thread could not take yet. They are kept, never
+    /// dropped here, and handed over with the next retirement.
+    parked: Vec<Engine>,
+}
+
+impl Reaper {
+    fn retire(&mut self, retired: Vec<Engine>) {
+        self.parked.extend(retired);
+        // A stopped cleanup thread is restarted at most once per retirement.
+        for _ in 0..2 {
+            if self.parked.is_empty() {
+                return;
+            }
+            let sender = match self.sender.take() {
+                Some(sender) => sender,
+                None => match spawn_reaper() {
+                    Ok(sender) => sender,
+                    Err(error) => {
+                        log::error!("could not start speech cleanup: {error}");
+                        return;
+                    }
+                },
+            };
+            while let Some(engine) = self.parked.pop() {
+                if let Err(std::sync::mpsc::SendError(engine)) = sender.send(engine) {
+                    self.parked.push(engine);
+                    break;
+                }
+            }
+            if self.parked.is_empty() {
+                self.sender = Some(sender);
+                return;
+            }
+            log::error!("speech cleanup stopped; restarting it");
+        }
+    }
+}
+
+fn spawn_reaper() -> std::io::Result<std::sync::mpsc::Sender<Engine>> {
+    let (sender, retired) = std::sync::mpsc::channel::<Engine>();
+    std::thread::Builder::new()
+        .name("localflow-speech-cleanup".into())
+        .spawn(move || {
+            for engine in retired {
+                let release = std::panic::AssertUnwindSafe(|| drop(engine));
+                if std::panic::catch_unwind(release).is_err() {
+                    log::error!("releasing a replaced speech engine panicked");
+                }
+            }
+        })?;
+    Ok(sender)
+}
+
+struct SpeechHolder {
+    slot: Mutex<SpeechSlot>,
+    reaper: Mutex<Reaper>,
+}
+
 #[derive(Clone)]
-struct SharedSpeech(Arc<Mutex<Arc<dyn SpeechEngine>>>);
+struct SharedSpeech(Arc<SpeechHolder>);
 
 impl SharedSpeech {
-    fn current(&self) -> Arc<dyn SpeechEngine> {
-        self.0.lock().unwrap().clone()
+    fn new(engine: Engine) -> Self {
+        Self(Arc::new(SpeechHolder {
+            slot: Mutex::new(SpeechSlot {
+                current: engine,
+                pending: None,
+            }),
+            reaper: Mutex::default(),
+        }))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, SpeechSlot> {
+        // Also taken from `Held::drop`, which must not panic on poison.
+        self.0
+            .slot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Apply `change` to the settled slot. Everything it (or a promotion)
+    /// retires goes to the reaper after the slot lock is released.
+    fn update<T>(&self, change: impl FnOnce(&mut SpeechSlot, &mut Vec<Engine>) -> T) -> T {
+        let mut retired = Vec::new();
+        let value = {
+            let mut slot = self.lock();
+            slot.settle(&mut retired);
+            let value = change(&mut slot, &mut retired);
+            slot.settle(&mut retired);
+            value
+        };
+        self.retire(retired);
+        value
+    }
+
+    fn retire(&self, retired: Vec<Engine>) {
+        if !retired.is_empty() {
+            self.0
+                .reaper
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .retire(retired);
+        }
+    }
+
+    fn hold(&self, engine: Engine) -> Held {
+        Held {
+            engine: Some(engine),
+            owner: self.clone(),
+        }
+    }
+
+    /// The engine requests use now (promoting a released pending selection).
+    fn current(&self) -> Held {
+        self.hold(self.update(|slot, _| slot.current.clone()))
+    }
+
+    /// The newest selection: pending if one waits, otherwise current.
+    fn latest(&self) -> Held {
+        self.hold(self.update(|slot, _| slot.pending.as_ref().unwrap_or(&slot.current).clone()))
+    }
+
+    /// Select `engine`, immediately if `current` is unborrowed; otherwise it
+    /// replaces (retires) any older pending selection and waits for the
+    /// borrow to end.
+    fn publish(&self, engine: Engine) {
+        self.update(|slot, retired| {
+            retired.extend(slot.pending.take());
+            if Arc::ptr_eq(&slot.current, &engine) {
+                retired.push(engine);
+            } else {
+                slot.pending = Some(engine);
+            }
+        });
+    }
+
+    /// Use `engine` now (a dictation reload that already loaded it); the old
+    /// engine and an older pending selection are retired, so the latter can
+    /// never be promoted over it.
+    fn set(&self, engine: Engine) {
+        self.update(|slot, retired| {
+            retired.extend(slot.pending.take());
+            retired.push(std::mem::replace(&mut slot.current, engine));
+        });
+    }
+
+    /// Promote a pending selection whose predecessor has been released.
+    fn settle(&self) {
+        self.update(|_, _| ());
+    }
+
+    /// Take back a reference handed out by [`Held`]. One the slot still holds
+    /// cannot be the last and is dropped under the lock (so the slot cannot
+    /// retire it meanwhile); any other may be the last and goes to the reaper.
+    fn release(&self, engine: Engine) {
+        let mut retired = Vec::new();
+        {
+            let mut slot = self.lock();
+            if slot.holds(&engine) {
+                drop(engine);
+            } else {
+                retired.push(engine);
+            }
+            slot.settle(&mut retired);
+        }
+        self.retire(retired);
+    }
+}
+
+/// A reference to one of `owner`'s engines. Dropping it hands the reference
+/// back, so the last reference to a replaced engine is always dropped by the
+/// reaper, never by the request, meeting or runtime that used it.
+struct Held {
+    engine: Option<Engine>,
+    owner: SharedSpeech,
+}
+
+impl Held {
+    fn engine(&self) -> &Engine {
+        self.engine.as_ref().expect("an engine is held until drop")
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            self.owner.release(engine);
+        }
+    }
+}
+
+impl SpeechEngine for Held {
+    fn loaded(&self) -> bool {
+        self.engine().loaded()
+    }
+    fn load(&self) -> std::result::Result<(), String> {
+        self.engine().load()
+    }
+    fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> std::result::Result<String, String> {
+        self.engine().transcribe(pcm, prompt)
+    }
+    fn unload(&self) {
+        self.engine().unload();
     }
 }
 
@@ -58,71 +295,73 @@ impl SpeechEngine for SharedSpeech {
     }
 }
 
-struct PublishSpeech {
-    inner: Arc<dyn SpeechEngine>,
-    destination: SharedSpeech,
-}
+/// A dictation reload's engine; publishes itself to the server once loaded.
+struct PublishSpeech(Held);
 
+#[cfg(test)]
 fn refresh_server_speech(
     previous: &Mutex<Config>,
     shared: &SharedSpeech,
     fresh: Config,
     factory: &lf_runtime::worker::SttFactory,
-) -> Result<bool, String> {
-    let mut previous = previous.lock().unwrap();
+) -> Result<(), String> {
+    replace_server_speech(&mut previous.lock().unwrap(), shared, fresh, factory)
+}
+
+/// Select speech for `fresh` when its STT settings differ from `previous`.
+/// The engine is published, so an in-flight request keeps its engine until it
+/// finishes. On a factory error nothing changes, including `previous`.
+fn replace_server_speech(
+    previous: &mut Config,
+    shared: &SharedSpeech,
+    fresh: Config,
+    factory: &lf_runtime::worker::SttFactory,
+) -> Result<(), String> {
     if lf_runtime::live::STT_FIELDS
         .iter()
         .any(|field| previous.field(field) != fresh.field(field))
     {
-        let mut current = shared.0.lock().unwrap();
-        if Arc::strong_count(&current) > 1 {
-            return Ok(false);
-        }
-        *current = factory(&fresh)?;
+        shared.publish(factory(&fresh)?);
     }
     *previous = fresh;
-    Ok(true)
+    Ok(())
 }
 
+/// Hand STT reloads from the server to a started in-process dictation
+/// runtime. Taken under the selection lock, so a concurrent server settings
+/// change either completes before the handoff or is skipped after it.
+fn hand_off_speech(selection: &Mutex<Config>, server_owns_speech: &AtomicBool, started: bool) {
+    if started {
+        let _selection = selection.lock().unwrap();
+        server_owns_speech.store(false, Ordering::Release);
+    }
+}
+
+/// `previous` is the config the server's speech was selected from; while
+/// `update_speech` is set the server follows STT settings itself, once a
+/// dictation runtime owns speech reloads (it publishes into `shared`) it stops.
 fn watch_server_services(
-    config: Config,
+    previous: Arc<Mutex<Config>>,
     shared: SharedSpeech,
     factory: lf_runtime::worker::SttFactory,
-    update_speech: bool,
+    update_speech: Arc<AtomicBool>,
     on_config: Arc<dyn Fn(Config) + Send + Sync>,
     maintenance: lf_runtime::live::OnTick,
 ) -> Result<lf_runtime::live::WatcherGuard> {
-    let previous = Mutex::new(config);
-    let pending = Arc::new(Mutex::new(None::<Config>));
-    let retry_pending = pending.clone();
-    let retry: lf_runtime::live::OnTick = Arc::new(move || {
-        maintenance();
-        let mut pending = retry_pending.lock().unwrap();
-        if let Some(fresh) = pending.as_ref() {
-            match refresh_server_speech(&previous, &shared, fresh.clone(), &factory) {
-                Ok(true) => {
-                    pending.take();
-                }
-                Ok(false) => {}
-                Err(error) => log::error!("server speech selection failed: {error}"),
-            }
-        }
-        true
-    });
-    let apply_retry = retry.clone();
-    let apply: Arc<dyn Fn(Config) + Send + Sync> = Arc::new(move |fresh| {
-        on_config(fresh.clone());
-        if update_speech {
-            *pending.lock().unwrap() = Some(fresh);
-            apply_retry();
-        }
-    });
+    let (apply, tick) = server_speech_updates(
+        previous,
+        shared,
+        factory,
+        update_speech,
+        on_config,
+        maintenance,
+    );
     let watch = lf_runtime::live::ConfigWatcher::new(
         lf_core::config::try_config_path()?,
         Arc::new(|| lf_runtime::settings::load_runtime_config(None)),
         apply.clone(),
     )
-    .with_tick(retry, lf_runtime::live::DEFAULT_INTERVAL)
+    .with_tick(tick, lf_runtime::live::DEFAULT_INTERVAL)
     .start();
     if let Ok(fresh) = lf_runtime::settings::load_runtime_config(None) {
         apply(fresh);
@@ -130,21 +369,66 @@ fn watch_server_services(
     Ok(watch)
 }
 
+/// The settings watcher's change callback and periodic tick, without the
+/// file watcher itself (so tests can drive them without touching user config).
+#[allow(clippy::type_complexity)]
+fn server_speech_updates(
+    previous: Arc<Mutex<Config>>,
+    shared: SharedSpeech,
+    factory: lf_runtime::worker::SttFactory,
+    update_speech: Arc<AtomicBool>,
+    on_config: Arc<dyn Fn(Config) + Send + Sync>,
+    maintenance: lf_runtime::live::OnTick,
+) -> (Arc<dyn Fn(Config) + Send + Sync>, lf_runtime::live::OnTick) {
+    let tick_shared = shared.clone();
+    let tick: lf_runtime::live::OnTick = Arc::new(move || {
+        maintenance();
+        // Release a superseded engine as soon as its last request finishes.
+        tick_shared.settle();
+        true
+    });
+    let apply: Arc<dyn Fn(Config) + Send + Sync> = Arc::new(move |fresh| {
+        on_config(fresh.clone());
+        let mut previous = previous.lock().unwrap();
+        if update_speech.load(Ordering::Acquire) {
+            if let Err(error) = replace_server_speech(&mut previous, &shared, fresh, &factory) {
+                log::error!("server speech selection failed: {error}");
+            }
+        }
+    });
+    (apply, tick)
+}
+
 impl SpeechEngine for PublishSpeech {
     fn loaded(&self) -> bool {
-        self.inner.loaded()
+        self.0.loaded()
     }
     fn load(&self) -> std::result::Result<(), String> {
-        self.inner.load()?;
-        *self.destination.0.lock().unwrap() = self.inner.clone();
+        self.0.load()?;
+        self.0.owner.set(self.0.engine().clone());
         Ok(())
     }
     fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> std::result::Result<String, String> {
-        self.inner.transcribe(pcm, prompt)
+        self.0.transcribe(pcm, prompt)
     }
     fn unload(&self) {
-        self.inner.unload();
+        self.0.unload();
     }
+}
+
+/// What a server-only runtime keeps to activate dictation later on the same
+/// server and shared speech; consumed by the first successful activation.
+struct Dictation {
+    menu: MenuState,
+    shared: SharedSpeech,
+    make_speech: lf_runtime::worker::SttFactory,
+    /// The config the server's speech was last selected from.
+    selection: Arc<Mutex<Config>>,
+    /// Whether the server, not a dictation runtime, follows STT settings.
+    server_owns_speech: Arc<AtomicBool>,
+    /// Meeting capture and meeting watching may open audio (setup finished).
+    meetings: Arc<AtomicBool>,
+    meeting_config: Option<Arc<dyn Fn(Config) + Send + Sync>>,
 }
 
 pub struct EmbeddedRuntime {
@@ -155,10 +439,14 @@ pub struct EmbeddedRuntime {
     memory: crate::speech_memory::SpeechMemory,
     server_watch: Option<lf_runtime::live::WatcherGuard>,
     meeting_watch: Option<meeting_watch::MeetingWatch>,
+    dictation: Option<Dictation>,
 }
 
 impl EmbeddedRuntime {
-    pub fn start(config: Config, menu: MenuState, toggle: ToggleStore) -> Self {
+    /// Start only the local server (health, setup and Hub APIs) with lazy
+    /// shared speech. Nothing here opens audio or listens to the keyboard:
+    /// meeting capture/watching and dictation wait for [`Self::activate`].
+    pub fn start_server(config: Config, menu: MenuState) -> Self {
         let memory = crate::speech_memory::SpeechMemory::new();
         let model_memory = memory.clone();
         let error_menu = menu.clone();
@@ -176,32 +464,10 @@ impl EmbeddedRuntime {
             )
         });
         let initial = make_speech(&config).expect("lazy speech construction is infallible");
-        let shared = SharedSpeech(Arc::new(Mutex::new(initial.clone())));
+        let shared = SharedSpeech::new(initial);
         let speech: Arc<dyn SpeechEngine> = Arc::new(shared.clone());
         let server_shared = shared.clone();
-        let reload_speech = make_speech.clone();
-        let build_stt: lf_runtime::worker::SttFactory = Arc::new(move |config| {
-            Ok(Arc::new(PublishSpeech {
-                inner: reload_speech(config)?,
-                destination: shared.clone(),
-            }) as Arc<dyn SpeechEngine>)
-        });
-        let runtime = (|| -> Result<Option<RuntimeHandle>> {
-            let options = RunOptions {
-                audio: memory.audio(Box::new(lf_stt::runtime::RecorderSource::from_config(
-                    &config,
-                )?)),
-                speech: initial,
-                build_stt,
-                play_sound: Arc::new(lf_runtime::sounds::play),
-            };
-            lf_runtime::run::start_with_menu(options, menu.clone(), Some(toggle))
-        })()
-        .unwrap_or_else(|e| {
-            log::error!("dictation startup failed: {e}");
-            menu.change(|m| m.input_warning = Some(format!("Dictation unavailable: {e}")));
-            None
-        });
+        let meetings = Arc::new(AtomicBool::new(false));
         let mut meeting_watch = None;
         let server = (|| -> Result<Option<ServerHandle>> {
             let host = config.field_str("server_host").unwrap_or("127.0.0.1");
@@ -211,7 +477,10 @@ impl EmbeddedRuntime {
                 let dictation = dictation_backend(speech.clone(), &config);
                 let backend = lf_meetings_backend::MeetingsBackend::new()?
                     .with_inner(Arc::new(dictation))
-                    .with_capture(Arc::new(Capture(server_shared.clone())));
+                    .with_capture(Arc::new(Capture {
+                        speech: server_shared.clone(),
+                        allowed: meetings.clone(),
+                    }));
                 let watcher = meeting_watch::MeetingWatch::new(config.clone())?;
                 let backend: Arc<dyn lf_server::backend::Backend> =
                     Arc::new(backend.with_watcher(watcher.watcher.clone()));
@@ -236,52 +505,68 @@ impl EmbeddedRuntime {
             None
         });
         eprintln!(
-            "in-process runtime: ready; speech loaded: {}",
+            "in-process server: ready; speech loaded: {}",
             speech.loaded()
         );
         let live = Arc::new(Mutex::new(config.clone()));
         let apply_live = live.clone();
-        let watcher_callback = meeting_watch
+        let meeting_config = meeting_watch
             .as_ref()
             .map(|watcher| watcher.apply_callback());
+        let watcher_callback = meeting_config.clone();
+        let watcher_allowed = meetings.clone();
         let on_config = Arc::new(move |fresh: Config| {
             *apply_live.lock().unwrap() = fresh.clone();
-            if let Some(callback) = &watcher_callback {
-                callback(fresh);
+            // Watching probes the microphone; it waits for activation.
+            if watcher_allowed.load(Ordering::Acquire) {
+                if let Some(callback) = &watcher_callback {
+                    callback(fresh);
+                }
             }
         });
+        let selection = Arc::new(Mutex::new(config));
+        let server_owns_speech = Arc::new(AtomicBool::new(true));
         let server_state = server.as_ref().map(|server| server.state.clone());
         let server_watch = lf_core::config::try_config_path()
             .and_then(|path| {
                 let settings = Mutex::new(crate::speech_memory::RuntimeSettings::new(&path));
                 let maintenance_memory = memory.clone();
                 let maintenance: lf_runtime::live::OnTick = Arc::new(move || {
-                    let mut settings = settings.lock().unwrap();
-                    settings.reload();
-                    let enabled = live
-                        .lock()
-                        .unwrap()
-                        .field_bool("dictation_enabled")
-                        .unwrap_or(true);
-                    let mut unload = || {
-                        maintenance_memory.poll(
-                            enabled,
-                            settings.timeout,
-                            std::time::Instant::now(),
-                        );
-                    };
-                    if let Some(state) = &server_state {
-                        state.while_idle(&mut unload);
-                    } else {
-                        unload();
+                    let mut inspected = crate::speech_memory::Inspected::default();
+                    {
+                        let mut settings = settings.lock().unwrap();
+                        settings.reload();
+                        let enabled = live
+                            .lock()
+                            .unwrap()
+                            .field_bool("dictation_enabled")
+                            .unwrap_or(true);
+                        let mut unload = || {
+                            maintenance_memory.poll_holding(
+                                enabled,
+                                settings.timeout,
+                                std::time::Instant::now(),
+                                &mut inspected,
+                            );
+                        };
+                        // `while_idle` holds the meetings state lock around
+                        // the poll (and the poll holds the memory lock).
+                        if let Some(state) = &server_state {
+                            state.while_idle(&mut unload);
+                        } else {
+                            unload();
+                        }
                     }
+                    // An engine retired meanwhile may be destroyed here, after
+                    // every lock above is released.
+                    drop(inspected);
                     true
                 });
                 watch_server_services(
-                    config,
-                    server_shared,
-                    make_speech,
-                    runtime.is_none(),
+                    selection.clone(),
+                    server_shared.clone(),
+                    make_speech.clone(),
+                    server_owns_speech.clone(),
                     on_config,
                     maintenance,
                 )
@@ -293,12 +578,125 @@ impl EmbeddedRuntime {
         crate::speech_profile::start(speech.clone(), memory.clone());
         Self {
             shutting_down: false,
-            runtime,
+            runtime: None,
             server,
             speech,
             memory,
             server_watch,
             meeting_watch,
+            dictation: Some(Dictation {
+                menu,
+                shared: server_shared,
+                make_speech,
+                selection,
+                server_owns_speech,
+                meetings,
+                meeting_config,
+            }),
+        }
+    }
+
+    /// Whether [`Self::activate`] already succeeded (dictation running, or
+    /// owned by another process).
+    pub fn activated(&self) -> bool {
+        self.dictation.is_none()
+    }
+
+    /// Start dictation (recorder, keyboard listener, menu runtime) on this
+    /// already running server and shared speech, and allow meeting capture,
+    /// using `config` loaded after setup saved it. Idempotent; a failure keeps
+    /// the server serving and can be retried. Returns whether it succeeded.
+    pub fn activate(&mut self, config: Config, toggle: ToggleStore) -> bool {
+        self.activate_with(
+            config,
+            toggle,
+            |config| {
+                Ok(Box::new(lf_stt::runtime::RecorderSource::from_config(
+                    config,
+                )?))
+            },
+            lf_runtime::run::start_with_menu,
+        )
+    }
+
+    fn activate_with(
+        &mut self,
+        config: Config,
+        toggle: ToggleStore,
+        open_audio: impl FnOnce(&Config) -> Result<Box<dyn lf_runtime::engine::AudioSource>>,
+        start: impl FnOnce(RunOptions, MenuState, Option<ToggleStore>) -> Result<Option<RuntimeHandle>>,
+    ) -> bool {
+        if self.shutting_down {
+            return false;
+        }
+        let Some(dictation) = self.dictation.take() else {
+            return true;
+        };
+        dictation.menu.change(|model| {
+            model.dictation_enabled = config.field_bool("dictation_enabled").unwrap_or(true)
+        });
+        if !dictation.meetings.swap(true, Ordering::AcqRel) {
+            if let Some(apply) = &dictation.meeting_config {
+                apply(config.clone());
+            }
+        }
+        let memory = &self.memory;
+        let result = (|| -> Result<Option<RuntimeHandle>> {
+            // Dictation shares the server's newest selection; if a request
+            // still borrows the old engine, the server switches once it ends.
+            let speech: Arc<dyn SpeechEngine> = {
+                let mut selected = dictation.selection.lock().unwrap();
+                replace_server_speech(
+                    &mut selected,
+                    &dictation.shared,
+                    config.clone(),
+                    &dictation.make_speech,
+                )
+                .map_err(anyhow::Error::msg)?;
+                Arc::new(dictation.shared.latest())
+            };
+            let reload_speech = dictation.make_speech.clone();
+            let destination = dictation.shared.clone();
+            let build_stt: lf_runtime::worker::SttFactory = Arc::new(move |config| {
+                Ok(
+                    Arc::new(PublishSpeech(destination.hold(reload_speech(config)?)))
+                        as Arc<dyn SpeechEngine>,
+                )
+            });
+            let options = RunOptions {
+                audio: memory.audio(open_audio(&config)?),
+                speech,
+                build_stt,
+                play_sound: Arc::new(lf_runtime::sounds::play),
+            };
+            start(options, dictation.menu.clone(), Some(toggle))
+        })();
+        match result {
+            Ok(runtime) => {
+                hand_off_speech(
+                    &dictation.selection,
+                    &dictation.server_owns_speech,
+                    runtime.is_some(),
+                );
+                eprintln!(
+                    "in-process runtime: dictation {}",
+                    if runtime.is_some() {
+                        "ready"
+                    } else {
+                        "owned by another process"
+                    }
+                );
+                self.runtime = runtime;
+                true
+            }
+            Err(error) => {
+                log::error!("dictation startup failed: {error}");
+                dictation.menu.change(|model| {
+                    model.input_warning = Some(format!("Dictation unavailable: {error}"))
+                });
+                self.dictation = Some(dictation);
+                false
+            }
         }
     }
 
@@ -499,7 +897,22 @@ fn finish_services(server: Option<ServerShutdown>, after: impl FnOnce() + Send +
     }
 }
 
-struct Capture(SharedSpeech);
+/// Meeting capture; refuses to open audio until dictation activation (setup
+/// finished), so a server-only setup run can never initialize the recorder.
+struct Capture {
+    speech: SharedSpeech,
+    allowed: Arc<AtomicBool>,
+}
+
+impl Capture {
+    fn ensure_allowed(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.allowed.load(Ordering::Acquire),
+            "Finish LocalFlow setup before recording meetings."
+        );
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[test]
@@ -801,6 +1214,7 @@ fn shutdown_keeps_speech_available_for_final_meeting_audio() {
         memory,
         server_watch: None,
         meeting_watch: None,
+        dictation: None,
     };
     runtime.shutdown();
     runtime.shutdown();
@@ -864,7 +1278,7 @@ fn shutdown_flushes_notes_before_backend_and_signals_even_on_save_error() {
     assert!(saved.load(Ordering::SeqCst));
 }
 
-struct MeetingSpeech(Arc<dyn SpeechEngine>);
+struct MeetingSpeech(Held);
 impl lf_meetings::Transcriber for MeetingSpeech {
     fn transcribe(&self, audio: &[f32], prompt: Option<&str>) -> Result<String> {
         self.0.transcribe(audio, prompt).map_err(anyhow::Error::msg)
@@ -872,9 +1286,11 @@ impl lf_meetings::Transcriber for MeetingSpeech {
 }
 impl lf_meetings_backend::CaptureFactory for Capture {
     fn transcriber(&self, _: &Config) -> Result<Arc<dyn lf_meetings::Transcriber>> {
-        Ok(Arc::new(MeetingSpeech(self.0.current())))
+        self.ensure_allowed()?;
+        Ok(Arc::new(MeetingSpeech(self.speech.current())))
     }
     fn microphone(&self, config: &Config) -> Result<Box<dyn lf_meetings::AudioSource>> {
+        self.ensure_allowed()?;
         Ok(Box::new(
             lf_meetings::system_audio::CpalSource::microphone_named(
                 config.field_str("input_device"),
@@ -882,6 +1298,7 @@ impl lf_meetings_backend::CaptureFactory for Capture {
         ))
     }
     fn system_audio(&self, config: &Config) -> Result<Option<Box<dyn lf_meetings::AudioSource>>> {
+        self.ensure_allowed()?;
         Ok(Some(lf_meetings::system_audio::open_system_audio(
             16000,
             config.field_str("system_audio_device").unwrap_or_default(),
@@ -945,26 +1362,29 @@ mod tests {
             Ok(Arc::new(Engine(model.into())))
         });
         let original = Config::default();
-        let shared = SharedSpeech(Arc::new(Mutex::new(factory(&original).unwrap())));
+        let shared = SharedSpeech::new(factory(&original).unwrap());
         let previous = Mutex::new(original.clone());
+        let capture = Capture {
+            speech: shared.clone(),
+            allowed: Arc::new(AtomicBool::new(true)),
+        };
+        let original_model = original.field_str("model_size").unwrap().to_owned();
         let meeting =
-            lf_meetings_backend::CaptureFactory::transcriber(&Capture(shared.clone()), &original)
-                .unwrap();
+            lf_meetings_backend::CaptureFactory::transcriber(&capture, &original).unwrap();
         let mut fresh = original.clone();
         fresh.set_field("model_size", serde_json::json!("new-model"));
-        assert!(!refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap());
-        assert_eq!(
-            meeting.transcribe(&[], None).unwrap(),
-            original.field_str("model_size").unwrap()
-        );
+        refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap();
+        // The meeting keeps its engine and new requests stay on it until it ends.
+        assert_eq!(meeting.transcribe(&[], None).unwrap(), original_model);
+        assert_eq!(shared.transcribe(&[], None).unwrap(), original_model);
+        assert_eq!(shared.latest().transcribe(&[], None).unwrap(), "new-model");
         drop(meeting);
-        assert!(refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap());
         assert_eq!(shared.transcribe(&[], None).unwrap(), "new-model");
         assert!(!shared.loaded());
         let same = shared.current();
         fresh.set_field("sounds_enabled", serde_json::json!(false));
-        assert!(refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap());
-        assert!(Arc::ptr_eq(&same, &shared.current()));
+        refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap();
+        assert!(Arc::ptr_eq(same.engine(), shared.current().engine()));
         drop(same);
         fresh.set_field("model_size", serde_json::json!("invalid"));
         assert!(refresh_server_speech(&previous, &shared, fresh, &factory).is_err());
@@ -1020,21 +1440,17 @@ mod tests {
             }
         }
         let old = Arc::new(Engine("old", false, AtomicBool::new(false)));
-        let shared = SharedSpeech(Arc::new(Mutex::new(old.clone())));
+        let shared = SharedSpeech::new(old.clone());
         assert!(!shared.loaded());
         assert_eq!(shared.transcribe(&[], None).unwrap(), "old");
-        let replacement = PublishSpeech {
-            inner: Arc::new(Engine("new", false, AtomicBool::new(false))),
-            destination: shared.clone(),
-        };
+        let replacement =
+            PublishSpeech(shared.hold(Arc::new(Engine("new", false, AtomicBool::new(false)))));
         replacement.load().unwrap();
         old.unload();
         assert!(shared.loaded());
         assert_eq!(shared.transcribe(&[0.1], None).unwrap(), "new");
-        let failed = PublishSpeech {
-            inner: Arc::new(Engine("bad", true, AtomicBool::new(false))),
-            destination: shared.clone(),
-        };
+        let failed =
+            PublishSpeech(shared.hold(Arc::new(Engine("bad", true, AtomicBool::new(false)))));
         assert!(failed.load().is_err());
         assert!(shared.loaded());
         assert_eq!(shared.transcribe(&[], None).unwrap(), "new");
@@ -1169,6 +1585,599 @@ mod tests {
         assert!(healthy(&base));
         let _ = stop.send(());
         thread.join().unwrap();
+    }
+
+    struct ModelEngine(String);
+    impl SpeechEngine for ModelEngine {
+        fn loaded(&self) -> bool {
+            false
+        }
+        fn load(&self) -> Result<(), String> {
+            panic!("activation must keep speech lazy")
+        }
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+            Ok(self.0.clone())
+        }
+        fn unload(&self) {}
+    }
+
+    struct SilentAudio;
+    impl lf_runtime::engine::AudioSource for SilentAudio {
+        fn start(&mut self) -> Result<(), String> {
+            panic!("activation must not open the microphone")
+        }
+        fn stop(&mut self) -> Vec<f32> {
+            Vec::new()
+        }
+        fn is_recording(&self) -> bool {
+            false
+        }
+    }
+
+    /// A server-only runtime on an ephemeral port with fake lazy speech: no
+    /// user config, token file, real port or microphone is touched.
+    type ServerOnly = (EmbeddedRuntime, String, Capture, Arc<Mutex<Vec<Config>>>);
+
+    fn server_only(startup: Config) -> ServerOnly {
+        server_only_with(
+            startup,
+            Arc::new(|config| {
+                Ok(Arc::new(ModelEngine(
+                    config.field_str("model_size").unwrap_or_default().into(),
+                )))
+            }),
+        )
+    }
+
+    fn server_only_with(startup: Config, factory: lf_runtime::worker::SttFactory) -> ServerOnly {
+        let shared = SharedSpeech::new(factory(&startup).unwrap());
+        let state = Arc::new(ServerState::new(
+            Config::default(),
+            "test-token".into(),
+            Arc::new(lf_server::backend::UnavailableBackend),
+        ));
+        let (server, address) = ServerHandle::bind("127.0.0.1".into(), 0, state).unwrap();
+        let meetings = Arc::new(AtomicBool::new(false));
+        let watched = Arc::new(Mutex::new(Vec::new()));
+        let record = watched.clone();
+        let runtime = EmbeddedRuntime {
+            shutting_down: false,
+            runtime: None,
+            server: Some(server),
+            speech: Arc::new(shared.clone()),
+            memory: crate::speech_memory::SpeechMemory::new(),
+            server_watch: None,
+            meeting_watch: None,
+            dictation: Some(Dictation {
+                menu: MenuState::new(None, true),
+                shared: shared.clone(),
+                make_speech: factory,
+                selection: Arc::new(Mutex::new(startup)),
+                server_owns_speech: Arc::new(AtomicBool::new(true)),
+                meetings: meetings.clone(),
+                meeting_config: Some(Arc::new(move |config| record.lock().unwrap().push(config))),
+            }),
+        };
+        let capture = Capture {
+            speech: shared,
+            allowed: meetings,
+        };
+        (runtime, format!("http://{address}"), capture, watched)
+    }
+
+    fn toggle() -> ToggleStore {
+        Arc::new(|| -> Result<bool, String> { panic!("activation must not toggle dictation") })
+    }
+
+    #[test]
+    fn server_serves_health_before_activation_which_uses_fresh_config_once() {
+        use lf_meetings_backend::CaptureFactory;
+        let _writes = crate::shutdown::TestWrites::new();
+        let mut startup = Config::default();
+        startup.set_field("model_size", serde_json::json!("setup-default"));
+        let (mut runtime, base, capture, watched) = server_only(startup.clone());
+        // Setup phase: HTTP is up, nothing that records or listens is.
+        assert!(healthy(&base));
+        assert!(!runtime.activated());
+        assert!(runtime.runtime.is_none());
+        assert!(capture.transcriber(&startup).is_err());
+        assert!(capture.microphone(&startup).is_err());
+        assert!(capture.system_audio(&startup).is_err());
+        assert!(watched.lock().unwrap().is_empty());
+        // Finish saved a different microphone and model.
+        let mut fresh = startup.clone();
+        fresh.set_field("model_size", serde_json::json!("chosen-model"));
+        fresh.set_field("input_device", serde_json::json!("Chosen Mic"));
+        fresh.set_field("dictation_enabled", serde_json::json!(false));
+        let opened = Arc::new(Mutex::new(None));
+        let opened_by = opened.clone();
+        let started = Arc::new(Mutex::new(None));
+        let started_by = started.clone();
+        let health_at_start = base.clone();
+        assert!(runtime.activate_with(
+            fresh.clone(),
+            toggle(),
+            move |config| {
+                *opened_by.lock().unwrap() = config.field_str("input_device").map(str::to_owned);
+                Ok(Box::new(SilentAudio))
+            },
+            move |options, menu, toggle| {
+                *started_by.lock().unwrap() = Some((
+                    options.speech.transcribe(&[], None).unwrap(),
+                    menu.snapshot().dictation_enabled,
+                    toggle.is_some(),
+                    healthy(&health_at_start),
+                ));
+                Ok(None)
+            },
+        ));
+        assert_eq!(opened.lock().unwrap().as_deref(), Some("Chosen Mic"));
+        assert_eq!(
+            started.lock().unwrap().take(),
+            Some(("chosen-model".into(), false, true, true)),
+            "dictation must start with the saved config on the running server"
+        );
+        assert!(runtime.activated());
+        // The server kept serving and now shares the activated selection.
+        assert!(healthy(&base));
+        assert_eq!(
+            runtime.speech.transcribe(&[], None).unwrap(),
+            "chosen-model"
+        );
+        assert!(capture.transcriber(&fresh).is_ok());
+        assert_eq!(watched.lock().unwrap().len(), 1);
+        assert_eq!(
+            watched.lock().unwrap()[0].field_str("input_device"),
+            Some("Chosen Mic")
+        );
+        // Repeated Finish/Hub requests never start a second dictation runtime.
+        assert!(runtime.activate_with(
+            fresh,
+            toggle(),
+            |_| panic!("second activation opened audio"),
+            |_, _, _| panic!("second activation started dictation"),
+        ));
+        assert_eq!(watched.lock().unwrap().len(), 1);
+        runtime.shutdown();
+        assert!(!runtime.activate_with(
+            startup,
+            toggle(),
+            |_| panic!("activation after shutdown"),
+            |_, _, _| panic!("activation after shutdown"),
+        ));
+    }
+
+    #[test]
+    fn failed_activation_keeps_the_server_and_a_retry_uses_the_newer_config() {
+        let _writes = crate::shutdown::TestWrites::new();
+        let (mut runtime, base, _capture, watched) = server_only(Config::default());
+        let mut first = Config::default();
+        first.set_field("model_size", serde_json::json!("first"));
+        assert!(!runtime.activate_with(
+            first,
+            toggle(),
+            |_| anyhow::bail!("microphone permission denied"),
+            |_, _, _| panic!("dictation started without audio"),
+        ));
+        assert!(!runtime.activated());
+        assert!(healthy(&base));
+        let warning = runtime
+            .dictation
+            .as_ref()
+            .unwrap()
+            .menu
+            .snapshot()
+            .input_warning
+            .unwrap();
+        assert!(
+            warning.contains("microphone permission denied"),
+            "{warning}"
+        );
+        let mut retry = Config::default();
+        retry.set_field("model_size", serde_json::json!("retry"));
+        let started = Arc::new(Mutex::new(None));
+        let started_by = started.clone();
+        assert!(runtime.activate_with(
+            retry,
+            toggle(),
+            |_| Ok(Box::new(SilentAudio)),
+            move |options, _, _| {
+                *started_by.lock().unwrap() = Some(options.speech.transcribe(&[], None).unwrap());
+                Ok(None)
+            },
+        ));
+        assert_eq!(started.lock().unwrap().as_deref(), Some("retry"));
+        assert!(runtime.activated());
+        assert!(healthy(&base));
+        // Meeting watching was enabled once, by the first attempt.
+        assert_eq!(watched.lock().unwrap().len(), 1);
+    }
+
+    /// Every engine is distinct ("model#n", counted in `built`) and panics on
+    /// load, so assertions see engine identity and no desktop load can happen.
+    /// The model "invalid" fails selection.
+    fn numbered(built: Arc<std::sync::atomic::AtomicUsize>) -> lf_runtime::worker::SttFactory {
+        Arc::new(move |config| {
+            let model = config.field_str("model_size").unwrap_or_default();
+            if model == "invalid" {
+                return Err("selection failed".into());
+            }
+            let n = built.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Arc::new(ModelEngine(format!("{model}#{n}"))))
+        })
+    }
+
+    fn model(name: &str) -> Config {
+        let mut config = Config::default();
+        config.set_field("model_size", serde_json::json!(name));
+        config
+    }
+
+    type Recorded = Arc<Mutex<Option<Arc<dyn SpeechEngine>>>>;
+
+    /// Activates with fake audio; the dictation speech is recorded and
+    /// `Ok(None)` returned, so activation itself never hands ownership off.
+    fn activate_recording(runtime: &mut EmbeddedRuntime, config: Config) -> (bool, Recorded) {
+        let recorded: Recorded = Arc::new(Mutex::new(None));
+        let started_with = recorded.clone();
+        let activated = runtime.activate_with(
+            config,
+            toggle(),
+            |_| Ok(Box::new(SilentAudio)),
+            move |options, _, _| {
+                *started_with.lock().unwrap() = Some(options.speech);
+                Ok(None)
+            },
+        );
+        (activated, recorded)
+    }
+
+    #[test]
+    fn activation_without_in_flight_request_shares_one_engine_immediately() {
+        use std::sync::atomic::AtomicUsize;
+        let _writes = crate::shutdown::TestWrites::new();
+        let built = Arc::new(AtomicUsize::new(0));
+        let (mut runtime, _base, _capture, _watched) =
+            server_only_with(model("old"), numbered(built.clone()));
+        let owner = runtime
+            .dictation
+            .as_ref()
+            .unwrap()
+            .server_owns_speech
+            .clone();
+        let (activated, recorded) = activate_recording(&mut runtime, model("new"));
+        assert!(activated);
+        let dictation = recorded.lock().unwrap().take().unwrap();
+        assert_eq!(dictation.transcribe(&[], None).unwrap(), "new#2");
+        assert_eq!(runtime.speech.transcribe(&[], None).unwrap(), "new#2");
+        assert_eq!(built.load(Ordering::SeqCst), 2, "one engine per selection");
+        assert!(!dictation.loaded());
+        // No runtime started in-process: the server keeps following settings.
+        assert!(owner.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn activation_during_in_flight_request_switches_server_once_it_ends() {
+        use std::sync::atomic::AtomicUsize;
+        let _writes = crate::shutdown::TestWrites::new();
+        let built = Arc::new(AtomicUsize::new(0));
+        let (mut runtime, _base, capture, _watched) =
+            server_only_with(model("old"), numbered(built.clone()));
+        let in_flight = capture.speech.current();
+        let (activated, recorded) = activate_recording(&mut runtime, model("new"));
+        assert!(activated);
+        let dictation = recorded.lock().unwrap().take().unwrap();
+        assert_eq!(dictation.transcribe(&[], None).unwrap(), "new#2");
+        assert_eq!(runtime.speech.transcribe(&[], None).unwrap(), "old#1");
+        drop(in_flight);
+        // The next request promotes the pending engine, without any tick.
+        assert_eq!(runtime.speech.transcribe(&[], None).unwrap(), "new#2");
+        assert_eq!(built.load(Ordering::SeqCst), 2);
+        assert!(!dictation.loaded());
+    }
+
+    #[test]
+    fn failed_selection_during_in_flight_request_publishes_nothing_and_retry_works() {
+        use std::sync::atomic::AtomicUsize;
+        let _writes = crate::shutdown::TestWrites::new();
+        let built = Arc::new(AtomicUsize::new(0));
+        let (mut runtime, base, capture, _watched) =
+            server_only_with(model("old"), numbered(built.clone()));
+        let selection = runtime.dictation.as_ref().unwrap().selection.clone();
+        let in_flight = capture.speech.current();
+        assert!(!runtime.activate_with(
+            model("invalid"),
+            toggle(),
+            |_| panic!("audio opened after failed selection"),
+            |_, _, _| panic!("dictation started after failed selection"),
+        ));
+        assert!(!runtime.activated());
+        assert!(healthy(&base));
+        assert_eq!(
+            selection.lock().unwrap().field_str("model_size"),
+            Some("old")
+        );
+        drop(in_flight);
+        assert_eq!(
+            capture.speech.latest().transcribe(&[], None).unwrap(),
+            "old#1"
+        );
+        assert_eq!(runtime.speech.transcribe(&[], None).unwrap(), "old#1");
+        let (activated, recorded) = activate_recording(&mut runtime, model("retry"));
+        assert!(activated);
+        let dictation = recorded.lock().unwrap().take().unwrap();
+        assert_eq!(dictation.transcribe(&[], None).unwrap(), "retry#2");
+        assert_eq!(runtime.speech.transcribe(&[], None).unwrap(), "retry#2");
+        assert_eq!(built.load(Ordering::SeqCst), 2);
+    }
+
+    /// (engine, finished): `false` when its destructor starts, `true` when done.
+    type DropEvents = mpsc::Receiver<(&'static str, bool)>;
+
+    /// A lazy fake engine that reports its destruction; with a gate, the
+    /// destructor blocks until the gate is released, like a helper process
+    /// that takes a while to exit.
+    struct Tracked {
+        name: &'static str,
+        events: mpsc::Sender<(&'static str, bool)>,
+        gate: Option<Mutex<mpsc::Receiver<()>>>,
+    }
+
+    impl SpeechEngine for Tracked {
+        fn loaded(&self) -> bool {
+            false
+        }
+        fn load(&self) -> Result<(), String> {
+            panic!("retirement must not load speech")
+        }
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+            Ok(self.name.into())
+        }
+        fn unload(&self) {}
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            let _ = self.events.send((self.name, false));
+            if let Some(gate) = &self.gate {
+                let _ = gate.lock().unwrap().recv();
+            }
+            let _ = self.events.send((self.name, true));
+        }
+    }
+
+    fn tracked(
+        events: &mpsc::Sender<(&'static str, bool)>,
+        name: &'static str,
+    ) -> Arc<dyn SpeechEngine> {
+        Arc::new(Tracked {
+            name,
+            events: events.clone(),
+            gate: None,
+        })
+    }
+
+    fn next_event(events: &DropEvents) -> (&'static str, bool) {
+        events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a retired engine was never released")
+    }
+
+    /// Waits until `names` have all been fully destroyed (in any order).
+    fn expect_destroyed(events: &DropEvents, names: &[&'static str]) {
+        let mut remaining: Vec<_> = names.to_vec();
+        while !remaining.is_empty() {
+            if let (name, true) = next_event(events) {
+                let index = remaining
+                    .iter()
+                    .position(|expected| *expected == name)
+                    .unwrap_or_else(|| panic!("unexpected destruction of {name}"));
+                remaining.remove(index);
+            }
+        }
+    }
+
+    /// Runs `access` on another thread; fails instead of hanging if it blocks.
+    fn returns<T: Send + 'static>(access: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(access());
+        });
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("speech access blocked behind a retiring engine")
+    }
+
+    #[test]
+    fn newer_selections_supersede_pending_ones_and_reloads_drop_stale_pending() {
+        let (sender, events) = mpsc::channel();
+        let shared = SharedSpeech::new(tracked(&sender, "old"));
+        let in_flight = shared.current();
+        let first = tracked(&sender, "first");
+        let first_weak = Arc::downgrade(&first);
+        shared.publish(first);
+        shared.publish(tracked(&sender, "second"));
+        // The superseded pending engine is destroyed by the cleanup thread.
+        expect_destroyed(&events, &["first"]);
+        assert!(first_weak.upgrade().is_none());
+        assert_eq!(shared.latest().transcribe(&[], None).unwrap(), "second");
+        assert_eq!(shared.current().transcribe(&[], None).unwrap(), "old");
+        // A dictation reload loads its engine and sets it, even while borrowed;
+        // the older pending server selection must never be promoted over it.
+        shared.set(tracked(&sender, "reloaded"));
+        expect_destroyed(&events, &["second"]);
+        // The request's reference to the replaced engine is the last one; it
+        // goes to the cleanup thread too.
+        drop(in_flight);
+        expect_destroyed(&events, &["old"]);
+        shared.settle();
+        assert_eq!(shared.current().transcribe(&[], None).unwrap(), "reloaded");
+        assert_eq!(shared.latest().transcribe(&[], None).unwrap(), "reloaded");
+        assert!(events.try_recv().is_err(), "the selection was retired");
+    }
+
+    #[test]
+    fn promotion_on_status_returns_while_old_engine_destructor_blocks() {
+        let (sender, events) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let shared = SharedSpeech::new(Arc::new(Tracked {
+            name: "old",
+            events: sender.clone(),
+            gate: Some(Mutex::new(gate)),
+        }));
+        // A borrow outside the holder (as a long upload would) defers the
+        // new selection; ending it does not promote by itself.
+        let borrowed = shared.current().engine().clone();
+        shared.publish(tracked(&sender, "new"));
+        drop(borrowed);
+        assert!(events.try_recv().is_err());
+        // Status (`loaded`) promotes; it must not wait for the old destructor.
+        let status = shared.clone();
+        assert!(!returns(move || status.loaded()));
+        assert_eq!(next_event(&events), ("old", false), "destructor started");
+        // Other speech access proceeds while the destructor is still blocked.
+        let request = shared.clone();
+        assert_eq!(
+            returns(move || request.transcribe(&[], None).unwrap()),
+            "new"
+        );
+        let selection = shared.clone();
+        let replacement = tracked(&sender, "newer");
+        returns(move || selection.publish(replacement));
+        let request = shared.clone();
+        assert_eq!(
+            returns(move || request.transcribe(&[], None).unwrap()),
+            "newer"
+        );
+        assert!(events.try_recv().is_err(), "old destructor still blocked");
+        release.send(()).unwrap();
+        assert_eq!(next_event(&events), ("old", true));
+        // The cleanup thread then continues with later retirements.
+        expect_destroyed(&events, &["new"]);
+    }
+
+    #[test]
+    fn speech_access_without_replacement_retires_nothing() {
+        let (sender, events) = mpsc::channel();
+        let shared = SharedSpeech::new(tracked(&sender, "only"));
+        let meeting = shared.current();
+        let dictation = shared.latest();
+        assert!(!shared.loaded());
+        assert_eq!(shared.transcribe(&[], None).unwrap(), "only");
+        shared.settle();
+        drop(meeting);
+        drop(dictation);
+        shared.settle();
+        assert_eq!(shared.current().transcribe(&[], None).unwrap(), "only");
+        assert!(events.try_recv().is_err(), "nothing was destroyed");
+        assert!(
+            shared.0.reaper.lock().unwrap().sender.is_none(),
+            "no cleanup thread without a retirement"
+        );
+    }
+
+    #[test]
+    fn stopped_cleanup_thread_is_restarted_without_dropping_inline() {
+        let (sender, events) = mpsc::channel();
+        let shared = SharedSpeech::new(tracked(&sender, "old"));
+        let (dead, receiver) = mpsc::channel();
+        drop(receiver);
+        shared.0.reaper.lock().unwrap().sender = Some(dead);
+        shared.publish(tracked(&sender, "new"));
+        expect_destroyed(&events, &["old"]);
+        let reaper = shared.0.reaper.lock().unwrap();
+        assert!(reaper.parked.is_empty());
+        assert!(reaper.sender.is_some());
+    }
+
+    #[test]
+    fn handoff_stops_server_reloads_only_when_dictation_started() {
+        use std::sync::atomic::AtomicUsize;
+        let built = Arc::new(AtomicUsize::new(0));
+        let factory = numbered(built.clone());
+        let shared = SharedSpeech::new(factory(&model("old")).unwrap());
+        let selection = Arc::new(Mutex::new(model("old")));
+        let owner = Arc::new(AtomicBool::new(true));
+        let (apply, _tick) = server_speech_updates(
+            selection.clone(),
+            shared.clone(),
+            factory,
+            owner.clone(),
+            Arc::new(|_| {}),
+            Arc::new(|| true),
+        );
+        hand_off_speech(&selection, &owner, false);
+        assert!(owner.load(Ordering::Acquire));
+        apply(model("server"));
+        assert_eq!(shared.current().transcribe(&[], None).unwrap(), "server#2");
+        hand_off_speech(&selection, &owner, true);
+        assert!(!owner.load(Ordering::Acquire));
+        apply(model("ignored"));
+        assert_eq!(shared.current().transcribe(&[], None).unwrap(), "server#2");
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            2,
+            "no engine built after handoff"
+        );
+    }
+
+    #[test]
+    fn deferred_server_reload_follows_dictation_engine_after_in_flight_request_ends() {
+        use std::sync::atomic::AtomicUsize;
+        let _writes = crate::shutdown::TestWrites::new();
+        let built = Arc::new(AtomicUsize::new(0));
+        let factory = numbered(built.clone());
+        let (mut runtime, _base, capture, _watched) =
+            server_only_with(model("old"), factory.clone());
+        let inactive = runtime.dictation.as_ref().unwrap();
+        let (selection, server_owns_speech) = (
+            inactive.selection.clone(),
+            inactive.server_owns_speech.clone(),
+        );
+        // The server's settings watcher, minus the file watch on user config.
+        let (apply, tick) = server_speech_updates(
+            selection.clone(),
+            capture.speech.clone(),
+            factory,
+            server_owns_speech.clone(),
+            Arc::new(|_| {}),
+            Arc::new(|| true),
+        );
+        assert_eq!(runtime.speech.transcribe(&[], None).unwrap(), "old#1");
+        // An in-flight server upload: `SharedSpeech::transcribe` (behind the
+        // server's `DictationBackend`) holds this clone for the whole request.
+        let in_flight = capture.speech.current();
+        // Setup saved a new model; the watcher sees it while the request runs.
+        apply(model("new"));
+        assert_eq!(
+            runtime.speech.transcribe(&[], None).unwrap(),
+            "old#1",
+            "the borrowed engine cannot be replaced yet"
+        );
+        let (activated, recorded) = activate_recording(&mut runtime, model("new"));
+        assert!(activated);
+        // What activation does for `Ok(Some(RuntimeHandle))`: dictation started.
+        hand_off_speech(&selection, &server_owns_speech, true);
+        let dictation_speech = recorded.lock().unwrap().take().unwrap();
+        let dictation_model = dictation_speech.transcribe(&[], None).unwrap();
+        assert_eq!(dictation_model, "new#2");
+        // The request finishes; the watcher's next tick runs.
+        assert_eq!(Arc::strong_count(in_flight.engine()), 2);
+        drop(in_flight);
+        assert!(tick());
+        assert_eq!(
+            runtime.speech.transcribe(&[], None).unwrap(),
+            dictation_model,
+            "after the in-flight request ends the server must use the dictation \
+             runtime's new engine, not keep the old model until a desktop load"
+        );
+        // Settings changes after the handoff are the dictation runtime's to
+        // load; the server watcher no longer selects (or overwrites) speech.
+        apply(model("later"));
+        assert!(tick());
+        assert_eq!(runtime.speech.transcribe(&[], None).unwrap(), "new#2");
+        assert_eq!(built.load(Ordering::SeqCst), 2, "no duplicate engines");
+        assert!(!dictation_speech.loaded(), "nothing may load speech");
     }
 
     #[test]

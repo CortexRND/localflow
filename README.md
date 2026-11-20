@@ -35,10 +35,12 @@ it starts dictation and the menu bar in the background (reusing the login agent
 if installed, never twice) and opens the native Hub. Opening it again just
 brings the Hub to the front.
 
-The app is unsigned and not notarized, so Gatekeeper blocks it the first time
-you open it. To allow it, go to System Settings > Privacy & Security, click
-**Open Anyway** next to the message about LocalFlow, and confirm. (On macOS 15
-and later, right-click > **Open** no longer offers this bypass.)
+**Install LocalFlow** and the app are unsigned and not notarized, so Gatekeeper
+blocks each the first time you open it. Close the warning, go to System
+Settings > Privacy & Security, scroll down to Security, click **Open Anyway**
+next to the message about the app, and confirm with **Open Anyway** and your
+password or Touch ID. (On macOS 15 and later, right-click > **Open** no longer
+offers this bypass.) The DMG's `Read Me.txt` gives the same steps.
 
 **Windows:** download `Install LocalFlow.cmd` from the same release (or the
 Actions artifact) and double-click it.
@@ -86,7 +88,9 @@ curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install
 The installer is pinned to release `v0.2.0`. Without git it downloads
 `localflow-0.2.0.tar.gz` from that release and verifies it against the
 release's `SHA256SUMS` before unpacking; it stops and deletes the download if
-the hash does not match. With git it checks out the `v0.2.0` tag.
+the hash does not match. With git it checks out the `v0.2.0` tag and stops
+unless the tag and the checked-out `HEAD` are the pinned release commit
+`ab33fac896af9f10c31bc76c0f08be396a51eb68` (a commit check, not `SHA256SUMS`).
 
 Or run from a checkout:
 

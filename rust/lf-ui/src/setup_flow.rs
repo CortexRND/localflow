@@ -408,8 +408,14 @@ pub trait SetupPlatform {
 pub trait LaunchAgent {
     /// `"running"`, `"loaded, not running"`, `"not installed"`, ...
     fn status(&self) -> std::result::Result<String, String>;
+    /// Enable start on login. Called from the running app, it must neither
+    /// stop this process nor start a second copy of it.
     fn install(&self) -> std::result::Result<(), String>;
+    /// Remove the agent and stop its job (full uninstall).
     fn uninstall(&self) -> std::result::Result<(), String>;
+    /// Opt out of start on login from the running app: nothing starts at the
+    /// next login, but the current job (possibly this process) keeps running.
+    fn disable_autostart(&self) -> std::result::Result<(), String>;
 }
 
 /// A launch agent that is not available (non-macOS or not wired): status is an
@@ -425,6 +431,9 @@ impl LaunchAgent for UnavailableLaunchAgent {
         Err("launch agent management is not available".to_string())
     }
     fn uninstall(&self) -> std::result::Result<(), String> {
+        Err("launch agent management is not available".to_string())
+    }
+    fn disable_autostart(&self) -> std::result::Result<(), String> {
         Err("launch agent management is not available".to_string())
     }
 }
@@ -698,6 +707,10 @@ impl LaunchAgent for FakeLaunchAgent {
         self.record("uninstall");
         Ok(())
     }
+    fn disable_autostart(&self) -> std::result::Result<(), String> {
+        self.record("disable_autostart");
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------ models functions ---
@@ -708,6 +721,19 @@ impl LaunchAgent for FakeLaunchAgent {
 /// links no speech runtime.)
 pub fn runtime_available(platform: &dyn SetupPlatform, backend: &str) -> bool {
     platform.runtime_available(backend)
+}
+
+/// Whether the native Rust app can run a setup catalog backend, given which
+/// native engines are compiled in. MLX is never available: Rust only aliases
+/// `mlx-whisper` to whisper.cpp, whose GGML files the faster-whisper entries
+/// already select, so offering or recommending `mlx-*` would name a runtime
+/// the app does not have (and list every Whisper size twice).
+pub fn native_backend_available(backend: &str, whisper_cpp: bool, parakeet_onnx: bool) -> bool {
+    match backend {
+        "faster-whisper" => whisper_cpp,
+        "parakeet" => parakeet_onnx,
+        _ => false,
+    }
 }
 
 /// `models.available_stt_models`.
@@ -1084,7 +1110,13 @@ pub fn initial_choices(
     if cfg.field_i64("setup_version").unwrap_or(0) > 0 {
         let mut stt_id = current_stt_id(cfg, platform);
         if !available_ids.contains(&stt_id.as_str()) {
-            stt_id = recommended_stt;
+            // Keep the saved size when only its MLX runtime is missing (the
+            // native app runs the same Whisper size through whisper.cpp).
+            stt_id = stt_id
+                .strip_prefix("mlx-")
+                .map(|size| format!("fw-{size}"))
+                .filter(|id| available_ids.contains(&id.as_str()))
+                .unwrap_or(recommended_stt);
         }
         let model = text("llm_model");
         let llm_id = (provider == "ollama"
@@ -1093,8 +1125,10 @@ pub fn initial_choices(
         .then_some(model);
         let mut start_on_login = false;
         if hw.system == "Darwin" {
+            // An installed agent that is not loaded yet (enabled from the
+            // running app) still starts LocalFlow at the next login.
             if let Ok(status) = launch_agent.status() {
-                start_on_login = status.starts_with("running") || status.starts_with("loaded");
+                start_on_login = status != "not installed";
             }
         }
         return Ok(common(stt_id, llm_id, start_on_login));
@@ -1104,7 +1138,8 @@ pub fn initial_choices(
     } else {
         None
     };
-    Ok(common(recommended_stt, llm_id, false))
+    // First run: start on login is checked by default on macOS.
+    Ok(common(recommended_stt, llm_id, hw.system == "Darwin"))
 }
 
 /// `stt_config_from_id`: the STT config update for a catalog id.
@@ -1239,9 +1274,11 @@ impl SetupConfigStore for MemoryConfigStore {
     }
 }
 
-/// `apply`: write the choices to the config, then install/remove the launch
-/// agent on macOS. Returns the config path. The launch agent is only touched
-/// after the config was written, like Python.
+/// `apply`: write the choices to the config, then enable/disable start on
+/// login on macOS. Returns the config path. The launch agent is only touched
+/// after the config was written, like Python. Setup runs inside the app the
+/// agent may be running, so opting out uses
+/// [`LaunchAgent::disable_autostart`], never a stopping uninstall.
 pub fn apply(
     choices: &SetupChoices,
     store: &dyn SetupConfigStore,
@@ -1257,7 +1294,9 @@ pub fn apply(
         if choices.start_on_login {
             launch_agent.install().map_err(anyhow::Error::msg)?;
         } else if launch_agent.status().map_err(anyhow::Error::msg)? != "not installed" {
-            launch_agent.uninstall().map_err(anyhow::Error::msg)?;
+            launch_agent
+                .disable_autostart()
+                .map_err(anyhow::Error::msg)?;
         }
     }
     Ok(path)
