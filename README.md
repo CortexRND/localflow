@@ -73,7 +73,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "c64e445b02d6e78908768ead74c78ab62e1413a18e8c6703046e003d21c43a1e  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -81,7 +81,7 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "c64e445b02d6e78908768ead74c78ab62e1413a18e8c6703046e003d21c43a1e  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
 The installer is pinned to release `v0.2.0`. Without git it downloads
