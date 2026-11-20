@@ -553,23 +553,35 @@ mod tests {
             "password: abc",
             "api_key=x",
         ];
-        for (case, leak) in cases.iter().zip([
-            "1234567890abcdef",
-            "AAAA1111BBBB",
-            "plainsecretval",
-            "tok_live_ABCDEF12",
-            "eyJhbGciOiJIUzI1NiJ9.payl",
-            "hunter2hun",
-            "0123456789abcd",
-            "abc",
-            "=x",
-        ]) {
+        // Failure messages name the fixture by index only: the masker's
+        // input and output are never printed, even when a redaction fails.
+        for (index, (case, leak)) in cases
+            .iter()
+            .zip([
+                "1234567890abcdef",
+                "AAAA1111BBBB",
+                "plainsecretval",
+                "tok_live_ABCDEF12",
+                "eyJhbGciOiJIUzI1NiJ9.payl",
+                "hunter2hun",
+                "0123456789abcd",
+                "abc",
+                "=x",
+            ])
+            .enumerate()
+        {
             let masked = mask_secrets(case);
-            assert!(!masked.contains(leak), "{case:?} -> {masked:?}");
-            assert!(masked.contains("••••"), "{case:?} -> {masked:?}");
+            assert!(
+                !masked.contains(leak),
+                "secret fixture #{index}: part of the secret survived masking"
+            );
+            assert!(
+                masked.contains("••••"),
+                "secret fixture #{index}: no mask marker in the output"
+            );
         }
         // Ordinary preview text is untouched.
-        for plain in [
+        for (index, plain) in [
             "Sounds: On → Off",
             "Add “Kubernetes” to the dictionary",
             "Push-to-talk shortcut: Right Option → Right Control",
@@ -577,8 +589,14 @@ mod tests {
             "Command key: Right Option → Left Option",
             "Dictation shortcut: Hold F19",
             "Runs on this computer with accounts/fireworks/models/kimi-k3",
-        ] {
-            assert_eq!(mask_secrets(plain), plain);
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                mask_secrets(plain) == plain,
+                "plain fixture #{index} was changed by masking"
+            );
         }
     }
 
@@ -598,11 +616,12 @@ mod tests {
         );
         let mut assistant = Assistant::new(agent);
         preview(&mut assistant, "please turn off sounds");
+        // Diagnostics name the status only: assistant messages can quote the
+        // request or an error, which may carry sensitive text.
         assert_eq!(
             assistant.state.status,
             Status::Preview,
-            "{}",
-            assistant.state.message
+            "the sandbox agent didn't produce a preview"
         );
         let request = assistant.begin_apply().unwrap();
         assert!(run(&mut assistant, request));
@@ -616,8 +635,7 @@ mod tests {
         assert_eq!(assistant.state.status, Status::Error);
         assert!(
             assistant.message().contains("Sandbox"),
-            "{}",
-            assistant.message()
+            "the refusal message doesn't mention the sandbox"
         );
         for path in [&root.config_path, &root.dictionary_path] {
             assert!(path.starts_with(dir.path()));

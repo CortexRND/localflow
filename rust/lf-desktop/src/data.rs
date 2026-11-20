@@ -509,12 +509,17 @@ mod tests {
         // Storage is in memory: no cache directory, no disk inventory.
         let inventory = services.storage.inventory(&services.config()).unwrap();
         assert!(inventory.cache_dir.is_none());
-        // Secrets never reach the OS keyring.
-        services
-            .secrets
-            .set("provider_key_openai", "sandbox-only")
-            .unwrap();
-        assert_eq!(services.secrets.get("provider_key_openai"), "sandbox-only");
+        // Secrets never reach the OS keyring: a test-only entry (not any
+        // provider's key name, so a wiring regression can't clobber a real
+        // credential) round-trips through the in-memory store. The marker
+        // is this test's own temporary path, not a credential.
+        let entry = "lf_desktop_test_sandbox_roundtrip";
+        let marker = root.localflow_dir.display().to_string();
+        assert_eq!(services.secrets.get(entry), "", "starts empty");
+        services.secrets.set(entry, &marker).unwrap();
+        assert_eq!(services.secrets.get(entry), marker);
+        services.secrets.delete(entry).unwrap();
+        assert_eq!(services.secrets.get(entry), "");
         // Every path the sandbox writes stays inside it, the window lock too.
         let instance = crate::controllers::instance::instance_dir(&services.root);
         assert!(instance.starts_with(dir.path()));
