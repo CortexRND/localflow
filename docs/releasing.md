@@ -31,7 +31,12 @@ the swap fails, the previous directory and its `.venv` are restored and no
 backup is left behind. A destination that is not recognisably a LocalFlow install is
 refused, never overwritten. Running `install.sh` from inside a developer
 checkout installs that checkout as is; `LOCALFLOW_REF` remains an explicitly
-unverified git/codeload override.
+unverified git/codeload override. With a usable git, a custom ref always uses
+git, even over an existing archive install: it is cloned from
+`LOCALFLOW_REPO_URL`, fetched and checked out in a sibling staging directory,
+and swapped in (keeping `.venv`) only after every git step succeeds; a git
+failure leaves the existing install untouched and never falls back to an
+archive. Codeload is used only when no usable git is found, with a warning.
 
 The installer intentionally pins no git commit. The release tag is placed on
 the merge commit of the release branch, and that commit contains `install.sh`;

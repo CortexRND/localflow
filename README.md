@@ -74,7 +74,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "872cde7cd5c1c390b6435e2e98062675fe95fc60abb15050cd85404b0828133c  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "993649d693952bd874184791eebdd5d847f88bb14e5bc6b9b311688ae5adb612  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -82,7 +82,7 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "872cde7cd5c1c390b6435e2e98062675fe95fc60abb15050cd85404b0828133c  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "993649d693952bd874184791eebdd5d847f88bb14e5bc6b9b311688ae5adb612  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
 The installer is pinned to release `v0.2.1`. Whether or not git is installed,
@@ -119,10 +119,17 @@ run outside a checkout, the app is installed to `~/.localflow/app`; override
 it with `LOCALFLOW_HOME`.
 
 `LOCALFLOW_REF` overrides the pinned release with any branch, tag or commit
-(for example `LOCALFLOW_REF=main bash install.sh`). A fresh install
-with git clones `LOCALFLOW_REPO_URL` (default: this repository) and an existing
-git install fetches; either then checks out the ref. Otherwise the installer
-downloads GitHub's archive for the ref. This is an unverified
+(for example `LOCALFLOW_REF=main bash install.sh`). When git is usable, any
+git ref works, including remote-tracking names such as `origin/main`: a fresh
+install clones `LOCALFLOW_REPO_URL` (default: this repository) and an existing
+git install fetches; either then checks out the ref. An existing archive
+install is switched to git too: the clone, fetch and checkout happen in a
+temporary directory next to it, and the archive install (and its `.venv`, which
+is kept) is replaced only once they succeed. If any git step fails the existing
+install is left as is and the installer stops; it does not fall back to an
+archive. Only without a usable git does the installer download GitHub's
+archive for the ref, with a warning (such archives cannot resolve names like
+`origin/main`). This is an unverified
 override: the source for a custom ref is not checksum-verified, and the
 installer prints a warning saying so.
 

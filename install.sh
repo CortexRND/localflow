@@ -35,9 +35,11 @@ Environment:
   LOCALFLOW_HOME           Install location
   LOCALFLOW_REPO_URL       Git repository URL or local path (LOCALFLOW_REF git
                            installs only)
-  LOCALFLOW_REF            Git ref to check out, or tarball ref, instead of the
-                           pinned release $LOCALFLOW_RELEASE. A custom ref is NOT
-                           checksum-verified.
+  LOCALFLOW_REF            Git ref to check out (e.g. origin/main) instead of
+                           the pinned release $LOCALFLOW_RELEASE; uses git when
+                           usable (an archive install is replaced only after
+                           clone/fetch/checkout succeed), else a codeload
+                           tarball. A custom ref is NOT checksum-verified.
   LOCALFLOW_RELEASE_BASE_URL
                            Testing only: alternative location of the release
                            assets (localflow-$LOCALFLOW_VERSION.tar.gz and SHA256SUMS)
@@ -95,6 +97,7 @@ fi
 
 PYTHON=""
 USE_UV=0
+GIT_REF_INSTALLED=0
 HAVE_BREW=0
 
 if [[ "$UNINSTALL" == 1 ]]; then
@@ -287,51 +290,13 @@ git_backup_path() {
     printf '%s\n' "$candidate"
 }
 
-# Download the source tarball into $REPO, replacing older source but keeping .venv.
-# Without LOCALFLOW_REF this is the pinned release asset, verified against the
-# release's SHA256SUMS; a custom LOCALFLOW_REF uses GitHub's unverified codeload.
+# Replace $REPO with the fully prepared source in $1/src (staging directory $1,
+# a sibling of $REPO), keeping the existing .venv, then remove $1.
 # A replaced directory containing .git (a checkout, worktree or submodule) is
 # never deleted: it is renamed, intact, to a sibling backup whose path is
-# printed. Everything is downloaded and verified before $REPO is touched, and
-# a failed replacement restores the previous directory and its .venv.
-install_tarball() {
-    local parent tmp url asset="" previous backup="" venv_moved=0
-    parent="$(dirname "$REPO")"
-    mkdir -p "$parent"
-    tmp="$(mktemp -d "$parent/.localflow-download.XXXXXX")"
-    if [[ -n "${LOCALFLOW_REF:-}" ]]; then
-        url="https://codeload.github.com/CortexRND/localflow/tar.gz/$LOCALFLOW_REF"
-        echo "Downloading LocalFlow source ($LOCALFLOW_REF, not checksum-verified)..."
-    else
-        asset="localflow-$LOCALFLOW_VERSION.tar.gz"
-        url="$RELEASE_BASE_URL/$asset"
-        echo "Downloading LocalFlow $LOCALFLOW_RELEASE..."
-    fi
-    mkdir "$tmp/src"
-    if ! curl -fsSL "$url" -o "$tmp/source.tar.gz"; then
-        rm -rf "$tmp"
-        echo "Could not download LocalFlow from $url" >&2
-        exit 1
-    fi
-    if [[ -n "$asset" ]]; then
-        if ! curl -fsSL "$RELEASE_BASE_URL/SHA256SUMS" -o "$tmp/SHA256SUMS"; then
-            rm -rf "$tmp"
-            echo "Could not download LocalFlow from $RELEASE_BASE_URL/SHA256SUMS" >&2
-            exit 1
-        fi
-        if ! verify_sha256 "$tmp/source.tar.gz" "$tmp/SHA256SUMS" "$asset"; then
-            rm -rf "$tmp"
-            echo "Refusing to install: $url failed checksum verification; the download was removed." >&2
-            exit 1
-        fi
-    fi
-    if ! tar -xzf "$tmp/source.tar.gz" -C "$tmp/src" --strip-components=1 \
-        || [[ ! -f "$tmp/src/pyproject.toml" ]]; then
-        rm -rf "$tmp"
-        echo "Could not download LocalFlow from $url" >&2
-        exit 1
-    fi
-    : >"$tmp/src/.localflow-tarball"
+# printed. A failed replacement restores the previous directory and its .venv.
+publish_staged_source() {
+    local tmp="$1" previous backup="" venv_moved=0
     if [[ -e "$REPO" ]]; then
         previous="$tmp/previous"
         if [[ -e "$REPO/.git" || -L "$REPO/.git" ]]; then
@@ -391,6 +356,86 @@ install_tarball() {
         mv "$tmp/src" "$REPO"
     fi
     rm -rf "$tmp"
+}
+
+# Download the source tarball into $REPO, replacing older source but keeping .venv.
+# Without LOCALFLOW_REF this is the pinned release asset, verified against the
+# release's SHA256SUMS; a custom LOCALFLOW_REF uses GitHub's unverified codeload.
+# A replaced directory containing .git (a checkout, worktree or submodule) is
+# never deleted: it is renamed, intact, to a sibling backup whose path is
+# printed. Everything is downloaded and verified before $REPO is touched, and
+# a failed replacement restores the previous directory and its .venv.
+install_tarball() {
+    local parent tmp url asset=""
+    parent="$(dirname "$REPO")"
+    mkdir -p "$parent"
+    tmp="$(mktemp -d "$parent/.localflow-download.XXXXXX")"
+    if [[ -n "${LOCALFLOW_REF:-}" ]]; then
+        url="https://codeload.github.com/CortexRND/localflow/tar.gz/$LOCALFLOW_REF"
+        echo "Downloading LocalFlow source ($LOCALFLOW_REF, not checksum-verified)..."
+    else
+        asset="localflow-$LOCALFLOW_VERSION.tar.gz"
+        url="$RELEASE_BASE_URL/$asset"
+        echo "Downloading LocalFlow $LOCALFLOW_RELEASE..."
+    fi
+    mkdir "$tmp/src"
+    if ! curl -fsSL "$url" -o "$tmp/source.tar.gz"; then
+        rm -rf "$tmp"
+        echo "Could not download LocalFlow from $url" >&2
+        exit 1
+    fi
+    if [[ -n "$asset" ]]; then
+        if ! curl -fsSL "$RELEASE_BASE_URL/SHA256SUMS" -o "$tmp/SHA256SUMS"; then
+            rm -rf "$tmp"
+            echo "Could not download LocalFlow from $RELEASE_BASE_URL/SHA256SUMS" >&2
+            exit 1
+        fi
+        if ! verify_sha256 "$tmp/source.tar.gz" "$tmp/SHA256SUMS" "$asset"; then
+            rm -rf "$tmp"
+            echo "Refusing to install: $url failed checksum verification; the download was removed." >&2
+            exit 1
+        fi
+    fi
+    if ! tar -xzf "$tmp/source.tar.gz" -C "$tmp/src" --strip-components=1 \
+        || [[ ! -f "$tmp/src/pyproject.toml" ]]; then
+        rm -rf "$tmp"
+        echo "Could not download LocalFlow from $url" >&2
+        exit 1
+    fi
+    : >"$tmp/src/.localflow-tarball"
+    publish_staged_source "$tmp"
+}
+
+# Replace an archive install at $REPO with a git checkout of LOCALFLOW_REF
+# (unverified), cloned from LOCALFLOW_REPO_URL. The clone, fetch and checkout
+# all happen in a staging directory next to $REPO; $REPO and its .venv are
+# only touched after they succeed, and a git failure exits without falling
+# back to an archive.
+install_git_ref() {
+    local parent tmp url="${LOCALFLOW_REPO_URL:-https://github.com/CortexRND/localflow.git}"
+    parent="$(dirname "$REPO")"
+    mkdir -p "$parent"
+    tmp="$(mktemp -d "$parent/.localflow-download.XXXXXX")"
+    echo "Cloning LocalFlow from $url to check out $LOCALFLOW_REF (not checksum-verified)..."
+    if ! git clone "$url" "$tmp/src"; then
+        rm -rf "$tmp"
+        echo "Could not clone $url; $REPO was left unchanged." >&2
+        exit 1
+    fi
+    if ! git -C "$tmp/src" rev-parse --verify --quiet \
+        "${LOCALFLOW_REF}^{commit}" >/dev/null \
+        && ! git -C "$tmp/src" fetch origin "$LOCALFLOW_REF"; then
+        rm -rf "$tmp"
+        echo "Could not fetch $LOCALFLOW_REF from $url; $REPO was left unchanged." >&2
+        exit 1
+    fi
+    if ! git -C "$tmp/src" checkout "$LOCALFLOW_REF" || [[ ! -f "$tmp/src/pyproject.toml" ]]; then
+        rm -rf "$tmp"
+        echo "Could not check out $LOCALFLOW_REF from $url; $REPO was left unchanged." >&2
+        exit 1
+    fi
+    publish_staged_source "$tmp"
+    GIT_REF_INSTALLED=1
 }
 
 wait_for_ollama() {
@@ -498,7 +543,12 @@ else
         if [[ -e "$REPO/.git" ]]; then
             : # Existing git install; checked out at LOCALFLOW_REF below.
         elif [[ -f "$REPO/.localflow-tarball" ]]; then
-            install_tarball
+            if find_git; then
+                install_git_ref
+            else
+                echo "Warning: no usable git found; downloading $LOCALFLOW_REF from codeload.github.com instead (refs such as origin/main need git)." >&2
+                install_tarball
+            fi
         elif [[ -e "$REPO" ]]; then
             echo "Install destination exists but is not a LocalFlow install: $REPO" >&2
             exit 1
@@ -526,7 +576,9 @@ else
     fi
 fi
 
-if [[ ! -e "$REPO/.git" ]]; then
+if [[ "$GIT_REF_INSTALLED" -eq 1 ]]; then
+    : # Archive install just replaced by a staged checkout of LOCALFLOW_REF.
+elif [[ ! -e "$REPO/.git" ]]; then
     : # Archive install: already at the requested (and, by default, verified) release.
 elif [[ -z "${LOCALFLOW_REF:-}" && "$FROM_CHECKOUT" -ne 1 ]]; then
     # Unreachable by design: default managed installs are archive installs.
