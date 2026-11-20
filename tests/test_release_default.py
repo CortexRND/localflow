@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 import tomllib
 from pathlib import Path
 
@@ -103,11 +104,168 @@ def test_tag_workflow_publishes_complete_release_and_checksums():
     workflow = (ROOT / ".github/workflows/mac-installer.yml").read_text(encoding="utf-8")
     assert "tags:" in workflow and "'v*'" in workflow
     assert 'scripts/release-assets.sh "$GITHUB_REF_NAME"' in workflow
-    assert 'cp dist/LocalFlow-Installer.dmg dist/release/' in workflow
-    assert 'cp "packaging/windows/Install LocalFlow.cmd" dist/release/' in workflow
-    assert 'shasum -a 256 LocalFlow-Installer.dmg "Install LocalFlow.cmd" >> SHA256SUMS' in workflow
+    assert 'cp dist/LocalFlow-Installer.dmg dist/release/LocalFlow-Installer.dmg' in workflow
+    # GitHub publishes "Install LocalFlow.cmd" as "Install.LocalFlow.cmd"; the
+    # checksum must name the uploaded asset, not the local spaced file.
+    assert 'cp "packaging/windows/Install LocalFlow.cmd" dist/release/Install.LocalFlow.cmd' in workflow
+    assert 'shasum -a 256 LocalFlow-Installer.dmg Install.LocalFlow.cmd >> SHA256SUMS' in workflow
+    assert '"Install LocalFlow.cmd" >> SHA256SUMS' not in workflow
+    assert 'shasum -a 256 -c SHA256SUMS' in workflow
     assert 'gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes' in workflow
     assert 'gh release upload "$GITHUB_REF_NAME" dist/release/* --clobber' in workflow
+    assert (ROOT / "packaging/windows/Install LocalFlow.cmd").is_file()
+
+
+def _workflow_step_run(step_name: str) -> str:
+    """Return the dedented `run: |` script of a step in mac-installer.yml."""
+    lines = (ROOT / ".github/workflows/mac-installer.yml").read_text(encoding="utf-8").splitlines()
+    indent = lambda line: len(line) - len(line.lstrip())
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"- name: {step_name}")
+    step_indent = indent(lines[start])
+    body: list[str] = []
+    run_indent = None
+    for line in lines[start + 1:]:
+        if line.strip() and indent(line) <= step_indent:
+            break
+        if run_indent is None:
+            if line.strip() == "run: |":
+                run_indent = indent(line)
+            continue
+        if line.strip() and indent(line) <= run_indent:
+            break
+        body.append(line)
+    assert body, f"step {step_name!r} has no run script"
+    block_indent = min(indent(line) for line in body if line.strip())
+    return "\n".join(line[block_indent:] for line in body) + "\n"
+
+
+def _write_stub(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _run_release_publisher(tmp_path: Path, fault: str | None = None):
+    """Run the workflow's upload step against stubbed release-assets.sh and gh."""
+    version = _release_version()
+    tag = f"v{version}"
+    work = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    (work / "scripts").mkdir(parents=True)
+    (work / "packaging/windows").mkdir(parents=True)
+    bin_dir.mkdir()
+    gh_log = tmp_path / "gh.log"
+    if shutil.which("shasum") is None:
+        _write_stub(bin_dir / "shasum", '[ "$1" = -a ] && shift 2\nexec sha256sum "$@"')
+    # Every gh call appends its argv (one per line) and a terminator; `release
+    # view` fails so the create path is exercised. No network is touched.
+    _write_stub(bin_dir / "gh", 'printf \'%s\\n\' "$@" "<<end>>" >> "$GH_LOG"\n[ "$1 $2" != "release view" ]')
+    assets = textwrap.dedent(f"""\
+        set -euo pipefail
+        [ "$1" = {tag} ]
+        mkdir -p dist/release
+        printf 'tarball' > dist/release/localflow-{version}.tar.gz
+        printf 'zipball' > dist/release/localflow-{version}.zip
+        (cd dist/release && shasum -a 256 localflow-{version}.tar.gz localflow-{version}.zip > SHA256SUMS)
+    """)
+    if fault == "tampered":
+        assets += f"printf 'changed' > dist/release/localflow-{version}.zip\n"
+    if fault == "unlisted":
+        assets += "printf 'extra' > 'dist/release/Extra Asset.txt'\n"
+    _write_stub(work / "scripts/release-assets.sh", assets)
+    if fault != "missing-dmg":
+        (work / "dist").mkdir()
+        (work / "dist/LocalFlow-Installer.dmg").write_bytes(b"fake dmg bytes")
+    if fault != "missing-cmd":
+        shutil.copyfile(ROOT / "packaging/windows/Install LocalFlow.cmd", work / "packaging/windows/Install LocalFlow.cmd")
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+           "GITHUB_REF_NAME": tag, "GH_TOKEN": "unused", "GH_LOG": str(gh_log)}
+    result = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", _workflow_step_run("Upload to release")],
+                            cwd=work, env=env, capture_output=True, text=True, check=False)
+    calls = []
+    if gh_log.exists():
+        current: list[str] = []
+        for arg in gh_log.read_text(encoding="utf-8").splitlines():
+            if arg == "<<end>>":
+                calls.append(current)
+                current = []
+            else:
+                current.append(arg)
+    return result, work, calls
+
+
+@pytest.mark.skipif(BASH is None, reason="requires Bash")
+def test_release_publisher_checksums_every_asset_under_its_upload_name(tmp_path):
+    version = _release_version()
+    result, work, calls = _run_release_publisher(tmp_path)
+    assert result.returncode == 0, result.stderr
+    uploads = [c for c in calls if c[:2] == ["release", "upload"]]
+    assert len(uploads) == 1, calls
+    upload = uploads[0]
+    assert upload[2] == f"v{version}" and upload[-1] == "--clobber"
+    uploaded = {Path(p).name: work / p for p in upload[3:-1]}
+    assert set(uploaded) == {
+        f"localflow-{version}.tar.gz", f"localflow-{version}.zip",
+        "LocalFlow-Installer.dmg", "Install.LocalFlow.cmd", "SHA256SUMS",
+    }
+    sums = {}
+    for line in uploaded["SHA256SUMS"].read_text(encoding="utf-8").splitlines():
+        digest, name = line.split(maxsplit=1)
+        name = name.lstrip("*")
+        assert name not in sums, f"duplicate checksum entry for {name}"
+        sums[name] = digest
+    assert set(sums) == set(uploaded) - {"SHA256SUMS"}
+    for name, digest in sums.items():
+        assert uploaded[name].is_file(), f"{name} is checksummed but not uploaded under that name"
+        assert hashlib.sha256(uploaded[name].read_bytes()).hexdigest() == digest, name
+    assert uploaded["Install.LocalFlow.cmd"].read_bytes() == (ROOT / "packaging/windows/Install LocalFlow.cmd").read_bytes()
+    assert (work / "packaging/windows/Install LocalFlow.cmd").is_file()
+
+
+@pytest.mark.skipif(BASH is None, reason="requires Bash")
+@pytest.mark.parametrize("fault", ["missing-dmg", "missing-cmd", "tampered", "unlisted"])
+def test_release_publisher_fails_closed_before_upload(tmp_path, fault):
+    result, _, calls = _run_release_publisher(tmp_path, fault)
+    assert result.returncode != 0, result.stdout
+    assert not [c for c in calls if c[:2] in (["release", "upload"], ["release", "create"])], calls
+
+
+def _local_manifest_version(manifest: Path) -> str:
+    version = tomllib.loads(manifest.read_text(encoding="utf-8"))["package"]["version"]
+    if version != {"workspace": True}:
+        return version
+    for directory in manifest.parent.parents:
+        candidate = directory / "Cargo.toml"
+        if candidate.is_file():
+            data = tomllib.loads(candidate.read_text(encoding="utf-8"))
+            if "workspace" in data:
+                return data["workspace"]["package"]["version"]
+    raise AssertionError(f"{manifest} inherits a version but has no workspace root")
+
+
+def test_standalone_desktop_lock_matches_local_manifest_versions():
+    # rust/lf-desktop is its own workspace with its own Cargo.lock, so bumping
+    # rust/Cargo.toml (or any local manifest) leaves that lock stale until it is
+    # refreshed (docs/releasing.md).
+    desktop = ROOT / "rust/lf-desktop"
+    local = {}
+    for manifest in [*(ROOT / "rust").glob("*/Cargo.toml"), *(desktop / "vendor").glob("*/Cargo.toml")]:
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        if "package" in data:
+            name = data["package"]["name"]
+            assert name not in local, f"duplicate local package {name}"
+            local[name] = _local_manifest_version(manifest)
+    manifest = tomllib.loads((desktop / "Cargo.toml").read_text(encoding="utf-8"))
+    expected = {manifest["package"]["name"]}
+    for table in (manifest["dependencies"], manifest["patch"]["crates-io"]):
+        expected |= {name for name, spec in table.items() if isinstance(spec, dict) and "path" in spec}
+    assert {"lf-desktop", "lf-core", "lf-ui", "lf-providers", "lf-audio", "xattr"} <= expected
+    lock = tomllib.loads((desktop / "Cargo.lock").read_text(encoding="utf-8"))
+    locked = {p["name"]: p["version"] for p in lock["package"] if "source" not in p}
+    assert expected <= set(locked), f"path packages missing from rust/lf-desktop/Cargo.lock: {expected - set(locked)}"
+    assert set(locked) <= set(local), f"unknown path packages in lock: {set(locked) - set(local)}"
+    stale = {name: (version, local[name]) for name, version in locked.items() if version != local[name]}
+    assert not stale, f"rust/lf-desktop/Cargo.lock is stale (locked, manifest): {stale}"
+    assert locked["lf-core"] == _release_version()
 
 
 @pytest.mark.skipif(BASH is None, reason="requires Bash")

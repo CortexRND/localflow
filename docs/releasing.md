@@ -72,6 +72,24 @@ shasum -a 256 install.ps1 | tr a-f A-F      # uppercase digest for the install.p
 any README one-liner carries a different digest or points at a tag other than
 the current version.
 
+## Version bumps and the standalone desktop lock
+
+`rust/lf-desktop` is a standalone Cargo workspace with its own
+`rust/lf-desktop/Cargo.lock`. It depends on `lf-core`, `lf-ui`, `lf-providers`
+and `lf-audio` (and transitively other local crates) by path, so bumping
+`[workspace.package] version` in `rust/Cargo.toml`, or any local crate's own
+version, leaves that lock stale. After every such bump, refresh it without
+upgrading third-party crates:
+
+```sh
+cargo metadata --manifest-path rust/lf-desktop/Cargo.toml --format-version 1 >/dev/null
+git diff rust/lf-desktop/Cargo.lock   # expect only local path package versions to change
+```
+
+`lf-desktop` keeps its own `version` in `rust/lf-desktop/Cargo.toml`; it is not
+inherited from the root workspace. `tests/test_release_default.py` fails if any
+source-less (path) package in the desktop lock differs from its manifest version.
+
 ## Tag-triggered assets
 
 After the release branch is merged, a maintainer can tag its commit and push:
@@ -86,11 +104,17 @@ runs on `v*` tag pushes. It builds and validates the DMG on `macos-latest`, runs
 `scripts/release-assets.sh` against the tag, creates the GitHub release if needed,
 and uploads all five assets:
 
-- `Install LocalFlow.cmd`
+- `Install.LocalFlow.cmd` (the repository's `packaging/windows/Install LocalFlow.cmd`;
+  GitHub replaces spaces in asset names with dots, so the workflow copies it to
+  the dotted name and checksums that exact name)
 - `localflow-0.2.1.tar.gz`
 - `localflow-0.2.1.zip`
 - `LocalFlow-Installer.dmg`
-- `SHA256SUMS` (covers all four downloadable files)
+- `SHA256SUMS` (covers all four downloadable files, by their uploaded names)
+
+Before uploading, the workflow runs `shasum -a 256 -c SHA256SUMS` and refuses to
+publish if a payload is missing, a digest does not match, or any staged asset is
+not listed under its exact upload name.
 
 The source archives are reproducible and the tag version must match
 `pyproject.toml`. No tag or release is published just by pushing a branch.
@@ -104,8 +128,9 @@ For a manual build on a Mac, check out the tag in a clean checkout, then:
 git checkout v0.2.1
 bash scripts/build_mac_installer.sh
 bash scripts/release-assets.sh v0.2.1
-cp dist/LocalFlow-Installer.dmg dist/release/
-cp "packaging/windows/Install LocalFlow.cmd" dist/release/
-(cd dist/release && shasum -a 256 LocalFlow-Installer.dmg "Install LocalFlow.cmd" >> SHA256SUMS)
+cp dist/LocalFlow-Installer.dmg dist/release/LocalFlow-Installer.dmg
+cp "packaging/windows/Install LocalFlow.cmd" dist/release/Install.LocalFlow.cmd
+(cd dist/release && shasum -a 256 LocalFlow-Installer.dmg Install.LocalFlow.cmd >> SHA256SUMS)
+(cd dist/release && shasum -a 256 -c SHA256SUMS)
 gh release create v0.2.1 dist/release/* --verify-tag --generate-notes
 ```
