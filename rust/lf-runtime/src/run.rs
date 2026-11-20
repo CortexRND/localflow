@@ -434,11 +434,8 @@ fn start_at(
                         .err()
                         .map_or(ListenerFact::Dead, listener_failure);
                     listener_status.set_listener(fact, &reason);
-                    // Shortcuts are gone, so nothing could end a hands-free
-                    // (toggle/locked) or command recording: discard it. The
-                    // source already released held keys, so a hold gesture
-                    // has ended normally; cancel is a no-op when idle.
-                    listener_controller.note_cancel();
+                    // Hold ends, command and hands-free are discarded.
+                    crate::app::listener_lost(&hub, &listener_controller);
                     let note = match fact {
                         ListenerFact::Unsupported => "⚠︎ Global shortcuts unavailable",
                         _ => "⚠︎ Input Monitoring needed",

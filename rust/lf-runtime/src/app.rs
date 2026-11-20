@@ -79,6 +79,17 @@ pub fn hub_actions(controller: &ControllerHandle) -> HubActions {
     }
 }
 
+/// The keyboard listener exited without being asked to stop: shortcuts are
+/// gone. Held keys are let go at the hub (idempotent; the Linux source has
+/// already done it), so a hold ends normally and is transcribed while an
+/// unfinished command is cancelled, never submitted. Nothing could end a
+/// hands-free (toggle/locked) recording any more, so it is discarded; the
+/// cancel is a no-op when idle.
+pub fn listener_lost(hub: &KeyboardHub, controller: &ControllerHandle) {
+    hub.end_of_input();
+    controller.note_cancel();
+}
+
 /// The running app's config, refreshed when the file changes. Live fields
 /// merge in place; model groups are adopted whole and their clients
 /// rebuilt on the worker between jobs; shortcuts rebind on the one hub,

@@ -209,7 +209,9 @@ pub trait KeySource {
 pub const POLL: Duration = Duration::from_millis(50);
 
 /// Feed `hub` from `source` until `stop` is set (`Ok`) or the source fails
-/// (`Err`, after releasing every held key).
+/// (`Err`). Either way the held keys are then let go through
+/// [`KeyboardHub::end_of_input`], not replayed as physical key-ups: a hold
+/// ends normally, an unfinished command is cancelled rather than submitted.
 pub fn pump(
     source: &mut dyn KeySource,
     hub: &KeyboardHub,
@@ -235,9 +237,7 @@ pub fn pump(
             Err(error) => break Err(InputError::Backend(error)),
         }
     };
-    for key in translator.release_all() {
-        hub.release(key);
-    }
+    hub.end_of_input();
     result
 }
 
