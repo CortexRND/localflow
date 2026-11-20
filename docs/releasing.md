@@ -1,4 +1,4 @@
-# Releasing LocalFlow v0.2.1
+# Releasing LocalFlow v0.2.2
 
 The macOS installer defaults to the native Rust app, built for the current Mac.
 It provisions stable Rust with rustup (minimal profile) and waits up to 30 minutes
@@ -95,8 +95,8 @@ source-less (path) package in the desktop lock differs from its manifest version
 After the release branch is merged, a maintainer can tag its commit and push:
 
 ```sh
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 The existing **Mac installer** workflow (`.github/workflows/mac-installer.yml`)
@@ -107,8 +107,8 @@ and uploads all five assets:
 - `Install.LocalFlow.cmd` (the repository's `packaging/windows/Install LocalFlow.cmd`;
   GitHub replaces spaces in asset names with dots, so the workflow copies it to
   the dotted name and checksums that exact name)
-- `localflow-0.2.1.tar.gz`
-- `localflow-0.2.1.zip`
+- `localflow-0.2.2.tar.gz`
+- `localflow-0.2.2.zip`
 - `LocalFlow-Installer.dmg`
 - `SHA256SUMS` (covers all four downloadable files, by their uploaded names)
 
@@ -119,7 +119,7 @@ not listed under its exact upload name.
 The source archives are reproducible and the tag version must match
 `pyproject.toml`. No tag or release is published just by pushing a branch.
 Before announcing the release, confirm that the published
-`raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh` and
+`raw.githubusercontent.com/CortexRND/localflow/v0.2.2/install.sh` and
 `install.ps1` hash to the README digests.
 
 ### macOS DMG note for release notes
@@ -141,12 +141,12 @@ release notes:
 For a manual build on a Mac, check out the tag in a clean checkout, then:
 
 ```sh
-git checkout v0.2.1 &&
+git checkout v0.2.2 &&
 bash scripts/build_mac_installer.sh &&
-bash scripts/release-assets.sh v0.2.1 &&
+bash scripts/release-assets.sh v0.2.2 &&
 cp dist/LocalFlow-Installer.dmg dist/release/LocalFlow-Installer.dmg &&
 cp "packaging/windows/Install LocalFlow.cmd" dist/release/Install.LocalFlow.cmd &&
 (cd dist/release && shasum -a 256 LocalFlow-Installer.dmg Install.LocalFlow.cmd >> SHA256SUMS) &&
 (cd dist/release && shasum -a 256 -c SHA256SUMS) &&
-gh release create v0.2.1 dist/release/* --verify-tag --generate-notes
+gh release create v0.2.2 dist/release/* --verify-tag --generate-notes
 ```
