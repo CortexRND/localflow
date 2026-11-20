@@ -1,0 +1,51 @@
+[package]
+name = "lf-desktop"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "LocalFlow native desktop app (GPUI). Parallel front end; not the default launcher yet."
+
+# Standalone workspace: keeps GPUI's dependency tree and system libraries out
+# of the parent `rust/` workspace and its CI. Build with
+# `cargo build --manifest-path rust/lf-desktop/Cargo.toml`.
+[workspace]
+members = [".", "vendor/xattr-shim"]
+
+[[bin]]
+name = "lf-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "lf_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+gpui = "=0.2.2"
+lf-core = { path = "../lf-core" }
+lf-ui = { path = "../lf-ui" }
+lf-providers = { path = "../lf-providers" }
+lf-audio = { path = "../lf-audio" }
+dirs = "6"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+anyhow = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = "0.4"
+unicode-segmentation = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+# GPUI 0.2.2 -> zed-async-tar -> xattr 0.2.3 does not build against the libc
+# that lf-core's keyring backend requires. See vendor/xattr-shim/src/lib.rs.
+[patch.crates-io]
+xattr = { path = "vendor/xattr-shim" }
+
+[profile.dev]
+# GPUI is slow unoptimised; keep our own code debuggable.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

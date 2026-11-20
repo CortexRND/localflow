@@ -1,0 +1,125 @@
+//! Navigation destinations. Route ids are the existing Hub page names.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Page {
+    Home,
+    History,
+    Dictionary,
+    Snippets,
+    Style,
+    Ask,
+    Meetings,
+    Prompts,
+    Models,
+    Settings,
+}
+
+/// Sidebar groups: `(group label, pages)`; `None` = ungrouped.
+pub const NAV_GROUPS: [(Option<&str>, &[Page]); 3] = [
+    (None, &[Page::Home, Page::History]),
+    (
+        Some("Personalize"),
+        &[Page::Dictionary, Page::Snippets, Page::Style],
+    ),
+    (
+        Some("Workspace"),
+        &[Page::Ask, Page::Meetings, Page::Prompts],
+    ),
+];
+/// Pinned to the bottom of the sidebar.
+pub const NAV_FOOTER: [Page; 2] = [Page::Models, Page::Settings];
+
+impl Page {
+    pub const ALL: [Page; 10] = [
+        Page::Home,
+        Page::History,
+        Page::Dictionary,
+        Page::Snippets,
+        Page::Style,
+        Page::Ask,
+        Page::Meetings,
+        Page::Prompts,
+        Page::Models,
+        Page::Settings,
+    ];
+
+    /// The existing route id (`hub_route::HUB_PAGES`).
+    pub fn route(self) -> &'static str {
+        match self {
+            Page::Home => "Home",
+            Page::History => "History",
+            Page::Dictionary => "Dictionary",
+            Page::Snippets => "Hot Phrases",
+            Page::Style => "Style",
+            Page::Ask => "Ask",
+            Page::Meetings => "Meetings",
+            Page::Prompts => "Prompts",
+            Page::Models => "Models",
+            Page::Settings => "Settings",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Page::Snippets => "Snippets",
+            Page::Models => "Models & keys",
+            other => other.route(),
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Page::Home => "house",
+            Page::History => "history",
+            Page::Dictionary => "book-a",
+            Page::Snippets => "zap",
+            Page::Style => "pen-line",
+            Page::Ask => "message-circle-question",
+            Page::Meetings => "users",
+            Page::Prompts => "list-checks",
+            Page::Models => "cpu",
+            Page::Settings => "settings",
+        }
+    }
+
+    /// Typed input: route ids case-insensitively, plus "snippets".
+    pub fn parse(text: &str) -> Option<Page> {
+        let folded = text.trim().to_lowercase();
+        if folded == "snippets" {
+            return Some(Page::Snippets);
+        }
+        if folded == "setup" {
+            return Some(Page::Home);
+        }
+        let route = lf_ui::hub_route::canonical_page(text)?;
+        Page::ALL.into_iter().find(|p| p.route() == route)
+    }
+
+    /// Index in sidebar order (for Ctrl+1..0).
+    pub fn sidebar_order() -> Vec<Page> {
+        let mut pages: Vec<Page> = NAV_GROUPS
+            .iter()
+            .flat_map(|(_, p)| p.iter().copied())
+            .collect();
+        pages.extend(NAV_FOOTER);
+        pages
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_match_the_hub() {
+        for page in Page::ALL {
+            assert!(lf_ui::hub_route::HUB_PAGES.contains(&page.route()));
+            assert_eq!(Page::parse(page.route()), Some(page));
+        }
+        assert_eq!(Page::sidebar_order().len(), 10);
+        assert_eq!(
+            Page::Models.label(),
+            lf_ui::hub_model::sidebar_label("Models")
+        );
+    }
+}

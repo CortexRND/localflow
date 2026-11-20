@@ -1,0 +1,292 @@
+//! History queries (run on the background executor) and row helpers.
+
+use anyhow::Result;
+use chrono::{Local, NaiveDateTime};
+use lf_core::history::{HistoryEntry, Stats};
+use lf_ui::hub_model;
+
+use crate::data::{open_history, DataRoot};
+
+pub const PAGE_SIZE: i64 = 50;
+
+/// One background load: a page of results plus the stats.
+#[derive(Clone, Debug)]
+pub struct Loaded {
+    pub generation: u64,
+    pub query: String,
+    pub offset: i64,
+    pub entries: Vec<HistoryEntry>,
+    /// A further page exists.
+    pub more: bool,
+    pub stats: Option<Stats>,
+}
+
+/// Search `query` (empty = everything) from `offset`. Blocking.
+pub fn load(
+    root: &DataRoot,
+    generation: u64,
+    query: &str,
+    offset: i64,
+    with_stats: bool,
+) -> Result<Loaded> {
+    let store = open_history(root)?;
+    let q = Some(query.trim()).filter(|q| !q.is_empty());
+    let mut entries = store.recent(PAGE_SIZE + 1, q, offset)?;
+    let more = entries.len() as i64 > PAGE_SIZE;
+    entries.truncate(PAGE_SIZE as usize);
+    let stats = if with_stats {
+        Some(store.stats(None)?)
+    } else {
+        None
+    };
+    Ok(Loaded {
+        generation,
+        query: query.to_string(),
+        offset,
+        entries,
+        more,
+        stats,
+    })
+}
+
+/// The History list: backend pages plus, separately, one entry opened from
+/// elsewhere (an Ask citation, a Home row) that isn't in the loaded pages.
+///
+/// The page cursor counts only rows that came from backend pages, so opening
+/// an older entry never shifts `Load more` (no skipped rows) and that entry
+/// is never listed twice when its page arrives.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Listing {
+    /// Rows from backend pages, newest first, no duplicates.
+    pub entries: Vec<HistoryEntry>,
+    /// Backend offset of the next page.
+    cursor: i64,
+    pub more: bool,
+    /// Shown in the detail pane only.
+    cited: Option<HistoryEntry>,
+}
+
+impl Listing {
+    pub fn next_offset(&self) -> i64 {
+        self.cursor
+    }
+
+    /// Apply a loaded page (offset 0 replaces the list).
+    pub fn apply(&mut self, loaded: Loaded) {
+        if loaded.offset == 0 {
+            self.entries.clear();
+        }
+        let fetched = loaded.entries.len() as i64;
+        for entry in loaded.entries {
+            // Rows added at the top between pages shift offsets; never list one twice.
+            if !self.entries.iter().any(|e| e.id == entry.id) {
+                self.entries.push(entry);
+            }
+        }
+        self.cursor = loaded.offset + fetched;
+        self.more = loaded.more;
+        if self
+            .cited
+            .as_ref()
+            .is_some_and(|c| self.entries.iter().any(|e| e.id == c.id))
+        {
+            self.cited = None; // its page arrived: it's a normal row now
+        }
+    }
+
+    /// Show an entry that isn't in the loaded pages (detail only).
+    pub fn cite(&mut self, entry: HistoryEntry) {
+        if self.entries.iter().any(|e| e.id == entry.id) {
+            self.cited = None;
+        } else {
+            self.cited = Some(entry);
+        }
+    }
+
+    pub fn in_pages(&self, id: i64) -> bool {
+        self.entries.iter().any(|e| e.id == id)
+    }
+
+    /// A listed or cited entry.
+    pub fn find(&self, id: i64) -> Option<&HistoryEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .or(self.cited.as_ref().filter(|c| c.id == id))
+    }
+
+    /// The entry was deleted from the store. Returns its list index. A
+    /// deleted paged row moves every later backend offset up by one.
+    pub fn remove(&mut self, id: i64) -> Option<usize> {
+        if self.cited.as_ref().is_some_and(|c| c.id == id) {
+            self.cited = None;
+        }
+        let index = self.entries.iter().position(|e| e.id == id)?;
+        self.entries.remove(index);
+        self.cursor = (self.cursor - 1).max(0);
+        Some(index)
+    }
+}
+
+pub fn now() -> NaiveDateTime {
+    Local::now().naive_local()
+}
+
+/// "Today", "Yesterday" or a date, for day separators.
+pub fn day_label(ts: f64, now: NaiveDateTime) -> String {
+    let when = hub_model::history_when(ts).date();
+    let today = now.date();
+    if when == today {
+        "Today".into()
+    } else if Some(when) == today.pred_opt() {
+        "Yesterday".into()
+    } else {
+        when.format("%A, %B %-d").to_string()
+    }
+}
+
+/// Time of day for a row.
+pub fn time_label(ts: f64) -> String {
+    hub_model::history_when(ts).format("%-I:%M %p").to_string()
+}
+
+/// The text shown for an entry.
+pub fn row_text(entry: &HistoryEntry) -> String {
+    hub_model::history_row_text(&entry.final_text, &entry.raw_text)
+}
+
+/// Whether "Copy original" adds anything.
+pub fn has_distinct_original(entry: &HistoryEntry) -> bool {
+    !entry.raw_text.is_empty() && entry.raw_text != entry.final_text
+}
+
+pub fn delete(root: &DataRoot, id: i64) -> Result<bool> {
+    open_history(root)?.delete(id)
+}
+
+pub fn clear(root: &DataRoot) -> Result<i64> {
+    open_history(root)?.clear()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lf_core::history::NewEntry;
+
+    fn seeded(n: usize) -> (tempfile::TempDir, DataRoot) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = DataRoot::sandbox(dir.path());
+        let store = open_history(&root).unwrap();
+        for i in 0..n {
+            let mut e = NewEntry::new("dictate");
+            e.raw_text = format!("raw {i}");
+            e.final_text = if i % 2 == 0 {
+                format!("Even item {i}.")
+            } else {
+                format!("Odd item {i}.")
+            };
+            e.ts = Some(1_800_000_000.0 + i as f64);
+            store.add(&e).unwrap();
+        }
+        (dir, root)
+    }
+
+    #[test]
+    fn pages_and_searches() {
+        let (_d, root) = seeded(120);
+        let first = load(&root, 1, "", 0, true).unwrap();
+        assert_eq!(first.entries.len(), PAGE_SIZE as usize);
+        assert!(first.more);
+        assert_eq!(first.stats.unwrap().total_dictations, 120);
+        let last = load(&root, 2, "", 100, false).unwrap();
+        assert_eq!(last.entries.len(), 20);
+        assert!(!last.more);
+        let odd = load(&root, 3, "odd", 0, false).unwrap();
+        assert!(odd.entries.iter().all(|e| e.final_text.starts_with("Odd")));
+        assert_eq!(odd.entries.len(), PAGE_SIZE as usize);
+        let none = load(&root, 4, "zzz-no-match", 0, false).unwrap();
+        assert!(none.entries.is_empty());
+    }
+
+    #[test]
+    fn delete_and_clear_are_durable() {
+        let (_d, root) = seeded(3);
+        let id = load(&root, 1, "", 0, false).unwrap().entries[0].id;
+        assert!(delete(&root, id).unwrap());
+        assert!(!delete(&root, id).unwrap());
+        assert_eq!(load(&root, 2, "", 0, false).unwrap().entries.len(), 2);
+        assert_eq!(clear(&root).unwrap(), 2);
+        assert!(load(&root, 3, "", 0, false).unwrap().entries.is_empty());
+    }
+
+    fn ids(rows: &[HistoryEntry]) -> Vec<i64> {
+        rows.iter().map(|e| e.id).collect()
+    }
+
+    /// 130 entries, an older one opened from a citation before paging: every
+    /// page is complete and ordered, nothing is skipped or listed twice.
+    #[test]
+    fn citing_an_older_entry_does_not_disturb_paging() {
+        let (_d, root) = seeded(130);
+        let all = open_history(&root).unwrap().recent(1000, None, 0).unwrap();
+        assert_eq!(all.len(), 130);
+        let mut list = Listing::default();
+        list.apply(load(&root, 1, "", 0, false).unwrap());
+        assert_eq!(list.next_offset(), 50);
+        // Open entry #120 (far beyond the first page) from a citation.
+        let older = all[120].clone();
+        assert!(!list.in_pages(older.id));
+        list.cite(older.clone());
+        assert_eq!(
+            list.find(older.id),
+            Some(&older),
+            "shown in the detail pane"
+        );
+        assert_eq!(list.entries.len(), 50, "but not inserted into the list");
+        assert_eq!(list.next_offset(), 50, "the page cursor is unchanged");
+        while list.more {
+            let offset = list.next_offset();
+            list.apply(load(&root, 2, "", offset, false).unwrap());
+        }
+        assert_eq!(
+            ids(&list.entries),
+            ids(&all),
+            "complete, ordered, no duplicates"
+        );
+        assert!(list.find(older.id).is_some(), "now a normal row");
+        assert_eq!(list.entries.iter().filter(|e| e.id == older.id).count(), 1);
+    }
+
+    #[test]
+    fn deleting_a_loaded_row_keeps_the_next_page_aligned() {
+        let (_d, root) = seeded(120);
+        let all = open_history(&root).unwrap().recent(1000, None, 0).unwrap();
+        let mut list = Listing::default();
+        list.apply(load(&root, 1, "", 0, false).unwrap());
+        let victim = list.entries[10].id;
+        assert!(delete(&root, victim).unwrap());
+        assert_eq!(list.remove(victim), Some(10));
+        while list.more {
+            let offset = list.next_offset();
+            list.apply(load(&root, 2, "", offset, false).unwrap());
+        }
+        let expected: Vec<i64> = ids(&all).into_iter().filter(|id| *id != victim).collect();
+        assert_eq!(ids(&list.entries), expected);
+        // Removing a cited (out-of-page) entry doesn't move the cursor.
+        let mut list = Listing::default();
+        list.apply(load(&root, 3, "", 0, false).unwrap());
+        list.cite(all[100].clone());
+        assert_eq!(list.remove(all[100].id), None);
+        assert_eq!(list.next_offset(), 50);
+        assert!(list.find(all[100].id).is_none());
+    }
+
+    #[test]
+    fn original_is_distinct_only_when_different() {
+        let (_d, root) = seeded(1);
+        let mut e = load(&root, 1, "", 0, false).unwrap().entries.remove(0);
+        assert!(has_distinct_original(&e));
+        e.raw_text = e.final_text.clone();
+        assert!(!has_distinct_original(&e));
+    }
+}

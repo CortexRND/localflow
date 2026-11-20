@@ -1,0 +1,23 @@
+[package]
+name = "xattr"
+# Same version as the crates.io release it stands in for (see src/lib.rs).
+version = "0.2.3"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "lf-desktop compatibility shim: xattr 0.2 API backed by upstream xattr 1.x"
+
+[lib]
+name = "xattr"
+path = "src/lib.rs"
+
+[dependencies]
+# Upstream xattr 1.x under an alias. Its requirement is not 0.2-compatible, so
+# the `[patch.crates-io]` entry that points `xattr 0.2` here never captures it.
+upstream = { package = "xattr", version = "1", default-features = false }
+
+[features]
+default = ["unsupported"]
+# Mirrors xattr's feature of the same name: build (and report errors at run
+# time) on platforms without extended attributes.
+unsupported = ["upstream/unsupported"]
