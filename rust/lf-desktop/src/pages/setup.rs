@@ -26,6 +26,8 @@ pub struct SetupView {
     device_values: Vec<String>,
     ticking: bool,
     polling_jobs: bool,
+    /// Which job kinds ran at the last poll (refresh each as it finishes).
+    job_watch: jobs::KindWatch,
 }
 
 impl SetupView {
@@ -41,6 +43,7 @@ impl SetupView {
             }
         })
         .detach();
+        let job_watch = jobs::KindWatch::new(&pcx.services.downloads);
         let mut view = SetupView {
             pcx,
             flow: None,
@@ -49,6 +52,7 @@ impl SetupView {
             device_values: Vec::new(),
             ticking: false,
             polling_jobs: false,
+            job_watch,
         };
         view.build(cx);
         view
@@ -424,8 +428,15 @@ impl SetupView {
         }
     }
 
-    /// Repaint while any job runs; re-inspect when one finishes.
+    /// Repaint while any job runs. Each kind is refreshed as soon as its last
+    /// job ends (speech inventory, Ollama list), not only when every job has
+    /// ended: the trial needs only speech, so a speech model that finished
+    /// is usable while a cleanup pull still runs.
     fn poll_jobs(&mut self, cx: &mut Context<Self>) {
+        // Hand out any completion that ended before this poll began (the
+        // watch counts finishes, so none is missed between polls).
+        let finished = self.job_watch.observe(&self.pcx.services.downloads);
+        self.refresh_finished(finished, cx);
         if self.polling_jobs {
             return;
         }
@@ -436,8 +447,11 @@ impl SetupView {
                 .await;
             let go_on = this
                 .update(cx, |this, cx| {
+                    let finished = this.job_watch.observe(&this.pcx.services.downloads);
                     let running = this.pcx.services.downloads.any_running();
-                    if !running {
+                    if running {
+                        this.refresh_finished(finished, cx);
+                    } else {
                         this.polling_jobs = false;
                         this.inspect(cx);
                         this.load_ollama_if_local(cx);
@@ -451,6 +465,17 @@ impl SetupView {
             }
         })
         .detach();
+    }
+
+    /// Refresh only what a finished kind changed (at most once per kind per
+    /// finish; generations drop results that a newer refresh replaced).
+    fn refresh_finished(&mut self, finished: jobs::Finished, cx: &mut Context<Self>) {
+        if finished.speech {
+            self.inspect(cx);
+        }
+        if finished.cleanup {
+            self.load_ollama_if_local(cx);
+        }
     }
 
     fn load_ollama_if_local(&mut self, cx: &mut Context<Self>) {

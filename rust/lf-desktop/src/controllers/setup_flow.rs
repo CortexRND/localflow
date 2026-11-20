@@ -1877,6 +1877,68 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_speech_download_unblocks_the_trial_while_a_cleanup_pull_runs() {
+        use crate::controllers::jobs::{cleanup_key, speech_key, Downloads, KindWatch};
+        use std::sync::mpsc;
+        let mut flow = new_flow(&Config::defaults_for(false));
+        let id = flow.choices.stt_id.clone();
+        // What the fake cache reports; only a finished download writes it.
+        let on_disk = Arc::new(Mutex::new(false));
+        let inspect = |flow: &mut SetupFlow, on_disk: &Arc<Mutex<bool>>| {
+            let g = flow.begin_fact(Fact::Installed);
+            let found = HashMap::from([(id.clone(), *on_disk.lock().unwrap())]);
+            assert!(flow.installed_done(g, Ok(found)));
+        };
+        inspect(&mut flow, &on_disk);
+        assert!(flow.trial_blocker(true, None).unwrap().contains("Download"));
+
+        let downloads = Downloads::new();
+        let mut watch = KindWatch::new(&downloads);
+        let gated = |gate: mpsc::Receiver<()>, done: Option<Arc<Mutex<bool>>>| {
+            Box::new(move |_: lf_ui::setup_backend::ProgressCallback, _| {
+                gate.recv().map_err(|e| e.to_string())?;
+                if let Some(done) = done {
+                    *done.lock().unwrap() = true;
+                }
+                Ok(())
+            }) as crate::controllers::jobs::Work
+        };
+        let (speech_go, speech_gate) = mpsc::channel();
+        let (cleanup_go, cleanup_gate) = mpsc::channel();
+        assert!(downloads.start(&speech_key(&id), gated(speech_gate, Some(on_disk.clone()))));
+        assert!(downloads.start(&cleanup_key("llama3.2:3b"), gated(cleanup_gate, None)));
+        // Both running: nothing finished, nothing re-inspected as installed.
+        assert_eq!(watch.observe(&downloads), Default::default());
+        assert_eq!(watch.observe(&downloads), Default::default());
+
+        // Speech finishes first; the cleanup pull keeps running.
+        speech_go.send(()).unwrap();
+        assert!(
+            downloads.wait_not_running(&speech_key(&id), Duration::from_secs(5)),
+            "the speech job never ended"
+        );
+        assert!(downloads.any_running(), "cleanup still running");
+        let finished = watch.observe(&downloads);
+        assert!(finished.speech && !finished.cleanup, "{finished:?}");
+        // The page refreshes speech now (not after cleanup), once.
+        inspect(&mut flow, &on_disk);
+        assert_eq!(flow.installed(&id), Some(true));
+        assert_eq!(flow.trial_blocker(true, None), None, "trial available");
+        assert_eq!(watch.observe(&downloads), Default::default(), "no repeat");
+
+        // A stale inspection started before the finish can't undo it.
+        let stale = flow.begin_fact(Fact::Installed);
+        inspect(&mut flow, &on_disk);
+        assert!(!flow.installed_done(stale, Ok(HashMap::from([(id.clone(), false)]))));
+        assert_eq!(flow.installed(&id), Some(true));
+
+        cleanup_go.send(()).unwrap();
+        assert!(downloads.wait_idle(Duration::from_secs(3)));
+        let finished = watch.observe(&downloads);
+        assert!(finished.cleanup && !finished.speech, "{finished:?}");
+    }
+
+    #[test]
     fn cleanup_modes_map_to_config_update_exactly() {
         let mut flow = new_flow(&Config::defaults_for(false));
         flow.set_cleanup(CleanupMode::Off);

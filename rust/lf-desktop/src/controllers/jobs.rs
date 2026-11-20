@@ -8,7 +8,7 @@
 //! "Cancelling…" until the worker really returns.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -82,6 +82,34 @@ struct Shared {
     changed: Condvar,
     /// Speech-model deletions in flight (see [`Downloads::begin_delete`]).
     deleting: std::sync::atomic::AtomicUsize,
+    /// How many speech / cleanup jobs have ended (done, failed or
+    /// cancelled). Bumped under the `jobs` lock in the same step that ends
+    /// the job, so a reader holding that lock sees both together.
+    finished: [AtomicU64; 2],
+}
+
+const SPEECH: usize = 0;
+const CLEANUP: usize = 1;
+
+fn kind_of(key: &str) -> Option<usize> {
+    if key.starts_with("speech:") {
+        Some(SPEECH)
+    } else if key.starts_with("cleanup:") {
+        Some(CLEANUP)
+    } else {
+        None
+    }
+}
+
+/// One consistent reading of job lifecycles, taken under the jobs lock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lifecycle {
+    pub speech_running: bool,
+    pub cleanup_running: bool,
+    /// Ever-increasing count of ended speech jobs.
+    pub speech_finished: u64,
+    /// Ever-increasing count of ended cleanup jobs.
+    pub cleanup_finished: u64,
 }
 
 /// Why a speech download didn't start: a model folder is being deleted.
@@ -212,6 +240,9 @@ impl Downloads {
                 Err(_) if cancel.load(Ordering::Acquire) => JobState::Cancelled,
                 Err(error) => JobState::Failed(one_line(&error)),
             };
+            if let Some(kind) = kind_of(key) {
+                self.shared.finished[kind].fetch_add(1, Ordering::AcqRel);
+            }
         }
         drop(jobs);
         self.shared.changed.notify_all();
@@ -256,6 +287,43 @@ impl Downloads {
 
     pub fn any_running(&self) -> bool {
         !self.running().is_empty()
+    }
+
+    /// Running flags and finish counts per kind, read under one lock.
+    pub fn lifecycle(&self) -> Lifecycle {
+        let jobs = self.lock();
+        let running = |kind| {
+            jobs.iter()
+                .any(|(k, e)| kind_of(k) == Some(kind) && e.state.running())
+        };
+        Lifecycle {
+            speech_running: running(SPEECH),
+            cleanup_running: running(CLEANUP),
+            speech_finished: self.shared.finished[SPEECH].load(Ordering::Acquire),
+            cleanup_finished: self.shared.finished[CLEANUP].load(Ordering::Acquire),
+        }
+    }
+
+    /// Wait (bounded) until `key` isn't running; `true` when it isn't.
+    #[cfg(test)]
+    pub fn wait_not_running(&self, key: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut jobs = self.lock();
+        loop {
+            if !jobs.get(key).is_some_and(|e| e.state.running()) {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            jobs = self
+                .shared
+                .changed
+                .wait_timeout(jobs, deadline - now)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
     }
 
     /// Forget a finished job (its row returns to the idle state).
@@ -314,6 +382,52 @@ impl Downloads {
     }
 }
 
+/// Which kinds of model job stopped running since the previous observation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Finished {
+    pub speech: bool,
+    pub cleanup: bool,
+}
+
+/// Tells a page when speech downloads or cleanup pulls have ended since it
+/// last refreshed, so it can refresh what one kind changed without waiting
+/// for the other (a finished speech model must not wait for an unrelated
+/// Ollama pull). It compares the registry's finish counts, not sampled busy
+/// states, so a job that started and ended between two polls — or before
+/// the first one, or a retry of the same key — is never missed. A kind's
+/// completions are handed out only once none of its jobs runs, so files
+/// another job of that kind is still writing are never re-inspected; each
+/// batch of completions is handed out exactly once.
+#[derive(Debug)]
+pub struct KindWatch {
+    speech: u64,
+    cleanup: u64,
+}
+
+impl KindWatch {
+    /// Start watching: completions from before now are already reflected.
+    pub fn new(downloads: &Downloads) -> Self {
+        let now = downloads.lifecycle();
+        KindWatch {
+            speech: now.speech_finished,
+            cleanup: now.cleanup_finished,
+        }
+    }
+
+    pub fn observe(&mut self, downloads: &Downloads) -> Finished {
+        let now = downloads.lifecycle();
+        let speech = !now.speech_running && now.speech_finished != self.speech;
+        let cleanup = !now.cleanup_running && now.cleanup_finished != self.cleanup;
+        if speech {
+            self.speech = now.speech_finished;
+        }
+        if cleanup {
+            self.cleanup = now.cleanup_finished;
+        }
+        Finished { speech, cleanup }
+    }
+}
+
 /// Registry key of a speech model download.
 pub fn speech_key(model_id: &str) -> String {
     format!("speech:{model_id}")
@@ -328,6 +442,104 @@ pub fn cleanup_key(model_id: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn quick() -> Work {
+        Box::new(|_, _| Ok(()))
+    }
+
+    fn gated() -> (mpsc::Sender<()>, Work) {
+        let (go, gate) = mpsc::channel::<()>();
+        let work: Work = Box::new(move |_, _| gate.recv().map_err(|e| e.to_string()));
+        (go, work)
+    }
+
+    const NOTHING: Finished = Finished {
+        speech: false,
+        cleanup: false,
+    };
+    const SPEECH_ONLY: Finished = Finished {
+        speech: true,
+        cleanup: false,
+    };
+
+    #[test]
+    fn a_speech_job_that_ends_before_the_first_poll_is_not_missed() {
+        let downloads = Downloads::new();
+        let mut watch = KindWatch::new(&downloads);
+        let (cleanup_go, cleanup) = gated();
+        assert!(downloads.start(&cleanup_key("llama3.2:3b"), cleanup));
+        // Started and finished before any poll ever saw it running.
+        assert!(downloads.start(&speech_key("fw-base"), quick()));
+        assert!(downloads.wait_not_running(&speech_key("fw-base"), WAIT));
+        assert!(downloads.any_running(), "cleanup is still active");
+        assert_eq!(watch.observe(&downloads), SPEECH_ONLY);
+        // Each completion fires once, however often the page polls.
+        assert_eq!(watch.observe(&downloads), NOTHING);
+        assert_eq!(watch.observe(&downloads), NOTHING);
+        cleanup_go.send(()).unwrap();
+        assert!(downloads.wait_idle(WAIT));
+        assert_eq!(
+            watch.observe(&downloads),
+            Finished {
+                speech: false,
+                cleanup: true
+            }
+        );
+        assert_eq!(watch.observe(&downloads), NOTHING);
+    }
+
+    #[test]
+    fn a_same_key_retry_that_ends_between_polls_is_not_missed() {
+        let downloads = Downloads::new();
+        let mut watch = KindWatch::new(&downloads);
+        let key = speech_key("fw-base");
+        let failing: Work = Box::new(|_, _| Err("network down".into()));
+        assert!(downloads.start(&key, failing));
+        assert!(downloads.wait_not_running(&key, WAIT));
+        assert_eq!(watch.observe(&downloads), SPEECH_ONLY);
+        // Retry of the same key, started and done entirely between polls:
+        // the job's state looks exactly as idle as before, yet it counts.
+        assert!(downloads.start(&key, quick()));
+        assert!(downloads.wait_not_running(&key, WAIT));
+        assert_eq!(downloads.state(&key), Some(JobState::Done));
+        assert_eq!(watch.observe(&downloads), SPEECH_ONLY);
+        assert_eq!(watch.observe(&downloads), NOTHING);
+    }
+
+    #[test]
+    fn another_running_speech_job_defers_the_refresh_until_speech_is_idle() {
+        let downloads = Downloads::new();
+        let mut watch = KindWatch::new(&downloads);
+        let (slow_go, slow) = gated();
+        assert!(downloads.start(&speech_key("fw-large"), slow));
+        assert!(downloads.start(&speech_key("fw-base"), quick()));
+        assert!(downloads.wait_not_running(&speech_key("fw-base"), WAIT));
+        // fw-large is still writing: no speech refresh, and the finished
+        // fw-base completion is kept rather than consumed.
+        assert_eq!(watch.observe(&downloads), NOTHING);
+        assert_eq!(watch.observe(&downloads), NOTHING);
+        slow_go.send(()).unwrap();
+        assert!(downloads.wait_idle(WAIT));
+        // Both completions are handed out together, once.
+        assert_eq!(watch.observe(&downloads), SPEECH_ONLY);
+        assert_eq!(watch.observe(&downloads), NOTHING);
+    }
+
+    #[test]
+    fn completions_from_before_the_watch_started_are_not_refired() {
+        let downloads = Downloads::new();
+        assert!(downloads.start(&speech_key("fw-base"), quick()));
+        assert!(downloads.wait_idle(WAIT));
+        let mut watch = KindWatch::new(&downloads);
+        assert_eq!(watch.observe(&downloads), NOTHING);
+        // A refused start (deletion in progress) ends nothing.
+        let guard = downloads.begin_delete().unwrap();
+        assert!(!downloads.start(&speech_key("fw-small"), quick()));
+        drop(guard);
+        assert_eq!(watch.observe(&downloads), NOTHING);
+    }
 
     fn progress(done: u64, total: u64) -> DownloadProgress {
         DownloadProgress {
