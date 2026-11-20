@@ -19,7 +19,7 @@ gate holds. The full feature matrix is in
 
 | Step | PR scope | Acceptance gate before the next step |
 |---|---|---|
-| **1. Parallel front end** (this PR) | Native app beside the existing ones. Home, History, Dictionary, Snippets, Style, Settings and Models & keys are connected to the real stores and config. Ask, Meetings and Prompts use the existing local HTTP service. Isolated `--sandbox`. Dedicated `gpui.yml` CI | Linux and macOS CI green (`gpui.yml`). A testing agent drives every page in the sandbox and in real mode. No existing launcher, installer or CI job changed |
+| **1. Parallel front end** (this PR) | Native app beside the existing ones. Home, History, Dictionary, Snippets, Style, Settings and Models & keys are connected to the real stores and config. Ask, Meetings and Prompts use the existing local HTTP service. Isolated `--sandbox`. Dedicated `gpui.yml` CI | Linux and macOS CI green (`gpui.yml`). Legacy runtime, launchers and installers unchanged. Existing CI changed only by the Windows `whisper-rs-sys` CMake-cache cleanup in `rust.yml`. UI testing for this PR was waived by the owner; native rendering on screen is unverified (later steps keep their validation gates) |
 | 2. Runtime and global-input parity | Setup wizard (model downloads, mic level, trial). Model storage. Settings assistant. Key import and Test LLM. Real runtime status (input device, listening, warnings) from the engine instead of HTTP reachability. Global hotkeys on Linux in the Rust engine. Single instance and `page-request.json` routing | Every capability the Python Hub and `lf-hub` offer works here, or the owner waives it in writing. Dictation readiness is shown only from a runtime signal |
 | 3. Packaging | Installers build and ship a release `lf-desktop`. System-library requirements documented per distribution. macOS app bundle and signing | Clean install, upgrade and uninstall on each supported platform. Existing installs keep working |
 | 4. Opt-in, then default-launch cutover | First an opt-in (`lf hub --gpui` or a config flag). After a soak period, `lf hub`, `lf phrases` and `lf setup` prefer `lf-desktop`, with a fallback to the current UIs | The data-safety hash check passes. Accessibility is accepted (GPUI has no accessibility tree today). Light and dark screenshots of every page are reviewed. The owner agrees |
@@ -68,7 +68,7 @@ reason and the removal condition are in `vendor/xattr-shim/src/lib.rs`.
 
 | Platform | Status |
 |---|---|
-| Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, X11 `DISPLAY=:0`, Mesa llvmpipe) |
+| Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, Mesa llvmpipe). Native rendering was not verified interactively: first paint was transparent under X11/VNC, and under Cage/Wayland redraws appeared only after a resize |
 | macOS | Expected to build (GPUI's Metal backend; the code has no Linux-only parts). Not verified in this PR. `lf-hub` stays the macOS app |
 | Windows | Not targeted |
 
