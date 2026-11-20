@@ -14,12 +14,16 @@ USAGE:
 OPTIONS:
     --page <PAGE>      Open a page: home, history, dictionary, snippets (\"Hot Phrases\"),
                        style, ask, meetings, prompts, models, settings
-    --setup            Open Home with the setup checklist expanded
+    --setup            Open the setup wizard (or hand it to the open window)
+    --engine           Allow this window to run dictation itself (Start on Home).
+                       Needs a build with `--features runtime`; never with --sandbox.
+                       Nothing starts until you press Start.
     --sandbox          Use an isolated example data directory and in-process fake
                        services (never touches your real LocalFlow data or keyring)
     --data-dir <DIR>   Sandbox directory (only with --sandbox; default
                        $XDG_DATA_HOME/localflow-desktop-sandbox). Kept between runs.
     --sandbox-reset    Re-seed the sandbox directory with fresh example data
+                       (refused while that sandbox is open in another window)
     -h, --help         Print this help
     -V, --version      Print the version
 
@@ -27,6 +31,7 @@ ENVIRONMENT:
     LOCALFLOW_SANDBOX=1   Same as --sandbox
     LOCALFLOW_CONFIG      Real config file (honoured in real mode, as everywhere in LocalFlow)
 
+One window runs per data folder: a second launch sends its page to it.
 This app runs beside the existing LocalFlow launchers; it does not replace
 `lf hub`, `lf-hub` or the Python runtime.";
 
@@ -35,6 +40,7 @@ pub struct Args {
     pub page: Option<Page>,
     pub unknown_page: Option<String>,
     pub setup: bool,
+    pub engine: bool,
     pub sandbox: bool,
     pub sandbox_reset: bool,
     pub data_dir: Option<PathBuf>,
@@ -69,8 +75,13 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
             "--sandbox" => out.sandbox = true,
             "--sandbox-reset" => out.sandbox_reset = true,
             "--setup" => out.setup = true,
+            "--engine" => out.engine = true,
             "--page" => {
                 let name = value("--page")?;
+                if lf_ui::hub_route::canonical_page(&name) == Some("Setup") {
+                    out.setup = true;
+                    continue;
+                }
                 match Page::parse(&name) {
                     Some(page) => out.page = Some(page),
                     None => out.unknown_page = Some(name),
@@ -86,6 +97,27 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
         ));
     }
     Ok(out)
+}
+
+/// Refuse `--engine` where it can't be honoured, instead of pretending.
+pub fn check_engine(args: &Args, runtime_compiled: bool) -> Result<(), ArgError> {
+    if !args.engine {
+        return Ok(());
+    }
+    if args.sandbox {
+        return Err(ArgError(
+            "--engine can't be used with --sandbox: the sandbox never starts a microphone, \
+             keyboard listener or engine"
+                .into(),
+        ));
+    }
+    if !runtime_compiled {
+        return Err(ArgError(format!(
+            "--engine needs a build with the dictation engine. Rebuild with:\n    {}",
+            crate::controllers::capabilities::REBUILD
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -115,6 +147,8 @@ mod tests {
         assert_eq!(unknown.unknown_page.as_deref(), Some("nowhere"));
         assert!(p(&["--help"]).unwrap().help);
         assert!(p(&["--setup"]).unwrap().setup);
+        let setup_page = p(&["--page", "SETUP"]).unwrap();
+        assert!(setup_page.setup && setup_page.page.is_none());
     }
 
     #[test]
@@ -126,5 +160,23 @@ mod tests {
         let a = p(&["--sandbox", "--data-dir", "/tmp/x", "--sandbox-reset"]).unwrap();
         assert_eq!(a.data_dir, Some(PathBuf::from("/tmp/x")));
         assert!(parse(Vec::new(), true).unwrap().sandbox);
+    }
+
+    #[test]
+    fn engine_is_refused_in_the_sandbox_and_without_the_runtime_feature() {
+        let engine = p(&["--engine"]).unwrap();
+        assert!(engine.engine);
+        assert!(check_engine(&engine, true).is_ok());
+        let err = check_engine(&engine, false).unwrap_err();
+        assert!(err.0.contains("--features runtime"), "{}", err.0);
+        let sandboxed = p(&["--sandbox", "--engine"]).unwrap();
+        assert!(check_engine(&sandboxed, true)
+            .unwrap_err()
+            .0
+            .contains("sandbox"));
+        // LOCALFLOW_SANDBOX counts too.
+        let env = parse(vec!["--engine".to_string()], true).unwrap();
+        assert!(check_engine(&env, true).is_err());
+        assert!(check_engine(&p(&[]).unwrap(), false).is_ok());
     }
 }

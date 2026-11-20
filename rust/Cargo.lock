@@ -1890,6 +1890,7 @@ dependencies = [
  "foreign-types 0.5.0",
  "log",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]

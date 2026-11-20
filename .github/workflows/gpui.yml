@@ -5,11 +5,16 @@ name: GPUI desktop
 # workflow and its platform matrix are unchanged. Without this workflow
 # nothing in CI would build it. Additive only: no other workflow is modified
 # and no runtime, installer or launcher behaviour depends on it.
+#
+# Two builds are checked: the default front end, and `--features runtime`
+# (forwards to lf-ui/runtime: native speech engine, model downloads, setup
+# trial and the opt-in `--engine`).
 on:
   push:
     paths:
       - "rust/lf-desktop/**"
-      # Path dependencies of lf-desktop (directly or through lf-ui).
+      # Path dependencies of lf-desktop (directly, through lf-ui, or through
+      # the `runtime` feature's lf-ui/runtime and lf-stt).
       - "rust/lf-core/**"
       - "rust/lf-ui/**"
       - "rust/lf-providers/**"
@@ -18,6 +23,10 @@ on:
       - "rust/lf-runtime/**"
       - "rust/lf-input/**"
       - "rust/lf-server/**"
+      - "rust/lf-stt/**"
+      - "rust/lf-meetings/**"
+      - "rust/lf-meetings-backend/**"
+      - "rust/lf-ask/**"
       # workspace.package / workspace.dependencies inherited by those crates.
       - "rust/Cargo.toml"
       - "scripts/run_gpui.sh"
@@ -25,7 +34,8 @@ on:
   pull_request:
     paths:
       - "rust/lf-desktop/**"
-      # Path dependencies of lf-desktop (directly or through lf-ui).
+      # Path dependencies of lf-desktop (directly, through lf-ui, or through
+      # the `runtime` feature's lf-ui/runtime and lf-stt).
       - "rust/lf-core/**"
       - "rust/lf-ui/**"
       - "rust/lf-providers/**"
@@ -34,6 +44,10 @@ on:
       - "rust/lf-runtime/**"
       - "rust/lf-input/**"
       - "rust/lf-server/**"
+      - "rust/lf-stt/**"
+      - "rust/lf-meetings/**"
+      - "rust/lf-meetings-backend/**"
+      - "rust/lf-ask/**"
       # workspace.package / workspace.dependencies inherited by those crates.
       - "rust/Cargo.toml"
       - "scripts/run_gpui.sh"
@@ -53,14 +67,15 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # whisper-rs (runtime feature) needs CMake and libclang.
       - name: GPUI and audio system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake clang pkg-config \
+            build-essential cmake clang libclang-dev pkg-config \
             libasound2-dev libfontconfig1-dev libfreetype-dev \
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
@@ -71,27 +86,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/lf-desktop
+      # rust-cache prunes the sherpa SDK copied next to the build output;
+      # rebuild the sys crate so it is restored (same as rust.yml).
+      - name: Restore native runtimes pruned by Rust cache
+        shell: bash
+        run: |
+          if [ -d rust/lf-desktop/target/sherpa-onnx-prebuilt ]; then
+            find rust/lf-desktop/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path "$MANIFEST" -p sherpa-onnx-sys
       - name: Format
         run: cargo fmt --manifest-path "$MANIFEST" --all -- --check
-      - name: Clippy
+      - name: Clippy (default build)
         run: cargo clippy --manifest-path "$MANIFEST" --workspace --all-targets --locked -- -D warnings
-      - name: Tests (headless; includes the xattr shim)
+      - name: Tests (default build; headless; includes the xattr shim)
         run: cargo test --manifest-path "$MANIFEST" --workspace --locked
-      - name: Build lf-desktop
+      - name: Build lf-desktop (default build)
         run: cargo build --manifest-path "$MANIFEST" --locked --bin lf-desktop
+      - name: Clippy (runtime feature)
+        run: cargo clippy --manifest-path "$MANIFEST" --workspace --all-targets --features runtime --locked -- -D warnings
+      - name: Tests (runtime feature; headless, no audio, keyboard hook or downloads)
+        run: cargo test --manifest-path "$MANIFEST" --workspace --features runtime --locked
+      - name: Build lf-desktop (runtime feature)
+        run: cargo build --manifest-path "$MANIFEST" --locked --features runtime --bin lf-desktop
 
   macos:
-    # Verifies the macOS cfg paths (GPUI Metal backend, xattr shim) compile.
-    # lf-hub stays the macOS app; this job does not package anything.
+    # Verifies the macOS cfg paths (GPUI Metal backend, xattr shim, CGEventTap
+    # readiness hook, Metal whisper.cpp) compile. lf-hub stays the macOS app;
+    # this job does not package anything or run a runtime.
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/lf-desktop
+      - name: Restore native runtimes pruned by Rust cache
+        shell: bash
+        run: |
+          if [ -d rust/lf-desktop/target/sherpa-onnx-prebuilt ]; then
+            find rust/lf-desktop/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path "$MANIFEST" -p sherpa-onnx-sys
       - name: xattr shim tests
         run: cargo test --manifest-path "$MANIFEST" -p xattr@0.2.3 --locked
-      - name: Type-check lf-desktop
+      - name: Type-check lf-desktop (default build)
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --locked
+      - name: Type-check lf-desktop (runtime feature)
+        run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --features runtime --locked

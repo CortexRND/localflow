@@ -205,6 +205,18 @@ pub fn run_tap_cancellable(
     stop: Arc<std::sync::atomic::AtomicBool>,
     request_permissions: bool,
 ) -> Result<(), InputError> {
+    run_tap_cancellable_ready(hub, warn, stop, request_permissions, Arc::new(|| {}))
+}
+
+/// [`run_tap_cancellable`], calling `ready` once the tap is installed and
+/// enabled on this run loop.
+pub fn run_tap_cancellable_ready(
+    hub: &KeyboardHub,
+    warn: WarningSink,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    request_permissions: bool,
+    ready: crate::listener::ReadySink,
+) -> Result<(), InputError> {
     let granted = input_monitoring_granted();
     if !request_permissions && !accessibility_trusted() {
         emit(&warn, InputWarning::InputMonitoringDenied);
@@ -302,6 +314,12 @@ pub fn run_tap_cancellable(
         .map_err(|()| InputError::TapCreateFailed)?;
     CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
     tap.enable();
+    // A listen-only tap without Input Monitoring receives nothing, so only a
+    // confirmed grant counts as a registered listener; otherwise the
+    // runtime keeps reporting "starting" next to the permission warning.
+    if granted {
+        ready();
+    }
     if watchdog_armed(granted) {
         let hub = hub.clone();
         std::thread::spawn(move || {

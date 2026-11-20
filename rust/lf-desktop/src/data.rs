@@ -18,6 +18,13 @@ use lf_core::phrases_model::{PhrasesModel, PhrasesSettings};
 use lf_providers::{ConfigStore, SecretStore};
 use serde_json::Value;
 
+use lf_ui::backends::settings_agent::SettingsAgent;
+
+use crate::controllers::capabilities::Capabilities;
+use crate::controllers::jobs::Downloads;
+use crate::controllers::model_storage::SpeechStorage;
+use crate::controllers::runtime_state::SimulatedState;
+use crate::controllers::setup_flow::SetupDeps;
 use crate::remote::Remote;
 
 /// Real data or an isolated sandbox.
@@ -161,7 +168,7 @@ impl ConfigFile {
     }
 
     /// Make sure the file exists so `config_write::update` can reload it.
-    fn ensure_file(&self) -> Result<()> {
+    pub fn ensure_file(&self) -> Result<()> {
         if !self.root.config_path.exists() {
             let current = self.load()?;
             config::save_config(&current, Some(&self.root.config_path))?;
@@ -235,10 +242,33 @@ pub struct Services {
     pub dictionary: DictionaryStore,
     pub secrets: Arc<dyn SecretStore + Send + Sync>,
     pub remote: Remote,
+    /// What this launch may run (sandbox / runtime feature / `--engine`).
+    pub caps: Capabilities,
+    /// Model downloads shared by setup and Models & keys.
+    pub downloads: Downloads,
+    /// Speech-model cache inventory and delete.
+    pub storage: Arc<dyn SpeechStorage>,
+    /// Setup wizard platform, model backend, meter and launch agent.
+    pub setup: SetupDeps,
+    /// The settings assistant's agent (explicit paths; sandbox: scripted).
+    pub assistant: Arc<dyn SettingsAgent>,
+    /// Sandbox-only: which runtime state Home simulates.
+    pub simulated_runtime: std::cell::Cell<SimulatedState>,
 }
 
 impl Services {
     pub fn open(root: DataRoot) -> Result<Self> {
+        let caps = Capabilities::new(root.is_sandbox(), false);
+        Self::open_with(root, caps)
+    }
+
+    /// Open with explicit launch capabilities (`--engine`). The sandbox
+    /// always gets fakes, whatever `caps` asks for.
+    pub fn open_with(root: DataRoot, caps: Capabilities) -> Result<Self> {
+        let caps = Capabilities {
+            sandbox: root.is_sandbox(),
+            ..caps
+        };
         if root.is_sandbox() {
             // Belt and braces: any code path reaching lf_core::secrets uses memory.
             lf_core::secrets::set_keyring_backend(Some(Arc::new(
@@ -259,6 +289,56 @@ impl Services {
             Arc::new(lf_providers::CoreSecrets)
         };
         let remote = Remote::for_root(&root);
+        let undo_path = root.localflow_dir.join("settings-undo.json");
+        let (storage, setup, assistant): (
+            Arc<dyn SpeechStorage>,
+            SetupDeps,
+            Arc<dyn SettingsAgent>,
+        ) = if root.is_sandbox() {
+            // One simulated model inventory behind storage, downloads, the
+            // setup wizard and Ollama pulls, so they always agree.
+            let sim = crate::sandbox::SimSpeech::seeded();
+            (
+                Arc::new(crate::sandbox::SimStorage::new(sim.clone())),
+                SetupDeps {
+                    platform: Arc::new(crate::sandbox::setup_platform()),
+                    models: Arc::new(crate::sandbox::SimSetupBackend::with_state(
+                        sim,
+                        std::time::Duration::from_millis(100),
+                    )),
+                    meter: Arc::new(crate::sandbox::SimMeterInput),
+                    launch_agent: Arc::new(lf_ui::setup_flow::FakeLaunchAgent::new(
+                        "not installed",
+                    )),
+                    simulated: true,
+                    native_speech: true,
+                    speech_reason: None,
+                },
+                crate::controllers::assistant::sandbox_agent(
+                    root.config_path.clone(),
+                    root.dictionary_path.clone(),
+                    undo_path,
+                ),
+            )
+        } else {
+            (
+                real_storage(&caps),
+                SetupDeps {
+                    platform: Arc::new(crate::controllers::setup_flow::DesktopPlatform::new()),
+                    models: Arc::new(lf_ui::setup_backend::FlowModelBackend::default()),
+                    meter: Arc::new(crate::controllers::setup_flow::AudioMeterInput),
+                    launch_agent: Arc::new(lf_ui::setup_flow::UnavailableLaunchAgent),
+                    simulated: false,
+                    native_speech: caps.native_speech(),
+                    speech_reason: caps.native_speech_reason(),
+                },
+                crate::controllers::assistant::native_agent(
+                    root.config_path.clone(),
+                    root.dictionary_path.clone(),
+                    undo_path,
+                ),
+            )
+        };
         Ok(Services {
             dictionary: DictionaryStore::new(Some(root.dictionary_path.clone())),
             config_file,
@@ -266,6 +346,12 @@ impl Services {
             config_error: RefCell::new(error),
             secrets,
             remote,
+            caps,
+            downloads: Downloads::new(),
+            storage,
+            setup,
+            assistant,
+            simulated_runtime: std::cell::Cell::new(SimulatedState::Example),
             root,
         })
     }
@@ -323,6 +409,18 @@ impl Services {
             )))
         })
     }
+}
+
+#[cfg(feature = "runtime")]
+fn real_storage(_: &Capabilities) -> Arc<dyn SpeechStorage> {
+    Arc::new(crate::controllers::model_storage::CacheStorage::user())
+}
+
+#[cfg(not(feature = "runtime"))]
+fn real_storage(caps: &Capabilities) -> Arc<dyn SpeechStorage> {
+    Arc::new(crate::controllers::model_storage::UnavailableStorage {
+        reason: caps.native_speech_reason().unwrap_or_default(),
+    })
 }
 
 /// Open history for reading and editing regardless of `[history] enabled`
@@ -390,6 +488,39 @@ mod tests {
         assert!(file.apply(&json!({"nope": {"x": 1}})).is_err());
         assert!(file.apply(&json!({"history": {"enabled": "yes"}})).is_err());
         assert_eq!(std::fs::read(file.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn sandbox_services_use_only_fakes_whatever_the_launch_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::sandbox::prepare(&dir.path().join("sb"), false).unwrap();
+        // Even a runtime build asked for `--engine` gets no native runtime.
+        let caps = Capabilities {
+            sandbox: false,
+            runtime_compiled: true,
+            engine_requested: true,
+        };
+        let services = Services::open_with(root.clone(), caps).unwrap();
+        assert!(services.caps.sandbox);
+        assert!(!services.caps.engine_allowed());
+        assert!(!services.caps.real_microphone());
+        assert!(services.setup.simulated);
+        assert!(services.setup.platform.input_devices().unwrap()[0].contains("example"));
+        // Storage is in memory: no cache directory, no disk inventory.
+        let inventory = services.storage.inventory(&services.config()).unwrap();
+        assert!(inventory.cache_dir.is_none());
+        // Secrets never reach the OS keyring.
+        services
+            .secrets
+            .set("provider_key_openai", "sandbox-only")
+            .unwrap();
+        assert_eq!(services.secrets.get("provider_key_openai"), "sandbox-only");
+        // Every path the sandbox writes stays inside it, the window lock too.
+        let instance = crate::controllers::instance::instance_dir(&services.root);
+        assert!(instance.starts_with(dir.path()));
+        for path in services.root.all_paths() {
+            assert!(path.starts_with(dir.path()));
+        }
     }
 
     #[test]

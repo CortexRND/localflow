@@ -107,6 +107,39 @@ pub fn provider_rows(
         .collect()
 }
 
+/// Provider rows read once (keyring + environment) off the UI thread, so
+/// rendering never touches the keyring. Holds no key values.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderSnapshot {
+    pub rows: Vec<ProviderRow>,
+}
+
+impl ProviderSnapshot {
+    /// Blocking: reads key presence from `secrets`. Call on a worker.
+    pub fn load(
+        secrets: &dyn SecretStore,
+        file: &ConfigFile,
+        config: &Config,
+        env_set: &dyn Fn(&str) -> bool,
+    ) -> Self {
+        ProviderSnapshot {
+            rows: provider_rows(secrets, file, config, env_set),
+        }
+    }
+
+    pub fn row(&self, id: &str) -> Option<&ProviderRow> {
+        self.rows.iter().find(|r| r.id == id)
+    }
+
+    pub fn has_key(&self, id: &str) -> bool {
+        self.row(id).is_some_and(|r| r.has_key)
+    }
+
+    pub fn env_override(&self, id: &str) -> Option<String> {
+        self.row(id).and_then(|r| r.env_override.clone())
+    }
+}
+
 pub fn save_key(
     secrets: &dyn SecretStore,
     file: &ConfigFile,
@@ -139,6 +172,17 @@ pub fn save_key_and_apply(
     key: &str,
 ) -> Result<KeySaved> {
     save_key(secrets, file, provider, key)?;
+    // "Is it still the active provider?" and the re-activation are one
+    // config transaction: an in-app provider change can't land between them
+    // and be switched back by this key save.
+    lf_ui::config_write::with_lock(|| reactivate_if_active(secrets, file, provider))
+}
+
+fn reactivate_if_active(
+    secrets: &dyn SecretStore,
+    file: &ConfigFile,
+    provider: &str,
+) -> Result<KeySaved> {
     let config = file.load()?;
     let preset = lf_providers::keys::get_preset(provider)?;
     if !models_layout::is_active(preset, &config, None) {
@@ -274,6 +318,57 @@ mod tests {
     }
 
     #[test]
+    fn provider_snapshot_reads_the_keyring_once_and_never_while_queried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Recording {
+            inner: MemorySecrets,
+            reads: AtomicUsize,
+        }
+        impl SecretStore for Recording {
+            fn get(&self, name: &str) -> String {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                self.inner.get(name)
+            }
+            fn set(&self, name: &str, value: &str) -> Result<()> {
+                self.inner.set(name, value)
+            }
+            fn delete(&self, name: &str) -> Result<()> {
+                self.inner.delete(name)
+            }
+        }
+        let (_d, file, inner) = setup();
+        inner
+            .set("provider_key_groq", "gsk-snapshot-secret")
+            .unwrap();
+        let secrets = Recording {
+            inner,
+            reads: AtomicUsize::new(0),
+        };
+        let config = file.load().unwrap();
+        let groq = key_env_var("groq");
+        let snapshot = ProviderSnapshot::load(&secrets, &file, &config, &|n| n == groq);
+        let after_load = secrets.reads.load(Ordering::SeqCst);
+        assert!(after_load > 0, "the load itself reads key presence");
+        for _ in 0..50 {
+            assert!(snapshot.has_key("groq"));
+            assert!(!snapshot.has_key("openai"));
+            assert_eq!(
+                snapshot.env_override("groq").as_deref(),
+                Some("LOCALFLOW_PROVIDER_KEY_GROQ")
+            );
+        }
+        assert_eq!(
+            secrets.reads.load(Ordering::SeqCst),
+            after_load,
+            "queries never hit the keyring"
+        );
+        assert!(
+            !format!("{snapshot:?}").contains("gsk-snapshot-secret"),
+            "no values kept"
+        );
+    }
+
+    #[test]
     fn environment_overrides_are_reported_not_hidden() {
         let (_d, file, secrets) = setup();
         let config = file.load().unwrap();
@@ -345,6 +440,41 @@ mod tests {
             KeySaved::Saved
         );
         assert_eq!(active_key(&secrets, &file.load().unwrap()), "sk-newer");
+    }
+
+    #[test]
+    fn a_key_save_cannot_switch_back_a_provider_changed_in_between() {
+        let (_d, file, secrets) = setup();
+        let secrets = std::sync::Arc::new(secrets);
+        save_key(secrets.as_ref(), &file, "openai", "sk-old").unwrap();
+        activate(secrets.as_ref(), &file, "openai", None, Some("gpt-5-mini")).unwrap();
+        let (locked, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let switcher = {
+            let (file, secrets) = (file.clone(), secrets.clone());
+            std::thread::spawn(move || {
+                lf_ui::config_write::with_lock(|| {
+                    locked.send(()).unwrap();
+                    released.recv().unwrap();
+                    // "Use" Ollama, inside the config transaction.
+                    activate(secrets.as_ref(), &file, "ollama", None, Some("qwen3:4b")).unwrap();
+                });
+            })
+        };
+        held.recv().unwrap();
+        let saver = {
+            let (file, secrets) = (file.clone(), secrets.clone());
+            std::thread::spawn(move || {
+                save_key_and_apply(secrets.as_ref(), &file, "openai", "sk-new")
+            })
+        };
+        release.send(()).unwrap();
+        switcher.join().unwrap();
+        let outcome = saver.join().unwrap().unwrap();
+        assert_eq!(outcome, KeySaved::Saved, "openai isn't active any more");
+        let config = file.load().unwrap();
+        assert_eq!(config.field_str("llm_provider"), Some("ollama"));
+        assert_eq!(config.field_str("llm_model"), Some("qwen3:4b"));
     }
 
     #[test]

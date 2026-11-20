@@ -6,7 +6,8 @@ use lf_core::history::{HistoryEntry, Stats};
 use lf_ui::hub_model;
 use serde_json::json;
 
-use crate::app::PageCx;
+use crate::app::{signal_tone, PageCx};
+use crate::controllers::runtime_state::OwnEngine;
 use crate::controllers::status::{self, Level};
 use crate::controllers::{history, setup};
 use crate::page::Page;
@@ -95,6 +96,73 @@ impl HomePage {
         cx.notify();
     }
 
+    /// Start/Stop for this window's engine (`--engine` builds only), with
+    /// the reason when it can't start.
+    fn engine_controls(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let services = &self.pcx.services;
+        let t = theme(cx).clone();
+        if !services.caps.engine_allowed() {
+            return None;
+        }
+        let state = self.pcx.engine_state().unwrap_or(OwnEngine::None);
+        let config = services.config();
+        let enabled = config.field_bool("dictation_enabled").unwrap_or(true);
+        let configured = setup::configured(&services.root);
+        let view = self.pcx.runtime();
+        // Only a provable owner blocks Start; where ownership can't be
+        // proven the engine's own lock acquisition decides.
+        let other_owner = view.external_owner.is_some()
+            && !matches!(
+                state,
+                OwnEngine::Running | OwnEngine::Starting | OwnEngine::Stopping
+            );
+        let blocker = if !enabled {
+            Some("Turn dictation on first.".to_string())
+        } else if !configured {
+            Some("Finish setup first.".to_string())
+        } else if other_owner {
+            Some(match view.external_owner {
+                Some(pid) => {
+                    format!("Another LocalFlow (pid {pid}) is already handling dictation.")
+                }
+                None => "Another LocalFlow is already handling dictation.".into(),
+            })
+        } else {
+            None
+        };
+        let pcx = self.pcx.clone();
+        let button = match state {
+            OwnEngine::Running | OwnEngine::Stopping => Button::new("engine-stop", "Stop")
+                .small()
+                .icon("square")
+                .busy(state == OwnEngine::Stopping)
+                .on_click(move |_, _, cx| pcx.engine_stop(cx)),
+            _ => Button::new("engine-start", "Start here")
+                .small()
+                .icon("play")
+                .busy(state == OwnEngine::Starting)
+                .disabled(blocker.is_some())
+                .tooltip(
+                    blocker
+                        .clone()
+                        .unwrap_or_else(|| "Run dictation in this window".into()),
+                )
+                .on_click(move |_, _, cx| pcx.engine_start(cx)),
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(space::s2())
+                .child(button)
+                .when_some(blocker.filter(|_| state != OwnEngine::Running), |d, b| {
+                    d.child(ui::supporting(&t, b).max_w(px(220.)))
+                })
+                .into_any_element(),
+        )
+    }
+
     fn render_card(&self, health: &Health, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let config = self.pcx.services.config();
@@ -102,7 +170,8 @@ impl HomePage {
         let key = hub_model::format_hotkey(config.field_str("hotkey"));
         let sandbox = self.pcx.services.is_sandbox();
         let address = self.pcx.services.remote.base_url(&config);
-        let status = status::describe(
+        // The service line is kept apart: it never changes the lead.
+        let legacy = status::describe(
             sandbox,
             enabled,
             &key,
@@ -110,20 +179,32 @@ impl HomePage {
             &address,
             cfg!(target_os = "macos"),
         );
+        let runtime = self.pcx.runtime();
         let this = cx.entity().downgrade();
         let toggle =
             Switch::new("dictation-switch", enabled, "Dictation").on_toggle(move |on, _, cx| {
                 let _ = this.update(cx, |p, cx| p.set_dictation(on, cx));
             });
-        let how = (!sandbox && *health == Health::Offline).then(|| {
-            Button::new("how-to-start", "How to start")
-                .small()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.setup_open = true;
-                    cx.notify();
-                }))
-        });
+        let engine = self.engine_controls(cx);
+        let note = (!self.pcx.services.caps.engine_allowed())
+            .then(|| ui::supporting(&t, self.pcx.services.caps.engine_note()));
         let (sz, _) = text::supporting();
+        let service = (
+            tone(legacy.service.0),
+            format!(
+                "Local service (Ask, Meetings, Prompts): {}",
+                legacy.service.1
+            ),
+        );
+        let lines = [
+            (signal_tone(runtime.shortcut.0), runtime.shortcut.1.clone()),
+            (
+                signal_tone(runtime.microphone.0),
+                runtime.microphone.1.clone(),
+            ),
+            service,
+        ];
+        let (lead, support) = (runtime.lead.clone(), runtime.support.clone());
         ui::card(&t)
             .items_start()
             .gap(space::s6())
@@ -145,24 +226,21 @@ impl HomePage {
                     .gap(space::s2())
                     .flex_1()
                     .min_w_0()
-                    .child(ui::heading(&t, status.lead))
-                    .child(ui::secondary(&t, status.support))
+                    .child(ui::heading(&t, lead))
+                    .when(!support.is_empty(), |d| d.child(ui::secondary(&t, support)))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(space::s1())
                             .pt(space::s2())
-                            .child(
-                                ui::status_dot(&t, tone(status.service.0), status.service.1)
-                                    .text_size(sz),
-                            )
-                            .child(
-                                ui::status_dot(&t, Tone::Neutral, status.input)
-                                    .text_size(sz)
-                                    .text_color(t.text_secondary),
+                            .children(
+                                lines.into_iter().map(|(tone, line)| {
+                                    ui::status_dot(&t, tone, line).text_size(sz)
+                                }),
                             ),
                     )
+                    .children(note)
                     .when_some(self.save_error.clone(), |d, e| {
                         d.child(ui::error_line(&t, e))
                     }),
@@ -181,26 +259,64 @@ impl HomePage {
                             .child(ui::label(&t, "Dictation"))
                             .child(toggle),
                     )
-                    .children(how),
+                    .children(engine),
             )
+    }
+
+    fn render_warnings(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let t = theme(cx).clone();
+        let warnings = self.pcx.runtime().warnings;
+        if warnings.is_empty() {
+            return None;
+        }
+        let mut column = div().flex().flex_col().gap(space::s3());
+        for (i, warning) in warnings.into_iter().enumerate() {
+            let pcx = self.pcx.clone();
+            let action = Button::new(("runtime-warning", i as u64), "Shortcuts")
+                .small()
+                .on_click(move |_, _, cx| pcx.navigate(Page::Settings, Some("shortcuts"), cx));
+            column = column.child(ui::banner(
+                &t,
+                Tone::Warning,
+                warning,
+                Some(action.into_any_element()),
+            ));
+        }
+        Some(column)
     }
 
     fn render_setup(&self, health: &Health, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let services = &self.pcx.services;
         let count = self.stats.as_ref().map_or(0, |s| s.total_dictations);
-        let steps = setup::steps(&services.root, &services.config(), health, count);
+        let listening = self.pcx.runtime().listening;
+        let steps = setup::steps(&services.root, &services.config(), health, count, listening);
+        let total = steps.len();
         let done = steps
             .iter()
             .filter(|s| s.state == setup::State::Done)
             .count();
-        let collapse = Button::new("setup-hide", "Hide")
-            .ghost()
-            .small()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.setup_open = false;
-                cx.notify();
-            }));
+        let pcx = self.pcx.clone();
+        let run = Button::new(
+            "setup-run",
+            if self.pcx.setup_draft.get() {
+                "Resume setup"
+            } else {
+                "Run setup"
+            },
+        )
+        .small()
+        .primary()
+        .on_click(move |_, _, cx| pcx.open_setup(cx));
+        let collapse = div().flex().gap(space::s3()).child(run).child(
+            Button::new("setup-hide", "Hide")
+                .ghost()
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.setup_open = false;
+                    cx.notify();
+                })),
+        );
         let mut list = ui::list(&t);
         for (i, step) in steps.into_iter().enumerate() {
             let (icon, color) = match step.state {
@@ -237,7 +353,7 @@ impl HomePage {
         ui::section(
             &t,
             "Get set up",
-            Some(format!("{done} of 6 ready. Full model downloads and the mic test run in `lf setup` for now.").into()),
+            Some(format!("{done} of {total} ready. Run setup to pick and download models, test the microphone and choose a shortcut.").into()),
             Some(collapse.into_any_element()),
         )
         .child(list)
@@ -434,6 +550,9 @@ impl Render for HomePage {
         let t = theme(cx).clone();
         let health = self.pcx.health(cx);
         let mut body = div().child(self.render_card(&health, cx));
+        if let Some(warnings) = self.render_warnings(cx) {
+            body = body.child(warnings);
+        }
         if self.setup_open {
             body = body.child(self.render_setup(&health, cx));
         }

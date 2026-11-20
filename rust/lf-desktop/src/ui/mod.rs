@@ -674,6 +674,47 @@ pub fn badge(t: &Theme, n: usize) -> Div {
         .child(n.to_string())
 }
 
+/// A 4 px progress track. `None` = indeterminate (a short accent segment).
+pub fn progress(t: &Theme, fraction: Option<f32>) -> Div {
+    let fill = match fraction {
+        Some(f) => gpui::relative(f.clamp(0.0, 1.0)),
+        None => gpui::relative(0.3),
+    };
+    div()
+        .w_full()
+        .h(px(4.))
+        .flex_none()
+        .rounded(size::radius_inner())
+        .bg(t.bg_muted)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(fill)
+                .rounded(size::radius_inner())
+                .bg(t.accent)
+                .when(fraction.is_none(), |d| d.opacity(0.6)),
+        )
+}
+
+/// An 8 px microphone level meter (0.0–1.0) in a tone's dot colour.
+pub fn level_meter(t: &Theme, level: f32, tone: Tone) -> Div {
+    div()
+        .w_full()
+        .h(px(8.))
+        .flex_none()
+        .rounded(size::radius_inner())
+        .bg(t.bg_muted)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(level.clamp(0.0, 1.0)))
+                .rounded(size::radius_inner())
+                .bg(t.dot(tone)),
+        )
+}
+
 /// A persistent condition strip: icon, sentence, optional action.
 pub fn banner(
     t: &Theme,

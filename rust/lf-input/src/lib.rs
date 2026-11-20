@@ -3,11 +3,13 @@
 //! - [`keys`]: pynput-compatible key names and order-insensitive chords.
 //! - [`hub`]: the `KeyboardHub` state machine (hold, toggle, chords, command
 //!   mode, deferred rebinding), independent of any OS.
-//! - [`listener`]: the OS event source feeding the hub (CGEventTap on macOS).
+//! - [`listener`]: the OS event source feeding the hub (CGEventTap on macOS,
+//!   XInput2 raw key events on Linux X11 via [`linux`]).
 //! - [`paste`]: clipboard capture/restore and synthetic paste.
 
 pub mod hub;
 pub mod keys;
+pub mod linux;
 pub mod listener;
 pub mod paste;
 
