@@ -165,6 +165,17 @@ impl SnippetsPage {
         ok
     }
 
+    /// Window close / quit: commit the snippet being edited now (no
+    /// debounce). `Err` explains what was kept unsaved.
+    pub fn flush_for_close(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let result = match self.editor.as_mut() {
+            Ok(ed) => crate::controllers::shutdown::flush_snippets(ed),
+            Err(_) => Ok(()),
+        };
+        cx.notify();
+        result
+    }
+
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.read(cx).focus(window);
     }

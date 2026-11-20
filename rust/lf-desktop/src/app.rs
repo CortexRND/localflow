@@ -169,6 +169,8 @@ pub struct Shell {
     restore_focus: Option<FocusHandle>,
     /// The dialog's initial focus has been scheduled.
     dialog_armed: bool,
+    /// The user chose to close or quit despite unsaved changes.
+    force_close: bool,
     config_mtime: Option<SystemTime>,
     setup: bool,
 }
@@ -217,6 +219,7 @@ impl Shell {
             ok_focus: cx.focus_handle().tab_stop(true),
             restore_focus: None,
             dialog_armed: false,
+            force_close: false,
             config_mtime,
             setup: launch.setup,
         };
@@ -692,6 +695,88 @@ impl Shell {
         )
     }
 
+    /// Flush every page's dirty state and wait (bounded) for the writes.
+    pub fn prepare_close(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> crate::controllers::shutdown::CloseCheck {
+        use crate::controllers::shutdown;
+        let mut failures = Vec::new();
+        let threads = shutdown::failures();
+        for (_, view) in &self.views {
+            match view {
+                View::Snippets(v) => {
+                    if let Err(e) = v.update(cx, |p, cx| p.flush_for_close(cx)) {
+                        failures.push(e);
+                    }
+                }
+                View::Meetings(v) => {
+                    let threads = threads.clone();
+                    v.update(cx, |p, cx| p.flush_for_close(threads, cx));
+                }
+                _ => {}
+            }
+        }
+        shutdown::finish(failures, &threads, shutdown::CLOSE_WAIT)
+    }
+
+    /// `true` when the window may close now. Otherwise a dialog explains what
+    /// wasn't saved and offers to close anyway.
+    pub fn should_close(
+        &mut self,
+        quit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.force_close {
+            return true;
+        }
+        let check = self.prepare_close(cx);
+        if check.ok() {
+            self.force_close = true;
+            return true;
+        }
+        let shell = cx.weak_entity();
+        self.confirm = Some(Confirm {
+            title: "Some changes weren't saved".into(),
+            body: format!(
+                "{} Keep the window open to fix this, or close anyway and lose them.",
+                check.message()
+            )
+            .into(),
+            verb: if quit { "Quit anyway" } else { "Close anyway" }.into(),
+            destructive: true,
+            on_confirm: Rc::new(move |window, cx| {
+                // Runs inside the shell's own listener: defer the shell update.
+                let handle = window.window_handle();
+                let shell = shell.clone();
+                cx.defer(move |cx| {
+                    let _ = shell.update(cx, |s, _| s.force_close = true);
+                    if quit {
+                        cx.quit();
+                    } else {
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    }
+                });
+            }),
+        });
+        self.dialog_armed = false;
+        window.refresh();
+        cx.notify();
+        false
+    }
+
+    /// Ctrl+Q / Ctrl+W.
+    fn request_close(&mut self, quit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.should_close(quit, window, cx) {
+            if quit {
+                cx.quit();
+            } else {
+                window.remove_window();
+            }
+        }
+    }
+
     /// Close the dialog, restore focus, then run the action when confirmed.
     fn close_dialog(&mut self, run: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(confirm) = self.confirm.take() else {
@@ -833,7 +918,12 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NavDown, w, cx| this.nav_step(1, w, cx)))
             .on_action(cx.listener(|this, _: &FocusNext, window, cx| this.tab(true, window, cx)))
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| this.tab(false, window, cx)))
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
+                this.request_close(false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &Quit, window, cx| this.request_close(true, window, cx)),
+            )
             .size_full()
             .relative()
             .flex()
@@ -945,9 +1035,20 @@ pub fn run(launch: Launch) {
             base.font_family = pick_font(cx);
             cx.set_global(base);
             bind_keys(cx);
+            // Quit with nothing focused in the shell: ask the shell window.
             cx.on_action(|_: &Quit, cx| {
-                lf_ui::shutdown::wait_for_pending_writes(Duration::from_secs(5));
-                cx.quit();
+                let shells: Vec<_> = cx
+                    .windows()
+                    .into_iter()
+                    .filter_map(|w| w.downcast::<Shell>())
+                    .collect();
+                if shells.is_empty() {
+                    lf_ui::shutdown::wait_for_pending_writes(Duration::from_secs(5));
+                    cx.quit();
+                }
+                for shell in shells {
+                    let _ = shell.update(cx, |s, window, cx| s.request_close(true, window, cx));
+                }
             });
             let sandbox = launch.services.is_sandbox();
             let bounds = Bounds::centered(None, size(px(1280.), px(850.)), cx);
@@ -976,6 +1077,13 @@ pub fn run(launch: Launch) {
                     let _ = window.update(cx, |shell, window, cx| {
                         window.focus(&shell.focus_handle(cx));
                         cx.activate(true);
+                        // Titlebar close: flush first; keep the window open
+                        // (with an explanation) when something wasn't saved.
+                        let weak = cx.weak_entity();
+                        window.on_window_should_close(cx, move |window, cx| {
+                            weak.update(cx, |s, cx| s.should_close(false, window, cx))
+                                .unwrap_or(true)
+                        });
                         // Follow the system light/dark setting live.
                         cx.observe_window_appearance(window, |_, window, cx| {
                             let want = Theme::for_appearance(window.appearance());

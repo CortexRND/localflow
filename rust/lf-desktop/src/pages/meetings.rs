@@ -235,10 +235,15 @@ impl MeetingsPage {
                 let ticket = writer.ticket();
                 let text = this.notes.read(cx).text().to_string();
                 let token = this.sync.edited_token();
+                // Registered so a close or quit waits for this save.
+                let guard = lf_ui::shutdown::register_pending_write();
                 cx.spawn(async move |this, cx| {
                     let ok = cx
                         .background_executor()
-                        .spawn(async move { writer.save(client.as_ref(), ticket, &text).is_ok() })
+                        .spawn(async move {
+                            let _guard = guard;
+                            writer.save(client.as_ref(), ticket, &text).is_ok()
+                        })
                         .await;
                     let _ = this.update(cx, |this, _| this.sync.save_finished(token, ok));
                 })
@@ -306,6 +311,34 @@ impl MeetingsPage {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Window close / quit during a meeting: send notes that are dirty or
+    /// still inside the autosave debounce right away, on a registered writer
+    /// thread the shell then waits for.
+    pub fn flush_for_close(
+        &mut self,
+        failures: crate::controllers::shutdown::Failures,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.phase, Phase::Recording { .. }) || !self.sync.is_dirty() {
+            return;
+        }
+        self.notes_ticket += 1; // cancel the pending debounce
+        let client = self
+            .pcx
+            .services
+            .remote
+            .meetings(&self.pcx.services.config());
+        let ticket = self.writer.ticket();
+        let text = self.notes.read(cx).text().to_string();
+        crate::controllers::shutdown::send_meeting_notes(
+            client,
+            self.writer.clone(),
+            ticket,
+            text,
+            failures,
+        );
     }
 
     fn new_meeting(&mut self, cx: &mut Context<Self>) {
