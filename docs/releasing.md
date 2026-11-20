@@ -125,12 +125,12 @@ Before announcing the release, confirm that the published
 For a manual build on a Mac, check out the tag in a clean checkout, then:
 
 ```sh
-git checkout v0.2.1
-bash scripts/build_mac_installer.sh
-bash scripts/release-assets.sh v0.2.1
-cp dist/LocalFlow-Installer.dmg dist/release/LocalFlow-Installer.dmg
-cp "packaging/windows/Install LocalFlow.cmd" dist/release/Install.LocalFlow.cmd
-(cd dist/release && shasum -a 256 LocalFlow-Installer.dmg Install.LocalFlow.cmd >> SHA256SUMS)
-(cd dist/release && shasum -a 256 -c SHA256SUMS)
+git checkout v0.2.1 &&
+bash scripts/build_mac_installer.sh &&
+bash scripts/release-assets.sh v0.2.1 &&
+cp dist/LocalFlow-Installer.dmg dist/release/LocalFlow-Installer.dmg &&
+cp "packaging/windows/Install LocalFlow.cmd" dist/release/Install.LocalFlow.cmd &&
+(cd dist/release && shasum -a 256 LocalFlow-Installer.dmg Install.LocalFlow.cmd >> SHA256SUMS) &&
+(cd dist/release && shasum -a 256 -c SHA256SUMS) &&
 gh release create v0.2.1 dist/release/* --verify-tag --generate-notes
 ```
