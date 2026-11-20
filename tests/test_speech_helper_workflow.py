@@ -129,6 +129,20 @@ def test_memory_baseline_uses_separate_cargo_artifacts():
     assert '"$PWD/artifacts/memory/after" rust/target/release/lf-hub --page Home' in workflow
 
 
+def test_windows_rust_job_cleans_whisper_cmake_cache_before_clippy():
+    workflow = (ROOT / ".github/workflows/rust.yml").read_text()
+    job = workflow[workflow.index("\n  rust:\n") :]
+    name = "name: Clean cached whisper-rs-sys CMake output (Windows)"
+    step = job[job.index(name) : job.index("- name:", job.index(name))]
+    assert "if: runner.os == 'Windows'" in step
+    assert "cargo clean --manifest-path rust/Cargo.toml -p whisper-rs-sys" in step
+    assert (
+        job.index("uses: Swatinem/rust-cache@v2")
+        < job.index(name)
+        < job.index("run: cargo clippy --workspace")
+    )
+
+
 def test_whisper_smoke_selects_auto_tiny_and_validates_a_real_helper(
     tmp_path, monkeypatch
 ):

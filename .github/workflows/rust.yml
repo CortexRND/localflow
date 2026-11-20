@@ -232,6 +232,13 @@ jobs:
           fi
           cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys
 
+      # The restored whisper-rs-sys CMake cache can pin an MSVC assembler path
+      # from an older runner image; rebuild its native output from scratch.
+      - name: Clean cached whisper-rs-sys CMake output (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo clean --manifest-path rust/Cargo.toml -p whisper-rs-sys
+
       - name: Ensure ffmpeg for HTTP transcription tests
         shell: bash
         run: |
