@@ -21,8 +21,8 @@ use crate::ui::{self, Button};
 pub struct HistoryPage {
     pcx: PageCx,
     search: Entity<TextInput>,
-    entries: Vec<HistoryEntry>,
-    more: bool,
+    /// Backend pages and the detail-only cited entry.
+    list: history::Listing,
     loading: bool,
     error: Option<String>,
     selected: Option<i64>,
@@ -47,8 +47,7 @@ impl HistoryPage {
         let mut page = HistoryPage {
             pcx,
             search,
-            entries: Vec::new(),
-            more: false,
+            list: history::Listing::default(),
             loading: true,
             error: None,
             selected: None,
@@ -123,31 +122,24 @@ impl HistoryPage {
         if let Some(stats) = &loaded.stats {
             self.total = Some(stats.total_dictations);
         }
-        if loaded.offset == 0 {
-            self.entries = loaded.entries;
-        } else {
-            self.entries.extend(loaded.entries);
-        }
-        self.more = loaded.more;
+        self.list.apply(loaded);
         if let Some(id) = self.pending_select.take() {
-            if self.entries.iter().any(|e| e.id == id) {
+            if self.list.in_pages(id) {
                 self.selected = Some(id);
             } else if let Ok(Some(entry)) = self.pcx.services.history().and_then(|h| h.get(id)) {
-                self.entries.insert(0, entry);
+                // Detail only: the page cursor is untouched.
+                self.list.cite(entry);
                 self.selected = Some(id);
             }
         }
-        if self
-            .selected
-            .is_some_and(|id| !self.entries.iter().any(|e| e.id == id))
-        {
+        if self.selected.is_some_and(|id| self.list.find(id).is_none()) {
             self.selected = None;
         }
         cx.notify();
     }
 
     pub fn select_id(&mut self, id: i64, cx: &mut Context<Self>) {
-        if self.entries.iter().any(|e| e.id == id) {
+        if self.list.find(id).is_some() {
             self.selected = Some(id);
             self.show_original = false;
             cx.notify();
@@ -169,8 +161,7 @@ impl HistoryPage {
     }
 
     fn selected_entry(&self) -> Option<&HistoryEntry> {
-        self.selected
-            .and_then(|id| self.entries.iter().find(|e| e.id == id))
+        self.selected.and_then(|id| self.list.find(id))
     }
 
     fn copy(&self, text: String, what: &str, cx: &mut Context<Self>) {
@@ -195,14 +186,14 @@ impl HistoryPage {
     }
 
     fn delete(&mut self, id: i64, cx: &mut Context<Self>) {
-        let index = self.entries.iter().position(|e| e.id == id);
         match history::delete(&self.pcx.services.root, id) {
             Ok(_) => {
-                self.entries.retain(|e| e.id != id);
+                let index = self.list.remove(id);
                 self.selected = index
                     .and_then(|i| {
-                        self.entries
-                            .get(i.min(self.entries.len().saturating_sub(1)))
+                        self.list
+                            .entries
+                            .get(i.min(self.list.entries.len().saturating_sub(1)))
                     })
                     .map(|e| e.id);
                 self.total = self.total.map(|n| (n - 1).max(0));
@@ -244,8 +235,8 @@ impl HistoryPage {
         let ks = &event.keystroke;
         let index = self
             .selected
-            .and_then(|id| self.entries.iter().position(|e| e.id == id));
-        let n = self.entries.len();
+            .and_then(|id| self.list.entries.iter().position(|e| e.id == id));
+        let n = self.list.entries.len();
         if n == 0 {
             return;
         }
@@ -271,10 +262,10 @@ impl HistoryPage {
             _ => return,
         };
         if let Some(i) = next {
-            self.selected = Some(self.entries[i].id);
+            self.selected = Some(self.list.entries[i].id);
             self.show_original = false;
-            if i + 1 >= n && self.more && !self.loading {
-                let offset = n as i64;
+            if i + 1 >= n && self.list.more && !self.loading {
+                let offset = self.list.next_offset();
                 self.load(offset, cx);
             }
             cx.notify();
@@ -288,7 +279,7 @@ impl HistoryPage {
         let searching = !self.search.read(cx).is_empty();
         let focused = self.list_focus.is_focused(window);
         let mut rows = div().flex().flex_col();
-        if self.entries.is_empty() && !self.loading {
+        if self.list.entries.is_empty() && !self.loading {
             let (h, d, button, _) = hub_model::history_empty_state(searching, false);
             let action = if searching {
                 Some(
@@ -307,7 +298,7 @@ impl HistoryPage {
             rows = rows.child(ui::empty_state(&t, "history", h, d, action));
         }
         let mut last_day = String::new();
-        for entry in &self.entries {
+        for entry in &self.list.entries {
             let day = history::day_label(entry.ts, now);
             if day != last_day {
                 rows = rows.child(
@@ -390,8 +381,8 @@ impl HistoryPage {
                     )),
             );
         }
-        if self.more {
-            let offset = self.entries.len() as i64;
+        if self.list.more {
+            let offset = self.list.next_offset();
             rows = rows.child(
                 div().p(space::s6()).child(
                     Button::new("load-more", "Load more")
@@ -609,7 +600,7 @@ impl Render for HistoryPage {
         let clear = Button::new("clear-all", "Clear all…")
             .ghost()
             .icon("trash-2")
-            .disabled(self.entries.is_empty() && self.search.read(cx).is_empty())
+            .disabled(self.list.entries.is_empty() && self.search.read(cx).is_empty())
             .on_click(cx.listener(|this, _, _, cx| this.ask_clear(cx)))
             .into_any_element();
         let support = self

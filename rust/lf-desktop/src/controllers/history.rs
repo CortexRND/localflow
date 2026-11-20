@@ -49,6 +49,85 @@ pub fn load(
     })
 }
 
+/// The History list: backend pages plus, separately, one entry opened from
+/// elsewhere (an Ask citation, a Home row) that isn't in the loaded pages.
+///
+/// The page cursor counts only rows that came from backend pages, so opening
+/// an older entry never shifts `Load more` (no skipped rows) and that entry
+/// is never listed twice when its page arrives.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Listing {
+    /// Rows from backend pages, newest first, no duplicates.
+    pub entries: Vec<HistoryEntry>,
+    /// Backend offset of the next page.
+    cursor: i64,
+    pub more: bool,
+    /// Shown in the detail pane only.
+    cited: Option<HistoryEntry>,
+}
+
+impl Listing {
+    pub fn next_offset(&self) -> i64 {
+        self.cursor
+    }
+
+    /// Apply a loaded page (offset 0 replaces the list).
+    pub fn apply(&mut self, loaded: Loaded) {
+        if loaded.offset == 0 {
+            self.entries.clear();
+        }
+        let fetched = loaded.entries.len() as i64;
+        for entry in loaded.entries {
+            // Rows added at the top between pages shift offsets; never list one twice.
+            if !self.entries.iter().any(|e| e.id == entry.id) {
+                self.entries.push(entry);
+            }
+        }
+        self.cursor = loaded.offset + fetched;
+        self.more = loaded.more;
+        if self
+            .cited
+            .as_ref()
+            .is_some_and(|c| self.entries.iter().any(|e| e.id == c.id))
+        {
+            self.cited = None; // its page arrived: it's a normal row now
+        }
+    }
+
+    /// Show an entry that isn't in the loaded pages (detail only).
+    pub fn cite(&mut self, entry: HistoryEntry) {
+        if self.entries.iter().any(|e| e.id == entry.id) {
+            self.cited = None;
+        } else {
+            self.cited = Some(entry);
+        }
+    }
+
+    pub fn in_pages(&self, id: i64) -> bool {
+        self.entries.iter().any(|e| e.id == id)
+    }
+
+    /// A listed or cited entry.
+    pub fn find(&self, id: i64) -> Option<&HistoryEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .or(self.cited.as_ref().filter(|c| c.id == id))
+    }
+
+    /// The entry was deleted from the store. Returns its list index. A
+    /// deleted paged row moves every later backend offset up by one.
+    pub fn remove(&mut self, id: i64) -> Option<usize> {
+        if self.cited.as_ref().is_some_and(|c| c.id == id) {
+            self.cited = None;
+        }
+        let index = self.entries.iter().position(|e| e.id == id)?;
+        self.entries.remove(index);
+        self.cursor = (self.cursor - 1).max(0);
+        Some(index)
+    }
+}
+
 pub fn now() -> NaiveDateTime {
     Local::now().naive_local()
 }
@@ -138,6 +217,68 @@ mod tests {
         assert_eq!(load(&root, 2, "", 0, false).unwrap().entries.len(), 2);
         assert_eq!(clear(&root).unwrap(), 2);
         assert!(load(&root, 3, "", 0, false).unwrap().entries.is_empty());
+    }
+
+    fn ids(rows: &[HistoryEntry]) -> Vec<i64> {
+        rows.iter().map(|e| e.id).collect()
+    }
+
+    /// 130 entries, an older one opened from a citation before paging: every
+    /// page is complete and ordered, nothing is skipped or listed twice.
+    #[test]
+    fn citing_an_older_entry_does_not_disturb_paging() {
+        let (_d, root) = seeded(130);
+        let all = open_history(&root).unwrap().recent(1000, None, 0).unwrap();
+        assert_eq!(all.len(), 130);
+        let mut list = Listing::default();
+        list.apply(load(&root, 1, "", 0, false).unwrap());
+        assert_eq!(list.next_offset(), 50);
+        // Open entry #120 (far beyond the first page) from a citation.
+        let older = all[120].clone();
+        assert!(!list.in_pages(older.id));
+        list.cite(older.clone());
+        assert_eq!(
+            list.find(older.id),
+            Some(&older),
+            "shown in the detail pane"
+        );
+        assert_eq!(list.entries.len(), 50, "but not inserted into the list");
+        assert_eq!(list.next_offset(), 50, "the page cursor is unchanged");
+        while list.more {
+            let offset = list.next_offset();
+            list.apply(load(&root, 2, "", offset, false).unwrap());
+        }
+        assert_eq!(
+            ids(&list.entries),
+            ids(&all),
+            "complete, ordered, no duplicates"
+        );
+        assert!(list.find(older.id).is_some(), "now a normal row");
+        assert_eq!(list.entries.iter().filter(|e| e.id == older.id).count(), 1);
+    }
+
+    #[test]
+    fn deleting_a_loaded_row_keeps_the_next_page_aligned() {
+        let (_d, root) = seeded(120);
+        let all = open_history(&root).unwrap().recent(1000, None, 0).unwrap();
+        let mut list = Listing::default();
+        list.apply(load(&root, 1, "", 0, false).unwrap());
+        let victim = list.entries[10].id;
+        assert!(delete(&root, victim).unwrap());
+        assert_eq!(list.remove(victim), Some(10));
+        while list.more {
+            let offset = list.next_offset();
+            list.apply(load(&root, 2, "", offset, false).unwrap());
+        }
+        let expected: Vec<i64> = ids(&all).into_iter().filter(|id| *id != victim).collect();
+        assert_eq!(ids(&list.entries), expected);
+        // Removing a cited (out-of-page) entry doesn't move the cursor.
+        let mut list = Listing::default();
+        list.apply(load(&root, 3, "", 0, false).unwrap());
+        list.cite(all[100].clone());
+        assert_eq!(list.remove(all[100].id), None);
+        assert_eq!(list.next_offset(), 50);
+        assert!(list.find(all[100].id).is_none());
     }
 
     #[test]
