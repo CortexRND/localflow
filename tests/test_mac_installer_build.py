@@ -179,30 +179,81 @@ elif name == "clang":
 elif name == "lipo":
     print(os.environ["LIPO_ARCHS"])
 elif name == "hdiutil":
-    staging = Path(args[args.index("-srcfolder") + 1])
-    shutil.copy(staging / "Read Me.txt", os.environ["BUILD_CALLS"] + ".readme")
-    Path(args[-1]).write_text("dmg fixture")
+    # Attached images persist across calls, like the real disk image driver.
+    state = Path(os.environ["BUILD_CALLS"] + ".images")
+    images = json.loads(state.read_text()) if state.exists() else []
+    if args[0] == "info":
+        import plistlib
+        sys.stdout.buffer.write(plistlib.dumps({"images": [
+            {"image-path": image["path"], "system-entities": [
+                {"dev-entry": image["dev"], "content-hint": "GUID_partition_scheme"},
+                {"dev-entry": image["dev"] + "s1",
+                 "mount-point": "/Volumes/" + image.get("volume", "Install LocalFlow")},
+            ]} for image in images]}))
+    elif args[0] == "detach":
+        dev = args[-1]
+        backing = [Path(i["path"]).exists() for i in images if i["dev"] == dev]
+        with open(os.environ["BUILD_CALLS"], "a", encoding="utf-8") as log:
+            log.write(json.dumps(["detach-saw-file", dev, any(backing)]) + "\n")
+        if os.environ.get("HDIUTIL_DETACH_FAILS"):
+            sys.exit("hdiutil: detach failed - Resource busy")
+        state.write_text(json.dumps([i for i in images if i["dev"] != dev]))
+    elif args[0] == "create":
+        target = args[-1]
+        counter = Path(os.environ["BUILD_CALLS"] + ".creates")
+        attempt = int(counter.read_text()) + 1 if counter.exists() else 1
+        counter.write_text(str(attempt))
+        if any(image["path"] == target for image in images):
+            sys.exit("hdiutil: create failed - Resource busy")
+        if attempt <= int(os.environ.get("HDIUTIL_CREATE_FAILS", "0")):
+            Path(target).write_text("partial dmg")
+            if os.environ.get("HDIUTIL_CREATE_LEAKS"):
+                images.append({"path": target, "dev": f"/dev/disk{40 + attempt}"})
+                state.write_text(json.dumps(images))
+            sys.exit("hdiutil: create failed - Resource busy")
+        staging = Path(args[args.index("-srcfolder") + 1])
+        shutil.copy(staging / "Read Me.txt", os.environ["BUILD_CALLS"] + ".readme")
+        Path(target).write_text("dmg fixture")
 """
 
 
 def _darwin_build(
-    tmp_path: Path, lipo_archs: str = "x86_64 arm64", clang: bool = True
+    tmp_path: Path,
+    lipo_archs: str = "x86_64 arm64",
+    clang: bool = True,
+    project_name: str = "project",
+    attached: list[dict[str, str]] | None = None,
+    stale_dmg: bool = False,
+    env: dict[str, str] | None = None,
 ) -> tuple[Path, subprocess.CompletedProcess[str], Path]:
-    """Run the builder as on macOS, with stubbed Apple tools."""
-    project = tmp_path / "project"
+    """Run the builder as on macOS, with stubbed Apple tools.
+
+    `attached` seeds the stub's attached disk images; `stale_dmg` leaves a DMG
+    from an earlier build at the output path.
+    """
+    project = tmp_path / project_name
     (project / "scripts").mkdir(parents=True)
     shutil.copy(BUILD_SH, project / "scripts" / "build_mac_installer.sh")
     shutil.copy(ROOT / "install.sh", project / "install.sh")
     stubs = tmp_path / "stubs"
     stubs.mkdir()
-    for tool in ("uname", "lipo", "codesign", "hdiutil", *(("clang",) if clang else ())):
+    stub_names = ("uname", "lipo", "codesign", "hdiutil", "sleep")
+    for tool in (*stub_names, *(("clang",) if clang else ())):
         (stubs / tool).write_text(f"#!{sys.executable}\n" + DARWIN_TOOL)
         (stubs / tool).chmod(0o755)
     tools = tmp_path / "tools"
     tools.mkdir()
     for tool in ("dirname", "mktemp", "chmod", "cat", "rm", "mkdir", "cp"):
         (tools / tool).symlink_to(shutil.which(tool))
+    # The Command Line Tools' python3, which parses `hdiutil info -plist`.
+    (tools / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (tools / "python3").chmod(0o755)
     calls = tmp_path / "calls"
+    if attached:
+        Path(str(calls) + ".images").write_text(json.dumps(attached))
+    if stale_dmg:
+        (project / "dist").mkdir()
+        (project / "dist" / "LocalFlow-Installer.dmg").write_text("stale dmg")
     result = subprocess.run(
         [BASH, str(project / "scripts" / "build_mac_installer.sh")],
         env={
@@ -210,6 +261,7 @@ def _darwin_build(
             "TMPDIR": str(tmp_path),
             "BUILD_CALLS": str(calls),
             "LIPO_ARCHS": lipo_archs,
+            **(env or {}),
         },
         capture_output=True,
         text=True,
@@ -268,6 +320,170 @@ def test_macos_build_requires_clang_instead_of_shipping_a_script_executable(
     assert "clang is required" in result.stderr
     assert not (project / "dist" / APP / "Contents" / "MacOS" / "install-localflow").exists()
     assert not (project / "dist" / "LocalFlow-Installer.dmg").exists()
+
+
+SPACED = "Local Flow build"  # the DMG path contains spaces
+
+
+def _logged(calls: Path) -> list[list[object]]:
+    return [json.loads(line) for line in calls.read_text().splitlines()]
+
+
+def _hdiutil(logged: list[list[object]], command: str) -> list[list[object]]:
+    return [call for call in logged if call[:2] == ["hdiutil", command]]
+
+
+def _detached(logged: list[list[object]]) -> list[object]:
+    return [call[-1] for call in _hdiutil(logged, "detach")]
+
+
+def _still_attached(calls: Path) -> list[dict[str, str]]:
+    state = Path(str(calls) + ".images")
+    return json.loads(state.read_text()) if state.exists() else []
+
+
+def _dmg(project: Path) -> Path:
+    return project / "dist" / "LocalFlow-Installer.dmg"
+
+
+def test_macos_dmg_without_stale_image_is_created_on_first_try(tmp_path: Path) -> None:
+    project, result, calls = _darwin_build(tmp_path, project_name=SPACED)
+
+    assert result.returncode == 0, result.stderr
+    logged = _logged(calls)
+    creates = _hdiutil(logged, "create")
+    assert len(creates) == 1 and creates[0][-1] == str(_dmg(project))
+    assert _hdiutil(logged, "info")  # the mount inventory was checked
+    assert _detached(logged) == []
+    assert not [call for call in logged if call[0] == "sleep"]
+    assert _dmg(project).read_text() == "dmg fixture"
+    assert not (project / "dist" / ".staging").exists()
+    assert result.stdout.strip().endswith(f"Built {_dmg(project)}")
+
+
+def test_macos_stale_image_at_dmg_path_is_detached_before_replacing_it(
+    tmp_path: Path,
+) -> None:
+    dmg = tmp_path / SPACED / "dist" / "LocalFlow-Installer.dmg"
+    project, result, calls = _darwin_build(
+        tmp_path,
+        project_name=SPACED,
+        attached=[{"path": str(dmg), "dev": "/dev/disk17"}],
+        stale_dmg=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    logged = _logged(calls)
+    assert _detached(logged) == ["/dev/disk17"]
+    # Detached while its backing file still existed, i.e. before it was deleted.
+    assert ["detach-saw-file", "/dev/disk17", True] in logged
+    detach = logged.index(_hdiutil(logged, "detach")[0])
+    assert detach < logged.index(_hdiutil(logged, "create")[0])
+    assert len(_hdiutil(logged, "create")) == 1
+    assert _still_attached(calls) == []
+    assert _dmg(project).read_text() == "dmg fixture"
+    assert f"Built {dmg}" in result.stdout
+
+
+def test_macos_transient_create_failure_detaches_leak_and_retries(tmp_path: Path) -> None:
+    project, result, calls = _darwin_build(
+        tmp_path,
+        project_name=SPACED,
+        env={"HDIUTIL_CREATE_FAILS": "1", "HDIUTIL_CREATE_LEAKS": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    logged = _logged(calls)
+    # Both creates share an argv, so compare positions rather than list.index().
+    creates = [i for i, call in enumerate(logged) if call[:2] == ["hdiutil", "create"]]
+    assert len(creates) == 2
+    detach = [i for i, call in enumerate(logged) if call[:2] == ["hdiutil", "detach"]]
+    assert [logged[i][-1] for i in detach] == ["/dev/disk41"]
+    assert creates[0] < detach[0] < creates[1]
+    assert [call for call in logged if call[0] == "sleep"] == [["sleep", "1"]]
+    assert _still_attached(calls) == []
+    assert _dmg(project).read_text() == "dmg fixture"
+    assert "attempt 1 of 3" in result.stderr
+    assert f"Built {_dmg(project)}" in result.stdout
+
+
+def test_macos_exhausted_create_failures_clean_up_without_built(tmp_path: Path) -> None:
+    project, result, calls = _darwin_build(
+        tmp_path,
+        project_name=SPACED,
+        env={"HDIUTIL_CREATE_FAILS": "99", "HDIUTIL_CREATE_LEAKS": "1"},
+    )
+
+    assert result.returncode != 0
+    logged = _logged(calls)
+    assert len(_hdiutil(logged, "create")) == 3
+    assert _detached(logged) == ["/dev/disk41", "/dev/disk42", "/dev/disk43"]
+    sleeps = [call for call in logged if call[0] == "sleep"]
+    assert sleeps == [["sleep", "1"], ["sleep", "2"]]  # short, bounded backoff
+    assert _still_attached(calls) == []
+    assert not _dmg(project).exists()  # the partial DMG is removed
+    assert not (project / "dist" / ".staging").exists()
+    assert "after 3 attempts" in result.stderr
+    assert "Built" not in result.stdout
+
+
+def test_macos_unrelated_attached_images_are_preserved(tmp_path: Path) -> None:
+    dist = tmp_path / SPACED / "dist"
+    unrelated = [
+        # Same volume name, different backing file.
+        {"path": str(tmp_path / "Downloads" / "LocalFlow-Installer.dmg"), "dev": "/dev/disk5"},
+        # Shares the DMG path as a prefix.
+        {"path": str(dist / "LocalFlow-Installer.dmg.bak"), "dev": "/dev/disk6"},
+    ]
+    exact = {"path": str(dist / "LocalFlow-Installer.dmg"), "dev": "/dev/disk7"}
+    project, result, calls = _darwin_build(
+        tmp_path,
+        project_name=SPACED,
+        attached=[*unrelated, exact],
+        stale_dmg=True,
+        env={"HDIUTIL_CREATE_FAILS": "1", "HDIUTIL_CREATE_LEAKS": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _detached(_logged(calls)) == ["/dev/disk7", "/dev/disk41"]
+    assert _still_attached(calls) == unrelated
+    assert _dmg(project).read_text() == "dmg fixture"
+
+
+@pytest.mark.parametrize("leaked_by_create", [False, True])
+def test_macos_detach_failure_refuses_to_replace_attached_image(
+    tmp_path: Path, leaked_by_create: bool
+) -> None:
+    dmg = tmp_path / SPACED / "dist" / "LocalFlow-Installer.dmg"
+    if leaked_by_create:
+        options: dict[str, object] = {
+            "env": {
+                "HDIUTIL_DETACH_FAILS": "1",
+                "HDIUTIL_CREATE_FAILS": "99",
+                "HDIUTIL_CREATE_LEAKS": "1",
+            }
+        }
+        device, expected_creates, contents = "/dev/disk41", 1, "partial dmg"
+    else:
+        options = {
+            "attached": [{"path": str(dmg), "dev": "/dev/disk17"}],
+            "stale_dmg": True,
+            "env": {"HDIUTIL_DETACH_FAILS": "1"},
+        }
+        device, expected_creates, contents = "/dev/disk17", 0, "stale dmg"
+
+    project, result, calls = _darwin_build(tmp_path, project_name=SPACED, **options)
+
+    assert result.returncode != 0
+    logged = _logged(calls)
+    assert len(_hdiutil(logged, "create")) == expected_creates  # no unsafe create
+    assert device in _detached(logged)
+    assert [image["dev"] for image in _still_attached(calls)] == [device]
+    # The attached image's backing file is not deleted underneath the device.
+    assert dmg.read_text() == contents
+    assert "refusing to replace" in result.stderr
+    assert "Built" not in result.stdout
+    assert not (project / "dist" / ".staging").exists()
 
 
 def test_build_rejects_unsafe_ref(tmp_path: Path) -> None:

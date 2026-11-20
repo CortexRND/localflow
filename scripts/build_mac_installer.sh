@@ -11,6 +11,8 @@
 # launcher, so Apple Silicon never asks to install Rosetta; it runs the shell
 # launcher in Contents/Resources with the system /bin/bash. Other systems cannot
 # compile it and ship the shell launcher itself as the executable.
+# On macOS the Xcode Command Line Tools (clang, python3) are required; python3
+# parses `hdiutil info -plist` to detach a stale image left at the DMG path.
 #
 # Environment:
 #   LOCALFLOW_REF  Custom ref the installer downloads (not checksum-verified).
@@ -32,6 +34,49 @@ if [[ -n "$REF" && ! "$REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
     exit 2
 fi
 
+# A failed `hdiutil create` can leave the output image attached ("Resource
+# busy" on macOS 26), which breaks every later build. Only images whose backing
+# file is exactly $DMG are detached (never another volume with the same name),
+# and $DMG is never deleted while still attached.
+DMG_ATTACHED_PY='
+import os, plistlib, re, sys
+target = os.path.realpath(sys.argv[1])
+for image in plistlib.loads(sys.stdin.buffer.read()).get("images", []):
+    path = image.get("image-path")
+    if not path or os.path.realpath(path) != target:
+        continue
+    disks = {entity.get("dev-entry", "") for entity in image.get("system-entities", [])}
+    disks = sorted(d for d in disks if re.fullmatch(r"/dev/disk[0-9]+", d))
+    if not disks:
+        sys.exit("attached image " + path + " has no whole-disk device")
+    print("\n".join(disks))
+'
+attached_dmg_devices() {
+    hdiutil info -plist | python3 -c "$DMG_ATTACHED_PY" "$DMG"
+}
+
+detach_stale_dmg() {
+    local devices device
+    if ! devices="$(attached_dmg_devices)"; then
+        echo "Could not list attached disk images; refusing to replace $DMG." >&2
+        return 1
+    fi
+    [[ -n "$devices" ]] || return 0
+    while IFS= read -r device; do
+        echo "Detaching stale disk image $device ($DMG)." >&2
+        hdiutil detach "$device" >/dev/null \
+            || hdiutil detach -force "$device" >/dev/null \
+            || true
+    done <<<"$devices"
+    if ! devices="$(attached_dmg_devices)" || [[ -n "$devices" ]]; then
+        echo "Could not detach the disk image at $DMG (${devices//$'\n'/ }); refusing to replace it. Detach it with 'hdiutil detach' and retry." >&2
+        return 1
+    fi
+}
+
+if [[ "$(uname -s)" == "Darwin" && -e "$DMG" ]] && command -v hdiutil >/dev/null 2>&1; then
+    detach_stale_dmg || exit 1
+fi
 rm -rf "$APP" "$DMG" "$ZIP" "$DIST/.staging"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/install.sh" "$APP/Contents/Resources/install.sh"
@@ -244,9 +289,32 @@ if [[ "$(uname -s)" == "Darwin" ]] && command -v hdiutil >/dev/null 2>&1; then
     mkdir -p "$staging"
     cp -R "$APP" "$staging/"
     printf '%s' "$README_TEXT" >"$staging/Read Me.txt"
-    hdiutil create -volname "Install LocalFlow" -srcfolder "$staging" \
-        -ov -format UDZO "$DMG"
+    created=0
+    for attempt in 1 2 3; do
+        # Detach an image leaked by an earlier attempt before replacing it.
+        if ! detach_stale_dmg; then
+            rm -rf "$staging"
+            exit 1
+        fi
+        rm -f "$DMG"
+        if hdiutil create -volname "Install LocalFlow" -srcfolder "$staging" \
+            -ov -format UDZO "$DMG"; then
+            created=1
+            break
+        fi
+        echo "hdiutil create failed (attempt $attempt of 3)." >&2
+        if ((attempt < 3)); then
+            sleep "$attempt"
+        fi
+    done
     rm -rf "$staging"
+    if ((!created)); then
+        if detach_stale_dmg; then
+            rm -f "$DMG"
+        fi
+        echo "Could not create $DMG after 3 attempts." >&2
+        exit 1
+    fi
     echo "Built $DMG"
 else
     staging="$(mktemp -d "${TMPDIR:-/tmp}/localflow-zip.XXXXXX")"
