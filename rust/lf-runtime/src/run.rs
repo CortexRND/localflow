@@ -775,55 +775,155 @@ mod tests {
         runtime.shutdown();
     }
 
-    #[test]
-    fn listener_is_ok_only_after_platform_registration_and_stop_is_explicit() {
-        use crate::status::StatusFile;
-        let root = tempfile::tempdir().unwrap();
+    /// How a fake platform registration ended.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Registration {
+        /// The test completed it; the listener then ran until stopped.
+        Registered,
+        /// The runtime stopped first: the listener returned without ready.
+        Stopped,
+        /// The test's gate was dropped (e.g. an assertion unwound).
+        Released,
+        /// Nobody completed or stopped it in time.
+        TimedOut,
+    }
+
+    /// Upper bound for any wait inside the fake listener.
+    const FAKE_LISTENER_WAIT: Duration = Duration::from_secs(10);
+
+    /// The test's side of a fake platform registration. Every wait in the
+    /// fake listener is bounded and honours the runtime's `stop`, so
+    /// `RuntimeHandle::drop` (which joins the listener) can never be
+    /// stranded; dropping the gate (also on an assertion unwind) releases
+    /// a listener still waiting.
+    struct RegistrationGate {
+        entered: mpsc::Receiver<()>,
+        register: mpsc::Sender<()>,
+        ended: mpsc::Receiver<Registration>,
+    }
+
+    impl RegistrationGate {
+        fn wait_entered(&self) {
+            self.entered
+                .recv_timeout(Duration::from_secs(3))
+                .expect("the listener never started registering");
+        }
+        fn register(&self) {
+            self.register.send(()).expect("the listener already ended");
+        }
+        fn ended(&self) -> Option<Registration> {
+            self.ended.recv_timeout(Duration::from_secs(3)).ok()
+        }
+    }
+
+    /// A fake platform listener that reports ready only when the test
+    /// completes its registration through the returned gate.
+    fn gated_listener() -> (KeyboardSource, RegistrationGate) {
+        let (entered_tx, entered) = mpsc::channel();
+        let (register, registered) = mpsc::channel::<()>();
+        let (ended_tx, ended) = mpsc::channel();
+        let registered = Mutex::new(registered);
+        let source: KeyboardSource = Arc::new(move |_, _, stop, ready| {
+            let _ = entered_tx.send(());
+            let deadline = std::time::Instant::now() + FAKE_LISTENER_WAIT;
+            let registered = registered.lock().unwrap_or_else(|p| p.into_inner());
+            let outcome = loop {
+                if stop.load(Ordering::Acquire) {
+                    break Registration::Stopped;
+                }
+                match registered.recv_timeout(Duration::from_millis(5)) {
+                    Ok(()) => break Registration::Registered,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break Registration::Released,
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                        if std::time::Instant::now() >= deadline =>
+                    {
+                        break Registration::TimedOut
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            };
+            let result = match outcome {
+                Registration::Registered => {
+                    ready();
+                    while !stop.load(Ordering::Acquire) {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Ok(())
+                }
+                Registration::Stopped => Ok(()),
+                Registration::Released | Registration::TimedOut => {
+                    Err(InputError::Backend("fake registration abandoned".into()))
+                }
+            };
+            let _ = ended_tx.send(outcome);
+            result
+        });
+        (
+            source,
+            RegistrationGate {
+                entered,
+                register,
+                ended,
+            },
+        )
+    }
+
+    fn offline_config(root: &std::path::Path) {
         let mut config = Config::default();
         config.set_field("command_names", serde_json::json!([]));
         config.set_field("skills_dirs", serde_json::json!([]));
         config.set_field("cleanup_enabled", serde_json::json!(false));
-        lf_core::config::save_config(&config, Some(&paths(root.path()).config)).unwrap();
-        let (entered, registering) = mpsc::channel();
-        let (register, registered) = mpsc::channel::<()>();
-        let registered = Mutex::new(registered);
+        lf_core::config::save_config(&config, Some(&paths(root).config)).unwrap();
+    }
+
+    fn start_gated(root: &std::path::Path, listener: KeyboardSource) -> RuntimeHandle {
         let (started, _) = mpsc::channel();
-        let mut runtime = start_at(
+        start_at(
             options(Box::new(Audio {
                 recording: Arc::new(AtomicBool::new(false)),
                 started,
             })),
             MenuState::new(None, true),
             None,
-            paths(root.path()),
-            Arc::new(move |_, _, stop, ready| {
-                entered.send(()).unwrap();
-                registered.lock().unwrap().recv().unwrap();
-                ready();
-                while !stop.load(Ordering::Acquire) {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(())
-            }),
+            paths(root),
+            listener,
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn listener_is_ok_only_after_platform_registration_and_stop_is_explicit() {
+        use crate::status::StatusFile;
+        let root = tempfile::tempdir().unwrap();
+        offline_config(root.path());
+        let (listener, gate) = gated_listener();
+        let mut runtime = start_gated(root.path(), listener);
         let status_path = paths(root.path()).status;
-        registering.recv_timeout(Duration::from_secs(3)).unwrap();
+        gate.wait_entered();
         let before = StatusFile::read(&status_path).unwrap().unwrap();
         assert_eq!(
             before.instance,
             runtime.status_instance(),
             "the handle proves the file"
         );
-        let (holder, _) = crate::singleinstance::read_holder_at(&paths(root.path()).lock);
-        assert_eq!(holder, Some(std::process::id()));
+        // Read the lock record through the runtime's own locked handle: on
+        // Windows the lock is mandatory, so a second handle can't read it
+        // while held.
+        let held = runtime
+            .lock
+            .as_mut()
+            .expect("the runtime holds the lock")
+            .identity()
+            .expect("the held lock's record is readable through its handle");
+        let pid = std::process::id().to_string();
+        assert_eq!(held.split_whitespace().next(), Some(pid.as_str()));
         assert_eq!(
             before.lock_identity.as_deref(),
-            std::fs::read_to_string(paths(root.path()).lock)
-                .ok()
-                .as_deref()
-                .map(str::trim),
+            Some(held.trim()),
             "bound to this lock acquisition"
         );
         assert_eq!(
@@ -831,7 +931,7 @@ mod tests {
             Some(ListenerFact::Starting),
             "a spawned listener thread is not a listening one"
         );
-        register.send(()).unwrap();
+        gate.register();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
             let now = StatusFile::read(&status_path).unwrap().unwrap();
@@ -843,10 +943,58 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         runtime.shutdown();
+        assert_eq!(gate.ended(), Some(Registration::Registered));
         assert_eq!(runtime.status_instance(), None, "no proof after shutdown");
         let after = StatusFile::read(&status_path).unwrap().unwrap();
         assert_eq!(after.state.as_deref(), Some("stopped"));
         assert_eq!(after.listener, Some(ListenerFact::Dead));
+        // Released now: an ordinary reader sees the same acquisition record.
+        let lock = paths(root.path()).lock;
+        assert_eq!(
+            crate::singleinstance::read_holder_at(&lock).0,
+            Some(std::process::id())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock)
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            before.lock_identity.as_deref()
+        );
+    }
+
+    #[test]
+    fn shutdown_before_platform_registration_never_strands_the_handle() {
+        use crate::status::StatusFile;
+        let root = tempfile::tempdir().unwrap();
+        offline_config(root.path());
+        // The gate (and its sender) stays alive throughout: only `stop` can
+        // end the listener's wait.
+        let (listener, gate) = gated_listener();
+        let runtime = start_gated(root.path(), listener);
+        gate.wait_entered();
+        // Drop the handle on a helper thread so a regression fails this test
+        // after a bounded wait instead of hanging it; the gate is dropped on
+        // that failure path too, releasing the listener.
+        let (done_tx, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "RuntimeHandle::drop was stranded by a listener still registering"
+        );
+        assert_eq!(gate.ended(), Some(Registration::Stopped));
+        let after = StatusFile::read(&paths(root.path()).status)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state.as_deref(), Some("stopped"));
+        assert_eq!(
+            after.listener,
+            Some(ListenerFact::Dead),
+            "never reported ok"
+        );
     }
 
     #[test]
