@@ -259,6 +259,12 @@ libclang are also needed on macOS/Windows (included on GitHub runners). The Secr
 client vendors libdbus, the clipboard uses pure-Rust X11, and HTTPS uses
 rustls.
 
+The native GPUI desktop app preview lives in `lf-desktop/`. It's a standalone crate
+outside this workspace, so the commands above don't build it. Build it with
+`cargo build --manifest-path rust/lf-desktop/Cargo.toml`, or run
+`scripts/run_gpui.sh --sandbox`. See `lf-desktop/README.md` and
+`docs/gpui-migration.md`. It doesn't replace `lf-hub` or any launcher.
+
 ## `lf-rs` commands
 
 Names, flags, defaults and messages follow the Python `lf` (`localflow/cli.py`).

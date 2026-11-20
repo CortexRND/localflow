@@ -1,0 +1,97 @@
+name: GPUI desktop
+
+# The native GPUI preview (rust/lf-desktop) is a standalone Cargo workspace
+# with its own Cargo.lock, kept out of rust/Cargo.toml so the existing Rust
+# workflow and its platform matrix are unchanged. Without this workflow
+# nothing in CI would build it. Additive only: no other workflow is modified
+# and no runtime, installer or launcher behaviour depends on it.
+on:
+  push:
+    paths:
+      - "rust/lf-desktop/**"
+      # Path dependencies of lf-desktop (directly or through lf-ui).
+      - "rust/lf-core/**"
+      - "rust/lf-ui/**"
+      - "rust/lf-providers/**"
+      - "rust/lf-audio/**"
+      - "rust/lf-agent/**"
+      - "rust/lf-runtime/**"
+      - "rust/lf-input/**"
+      - "rust/lf-server/**"
+      # workspace.package / workspace.dependencies inherited by those crates.
+      - "rust/Cargo.toml"
+      - "scripts/run_gpui.sh"
+      - ".github/workflows/gpui.yml"
+  pull_request:
+    paths:
+      - "rust/lf-desktop/**"
+      # Path dependencies of lf-desktop (directly or through lf-ui).
+      - "rust/lf-core/**"
+      - "rust/lf-ui/**"
+      - "rust/lf-providers/**"
+      - "rust/lf-audio/**"
+      - "rust/lf-agent/**"
+      - "rust/lf-runtime/**"
+      - "rust/lf-input/**"
+      - "rust/lf-server/**"
+      # workspace.package / workspace.dependencies inherited by those crates.
+      - "rust/Cargo.toml"
+      - "scripts/run_gpui.sh"
+      - ".github/workflows/gpui.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpui-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MANIFEST: rust/lf-desktop/Cargo.toml
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: GPUI and audio system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang pkg-config \
+            libasound2-dev libfontconfig1-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libvulkan-dev libzstd-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/lf-desktop
+      - name: Format
+        run: cargo fmt --manifest-path "$MANIFEST" --all -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path "$MANIFEST" --workspace --all-targets --locked -- -D warnings
+      - name: Tests (headless; includes the xattr shim)
+        run: cargo test --manifest-path "$MANIFEST" --workspace --locked
+      - name: Build lf-desktop
+        run: cargo build --manifest-path "$MANIFEST" --locked --bin lf-desktop
+
+  macos:
+    # Verifies the macOS cfg paths (GPUI Metal backend, xattr shim) compile.
+    # lf-hub stays the macOS app; this job does not package anything.
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/lf-desktop
+      - name: xattr shim tests
+        run: cargo test --manifest-path "$MANIFEST" -p xattr@0.2.3 --locked
+      - name: Type-check lf-desktop
+        run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --locked
