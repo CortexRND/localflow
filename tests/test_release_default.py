@@ -170,7 +170,7 @@ def _run_release_publisher(tmp_path: Path, fault: str | None = None):
     if fault == "tampered":
         assets += f"printf 'changed' > dist/release/localflow-{version}.zip\n"
     if fault == "unlisted":
-        assets += "printf 'extra' > 'dist/release/Extra Asset.txt'\n"
+        assets += "printf 'extra' > 'dist/release/ExtraAsset.txt'\n"
     _write_stub(work / "scripts/release-assets.sh", assets)
     if fault != "missing-dmg":
         (work / "dist").mkdir()
