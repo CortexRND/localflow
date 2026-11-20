@@ -11,7 +11,7 @@ use lf_ui::hub_model::{self, RecentNote};
 use serde_json::json;
 
 use crate::app::PageCx;
-use crate::controllers::meetings::{self as ctl, Phase, Template};
+use crate::controllers::meetings::{self as ctl, NotesSync, Phase, Template};
 use crate::page::Page;
 use crate::pages::{header, page, sandbox_note, service_banner, split};
 use crate::remote::Health;
@@ -32,6 +32,8 @@ pub struct MeetingsPage {
     chat_available: bool,
     writer: Arc<MeetingNotesWriter>,
     notes_ticket: u64,
+    /// Composer vs server notes (adoption without clobbering local edits).
+    sync: NotesSync,
     recent: (Vec<RecentNote>, String),
     busy: bool,
 }
@@ -53,6 +55,8 @@ impl MeetingsPage {
         let template = cx.new(|cx| Select::new(cx, Vec::new(), None).width(220.));
         cx.subscribe(&notes, |this, _, e, cx| {
             if *e == InputEvent::Changed {
+                // Typing only: programmatic loads (`set_text`) emit nothing.
+                this.sync.edited();
                 this.schedule_notes_save(cx);
                 cx.notify();
             }
@@ -76,6 +80,7 @@ impl MeetingsPage {
             chat_available: false,
             writer: Arc::new(MeetingNotesWriter::new()),
             notes_ticket: 0,
+            sync: NotesSync::default(),
             recent: (Vec::new(), String::new()),
             busy: false,
         };
@@ -126,6 +131,7 @@ impl MeetingsPage {
             .services
             .remote
             .meetings(&self.pcx.services.config());
+        let sent = self.sync.poll_started();
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
@@ -139,6 +145,17 @@ impl MeetingsPage {
                     && snap.phase == Phase::Idle;
                 if !keep {
                     this.phase = snap.phase;
+                }
+                if matches!(this.phase, Phase::Recording { .. }) {
+                    let local = this.notes.read(cx).text().to_string();
+                    if let Some(server) = this.sync.adopt(sent, &local, snap.notes.as_deref()) {
+                        this.notes.update(cx, |i, cx| i.set_text(server, cx));
+                    } else if this.sync.is_dirty() && snap.notes.as_deref() != Some(local.as_str())
+                    {
+                        // Local edits the server hasn't got yet (e.g. typed
+                        // before this meeting was found running): send them.
+                        this.schedule_notes_save(cx);
+                    }
                 }
                 this.chat_available = snap.chat_available;
                 if with_templates && !snap.templates.is_empty() {
@@ -217,11 +234,15 @@ impl MeetingsPage {
                 let writer = this.writer.clone();
                 let ticket = writer.ticket();
                 let text = this.notes.read(cx).text().to_string();
-                cx.background_executor()
-                    .spawn(async move {
-                        let _ = writer.save(client.as_ref(), ticket, &text);
-                    })
-                    .detach();
+                let token = this.sync.edited_token();
+                cx.spawn(async move |this, cx| {
+                    let ok = cx
+                        .background_executor()
+                        .spawn(async move { writer.save(client.as_ref(), ticket, &text).is_ok() })
+                        .await;
+                    let _ = this.update(cx, |this, _| this.sync.save_finished(token, ok));
+                })
+                .detach();
             });
         })
         .detach();
@@ -248,6 +269,7 @@ impl MeetingsPage {
                 this.busy = false;
                 if matches!(phase, Phase::Saved { .. }) {
                     this.chat_available = true;
+                    this.sync.reset();
                 }
                 this.phase = phase;
                 this.refresh(cx);
@@ -289,6 +311,7 @@ impl MeetingsPage {
     fn new_meeting(&mut self, cx: &mut Context<Self>) {
         self.title.update(cx, |i, cx| i.clear(cx));
         self.notes.update(cx, |i, cx| i.clear(cx));
+        self.sync.reset();
         self.phase = Phase::Idle;
         cx.notify();
     }

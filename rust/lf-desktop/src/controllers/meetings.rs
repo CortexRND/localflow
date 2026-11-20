@@ -40,6 +40,76 @@ pub struct Snapshot {
     pub default_template: String,
     pub chat_available: bool,
     pub detected: bool,
+    /// `session.user_notes` of a running meeting (`None` when idle/offline).
+    pub notes: Option<String>,
+}
+
+/// Keeps the notes composer and the server's `session.user_notes` in step.
+///
+/// * A running meeting's notes are **adopted** into the composer, so opening
+///   the page during a meeting (or after a restart) shows them and Stop never
+///   overwrites them with an empty composer.
+/// * Local edits are **never clobbered**: once the user types, the composer is
+///   dirty until a save of that exact edit is confirmed.
+/// * Poll/save races: every edit and every finished save bumps an epoch. A
+///   poll result is adopted only if the epoch is unchanged since the poll was
+///   sent, so a status read that left before a save finished cannot roll the
+///   composer back to older server text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotesSync {
+    epoch: u64,
+    dirty: bool,
+    /// Epoch of the newest local edit.
+    edit_epoch: u64,
+}
+
+impl NotesSync {
+    /// Call when sending a status poll; pass the result to [`Self::adopt`].
+    pub fn poll_started(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The user changed the composer. Returns the edit's token for the save.
+    pub fn edited(&mut self) -> u64 {
+        self.epoch += 1;
+        self.dirty = true;
+        self.edit_epoch = self.epoch;
+        self.edit_epoch
+    }
+
+    /// A save of edit `token` finished. Only a successful save of the newest
+    /// edit makes the composer clean; a failed or superseded one keeps it dirty.
+    pub fn save_finished(&mut self, token: u64, ok: bool) {
+        self.epoch += 1;
+        if ok && token == self.edit_epoch {
+            self.dirty = false;
+        }
+    }
+
+    /// Token of the newest local edit (what a save sent now covers).
+    pub fn edited_token(&self) -> u64 {
+        self.edit_epoch
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// The text to load into the composer from a poll sent at `poll_epoch`,
+    /// or `None` to keep the composer as it is.
+    pub fn adopt(&self, poll_epoch: u64, local: &str, server: Option<&str>) -> Option<String> {
+        let server = server?;
+        if self.dirty || poll_epoch != self.epoch || local == server {
+            return None;
+        }
+        Some(server.to_string())
+    }
+
+    /// A new meeting (or no meeting): forget all state.
+    pub fn reset(&mut self) {
+        self.epoch += 1;
+        self.dirty = false;
+    }
 }
 
 fn text(value: &Value, key: &str) -> String {
@@ -61,6 +131,7 @@ pub fn poll(client: &dyn MeetingClient, with_templates: bool) -> Snapshot {
                 default_template: String::new(),
                 chat_available: false,
                 detected: false,
+                notes: None,
             }
         }
     };
@@ -69,7 +140,9 @@ pub fn poll(client: &dyn MeetingClient, with_templates: bool) -> Snapshot {
     } else {
         (Vec::new(), String::new())
     };
-    let phase = match status.get("session").filter(|s| s.is_object()) {
+    let session = status.get("session").filter(|s| s.is_object());
+    let notes = session.map(|s| text(s, "user_notes"));
+    let phase = match session {
         Some(session) => Phase::Recording {
             seconds: session.get("seconds").and_then(Value::as_i64).unwrap_or(0),
             capture: hub_model::meeting_capture_status(session),
@@ -88,6 +161,7 @@ pub fn poll(client: &dyn MeetingClient, with_templates: bool) -> Snapshot {
             .get("detected")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        notes,
     }
 }
 
@@ -250,6 +324,93 @@ mod tests {
         let long = "a".repeat(MAX_USER_NOTES_CHARS + 1);
         assert!(matches!(start(&client, "x", "", &long), Phase::Error(_)));
         assert!(chat(&client, "q").is_err(), "chat needs a saved meeting");
+    }
+
+    /// A meeting already running on the server (started elsewhere, or before
+    /// this window opened) with notes: the page adopts them, so Stop and save
+    /// sends those notes, not an empty composer.
+    #[test]
+    fn running_meeting_notes_are_adopted_and_survive_stop() {
+        let client = FakeMeetingClient::new();
+        client
+            .start("Standup", "", "general", "- ship the preview", Some(false))
+            .unwrap();
+        let sync = NotesSync::default();
+        let sent = sync.poll_started();
+        let snap = poll(&client, false);
+        assert!(matches!(snap.phase, Phase::Recording { .. }));
+        assert_eq!(snap.notes.as_deref(), Some("- ship the preview"));
+        let composer = sync
+            .adopt(sent, "", snap.notes.as_deref())
+            .expect("empty composer adopts the running notes");
+        let writer = MeetingNotesWriter::new();
+        let phase = stop(&client, &writer, writer.ticket(), &composer);
+        assert!(matches!(phase, Phase::Saved { .. }));
+        assert!(client
+            .calls()
+            .contains(&MeetingCall::SaveNotes("- ship the preview".into())));
+        assert!(!client
+            .calls()
+            .contains(&MeetingCall::SaveNotes(String::new())));
+        // Idle server: nothing to adopt.
+        assert_eq!(poll(&client, false).notes, None);
+        assert_eq!(sync.adopt(sync.poll_started(), "x", None), None);
+    }
+
+    #[test]
+    fn local_edits_and_racing_polls_never_clobber_notes() {
+        let client = FakeMeetingClient::new();
+        client.start("", "", "", "server v1", None).unwrap();
+        let mut sync = NotesSync::default();
+
+        // Dirty local text wins over whatever the server reports.
+        let token = sync.edited();
+        let sent = sync.poll_started();
+        let server = poll(&client, false).notes;
+        assert_eq!(sync.adopt(sent, "local draft", server.as_deref()), None);
+
+        // A poll sent before the save finished returns pre-save notes:
+        // the epoch moved, so it is ignored even though the edit is now clean.
+        let stale_poll = sync.poll_started();
+        let stale = poll(&client, false).notes; // still "server v1"
+        let writer = MeetingNotesWriter::new();
+        writer
+            .save(&client, writer.ticket(), "local draft")
+            .unwrap();
+        sync.save_finished(token, true);
+        assert!(!sync.is_dirty());
+        assert_eq!(
+            sync.adopt(stale_poll, "local draft", stale.as_deref()),
+            None
+        );
+
+        // A fresh poll after the save agrees with the composer: no change.
+        let fresh = sync.poll_started();
+        let now = poll(&client, false).notes;
+        assert_eq!(now.as_deref(), Some("local draft"));
+        assert_eq!(sync.adopt(fresh, "local draft", now.as_deref()), None);
+
+        // Server notes changed elsewhere while the composer is clean: adopted.
+        client.save_notes("edited on another device").unwrap();
+        let later = sync.poll_started();
+        let other = poll(&client, false).notes;
+        assert_eq!(
+            sync.adopt(later, "local draft", other.as_deref())
+                .as_deref(),
+            Some("edited on another device")
+        );
+
+        // Only a successful save of the newest edit clears the dirty flag.
+        let first = sync.edited();
+        let second = sync.edited();
+        sync.save_finished(first, true);
+        assert!(sync.is_dirty(), "older save must not clean a newer edit");
+        sync.save_finished(second, false);
+        assert!(sync.is_dirty(), "failed save keeps the edit dirty");
+        sync.save_finished(second, true);
+        assert!(!sync.is_dirty());
+        sync.reset();
+        assert!(!sync.is_dirty());
     }
 
     #[test]
