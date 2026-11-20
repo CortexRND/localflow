@@ -74,7 +74,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "5c7a843348609ea34039a3fffbde3dd8a6cc919397842e021fd3c238e0d919a5  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "872cde7cd5c1c390b6435e2e98062675fe95fc60abb15050cd85404b0828133c  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -82,7 +82,7 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "5c7a843348609ea34039a3fffbde3dd8a6cc919397842e021fd3c238e0d919a5  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.1/install.sh && echo "872cde7cd5c1c390b6435e2e98062675fe95fc60abb15050cd85404b0828133c  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
 The installer is pinned to release `v0.2.1`. Whether or not git is installed,
@@ -92,7 +92,12 @@ if the checksum file or hash is missing or does not match. An existing install
 in `~/.localflow/app` (including an older git checkout made by a previous
 installer) is replaced by the verified archive only after verification
 succeeds, keeping its `.venv`; a destination that is not a LocalFlow install is
-never overwritten. The installer does not pin a git commit: the release tag
+never overwritten. A replaced git checkout is never deleted, even a clean one:
+it is moved as is (uncommitted, staged and untracked files, unpushed commits,
+stashes and all git metadata) to a sibling backup such as
+`~/.localflow/app.git-backup-20261120-101500-4242`, and the installer prints
+the exact path. Delete the backup yourself once you have recovered anything
+you need from it. The installer does not pin a git commit: the release tag
 points at the merge commit that contains `install.sh`, and a file cannot embed
 the hash of a commit that includes it.
 

@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="Bash is not installed")
 
 REAL_TOOLS = (
     "sh", "dirname", "mkdir", "mv", "rm", "cat", "touch", "tar", "gzip",
-    "mktemp", "chmod", "cp", "ls", "ln", "env", "sleep", "tr",
+    "mktemp", "chmod", "cp", "ls", "ln", "env", "sleep", "tr", "date",
 )  # fmt: skip
 HASH_TOOLS = ("sha256sum", "shasum")
 RELEASE = re.search(
@@ -631,6 +631,22 @@ def _install_work(calls: list[str]) -> list[int]:
     ]
 
 
+def _backups(sandbox: Sandbox) -> list[Path]:
+    return sorted(sandbox.dest.parent.glob(f"{sandbox.dest.name}.git-backup-*"))
+
+
+def _reported_backup(sandbox: Sandbox, result: subprocess.CompletedProcess[str]) -> Path:
+    """The single backup directory, which must be the exact path printed."""
+    reported = re.findall(r"^Previous git checkout preserved at: (.+)$", result.stdout, re.M)
+    assert len(reported) == 1, result.stdout
+    backup = Path(reported[0])
+    assert _backups(sandbox) == [backup]
+    assert backup.parent == sandbox.dest.parent
+    name = re.escape(sandbox.dest.name)
+    assert re.fullmatch(rf"{name}\.git-backup-\d{{8}}-\d{{6}}-\d+(-\d+)?", backup.name)
+    return backup
+
+
 def test_existing_git_checkout_is_replaced_by_verified_archive(tmp_path: Path) -> None:
     sandbox = _git_sandbox(tmp_path, existing=True)
 
@@ -642,6 +658,10 @@ def test_existing_git_checkout_is_replaced_by_verified_archive(tmp_path: Path) -
     assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
     assert "will be replaced by the" in result.stdout
     assert _no_leftover_downloads(sandbox)
+    backup = _reported_backup(sandbox, result)
+    assert (backup / ".git").is_dir()
+    assert (backup / "local-edit.txt").read_text() == "old checkout"
+    assert not (backup / ".venv").exists()  # reused by the new install instead
     # The archive is fetched and verified before any environment work.
     calls = sandbox.calls()
     sums = next(i for i, call in enumerate(calls) if call.startswith("curl ") and "SHA256SUMS" in call)
@@ -663,6 +683,9 @@ def test_existing_git_checkout_without_git_is_replaced_by_verified_archive(
     _assert_verified_release_archive(sandbox, result)
     assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
     assert "keeping the existing checkout" not in result.stdout
+    backup = _reported_backup(sandbox, result)
+    assert (backup / ".git").is_dir()
+    assert (backup / "pyproject.toml").is_file()
 
 
 @pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing"])
@@ -732,6 +755,204 @@ def test_archive_failure_with_git_fails_closed(
         assert not (sandbox.dest / ".localflow-tarball").exists()
     else:
         assert not sandbox.dest.exists()
+    assert not _backups(sandbox)  # nothing is moved before verification
+
+
+# Real-git regression tests: replacing an old managed checkout must never lose
+# work. Real git only builds and inspects the fixture (isolated from the user's
+# and system git config); install.sh itself sees a stub git, or none at all.
+
+REAL_GIT = shutil.which("git")
+needs_real_git = pytest.mark.skipif(REAL_GIT is None, reason="git is not installed")
+GIT_CASES = ("clean", "unpushed", "dirty", "worktree")
+
+
+def _fixture_git_env(tmp_path: Path) -> dict[str, str]:
+    home = tmp_path / "git-home"
+    home.mkdir(exist_ok=True)
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_AUTHOR_NAME": "LocalFlow Fixture",
+        "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+        "GIT_COMMITTER_NAME": "LocalFlow Fixture",
+        "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+    }
+
+
+def _git(env: dict[str, str], cwd: Path, *args: str) -> str:
+    assert REAL_GIT
+    return subprocess.run(
+        [REAL_GIT, "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false", *args],
+        cwd=cwd, env=env, capture_output=True, text=True, check=True,
+    ).stdout  # fmt: skip
+
+
+def _make_real_checkout(tmp_path: Path, dest: Path, case: str) -> dict[str, str]:
+    """Clone a pushed LocalFlow-like repo to dest and give it `case` local work."""
+    env = _fixture_git_env(tmp_path)
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    _git(env, tmp_path, "init", "--bare", str(origin))
+    _git(env, tmp_path, "init", str(seed))
+    (seed / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
+    (seed / "tracked.txt").write_text("pushed\n")
+    _git(env, seed, "add", ".")
+    _git(env, seed, "commit", "-m", "pushed")
+    _git(env, seed, "push", str(origin), "main")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if case == "worktree":
+        main = tmp_path / "main-checkout"
+        _git(env, tmp_path, "clone", str(origin), str(main))
+        _git(env, main, "worktree", "add", "-b", "wt", str(dest))
+        (dest / "tracked.txt").write_text("worktree edit\n")
+    else:
+        _git(env, tmp_path, "clone", str(origin), str(dest))
+    common = _common_dir(env, dest)
+    (common / "info").mkdir(exist_ok=True)
+    with (common / "info" / "exclude").open("a") as exclude:
+        exclude.write(".venv/\n")
+    (common / "hooks" / "post-commit").write_text("#!/bin/sh\n# fixture hook\n")
+    if case == "unpushed":
+        (dest / "local.txt").write_text("unpushed commit\n")
+        _git(env, dest, "add", "local.txt")
+        _git(env, dest, "commit", "-m", "unpushed")
+        _git(env, dest, "branch", "local-only")
+    if case == "dirty":
+        (dest / "tracked.txt").write_text("stashed\n")
+        _git(env, dest, "stash", "push", "-m", "fixture stash")
+        (dest / "staged.txt").write_text("staged\n")
+        _git(env, dest, "add", "staged.txt")
+        (dest / "tracked.txt").write_text("unstaged edit\n")
+        (dest / "untracked.txt").write_text("untracked\n")
+    (dest / ".venv").mkdir()
+    (dest / ".venv" / "keep.txt").write_text("keep")
+    return env
+
+
+def _common_dir(env: dict[str, str], repo: Path) -> Path:
+    common = Path(_git(env, repo, "rev-parse", "--git-common-dir").strip())
+    return common if common.is_absolute() else repo / common
+
+
+def _git_state(env: dict[str, str], repo: Path) -> dict[str, str]:
+    """Everything a backup must preserve: HEAD, refs, index, worktree, stashes,
+    unpushed commits and repository metadata (a hook), plus object integrity."""
+    files = {
+        p.relative_to(repo).as_posix(): p.read_text()
+        for p in sorted(repo.rglob("*"))
+        if p.is_file() and p.relative_to(repo).parts[0] not in (".git", ".venv")
+    }
+    status = _git(env, repo, "status", "--porcelain=v1", "--branch", "--untracked-files=all")
+    has_upstream = "..." in status.splitlines()[0]
+    return {
+        "head": _git(env, repo, "rev-parse", "HEAD"),
+        "status": status,
+        "diff": _git(env, repo, "diff"),
+        "staged": _git(env, repo, "diff", "--cached"),
+        "stashes": _git(env, repo, "stash", "list", "--format=%H %gs"),
+        "refs": _git(env, repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+        "unpushed": (
+            _git(env, repo, "log", "--format=%H %s", "@{upstream}..HEAD") if has_upstream else ""
+        ),
+        "hook": (_common_dir(env, repo) / "hooks" / "post-commit").read_text(),
+        "files": repr(files),
+        "fsck": _git(env, repo, "fsck", "--no-progress", "--no-dangling"),
+    }
+
+
+def _real_git_sandbox(tmp_path: Path, *, git_stub: bool) -> Sandbox:
+    sandbox = Sandbox(tmp_path)
+    if git_stub:
+        sandbox.add("brew")
+        sandbox.add("git")
+        sandbox.add("python3", "3.12.4")
+    return sandbox
+
+
+@needs_real_git
+@pytest.mark.parametrize("git_stub", [True, False], ids=["git", "no-git"])
+@pytest.mark.parametrize("case", GIT_CASES)
+def test_replaced_real_git_checkout_is_backed_up_intact(
+    tmp_path: Path, case: str, git_stub: bool
+) -> None:
+    sandbox = _real_git_sandbox(tmp_path, git_stub=git_stub)
+    env = _make_real_checkout(tmp_path, sandbox.dest, case)
+    before = _git_state(env, sandbox.dest)
+    if case == "unpushed":
+        assert "[ahead 1]" in before["status"] and before["unpushed"]
+    if case == "dirty":
+        assert "fixture stash" in before["stashes"]
+        assert before["diff"] and before["staged"] and "?? untracked.txt" in before["status"]
+
+    result = sandbox.run()
+
+    assert result.returncode == 0, result.stderr
+    _assert_verified_release_archive(sandbox, result)
+    assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"  # .venv reused
+    assert _no_leftover_downloads(sandbox)
+    backup = _reported_backup(sandbox, result)
+    assert f"to {backup} (its .venv is reused" in result.stdout
+    assert not (backup / ".venv").exists()
+    if case == "worktree":
+        assert (backup / ".git").is_file()
+        assert "worktree repair" in result.stdout
+        _git(env, backup, "worktree", "repair")
+    else:
+        assert (backup / ".git").is_dir()
+    assert _git_state(env, backup) == before
+
+    # A rerun replaces the archive install without touching the backup.
+    rerun = sandbox.run()
+    assert rerun.returncode == 0, rerun.stderr
+    assert _backups(sandbox) == [backup]
+    assert "Previous git checkout preserved" not in rerun.stdout
+    assert _git_state(env, backup) == before
+
+
+MV_FAILURE = r'''#!/bin/sh
+case "$STUB_MV_FAIL" in
+    publish) case "$1" in */.localflow-download.*/src) echo "mv: stubbed failure" >&2; exit 1;; esac ;;
+    aside) case "$2" in *.git-backup-*) echo "mv: stubbed failure" >&2; exit 1;; esac ;;
+esac
+exec "%s" "$@"
+'''
+
+
+@needs_real_git
+@pytest.mark.parametrize(
+    "failure,message",
+    [
+        ("aside", "was left unchanged"),
+        ("publish", "the previous install was restored"),
+    ],
+)
+def test_failed_replacement_rolls_back_real_git_checkout(
+    tmp_path: Path, failure: str, message: str
+) -> None:
+    sandbox = _real_git_sandbox(tmp_path, git_stub=True)
+    real_mv = shutil.which("mv")
+    assert real_mv
+    (sandbox.bin / "mv").write_text(MV_FAILURE % real_mv)
+    (sandbox.bin / "mv").chmod(0o755)
+    env = _make_real_checkout(tmp_path, sandbox.dest, "dirty")
+    before = _git_state(env, sandbox.dest)
+
+    result = sandbox.run(env={"STUB_MV_FAIL": failure})
+
+    assert result.returncode == 1
+    assert "mv: stubbed failure" in result.stderr
+    assert message in result.stderr
+    assert f"Verified SHA-256 of {ASSET}." in result.stdout  # failed after verifying
+    assert not _install_work(sandbox.calls())
+    assert (sandbox.dest / ".git").is_dir()
+    assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
+    assert not (sandbox.dest / ".localflow-tarball").exists()
+    assert _git_state(env, sandbox.dest) == before
+    assert not _backups(sandbox)
+    assert _no_leftover_downloads(sandbox)
 
 
 def test_existing_git_checkout_without_usable_git_is_kept(tmp_path: Path) -> None:

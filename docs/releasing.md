@@ -19,7 +19,16 @@ it unless it matches the release's `SHA256SUMS`. Fresh installs, earlier archive
 installs and earlier managed git checkouts (from installers before v0.2.1) are
 all handled the same way: the existing directory is replaced only after the
 download verifies, its `.venv` is kept, and a failed download or checksum leaves
-it untouched. A destination that is not recognisably a LocalFlow install is
+it untouched. A replaced directory that contains `.git` (a directory, or a
+`.git` file for a worktree or submodule) is never deleted, even when it is
+clean: it is renamed intact to a sibling `<name>.git-backup-<YYYYmmdd-HHMMSS>-<pid>`
+directory (for example `~/.localflow/app.git-backup-20261120-101500-4242`),
+outside the temporary download directory, and the installer prints the exact
+path. Uncommitted, staged and untracked files, unpushed commits, branches,
+stashes, hooks and other git metadata therefore survive; only `.venv` moves to
+the new install for reuse. The backup is a plain rename, so it needs no git. If
+the swap fails, the previous directory and its `.venv` are restored and no
+backup is left behind. A destination that is not recognisably a LocalFlow install is
 refused, never overwritten. Running `install.sh` from inside a developer
 checkout installs that checkout as is; `LOCALFLOW_REF` remains an explicitly
 unverified git/codeload override.

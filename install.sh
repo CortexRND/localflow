@@ -46,7 +46,10 @@ By default, with or without git, the installer downloads
 localflow-$LOCALFLOW_VERSION.tar.gz from the $LOCALFLOW_RELEASE GitHub release and
 verifies it against the release's SHA256SUMS before unpacking. An existing
 LocalFlow install at the destination, including an older git checkout, is
-replaced only after verification succeeds; its .venv is kept. Git commits are
+replaced only after verification succeeds; its .venv is kept. A replaced
+directory that contains .git is never deleted: it is moved, with all local
+changes, commits and stashes, to a sibling <name>.git-backup-<time>-<pid>
+directory whose path is printed. Git commits are
 not pinned: the release tag points at the merge commit that contains this
 script, whose hash cannot be known when the script is written.
 Running install.sh from inside a git checkout installs that checkout as is.
@@ -267,11 +270,32 @@ is_localflow_checkout() {
     return 1
 }
 
+# Print an unused path next to directory $1 for preserving a replaced git
+# checkout: <name>.git-backup-<timestamp>-<pid>[-<n>]. Needs neither git nor
+# any tool beyond date (optional).
+git_backup_path() {
+    local trimmed="$1" parent base stamp candidate n=1
+    while [[ "$trimmed" == */ && "$trimmed" != / ]]; do trimmed="${trimmed%/}"; done
+    parent="$(dirname "$trimmed")"
+    base="${trimmed##*/}"
+    stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null)" || stamp=""
+    candidate="$parent/$base.git-backup-${stamp:+$stamp-}$$"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="$parent/$base.git-backup-${stamp:+$stamp-}$$-$n"
+    done
+    printf '%s\n' "$candidate"
+}
+
 # Download the source tarball into $REPO, replacing older source but keeping .venv.
 # Without LOCALFLOW_REF this is the pinned release asset, verified against the
 # release's SHA256SUMS; a custom LOCALFLOW_REF uses GitHub's unverified codeload.
+# A replaced directory containing .git (a checkout, worktree or submodule) is
+# never deleted: it is renamed, intact, to a sibling backup whose path is
+# printed. Everything is downloaded and verified before $REPO is touched, and
+# a failed replacement restores the previous directory and its .venv.
 install_tarball() {
-    local parent tmp url asset=""
+    local parent tmp url asset="" previous backup="" venv_moved=0
     parent="$(dirname "$REPO")"
     mkdir -p "$parent"
     tmp="$(mktemp -d "$parent/.localflow-download.XXXXXX")"
@@ -309,18 +333,59 @@ install_tarball() {
     fi
     : >"$tmp/src/.localflow-tarball"
     if [[ -e "$REPO" ]]; then
-        if [[ -d "$REPO/.venv" ]]; then
-            mv "$REPO/.venv" "$tmp/src/.venv"
+        previous="$tmp/previous"
+        if [[ -e "$REPO/.git" || -L "$REPO/.git" ]]; then
+            # Uncommitted, staged and untracked files, unpushed commits,
+            # stashes and git metadata all live here: keep the whole tree.
+            backup="$(git_backup_path "$REPO")"
+            previous="$backup"
+            if [[ -d "$REPO/.venv" ]]; then
+                echo "Backing up the existing git checkout at $REPO to $backup (its .venv is reused by the new install)."
+            else
+                echo "Backing up the existing git checkout at $REPO to $backup."
+            fi
         fi
-        mv "$REPO" "$tmp/previous"
-        if ! mv "$tmp/src" "$REPO"; then
-            mv "$tmp/previous" "$REPO"
-            if [[ -d "$tmp/src/.venv" ]]; then
-                mv "$tmp/src/.venv" "$REPO/.venv"
+        if [[ -d "$REPO/.venv" ]]; then
+            if ! mv "$REPO/.venv" "$tmp/src/.venv"; then
+                rm -rf "$tmp"
+                echo "Could not move $REPO/.venv; $REPO was left unchanged." >&2
+                exit 1
+            fi
+            venv_moved=1
+        fi
+        if ! mv "$REPO" "$previous"; then
+            if [[ "$venv_moved" == 1 && ! -e "$REPO/.venv" ]]; then
+                mv "$tmp/src/.venv" "$REPO/.venv" || {
+                    echo "Could not restore $REPO/.venv; it remains at $tmp/src/.venv" >&2
+                    exit 1
+                }
             fi
             rm -rf "$tmp"
-            echo "Could not replace $REPO" >&2
+            echo "Could not move $REPO aside${backup:+ to $backup}; $REPO was left unchanged." >&2
             exit 1
+        fi
+        if ! mv "$tmp/src" "$REPO"; then
+            if ! mv "$previous" "$REPO"; then
+                # Keep $tmp: it may hold the previous install or its .venv.
+                echo "Could not replace $REPO or restore it; the previous install is at $previous" >&2
+                if [[ "$venv_moved" == 1 ]]; then
+                    echo "Its .venv is at $tmp/src/.venv" >&2
+                fi
+                exit 1
+            fi
+            if [[ "$venv_moved" == 1 ]] && ! mv "$tmp/src/.venv" "$REPO/.venv"; then
+                echo "Restored $REPO but not its .venv; it remains at $tmp/src/.venv" >&2
+                exit 1
+            fi
+            rm -rf "$tmp"
+            echo "Could not replace $REPO; the previous install was restored." >&2
+            exit 1
+        fi
+        if [[ -n "$backup" ]]; then
+            echo "Previous git checkout preserved at: $backup"
+            if [[ -f "$backup/.git" ]]; then
+                echo "Its .git is a gitdir link; run 'git -C \"$backup\" worktree repair' if git reports it as missing."
+            fi
         fi
     else
         mv "$tmp/src" "$REPO"
@@ -449,8 +514,9 @@ else
     elif is_localflow_checkout "$REPO"; then
         # Default installs never trust git: an older managed git checkout is
         # replaced by the verified release archive (keeping .venv), and only
-        # after the download passes its SHA256SUMS check.
-        echo "Existing git checkout at $REPO will be replaced by the $LOCALFLOW_RELEASE release archive once it passes SHA256SUMS verification (.venv is kept)."
+        # after the download passes its SHA256SUMS check. The checkout itself
+        # is moved to a sibling backup, never deleted.
+        echo "Existing git checkout at $REPO will be replaced by the $LOCALFLOW_RELEASE release archive once it passes SHA256SUMS verification (.venv is kept; the checkout is backed up next to it)."
         install_tarball
     elif [[ -e "$REPO" ]]; then
         echo "Install destination exists but is not a LocalFlow install: $REPO" >&2
