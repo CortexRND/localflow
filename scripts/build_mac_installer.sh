@@ -7,8 +7,15 @@
 #   LocalFlow-Installer.dmg        (macOS: app + Read Me.txt)
 #   LocalFlow-Installer-mac.zip    (other systems; keeps the executable bit)
 #
+# On macOS the bundle executable is a small universal (arm64 + x86_64) Mach-O
+# launcher, so Apple Silicon never asks to install Rosetta; it runs the shell
+# launcher in Contents/Resources with the system /bin/bash. Other systems cannot
+# compile it and ship the shell launcher itself as the executable.
+#
 # Environment:
-#   LOCALFLOW_REF  Ref the installer downloads (default: current git commit, else main)
+#   LOCALFLOW_REF  Custom ref the installer downloads (not checksum-verified).
+#                  Default: unset, so install.sh installs its pinned release
+#                  and verifies it against the release's SHA256SUMS.
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,12 +24,10 @@ APP="$DIST/Install LocalFlow.app"
 DMG="$DIST/LocalFlow-Installer.dmg"
 ZIP="$DIST/LocalFlow-Installer-mac.zip"
 
+# Never pin the build commit: an exported LOCALFLOW_REF turns off install.sh's
+# checksum-verified release download.
 REF="${LOCALFLOW_REF:-}"
-if [[ -z "$REF" ]]; then
-    REF="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
-fi
-REF="${REF:-main}"
-if [[ ! "$REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+if [[ -n "$REF" && ! "$REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
     echo "Unsupported LOCALFLOW_REF: $REF" >&2
     exit 2
 fi
@@ -76,6 +81,11 @@ cat >"$APP/Contents/Info.plist" <<EOF
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>0.2.0</string>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+        <string>x86_64</string>
+    </array>
     <key>NSHighResolutionCapable</key>
     <true/>
 $ICON_XML
@@ -89,6 +99,7 @@ launcher_template="$(cat <<'EOF'
 # generated in a temporary writable directory, so this also works when the app
 # runs from a read-only disk image or from a path with spaces.
 set -u
+# Empty: install the release pinned in install.sh (checksum-verified).
 PINNED_REF="@@LOCALFLOW_REF@@"
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -107,7 +118,11 @@ ref="${LOCALFLOW_REF:-$PINNED_REF}"
     printf '#!/bin/bash\n'
     printf 'WORKDIR=%q\n' "$workdir"
     printf 'INSTALLER=%q\n' "$installer"
-    printf 'export LOCALFLOW_REF=%q\n' "$ref"
+    if [[ -n "$ref" ]]; then
+        printf 'export LOCALFLOW_REF=%q\n' "$ref"
+    else
+        printf 'unset LOCALFLOW_REF\n'
+    fi
     cat <<'INNER'
 trap 'rm -rf "$WORKDIR"' EXIT
 clear
@@ -138,9 +153,63 @@ if ! open -a Terminal "$command_file"; then
 fi
 EOF
 )"
-printf '%s\n' "${launcher_template//@@LOCALFLOW_REF@@/$REF}" \
-    >"$APP/Contents/MacOS/install-localflow"
-chmod 755 "$APP/Contents/MacOS/install-localflow"
+LAUNCHER_SCRIPT="$APP/Contents/Resources/install-localflow.sh"
+printf '%s\n' "${launcher_template//@@LOCALFLOW_REF@@/$REF}" >"$LAUNCHER_SCRIPT"
+chmod 755 "$LAUNCHER_SCRIPT"
+
+EXECUTABLE="$APP/Contents/MacOS/install-localflow"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    # A script CFBundleExecutable has no architecture, which makes Apple Silicon
+    # offer to install Rosetta. Build a universal native launcher instead.
+    command -v clang >/dev/null 2>&1 || {
+        echo "clang is required to build the native installer launcher; install the Xcode Command Line Tools (xcode-select --install)." >&2
+        exit 1
+    }
+    stub_dir="$(mktemp -d "${TMPDIR:-/tmp}/localflow-launcher.XXXXXX")"
+    cat >"$stub_dir/launcher.c" <<'C'
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(void) {
+    char exe[PATH_MAX], real[PATH_MAX], script[PATH_MAX];
+    uint32_t size = sizeof exe;
+    if (_NSGetExecutablePath(exe, &size) != 0 || realpath(exe, real) == NULL) {
+        fprintf(stderr, "install-localflow: cannot locate the app bundle\n");
+        return 1;
+    }
+    char *slash = strrchr(real, '/');
+    if (slash == NULL) return 1;
+    *slash = '\0';
+    if (snprintf(script, sizeof script, "%s/../Resources/install-localflow.sh", real)
+        >= (int)sizeof script) return 1;
+    char *const args[] = {"/bin/bash", script, NULL};
+    execv("/bin/bash", args);
+    perror("install-localflow: /bin/bash");
+    return 127;
+}
+C
+    if ! clang -Os -arch arm64 -arch x86_64 -mmacosx-version-min=10.13 \
+        -o "$EXECUTABLE" "$stub_dir/launcher.c"; then
+        rm -rf "$stub_dir"
+        echo "Could not compile the universal installer launcher." >&2
+        exit 1
+    fi
+    rm -rf "$stub_dir"
+    # Verified here rather than in CI so every build path is covered.
+    archs="$(lipo -archs "$EXECUTABLE" 2>/dev/null || true)"
+    if [[ " $archs " != *" arm64 "* || " $archs " != *" x86_64 "* ]]; then
+        echo "Installer launcher is not universal (architectures: ${archs:-unknown})." >&2
+        exit 1
+    fi
+else
+    cp "$LAUNCHER_SCRIPT" "$EXECUTABLE"
+fi
+chmod 755 "$EXECUTABLE"
 
 if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$APP" \
@@ -155,11 +224,14 @@ README_TEXT='Install LocalFlow
    LocalFlow opens when it is done. Afterwards, find it in Applications >
    LocalFlow (the Applications folder inside your home folder).
 
-The app is not signed by Apple, so macOS may block it the first time:
-  - Right-click (or Control-click) "Install LocalFlow" and choose Open, then
-    click Open again; or
-  - open System Settings > Privacy & Security, scroll down, and click
-    "Open Anyway" next to the Install LocalFlow message.
+The app is not signed or notarized by Apple, so macOS blocks it the first
+time you open it. To allow it:
+  1. Double-click "Install LocalFlow" and close the warning (Done or OK).
+  2. Open System Settings > Privacy & Security and scroll down to Security.
+  3. Click "Open Anyway" next to the message about Install LocalFlow, then
+     confirm with Open Anyway and your password or Touch ID.
+On macOS 15 and later, right-click > Open no longer offers this bypass; use
+System Settings as above.
 
 The default app uses Rust, not Python. Rust is provisioned automatically;
 accept the Apple Command Line Tools dialog if prompted. Missing CMake is

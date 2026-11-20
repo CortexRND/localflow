@@ -1233,8 +1233,8 @@ impl SetupWindow {
         let state = self.state.borrow();
         // detect() used the injected runtime/platform to make these choices;
         // never re-recommend with HostPlatform (which intentionally knows no
-        // speech runtimes).
-        let stt = state.choices.stt_id.clone();
+        // speech runtimes). The speech page tags and preselects the same model.
+        let stt = self.recommended_stt();
         let llm = state.choices.llm_id.clone();
         let mut cursor = 8.0;
         self.add_text(
@@ -3040,6 +3040,7 @@ impl SetupWindow {
             }
             Ok(output) => {
                 let mut advance = false;
+                let mut open_hub = false;
                 {
                     let mut state = self.state.borrow_mut();
                     match (kind, output) {
@@ -3082,6 +3083,7 @@ impl SetupWindow {
                         (JobKind::Apply, JobOutput::Applied(path)) => {
                             state.saved = true;
                             state.status_message = path.display().to_string();
+                            open_hub = true;
                         }
                         (JobKind::Monitor, JobOutput::MonitorStarted) => {
                             if let Some(pending) = self.pending_mic.borrow_mut().take() {
@@ -3103,6 +3105,12 @@ impl SetupWindow {
                     self.advance();
                 } else {
                     self.rebuild();
+                }
+                // Finish opens the Hub in this process; it never quits the app.
+                if open_hub {
+                    if let Some(launch) = self.services.hooks.launch_runtime.clone() {
+                        launch();
+                    }
                 }
             }
         }

@@ -265,6 +265,54 @@ pub fn plan_initial_route(
     })
 }
 
+/// What the native router does for one show request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowAction {
+    /// An explicit Setup page request: show setup, route state untouched.
+    OpenSetup,
+    /// `--setup` launch: show setup; saving it does not auto-open the Hub.
+    SetupOnly,
+    /// First run: show setup, then the Hub (at `desired`) once configured.
+    FirstRun {
+        desired: Option<&'static str>,
+    },
+    Hub {
+        page: &'static str,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowPlan {
+    pub action: WindowAction,
+    /// The one in-process runtime (dictation, menu bar, local server) starts
+    /// with whichever window opens, setup included, so it is already running
+    /// when first-run setup finishes. Starting is idempotent and guarded by the
+    /// process's single-instance locks, so this never creates a second runtime.
+    pub start_runtime: bool,
+}
+
+pub fn plan_window(
+    setup_page: bool,
+    setup_only: bool,
+    configured: bool,
+    requested: Option<&str>,
+) -> Result<WindowPlan, String> {
+    let action = if setup_page {
+        WindowAction::OpenSetup
+    } else if setup_only {
+        WindowAction::SetupOnly
+    } else {
+        match plan_initial_route(configured, requested)? {
+            InitialRoute::Setup { desired } => WindowAction::FirstRun { desired },
+            InitialRoute::Hub { page } => WindowAction::Hub { page },
+        }
+    };
+    Ok(WindowPlan {
+        action,
+        start_runtime: true,
+    })
+}
+
 /// Seconds since the Unix epoch (`time.time()`).
 pub fn system_now() -> f64 {
     SystemTime::now()
@@ -611,6 +659,48 @@ mod tests {
         );
         assert!(plan_initial_route(true, Some("not-a-page")).is_err());
         assert!(plan_initial_route(false, Some("not-a-page")).is_err());
+    }
+
+    #[test]
+    fn runtime_starts_with_first_run_and_explicit_setup_not_only_the_hub() {
+        let plan =
+            |setup_page: bool, setup_only: bool, configured: bool, requested: Option<&str>| {
+                plan_window(setup_page, setup_only, configured, requested).unwrap()
+            };
+        let cases = [
+            (
+                plan(false, false, false, None),
+                WindowAction::FirstRun { desired: None },
+            ),
+            (
+                plan(false, false, false, Some("History")),
+                WindowAction::FirstRun {
+                    desired: Some("History"),
+                },
+            ),
+            (plan(false, true, false, None), WindowAction::SetupOnly),
+            (
+                plan(false, true, true, Some("History")),
+                WindowAction::SetupOnly,
+            ),
+            (plan(true, false, true, None), WindowAction::OpenSetup),
+            (plan(true, false, false, None), WindowAction::OpenSetup),
+            (
+                plan(false, false, true, None),
+                WindowAction::Hub { page: "Home" },
+            ),
+            (
+                plan(false, false, true, Some("Models")),
+                WindowAction::Hub { page: "Models" },
+            ),
+        ];
+        for (plan, action) in cases {
+            assert_eq!(plan.action, action);
+            assert!(plan.start_runtime, "{action:?} must start the runtime");
+        }
+        // Errors still surface instead of opening a window.
+        assert!(plan_window(false, false, true, Some("not-a-page")).is_err());
+        assert!(plan_window(false, false, false, Some("not-a-page")).is_err());
     }
 
     fn file() -> (tempfile::TempDir, RequestFile) {

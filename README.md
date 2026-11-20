@@ -35,10 +35,12 @@ it starts dictation and the menu bar in the background (reusing the login agent
 if installed, never twice) and opens the native Hub. Opening it again just
 brings the Hub to the front.
 
-The app is unsigned and not notarized, so Gatekeeper blocks it the first time
-you open it. To allow it, go to System Settings > Privacy & Security, click
-**Open Anyway** next to the message about LocalFlow, and confirm. (On macOS 15
-and later, right-click > **Open** no longer offers this bypass.)
+**Install LocalFlow** and the app are unsigned and not notarized, so Gatekeeper
+blocks each the first time you open it. Close the warning, go to System
+Settings > Privacy & Security, scroll down to Security, click **Open Anyway**
+next to the message about the app, and confirm with **Open Anyway** and your
+password or Touch ID. (On macOS 15 and later, right-click > **Open** no longer
+offers this bypass.) The DMG's `Read Me.txt` gives the same steps.
 
 **Windows:** download `Install LocalFlow.cmd` from the same release (or the
 Actions artifact) and double-click it.
@@ -71,7 +73,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "c64e445b02d6e78908768ead74c78ab62e1413a18e8c6703046e003d21c43a1e  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -79,7 +81,7 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "d89077207fd607d073b5b4968e1ddac375d3910bdb05400a9e94ff72c63cc1ab  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.0/install.sh && echo "c64e445b02d6e78908768ead74c78ab62e1413a18e8c6703046e003d21c43a1e  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
 The installer is pinned to release `v0.2.0`. Without git it downloads

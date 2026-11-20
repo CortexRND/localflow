@@ -539,9 +539,21 @@ if [[ "$NO_LAUNCH" -eq 1 ]]; then
 fi
 
 if [[ "$OS" == "Darwin" ]]; then
-    # First run routes to the setup window; later runs open the Hub.
+    # First run routes to the setup window; later runs open the Hub. The
+    # install already succeeded (build and setup failures exited above), so a
+    # failed open -- e.g. LaunchServices error -600 while the login agent's copy
+    # is still starting -- is retried briefly, then only reported.
     echo "Opening LocalFlow..."
-    exec open "$HOME/Applications/LocalFlow.app"
+    open_error=""
+    for ((attempt = 1; attempt <= 5; attempt++)); do
+        if open_error="$(open "$HOME/Applications/LocalFlow.app" 2>&1)"; then
+            exit 0
+        fi
+        if ((attempt < 5)); then sleep 2; fi
+    done
+    echo "Warning: LocalFlow is installed but could not be opened automatically${open_error:+ ($open_error)}." >&2
+    echo "Open it from Applications → LocalFlow (in your home folder)." >&2
+    exit 0
 fi
 
 echo "Opening LocalFlow Setup..."

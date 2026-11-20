@@ -24,11 +24,30 @@ bootout() {
     fi
 }
 
+# Clear a `launchctl disable` override (left by disable-autostart); otherwise
+# launchd refuses to bootstrap the agent now and skips it at every login.
+enable_agent() {
+    if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" == 1 ]]; then
+        return
+    fi
+    local enable_error
+    if ! enable_error="$(launchctl enable "$TARGET" 2>&1)"; then
+        echo "launchctl enable failed: $enable_error" >&2
+        return 1
+    fi
+}
+
+# PID of the process the loaded job is running, if any.
+job_pid() {
+    launchctl print "$TARGET" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}' || true
+}
+
 load_agent() {
     if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" == 1 ]]; then
         echo "Skipping launchctl (LOCALFLOW_SKIP_LAUNCHCTL=1; installer testing only)."
         return
     fi
+    enable_agent || return 1
     local bootstrap_error load_error
     if bootstrap_error="$(launchctl bootstrap "$DOMAIN" "$AGENT" 2>&1)"; then
         return
@@ -67,7 +86,7 @@ stop_rust() {
 verify_rust_pid() {
     local pid old_pid current_pid attempt fresh
     for ((attempt=0; attempt<50; attempt++)); do
-        pid="$(launchctl print "$TARGET" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}')" || pid=""
+        pid="$(job_pid)"
         if [[ "$pid" =~ ^[0-9]+$ ]]; then
             fresh=1
             for old_pid in $old_rust_pids; do
@@ -94,6 +113,18 @@ case "${1:-}" in
         bootout
         exit 0
         ;;
+    disable-autostart)
+        # Opting out of start on login from the running app (setup): remove the
+        # agent and disable its label so launchd does not start it at the next
+        # login, but never boot out the job -- it may be running the caller.
+        rm -f "$AGENT"
+        if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]] \
+            && ! disable_error="$(launchctl disable "$TARGET" 2>&1)"; then
+            echo "Warning: launchctl disable failed ($disable_error); the agent file was removed, so LocalFlow will not start on login." >&2
+        fi
+        echo "Disabled start on login: $AGENT"
+        exit 0
+        ;;
     restore-python)
         # A normal Python installation does not opt the user into autostart.
         [[ -f "$AGENT" ]] && is_rust "$(program "$AGENT")" || exit 0
@@ -101,11 +132,18 @@ case "${1:-}" in
         ;;
     install-rust) runtime=rust ;;
     restart-rust) runtime=rust; restart_rust=1 ;;
-    *) echo "Usage: $0 install-rust EXE | restart-rust EXE | restore-python EXE | uninstall" >&2; exit 2 ;;
+    *) echo "Usage: $0 install-rust EXE [RUNNING_PID] | restart-rust EXE | restore-python EXE | disable-autostart | uninstall" >&2; exit 2 ;;
 esac
 
 EXE="${2:?runtime executable required}"
 [[ "$EXE" == /* && -x "$EXE" ]] || { echo "Runtime executable is missing or not absolute: $EXE" >&2; exit 1; }
+# install-rust from the running app passes its own PID: that process must keep
+# running, and loading the agent now would start a second copy (RunAtLoad).
+CALLER_PID="${3:-}"
+if [[ -n "$CALLER_PID" && ( "$runtime" != rust || "$restart_rust" == 1 || ! "$CALLER_PID" =~ ^[0-9]+$ ) ]]; then
+    echo "RUNNING_PID is only valid as a number for install-rust: $CALLER_PID" >&2
+    exit 2
+fi
 if [[ "$runtime" == rust && "$restart_rust" == 0 && -f "$AGENT" && "$(program "$AGENT")" == "$EXE" ]]; then
     # Do not boot out the Hub that is currently enabling its own login agent.
     if [[ "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" == 1 ]] || launchctl print "$TARGET" >/dev/null 2>&1; then
@@ -151,11 +189,20 @@ fi
 plutil -lint "$pending"
 if [[ "$restart_rust" == 1 && "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
     stop_rust
+elif [[ -n "$CALLER_PID" && "${LOCALFLOW_SKIP_LAUNCHCTL:-0}" != 1 && "$(job_pid)" == "$CALLER_PID" ]]; then
+    : # The loaded job is running the caller; booting it out would quit it.
 else
     bootout
 fi
 mv -f "$pending" "$AGENT"
-if ! load_agent; then
+if [[ -n "$CALLER_PID" ]]; then
+    # The caller is already running; launchd loads the agent at the next login.
+    # A failure restores the previous file but never boots out or loads a job.
+    if ! enable_agent; then
+        if [[ "$had_agent" == 1 ]]; then cp -p "$previous" "$AGENT"; else rm -f "$AGENT"; fi
+        exit 1
+    fi
+elif ! load_agent; then
     bootout
     if [[ "$had_agent" == 1 ]]; then
         cp -p "$previous" "$AGENT"

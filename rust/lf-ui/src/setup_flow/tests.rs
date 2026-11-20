@@ -93,6 +93,30 @@ fn initial_choices_use_hardware_recommendations_before_setup() {
 }
 
 #[test]
+fn first_run_checks_start_on_login_by_default_on_macos_only() {
+    let mac = HardwareInfo::new("Darwin", "arm64", 16.0, true, 50.0);
+    // Even with the installer's agent already loaded, the first-run default
+    // is on, so finishing setup never turns autostart off by accident.
+    for status in ["not installed", "running (com.cortexrnd.localflow)"] {
+        let agent = FakeLaunchAgent::new(status);
+        let choices = initial_choices(&cfg(&[]), &mac, &platform(), &agent).unwrap();
+        assert!(choices.start_on_login, "{status}");
+        assert!(agent.calls().is_empty());
+    }
+    let broken = FakeLaunchAgent::failing("launchctl missing");
+    assert!(
+        initial_choices(&cfg(&[]), &mac, &platform(), &broken)
+            .unwrap()
+            .start_on_login
+    );
+    assert!(
+        !initial_choices(&cfg(&[]), &linux(16.0), &platform(), &no_agent())
+            .unwrap()
+            .start_on_login
+    );
+}
+
+#[test]
 fn initial_choices_reuse_existing_config_after_setup() {
     let config = cfg(&[
         ("setup_version", json!(1)),
@@ -143,8 +167,91 @@ fn initial_choices_replaces_models_unavailable_on_current_hardware() {
         ("stt_backend", json!("mlx")),
         ("model_size", json!("small")),
     ]);
+    // The saved Whisper size is kept on a runtime that can run it.
     let choices = initial_choices(&config, &linux(8.0), &platform(), &no_agent()).unwrap();
+    assert_eq!(choices.stt_id, "fw-small");
+    // Without a same-size equivalent the recommendation is used.
+    let parakeet = cfg(&[
+        ("setup_version", json!(1)),
+        ("stt_backend", json!("parakeet")),
+    ]);
+    let choices = initial_choices(&parakeet, &linux(8.0), &platform(), &no_agent()).unwrap();
     assert_eq!(choices.stt_id, "fw-base");
+}
+
+fn native_rust_platform(whisper_cpp: bool, parakeet_onnx: bool) -> FakeSetupPlatform {
+    FakeSetupPlatform {
+        system: "Darwin".into(),
+        machine: "aarch64".into(),
+        runtimes: ["faster-whisper", "mlx-whisper", "parakeet"]
+            .into_iter()
+            .filter(|backend| native_backend_available(backend, whisper_cpp, parakeet_onnx))
+            .map(str::to_string)
+            .collect(),
+        ..FakeSetupPlatform::default()
+    }
+}
+
+#[test]
+fn native_backend_availability_never_claims_mlx() {
+    assert!(native_backend_available("faster-whisper", true, false));
+    assert!(!native_backend_available("faster-whisper", false, true));
+    assert!(native_backend_available("parakeet", false, true));
+    assert!(!native_backend_available("parakeet", true, false));
+    for (whisper, parakeet) in [(true, true), (true, false), (false, true)] {
+        assert!(!native_backend_available("mlx-whisper", whisper, parakeet));
+    }
+    assert!(!native_backend_available("unknown", true, true));
+}
+
+#[test]
+fn rust_first_run_preselects_a_supported_recommended_model() {
+    let p = native_rust_platform(true, true);
+    for (ram, expected) in [(16.0, "fw-base"), (8.0, "fw-base"), (4.0, "fw-tiny")] {
+        let mac = HardwareInfo::new("Darwin", "aarch64", ram, true, 50.0);
+        let choices = initial_choices(&cfg(&[]), &mac, &p, &no_agent()).unwrap();
+        let available: Vec<String> = available_stt_models(&mac, &p)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(choices.stt_id, expected, "{ram} GB");
+        assert!(available.contains(&choices.stt_id));
+        assert!(
+            available.iter().all(|id| !id.starts_with("mlx-")),
+            "{available:?}"
+        );
+        assert!(available.contains(&"parakeet-v2".to_string()));
+    }
+}
+
+#[test]
+fn rust_setup_keeps_a_saved_mlx_size_through_whisper_cpp() {
+    let mac = HardwareInfo::new("Darwin", "aarch64", 16.0, true, 50.0);
+    let p = native_rust_platform(true, true);
+    for (backend, size, expected) in [
+        ("mlx-whisper", "small", "fw-small"),
+        ("mlx", "large-v3-turbo", "fw-large-v3-turbo"),
+        ("auto", "medium", "fw-medium"),
+        ("parakeet", "large-v3", "parakeet-v2"),
+    ] {
+        let config = cfg(&[
+            ("setup_version", json!(1)),
+            ("stt_backend", json!(backend)),
+            ("model_size", json!(size)),
+        ]);
+        let choices = initial_choices(&config, &mac, &p, &no_agent()).unwrap();
+        assert_eq!(choices.stt_id, expected, "{backend}/{size}");
+    }
+    // Without the whisper.cpp engine, no faster-whisper model exists: a clear
+    // error instead of an unsupported MLX default.
+    let err = initial_choices(
+        &cfg(&[]),
+        &mac,
+        &native_rust_platform(false, true),
+        &no_agent(),
+    )
+    .unwrap_err();
+    assert!(err.0.contains("faster-whisper"));
 }
 
 #[test]
@@ -194,6 +301,7 @@ fn start_on_login_follows_the_launch_agent_on_darwin_only() {
     for (status, expected) in [
         ("running", true),
         ("loaded, not running", true),
+        ("not loaded (com.cortexrnd.localflow)", true),
         ("not installed", false),
     ] {
         let agent = FakeLaunchAgent::new(status);
@@ -524,14 +632,39 @@ fn apply_writes_configuration_and_can_install_launchagent() {
 }
 
 #[test]
-fn apply_uninstalls_launchagent_when_startup_is_disabled() {
+fn apply_disables_autostart_without_stopping_the_running_app() {
+    for status in [
+        "running (com.cortexrnd.localflow)",
+        "loaded, not running (com.cortexrnd.localflow)",
+        "not loaded (com.cortexrnd.localflow)",
+    ] {
+        let store = memory_store(Config::defaults_for(false));
+        let choices = SetupChoices::new_for(false, "fw-base", None, "", "alt_l", None, false);
+        let mut p = platform();
+        p.system = "Darwin".into();
+        let agent = FakeLaunchAgent::new(status);
+        apply(&choices, &store, &p, &agent).unwrap();
+        // Never the stopping `uninstall`: the agent may be running this app.
+        assert_eq!(
+            agent.calls(),
+            vec!["status", "disable_autostart"],
+            "{status}"
+        );
+        assert_eq!(store.saved().len(), 1);
+    }
+}
+
+#[test]
+fn apply_reports_autostart_status_errors_after_saving() {
     let store = memory_store(Config::defaults_for(false));
     let choices = SetupChoices::new_for(false, "fw-base", None, "", "alt_l", None, false);
     let mut p = platform();
     p.system = "Darwin".into();
-    let agent = FakeLaunchAgent::new("loaded, not running");
-    apply(&choices, &store, &p, &agent).unwrap();
-    assert_eq!(agent.calls(), vec!["status", "uninstall"]);
+    let agent = FakeLaunchAgent::failing("launchctl missing");
+    let err = apply(&choices, &store, &p, &agent).unwrap_err();
+    assert!(err.to_string().contains("launchctl missing"));
+    assert_eq!(agent.calls(), vec!["status"]);
+    assert_eq!(store.saved().len(), 1);
 }
 
 #[test]

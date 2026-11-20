@@ -111,6 +111,18 @@ elif name == "git" and args[:1] == ["clone"]:
     dest = Path(args[-1])
     (dest / ".git").mkdir(parents=True)
     (dest / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
+elif name == "open":
+    # Fail the first STUB_OPEN_FAILURES launches like LaunchServices -600.
+    counter = Path(os.environ["STUB_LOG"] + ".open")
+    count = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(count + 1))
+    if count < int(os.environ.get("STUB_OPEN_FAILURES", "0")):
+        print("LSOpenURLsWithRole() failed with error -600", file=sys.stderr)
+        sys.exit(1)
+elif name == "venv-lf" and args[:2] == ["setup", "install-app"]:
+    if os.environ.get("STUB_FAIL_INSTALL_APP"):
+        print("install-app failed", file=sys.stderr)
+        sys.exit(3)
 '''
 
 
@@ -258,6 +270,52 @@ def test_macos_final_step_opens_main_app(tmp_path: Path) -> None:
     assert "venv-lf setup install-app" in calls
     assert calls[-1] == f"open {sandbox.home}/Applications/LocalFlow.app"
     assert "venv-lf setup" not in calls
+
+
+def _opens(calls: list[str]) -> list[str]:
+    return [call for call in calls if call.startswith("open ")]
+
+
+def test_macos_final_open_retries_transient_failure(tmp_path: Path) -> None:
+    sandbox = Sandbox(tmp_path)
+    sandbox.add("open")
+    sandbox.add("sleep")
+
+    result = sandbox.run(args=(), env={"STUB_OPEN_FAILURES": "2"})
+
+    assert result.returncode == 0, result.stderr
+    calls = sandbox.calls()
+    assert _opens(calls) == [f"open {sandbox.home}/Applications/LocalFlow.app"] * 3
+    assert calls.count("sleep 2") == 2
+    assert "could not be opened" not in result.stderr
+
+
+def test_macos_final_open_failure_warns_but_install_succeeds(tmp_path: Path) -> None:
+    sandbox = Sandbox(tmp_path)
+    sandbox.add("open")
+    sandbox.add("sleep")
+
+    result = sandbox.run(args=(), env={"STUB_OPEN_FAILURES": "99"})
+
+    assert result.returncode == 0, result.stderr
+    calls = sandbox.calls()
+    assert len(_opens(calls)) == 5  # bounded
+    assert calls.count("sleep 2") == 4
+    assert "Warning: LocalFlow is installed but could not be opened automatically" in result.stderr
+    assert "error -600" in result.stderr
+    assert "Applications → LocalFlow" in result.stderr
+
+
+def test_macos_setup_failure_still_fails_before_launch(tmp_path: Path) -> None:
+    sandbox = Sandbox(tmp_path)
+    sandbox.add("open")
+    sandbox.add("sleep")
+
+    result = sandbox.run(args=(), env={"STUB_FAIL_INSTALL_APP": "1"})
+
+    assert result.returncode == 3
+    assert "install-app failed" in result.stderr
+    assert not _opens(sandbox.calls())
 
 
 def test_macos_no_launch_does_not_open_app(tmp_path: Path) -> None:

@@ -241,10 +241,14 @@ impl LaunchAgent for NativeLaunchAgent {
     fn install(&self) -> std::result::Result<(), String> {
         let current = std::env::current_exe().map_err(|error| error.to_string())?;
         if let Some(helper) = crate::launch_agent::bundled_helper(&current) {
+            // Called from this running app: the helper keeps this process
+            // running and defers loading the agent to the next login.
             let result = Command::new("/bin/bash")
-                .arg(helper)
-                .arg("install-rust")
-                .arg(&current)
+                .args(crate::launch_agent::install_rust_args(
+                    &helper,
+                    &current,
+                    std::process::id(),
+                ))
                 .output()
                 .map_err(|error| error.to_string())?;
             return if result.status.success() {
@@ -289,6 +293,10 @@ impl LaunchAgent for NativeLaunchAgent {
         let _ = Command::new("launchctl")
             .args(["bootout", &Self::target()])
             .output();
+        // Clear a disable override left by `disable_autostart`.
+        let _ = Command::new("launchctl")
+            .args(["enable", &Self::target()])
+            .output();
         let domain = format!("gui/{}", unsafe { libc::getuid() });
         let result = Command::new("launchctl")
             .arg("bootstrap")
@@ -324,6 +332,39 @@ impl LaunchAgent for NativeLaunchAgent {
                 .output();
         })
         .map_err(|error| error.to_string())
+    }
+
+    fn disable_autostart(&self) -> std::result::Result<(), String> {
+        let current = std::env::current_exe().map_err(|error| error.to_string())?;
+        if let Some(helper) = crate::launch_agent::bundled_helper(&current) {
+            let result = Command::new("/bin/bash")
+                .args(crate::launch_agent::disable_autostart_args(&helper))
+                .output()
+                .map_err(|error| error.to_string())?;
+            return if result.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Disabling start on login failed: {}",
+                    String::from_utf8_lossy(&result.stderr).trim()
+                ))
+            };
+        }
+        let path = Self::plist_path().map_err(|error| error.to_string())?;
+        crate::launch_agent::disable_autostart(&path, || {
+            let result = Command::new("launchctl")
+                .args(["disable", &Self::target()])
+                .output()
+                .map_err(|error| error.to_string())?;
+            if result.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "launchctl disable failed: {}",
+                    String::from_utf8_lossy(&result.stderr).trim()
+                ))
+            }
+        })
     }
 }
 
@@ -752,34 +793,41 @@ impl WindowRouter {
     }
 
     pub fn show(&self, page: Option<&str>) -> Result<()> {
-        if page == Some("Setup") {
-            return self.open_setup();
-        }
-        if let Some(page) = page {
+        let setup_page = page == Some("Setup");
+        if let Some(page) = page.filter(|_| !setup_page) {
             self.desired.set(Some(
                 hub_route::validate_page(page)
                     .ok_or_else(|| anyhow!("unknown Hub page: {page:?}"))?,
             ));
         }
-        if self.setup_only.get() {
-            self.awaiting_setup.set(false);
-            return self.open_setup();
-        }
         let requested = self.desired.get();
-        match hub_route::plan_initial_route(hub_route::is_configured(), requested)
-            .map_err(anyhow::Error::msg)?
-        {
-            hub_route::InitialRoute::Setup { desired } => {
+        let plan = hub_route::plan_window(
+            setup_page,
+            self.setup_only.get(),
+            hub_route::is_configured(),
+            requested,
+        )
+        .map_err(anyhow::Error::msg)?;
+        if plan.start_runtime {
+            // The same single runtime the Hub uses; idempotent, never a second one.
+            if let Err(error) = (self.ensure_runtime)() {
+                eprintln!("lf-hub: could not ensure the native menu runtime: {error:#}");
+            }
+        }
+        match plan.action {
+            hub_route::WindowAction::OpenSetup => self.open_setup(),
+            hub_route::WindowAction::SetupOnly => {
+                self.awaiting_setup.set(false);
+                self.open_setup()
+            }
+            hub_route::WindowAction::FirstRun { desired } => {
                 self.desired.set(desired);
                 self.awaiting_setup.set(true);
                 self.open_setup()
             }
-            hub_route::InitialRoute::Hub { page } => {
+            hub_route::WindowAction::Hub { page } => {
                 self.awaiting_setup.set(false);
                 self.desired.set(None);
-                if let Err(error) = (self.ensure_runtime)() {
-                    eprintln!("lf-hub: could not ensure the native menu runtime: {error:#}");
-                }
                 if requested.is_some() {
                     self.hub_slot.open(Some(page))?;
                 } else {
