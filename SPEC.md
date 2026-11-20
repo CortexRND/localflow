@@ -1,5 +1,7 @@
 # localflow — spec
 
+> **Historical v0 spec.** Superseded by [README.md](README.md); hotkeys, config layout and dependencies below are out of date.
+
 Local push-to-talk dictation for macOS (open-source WisprFlow clone).
 Flow: global hotkey toggles recording → mic audio → faster-whisper transcribes →
 optional Ollama LLM cleans punctuation/formatting → text pasted into frontmost app.

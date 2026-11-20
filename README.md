@@ -1,6 +1,6 @@
 # localflow
 
-Local push-to-talk dictation for macOS. Fully offline STT using Whisper or Parakeet, optional LLM cleanup, and phone access via Tailscale.
+Local push-to-talk dictation for macOS, with best-effort Linux and Windows support. Fully offline STT using Whisper or Parakeet, optional LLM cleanup, and phone access via Tailscale.
 
 See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a feature-by-feature overview.
 
@@ -11,7 +11,7 @@ Release maintainers: [v0.2.0 asset build and publishing](docs/releasing.md).
 **macOS:** download `LocalFlow-Installer.dmg` from the
 [latest release](https://github.com/CortexRND/localflow/releases/latest) (or from
 the artifacts of a "Mac installer" run on the Actions tab), open it, and
-double-click **Install LocalFlow**. A window installs everything, which takes a
+double-click **Install LocalFlow**. A window installs everything, which takes
 several minutes, and LocalFlow opens when it is done. Since v0.2.0, macOS installs
 the native **Rust LocalFlow.app** by default. Rust is installed automatically;
 accept Apple's Command Line Tools installation dialog if prompted. Python and
@@ -48,8 +48,9 @@ Actions artifact) and double-click it.
 An open-source WisprFlow-style dictation app:
 - **Hold left Option** (default) to record — release to transcribe and paste; combo hotkeys toggle instead
 - **Offline transcription** via Whisper or Parakeet (no cloud calls)
-- **Optional cleanup** with Ollama (fix punctuation, casing, remove filler words)
+- **Optional cleanup** with Ollama or an OpenAI-compatible provider (fix punctuation, casing, remove filler words)
 - **Instant paste** into the frontmost app
+- **Local history and recall**: search past dictations, ask questions across them and your meetings, and let agents search them through the [MCP server](#mcp-server-for-agents)
 - **Server mode** for phone access: record in browser over HTTPS (Tailscale), get transcript, copy to clipboard
 
 ## Getting started (launcher)
@@ -319,6 +320,49 @@ lf recall "what did I tell Sarah?" --json --k 5
   `{answer, citations}`. It requires the API token (`X-Localflow-Token`), even from
   loopback. The web UI has a Recall panel; open the page with `?token=…` to use it.
 
+### MCP server for agents
+
+`localflow-mcp` is a local [MCP](https://modelcontextprotocol.io) server that lets an
+agent (Claude Code, Claude Desktop, Cursor, …) search what you have dictated and the work
+prompts generated from your meetings. It speaks MCP over stdio only (no network port, no
+token), is read-only (it never writes under `~/.localflow`), never calls an LLM itself, and
+never returns audio clips.
+
+| Tool | What it does |
+| --- | --- |
+| `search_dictations` | Search or list recent dictations, spoken commands and transforms; filter by `since`/`until` (`today`, `yesterday`, `7d`, `YYYY-MM-DD`), `app` and `kind`. |
+| `get_dictation` | Full final and raw text of one dictation by id. |
+| `search_prompts` | Search or list meeting work prompts (title, meeting, body); filter by `status`. |
+| `get_prompt` | Full body and status of one work prompt by id. |
+
+Whatever the tools return is sent to the agent's model provider, so only connect clients
+you are happy to share that history with. With `[history] enabled = false` the dictation
+tools return an error and never open the history database; the prompt tools still work.
+
+The server is part of the Python package. The default macOS install is the Rust app and has
+no `lf` on `PATH`; run a Python install (`LOCALFLOW_RUNTIME=python bash install.sh`) and use
+the absolute path `<repo>/.venv/bin/localflow-mcp`, or run it without installing via
+`uvx --from <repo> localflow-mcp`.
+
+Claude Code:
+
+```bash
+claude mcp add localflow -- localflow-mcp
+```
+
+Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`, on
+Windows `%APPDATA%\Claude\claude_desktop_config.json`) and Cursor (`~/.cursor/mcp.json` or a
+project's `.cursor/mcp.json`) use the same JSON. GUI clients do not see your shell `PATH`,
+so give the absolute path:
+
+```json
+{ "mcpServers": { "localflow": { "command": "/abs/path/to/.venv/bin/localflow-mcp" } } }
+```
+
+Then ask, for example, "find what I dictated about the pricing page last week" or "show
+pending work prompts from the Acme sync". `lf mcp` and `python -m localflow.mcp_server`
+run the same server.
+
 ### Hot phrases
 
 Hot phrases let you paste a saved long prompt by speaking a short trigger
@@ -387,7 +431,8 @@ LocalFlow stores dictations, commands, and transforms in
 WPM, daily totals, streaks, and top-app summaries. Raw transcripts remain
 available alongside the final text. Failed dictations can be retried from a
 private local audio clip; configure `[history].keep_audio_clips` to choose how
-many successful clips to retain. History is enabled by default.
+many successful clips to retain. History is enabled by default. Agents can
+search it read-only through the [MCP server](#mcp-server-for-agents).
 
 Open the native hub with `lf hub` to browse history, edit the dictionary and
 cleanup styles, or review the selected models. The CLI can search and manage
@@ -654,12 +699,20 @@ token get `401`.
 - **localflow/config.py**: Load nested v2 TOML (and migrate legacy
   `~/.localflow.toml` files)
 - **localflow/audio.py**: Record mono float32 via sounddevice
-- **localflow/stt.py**: Transcribe via mlx-whisper (Apple GPU), faster-whisper (CPU, int8), or NVIDIA Parakeet TDT via parakeet-mlx (English-only; arrays fed straight to the log-mel front-end, no temp files/ffmpeg)
-- **localflow/cleanup.py**: Optional Ollama LLM polish (timeout 15s, graceful fallback)
-- **localflow/inject.py**: Paste text via osascript and System Events
+- **localflow/stt.py**: Speech-to-text front door; delegates to the providers below
+- **localflow/providers/**: Pluggable STT (mlx-whisper, faster-whisper, Parakeet) and LLM (Ollama, OpenAI-compatible) providers, registered as entry points
+- **localflow/cleanup.py**: Optional LLM polish through the configured LLM provider (graceful fallback to the raw transcript)
+- **localflow/inject.py**: Paste text through the platform layer
+- **localflow/platform/**: Per-OS paste, autostart, notifications and locking (`darwin.py`, `linux.py`, `win32.py`)
 - **localflow/hotkey.py**: Global hotkey listener (pynput)
 - **localflow/launchagent.py**: launchd LaunchAgent — run on login, stay always on
-- **localflow/app.py**: Desktop CLI entrypoint
+- **localflow/app.py**: Dictation entrypoint (`localflow`)
+- **localflow/cli.py**: The `lf` command
+- **localflow/history.py**: Local SQLite dictation history and retry clips
+- **localflow/recall.py**: BM25 search and recall across history, transcripts and notes
+- **localflow/meetings.py**: Meeting detection, transcription and notes
+- **localflow/dispatch.py**: Work-prompt files, review queue and Orca dispatch
+- **localflow/mcp_server.py**: Read-only MCP server over stdio for agents
 - **localflow/server.py**: FastAPI web server for phone access
 - **localflow/static/index.html**: Single-page mobile app (no external assets)
 
