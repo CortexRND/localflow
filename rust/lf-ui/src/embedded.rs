@@ -8,6 +8,7 @@ use lf_runtime::{
     run::{RunOptions, RuntimeHandle, ToggleStore},
 };
 use lf_server::{Server, ServerState};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod meeting_watch;
@@ -63,13 +64,22 @@ struct PublishSpeech {
     destination: SharedSpeech,
 }
 
+#[cfg(test)]
 fn refresh_server_speech(
     previous: &Mutex<Config>,
     shared: &SharedSpeech,
     fresh: Config,
     factory: &lf_runtime::worker::SttFactory,
 ) -> Result<bool, String> {
-    let mut previous = previous.lock().unwrap();
+    replace_server_speech(&mut previous.lock().unwrap(), shared, fresh, factory)
+}
+
+fn replace_server_speech(
+    previous: &mut Config,
+    shared: &SharedSpeech,
+    fresh: Config,
+    factory: &lf_runtime::worker::SttFactory,
+) -> Result<bool, String> {
     if lf_runtime::live::STT_FIELDS
         .iter()
         .any(|field| previous.field(field) != fresh.field(field))
@@ -84,22 +94,30 @@ fn refresh_server_speech(
     Ok(true)
 }
 
+/// `previous` is the config the server's speech was selected from; while
+/// `update_speech` is set the server follows STT settings itself, once a
+/// dictation runtime owns speech reloads (it publishes into `shared`) it stops.
 fn watch_server_services(
-    config: Config,
+    previous: Arc<Mutex<Config>>,
     shared: SharedSpeech,
     factory: lf_runtime::worker::SttFactory,
-    update_speech: bool,
+    update_speech: Arc<AtomicBool>,
     on_config: Arc<dyn Fn(Config) + Send + Sync>,
     maintenance: lf_runtime::live::OnTick,
 ) -> Result<lf_runtime::live::WatcherGuard> {
-    let previous = Mutex::new(config);
     let pending = Arc::new(Mutex::new(None::<Config>));
     let retry_pending = pending.clone();
+    let retry_update = update_speech.clone();
     let retry: lf_runtime::live::OnTick = Arc::new(move || {
         maintenance();
         let mut pending = retry_pending.lock().unwrap();
         if let Some(fresh) = pending.as_ref() {
-            match refresh_server_speech(&previous, &shared, fresh.clone(), &factory) {
+            let mut previous = previous.lock().unwrap();
+            if !retry_update.load(Ordering::Acquire) {
+                pending.take();
+                return true;
+            }
+            match replace_server_speech(&mut previous, &shared, fresh.clone(), &factory) {
                 Ok(true) => {
                     pending.take();
                 }
@@ -112,7 +130,7 @@ fn watch_server_services(
     let apply_retry = retry.clone();
     let apply: Arc<dyn Fn(Config) + Send + Sync> = Arc::new(move |fresh| {
         on_config(fresh.clone());
-        if update_speech {
+        if update_speech.load(Ordering::Acquire) {
             *pending.lock().unwrap() = Some(fresh);
             apply_retry();
         }
@@ -147,6 +165,21 @@ impl SpeechEngine for PublishSpeech {
     }
 }
 
+/// What a server-only runtime keeps to activate dictation later on the same
+/// server and shared speech; consumed by the first successful activation.
+struct Dictation {
+    menu: MenuState,
+    shared: SharedSpeech,
+    make_speech: lf_runtime::worker::SttFactory,
+    /// The config the server's speech was last selected from.
+    selection: Arc<Mutex<Config>>,
+    /// Whether the server, not a dictation runtime, follows STT settings.
+    server_owns_speech: Arc<AtomicBool>,
+    /// Meeting capture and meeting watching may open audio (setup finished).
+    meetings: Arc<AtomicBool>,
+    meeting_config: Option<Arc<dyn Fn(Config) + Send + Sync>>,
+}
+
 pub struct EmbeddedRuntime {
     shutting_down: bool,
     pub runtime: Option<RuntimeHandle>,
@@ -155,10 +188,14 @@ pub struct EmbeddedRuntime {
     memory: crate::speech_memory::SpeechMemory,
     server_watch: Option<lf_runtime::live::WatcherGuard>,
     meeting_watch: Option<meeting_watch::MeetingWatch>,
+    dictation: Option<Dictation>,
 }
 
 impl EmbeddedRuntime {
-    pub fn start(config: Config, menu: MenuState, toggle: ToggleStore) -> Self {
+    /// Start only the local server (health, setup and Hub APIs) with lazy
+    /// shared speech. Nothing here opens audio or listens to the keyboard:
+    /// meeting capture/watching and dictation wait for [`Self::activate`].
+    pub fn start_server(config: Config, menu: MenuState) -> Self {
         let memory = crate::speech_memory::SpeechMemory::new();
         let model_memory = memory.clone();
         let error_menu = menu.clone();
@@ -176,32 +213,10 @@ impl EmbeddedRuntime {
             )
         });
         let initial = make_speech(&config).expect("lazy speech construction is infallible");
-        let shared = SharedSpeech(Arc::new(Mutex::new(initial.clone())));
+        let shared = SharedSpeech(Arc::new(Mutex::new(initial)));
         let speech: Arc<dyn SpeechEngine> = Arc::new(shared.clone());
         let server_shared = shared.clone();
-        let reload_speech = make_speech.clone();
-        let build_stt: lf_runtime::worker::SttFactory = Arc::new(move |config| {
-            Ok(Arc::new(PublishSpeech {
-                inner: reload_speech(config)?,
-                destination: shared.clone(),
-            }) as Arc<dyn SpeechEngine>)
-        });
-        let runtime = (|| -> Result<Option<RuntimeHandle>> {
-            let options = RunOptions {
-                audio: memory.audio(Box::new(lf_stt::runtime::RecorderSource::from_config(
-                    &config,
-                )?)),
-                speech: initial,
-                build_stt,
-                play_sound: Arc::new(lf_runtime::sounds::play),
-            };
-            lf_runtime::run::start_with_menu(options, menu.clone(), Some(toggle))
-        })()
-        .unwrap_or_else(|e| {
-            log::error!("dictation startup failed: {e}");
-            menu.change(|m| m.input_warning = Some(format!("Dictation unavailable: {e}")));
-            None
-        });
+        let meetings = Arc::new(AtomicBool::new(false));
         let mut meeting_watch = None;
         let server = (|| -> Result<Option<ServerHandle>> {
             let host = config.field_str("server_host").unwrap_or("127.0.0.1");
@@ -211,7 +226,10 @@ impl EmbeddedRuntime {
                 let dictation = dictation_backend(speech.clone(), &config);
                 let backend = lf_meetings_backend::MeetingsBackend::new()?
                     .with_inner(Arc::new(dictation))
-                    .with_capture(Arc::new(Capture(server_shared.clone())));
+                    .with_capture(Arc::new(Capture {
+                        speech: server_shared.clone(),
+                        allowed: meetings.clone(),
+                    }));
                 let watcher = meeting_watch::MeetingWatch::new(config.clone())?;
                 let backend: Arc<dyn lf_server::backend::Backend> =
                     Arc::new(backend.with_watcher(watcher.watcher.clone()));
@@ -236,20 +254,27 @@ impl EmbeddedRuntime {
             None
         });
         eprintln!(
-            "in-process runtime: ready; speech loaded: {}",
+            "in-process server: ready; speech loaded: {}",
             speech.loaded()
         );
         let live = Arc::new(Mutex::new(config.clone()));
         let apply_live = live.clone();
-        let watcher_callback = meeting_watch
+        let meeting_config = meeting_watch
             .as_ref()
             .map(|watcher| watcher.apply_callback());
+        let watcher_callback = meeting_config.clone();
+        let watcher_allowed = meetings.clone();
         let on_config = Arc::new(move |fresh: Config| {
             *apply_live.lock().unwrap() = fresh.clone();
-            if let Some(callback) = &watcher_callback {
-                callback(fresh);
+            // Watching probes the microphone; it waits for activation.
+            if watcher_allowed.load(Ordering::Acquire) {
+                if let Some(callback) = &watcher_callback {
+                    callback(fresh);
+                }
             }
         });
+        let selection = Arc::new(Mutex::new(config));
+        let server_owns_speech = Arc::new(AtomicBool::new(true));
         let server_state = server.as_ref().map(|server| server.state.clone());
         let server_watch = lf_core::config::try_config_path()
             .and_then(|path| {
@@ -278,10 +303,10 @@ impl EmbeddedRuntime {
                     true
                 });
                 watch_server_services(
-                    config,
-                    server_shared,
-                    make_speech,
-                    runtime.is_none(),
+                    selection.clone(),
+                    server_shared.clone(),
+                    make_speech.clone(),
+                    server_owns_speech.clone(),
                     on_config,
                     maintenance,
                 )
@@ -293,12 +318,129 @@ impl EmbeddedRuntime {
         crate::speech_profile::start(speech.clone(), memory.clone());
         Self {
             shutting_down: false,
-            runtime,
+            runtime: None,
             server,
             speech,
             memory,
             server_watch,
             meeting_watch,
+            dictation: Some(Dictation {
+                menu,
+                shared: server_shared,
+                make_speech,
+                selection,
+                server_owns_speech,
+                meetings,
+                meeting_config,
+            }),
+        }
+    }
+
+    /// Whether [`Self::activate`] already succeeded (dictation running, or
+    /// owned by another process).
+    pub fn activated(&self) -> bool {
+        self.dictation.is_none()
+    }
+
+    /// Start dictation (recorder, keyboard listener, menu runtime) on this
+    /// already running server and shared speech, and allow meeting capture,
+    /// using `config` loaded after setup saved it. Idempotent; a failure keeps
+    /// the server serving and can be retried. Returns whether it succeeded.
+    pub fn activate(&mut self, config: Config, toggle: ToggleStore) -> bool {
+        self.activate_with(
+            config,
+            toggle,
+            |config| {
+                Ok(Box::new(lf_stt::runtime::RecorderSource::from_config(
+                    config,
+                )?))
+            },
+            lf_runtime::run::start_with_menu,
+        )
+    }
+
+    fn activate_with(
+        &mut self,
+        config: Config,
+        toggle: ToggleStore,
+        open_audio: impl FnOnce(&Config) -> Result<Box<dyn lf_runtime::engine::AudioSource>>,
+        start: impl FnOnce(RunOptions, MenuState, Option<ToggleStore>) -> Result<Option<RuntimeHandle>>,
+    ) -> bool {
+        if self.shutting_down {
+            return false;
+        }
+        let Some(dictation) = self.dictation.take() else {
+            return true;
+        };
+        dictation.menu.change(|model| {
+            model.dictation_enabled = config.field_bool("dictation_enabled").unwrap_or(true)
+        });
+        if !dictation.meetings.swap(true, Ordering::AcqRel) {
+            if let Some(apply) = &dictation.meeting_config {
+                apply(config.clone());
+            }
+        }
+        let memory = &self.memory;
+        let result = (|| -> Result<Option<RuntimeHandle>> {
+            let speech: Arc<dyn SpeechEngine> = {
+                let mut selected = dictation.selection.lock().unwrap();
+                if replace_server_speech(
+                    &mut selected,
+                    &dictation.shared,
+                    config.clone(),
+                    &dictation.make_speech,
+                )
+                .map_err(anyhow::Error::msg)?
+                {
+                    dictation.shared.current()
+                } else {
+                    // A request still borrows the old engine: publish on load.
+                    Arc::new(PublishSpeech {
+                        inner: (dictation.make_speech)(&config).map_err(anyhow::Error::msg)?,
+                        destination: dictation.shared.clone(),
+                    })
+                }
+            };
+            let reload_speech = dictation.make_speech.clone();
+            let destination = dictation.shared.clone();
+            let build_stt: lf_runtime::worker::SttFactory = Arc::new(move |config| {
+                Ok(Arc::new(PublishSpeech {
+                    inner: reload_speech(config)?,
+                    destination: destination.clone(),
+                }) as Arc<dyn SpeechEngine>)
+            });
+            let options = RunOptions {
+                audio: memory.audio(open_audio(&config)?),
+                speech,
+                build_stt,
+                play_sound: Arc::new(lf_runtime::sounds::play),
+            };
+            start(options, dictation.menu.clone(), Some(toggle))
+        })();
+        match result {
+            Ok(runtime) => {
+                if runtime.is_some() {
+                    dictation.server_owns_speech.store(false, Ordering::Release);
+                }
+                eprintln!(
+                    "in-process runtime: dictation {}",
+                    if runtime.is_some() {
+                        "ready"
+                    } else {
+                        "owned by another process"
+                    }
+                );
+                self.runtime = runtime;
+                true
+            }
+            Err(error) => {
+                log::error!("dictation startup failed: {error}");
+                dictation.menu.change(|model| {
+                    model.input_warning = Some(format!("Dictation unavailable: {error}"))
+                });
+                self.dictation = Some(dictation);
+                false
+            }
         }
     }
 
@@ -499,7 +641,22 @@ fn finish_services(server: Option<ServerShutdown>, after: impl FnOnce() + Send +
     }
 }
 
-struct Capture(SharedSpeech);
+/// Meeting capture; refuses to open audio until dictation activation (setup
+/// finished), so a server-only setup run can never initialize the recorder.
+struct Capture {
+    speech: SharedSpeech,
+    allowed: Arc<AtomicBool>,
+}
+
+impl Capture {
+    fn ensure_allowed(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.allowed.load(Ordering::Acquire),
+            "Finish LocalFlow setup before recording meetings."
+        );
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[test]
@@ -801,6 +958,7 @@ fn shutdown_keeps_speech_available_for_final_meeting_audio() {
         memory,
         server_watch: None,
         meeting_watch: None,
+        dictation: None,
     };
     runtime.shutdown();
     runtime.shutdown();
@@ -872,9 +1030,11 @@ impl lf_meetings::Transcriber for MeetingSpeech {
 }
 impl lf_meetings_backend::CaptureFactory for Capture {
     fn transcriber(&self, _: &Config) -> Result<Arc<dyn lf_meetings::Transcriber>> {
-        Ok(Arc::new(MeetingSpeech(self.0.current())))
+        self.ensure_allowed()?;
+        Ok(Arc::new(MeetingSpeech(self.speech.current())))
     }
     fn microphone(&self, config: &Config) -> Result<Box<dyn lf_meetings::AudioSource>> {
+        self.ensure_allowed()?;
         Ok(Box::new(
             lf_meetings::system_audio::CpalSource::microphone_named(
                 config.field_str("input_device"),
@@ -882,6 +1042,7 @@ impl lf_meetings_backend::CaptureFactory for Capture {
         ))
     }
     fn system_audio(&self, config: &Config) -> Result<Option<Box<dyn lf_meetings::AudioSource>>> {
+        self.ensure_allowed()?;
         Ok(Some(lf_meetings::system_audio::open_system_audio(
             16000,
             config.field_str("system_audio_device").unwrap_or_default(),
@@ -947,9 +1108,12 @@ mod tests {
         let original = Config::default();
         let shared = SharedSpeech(Arc::new(Mutex::new(factory(&original).unwrap())));
         let previous = Mutex::new(original.clone());
+        let capture = Capture {
+            speech: shared.clone(),
+            allowed: Arc::new(AtomicBool::new(true)),
+        };
         let meeting =
-            lf_meetings_backend::CaptureFactory::transcriber(&Capture(shared.clone()), &original)
-                .unwrap();
+            lf_meetings_backend::CaptureFactory::transcriber(&capture, &original).unwrap();
         let mut fresh = original.clone();
         fresh.set_field("model_size", serde_json::json!("new-model"));
         assert!(!refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap());
@@ -1169,6 +1333,206 @@ mod tests {
         assert!(healthy(&base));
         let _ = stop.send(());
         thread.join().unwrap();
+    }
+
+    struct ModelEngine(String);
+    impl SpeechEngine for ModelEngine {
+        fn loaded(&self) -> bool {
+            false
+        }
+        fn load(&self) -> Result<(), String> {
+            panic!("activation must keep speech lazy")
+        }
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+            Ok(self.0.clone())
+        }
+        fn unload(&self) {}
+    }
+
+    struct SilentAudio;
+    impl lf_runtime::engine::AudioSource for SilentAudio {
+        fn start(&mut self) -> Result<(), String> {
+            panic!("activation must not open the microphone")
+        }
+        fn stop(&mut self) -> Vec<f32> {
+            Vec::new()
+        }
+        fn is_recording(&self) -> bool {
+            false
+        }
+    }
+
+    /// A server-only runtime on an ephemeral port with fake lazy speech: no
+    /// user config, token file, real port or microphone is touched.
+    type ServerOnly = (EmbeddedRuntime, String, Capture, Arc<Mutex<Vec<Config>>>);
+
+    fn server_only(startup: Config) -> ServerOnly {
+        let factory: lf_runtime::worker::SttFactory = Arc::new(|config| {
+            Ok(Arc::new(ModelEngine(
+                config.field_str("model_size").unwrap_or_default().into(),
+            )))
+        });
+        let shared = SharedSpeech(Arc::new(Mutex::new(factory(&startup).unwrap())));
+        let state = Arc::new(ServerState::new(
+            Config::default(),
+            "test-token".into(),
+            Arc::new(lf_server::backend::UnavailableBackend),
+        ));
+        let (server, address) = ServerHandle::bind("127.0.0.1".into(), 0, state).unwrap();
+        let meetings = Arc::new(AtomicBool::new(false));
+        let watched = Arc::new(Mutex::new(Vec::new()));
+        let record = watched.clone();
+        let runtime = EmbeddedRuntime {
+            shutting_down: false,
+            runtime: None,
+            server: Some(server),
+            speech: Arc::new(shared.clone()),
+            memory: crate::speech_memory::SpeechMemory::new(),
+            server_watch: None,
+            meeting_watch: None,
+            dictation: Some(Dictation {
+                menu: MenuState::new(None, true),
+                shared: shared.clone(),
+                make_speech: factory,
+                selection: Arc::new(Mutex::new(startup)),
+                server_owns_speech: Arc::new(AtomicBool::new(true)),
+                meetings: meetings.clone(),
+                meeting_config: Some(Arc::new(move |config| record.lock().unwrap().push(config))),
+            }),
+        };
+        let capture = Capture {
+            speech: shared,
+            allowed: meetings,
+        };
+        (runtime, format!("http://{address}"), capture, watched)
+    }
+
+    fn toggle() -> ToggleStore {
+        Arc::new(|| -> Result<bool, String> { panic!("activation must not toggle dictation") })
+    }
+
+    #[test]
+    fn server_serves_health_before_activation_which_uses_fresh_config_once() {
+        use lf_meetings_backend::CaptureFactory;
+        let _writes = crate::shutdown::TestWrites::new();
+        let mut startup = Config::default();
+        startup.set_field("model_size", serde_json::json!("setup-default"));
+        let (mut runtime, base, capture, watched) = server_only(startup.clone());
+        // Setup phase: HTTP is up, nothing that records or listens is.
+        assert!(healthy(&base));
+        assert!(!runtime.activated());
+        assert!(runtime.runtime.is_none());
+        assert!(capture.transcriber(&startup).is_err());
+        assert!(capture.microphone(&startup).is_err());
+        assert!(capture.system_audio(&startup).is_err());
+        assert!(watched.lock().unwrap().is_empty());
+        // Finish saved a different microphone and model.
+        let mut fresh = startup.clone();
+        fresh.set_field("model_size", serde_json::json!("chosen-model"));
+        fresh.set_field("input_device", serde_json::json!("Chosen Mic"));
+        fresh.set_field("dictation_enabled", serde_json::json!(false));
+        let opened = Arc::new(Mutex::new(None));
+        let opened_by = opened.clone();
+        let started = Arc::new(Mutex::new(None));
+        let started_by = started.clone();
+        let health_at_start = base.clone();
+        assert!(runtime.activate_with(
+            fresh.clone(),
+            toggle(),
+            move |config| {
+                *opened_by.lock().unwrap() = config.field_str("input_device").map(str::to_owned);
+                Ok(Box::new(SilentAudio))
+            },
+            move |options, menu, toggle| {
+                *started_by.lock().unwrap() = Some((
+                    options.speech.transcribe(&[], None).unwrap(),
+                    menu.snapshot().dictation_enabled,
+                    toggle.is_some(),
+                    healthy(&health_at_start),
+                ));
+                Ok(None)
+            },
+        ));
+        assert_eq!(opened.lock().unwrap().as_deref(), Some("Chosen Mic"));
+        assert_eq!(
+            started.lock().unwrap().take(),
+            Some(("chosen-model".into(), false, true, true)),
+            "dictation must start with the saved config on the running server"
+        );
+        assert!(runtime.activated());
+        // The server kept serving and now shares the activated selection.
+        assert!(healthy(&base));
+        assert_eq!(
+            runtime.speech.transcribe(&[], None).unwrap(),
+            "chosen-model"
+        );
+        assert!(capture.transcriber(&fresh).is_ok());
+        assert_eq!(watched.lock().unwrap().len(), 1);
+        assert_eq!(
+            watched.lock().unwrap()[0].field_str("input_device"),
+            Some("Chosen Mic")
+        );
+        // Repeated Finish/Hub requests never start a second dictation runtime.
+        assert!(runtime.activate_with(
+            fresh,
+            toggle(),
+            |_| panic!("second activation opened audio"),
+            |_, _, _| panic!("second activation started dictation"),
+        ));
+        assert_eq!(watched.lock().unwrap().len(), 1);
+        runtime.shutdown();
+        assert!(!runtime.activate_with(
+            startup,
+            toggle(),
+            |_| panic!("activation after shutdown"),
+            |_, _, _| panic!("activation after shutdown"),
+        ));
+    }
+
+    #[test]
+    fn failed_activation_keeps_the_server_and_a_retry_uses_the_newer_config() {
+        let _writes = crate::shutdown::TestWrites::new();
+        let (mut runtime, base, _capture, watched) = server_only(Config::default());
+        let mut first = Config::default();
+        first.set_field("model_size", serde_json::json!("first"));
+        assert!(!runtime.activate_with(
+            first,
+            toggle(),
+            |_| anyhow::bail!("microphone permission denied"),
+            |_, _, _| panic!("dictation started without audio"),
+        ));
+        assert!(!runtime.activated());
+        assert!(healthy(&base));
+        let warning = runtime
+            .dictation
+            .as_ref()
+            .unwrap()
+            .menu
+            .snapshot()
+            .input_warning
+            .unwrap();
+        assert!(
+            warning.contains("microphone permission denied"),
+            "{warning}"
+        );
+        let mut retry = Config::default();
+        retry.set_field("model_size", serde_json::json!("retry"));
+        let started = Arc::new(Mutex::new(None));
+        let started_by = started.clone();
+        assert!(runtime.activate_with(
+            retry,
+            toggle(),
+            |_| Ok(Box::new(SilentAudio)),
+            move |options, _, _| {
+                *started_by.lock().unwrap() = Some(options.speech.transcribe(&[], None).unwrap());
+                Ok(None)
+            },
+        ));
+        assert_eq!(started.lock().unwrap().as_deref(), Some("retry"));
+        assert!(runtime.activated());
+        assert!(healthy(&base));
+        // Meeting watching was enabled once, by the first attempt.
+        assert_eq!(watched.lock().unwrap().len(), 1);
     }
 
     #[test]

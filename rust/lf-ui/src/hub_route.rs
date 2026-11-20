@@ -281,14 +281,25 @@ pub enum WindowAction {
     },
 }
 
+/// How much of the one in-process runtime a window needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeStart {
+    /// Only the local HTTP server (`/healthz`, setup/Hub APIs). No keyboard
+    /// listener, recorder, status menu, dictation toggle or meeting capture:
+    /// first-run setup has not granted permissions or saved a microphone yet.
+    ServerOnly,
+    /// The server plus dictation, the status menu and meeting capture.
+    Full,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowPlan {
     pub action: WindowAction,
-    /// The one in-process runtime (dictation, menu bar, local server) starts
-    /// with whichever window opens, setup included, so it is already running
-    /// when first-run setup finishes. Starting is idempotent and guarded by the
-    /// process's single-instance locks, so this never creates a second runtime.
-    pub start_runtime: bool,
+    /// What the one in-process runtime must be running for this window.
+    /// Every window starts the server; dictation and the menu start only once
+    /// the app is configured (for first run: after Finish saved the config).
+    /// Requests are idempotent and only ever upgrade, see [`RuntimeLifecycle`].
+    pub runtime: RuntimeStart,
 }
 
 pub fn plan_window(
@@ -309,8 +320,115 @@ pub fn plan_window(
     };
     Ok(WindowPlan {
         action,
-        start_runtime: true,
+        runtime: if configured {
+            RuntimeStart::Full
+        } else {
+            RuntimeStart::ServerOnly
+        },
     })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Phase {
+    #[default]
+    Idle,
+    Starting,
+    Ready,
+}
+
+/// The work one [`RuntimeLifecycle`] transition asks the app to do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeSteps {
+    /// Start the (single) server off the main thread.
+    pub start_server: bool,
+    /// Install the status menu and its meeting poller.
+    pub install_menu: bool,
+    /// Activate dictation on the running server with freshly loaded config.
+    pub activate_dictation: bool,
+}
+
+/// The single in-process runtime across setup and Hub windows: the server
+/// starts once, the menu installs once, and dictation activates once on that
+/// same server, only after a [`RuntimeStart::Full`] request *and* the server
+/// startup finished (a Finish that races a pending server start is deferred,
+/// not lost). A failed server startup or dictation activation returns to idle
+/// so a later request retries; nothing is ever started twice concurrently.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeLifecycle {
+    server: Phase,
+    menu: bool,
+    dictation: Phase,
+    wants_dictation: bool,
+    stopped: bool,
+}
+
+impl RuntimeLifecycle {
+    pub fn request(&mut self, start: RuntimeStart) -> RuntimeSteps {
+        let mut steps = RuntimeSteps::default();
+        if self.stopped {
+            return steps;
+        }
+        if self.server == Phase::Idle {
+            self.server = Phase::Starting;
+            steps.start_server = true;
+        }
+        if start == RuntimeStart::Full {
+            steps.install_menu = !std::mem::replace(&mut self.menu, true);
+            if self.dictation == Phase::Idle {
+                self.wants_dictation = true;
+            }
+        }
+        steps.activate_dictation = self.next_activation();
+        steps
+    }
+
+    /// The server startup finished (even if it found another healthy owner);
+    /// returns whether a deferred dictation activation must start now.
+    pub fn server_started(&mut self) -> bool {
+        if self.stopped || self.server != Phase::Starting {
+            return false;
+        }
+        self.server = Phase::Ready;
+        self.next_activation()
+    }
+
+    /// The runtime is gone (its startup or activation worker died); the next
+    /// request starts the server again and a Full one re-activates dictation.
+    pub fn server_failed(&mut self) {
+        self.server = Phase::Idle;
+        self.dictation = Phase::Idle;
+        self.wants_dictation = false;
+    }
+
+    /// A dictation activation ended; a failure is retried by the next Full
+    /// request, never automatically in a loop.
+    pub fn dictation_finished(&mut self, ok: bool) {
+        if self.dictation == Phase::Starting {
+            self.dictation = if ok { Phase::Ready } else { Phase::Idle };
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        self.wants_dictation = false;
+    }
+
+    pub fn full(&self) -> bool {
+        self.menu
+    }
+
+    fn next_activation(&mut self) -> bool {
+        if self.stopped
+            || !self.wants_dictation
+            || self.server != Phase::Ready
+            || self.dictation != Phase::Idle
+        {
+            return false;
+        }
+        self.wants_dictation = false;
+        self.dictation = Phase::Starting;
+        true
+    }
 }
 
 /// Seconds since the Unix epoch (`time.time()`).
@@ -662,7 +780,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_starts_with_first_run_and_explicit_setup_not_only_the_hub() {
+    fn unconfigured_setup_starts_only_the_server_and_configured_windows_start_full() {
+        use RuntimeStart::{Full, ServerOnly};
         let plan =
             |setup_page: bool, setup_only: bool, configured: bool, requested: Option<&str>| {
                 plan_window(setup_page, setup_only, configured, requested).unwrap()
@@ -671,36 +790,156 @@ mod tests {
             (
                 plan(false, false, false, None),
                 WindowAction::FirstRun { desired: None },
+                ServerOnly,
             ),
             (
                 plan(false, false, false, Some("History")),
                 WindowAction::FirstRun {
                     desired: Some("History"),
                 },
+                ServerOnly,
             ),
-            (plan(false, true, false, None), WindowAction::SetupOnly),
+            (
+                plan(false, true, false, None),
+                WindowAction::SetupOnly,
+                ServerOnly,
+            ),
             (
                 plan(false, true, true, Some("History")),
                 WindowAction::SetupOnly,
+                Full,
             ),
-            (plan(true, false, true, None), WindowAction::OpenSetup),
-            (plan(true, false, false, None), WindowAction::OpenSetup),
+            (plan(true, false, true, None), WindowAction::OpenSetup, Full),
+            (
+                plan(true, false, false, None),
+                WindowAction::OpenSetup,
+                ServerOnly,
+            ),
             (
                 plan(false, false, true, None),
                 WindowAction::Hub { page: "Home" },
+                Full,
             ),
             (
                 plan(false, false, true, Some("Models")),
                 WindowAction::Hub { page: "Models" },
+                Full,
             ),
         ];
-        for (plan, action) in cases {
+        for (plan, action, runtime) in cases {
             assert_eq!(plan.action, action);
-            assert!(plan.start_runtime, "{action:?} must start the runtime");
+            assert_eq!(plan.runtime, runtime, "{action:?}");
         }
         // Errors still surface instead of opening a window.
         assert!(plan_window(false, false, true, Some("not-a-page")).is_err());
         assert!(plan_window(false, false, false, Some("not-a-page")).is_err());
+    }
+
+    fn steps(server: bool, menu: bool, dictation: bool) -> RuntimeSteps {
+        RuntimeSteps {
+            start_server: server,
+            install_menu: menu,
+            activate_dictation: dictation,
+        }
+    }
+
+    #[test]
+    fn first_run_starts_server_once_and_activates_dictation_only_after_finish() {
+        let mut life = RuntimeLifecycle::default();
+        // Setup window: the server alone, once, however often setup is shown.
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(true, false, false)
+        );
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert!(!life.server_started());
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert!(!life.full());
+        // Finish saved the config: menu and dictation on the same server.
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, true, true));
+        assert!(life.full());
+        // Repeated Finish / Hub reopen / re-run Setup while activating or after.
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        life.dictation_finished(true);
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert!(!life.server_started());
+    }
+
+    #[test]
+    fn finish_racing_a_pending_server_start_defers_activation_until_it_lands() {
+        let mut life = RuntimeLifecycle::default();
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(true, false, false)
+        );
+        // Finish arrives while the server bootstrap channel is still pending.
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, true, false));
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert!(life.server_started(), "deferred activation was lost");
+        assert!(!life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+    }
+
+    #[test]
+    fn configured_launch_starts_server_before_dictation_and_menu_once() {
+        let mut life = RuntimeLifecycle::default();
+        assert_eq!(life.request(RuntimeStart::Full), steps(true, true, false));
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        assert!(life.server_started());
+        life.dictation_finished(true);
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+    }
+
+    #[test]
+    fn failed_startups_retry_on_the_next_request_never_in_a_loop() {
+        let mut life = RuntimeLifecycle::default();
+        assert!(life.request(RuntimeStart::ServerOnly).start_server);
+        life.server_failed();
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(true, false, false)
+        );
+        assert!(!life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, true, true));
+        life.dictation_finished(false);
+        // No automatic retry: only another Full request (Finish/Hub) retries.
+        assert!(!life.server_started());
+        assert_eq!(
+            life.request(RuntimeStart::ServerOnly),
+            steps(false, false, false)
+        );
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, true));
+        life.dictation_finished(true);
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+        // The runtime died during/after activation: restart, then re-activate.
+        life.server_failed();
+        assert_eq!(life.request(RuntimeStart::Full), steps(true, false, false));
+        assert!(life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
+    }
+
+    #[test]
+    fn stopped_lifecycle_starts_nothing() {
+        let mut life = RuntimeLifecycle::default();
+        assert!(life.request(RuntimeStart::ServerOnly).start_server);
+        life.request(RuntimeStart::Full);
+        life.stop();
+        assert!(!life.server_started());
+        assert_eq!(life.request(RuntimeStart::Full), steps(false, false, false));
     }
 
     fn file() -> (tempfile::TempDir, RequestFile) {

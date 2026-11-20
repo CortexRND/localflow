@@ -71,7 +71,8 @@ mod runtime_start_tests {
         menu.starting.set(true);
         let (commands, _) = mpsc::channel();
         let transport = Rc::new(RefCell::new(None));
-        menu.ensure_runtime(&commands, &transport).unwrap();
+        menu.ensure_runtime(hub_route::RuntimeStart::Full, &commands, &transport)
+            .unwrap();
         assert!(menu.runtime.borrow().is_none());
         assert!(menu.starting.get());
     }
@@ -480,14 +481,40 @@ impl HubSlot {
     }
 }
 
+/// The one in-process runtime, driven by [`hub_route::RuntimeLifecycle`]:
+/// unconfigured setup gets only the server; the first Full request (configured
+/// launch, or Finish) adds the status menu, its poller and dictation, which is
+/// activated on that same server with config loaded after setup saved it.
 struct MenuRuntime {
     menu: MenuState,
-    _poller: MeetingStatusPoller,
+    lifecycle: hub_route::RuntimeLifecycle,
+    poller: Option<MeetingStatusPoller>,
     menu_lock: Option<lf_runtime::singleinstance::SingleInstance>,
     #[cfg(feature = "runtime")]
     bootstrap: Option<mpsc::Receiver<crate::embedded::EmbeddedRuntime>>,
+    /// Dictation activation in flight; the runtime is moved to its worker.
+    #[cfg(feature = "runtime")]
+    activation: Option<mpsc::Receiver<(crate::embedded::EmbeddedRuntime, bool)>>,
     #[cfg(feature = "runtime")]
     embedded: Option<crate::embedded::EmbeddedRuntime>,
+}
+
+/// Persist the menu's dictation toggle. Only a Full (configured) runtime gets
+/// one, so toggling can never write a config during first-run setup.
+#[cfg(feature = "runtime")]
+fn dictation_toggle() -> lf_runtime::run::ToggleStore {
+    Arc::new(|| {
+        crate::config_write::update(None, |current| {
+            let mut updated = current.clone();
+            updated.set_field(
+                "dictation_enabled",
+                serde_json::json!(!current.field_bool("dictation_enabled").unwrap_or(true)),
+            );
+            Ok(updated)
+        })
+        .map(|config| config.field_bool("dictation_enabled").unwrap_or(true))
+        .map_err(|e| e.to_string())
+    })
 }
 
 #[derive(Default)]
@@ -513,8 +540,11 @@ impl MenuSlot {
             }),
         }
     }
+    /// Idempotently bring the runtime up to `start`: never a second server,
+    /// menu or dictation runtime, and never a downgrade.
     fn ensure_runtime(
         &self,
+        start: hub_route::RuntimeStart,
         commands: &std::sync::mpsc::Sender<MenuCommand>,
         transport: &Rc<RefCell<Option<HttpTransport>>>,
     ) -> Result<()> {
@@ -528,113 +558,185 @@ impl MenuSlot {
             }
         }
         let _reset = Reset(&self.starting);
-        if let Some(runtime) = self.runtime.borrow_mut().as_mut() {
-            if runtime.menu_lock.is_none() {
-                if let Some(lock) = lf_runtime::singleinstance::acquire("menubar")? {
-                    install_hub_menu_bar(runtime.menu.snapshot(), Self::actions(commands))
-                        .map_err(|error| anyhow!(error))?;
-                    runtime.menu_lock = Some(lock);
-                    eprintln!("menu bar: enabled");
+        // Collect a finished server start first, so a Finish that arrives
+        // after it landed activates now instead of on the next poll.
+        #[cfg(feature = "runtime")]
+        self.drive();
+        let mut slot = self.runtime.borrow_mut();
+        if slot.is_none() {
+            let config = load_config()?;
+            *slot = Some(MenuRuntime {
+                menu: MenuState::new(
+                    lf_runtime::platform_menu_bar(),
+                    config.field_bool("dictation_enabled").unwrap_or(true),
+                ),
+                lifecycle: hub_route::RuntimeLifecycle::default(),
+                poller: None,
+                menu_lock: None,
+                #[cfg(feature = "runtime")]
+                bootstrap: None,
+                #[cfg(feature = "runtime")]
+                activation: None,
+                #[cfg(feature = "runtime")]
+                embedded: None,
+            });
+        }
+        let Some(runtime) = slot.as_mut() else {
+            return Ok(());
+        };
+        let steps = runtime.lifecycle.request(start);
+        #[cfg(feature = "runtime")]
+        {
+            if steps.start_server {
+                if let Err(error) = Self::spawn_server(runtime) {
+                    runtime.lifecycle.server_failed();
+                    return Err(error);
                 }
             }
+            if steps.activate_dictation {
+                Self::spawn_activation(runtime);
+            }
+        }
+        if !runtime.lifecycle.full() {
             return Ok(());
         }
-        let config = load_config()?;
-        let menu_lock = lf_runtime::singleinstance::acquire("menubar")?;
-        let menu = MenuState::new(
-            lf_runtime::platform_menu_bar(),
-            config.field_bool("dictation_enabled").unwrap_or(true),
-        );
-        if menu_lock.is_some() {
-            install_hub_menu_bar(menu.snapshot(), Self::actions(commands))
-                .map_err(|error| anyhow!(error))?;
+        if runtime.poller.is_none() {
+            let mut borrowed = transport.borrow_mut();
+            let http = match borrowed.as_ref() {
+                Some(http) => http.clone(),
+                None => {
+                    let http = HttpTransport::from_config(&load_config()?)?;
+                    *borrowed = Some(http.clone());
+                    http
+                }
+            };
+            drop(borrowed);
+            let meeting_menu = runtime.menu.clone();
+            runtime.poller = Some(MeetingStatusPoller::start(
+                HttpMeetingClient(http).status_fetch(),
+                Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
+            ));
+            eprintln!("menu meeting status poller: enabled");
         }
-        let mut borrowed = transport.borrow_mut();
-        let http = match borrowed.as_ref() {
-            Some(http) => http.clone(),
-            None => {
-                let http = HttpTransport::from_config(&config)?;
-                *borrowed = Some(http.clone());
-                http
+        if runtime.menu_lock.is_none() {
+            if let Some(lock) = lf_runtime::singleinstance::acquire("menubar")? {
+                install_hub_menu_bar(runtime.menu.snapshot(), Self::actions(commands))
+                    .map_err(|error| anyhow!(error))?;
+                runtime.menu_lock = Some(lock);
+                eprintln!("menu bar: enabled");
+            } else if steps.install_menu {
+                eprintln!("menu bar: existing owner");
             }
-        };
-        drop(borrowed);
-        let meeting = HttpMeetingClient(http);
-        let meeting_menu = menu.clone();
-        let poller = MeetingStatusPoller::start(
-            meeting.status_fetch(),
-            Arc::new(move |result| meeting_menu.change(|model| model.apply_status(&result))),
-        );
-        if menu_lock.is_some() {
-            eprintln!("menu bar: enabled");
-        } else {
-            eprintln!("menu bar: existing owner");
         }
-        eprintln!("menu meeting status poller: enabled");
-        #[cfg(feature = "runtime")]
-        let bootstrap = {
-            let (send, receive) = mpsc::channel();
-            let runtime_menu = menu.clone();
-            std::thread::Builder::new()
-                .name("localflow-startup".into())
-                .spawn(move || {
-                    let toggle: lf_runtime::run::ToggleStore = Arc::new(|| {
-                        crate::config_write::update(None, |current| {
-                            let mut updated = current.clone();
-                            updated.set_field(
-                                "dictation_enabled",
-                                serde_json::json!(!current
-                                    .field_bool("dictation_enabled")
-                                    .unwrap_or(true)),
-                            );
-                            Ok(updated)
-                        })
-                        .map(|config| config.field_bool("dictation_enabled").unwrap_or(true))
-                        .map_err(|e| e.to_string())
-                    });
-                    let runtime =
-                        crate::embedded::EmbeddedRuntime::start(config, runtime_menu, toggle);
-                    let _ = send.send(runtime);
-                })?;
-            Some(receive)
-        };
-        *self.runtime.borrow_mut() = Some(MenuRuntime {
-            menu,
-            _poller: poller,
-            menu_lock,
-            #[cfg(feature = "runtime")]
-            bootstrap,
-            #[cfg(feature = "runtime")]
-            embedded: None,
-        });
         Ok(())
+    }
+
+    /// Start only the server, off the main thread.
+    #[cfg(feature = "runtime")]
+    fn spawn_server(runtime: &mut MenuRuntime) -> Result<()> {
+        let config = load_config()?;
+        let (send, receive) = mpsc::channel();
+        let menu = runtime.menu.clone();
+        std::thread::Builder::new()
+            .name("localflow-startup".into())
+            .spawn(move || {
+                let _ = send.send(crate::embedded::EmbeddedRuntime::start_server(config, menu));
+            })?;
+        runtime.bootstrap = Some(receive);
+        Ok(())
+    }
+
+    /// Activate dictation on the running server off the main thread, with
+    /// settings loaded now (after setup saved the microphone and model).
+    #[cfg(feature = "runtime")]
+    fn spawn_activation(runtime: &mut MenuRuntime) {
+        let Some(embedded) = runtime.embedded.take() else {
+            runtime.lifecycle.dictation_finished(false);
+            return;
+        };
+        // Handed over through a slot so a failed spawn gives the runtime back.
+        let handoff = Arc::new(std::sync::Mutex::new(Some(embedded)));
+        let worker = handoff.clone();
+        let (send, receive) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("localflow-dictation".into())
+            .spawn(move || {
+                let Some(mut embedded) = worker.lock().unwrap().take() else {
+                    return;
+                };
+                let ok = match load_config() {
+                    Ok(config) => embedded.activate(config, dictation_toggle()),
+                    Err(error) => {
+                        log::error!("could not load settings to start dictation: {error}");
+                        false
+                    }
+                };
+                let _ = send.send((embedded, ok));
+            });
+        match spawned {
+            Ok(_) => runtime.activation = Some(receive),
+            Err(error) => {
+                log::error!("could not start dictation: {error}");
+                runtime.embedded = handoff.lock().unwrap().take();
+                runtime.lifecycle.dictation_finished(false);
+            }
+        }
+    }
+
+    /// Collect finished startup/activation workers and run a deferred
+    /// activation once the server is up.
+    #[cfg(feature = "runtime")]
+    fn drive(&self) {
+        let mut slot = self.runtime.borrow_mut();
+        let Some(runtime) = slot.as_mut() else {
+            return;
+        };
+        if let Some(receiver) = runtime.bootstrap.as_ref() {
+            match receiver.try_recv() {
+                Ok(embedded) => {
+                    runtime.bootstrap = None;
+                    runtime.embedded = Some(embedded);
+                    if runtime.lifecycle.server_started() {
+                        Self::spawn_activation(runtime);
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    log::error!("runtime startup worker stopped");
+                    runtime.bootstrap = None;
+                    runtime.lifecycle.server_failed();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(receiver) = runtime.activation.as_ref() {
+            match receiver.try_recv() {
+                Ok((embedded, ok)) => {
+                    runtime.activation = None;
+                    runtime.embedded = Some(embedded);
+                    runtime.lifecycle.dictation_finished(ok);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    log::error!("dictation startup worker stopped");
+                    runtime.activation = None;
+                    runtime.lifecycle.server_failed();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
     }
 
     fn update(&self, enabled: bool) {
         #[cfg(feature = "runtime")]
         {
-            let mut runtime = self.runtime.borrow_mut();
-            if let Some(runtime) = runtime.as_mut() {
-                if let Some(receiver) = runtime.bootstrap.as_ref() {
-                    match receiver.try_recv() {
-                        Ok(embedded) => {
-                            runtime.embedded = Some(embedded);
-                            runtime.bootstrap = None;
-                        }
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            log::error!("runtime startup worker stopped");
-                            runtime.bootstrap = None;
-                        }
-                        Err(mpsc::TryRecvError::Empty) => {}
-                    }
-                }
-                if runtime
-                    .embedded
-                    .as_ref()
-                    .is_some_and(|embedded| embedded.runtime.is_some())
-                {
-                    return;
-                }
+            self.drive();
+            if self
+                .runtime
+                .borrow()
+                .as_ref()
+                .and_then(|runtime| runtime.embedded.as_ref())
+                .is_some_and(|embedded| embedded.runtime.is_some())
+            {
+                return;
             }
         }
         if let Some(runtime) = self.runtime.borrow().as_ref() {
@@ -665,7 +767,11 @@ impl MenuSlot {
     #[cfg(feature = "runtime")]
     fn shutdown(&self) {
         if let Some(runtime) = self.runtime.borrow_mut().as_mut() {
+            runtime.lifecycle.stop();
             runtime.bootstrap.take();
+            // An in-flight activation's runtime shuts down when its worker
+            // finds the receiver gone and drops it.
+            runtime.activation.take();
             if let Some(embedded) = runtime.embedded.as_mut() {
                 embedded.shutdown();
             }
@@ -683,9 +789,11 @@ pub struct WindowRouter {
     desired: Cell<Option<&'static str>>,
     awaiting_setup: Cell<bool>,
     setup_only: Cell<bool>,
-    ensure_runtime: Rc<dyn Fn() -> Result<()>>,
+    ensure_runtime: EnsureRuntime,
     me: Weak<WindowRouter>,
 }
+
+type EnsureRuntime = Rc<dyn Fn(hub_route::RuntimeStart) -> Result<()>>;
 
 impl WindowRouter {
     fn new(
@@ -693,7 +801,7 @@ impl WindowRouter {
         hub_slot: Rc<HubSlot>,
         desired: Option<&'static str>,
         setup_only: bool,
-        ensure_runtime: Rc<dyn Fn() -> Result<()>>,
+        ensure_runtime: EnsureRuntime,
     ) -> Rc<Self> {
         Rc::new_cyclic(|me| Self {
             mtm,
@@ -808,11 +916,10 @@ impl WindowRouter {
             requested,
         )
         .map_err(anyhow::Error::msg)?;
-        if plan.start_runtime {
-            // The same single runtime the Hub uses; idempotent, never a second one.
-            if let Err(error) = (self.ensure_runtime)() {
-                eprintln!("lf-hub: could not ensure the native menu runtime: {error:#}");
-            }
+        // The same single runtime the Hub uses: unconfigured setup gets only
+        // the server; Finish (now configured) upgrades it in place.
+        if let Err(error) = (self.ensure_runtime)(plan.runtime) {
+            eprintln!("lf-hub: could not ensure the native menu runtime: {error:#}");
         }
         match plan.action {
             hub_route::WindowAction::OpenSetup => self.open_setup(),
@@ -903,8 +1010,8 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
     );
     let runtime_menu = menu.clone();
     let runtime_commands = commands.clone();
-    let ensure_runtime: Rc<dyn Fn() -> Result<()>> =
-        Rc::new(move || runtime_menu.ensure_runtime(&runtime_commands, &transport));
+    let ensure_runtime: EnsureRuntime =
+        Rc::new(move |start| runtime_menu.ensure_runtime(start, &runtime_commands, &transport));
     let router = WindowRouter::new(
         mtm,
         slot,
