@@ -76,6 +76,40 @@ mod runtime_start_tests {
         assert!(menu.runtime.borrow().is_none());
         assert!(menu.starting.get());
     }
+
+    fn menu_without_dictation(enabled: bool) -> MenuSlot {
+        let menu = MenuSlot::default();
+        *menu.runtime.borrow_mut() = Some(MenuRuntime {
+            menu: MenuState::new(None, enabled),
+            lifecycle: hub_route::RuntimeLifecycle::default(),
+            poller: None,
+            menu_lock: None,
+            #[cfg(feature = "runtime")]
+            bootstrap: None,
+            #[cfg(feature = "runtime")]
+            activation: None,
+            #[cfg(feature = "runtime")]
+            embedded: None,
+        });
+        menu
+    }
+
+    #[test]
+    fn without_a_dictation_runtime_the_menu_mirrors_the_hub_and_is_not_authoritative() {
+        let empty = MenuSlot::default();
+        assert_eq!(empty.runtime_dictation(), None);
+        // Nothing to mirror into: the (possibly file-reading) value is not read.
+        empty.update(|| panic!("no menu runtime: the Hub value must not be read"));
+
+        // Server-only setup, a failed activation or a non-runtime build.
+        let menu = menu_without_dictation(true);
+        assert_eq!(menu.runtime_dictation(), None);
+        menu.update(|| false);
+        let mirrored = menu.runtime.borrow().as_ref().unwrap().menu.snapshot();
+        assert!(!mirrored.dictation_enabled);
+        // The mirrored menu still is not reported as runtime state.
+        assert_eq!(menu.runtime_dictation(), None);
+    }
 }
 
 enum MenuCommand {
@@ -481,6 +515,40 @@ impl HubSlot {
     }
 }
 
+/// Apply one [`hub_route::DictationStatusSync`] poll to the Hub: adopt the
+/// runtime's dictation state into the in-memory config (that one field only,
+/// never written to disk) and re-render Home when it is the visible page.
+/// While runtime and Hub agree this is an in-memory comparison only; the
+/// Hub's config source is read only to resolve a disagreement.
+fn sync_hub_dictation(
+    sync: &mut hub_route::DictationStatusSync,
+    runtime: Option<bool>,
+    hub: Option<&Hub>,
+) {
+    let state = hub.map(HubSlot::state);
+    let cached = hub.and_then(|hub| {
+        hub.services()
+            .config
+            .borrow()
+            .field_bool("dictation_enabled")
+    });
+    let steps = sync.poll(runtime, cached, state.as_ref(), || {
+        hub.and_then(|hub| hub.services().persisted_dictation())
+    });
+    let Some(hub) = hub else {
+        return;
+    };
+    if let Some(enabled) = steps.adopt {
+        hub.services()
+            .config
+            .borrow_mut()
+            .set_field("dictation_enabled", serde_json::Value::Bool(enabled));
+    }
+    if steps.rebuild_home {
+        hub.rebuild_current_page();
+    }
+}
+
 /// The one in-process runtime, driven by [`hub_route::RuntimeLifecycle`]:
 /// unconfigured setup gets only the server; the first Full request (configured
 /// launch, or Finish) adds the status menu, its poller and dictation, which is
@@ -725,25 +793,42 @@ impl MenuSlot {
         }
     }
 
-    fn update(&self, enabled: bool) {
+    /// Mirror the Hub's setting into the menu while no dictation runtime owns
+    /// it. `enabled` is only evaluated then (it may read the config file).
+    fn update(&self, enabled: impl FnOnce() -> bool) {
         #[cfg(feature = "runtime")]
         {
             self.drive();
-            if self
-                .runtime
-                .borrow()
-                .as_ref()
-                .and_then(|runtime| runtime.embedded.as_ref())
-                .is_some_and(|embedded| embedded.runtime.is_some())
-            {
+            if self.runtime_dictation().is_some() {
                 return;
             }
         }
         if let Some(runtime) = self.runtime.borrow().as_ref() {
+            let enabled = enabled();
             runtime
                 .menu
                 .change(|model| model.dictation_enabled = enabled);
         }
+    }
+
+    /// The running dictation runtime's dictation state: the shared menu model
+    /// it updates after every toggle (menu, hotkey, or a saved Hub change it
+    /// picked up). `None` while no dictation runtime runs in this process —
+    /// then the menu only mirrors the Hub and is not authoritative.
+    fn runtime_dictation(&self) -> Option<bool> {
+        #[cfg(feature = "runtime")]
+        {
+            let slot = self.runtime.borrow();
+            let runtime = slot.as_ref()?;
+            if runtime
+                .embedded
+                .as_ref()
+                .is_some_and(|embedded| embedded.runtime.is_some())
+            {
+                return Some(runtime.menu.snapshot().dictation_enabled);
+            }
+        }
+        None
     }
 
     #[cfg(feature = "runtime")]
@@ -1032,9 +1117,10 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
     let quit_menu = menu.clone();
     let poll: Box<dyn Fn() -> bool> = {
         let router = router.clone();
+        let dictation_sync = RefCell::new(hub_route::DictationStatusSync::default());
         Box::new(move || {
             #[cfg(feature = "runtime")]
-            menu.update(
+            menu.update(|| {
                 router
                     .hub()
                     .map(|hub| {
@@ -1043,8 +1129,8 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
                             .field_bool("dictation_enabled")
                             .unwrap_or(true)
                     })
-                    .unwrap_or(true),
-            );
+                    .unwrap_or(true)
+            });
             for command in menu_commands.try_iter() {
                 if let MenuCommand::Quit = command {
                     NSApplication::sharedApplication(mtm).terminate(None);
@@ -1092,14 +1178,20 @@ pub fn run_hub(initial_page: Option<&str>, setup_only: bool) -> Result<()> {
                     }
                 }
             }
-            if let Some(hub) = router.hub() {
-                menu.update(
+            let hub = router.hub();
+            if let Some(hub) = hub.as_ref() {
+                menu.update(|| {
                     hub.services()
                         .dictation_config()
                         .field_bool("dictation_enabled")
-                        .unwrap_or(true),
-                );
+                        .unwrap_or(true)
+                });
             }
+            sync_hub_dictation(
+                &mut dictation_sync.borrow_mut(),
+                menu.runtime_dictation(),
+                hub.as_deref(),
+            );
             match router.poll() {
                 Ok(served) => served,
                 Err(error) => {

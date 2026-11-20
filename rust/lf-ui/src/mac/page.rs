@@ -127,6 +127,13 @@ impl HubServices {
         config
     }
 
+    /// The saved `dictation_enabled` from this Hub's config source (its
+    /// configured path, or the in-memory config for snapshots and tests).
+    /// `None` when it cannot be read or is not a bool: no default is assumed.
+    pub fn persisted_dictation(&self) -> Option<bool> {
+        self.latest_config().ok()?.field_bool("dictation_enabled")
+    }
+
     pub fn update_dictation(&self, enabled: bool) -> Result<Config> {
         self.update_config(&serde_json::json!({"dictation": {"enabled": enabled}}))
     }

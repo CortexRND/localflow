@@ -620,6 +620,75 @@ pub fn plan_reopen(existing: Option<&HubWindowState>, requested: Option<&str>) -
     }
 }
 
+/// What one [`DictationStatusSync::poll`] asks the Hub to do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DictationSyncSteps {
+    /// Set only `dictation_enabled` in the Hub's in-memory config to this
+    /// (nothing is written to disk; every other setting is left alone).
+    pub adopt: Option<bool>,
+    /// Re-render the Home page now (it is current, visible and not closed).
+    pub rebuild_home: bool,
+}
+
+/// Keeps the Hub's dictation status in step with the running dictation
+/// runtime, whatever toggled it (status menu, keyboard hotkey, Hub switch).
+///
+/// `runtime` is the running dictation runtime's value, or `None` while none
+/// runs (setup's server-only phase, a failed or foreign activation, builds
+/// without the runtime): then nothing is fabricated and the Hub keeps what it
+/// shows. While runtime and Hub agree nothing is read. On any disagreement
+/// (including the very first poll) the persisted value decides, since every
+/// toggle saves before the runtime or Hub shows it:
+/// - persisted == runtime: the runtime toggled (menu, hotkey); the Hub adopts
+///   it, even if the runtime value never changed between polls (a hotkey
+///   flip landing on a Hub save the runtime had not picked up yet);
+/// - persisted == Hub: the Hub saved and the runtime is still catching up;
+///   the Hub keeps its value;
+/// - unreadable or not a bool: the Hub keeps its value and the next poll
+///   retries.
+///
+/// Home re-renders once per adopted change, as soon as it is visible. Other
+/// pages are never re-rendered: navigating to Home renders it fresh.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DictationStatusSync {
+    stale_home: bool,
+}
+
+impl DictationStatusSync {
+    /// `cached` is the Hub's in-memory `dictation_enabled` and `hub` its window
+    /// state (`None`: no Hub). `persisted` reads the saved value; it is called
+    /// only when runtime and Hub disagree.
+    pub fn poll(
+        &mut self,
+        runtime: Option<bool>,
+        cached: Option<bool>,
+        hub: Option<&HubWindowState>,
+        persisted: impl FnOnce() -> Option<bool>,
+    ) -> DictationSyncSteps {
+        let mut steps = DictationSyncSteps::default();
+        if let Some(now) = runtime.filter(|now| hub.is_some() && cached != Some(*now)) {
+            if persisted() == Some(now) {
+                steps.adopt = Some(now);
+                self.stale_home = true;
+            }
+        }
+        if self.stale_home {
+            match hub {
+                Some(hub) if !hub.closed && hub.page == "Home" => {
+                    if hub.visible && !hub.miniaturized {
+                        steps.rebuild_home = true;
+                        self.stale_home = false;
+                    }
+                }
+                // No Hub, a closed one (its successor loads fresh config) or
+                // another page (Home renders fresh when navigated to).
+                _ => self.stale_home = false,
+            }
+        }
+        steps
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,6 +1377,197 @@ lock.release()
         assert_eq!(canonical_page("MODELS"), Some("Models"));
         assert_eq!(canonical_page("nope"), None);
         assert_eq!(canonical_page(""), None);
+    }
+
+    fn home(visible: bool) -> HubWindowState {
+        HubWindowState {
+            closed: false,
+            miniaturized: false,
+            visible,
+            page: "Home".into(),
+        }
+    }
+
+    fn adopt(value: bool) -> DictationSyncSteps {
+        DictationSyncSteps {
+            adopt: Some(value),
+            rebuild_home: true,
+        }
+    }
+
+    /// The persisted value must not be read while runtime and Hub agree.
+    fn unread() -> Option<bool> {
+        panic!("dictation sync read the config without a mismatch")
+    }
+
+    #[test]
+    fn dictation_sync_follows_runtime_on_off_on() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&hub), || Some(false)),
+            adopt(false)
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&hub), unread),
+            idle
+        );
+        assert_eq!(
+            sync.poll(Some(true), Some(false), Some(&hub), || Some(true)),
+            adopt(true)
+        );
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+    }
+
+    #[test]
+    fn dictation_sync_steady_state_never_reads_or_rebuilds() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        for _ in 0..5 {
+            assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+        }
+        // No dictation runtime: nothing is fabricated or read, whatever the
+        // Hub shows; without a Hub there is nothing to reconcile.
+        assert_eq!(sync.poll(None, Some(true), Some(&hub), unread), idle);
+        assert_eq!(sync.poll(None, Some(false), Some(&hub), unread), idle);
+        assert_eq!(sync.poll(Some(false), None, None, unread), idle);
+        assert_eq!(sync.poll(None, None, None, unread), idle);
+    }
+
+    #[test]
+    fn dictation_sync_first_poll_mismatch_adopts_when_persisted_agrees_with_runtime() {
+        // E.g. the hotkey toggled right after activation, before any poll.
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&hub), || Some(false)),
+            adopt(false)
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&hub), unread),
+            DictationSyncSteps::default()
+        );
+    }
+
+    #[test]
+    fn dictation_sync_pending_hub_save_is_not_undone_by_the_old_runtime_value() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        // The Hub saved Off; the runtime shows On until its watcher applies it.
+        for _ in 0..3 {
+            assert_eq!(
+                sync.poll(Some(true), Some(false), Some(&hub), || Some(false)),
+                idle
+            );
+        }
+        // The runtime caught up: nothing to show, nothing to read.
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&hub), unread),
+            idle
+        );
+    }
+
+    #[test]
+    fn dictation_sync_hotkey_after_rapid_hub_save_is_adopted_with_unchanged_runtime() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+        // The Hub saves Off; the runtime has not picked it up yet.
+        assert_eq!(
+            sync.poll(Some(true), Some(false), Some(&hub), || Some(false)),
+            idle
+        );
+        // The hotkey re-reads the saved Off, flips it and saves On: the
+        // runtime value stays On throughout, yet the Hub must show On.
+        assert_eq!(
+            sync.poll(Some(true), Some(false), Some(&hub), || Some(true)),
+            adopt(true)
+        );
+        assert_eq!(sync.poll(Some(true), Some(true), Some(&hub), unread), idle);
+    }
+
+    #[test]
+    fn dictation_sync_unreadable_config_keeps_the_hub_value_and_retries() {
+        let mut sync = DictationStatusSync::default();
+        let hub = home(true);
+        let idle = DictationSyncSteps::default();
+        let reads = std::cell::Cell::new(0);
+        let failed = || {
+            reads.set(reads.get() + 1);
+            None
+        };
+        // Read error or a missing/non-bool field: the Hub keeps showing On.
+        assert_eq!(sync.poll(Some(false), Some(true), Some(&hub), failed), idle);
+        assert_eq!(sync.poll(Some(false), Some(true), Some(&hub), failed), idle);
+        assert_eq!(reads.get(), 2);
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&hub), || Some(false)),
+            adopt(false)
+        );
+    }
+
+    #[test]
+    fn dictation_sync_rebuilds_home_only_when_visible_and_open() {
+        let idle = DictationSyncSteps::default();
+        let adopted_only = DictationSyncSteps {
+            adopt: Some(false),
+            rebuild_home: false,
+        };
+        let off = || Some(false);
+        // Another page: adopt, never rebuild, and no rebuild later either.
+        let mut sync = DictationStatusSync::default();
+        let mut settings = home(true);
+        settings.page = "Settings".into();
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&settings), off),
+            adopted_only
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            idle
+        );
+
+        // Hidden or miniaturized Home: rebuild once it is visible again.
+        let mut sync = DictationStatusSync::default();
+        let mut mini = home(false);
+        mini.miniaturized = true;
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&mini), off),
+            adopted_only
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(false)), unread),
+            idle
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            DictationSyncSteps {
+                adopt: None,
+                rebuild_home: true
+            }
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            idle
+        );
+
+        // Closed Hub (its successor loads fresh config): nothing to rebuild.
+        let mut sync = DictationStatusSync::default();
+        let mut closed = home(true);
+        closed.closed = true;
+        assert_eq!(
+            sync.poll(Some(false), Some(true), Some(&closed), off),
+            adopted_only
+        );
+        assert_eq!(
+            sync.poll(Some(false), Some(false), Some(&home(true)), unread),
+            idle
+        );
     }
 
     #[test]
