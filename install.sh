@@ -3,12 +3,13 @@ set -euo pipefail
 
 # The release a default install downloads and verifies. Keep synchronized
 # with package metadata and the other release launchers.
-LOCALFLOW_RELEASE="v0.2.0"
+LOCALFLOW_RELEASE="v0.2.1"
 LOCALFLOW_VERSION="${LOCALFLOW_RELEASE#v}"
-# The commit the published $LOCALFLOW_RELEASE tag points to (peeled), verified
-# out of band. Git installs refuse a tag or checkout that resolves elsewhere.
-# Update together with LOCALFLOW_RELEASE; never derive it from a fetch.
-LOCALFLOW_RELEASE_COMMIT="ab33fac896af9f10c31bc76c0f08be396a51eb68"
+# Default installs trust only the release's source archive, checked against the
+# release's SHA256SUMS. There is deliberately no pinned git commit: a release is
+# tagged on the merge commit that contains this file, so that commit's hash
+# cannot be written into this file in advance, and a fetched tag is never
+# trusted to name the expected source.
 # LOCALFLOW_RELEASE_BASE_URL is for testing only: it points the verified
 # download at another copy of the release assets (e.g. a file:// directory).
 RELEASE_BASE_URL="${LOCALFLOW_RELEASE_BASE_URL:-https://github.com/CortexRND/localflow/releases/download/$LOCALFLOW_RELEASE}"
@@ -31,20 +32,24 @@ Environment:
                            Rust and Xcode CLT are provisioned; CMake uses Homebrew if missing
   LOCALFLOW_WITH_OLLAMA=1  Same as --with-ollama
   LOCALFLOW_NO_LAUNCH=1    Same as --no-launch
-  LOCALFLOW_HOME           Install checkout location
-  LOCALFLOW_REPO_URL       Git repository URL or local path (git installs only)
+  LOCALFLOW_HOME           Install location
+  LOCALFLOW_REPO_URL       Git repository URL or local path (LOCALFLOW_REF git
+                           installs only)
   LOCALFLOW_REF            Git ref to check out, or tarball ref, instead of the
                            pinned release $LOCALFLOW_RELEASE. A custom ref is NOT
-                           checksum- or commit-verified.
+                           checksum-verified.
   LOCALFLOW_RELEASE_BASE_URL
                            Testing only: alternative location of the release
                            assets (localflow-$LOCALFLOW_VERSION.tar.gz and SHA256SUMS)
 
-By default git installs check out tag $LOCALFLOW_RELEASE and verify that it
-resolves to the pinned release commit $LOCALFLOW_RELEASE_COMMIT
-(no SHA256SUMS check). Without git the installer downloads
-localflow-$LOCALFLOW_VERSION.tar.gz from that GitHub release and verifies it
-against the release's SHA256SUMS before unpacking.
+By default, with or without git, the installer downloads
+localflow-$LOCALFLOW_VERSION.tar.gz from the $LOCALFLOW_RELEASE GitHub release and
+verifies it against the release's SHA256SUMS before unpacking. An existing
+LocalFlow install at the destination, including an older git checkout, is
+replaced only after verification succeeds; its .venv is kept. Git commits are
+not pinned: the release tag points at the merge commit that contains this
+script, whose hash cannot be known when the script is written.
+Running install.sh from inside a git checkout installs that checkout as is.
 
 On macOS, the native Rust app needs no Python or virtual environment. Accept
 the Xcode Command Line Tools dialog when prompted. For the Python app, run
@@ -247,18 +252,19 @@ verify_sha256() {
     echo "Verified SHA-256 of $name."
 }
 
-# Exit unless git revision $1 in $REPO resolves to exactly the pinned
-# LOCALFLOW_RELEASE_COMMIT; an empty or failed resolution also fails closed.
-require_release_commit() {
-    local rev="$1" what="$2" actual=""
-    if ! actual="$(git -C "$REPO" rev-parse --verify --quiet "$rev")" || [[ -z "$actual" ]]; then
-        echo "$what could not be resolved in $REPO; refusing to install unverified source." >&2
-        exit 1
-    fi
-    if [[ "$actual" != "$LOCALFLOW_RELEASE_COMMIT" ]]; then
-        echo "$what resolves to $actual, not the pinned release commit $LOCALFLOW_RELEASE_COMMIT; refusing to install." >&2
-        exit 1
-    fi
+# Succeed when directory $1 is a git checkout of LocalFlow: it has .git and a
+# pyproject.toml declaring name = "localflow". Only such a checkout may be
+# replaced by the verified release archive.
+is_localflow_checkout() {
+    local line pattern="^[[:space:]]*name[[:space:]]*=[[:space:]]*[\"']localflow[\"'][[:space:]]*(#.*)?\$"
+    [[ -e "$1/.git" && -f "$1/pyproject.toml" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        if [[ "$line" =~ $pattern ]]; then
+            return 0
+        fi
+    done <"$1/pyproject.toml"
+    return 1
 }
 
 # Download the source tarball into $REPO, replacing older source but keeping .venv.
@@ -422,24 +428,44 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/pyproject.toml" \
     FROM_CHECKOUT=1
 else
     REPO="${LOCALFLOW_HOME:-$HOME/.localflow/app}"
-    if [[ -e "$REPO/.git" ]]; then
-        : # Existing git install; pinned to the release below.
+    if [[ -n "${LOCALFLOW_REF:-}" ]]; then
+        # Custom ref (unverified): use git when available, else codeload.
+        if [[ -e "$REPO/.git" ]]; then
+            : # Existing git install; checked out at LOCALFLOW_REF below.
+        elif [[ -f "$REPO/.localflow-tarball" ]]; then
+            install_tarball
+        elif [[ -e "$REPO" ]]; then
+            echo "Install destination exists but is not a LocalFlow install: $REPO" >&2
+            exit 1
+        elif find_git; then
+            mkdir -p "$(dirname "$REPO")"
+            git clone "${LOCALFLOW_REPO_URL:-https://github.com/CortexRND/localflow.git}" "$REPO"
+        else
+            echo "No usable git found; downloading a source tarball instead."
+            install_tarball
+        fi
     elif [[ -f "$REPO/.localflow-tarball" ]]; then
+        install_tarball
+    elif is_localflow_checkout "$REPO"; then
+        # Default installs never trust git: an older managed git checkout is
+        # replaced by the verified release archive (keeping .venv), and only
+        # after the download passes its SHA256SUMS check.
+        echo "Existing git checkout at $REPO will be replaced by the $LOCALFLOW_RELEASE release archive once it passes SHA256SUMS verification (.venv is kept)."
         install_tarball
     elif [[ -e "$REPO" ]]; then
         echo "Install destination exists but is not a LocalFlow install: $REPO" >&2
         exit 1
-    elif find_git; then
-        mkdir -p "$(dirname "$REPO")"
-        git clone "${LOCALFLOW_REPO_URL:-https://github.com/CortexRND/localflow.git}" "$REPO"
     else
-        echo "No usable git found; downloading a source tarball instead."
         install_tarball
     fi
 fi
 
 if [[ ! -e "$REPO/.git" ]]; then
-    : # Tarball install: already at the requested (and, by default, verified) release.
+    : # Archive install: already at the requested (and, by default, verified) release.
+elif [[ -z "${LOCALFLOW_REF:-}" && "$FROM_CHECKOUT" -ne 1 ]]; then
+    # Unreachable by design: default managed installs are archive installs.
+    echo "Unexpected git checkout at $REPO; refusing to install unverified source." >&2
+    exit 1
 elif ! find_git; then
     echo "Note: no usable git found; keeping the existing checkout at $REPO as is."
 elif [[ -n "${LOCALFLOW_REF:-}" ]]; then
@@ -449,16 +475,6 @@ elif [[ -n "${LOCALFLOW_REF:-}" ]]; then
         git -C "$REPO" fetch origin "$LOCALFLOW_REF"
     fi
     git -C "$REPO" checkout "$LOCALFLOW_REF"
-elif [[ "$FROM_CHECKOUT" -eq 0 ]]; then
-    # Fresh clone or existing install: pin to the release tag. Fetching the
-    # tag without '+' refuses to move a local tag that changed upstream.
-    git -C "$REPO" fetch origin "refs/tags/$LOCALFLOW_RELEASE:refs/tags/$LOCALFLOW_RELEASE"
-    # The tag itself is not the trust root: it must resolve to the pinned
-    # release commit before anything is checked out, built or installed.
-    require_release_commit "refs/tags/$LOCALFLOW_RELEASE^{commit}" "Release tag $LOCALFLOW_RELEASE"
-    git -C "$REPO" -c advice.detachedHead=false checkout "refs/tags/$LOCALFLOW_RELEASE"
-    require_release_commit HEAD "Checked-out HEAD"
-    echo "Verified LocalFlow $LOCALFLOW_RELEASE at pinned release commit $LOCALFLOW_RELEASE_COMMIT (git checkout; SHA256SUMS applies only to tarball installs)."
 fi
 
 cd "$REPO"

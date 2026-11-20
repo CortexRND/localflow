@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,10 +30,6 @@ HASH_TOOLS = ("sha256sum", "shasum")
 RELEASE = re.search(
     r'^LOCALFLOW_RELEASE="(v[^"]+)"$', INSTALL_SH.read_text(encoding="utf-8"), re.M
 ).group(1)
-RELEASE_COMMIT = re.search(
-    r'^LOCALFLOW_RELEASE_COMMIT="([0-9a-f]{40})"$', INSTALL_SH.read_text(encoding="utf-8"), re.MULTILINE
-).group(1)  # independently checked against the published tag in test_release_default
-OTHER_COMMIT = "1" * 40
 VERSION = RELEASE.removeprefix("v")
 ASSET = f"localflow-{VERSION}.tar.gz"
 RELEASE_URL = f"https://github.com/CortexRND/localflow/releases/download/{RELEASE}"
@@ -112,9 +109,8 @@ elif name == "curl":
             sys.exit(22)
         shutil.copy(asset, args[args.index("-o") + 1])
 elif name == "git":
-    # STUB_GIT_FAIL lists git subcommands that exit 128; STUB_GIT_TAG_COMMIT /
-    # STUB_GIT_HEAD_COMMIT are what the release tag and HEAD resolve to (an
-    # empty value prints nothing). Any other rev-parse is an unknown revision.
+    # STUB_GIT_FAIL lists git subcommands that exit 128. Every rev-parse is an
+    # unknown revision, so a custom LOCALFLOW_REF is fetched explicitly.
     command = args[2] if args[:1] == ["-C"] else (args[0] if args else "")
     if command in os.environ.get("STUB_GIT_FAIL", "").split(","):
         print("fatal: stubbed git failure", file=sys.stderr)
@@ -124,15 +120,7 @@ elif name == "git":
         (dest / ".git").mkdir(parents=True)
         (dest / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
     elif command == "rev-parse":
-        tag_rev = "refs/tags/%s^{commit}" % os.environ["STUB_GIT_RELEASE"]
-        if args[3:] == ["--verify", "--quiet", tag_rev]:
-            value = os.environ["STUB_GIT_TAG_COMMIT"]
-        elif args[3:] == ["--verify", "--quiet", "HEAD"]:
-            value = os.environ.get("STUB_GIT_HEAD_COMMIT", os.environ["STUB_GIT_TAG_COMMIT"])
-        else:
-            sys.exit(1)
-        if value:
-            print(value)
+        sys.exit(1)
 elif name == "open":
     # Fail the first STUB_OPEN_FAILURES launches like LaunchServices -600.
     counter = Path(os.environ["STUB_LOG"] + ".open")
@@ -229,8 +217,6 @@ class Sandbox:
             "STUB_TARBALL": str(self.tarball),
             "STUB_RELEASE_DIR": str(self.release),
             "STUB_REAL_CURL": str(REAL_CURL),
-            "STUB_GIT_RELEASE": RELEASE,
-            "STUB_GIT_TAG_COMMIT": RELEASE_COMMIT,
             "LOCALFLOW_HOME": str(self.dest),
             "LOCALFLOW_RUNTIME": "python",
             "LOCALFLOW_REPO_URL": "https://example.invalid/localflow.git",
@@ -263,6 +249,27 @@ def _hosts(calls: list[str]) -> set[str | None]:
 
 def _astral_downloads(calls: list[str]) -> int:
     return _urls(calls).count("https://astral.sh/uv/install.sh")
+
+
+def _git_calls(calls: list[str]) -> list[str]:
+    return [call for call in calls if call.startswith("git ")]
+
+
+def _assert_verified_release_archive(
+    sandbox: Sandbox, result: subprocess.CompletedProcess[str], marker: str = "v1"
+) -> None:
+    """The default install used the checksummed release archive, never git."""
+    calls = sandbox.calls()
+    urls = _urls(calls)
+    assert f"{RELEASE_URL}/{ASSET}" in urls
+    assert f"{RELEASE_URL}/SHA256SUMS" in urls
+    assert "codeload.github.com" not in _hosts(calls)
+    assert not _git_calls(calls)
+    assert f"Verified SHA-256 of {ASSET}." in result.stdout
+    assert "not checksum-verified" not in result.stderr
+    assert (sandbox.dest / ".localflow-tarball").is_file()
+    assert not (sandbox.dest / ".git").exists()
+    assert (sandbox.dest / "version.txt").read_text() == marker
 
 
 def test_macos_without_brew_python_or_git_uses_uv_and_tarball(tmp_path: Path) -> None:
@@ -382,7 +389,7 @@ def test_macos_with_brew_and_supported_python_uses_pip(
     assert f"venv-pip install -e .{EXTRAS_ARM}" in calls
     assert not any(call.startswith("uv ") for call in calls)
     assert "astral.sh" not in _hosts(calls)
-    assert any(call.startswith("git clone https://example.invalid/") for call in calls)
+    _assert_verified_release_archive(sandbox, result)  # git is present but unused
 
 
 def test_macos_too_old_python_falls_back_to_uv(tmp_path: Path) -> None:
@@ -398,9 +405,10 @@ def test_macos_too_old_python_falls_back_to_uv(tmp_path: Path) -> None:
     assert "uv python install 3.12" in calls
     assert f"uv pip install --python .venv/bin/python -e .{EXTRAS_ARM}" in calls
     assert not any(call.startswith("python3 -m venv") for call in calls)
-    # Homebrew and git are present, so those are still used.
+    # Homebrew is still used; git is present but the default install uses the
+    # verified release archive.
     assert "brew install ffmpeg" in calls
-    assert any(call.startswith("git clone ") for call in calls)
+    _assert_verified_release_archive(sandbox, result)
 
 
 def test_macos_accepts_python_314(tmp_path: Path) -> None:
@@ -487,17 +495,20 @@ def test_macos_without_clt_never_runs_usr_bin_git(tmp_path: Path) -> None:
 
 
 def test_macos_without_clt_still_uses_non_usr_bin_git(tmp_path: Path) -> None:
+    # Only a custom ref uses git; it may come from outside /usr/bin without CLT.
     sandbox = Sandbox(tmp_path, clt=False)
     sandbox.add("brew")
     sandbox.add("git")
     sandbox.add("python3.12", "3.12.4")
 
-    result = sandbox.run()
+    result = sandbox.run(env={"LOCALFLOW_REF": "v9.9.9"})
 
     assert result.returncode == 0, result.stderr
     calls = sandbox.calls()
-    assert any(call.startswith("git clone ") for call in calls)
+    assert any(call.startswith("git clone https://example.invalid/") for call in calls)
+    assert f"git -C {sandbox.dest} checkout v9.9.9" in calls
     assert "codeload.github.com" not in _hosts(calls)
+    assert "github.com" not in _hosts(calls)
 
 
 def test_tarball_uses_localflow_ref_but_ignores_repo_url(tmp_path: Path) -> None:
@@ -570,22 +581,157 @@ def test_unrelated_destination_is_refused_untouched(tmp_path: Path) -> None:
     assert "not a LocalFlow install" in result.stderr
     assert (sandbox.dest / "notes.txt").read_text() == "mine"
     assert "codeload.github.com" not in _hosts(sandbox.calls())
+    assert "github.com" not in _hosts(sandbox.calls())
 
 
-def test_existing_git_checkout_is_updated_with_git(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "pyproject",
+    [None, "[project]\nname = 'something-else'\n", "[project]\n# name = 'localflow'\n"],
+    ids=["no-pyproject", "other-project", "commented-name"],
+)
+def test_unrecognized_git_destination_is_refused_untouched(
+    tmp_path: Path, pyproject: str | None
+) -> None:
+    sandbox = _git_sandbox(tmp_path, existing=False)
+    (sandbox.dest / ".git").mkdir(parents=True)
+    (sandbox.dest / "notes.txt").write_text("mine")
+    if pyproject is not None:
+        (sandbox.dest / "pyproject.toml").write_text(pyproject)
+
+    result = sandbox.run()
+
+    assert result.returncode == 1
+    assert "not a LocalFlow install" in result.stderr
+    assert (sandbox.dest / "notes.txt").read_text() == "mine"
+    assert (sandbox.dest / ".git").is_dir()
+    calls = sandbox.calls()
+    assert not _urls(calls) and not _git_calls(calls)
+    assert not _install_work(calls)
+
+
+def _git_sandbox(tmp_path: Path, *, existing: bool) -> Sandbox:
     sandbox = Sandbox(tmp_path)
     sandbox.add("brew")
     sandbox.add("git")
     sandbox.add("python3", "3.12.4")
-    (sandbox.dest / ".git").mkdir(parents=True)
-    (sandbox.dest / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
+    if existing:
+        (sandbox.dest / ".git").mkdir(parents=True)
+        (sandbox.dest / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
+        (sandbox.dest / "local-edit.txt").write_text("old checkout")
+        (sandbox.dest / ".venv").mkdir()
+        (sandbox.dest / ".venv" / "keep.txt").write_text("keep")
+    return sandbox
+
+
+def _install_work(calls: list[str]) -> list[int]:
+    """Indexes of calls that create the environment or install the app."""
+    return [
+        i for i, call in enumerate(calls)
+        if " -m venv " in f"{call} " or call.startswith(("uv ", "venv-"))
+    ]
+
+
+def test_existing_git_checkout_is_replaced_by_verified_archive(tmp_path: Path) -> None:
+    sandbox = _git_sandbox(tmp_path, existing=True)
 
     result = sandbox.run()
 
     assert result.returncode == 0, result.stderr
+    _assert_verified_release_archive(sandbox, result)
+    assert not (sandbox.dest / "local-edit.txt").exists()
+    assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
+    assert "will be replaced by the" in result.stdout
+    assert _no_leftover_downloads(sandbox)
+    # The archive is fetched and verified before any environment work.
     calls = sandbox.calls()
-    _assert_release_commit_verified_before_install(sandbox, calls, result)
-    assert not any("pull" in call for call in calls)
+    sums = next(i for i, call in enumerate(calls) if call.startswith("curl ") and "SHA256SUMS" in call)
+    assert sums < min(_install_work(calls))
+
+
+def test_existing_git_checkout_without_git_is_replaced_by_verified_archive(
+    tmp_path: Path,
+) -> None:
+    sandbox = Sandbox(tmp_path)
+    (sandbox.dest / ".git").mkdir(parents=True)
+    (sandbox.dest / "pyproject.toml").write_text('[project]\nname = "localflow"\r\n')
+    (sandbox.dest / ".venv").mkdir()
+    (sandbox.dest / ".venv" / "keep.txt").write_text("keep")
+
+    result = sandbox.run()
+
+    assert result.returncode == 0, result.stderr
+    _assert_verified_release_archive(sandbox, result)
+    assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
+    assert "keeping the existing checkout" not in result.stdout
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing"])
+def test_default_install_with_git_uses_verified_archive(tmp_path: Path, existing: bool) -> None:
+    sandbox = _git_sandbox(tmp_path, existing=existing)
+
+    result = sandbox.run()
+
+    assert result.returncode == 0, result.stderr
+    _assert_verified_release_archive(sandbox, result)
+    assert "example.invalid" not in _hosts(sandbox.calls())  # LOCALFLOW_REPO_URL unused
+
+
+def _tamper(sandbox: Sandbox) -> None:
+    with (sandbox.release / ASSET).open("ab") as asset:
+        asset.write(b"tampered")
+
+
+def _drop_entry(sandbox: Sandbox) -> None:
+    (sandbox.release / "SHA256SUMS").write_text(f"{'a' * 64}  localflow-{VERSION}.zip\n")
+
+
+def _drop_sums(sandbox: Sandbox) -> None:
+    (sandbox.release / "SHA256SUMS").unlink()
+
+
+def _drop_asset(sandbox: Sandbox) -> None:
+    (sandbox.release / ASSET).unlink()
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing"])
+@pytest.mark.parametrize(
+    "break_release,env,message",
+    [
+        (_tamper, {}, f"SHA-256 mismatch for {ASSET}"),
+        (_drop_entry, {}, f"SHA256SUMS has no valid entry for {ASSET}"),
+        (_drop_sums, {}, "Could not download LocalFlow from"),
+        (_drop_asset, {}, "Could not download LocalFlow from"),
+        (None, {"STUB_DOWNLOAD_FAIL": "1"}, "Could not download LocalFlow from"),
+    ],
+    ids=["mismatch", "missing-entry", "missing-sums", "missing-asset", "download-fail"],
+)
+def test_archive_failure_with_git_fails_closed(
+    tmp_path: Path,
+    existing: bool,
+    break_release: Callable[[Sandbox], None] | None,
+    env: dict[str, str],
+    message: str,
+) -> None:
+    sandbox = _git_sandbox(tmp_path, existing=existing)
+    if break_release is not None:
+        break_release(sandbox)
+
+    result = sandbox.run(env=env)
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    calls = sandbox.calls()
+    assert not _git_calls(calls)  # never falls back to git
+    assert not _install_work(calls)
+    assert "Verified SHA-256" not in result.stdout
+    assert _no_leftover_downloads(sandbox)
+    if existing:
+        assert (sandbox.dest / ".git").is_dir()
+        assert (sandbox.dest / "local-edit.txt").read_text() == "old checkout"
+        assert (sandbox.dest / ".venv" / "keep.txt").read_text() == "keep"
+        assert not (sandbox.dest / ".localflow-tarball").exists()
+    else:
+        assert not sandbox.dest.exists()
 
 
 def test_existing_git_checkout_without_usable_git_is_kept(tmp_path: Path) -> None:
@@ -608,16 +754,19 @@ def test_existing_git_checkout_honours_localflow_ref(tmp_path: Path) -> None:
     (sandbox.dest / ".git").mkdir(parents=True)
     (sandbox.dest / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
 
-    # A custom ref is never compared with the release pin, even if it differs.
-    result = sandbox.run(env={"LOCALFLOW_REF": "v1.0.0", "STUB_GIT_TAG_COMMIT": OTHER_COMMIT})
+    # A custom ref keeps the git checkout and never touches the release archive.
+    result = sandbox.run(env={"LOCALFLOW_REF": "v1.0.0"})
 
     assert result.returncode == 0, result.stderr
     calls = sandbox.calls()
     assert f"git -C {sandbox.dest} fetch origin" in calls
+    assert f"git -C {sandbox.dest} fetch origin v1.0.0" in calls
     assert f"git -C {sandbox.dest} checkout v1.0.0" in calls
     assert "LOCALFLOW_REF=v1.0.0 is a custom ref; its source is not checksum-verified" in result.stderr
-    assert not any(f"refs/tags/{RELEASE}" in call or call.endswith(" HEAD") for call in calls)
-    assert "pinned release commit" not in result.stdout + result.stderr
+    assert not any(f"refs/tags/{RELEASE}" in call for call in calls)
+    assert "github.com" not in _hosts(calls) and "codeload.github.com" not in _hosts(calls)
+    assert (sandbox.dest / ".git").is_dir()
+    assert "Verified SHA-256" not in result.stdout
 
 
 def test_install_sh_never_requires_tkinter_on_macos(tmp_path: Path) -> None:
@@ -632,133 +781,37 @@ def test_install_sh_never_requires_tkinter_on_macos(tmp_path: Path) -> None:
     assert not any("tkinter" in call for call in sandbox.calls())
 
 
-def test_fresh_git_clone_checks_out_release_tag(tmp_path: Path) -> None:
-    sandbox = Sandbox(tmp_path)
-    sandbox.add("brew")
-    sandbox.add("git")
-    sandbox.add("python3", "3.12.4")
+def test_custom_ref_fresh_install_with_git_clones_and_checks_out(tmp_path: Path) -> None:
+    sandbox = _git_sandbox(tmp_path, existing=False)
 
-    result = sandbox.run()
+    result = sandbox.run(env={"LOCALFLOW_REF": "feature/x"})
 
     assert result.returncode == 0, result.stderr
     calls = sandbox.calls()
     clone = calls.index(f"git clone https://example.invalid/localflow.git {sandbox.dest}")
-    fetch = _assert_release_commit_verified_before_install(sandbox, calls, result)
-    assert clone < fetch
-    assert "not checksum-verified" not in result.stderr
+    checkout = calls.index(f"git -C {sandbox.dest} checkout feature/x")
+    assert clone < checkout < min(_install_work(calls))
+    assert "github.com" not in _hosts(calls)  # no release archive or SHA256SUMS
+    assert "LOCALFLOW_REF=feature/x is a custom ref; its source is not checksum-verified" in result.stderr
+    assert "Verified SHA-256" not in result.stdout
 
 
-def _git_calls(sandbox: Sandbox) -> dict[str, str]:
-    tag = f"refs/tags/{RELEASE}"
-    prefix = f"git -C {sandbox.dest}"
-    return {
-        "fetch": f"{prefix} fetch origin {tag}:{tag}",
-        "tag": f"{prefix} rev-parse --verify --quiet {tag}^{{commit}}",
-        "checkout": f"{prefix} -c advice.detachedHead=false checkout {tag}",
-        "head": f"{prefix} rev-parse --verify --quiet HEAD",
-    }
-
-
-def _install_work(calls: list[str]) -> list[int]:
-    """Indexes of calls that create the environment or install the app."""
-    return [
-        i for i, call in enumerate(calls)
-        if " -m venv " in f"{call} " or call.startswith(("uv ", "venv-"))
-    ]
-
-
-def _assert_release_commit_verified_before_install(
-    sandbox: Sandbox, calls: list[str], result: subprocess.CompletedProcess[str]
-) -> int:
-    git = {step: calls.index(call) for step, call in _git_calls(sandbox).items()}
-    assert git["fetch"] < git["tag"] < git["checkout"] < git["head"]
-    work = _install_work(calls)
-    assert work and git["head"] < min(work)
-    assert f"Verified LocalFlow {RELEASE} at pinned release commit {RELEASE_COMMIT}" in result.stdout
-    assert "Verified SHA-256" not in result.stdout  # git path makes no SHA256SUMS claim
-    return git["fetch"]
-
-
-def _git_sandbox(tmp_path: Path, *, existing: bool) -> Sandbox:
-    sandbox = Sandbox(tmp_path)
-    sandbox.add("brew")
-    sandbox.add("git")
-    sandbox.add("python3", "3.12.4")
-    if existing:
-        (sandbox.dest / ".git").mkdir(parents=True)
-        (sandbox.dest / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
-    return sandbox
-
-
-@pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing"])
-@pytest.mark.parametrize(
-    "env,message",
-    [
-        ({"STUB_GIT_TAG_COMMIT": OTHER_COMMIT}, f"resolves to {OTHER_COMMIT}, not the pinned"),
-        ({"STUB_GIT_TAG_COMMIT": ""}, "could not be resolved"),
-        ({"STUB_GIT_FAIL": "rev-parse"}, "could not be resolved"),
-    ],
-    ids=["mismatch", "empty", "error"],
-)
-def test_release_tag_not_at_pinned_commit_fails_before_checkout(
-    tmp_path: Path, existing: bool, env: dict[str, str], message: str
-) -> None:
-    sandbox = _git_sandbox(tmp_path, existing=existing)
-
-    result = sandbox.run(env=env)
-
-    assert result.returncode == 1
-    assert f"Release tag {RELEASE} {message}" in result.stderr
-    calls = sandbox.calls()
-    git = _git_calls(sandbox)
-    assert git["fetch"] in calls and git["tag"] in calls
-    assert git["checkout"] not in calls
-    assert not _install_work(calls)
-    assert "Verified LocalFlow" not in result.stdout
-
-
-@pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing"])
-@pytest.mark.parametrize("head", [OTHER_COMMIT, ""], ids=["mismatch", "empty"])
-def test_checked_out_head_not_at_pinned_commit_fails_closed(
-    tmp_path: Path, existing: bool, head: str
-) -> None:
-    sandbox = _git_sandbox(tmp_path, existing=existing)
-
-    result = sandbox.run(env={"STUB_GIT_HEAD_COMMIT": head})
-
-    assert result.returncode == 1
-    assert "Checked-out HEAD " in result.stderr
-    calls = sandbox.calls()
-    assert _git_calls(sandbox)["head"] in calls
-    assert not _install_work(calls)
-    assert "Verified LocalFlow" not in result.stdout
-
-
-def test_failed_release_tag_fetch_fails_closed(tmp_path: Path) -> None:
-    sandbox = _git_sandbox(tmp_path, existing=True)
-
-    result = sandbox.run(env={"STUB_GIT_FAIL": "fetch"})
-
-    assert result.returncode != 0
-    calls = sandbox.calls()
-    git = _git_calls(sandbox)
-    assert git["tag"] not in calls and git["checkout"] not in calls
-    assert not _install_work(calls)
-
-
-def test_developer_checkout_is_not_forced_to_release_commit(tmp_path: Path) -> None:
+def test_developer_checkout_is_installed_as_is(tmp_path: Path) -> None:
     sandbox = _git_sandbox(tmp_path, existing=False)
     checkout = sandbox.script.parent
     (checkout / ".git").mkdir()
     (checkout / "pyproject.toml").write_text("[project]\nname = 'localflow'\n")
 
-    result = sandbox.run(env={"STUB_GIT_TAG_COMMIT": OTHER_COMMIT})
+    result = sandbox.run()
 
     assert result.returncode == 0, result.stderr
     calls = sandbox.calls()
-    assert not any(" fetch " in call or " checkout " in call or "rev-parse" in call for call in calls)
-    assert not any(call.startswith("git clone ") for call in calls)
-    assert "pinned release commit" not in result.stdout + result.stderr
+    assert not _git_calls(calls)
+    assert not _urls(calls)  # no release archive, SHA256SUMS or codeload
+    assert not sandbox.dest.exists()
+    assert (checkout / ".git").is_dir()
+    assert "Verified SHA-256" not in result.stdout
+    assert "Unexpected git checkout" not in result.stderr
 
 
 def test_help_names_pinned_release_not_main() -> None:
@@ -769,6 +822,9 @@ def test_help_names_pinned_release_not_main() -> None:
     assert RELEASE in result.stdout
     assert "default: main" not in result.stdout
     assert "LOCALFLOW_RELEASE_BASE_URL" in result.stdout
+    assert "SHA256SUMS" in result.stdout
+    assert "with or without git" in result.stdout
+    assert "pinned release commit" not in result.stdout
 
 
 def test_install_ps1_pins_the_same_release() -> None:

@@ -52,7 +52,7 @@ real load/transcription/reload, nonempty stable text, and PID-gone assertions
 after unload and dictation-off. Its transcript is recorded independently rather
 than required to match Parakeet's punctuation and spelling.
 
-# Default macOS app packaging (v0.2.0)
+# Default macOS app packaging (v0.2.1)
 
 Rust is the macOS installer default; Linux and Windows retain Python. From a source checkout on macOS:
 
