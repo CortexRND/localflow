@@ -127,6 +127,46 @@ def test_command_found_by_spoken_instruction(tmp_path, history):
     assert "haiku" in result["results"][0]["snippet"]
 
 
+def test_many_matching_chunks_do_not_hide_other_entries(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite")
+    long_text = "\n".join(" ".join(["zebra"] * 160) for _ in range(10))
+    long_id = store.add(kind="dictate", final_text=long_text, ts=_ts(1))
+    short_id = store.add(kind="dictate", final_text="a zebra once", ts=_ts(2))
+    result = mcp.search_dictations(_sources(tmp_path), query="zebra", limit=2)
+    assert result["match"] == "ranked"
+    assert _ids(result) == [long_id, short_id]
+
+
+def test_history_flag_from_legacy_config_writes_nothing(tmp_path, monkeypatch):
+    from localflow import config, secrets
+
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".localflow.toml"
+    legacy.write_text('history_enabled = false\nfireworks_api_key = "fw-secret"\n')
+    target = tmp_path / "xdg" / "localflow" / "config.toml"
+    monkeypatch.setattr(config, "config_path", lambda: target)
+    monkeypatch.setattr(config, "legacy_config_path", lambda: legacy)
+    secret_writes = []
+    monkeypatch.setattr(secrets, "set_secret", lambda *a: secret_writes.append(a))
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    before = {p: p.stat().st_mtime_ns for p in tmp_path.rglob("*")}
+
+    assert mcp._config_history_enabled() is False
+
+    assert {p: p.stat().st_mtime_ns for p in tmp_path.rglob("*")} == before
+    assert not target.exists()
+    assert secret_writes == []
+    assert "FIREWORKS_API_KEY" not in os.environ
+
+    target.parent.mkdir(parents=True)
+    target.write_text("config_version = 2\n[history]\nenabled = true\n")
+    assert mcp._config_history_enabled() is True
+    target.unlink()
+    legacy.unlink()
+    assert mcp._config_history_enabled() is True
+
+
 def test_substring_fallback(tmp_path, history):
     result = mcp.search_dictations(_sources(tmp_path), query="kube")
     assert result["match"] == "substring"

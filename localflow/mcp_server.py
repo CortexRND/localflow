@@ -67,9 +67,22 @@ class Sources:
 
 
 def _config_history_enabled() -> bool:
-    from localflow.config import load_config
+    """``[history] enabled`` without ``load_config``'s legacy migration side effects.
 
-    return load_config().history_enabled
+    ``load_config`` saves a migrated config and may write the keyring when only
+    ``~/.localflow.toml`` exists; here the legacy file is converted in memory only.
+    """
+    from localflow import config
+    from localflow.config_migrate import migrate_v1
+
+    target = config.config_path()
+    if target.exists():
+        return config._config_from_v2(config._parse(target)).history_enabled
+    legacy = config.legacy_config_path()
+    if legacy.exists():
+        data, _ = migrate_v1(config._parse(legacy))
+        return config._config_from_v2(data).history_enabled
+    return config.Config().history_enabled
 
 
 def default_sources() -> Sources:
@@ -123,9 +136,13 @@ def _bound(value: str | None, name: str, *, end: bool) -> float | None:
 def _rank_refs(
     query: str, passages: list[recall.Passage], limit: int,
 ) -> list[recall.Passage]:
-    """Best passage per ``ref``, at most ``limit`` refs."""
+    """Best passage per ``ref``, at most ``limit`` refs.
+
+    Ranks every passage: a fixed ``k`` lets one entry with many matching chunks
+    crowd out other matching entries before the per-ref dedupe.
+    """
     best: dict[str, recall.Passage] = {}
-    for passage in recall.rank(query, passages, k=limit * 4):
+    for passage in recall.rank(query, passages, k=len(passages)):
         best.setdefault(passage.ref, passage)
         if len(best) >= limit:
             break
