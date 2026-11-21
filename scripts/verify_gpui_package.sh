@@ -3,14 +3,18 @@
 # scripts/build_gpui_package.sh, on the platform it was built for.
 #
 # Usage:
-#   scripts/verify_gpui_package.sh <LocalFlow-Preview-<ver>-<os>-<arch>.tar.gz>
+#   scripts/verify_gpui_package.sh <LocalFlow-Preview-<ver>-<os>-<arch>.tar.gz|.zip>
 #       Check the member list (paths, types, links), extract into a fresh
 #       temporary directory and verify the extracted copy: identity, file
 #       manifest, native-library closure and relative search paths (Linux:
 #       readelf/ldd, glibc/libstdc++ symbol floors; macOS: otool, ad-hoc
-#       signatures), then non-GUI CLI smoke checks with an empty environment.
+#       signatures; Windows: llvm-readobj PE imports, no Visual C++ runtime),
+#       then non-GUI CLI smoke checks with an empty environment.
 #   scripts/verify_gpui_package.sh --linux-abi <package-tree>
+#   scripts/verify_gpui_package.sh --windows-abi <package-tree>
 #       Print the tree's ABI requirements (used by the builder's MANIFEST.json).
+#   scripts/verify_gpui_package.sh --zip-tool
+#       Print the bsdtar used to write and read the Windows zip package.
 #   scripts/verify_gpui_package.sh --macos-minos <LocalFlow Preview.app>
 #       Print the bundle's minimum macOS: the highest Mach-O minimum and the
 #       introduction version of each strongly linked framework it knows.
@@ -22,12 +26,17 @@
 # What this does NOT prove: that the GPU driver, Vulkan loader, Wayland,
 # fontconfig or other libraries loaded at run time (dlopen) exist on another
 # machine, or (macOS) Developer ID / notarisation / Gatekeeper approval or
-# privacy permission prompts. Those are documented, not verified.
+# privacy permission prompts, or (Windows) Authenticode / SmartScreen and the
+# Direct3D 11 driver. Those are documented, not verified.
 set -euo pipefail
 
 PREVIEW_ID="com.cortexrnd.localflow.desktop-preview"
 MAC_APP="LocalFlow Preview.app"
 LINUX_ROOT="localflow-preview"
+WINDOWS_ROOT="LocalFlow Preview"
+# Visual C++ runtime DLLs: the Windows package links the CRT statically, so an
+# import of any of these would need a Redistributable the README says it does not.
+WINDOWS_VC_RUNTIME_RE='^(vcruntime|msvcp|msvcr|concrt|vccorlib|vcomp|ucrtbased)'
 # The documented Linux ABI claim (rust/lf-desktop/README.md). A build whose
 # binary or bundled libraries need newer symbol versions fails here instead
 # of shipping a package that would not load where the README says it does.
@@ -226,14 +235,40 @@ macho_rpaths() {
     otool -l "$1" | awk '/cmd LC_RPATH/{r=1;next} r && /^[[:space:]]*path /{sub(/^[[:space:]]*path /, "");sub(/ \(offset.*$/, "");print;r=0}'
 }
 
+# The archiver for zip packages: libarchive's bsdtar (Windows ships it as
+# System32\tar.exe; Git Bash's own tar is GNU tar, which cannot read zip).
+zip_tool() {
+    local sys
+    if command -v bsdtar >/dev/null 2>&1; then command -v bsdtar; return; fi
+    sys="$(windows_system_dir 2>/dev/null)" || sys=""
+    [[ -n "$sys" && -x "$sys/tar.exe" ]] || die "bsdtar (System32\\tar.exe on Windows) is needed for the zip package"
+    printf '%s\n' "$sys/tar.exe"
+}
+
+# List archive $1 (names; with -v, ls-style lines). Zip for Windows, else tar.gz.
+list_archive() {
+    local verbose=""
+    [[ "${2:-}" == -v ]] && verbose=v
+    # Windows' tar.exe writes CRLF line ends to a pipe.
+    if [[ "$1" == *.zip ]]; then "$(zip_tool)" "-t${verbose}f" "$1" | sed 's/\r$//'; else tar "-t${verbose}zf" "$1"; fi
+}
+
+# Windows' System32 directory as a POSIX path.
+windows_system_dir() {
+    local root="${SYSTEMROOT:-${WINDIR:-}}"
+    [[ -n "$root" ]] || return 1
+    if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -u "$root")"; fi
+    printf '%s\n' "$root/System32"
+}
+
 # Validate archive $1's member list before anything is extracted: every
 # member sits under root $2, has no absolute/parent/dot component, control
 # character or backslash, and is a regular file or directory (no symlink,
 # hard link, device or FIFO).
 check_members() {
     local archive="$1" root="$2" member line names verbose
-    names="$(tar -tzf "$archive")" || die "cannot list $archive"
-    verbose="$(tar -tvzf "$archive")" || die "cannot list $archive"
+    names="$(list_archive "$archive")" || die "cannot list $archive"
+    verbose="$(list_archive "$archive" -v)" || die "cannot list $archive"
     [[ -n "$names" ]] || die "$archive is empty"
     [[ "$(printf '%s\n' "$names" | wc -l)" -eq "$(printf '%s\n' "$verbose" | wc -l)" ]] \
         || die "$archive has members whose names span lines"
@@ -262,9 +297,19 @@ check_extracted() {
 # Run lf-desktop $1 with an empty environment and a throwaway HOME; never a
 # display, a model, a device or real data.
 smoke() {
-    local exe="$1" version="$2" smoke_home out code
+    local exe="$1" version="$2" smoke_home smoke_tmp out code
     smoke_home="$(mktemp -d "$work/smoke-home.XXXXXX")"
-    run() { env -i PATH=/usr/bin:/bin HOME="$smoke_home" LANG=C "$exe" "$@"; }
+    smoke_tmp="$(mktemp -d "$work/smoke-tmp.XXXXXX")"
+    if [[ "$exe" == *.exe ]]; then
+        # Windows needs SystemRoot to load anything; the package's own folder
+        # is the only non-system DLL search location.
+        run() {
+            env -i PATH="$(windows_system_dir)" SYSTEMROOT="${SYSTEMROOT:-${WINDIR:-}}" HOME="$smoke_home" \
+                USERPROFILE="$smoke_home" TEMP="$smoke_tmp" TMP="$smoke_tmp" LANG=C "$exe" "$@"
+        }
+    else
+        run() { env -i PATH=/usr/bin:/bin HOME="$smoke_home" LANG=C "$exe" "$@"; }
+    fi
     out="$(run --version)" || die "lf-desktop --version failed"
     [[ "$out" == "lf-desktop $version" ]] || die "lf-desktop --version printed '$out', expected 'lf-desktop $version'"
     out="$(run --help)" || die "lf-desktop --help failed"
@@ -286,8 +331,19 @@ manifest_value() {
     sed -n "s/^  \"$2\": \"\\([^\"]*\\)\",\\{0,1\\}\$/\\1/p" "$1"
 }
 
+# Every file of tree $1 (except the manifest) is listed once in its
+# MANIFEST.json with its hash, and nothing else is.
+check_manifest_files() {
+    local tree="$1" listed actual
+    listed="$(sed -n 's/^    "\([^"]*\)": "\([0-9a-f]\{64\}\)",\{0,1\}$/\1 \2/p' "$tree/MANIFEST.json" | LC_ALL=C sort)"
+    actual="$(cd "$tree" && find . -type f ! -path ./MANIFEST.json | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r rel; do
+        printf '%s %s\n' "$rel" "$(sha256_of "$rel")"
+    done)"
+    [[ -n "$listed" && "$listed" == "$actual" ]] || die "package files do not match MANIFEST.json"
+}
+
 verify_linux() {
-    local tree="$1" version="$2" manifest="$1/MANIFEST.json" file rel listed actual need runpath
+    local tree="$1" version="$2" manifest="$1/MANIFEST.json" file rel need runpath
     local -a bundled=()
     [[ -f "$manifest" ]] || die "MANIFEST.json is missing"
     [[ "$(manifest_value "$manifest" name)" == "$LINUX_ROOT" ]] || die "MANIFEST.json does not name $LINUX_ROOT"
@@ -299,12 +355,7 @@ verify_linux() {
         [[ -f "$tree/$rel" ]] || die "package is missing $rel"
     done
     [[ -x "$tree/bin/lf-desktop" ]] || die "bin/lf-desktop is not executable"
-    # Every file (except the manifest) is listed once with its hash, and nothing else is.
-    listed="$(sed -n 's/^    "\([^"]*\)": "\([0-9a-f]\{64\}\)",\{0,1\}$/\1 \2/p' "$manifest" | LC_ALL=C sort)"
-    actual="$(cd "$tree" && find . -type f ! -path ./MANIFEST.json | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r rel; do
-        printf '%s %s\n' "$rel" "$(sha256_of "$rel")"
-    done)"
-    [[ -n "$listed" && "$listed" == "$actual" ]] || die "package files do not match MANIFEST.json"
+    check_manifest_files "$tree"
     while IFS= read -r file; do bundled+=("${file##*/}"); done < <(find "$tree/lib" -type f -name 'lib*.so*')
     while IFS= read -r file; do
         runpath="$(elf_runpath "$file")"
@@ -409,7 +460,88 @@ verify_macos() {
     echo "Verified macOS bundle (ad-hoc signed; minimum macOS $(macos_minos "$app"))"
 }
 
+# llvm-readobj (from rustup's llvm-tools or the LLVM install on Windows runners).
+readobj() {
+    local tool sysroot
+    for tool in "${LLVM_READOBJ:-}" "$(command -v llvm-readobj 2>/dev/null)"; do
+        [[ -n "$tool" ]] && { "$tool" "$@"; return; }
+    done
+    sysroot="$(rustc --print sysroot 2>/dev/null)" || sysroot=""
+    if command -v cygpath >/dev/null 2>&1 && [[ -n "$sysroot" ]]; then sysroot="$(cygpath -u "$sysroot")"; fi
+    for tool in "$sysroot/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-readobj.exe" \
+        "/c/Program Files/LLVM/bin/llvm-readobj.exe"; do
+        [[ -x "$tool" ]] && { "$tool" "$@"; return; }
+    done
+    die "llvm-readobj is needed to check the Windows package (rustup component add llvm-tools)"
+}
+
+# Lower-cased DLL names PE file $1 imports (normal and delay-load).
+pe_imports() {
+    local out
+    out="$(readobj --coff-imports "$1" | sed 's/\r$//')" || die "llvm-readobj failed for $1"
+    grep -q '^Format: COFF-x86-64$' <<<"$out" || die "${1##*/} is not an x86-64 PE image"
+    sed -n 's/^  Name: \(.*\)$/\1/p' <<<"$out" | tr '[:upper:]' '[:lower:]'
+}
+
+# The Windows tree's ABI: every PE import of lf-desktop.exe and the bundled
+# DLLs is either bundled next to it or an OS DLL in System32 (never the VC++
+# runtime); prints the system DLLs it needs.
+windows_abi() {
+    local tree="$1" file need sys imports
+    local -a bundled=() system=()
+    sys="$(windows_system_dir)" || die "SYSTEMROOT is not set; run this on Windows"
+    for file in "$tree"/*.dll; do bundled+=("$(printf '%s' "${file##*/}" | tr '[:upper:]' '[:lower:]')"); done
+    for file in "$tree"/lf-desktop.exe "$tree"/*.dll; do
+        imports="$(pe_imports "$file")"
+        while IFS= read -r need; do
+            [[ -n "$need" ]] || continue
+            if [[ "$need" =~ $WINDOWS_VC_RUNTIME_RE ]]; then
+                die "${file##*/} needs $need (the Visual C++ runtime); the package links the CRT statically"
+            fi
+            [[ " ${bundled[*]} " == *" $need "* ]] && continue
+            if [[ "$need" == api-ms-win-* || "$need" == ext-ms-* || -f "$sys/$need" ]]; then
+                system+=("$need")
+                continue
+            fi
+            die "${file##*/} needs $need, which is neither bundled nor a Windows system DLL"
+        done <<<"$imports"
+    done
+    printf 'crt=static\n'
+    printf 'system_libraries=%s\n' "$(printf '%s\n' "${system[@]}" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+}
+
+verify_windows() {
+    local tree="$1" version="$2" manifest="$1/MANIFEST.json" rel odd abi
+    [[ -f "$manifest" ]] || die "MANIFEST.json is missing"
+    [[ "$(manifest_value "$manifest" name)" == "$LINUX_ROOT" ]] || die "MANIFEST.json does not name $LINUX_ROOT"
+    [[ "$(manifest_value "$manifest" version)" == "$version" ]] || die "MANIFEST.json version does not match the archive name"
+    [[ "$(manifest_value "$manifest" os)" == windows && "$(manifest_value "$manifest" arch)" == x86_64 ]] \
+        || die "MANIFEST.json platform is not windows-x86_64"
+    for rel in lf-desktop.exe sherpa-onnx-c-api.dll onnxruntime.dll README.txt; do
+        [[ -f "$tree/$rel" ]] || die "package is missing $rel"
+    done
+    # One flat folder: the executable, its DLLs, the README and the manifest.
+    odd="$(cd "$tree" && find . -mindepth 1 \( -path './*/*' -o -type d -o \( ! -name lf-desktop.exe ! -name '*.dll' \
+        ! -name README.txt ! -name MANIFEST.json \) \) -print)"
+    [[ -z "$odd" ]] || die "unexpected files in the Windows package: $odd"
+    check_manifest_files "$tree"
+    abi="$(windows_abi "$tree")"
+    [[ "$(manifest_value "$manifest" crt)" == static ]] || die "MANIFEST.json does not record the static CRT"
+    [[ "$(manifest_value "$manifest" system_libraries)" == "$(sed -n 's/^system_libraries=//p' <<<"$abi")" ]] \
+        || die "MANIFEST.json system_libraries do not match the package's imports"
+    smoke "$tree/lf-desktop.exe" "$version"
+}
+
 case "${1:-}" in
+    --windows-abi)
+        [[ $# -eq 2 && -d "$2" ]] || die "usage: $0 --windows-abi <package-tree>"
+        windows_abi "$2"
+        exit 0
+        ;;
+    --zip-tool)
+        zip_tool
+        exit 0
+        ;;
     --linux-abi)
         [[ $# -eq 2 && -d "$2" ]] || die "usage: $0 --linux-abi <package-tree>"
         linux_abi "$2"
@@ -428,7 +560,7 @@ case "${1:-}" in
         exit 1
         ;;
     ""|-*)
-        echo "Usage: $0 <LocalFlow-Preview-<ver>-<os>-<arch>.tar.gz>" >&2
+        echo "Usage: $0 <LocalFlow-Preview-<ver>-<os>-<arch>.tar.gz|.zip>" >&2
         exit 2
         ;;
 esac
@@ -436,7 +568,8 @@ esac
 archive="$1"
 [[ -f "$archive" ]] || die "no such archive: $archive"
 base="${archive##*/}"
-[[ "$base" =~ ^LocalFlow-Preview-([0-9]+\.[0-9]+\.[0-9]+)-(linux-x86_64|macos-arm64|macos-x86_64)\.tar\.gz$ ]] \
+[[ "$base" =~ ^LocalFlow-Preview-([0-9]+\.[0-9]+\.[0-9]+)-(linux-x86_64|macos-arm64|macos-x86_64)\.tar\.gz$ \
+    || "$base" =~ ^LocalFlow-Preview-([0-9]+\.[0-9]+\.[0-9]+)-(windows-x86_64)\.zip$ ]] \
     || die "not a LocalFlow Preview archive name: $base"
 version="${BASH_REMATCH[1]}"
 platform="${BASH_REMATCH[2]}"
@@ -444,20 +577,29 @@ case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) here=linux-x86_64 ;;
     Darwin-arm64) here=macos-arm64 ;;
     Darwin-x86_64) here=macos-x86_64 ;;
+    MINGW*-x86_64|MSYS*-x86_64) here=windows-x86_64 ;;
     *) here="unsupported" ;;
 esac
 [[ "$platform" == "$here" ]] || die "$base is for $platform; verify it on that platform (this is $here)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/localflow-preview-verify.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-if [[ "$platform" == linux-* ]]; then root="$LINUX_ROOT"; else root="$MAC_APP"; fi
+case "$platform" in
+    linux-*) root="$LINUX_ROOT" ;;
+    windows-*) root="$WINDOWS_ROOT" ;;
+    *) root="$MAC_APP" ;;
+esac
 check_members "$archive" "$root"
 mkdir "$work/x"
-tar -xzf "$archive" -C "$work/x" --no-same-owner
+if [[ "$platform" == windows-* ]]; then
+    "$(zip_tool)" -xf "$archive" -C "$work/x"
+else
+    tar -xzf "$archive" -C "$work/x" --no-same-owner
+fi
 check_extracted "$work/x"
 [[ "$(ls -A "$work/x")" == "$root" ]] || die "archive does not unpack to exactly $root"
-if [[ "$platform" == linux-* ]]; then
-    verify_linux "$work/x/$root" "$version"
-else
-    verify_macos "$work/x/$root" "$version"
-fi
+case "$platform" in
+    linux-*) verify_linux "$work/x/$root" "$version" ;;
+    windows-*) verify_windows "$work/x/$root" "$version" ;;
+    *) verify_macos "$work/x/$root" "$version" ;;
+esac
 echo "Verified $base"

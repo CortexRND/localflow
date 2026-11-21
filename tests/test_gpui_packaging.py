@@ -5,8 +5,9 @@ otool, install_name_tool, codesign, plutil) whose "binaries" are small shell
 programs carrying their link metadata in a ``# FAKE {...}`` line, so search
 paths, dependencies and symbol versions travel with the files through
 staging, archiving and extraction. The installer and publisher use the real
-``tar``. None of this is native macOS validation: the gpui-package.yml macOS
-legs run the real tools.
+``tar``. None of this is native macOS or Windows validation: the
+gpui-package.yml macOS and Windows legs run the real tools (the Windows leg
+also launches the window).
 """
 
 import hashlib
@@ -21,6 +22,7 @@ import sys
 import tarfile
 import textwrap
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -30,7 +32,8 @@ BASH = shutil.which("bash") if os.name != "nt" else None
 pytestmark = pytest.mark.skipif(BASH is None, reason="requires Bash")
 LINUX_ONLY = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the Linux builder uses GNU tar")
 PREVIEW_ID = "com.cortexrnd.localflow.desktop-preview"
-PLATFORMS = ["linux-x86_64", "macos-arm64", "macos-x86_64"]
+PLATFORMS = ["linux-x86_64", "macos-arm64", "macos-x86_64", "windows-x86_64"]
+WINDOWS_SYSTEM_DLLS = ["kernel32.dll", "user32.dll", "gdi32.dll", "d3d11.dll", "dxgi.dll", "ole32.dll"]
 VERSION = tomllib.loads((ROOT / "rust/lf-desktop/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
 
 LINUX_BIN_NEEDED = [
@@ -82,11 +85,22 @@ elif name == "cargo":
         cleaned = any(json.loads(l)[:2] == ["cargo", "clean"] for l in open(os.environ["CALLS"]))
         version = os.environ.get("FAKE_VERSION", os.environ["REAL_VERSION"])
         mac = os.environ["FAKE_OS"] == "Darwin"
-        ext = "dylib" if mac else "so"
-        libs = ["libsherpa-onnx-c-api", "libonnxruntime"] + ([] if mac else ["libsherpa-onnx-cxx-api"])
+        win = os.environ["FAKE_OS"].startswith("MINGW")
+        ext = "dylib" if mac else "dll" if win else "so"
+        if win:
+            libs = ["sherpa-onnx-c-api", "sherpa-onnx-cxx-api", "onnxruntime", "onnxruntime_providers_shared"]
+        else:
+            libs = ["libsherpa-onnx-c-api", "libonnxruntime"] + ([] if mac else ["libsherpa-onnx-cxx-api"])
         if "MISSING_ORT" in fault:
-            libs.remove("libonnxruntime")
-        if mac:
+            libs.remove("onnxruntime" if win else "libonnxruntime")
+        if win:
+            imports = ["KERNEL32.dll", "USER32.dll", "d3d11.dll", "sherpa-onnx-c-api.dll", "api-ms-win-core-synch-l1-2-0.dll"]
+            if "VC_RUNTIME" in fault:
+                imports.append("VCRUNTIME140.dll")
+            if "BAD_IMPORT" in fault:
+                imports.append("libomp140.x86_64.dll")
+            exe = {"imports": imports, "format": "COFF-i386" if "WRONG_ARCH" in fault else "COFF-x86-64"}
+        elif mac:
             sck = "/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit"
             deps = ["/build/target/release/libsherpa-onnx-c-api.dylib", "/usr/lib/libSystem.B.dylib",
                     "/System/Library/Frameworks/Metal.framework/Versions/A/Metal"]
@@ -110,13 +124,17 @@ elif name == "cargo":
                 verneed.append("GLIBC_2.39")
             runpath = "/build/target/release" if "BAD_RUNPATH" in fault else "$ORIGIN:$ORIGIN/../lib"
             exe = {"needed": needed, "runpath": runpath, "verneed": verneed}
-        (release / "lf-desktop").write_text(program(exe, version))
-        (release / "lf-desktop").chmod(0o755)
+        binary = release / ("lf-desktop.exe" if win else "lf-desktop")
+        binary.write_text(program(exe, version))
+        binary.chmod(0o755)
         if "PRUNED" in fault and not cleaned:
             libs = []
         for lib in libs:
             path = release / f"{lib}.{ext}"
-            if mac:
+            if win:
+                m = {"format": "COFF-x86-64",
+                     "imports": ["KERNEL32.dll"] + (["onnxruntime.dll"] if lib.startswith("sherpa") else [])}
+            elif mac:
                 m = {"id": f"/build/sdk/{lib}.dylib", "rpaths": ["/build/sdk/lib"],
                      "deps": ["@rpath/libonnxruntime.dylib", "/usr/lib/libc++.1.dylib"],
                      "minos": os.environ.get("FAKE_ORT_MINOS", "13.3") if lib == "libonnxruntime" else "10.15"}
@@ -167,6 +185,30 @@ elif name == "ldd":
             print(f"\t{lib} => /lib/x86_64-linux-gnu/{lib} (0x0)")
         else:
             print(f"\t{lib} => not found")
+elif name == "llvm-readobj":
+    m = meta(a[-1])
+    print(f"File: {a[-1]}\nFormat: {m['format']}\nArch: x86_64\nAddressSize: 64bit")
+    for dll in m["imports"]:
+        print(f"Import {{\n  Name: {dll}\n  ImportLookupTableRVA: 0x1000\n  Symbol: Fn (0)\n}}")
+elif name == "bsdtar":
+    import zipfile
+    mode = a[0] if a[0] != "--format" else a[2]
+    if mode == "-cf":
+        with zipfile.ZipFile(a[3] if a[0] == "--format" else a[1], "w") as z:
+            for root in a[4 if a[0] == "--format" else 2:]:
+                for p in sorted([Path(root), *Path(root).rglob("*")]):
+                    z.write(p, str(p) + ("/" if p.is_dir() else ""))
+    elif mode in ("-tf", "-tvf"):
+        for info in zipfile.ZipFile(a[1]).infolist():
+            kind = "d" if info.is_dir() else ("l" if (info.external_attr >> 28) == 0xA else "-")
+            print(f"{kind}rw-r--r--  0 0      0         {info.file_size} Jan  1 00:00 {info.filename}" if mode == "-tvf"
+                  else info.filename)
+    elif mode == "-xf":
+        with zipfile.ZipFile(a[1]) as z:
+            z.extractall(a[a.index("-C") + 1])
+            for info in z.infolist():
+                if not info.is_dir() and (info.external_attr >> 16) & 0o111:
+                    (Path(a[a.index("-C") + 1]) / info.filename).chmod(0o755)
 elif name == "desktop-file-validate":
     sys.exit(0 if Path(a[-1]).read_text().startswith("[Desktop Entry]\n") else 1)
 elif name == "otool":
@@ -223,7 +265,7 @@ elif name == "plutil":
         print(v[a[1]])
 '''
 FAKE_TOOLS = ("uname", "cargo", "readelf", "ldd", "desktop-file-validate", "otool",
-              "install_name_tool", "codesign", "plutil", "xattr", "open")
+              "install_name_tool", "codesign", "plutil", "xattr", "open", "llvm-readobj", "bsdtar")
 
 
 def _calls(env) -> list[list[str]]:
@@ -250,7 +292,7 @@ def fake(tmp_path: Path):
                CARGO_TARGET_DIR=str(tmp_path / "target"), REAL_VERSION=VERSION,
                BIN_NEEDED=",".join(LINUX_BIN_NEEDED), TMPDIR=str(tmp_path))
     for key in ("CARGO_BUILD_TARGET", "MACOSX_DEPLOYMENT_TARGET", "LOCALFLOW_PREVIEW_BASE_URL", "DISPLAY", "WAYLAND_DISPLAY",
-                "LOCALFLOW_SANDBOX", "FAULTS"):
+                "LOCALFLOW_SANDBOX", "FAULTS", "SYSTEMROOT", "WINDIR", "LLVM_READOBJ", "RUSTFLAGS"):
         env.pop(key, None)
     return home, env
 
@@ -266,7 +308,8 @@ def _build(env, out: Path, *faults: str):
 
 
 def _asset(platform: str, version: str = VERSION) -> str:
-    return f"LocalFlow-Preview-{version}-{platform}.tar.gz"
+    ext = "zip" if platform.startswith("windows") else "tar.gz"
+    return f"LocalFlow-Preview-{version}-{platform}.{ext}"
 
 
 # --- builder and verifier -------------------------------------------------
@@ -336,6 +379,113 @@ def test_linux_builder_fails_closed_and_keeps_the_previous_output(fake, tmp_path
     assert sorted(p.name for p in out.iterdir()) == [previous.name], "no staging left behind"
 
 
+@pytest.fixture
+def windows(fake, tmp_path):
+    """The fake environment as Git Bash on Windows x64, with a fake System32."""
+    home, env = fake
+    system32 = tmp_path / "Windows" / "System32"
+    system32.mkdir(parents=True)
+    for dll in WINDOWS_SYSTEM_DLLS:
+        (system32 / dll).write_text("system dll")
+    env.update(FAKE_OS="MINGW64_NT-10.0-20348", SYSTEMROOT=str(tmp_path / "Windows"))
+    return home, env
+
+
+@LINUX_ONLY
+def test_windows_builder_zips_a_flat_static_crt_folder_and_verifies_it(windows, tmp_path):
+    _, env = windows
+    out = tmp_path / "out"
+    result = _build(env, out)
+    assert result.returncode == 0, result.stderr + result.stdout
+    name = _asset("windows-x86_64")
+    assert name == f"LocalFlow-Preview-{VERSION}-windows-x86_64.zip"
+    assert sorted(p.name for p in out.iterdir()) == [name, f"{name}.sha256"]
+    digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
+    assert (out / f"{name}.sha256").read_text() == f"{digest}  {name}\n"
+    with zipfile.ZipFile(out / name) as archive:
+        names = archive.namelist()
+        manifest = json.loads(archive.read("LocalFlow Preview/MANIFEST.json"))
+        files = {n[len("LocalFlow Preview/"):]: hashlib.sha256(archive.read(n)).hexdigest()
+                 for n in names if not n.endswith("/") and not n.endswith("/MANIFEST.json")}
+        readme = archive.read("LocalFlow Preview/README.txt").decode()
+    assert all(n == "LocalFlow Preview/" or n.startswith("LocalFlow Preview/") for n in names)
+    assert sorted(files) == ["README.txt", "lf-desktop.exe", "onnxruntime.dll", "onnxruntime_providers_shared.dll",
+                             "sherpa-onnx-c-api.dll", "sherpa-onnx-cxx-api.dll"]
+    assert manifest["files"] == files
+    assert (manifest["name"], manifest["version"], manifest["os"], manifest["arch"]) == (
+        "localflow-preview", VERSION, "windows", "x86_64")
+    assert manifest["crt"] == "static"
+    # Bundled DLLs are not system libraries; api-ms-win-* sets resolve in the OS.
+    assert manifest["system_libraries"].split() == [
+        "api-ms-win-core-synch-l1-2-0.dll", "d3d11.dll", "kernel32.dll", "user32.dll"]
+    assert "install.ps1" in readme and "Visual C++ Redistributable" in readme
+    calls = _calls(env)
+    assert [c for c in calls if c[:2] == ["cargo", "build"]] == [[
+        "cargo", "build", "--manifest-path", str(ROOT / "rust/lf-desktop/Cargo.toml"), "--locked",
+        "--release", "--features", "runtime", "--bin", "lf-desktop"]]
+    # The extracted copy was inspected and smoke-tested, not the build tree.
+    inspected = [Path(c[-1]) for c in calls if c[0] == "llvm-readobj"]
+    assert {p.name for p in inspected} == set(files) - {"README.txt"}
+    assert all("localflow-preview-verify." in str(p) for p in inspected[len(files) - 1:])
+
+
+@LINUX_ONLY
+def test_windows_builder_links_the_crt_statically(windows, tmp_path):
+    _, env = windows
+    env["RUSTFLAGS"] = "-D warnings"
+    bin_dir = tmp_path / "rustflags-bin"
+    bin_dir.mkdir()
+    real_cargo = shutil.which("cargo", path=env["PATH"])
+    (bin_dir / "cargo").write_text(f'#!/bin/bash\nprintf "%s\\n" "$RUSTFLAGS" >> "{tmp_path}/rustflags"\n'
+                                   f'exec "{real_cargo}" "$@"\n')
+    (bin_dir / "cargo").chmod(0o755)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    result = _build(env, tmp_path / "out")
+    assert result.returncode == 0, result.stderr
+    assert set((tmp_path / "rustflags").read_text().splitlines()) == {"-D warnings -C target-feature=+crt-static"}
+
+
+@LINUX_ONLY
+@pytest.mark.parametrize("fault,message", [
+    ("MISSING_ORT", "onnxruntime.dll is missing"),
+    ("VC_RUNTIME", "lf-desktop.exe needs vcruntime140.dll (the Visual C++ runtime)"),
+    ("BAD_IMPORT", "lf-desktop.exe needs libomp140.x86_64.dll, which is neither bundled nor a Windows system DLL"),
+    ("WRONG_ARCH", "lf-desktop.exe is not an x86-64 PE image"),
+])
+def test_windows_builder_fails_closed_and_keeps_the_previous_output(windows, tmp_path, fault, message):
+    _, env = windows
+    out = tmp_path / "out"
+    out.mkdir()
+    previous = out / _asset("windows-x86_64")
+    previous.write_text("previous release")
+    result = _build(env, out, fault)
+    assert result.returncode != 0
+    assert message in result.stderr, result.stderr
+    assert previous.read_text() == "previous release"
+    assert sorted(p.name for p in out.iterdir()) == [previous.name], "no staging left behind"
+
+
+@LINUX_ONLY
+def test_windows_verifier_rejects_extra_files_and_other_hosts(windows, tmp_path):
+    _, env = windows
+    out = tmp_path / "out"
+    assert _build(env, out).returncode == 0
+    name = _asset("windows-x86_64")
+    with zipfile.ZipFile(out / name) as z:
+        entries = {n: z.read(n) for n in z.namelist() if not n.endswith("/")}
+    tampered = tmp_path / "tampered" / name
+    tampered.parent.mkdir()
+    with zipfile.ZipFile(tampered, "w") as z:
+        for n, data in entries.items():
+            z.writestr(n, data)
+        z.writestr("LocalFlow Preview/plugins/extra.dll", "x")
+    result = _run("verify_gpui_package.sh", env, tampered)
+    assert result.returncode != 0 and "unexpected files in the Windows package" in result.stderr, result.stderr
+    linux = dict(env, FAKE_OS="Linux")
+    result = _run("verify_gpui_package.sh", linux, out / name)
+    assert result.returncode != 0 and "verify it on that platform (this is linux-x86_64)" in result.stderr
+
+
 @LINUX_ONLY
 def test_linux_archive_verifies_from_a_temporary_directory_with_spaces(fake, tmp_path):
     # The verifier extracts into $TMPDIR; bundled libraries then resolve to
@@ -369,7 +519,9 @@ def test_builder_refuses_cross_targets_relative_output_and_other_platforms(fake,
     result = _run("build_gpui_package.sh", env, "relative/out")
     assert result.returncode == 2
     result = _run("build_gpui_package.sh", dict(env, FAKE_ARCH="aarch64"), tmp_path / "out")
-    assert result.returncode == 1 and "Linux x86_64 and macOS" in result.stderr
+    assert result.returncode == 1 and "Linux x86_64, macOS arm64/x86_64 and Windows x86_64 only" in result.stderr
+    result = _run("build_gpui_package.sh", dict(env, FAKE_OS="MINGW64_NT-10.0-26100", FAKE_ARCH="aarch64"), tmp_path / "out")
+    assert result.returncode == 1 and "Windows x86_64 only" in result.stderr
     assert not [c for c in _calls(env) if c[0] == "cargo"]
 
 
@@ -589,7 +741,8 @@ def test_builder_leaves_the_legacy_app_builder_and_identity_alone():
     assert f'PREVIEW_ID="{PREVIEW_ID}"' in preview
     assert "LocalFlowRuntime" not in preview.replace("never carries LocalFlowRuntime", "")
     assert "macos_launchagent" not in preview and "LaunchAgents" not in preview
-    assert "--engine" not in preview.replace("localflow-preview --engine", "")
+    # Only the READMEs mention --engine; no launcher, entry or default passes it.
+    assert "--engine" not in preview.replace("localflow-preview --engine", "").replace("lf-desktop.exe --engine", "")
 
 
 def test_desktop_build_script_sets_relative_runtime_search_paths():
@@ -1177,8 +1330,13 @@ def _artifacts(tmp_path: Path, version=VERSION) -> Path:
     for platform in PLATFORMS:
         folder = artifacts / f"gpui-preview-{platform}"
         folder.mkdir(parents=True)
-        root = "localflow-preview" if platform.startswith("linux") else "LocalFlow Preview.app"
-        archive = _write_tar(folder / _asset(platform, version), [(f"{root}/file-{platform}", platform.encode(), {})])
+        if platform.startswith("windows"):
+            archive = folder / _asset(platform, version)
+            with zipfile.ZipFile(archive, "w") as z:
+                z.writestr(f"LocalFlow Preview/file-{platform}", platform)
+        else:
+            root = "localflow-preview" if platform.startswith("linux") else "LocalFlow Preview.app"
+            archive = _write_tar(folder / _asset(platform, version), [(f"{root}/file-{platform}", platform.encode(), {})])
         _sidecar(archive)
     return artifacts
 
@@ -1334,7 +1492,16 @@ def test_package_workflow_builds_every_native_platform_without_cross_targets():
     assert "workflow_call:" in workflow and "fail-fast: false" in workflow
     pairs = re.findall(r"- runner: (\S+)\n\s+platform: (\S+)", workflow)
     assert pairs == [("ubuntu-22.04", "linux-x86_64"), ("macos-latest", "macos-arm64"),
-                     ("macos-15-intel", "macos-x86_64")]
+                     ("macos-15-intel", "macos-x86_64"), ("windows-latest", "windows-x86_64")]
+    # Windows: no preview installer (install.ps1 is untouched); the unzipped
+    # package is launched in sandbox mode and must open a window.
+    assert "install.ps1" in workflow and "install.ps1 is unchanged" in workflow
+    installer = workflow.split("- name: Installer smoke test in a temporary HOME (no launch)\n", 1)[1]
+    assert installer.startswith("        if: runner.os != 'Windows'\n")
+    launch = workflow.split("- name: Launch the packaged app (Windows)\n", 1)[1].split("\n      - ", 1)[0]
+    assert "if: runner.os == 'Windows'" in launch and "--sandbox" in launch and "--engine" not in launch
+    assert "MainWindowHandle" in launch and "Stop-Process" in launch
+    assert "name: windows-launch-screenshot" in workflow, "never matched by mac-installer's gpui-preview-* download"
     assert "CARGO_BUILD_TARGET" not in workflow and "--target" not in workflow
     assert "name: gpui-preview-${{ matrix.platform }}" in workflow
     assert "if-no-files-found: error" in workflow

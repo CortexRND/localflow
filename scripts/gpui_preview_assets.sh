@@ -3,7 +3,8 @@
 #   LocalFlow-Preview-<ver>-linux-x86_64.tar.gz
 #   LocalFlow-Preview-<ver>-macos-arm64.tar.gz
 #   LocalFlow-Preview-<ver>-macos-x86_64.tar.gz
-#   SHA256SUMS-gpui-preview   sha256sum format, covering exactly those three
+#   LocalFlow-Preview-<ver>-windows-x86_64.zip
+#   SHA256SUMS-gpui-preview   sha256sum format, covering exactly those four
 #
 # <artifacts-dir> is what actions/download-artifact writes for the
 # gpui-package.yml matrix: one gpui-preview-<platform>/ directory per native
@@ -18,7 +19,7 @@
 # Usage: scripts/gpui_preview_assets.sh <tag> <artifacts-dir> <out-dir>
 set -euo pipefail
 
-PLATFORMS=(linux-x86_64 macos-arm64 macos-x86_64)
+PLATFORMS=(linux-x86_64 macos-arm64 macos-x86_64 windows-x86_64)
 SUMS_NAME="SHA256SUMS-gpui-preview"
 
 die() {
@@ -65,7 +66,11 @@ mkdir -p "$out"
 names=()
 for platform in "${PLATFORMS[@]}"; do
     dir="$artifacts/gpui-preview-$platform"
-    name="LocalFlow-Preview-$version-$platform.tar.gz"
+    if [[ "$platform" == windows-* ]]; then
+        name="LocalFlow-Preview-$version-$platform.zip"
+    else
+        name="LocalFlow-Preview-$version-$platform.tar.gz"
+    fi
     [[ -d "$dir" && ! -L "$dir" ]] || die "$dir is not a directory"
     [[ "$(entries "$dir")" == "$(printf '%s\n' "$name" "$name.sha256" | LC_ALL=C sort)" ]] \
         || die "$dir must hold only $name and $name.sha256; found: $(entries "$dir" | tr '\n' ' ')"
@@ -80,8 +85,17 @@ for platform in "${PLATFORMS[@]}"; do
     [[ "$(printf '%s\n' "$listed" | tr '[:upper:]' '[:lower:]')" == "$(digest_of "$dir/$name")" ]] \
         || die "$name does not match its build checksum"
     # The archive holds the layout its platform name promises.
-    if [[ "$platform" == linux-* ]]; then root="localflow-preview"; else root="LocalFlow Preview.app"; fi
-    members="$(tar -tzf "$dir/$name")" || die "$name is not a gzip tar archive"
+    case "$platform" in
+        linux-*) root="localflow-preview" ;;
+        windows-*) root="LocalFlow Preview" ;;
+        *) root="LocalFlow Preview.app" ;;
+    esac
+    if [[ "$platform" == windows-* ]]; then
+        members="$(python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$dir/$name")" \
+            || die "$name is not a zip archive"
+    else
+        members="$(tar -tzf "$dir/$name")" || die "$name is not a gzip tar archive"
+    fi
     while IFS= read -r member; do
         member="${member%/}"
         [[ "$member" == "$root" || "$member" == "$root"/* ]] || die "$name is not a $platform package (member $member)"

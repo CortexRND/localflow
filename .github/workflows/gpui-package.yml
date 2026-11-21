@@ -3,15 +3,18 @@ name: GPUI preview package
 # Builds the ready-to-run LocalFlow Preview package (release lf-desktop with
 # the runtime feature) natively on each supported platform, verifies the
 # extracted archive and smoke-tests the dedicated preview installer in a
-# temporary HOME. No GUI, audio, keyboard hook, keyring, model download or
-# provider call is ever started. Additive only: it does not change the
-# legacy installers, LocalFlow.app, its login agent or any launcher default.
+# temporary HOME (Linux/macOS). The Windows leg has no preview installer
+# (install.ps1 is unchanged): it opens the unzipped app once in --sandbox mode
+# to prove the window comes up, and stops it. Otherwise no GUI, audio,
+# keyboard hook, keyring, model download or provider call is ever started.
+# Additive only: it does not change the legacy installers, LocalFlow.app, its
+# login agent or any launcher default.
 #
 # mac-installer.yml calls this only on release tags and manual dispatch
 # (workflow_call) and publishes the archives from a dependent job; this
 # workflow itself never publishes. Standalone it runs on pull requests and
 # pushes to main that touch the package inputs, and on manual dispatch, so a
-# branch push with an open PR builds the three native legs once, not twice.
+# branch push with an open PR builds the four native legs once, not twice.
 on:
   workflow_call:
   workflow_dispatch:
@@ -89,6 +92,8 @@ jobs:
             platform: macos-arm64
           - runner: macos-15-intel
             platform: macos-x86_64
+          - runner: windows-latest
+            platform: windows-x86_64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
@@ -110,6 +115,12 @@ jobs:
         with:
           workspaces: rust/lf-desktop
           key: gpui-package-${{ matrix.platform }}
+      # As in rust.yml: a cached whisper-rs-sys CMake cache can name an older
+      # runner image's MSVC path; rebuild only that crate on Windows.
+      - name: Drop cached whisper-rs-sys CMake state (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo clean --manifest-path rust/lf-desktop/Cargo.toml --release -p whisper-rs-sys
       # The builder restores pruned Sherpa/ORT outputs itself, verifies the
       # extracted archive (closure, relative search paths, ABI floor or
       # signatures) and only then writes it to the output directory.
@@ -117,12 +128,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/build_gpui_package.sh "$RUNNER_TEMP/gpui-preview"
+          tmp="$RUNNER_TEMP"
+          if [[ "$RUNNER_OS" == Windows ]]; then tmp="$(cygpath -u "$tmp")"; fi
+          bash scripts/build_gpui_package.sh "$tmp/gpui-preview"
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' rust/lf-desktop/Cargo.toml | head -n 1)"
-          asset="LocalFlow-Preview-$version-${{ matrix.platform }}.tar.gz"
-          test -f "$RUNNER_TEMP/gpui-preview/$asset"
-          test -f "$RUNNER_TEMP/gpui-preview/$asset.sha256"
-          [[ "$(ls -A "$RUNNER_TEMP/gpui-preview" | sort)" == "$(printf '%s\n' "$asset" "$asset.sha256" | sort)" ]]
+          if [[ "$RUNNER_OS" == Windows ]]; then ext=zip; else ext=tar.gz; fi
+          asset="LocalFlow-Preview-$version-${{ matrix.platform }}.$ext"
+          test -f "$tmp/gpui-preview/$asset"
+          test -f "$tmp/gpui-preview/$asset.sha256"
+          [[ "$(ls -A "$tmp/gpui-preview" | sort)" == "$(printf '%s\n' "$asset" "$asset.sha256" | sort)" ]]
           echo "ASSET=$asset" >> "$GITHUB_ENV"
       # Re-verify a fresh copy outside the repository (signatures after
       # extraction/relocation on macOS; no build-tree library on Linux).
@@ -130,10 +144,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          copy="$(mktemp -d "$RUNNER_TEMP/verify.XXXXXX")"
-          cp "$RUNNER_TEMP/gpui-preview/$ASSET" "$copy/"
+          tmp="$RUNNER_TEMP"
+          if [[ "$RUNNER_OS" == Windows ]]; then tmp="$(cygpath -u "$tmp")"; fi
+          copy="$(mktemp -d "$tmp/verify.XXXXXX")"
+          cp "$tmp/gpui-preview/$ASSET" "$copy/"
           (cd "$copy" && bash "$GITHUB_WORKSPACE/scripts/verify_gpui_package.sh" "$copy/$ASSET")
       - name: Installer smoke test in a temporary HOME (no launch)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -169,6 +186,54 @@ jobs:
           test "$(cat "$preview_home/.local/share/applications/localflow.desktop")" = legacy
           test "$(cat "$preview_home/.local/bin/lf")" = legacy
           test ! -e "$preview_home/.localflow"
+      # "Launches" on Windows: unzip the uploaded archive with the stock
+      # Expand-Archive, start lf-desktop.exe --sandbox (example data only, a
+      # throwaway data dir) and require a top-level window that is still
+      # alive a few seconds later; then stop it.
+      - name: Launch the packaged app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'launch'
+          Expand-Archive -Path (Join-Path $env:RUNNER_TEMP "gpui-preview\$env:ASSET") -DestinationPath $root
+          $exe = Join-Path $root 'LocalFlow Preview\lf-desktop.exe'
+          $data = Join-Path $env:RUNNER_TEMP 'launch-data'
+          $out = Join-Path $env:RUNNER_TEMP 'launch-stdout.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'launch-stderr.txt'
+          $p = Start-Process -FilePath $exe -ArgumentList @('--sandbox', '--data-dir', "`"$data`"") `
+            -WorkingDirectory $root -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+          $deadline = (Get-Date).AddSeconds(120)
+          while (-not $p.HasExited -and $p.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            $p.Refresh()
+          }
+          $window = $p.MainWindowHandle -ne [IntPtr]::Zero
+          if ($window) { Start-Sleep -Seconds 5; $p.Refresh() }
+          $alive = -not $p.HasExited
+          if ($window -and $alive) {
+            Write-Host "lf-desktop window: '$($p.MainWindowTitle)' (pid $($p.Id))"
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+              $bmp.Save((Join-Path $env:RUNNER_TEMP 'windows-launch.png'))
+            } catch { Write-Host "screenshot skipped: $_" }
+            Stop-Process -Id $p.Id -Force
+          }
+          Write-Host '--- stdout'; Get-Content $out -ErrorAction SilentlyContinue
+          Write-Host '--- stderr'; Get-Content $err -ErrorAction SilentlyContinue
+          if (-not $window) { throw "lf-desktop.exe opened no window (exited: $($p.HasExited), code: $($p.ExitCode))" }
+          if (-not $alive) { throw "lf-desktop.exe exited within 5 s of opening its window (code: $($p.ExitCode))" }
+      - name: Upload the Windows launch screenshot
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-launch-screenshot
+          path: ${{ runner.temp }}/windows-launch.png
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: gpui-preview-${{ matrix.platform }}
