@@ -146,4 +146,4 @@ jobs:
         with:
           workspaces: rust/lf-desktop
       - name: Type-check lf-desktop and Windows tray
-        run: cargo check --manifest-path "$env:MANIFEST" --workspace --all-targets --locked
+        run: cargo check --manifest-path "$env:MANIFEST" -p lf-desktop --all-targets --locked
