@@ -34,14 +34,37 @@ OPTIONS:
     --page <PAGE>      Open a page
     --setup            Open the setup wizard (or hand it to the open window)
     --engine           Allow this window to run dictation itself
+
+EXIT STATUS (launch-status: 1):
+    0   The window closed, or the request was handed to the open window
+    1   No window could be opened (display, lock or data error)
+"""
+# A Scope 3 preview package: the same name, version and every flag, but it
+# exits 0 even when no window opens, so its exit 0 can't mean a hand-off.
+SCOPE3_HELP = """\
+lf-desktop — LocalFlow native desktop app (GPUI preview)
+
+OPTIONS:
+    --page <PAGE>      Open a page
+    --setup            Open the setup wizard (or hand it to the open window)
+    --engine           Allow this window to run dictation itself
+    --sandbox          Use an isolated example data directory
+    --data-dir <DIR>   Sandbox directory
+    --sandbox-reset    Re-seed the sandbox directory
+    -h, --help         Print this help
+    -V, --version      Print the version
 """
 # Near misses: a different program whose name starts with lf-desktop, and a
 # build whose flags only start with the right tokens.
-OTHER_IDENTITY_HELP = "lf-desktop-other\n    --page <PAGE> x\n    --setup x\n"
+# Each carries the launch-status marker, so only the near miss is wrong.
+_MARK = "EXIT STATUS (launch-status: 1):\n"
+OTHER_IDENTITY_HELP = "lf-desktop-other\n    --page <PAGE> x\n    --setup x\n" + _MARK
 NEAR_FLAGS_HELPS = (
-    "lf-desktop\n    --page <PAGE> x\n    --setup-extra x\n",
-    "lf-desktop\n    --page <PAGE>S x\n    --setup x\n",
-    "lf-desktop_x\n    --page <PAGE> x\n    --setup x\n",
+    "lf-desktop\n    --page <PAGE> x\n    --setup-extra x\n" + _MARK,
+    "lf-desktop\n    --page <PAGE>S x\n    --setup x\n" + _MARK,
+    "lf-desktop_x\n    --page <PAGE> x\n    --setup x\n" + _MARK,
+    "lf-desktop\n    --page <PAGE> x\n    --setup x\nEXIT STATUS (launch-status: 0):\n",
+    "lf-desktop\n    --page <PAGE> x\n    --setup x\nEXIT STATUS (launch-status: 1): later\n",
 )
 # An early unpackaged build: same identity and version, but no Setup.
 OLD_HELP = GOOD_HELP.replace(
@@ -362,12 +385,13 @@ def test_non_executable_override_is_refused(tmp_path, home):
 @posix_only
 def test_probe_accepts_only_lf_desktop_with_page_and_setup(fake):
     assert desktop_launch.probe(fake(help_text=GOOD_HELP).path)
-    assert desktop_launch.probe(fake(name="tabs", help_text="lf-desktop\n\t--page <PAGE>\n\t--setup\n").path)
+    assert desktop_launch.probe(fake(name="tabs", help_text="lf-desktop\n\t--page <PAGE>\n\t--setup\n" + _MARK).path)
+    assert desktop_launch.LAUNCH_STATUS_MARKER + "\n" == _MARK
     desktop_names = []
     for kwargs in ({"help_text": OLD_HELP}, {"help_text": "usage: something-else --page <PAGE> --setup\n"},
                    {"help_text": ""}, {"raw_help": b"\x00\xff\xfe" * 100},
                    {"help_code": 1}, {"help_code": 2, "help_text": "lf-desktop: unknown argument"},
-                   {"help_text": OTHER_IDENTITY_HELP},
+                   {"help_text": OTHER_IDENTITY_HELP}, {"help_text": SCOPE3_HELP},
                    *({"help_text": text} for text in NEAR_FLAGS_HELPS)):
         desktop = fake(name=f"lf-desktop-{len(desktop_names)}", **kwargs)
         desktop_names.append(desktop.path)
@@ -577,6 +601,35 @@ def test_stale_or_wrong_binary_falls_back_once(kwargs, fake, legacy):
     assert legacy.calls == [("setup", None)]
     assert result.output.strip() == desktop_launch.NOTICE_PROBE
     assert desktop.argvs() == [["--help"]]
+
+
+@posix_only
+@pytest.mark.parametrize(("command", "expected"), [
+    (["hub", "--gpui"], _hub_legacy()),
+    (["hub", "--gpui", "--page", "history"], _hub_legacy("History")),
+    (["phrases", "--gpui"], ("phrases", None)),
+    (["setup", "--gpui"], ("setup", None)),
+])
+def test_scope3_preview_is_never_launched_because_its_exit_0_proves_nothing(
+        command, expected, fake, legacy):
+    # Every flag lf sends is there, but a Scope 3 build exits 0 even when its
+    # window can't open: launching it could look like a hand-off and show nothing.
+    desktop = fake(help_text=SCOPE3_HELP, launch="exit0")
+    result = _invoke(command, env=_gpui_env(desktop))
+    assert result.exit_code == 0
+    assert desktop.argvs() == [["--help"]]  # probed, never started as a window
+    assert legacy.calls == [expected]  # legacy exactly once
+    assert result.output.strip() == desktop_launch.NOTICE_PROBE
+    assert "update LocalFlow Preview" in result.output
+
+
+@posix_only
+def test_window_open_failure_status_falls_back_once(fake, legacy):
+    # A current build that couldn't open a window now exits 1 (not 0).
+    desktop = fake(launch="exit1")
+    result = _invoke(["hub", "--gpui"], env=_gpui_env(desktop))
+    assert legacy.calls == [_hub_legacy()]
+    assert result.output.strip() == desktop_launch.NOTICE_EARLY_EXIT.format(code=1)
 
 
 @posix_only

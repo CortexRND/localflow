@@ -4,7 +4,9 @@
 //! (`localflow/desktop_launch.py`): an absolute `LOCALFLOW_DESKTOP_BIN`, else
 //! only the package `scripts/install_gpui_preview.sh` owns (checked by its
 //! `MANIFEST.json`). Never `PATH` or a build tree. A candidate must answer a
-//! bounded `--help` probe as an `lf-desktop` with `--page` and `--setup`. The
+//! bounded `--help` probe as an `lf-desktop` with `--page`, `--setup` and the
+//! [`LAUNCH_STATUS_MARKER`] line (exit 0 only after a window opened or a
+//! hand-off; Scope 3 preview builds returned 0 when no window opened). The
 //! argv is closed: `--page <canonical>` or `--setup`, never `--engine` or
 //! `--sandbox`. Portable policy only; the Linux `exec` lives in `lf-hub`.
 
@@ -24,6 +26,12 @@ pub const LINUX_ROOT: [&str; 3] = [".local", "share", "localflow-preview"];
 pub const LINUX_MANIFEST_NAME: &str = "localflow-preview";
 /// How long the `--help` probe may run before it (and only it) is killed.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The `lf-desktop --help` line that promises the launch exit status: 0 only
+/// when a window opened (then closed) or the request was handed to the open
+/// window; 1 when no window could open. Older preview builds lack it and are
+/// treated as too old. Must match `lf-desktop`'s `USAGE` and the Python probe.
+pub const LAUNCH_STATUS_MARKER: &str = "EXIT STATUS (launch-status: 1):";
 
 const MAX_METADATA_BYTES: u64 = 1 << 20;
 const MAX_HELP_BYTES: u64 = 64 * 1024;
@@ -52,7 +60,7 @@ impl fmt::Display for Problem {
                 "LOCALFLOW_DESKTOP_BIN must be an absolute path to an executable lf-desktop"
             }
             Problem::NotDesktop => {
-                "that lf-desktop is too old or isn't LocalFlow Preview (no --page/--setup)"
+                "that lf-desktop is too old (update LocalFlow Preview) or isn't LocalFlow Preview"
             }
             Problem::IsSelf => "LOCALFLOW_DESKTOP_BIN points at lf-hub itself",
         })
@@ -126,7 +134,8 @@ pub fn find(override_bin: Option<&OsStr>, home: Option<&Path>) -> Result<PathBuf
     }
 }
 
-/// `--help` output of an `lf-desktop` that has the `--page` / `--setup` interface.
+/// `--help` output of an `lf-desktop` with the `--page` / `--setup` interface
+/// and the launch-status promise.
 pub fn help_has_interface(text: &str) -> bool {
     let identity = text
         .trim_start()
@@ -141,7 +150,8 @@ pub fn help_has_interface(text: &str) -> bool {
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
         })
     };
-    identity && has_line("--page <PAGE>") && has_line("--setup")
+    let launch_status = text.lines().any(|line| line.trim() == LAUNCH_STATUS_MARKER);
+    identity && has_line("--page <PAGE>") && has_line("--setup") && launch_status
 }
 
 /// Run `exe --help` with no stdin, bounded output and a deadline; a hung probe
@@ -228,7 +238,14 @@ mod tests {
     use super::*;
 
     const GOOD_HELP: &str = "lf-desktop — LocalFlow native desktop app (GPUI preview)\n\n\
-        OPTIONS:\n    --page <PAGE>      Open a page\n    --setup            Open the setup wizard\n";
+        OPTIONS:\n    --page <PAGE>      Open a page\n    --setup            Open the setup wizard\n\n\
+        EXIT STATUS (launch-status: 1):\n    0   closed or handed off\n";
+    // A Scope 3 preview build: every flag, but no launch-status promise.
+    const SCOPE3_HELP: &str = "lf-desktop — LocalFlow native desktop app (GPUI preview)\n\n\
+        OPTIONS:\n    --page <PAGE>      Open a page\n    --setup            Open the setup wizard\n\
+        \x20   --engine           Run dictation\n    --sandbox          Sandbox\n\
+        \x20   --data-dir <DIR>   Sandbox directory\n    --sandbox-reset    Re-seed\n\
+        \x20   -h, --help         Help\n    -V, --version      Version\n";
 
     #[test]
     fn help_needs_identity_page_and_setup() {
@@ -246,18 +263,24 @@ mod tests {
             &GOOD_HELP.replace("lf-desktop —", "lf-hub —")
         ));
         assert!(!help_has_interface(""));
-        // Same near misses as the Python launcher's tests.
+        assert!(!help_has_interface(SCOPE3_HELP));
+        assert!(!help_has_interface(
+            &GOOD_HELP.replace("launch-status: 1", "launch-status: 0")
+        ));
+        assert!(!help_has_interface(&GOOD_HELP.replace("):", "): extra")));
+        // Same near misses as the Python launcher's tests (each has the marker).
         for near in [
             "lf-desktop-other\n    --page <PAGE> x\n    --setup x\n",
             "lf-desktop\n    --page <PAGE> x\n    --setup-extra x\n",
             "lf-desktop\n    --page <PAGE>S x\n    --setup x\n",
             "lf-desktop_x\n    --page <PAGE> x\n    --setup x\n",
         ] {
-            assert!(!help_has_interface(near), "{near}");
+            let near = format!("{near}{LAUNCH_STATUS_MARKER}\n");
+            assert!(!help_has_interface(&near), "{near}");
         }
-        assert!(help_has_interface(
-            "lf-desktop\n\t--page <PAGE>\n\t--setup\n"
-        ));
+        assert!(help_has_interface(&format!(
+            "lf-desktop\n\t--page <PAGE>\n\t--setup\n{LAUNCH_STATUS_MARKER}\n"
+        )));
         assert!(!help_has_interface("--setup --page <PAGE>"));
     }
 
@@ -390,6 +413,12 @@ mod tests {
                 "printf 'lf-desktop\\n    --page <PAGE>  x\\n'",
             );
             assert!(!probe(&old, PROBE_TIMEOUT));
+            let scope3 = script(
+                dir.path(),
+                "scope3",
+                &format!("printf '%s' '{SCOPE3_HELP}'"),
+            );
+            assert!(!probe(&scope3, PROBE_TIMEOUT));
             let failing = script(
                 dir.path(),
                 "failing",

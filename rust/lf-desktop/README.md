@@ -237,9 +237,17 @@ lf hub --legacy               # always the legacy window; nothing is probed
   Prebuilt packages exist for Linux x86_64 and macOS arm64/x86_64 only (no ARM
   Linux); Windows and other platforms always use legacy.
 - **Probe:** the candidate must answer `--help` within 5 s as `lf-desktop` with
-  `--page <PAGE>` and `--setup` (a version number alone isn't trusted: early
-  unpackaged 0.2.2 builds have no Setup). A probe that hangs is killed; nothing
-  else ever is.
+  `--page <PAGE>`, `--setup` and the line `EXIT STATUS (launch-status: 1):`.
+  That line promises the exit status the launchers rely on: 0 only when a window
+  opened (and later closed) or the request was handed to the open window, 1 when
+  no window could open, 2 for bad arguments. A version number alone isn't
+  trusted: early unpackaged 0.2.2 builds have no Setup, and Scope 3 preview
+  packages (also 0.2.2, with `--page` and `--setup`) exit 0 even when no window
+  opens. **Preview packages installed before this change must be updated**
+  (re-run `scripts/install_gpui_preview.sh` with a package built from this
+  source) to be opened from `lf` or Linux `lf-hub`; until then `lf … --gpui`
+  falls back to the legacy window and `lf-hub` prints its install hint. They can
+  still be started directly. A probe that hangs is killed; nothing else ever is.
 - **Launch:** a fixed argv (no shell; never `--engine`, `--sandbox` or a speech
   helper), stdin closed, stdout discarded, stderr inherited, in its own session.
   Environment (`HOME`, `LOCALFLOW_CONFIG`, …) is inherited, so it opens the same

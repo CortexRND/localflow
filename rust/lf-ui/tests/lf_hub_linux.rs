@@ -8,13 +8,21 @@ use std::process::{Command, Output};
 
 const LF_HUB: &str = env!("CARGO_BIN_EXE_lf-hub");
 
-fn fake_desktop(dir: &Path, record: &Path, help: bool) -> PathBuf {
+// `printf` formats (`\\n` becomes a newline in the fake's shell script).
+const CURRENT_HELP: &str =
+    "lf-desktop — LocalFlow native desktop app\\n    --page <PAGE>  x\\n    \
+    --setup  y\\n\\nEXIT STATUS (launch-status: 1):\\n    0   closed or handed off\\n";
+const OLD_HELP: &str = "lf-desktop — old build\\n    --page <PAGE>  x\\n";
+// A Scope 3 preview build: every flag lf-hub sends and more, but no
+// launch-status promise (it exited 0 even when no window could open).
+const SCOPE3_HELP: &str = "lf-desktop — LocalFlow native desktop app (GPUI preview)\\n\\n\
+    OPTIONS:\\n    --page <PAGE>      Open a page\\n    --setup            Setup wizard\\n    \
+    --engine           Dictation\\n    --sandbox          Sandbox\\n    \
+    --data-dir <DIR>   Sandbox directory\\n    --sandbox-reset    Re-seed\\n    \
+    -h, --help         Help\\n    -V, --version      Version\\n";
+
+fn fake_desktop(dir: &Path, record: &Path, help_text: &str) -> PathBuf {
     let path = dir.join("lf-desktop");
-    let help_text = if help {
-        "lf-desktop — LocalFlow native desktop app\\n    --page <PAGE>  x\\n    --setup  y\\n"
-    } else {
-        "lf-desktop — old build\\n    --page <PAGE>  x\\n"
-    };
     let script = format!(
         "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '{help_text}'; exit 0; fi\n\
          printf '%s\\n' \"argv:$#:$*\" \"home:$HOME\" \"config:$LOCALFLOW_CONFIG\" \
@@ -49,7 +57,7 @@ fn routes_parsed_options_to_the_override_and_keeps_the_environment() {
     let dir = tmp.path().join("dir with space $(touch pwned)");
     std::fs::create_dir(&dir).unwrap();
     let record = tmp.path().join("record");
-    let exe = fake_desktop(&dir, &record, true);
+    let exe = fake_desktop(&dir, &record, CURRENT_HELP);
     for (args, expected) in [
         (&[][..], "argv:0:"),
         (&["--page", "hot phrases"][..], "argv:2:--page Hot Phrases"),
@@ -98,7 +106,7 @@ fn uses_the_owned_package_without_an_override() {
     )
     .unwrap();
     let record = home.path().join("record");
-    fake_desktop(&root.join("bin"), &record, true);
+    fake_desktop(&root.join("bin"), &record, CURRENT_HELP);
     // Malformed manifest (trailing comma): not trusted.
     let out = lf_hub(home.path(), None, &["--page=history"], &[]);
     assert_eq!(out.status.code(), Some(1));
@@ -145,11 +153,24 @@ fn failures_exit_1_with_an_install_hint_and_never_loop() {
     }
     let old_dir = tmp.path().join("old");
     std::fs::create_dir(&old_dir).unwrap();
-    let old = fake_desktop(&old_dir, &record, false);
-    let out = lf_hub(tmp.path(), Some(&old), &["--setup"], &[]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("too old"));
-    assert!(!record.exists(), "a stale binary must not be launched");
+    for (name, help) in [("old", OLD_HELP), ("scope3", SCOPE3_HELP)] {
+        let dir = old_dir.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        let stale = fake_desktop(&dir, &record, help);
+        for args in [&["--setup"][..], &[][..], &["--page", "history"][..]] {
+            let out = lf_hub(tmp.path(), Some(&stale), args, &[]);
+            assert_eq!(out.status.code(), Some(1), "{name}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains("too old") && stderr.contains("install_gpui_preview.sh"),
+                "{stderr}"
+            );
+            assert!(
+                !record.exists(),
+                "{name}: a stale binary must not be launched"
+            );
+        }
+    }
     // An override pointing back at lf-hub (here through a symlink) is refused.
     let link = tmp.path().join("lf-desktop-link");
     symlink(LF_HUB, &link).unwrap();

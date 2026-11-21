@@ -40,6 +40,13 @@ LINUX_MANIFEST_NAME = "localflow-preview"
 MAC_APP = ("Applications", "LocalFlow Preview.app")
 MAC_BUNDLE_ID = "com.cortexrnd.localflow.desktop-preview"
 
+# The `lf-desktop --help` line promising its exit status: 0 only when a window
+# opened (then closed) or the request was handed to the open window, 1 when no
+# window could open. Scope 3 preview builds (also 0.2.2, with --page/--setup)
+# lack it and exit 0 even when no window opens, so they're treated as too old.
+# Same marker as lf_ui::desktop_launch::LAUNCH_STATUS_MARKER and lf-desktop's USAGE.
+LAUNCH_STATUS_MARKER = "EXIT STATUS (launch-status: 1):"
+
 PROBE_TIMEOUT = 5.0  # seconds; only this `--help` probe is ever killed
 STARTUP_WAIT = 1.5  # seconds a launched window is watched for an early exit
 _MAX_METADATA_BYTES = 1 << 20
@@ -60,8 +67,8 @@ NOTICE_BAD_OVERRIDE = (
     f"{_PREFIX}{BIN_ENV} must be an absolute path to an executable lf-desktop{_LEGACY}"
 )
 NOTICE_PROBE = (
-    f"{_PREFIX}that lf-desktop is too old or isn't LocalFlow Preview "
-    f"(no --page/--setup){_LEGACY}"
+    f"{_PREFIX}that lf-desktop is too old (update LocalFlow Preview) or isn't "
+    f"LocalFlow Preview{_LEGACY}"
 )
 NOTICE_SPAWN = f"{_PREFIX}couldn't start LocalFlow Preview{_LEGACY}"
 NOTICE_EARLY_EXIT = f"{_PREFIX}LocalFlow Preview exited during startup (code {{code}}){_LEGACY}"
@@ -211,14 +218,16 @@ def find_desktop(
 _HELP_IDENTITY = re.compile(r"\A\s*lf-desktop(?![\w-])")
 _HELP_PAGE = re.compile(r"^[ \t]*--page <PAGE>(?:[ \t]|$)", re.MULTILINE)
 _HELP_SETUP = re.compile(r"^[ \t]*--setup(?:[ \t]|$)", re.MULTILINE)
+_HELP_LAUNCH_STATUS = re.compile(rf"^[ \t]*{re.escape(LAUNCH_STATUS_MARKER)}[ \t]*$", re.MULTILINE)
 
 
 def probe(exe: Path, timeout: float | None = None) -> bool:
-    """True when `exe --help` is an lf-desktop with the `--page`/`--setup` interface.
+    """True when `exe --help` is an lf-desktop with `--page`/`--setup` and the
+    launch-status promise.
 
     A version number alone isn't enough: early unpackaged 0.2.2 builds have no
-    Setup. Output goes to a temporary file (no pipe to fill); only this probe is
-    killed when it hangs.
+    Setup, and Scope 3 packages exit 0 when no window opens. Output goes to a
+    temporary file (no pipe to fill); only this probe is killed when it hangs.
     """
     try:
         with tempfile.TemporaryFile() as out:
@@ -244,6 +253,7 @@ def probe(exe: Path, timeout: float | None = None) -> bool:
         and bool(_HELP_IDENTITY.match(text))
         and bool(_HELP_PAGE.search(text))
         and bool(_HELP_SETUP.search(text))
+        and bool(_HELP_LAUNCH_STATUS.search(text))
     )
 
 
