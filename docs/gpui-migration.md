@@ -7,8 +7,10 @@ default. Build and run commands are in
 [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md).
 
 **Current state: preview, not the default.** `lf hub`, `lf phrases`, `lf setup`,
-`lf-hub` (the macOS AppKit Hub), the Python runtime and all installers are unchanged.
-Nothing launches `lf-desktop` automatically.
+`lf-hub` (the macOS AppKit Hub), the Python runtime and all existing installers are
+unchanged. PR 3 adds a separate, opt-in preview package and installer
+(`scripts/install_gpui_preview.sh`). Existing launchers never select `lf-desktop`;
+the preview installer opens it after an explicit install unless `--no-launch` is set.
 
 ## PR boundaries
 
@@ -18,8 +20,8 @@ Each PR leaves every existing entry point working.
 | PR | Scope | Status |
 |---|---|---|
 | **1. Parallel GPUI front end** | Standalone crate `rust/lf-desktop` (pinned `gpui = 0.2.2`, own `Cargo.lock`, outside the `rust/` workspace). One token and component layer. Library and config workflows connected to the real stores. Ask, Meetings and Prompts over the existing local HTTP service. Isolated persistent `--sandbox`. Controller, store and editing tests. Additive `gpui.yml` CI (Linux full, macOS type-check). `scripts/run_gpui.sh` | Done |
-| **2. Runtime and global-input parity** (this one) | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
-| 3. Packaging | Installers build and ship a release `lf-desktop`. Per-distribution system libraries. macOS bundle and signing | Not started |
+| **2. Runtime and global-input parity** | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
+| **3. Packaging** (this one) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Implemented; Linux package built and smoke-installed on the VM, fixture tests for builder/installer/publisher. macOS relocation and signing are verified only by the CI legs. No interactive GUI, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
 | 4. Opt-in, then default-launch cutover | An opt-in flag first. Then `lf hub` / `lf phrases` / `lf setup` prefer `lf-desktop`, with a fallback. `lf-hub` on Linux points to it | Not started. Needs the gates below and the owner's agreement |
 | 5. Legacy retirement | Remove the launch paths that are no longer used and the controller code duplicated from `lf_ui::mac` (done on macOS). Bundle Figtree. Screen-reader support once GPUI has an accessibility tree | Not started |
 
@@ -100,7 +102,10 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    over the page instead of opening two windows.
 5. **Packaging.** The installers ship a release `lf-desktop` and its system-library
    requirements are documented per distribution. The `rust/` workspace CI matrix
-   isn't weakened.
+   isn't weakened. PR 3 ships it as a separate preview package and installer;
+   before PR 4 the package still needs interactive install/upgrade/uninstall
+   and permission checks on each platform, and the default installers don't
+   ship it yet.
 6. **Honest runtime status.** Home and the sidebar report listening, input device
    and warnings from a runtime signal (PR 2: status-file protocol 2 from the Rust
    runtime). HTTP reachability alone is never shown as dictation readiness. Before

@@ -11,7 +11,9 @@ runtime/setup parity work (setup wizard, model storage, key import, Test
 connection, settings assistant, runtime status, single-instance routing and an
 opt-in in-window engine). It isn't the default launcher and it doesn't replace
 `lf hub`, `lf-hub` (the macOS AppKit Hub), `lf setup` or the Python runtime.
-Installers, packaging and launch behaviour are unchanged. By default this window
+Step 3 adds a separate, opt-in **LocalFlow Preview** package and installer
+([Preview package](#preview-package-step-3)); `install.sh`, the existing
+installers and every launcher default are unchanged. By default this window
 does not run dictation; a `--features runtime` build can, after `--engine` and an
 explicit **Start here**.
 
@@ -24,8 +26,8 @@ gate holds. The full feature matrix is in
 | Step | PR scope | Acceptance gate before the next step |
 |---|---|---|
 | **1. Parallel front end** (done) | Native app beside the existing ones. Home, History, Dictionary, Snippets, Style, Settings and Models & keys are connected to the real stores and config. Ask, Meetings and Prompts use the existing local HTTP service. Isolated `--sandbox`. Dedicated `gpui.yml` CI | Linux and macOS CI green (`gpui.yml`). Legacy runtime, launchers and installers unchanged. Existing CI changed only by the Windows `whisper-rs-sys` CMake-cache cleanup in `rust.yml`. UI testing for this PR was waived by the owner; native rendering on screen is unverified (later steps keep their validation gates) |
-| **2. Runtime and global-input parity** (this PR) | Setup wizard (checks, mic level, model choice/download, cleanup, shortcut, trial, apply). Model storage. Settings assistant. Key import and Test connection. Runtime status from the runtime's own status file (protocol 2) instead of HTTP reachability. Linux X11 global hotkeys in the Rust engine. Single instance and page routing. Opt-in engine behind `--features runtime` + `--engine` | Every capability the Python Hub and `lf-hub` offer works here, or the owner waives it in writing. Dictation readiness is shown only from a runtime signal. Interactive and macOS runtime QA are still open (UI probing on the development VM was waived by the owner) |
-| 3. Packaging | Installers build and ship a release `lf-desktop`. System-library requirements documented per distribution. macOS app bundle and signing | Clean install, upgrade and uninstall on each supported platform. Existing installs keep working |
+| **2. Runtime and global-input parity** (done) | Setup wizard (checks, mic level, model choice/download, cleanup, shortcut, trial, apply). Model storage. Settings assistant. Key import and Test connection. Runtime status from the runtime's own status file (protocol 2) instead of HTTP reachability. Linux X11 global hotkeys in the Rust engine. Single instance and page routing. Opt-in engine behind `--features runtime` + `--engine` | Every capability the Python Hub and `lf-hub` offer works here, or the owner waives it in writing. Dictation readiness is shown only from a runtime signal. Interactive and macOS runtime QA are still open (UI probing on the development VM was waived by the owner) |
+| **3. Packaging** (this PR) | A dedicated preview package and installer ship a release `lf-desktop` (runtime feature) for Linux x86_64 and macOS arm64/x86_64, built natively in `gpui-package.yml`. System-library requirements documented per distribution. Separate ad-hoc signed `LocalFlow Preview.app`. Published from release tags with `SHA256SUMS-gpui-preview` | Clean install, upgrade and uninstall on each supported platform. Existing installs keep working. Interactive (GUI, permissions, Gatekeeper) QA is still open |
 | 4. Opt-in, then default-launch cutover | First an opt-in (`lf hub --gpui` or a config flag). After a soak period, `lf hub`, `lf phrases` and `lf setup` prefer `lf-desktop`, with a fallback to the current UIs | The data-safety hash check passes. Accessibility is accepted (GPUI has no accessibility tree today). Light and dark screenshots of every page are reviewed. The owner agrees |
 | 5. Legacy retirement | Remove the Tk Hub and the AppKit Hub paths that are no longer launched, and controller code duplicated from `lf_ui::mac` | One release cycle on the new default without a rollback |
 
@@ -102,6 +104,162 @@ Ubuntu, Noto Sans, Liberation Sans, DejaVu Sans. Figtree isn't bundled yet. Mono
 text (key names, config keys) uses JetBrains Mono when it's installed. **Icons** are
 Lucide outline SVGs (ISC, `assets/icons/LICENSE-lucide.txt`), embedded in the
 binary.
+
+## Preview package (step 3)
+
+`scripts/build_gpui_package.sh` builds a ready-to-run package of a release
+`lf-desktop` **with** `--features runtime`, natively for the machine it runs on
+(Linux x86_64, macOS arm64 or macOS x86_64; `CARGO_BUILD_TARGET` is refused, as
+in `scripts/build_rust_app.sh`). It builds in `rust/lf-desktop/target` unless
+`CARGO_TARGET_DIR` is set, and writes to `dist/gpui-preview/` or the absolute
+directory you pass:
+
+| Asset | Contents |
+|---|---|
+| `LocalFlow-Preview-<ver>-linux-x86_64.tar.gz` | `localflow-preview/`: `bin/lf-desktop`, `lib/` (Sherpa-ONNX C and C++ API and ONNX Runtime `.so` files), `share/applications/localflow-preview.desktop`, `share/icons/localflow-preview.png`, `README.txt`, `MANIFEST.json` (version, measured ABI requirements, SHA-256 of every file) |
+| `LocalFlow-Preview-<ver>-macos-arm64.tar.gz`, `LocalFlow-Preview-<ver>-macos-x86_64.tar.gz` | `LocalFlow Preview.app` |
+
+Each archive comes with `<asset>.sha256`. Nothing in the output directory is
+replaced until `scripts/verify_gpui_package.sh` has extracted the archive into
+a fresh directory and checked the extracted copy:
+
+- **Every platform:** only regular files and directories under the one expected
+  root; `lf-desktop --version` matches `rust/lf-desktop/Cargo.toml`; `--help`
+  works, `--sandbox --engine` is refused, and the `--speech-helper` mode exits
+  cleanly on stdin EOF and rejects extra arguments. These run with an empty
+  environment and a throwaway `HOME`; nothing opens a window, a device, the
+  keyring or the network.
+- **Linux:** the binary's `RUNPATH` is exactly `$ORIGIN:$ORIGIN/../lib` (set at
+  link time by `build.rs`, no `patchelf`), each bundled library's is `$ORIGIN`,
+  every `DT_NEEDED` entry is bundled or on the system allowlist below, `ldd`
+  resolves the bundled libraries inside the package and the rest from system
+  library directories, the symbol-version floor below holds for the binary and
+  every bundled library, the files match `MANIFEST.json`, and the desktop entry
+  passes `desktop-file-validate` (from `desktop-file-utils`, needed to build).
+- **macOS:** the same relocation as `lf-hub`'s bundle: all non-system dylibs
+  in `Contents/Frameworks` with `@rpath` install names, build-machine search
+  paths removed (only `@executable_path/../Frameworks` and `@loader_path`), no
+  dependency outside `/usr/lib` and `/System/Library`, nested dylibs and then
+  the bundle ad-hoc signed with the designated requirement
+  `identifier "com.cortexrnd.localflow.desktop-preview"`, and
+  `codesign --verify --deep --strict` on the extracted copy.
+
+`.github/workflows/gpui-package.yml` runs this on `ubuntu-22.04`,
+`macos-latest` (arm64) and `macos-15-intel` (x86_64), re-verifies a copy
+outside the checkout, runs the installer below twice and then `--uninstall` in
+a temporary `HOME` (with `--no-launch`), and uploads `gpui-preview-<platform>`
+artifacts. It runs on pull requests and pushes to `main` that touch the
+package inputs, and on manual dispatch; `mac-installer.yml` calls it only for
+release tags and manual runs, so a pull request builds the native legs once.
+On release tags `mac-installer.yml` publishes them (see `docs/releasing.md`).
+
+### Installing the preview
+
+`scripts/install_gpui_preview.sh` needs no Rust toolchain. It uses Bash, `tar`,
+`sha256sum` or `shasum`, `curl` (downloads only) and, on macOS, the stock
+`plutil`, `codesign` and `open`.
+
+```bash
+scripts/install_gpui_preview.sh                    # this release's package, checked against SHA256SUMS-gpui-preview
+scripts/install_gpui_preview.sh --release v0.2.3   # another release
+scripts/install_gpui_preview.sh --archive LocalFlow-Preview-0.2.2-linux-x86_64.tar.gz \
+    --sha256 LocalFlow-Preview-0.2.2-linux-x86_64.tar.gz.sha256 --no-launch   # CI artifact or offline copy
+scripts/install_gpui_preview.sh --uninstall
+```
+
+The `v0.2.2` release predates the package, so downloads work from the first
+release tagged with this workflow; until then use a `gpui-preview-<platform>`
+artifact with `--archive` and `--sha256` (a `.sha256` file, a
+`SHA256SUMS-gpui-preview` file or the digest itself).
+
+| Platform | Installed (and the only paths the script owns) |
+|---|---|
+| macOS | `~/Applications/LocalFlow Preview.app` (bundle id `com.cortexrnd.localflow.desktop-preview`) |
+| Linux | `~/.local/share/localflow-preview/`, the `~/.local/bin/localflow-preview` symlink and `~/.local/share/applications/localflow-preview.desktop` |
+
+- It refuses an archive whose checksum is missing or wrong, whose name is not
+  for this platform, or that contains links, special files, paths outside its
+  root or files that don't match its `MANIFEST.json` (Linux) or bundle
+  identity and signature (macOS). It also checks that `lf-desktop --version`
+  runs from the unpacked copy, which proves the bundled and listed system
+  libraries load on this machine.
+- It refuses to replace or remove anything at its paths that it didn't install
+  (identified by the bundle id, `MANIFEST.json` and a marker line in the
+  desktop entry). It unpacks beside the destination, swaps it in by rename and
+  restores the previous install if any step fails.
+- It never touches `install.sh`'s files: `lf`, `localflow`, `LocalFlow.app`
+  (`com.cortexrnd.localflow.app`), its login agent, `localflow.desktop` or
+  `localflow-setup.desktop`. It adds no login item and downloads no model.
+- After installing it opens the app **with no arguments** (`--no-launch`
+  skips this; Linux only launches when a display is present). The window is a
+  front end; to let it dictate, start it with `--engine` and press **Start
+  here**: `open -a "LocalFlow Preview" --args --engine` or
+  `localflow-preview --engine`.
+- In real mode the preview uses the same config, `~/.localflow` data and
+  keyring as the main LocalFlow app, exactly as step 2's `lf-desktop` does; its
+  single-instance lock is its own (`~/.localflow/desktop/`). Uninstalling the
+  preview leaves that data alone.
+
+### Linux runtime requirements
+
+The verifier fails the build if the binary or any bundled library needs a
+symbol version newer than glibc 2.35, `GLIBCXX_3.4.30` or `CXXABI_1.3.13`, so
+the package needs a distribution at least as new as Ubuntu 22.04, Debian 12 or
+Fedora 36. The measured requirement is recorded in `MANIFEST.json` (the first
+build of this package on Ubuntu 22.04: `GLIBC_2.35`, `GLIBCXX_3.4.29`,
+`CXXABI_1.3.9`).
+
+System libraries the binary links directly (`DT_NEEDED`; the allowlist in
+`scripts/verify_gpui_package.sh`). Sherpa-ONNX and ONNX Runtime are bundled.
+
+| Library | Debian / Ubuntu | Fedora | Arch |
+|---|---|---|---|
+| `libc.so.6`, `libm.so.6`, `libdl.so.2`, `librt.so.1`, `libpthread.so.0`, `ld-linux-x86-64.so.2` | `libc6` | `glibc` | `glibc` |
+| `libstdc++.so.6`, `libgcc_s.so.1` | `libstdc++6`, `libgcc-s1` | `libstdc++`, `libgcc` | `gcc-libs` |
+| `libasound.so.2` | `libasound2` (`libasound2t64` on Ubuntu 24.04+) | `alsa-lib` | `alsa-lib` |
+| `libxcb.so.1` | `libxcb1` | `libxcb` | `libxcb` |
+| `libxkbcommon.so.0` | `libxkbcommon0` | `libxkbcommon` | `libxkbcommon` |
+| `libxkbcommon-x11.so.0` | `libxkbcommon-x11-0` | `libxkbcommon-x11` | `libxkbcommon-x11` |
+
+Loaded at run time and **not** proven by the package checks (a `DT_NEEDED`
+closure says nothing about `dlopen` or GPU drivers): a Vulkan loader and
+driver (`libvulkan1` + `mesa-vulkan-drivers`; `vulkan-loader` +
+`mesa-vulkan-drivers`; `vulkan-icd-loader` + a `vulkan-*` driver), the Wayland
+client library for Wayland sessions (`libwayland-client0`; `libwayland-client`;
+`wayland`) and fontconfig/FreeType (`libfontconfig1`, `libfreetype6`;
+`fontconfig`, `freetype`; `fontconfig`, `freetype2`), plus a graphical session.
+
+### macOS notes
+
+- **Signing:** ad-hoc only. It is not Developer ID signed or notarized and has
+  no Gatekeeper approval. The installer downloads with `curl`, which doesn't
+  quarantine the app; an archive downloaded in a browser may be quarantined and
+  need **Open Anyway** in System Settings > Privacy & Security.
+- **Minimum macOS: 13.0 or later** (higher if a bundled library needs it).
+  `lf-desktop` strongly links ScreenCaptureKit (GPUI's screen capture and
+  `lf-meetings`' system audio). The framework first shipped in macOS 12.3, but
+  `lf-meetings`' `ScreenCaptureKitSource` unconditionally configures
+  `SCStreamConfiguration` audio capture (`capturesAudio`,
+  `excludesCurrentProcessAudio`, `sampleRate`, `channelCount`), which Apple
+  introduced in macOS 13.0. The builder therefore sets
+  `MACOSX_DEPLOYMENT_TARGET=13.0` (a higher explicit value is kept; a lower
+  one, including 12.3, is refused), and the verifier refuses an executable that
+  records an older minimum. `LSMinimumSystemVersion` is the highest of the
+  minimum OS recorded in the executable and each bundled dylib
+  (`LC_BUILD_VERSION`) and the introduction version of each strongly linked
+  framework in the verifier's table (ScreenCaptureKit 12.3, MetalFX 13.0); an
+  image that strongly links such a framework while recording an older minimum
+  fails. `LC_BUILD_VERSION` alone does not encode framework or API
+  availability, and the table is not a complete SDK availability database. The
+  minimum is not a list of macOS versions the app was tested on.
+- **Permissions:** the preview is its own TCC identity, so microphone,
+  Accessibility and Input Monitoring grants for the main LocalFlow app don't
+  carry over. The usage descriptions are the main app's. Permission prompts
+  were not validated interactively.
+- **Speech helper:** as with `lf-hub`, the engine runs the speech model in a
+  child process of the same signed executable (`lf-desktop --speech-helper`,
+  an internal mode that takes no other argument and is refused in the sandbox).
+  Linux runs the model in-process.
 
 ## Real mode vs sandbox
 
@@ -366,10 +524,13 @@ These are tracked in `docs/gpui-migration.md`:
   subprocess tests. macOS runtime behaviour (tap readiness, engine, Metal
   whisper) is type-checked in CI only.
 - The engine runs only on LocalFlow's own data folders, has no tray item, and
-  runs only in builds made with `--features runtime` (not packaged yet).
+  runs only in builds made with `--features runtime` (the preview package is one).
 - Wayland global shortcuts are not possible (see above). Windows isn't targeted.
 - The Python runtime still writes protocol-1 status, so Home shows it as
   "Running · status limited".
 - `lf-hub` / the Python Hub and this window don't route to each other until the
   cutover (separate lock namespaces on purpose).
-- Packaging, default-launch cutover and legacy retirement are later steps.
+- The preview package is opt-in and separate. Default-launch cutover and legacy
+  retirement are later steps. The macOS bundle is ad-hoc signed only (no
+  Developer ID, notarisation or Gatekeeper approval) and its permissions,
+  speech helper and rendering were not exercised interactively.

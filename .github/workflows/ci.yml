@@ -70,5 +70,6 @@ jobs:
           tests/test_ask_model.py
           localflow/mcp_server.py
           tests/test_mcp_server.py
+          tests/test_gpui_packaging.py
       - name: Test
         run: pytest -q

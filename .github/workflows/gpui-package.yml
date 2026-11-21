@@ -1,0 +1,179 @@
+name: GPUI preview package
+
+# Builds the ready-to-run LocalFlow Preview package (release lf-desktop with
+# the runtime feature) natively on each supported platform, verifies the
+# extracted archive and smoke-tests the dedicated preview installer in a
+# temporary HOME. No GUI, audio, keyboard hook, keyring, model download or
+# provider call is ever started. Additive only: it does not change the
+# legacy installers, LocalFlow.app, its login agent or any launcher default.
+#
+# mac-installer.yml calls this only on release tags and manual dispatch
+# (workflow_call) and publishes the archives from a dependent job; this
+# workflow itself never publishes. Standalone it runs on pull requests and
+# pushes to main that touch the package inputs, and on manual dispatch, so a
+# branch push with an open PR builds the three native legs once, not twice.
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/build_gpui_package.sh"
+      - "scripts/verify_gpui_package.sh"
+      - "scripts/install_gpui_preview.sh"
+      - "scripts/gpui_preview_assets.sh"
+      - "tests/test_gpui_packaging.py"
+      - ".github/workflows/gpui-package.yml"
+      - "packaging/macos/**"
+      - "rust/lf-desktop/**"
+      # Path dependencies of lf-desktop (see gpui.yml).
+      - "rust/lf-core/**"
+      - "rust/lf-ui/**"
+      - "rust/lf-providers/**"
+      - "rust/lf-audio/**"
+      - "rust/lf-agent/**"
+      - "rust/lf-runtime/**"
+      - "rust/lf-input/**"
+      - "rust/lf-server/**"
+      - "rust/lf-stt/**"
+      - "rust/lf-meetings/**"
+      - "rust/lf-meetings-backend/**"
+      - "rust/lf-ask/**"
+      - "rust/Cargo.toml"
+  pull_request:
+    paths:
+      - "scripts/build_gpui_package.sh"
+      - "scripts/verify_gpui_package.sh"
+      - "scripts/install_gpui_preview.sh"
+      - "scripts/gpui_preview_assets.sh"
+      - "tests/test_gpui_packaging.py"
+      - ".github/workflows/gpui-package.yml"
+      - "packaging/macos/**"
+      - "rust/lf-desktop/**"
+      - "rust/lf-core/**"
+      - "rust/lf-ui/**"
+      - "rust/lf-providers/**"
+      - "rust/lf-audio/**"
+      - "rust/lf-agent/**"
+      - "rust/lf-runtime/**"
+      - "rust/lf-input/**"
+      - "rust/lf-server/**"
+      - "rust/lf-stt/**"
+      - "rust/lf-meetings/**"
+      - "rust/lf-meetings-backend/**"
+      - "rust/lf-ask/**"
+      - "rust/Cargo.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  # github.workflow is the caller's name under workflow_call, so a release
+  # tag's call never shares (or cancels) a group with these standalone runs.
+  group: gpui-package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: package (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+          - runner: macos-latest
+            platform: macos-arm64
+          - runner: macos-15-intel
+            platform: macos-x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      # whisper-rs (runtime feature) needs CMake and libclang; desktop-file-utils
+      # validates the packaged desktop entry.
+      - name: GPUI and audio system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang libclang-dev pkg-config \
+            libasound2-dev libfontconfig1-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libvulkan-dev libzstd-dev desktop-file-utils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/lf-desktop
+          key: gpui-package-${{ matrix.platform }}
+      # The builder restores pruned Sherpa/ORT outputs itself, verifies the
+      # extracted archive (closure, relative search paths, ABI floor or
+      # signatures) and only then writes it to the output directory.
+      - name: Build and verify the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_gpui_package.sh "$RUNNER_TEMP/gpui-preview"
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' rust/lf-desktop/Cargo.toml | head -n 1)"
+          asset="LocalFlow-Preview-$version-${{ matrix.platform }}.tar.gz"
+          test -f "$RUNNER_TEMP/gpui-preview/$asset"
+          test -f "$RUNNER_TEMP/gpui-preview/$asset.sha256"
+          [[ "$(ls -A "$RUNNER_TEMP/gpui-preview" | sort)" == "$(printf '%s\n' "$asset" "$asset.sha256" | sort)" ]]
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      # Re-verify a fresh copy outside the repository (signatures after
+      # extraction/relocation on macOS; no build-tree library on Linux).
+      - name: Verify the archive outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          copy="$(mktemp -d "$RUNNER_TEMP/verify.XXXXXX")"
+          cp "$RUNNER_TEMP/gpui-preview/$ASSET" "$copy/"
+          (cd "$copy" && bash "$GITHUB_WORKSPACE/scripts/verify_gpui_package.sh" "$copy/$ASSET")
+      - name: Installer smoke test in a temporary HOME (no launch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview_home="$(mktemp -d "$RUNNER_TEMP/home with space.XXXXXX")"
+          archive="$RUNNER_TEMP/gpui-preview/$ASSET"
+          # Seed the legacy install locations; the preview must never touch them.
+          mkdir -p "$preview_home/Applications/LocalFlow.app/Contents" "$preview_home/.local/share/applications" "$preview_home/.local/bin"
+          echo legacy > "$preview_home/Applications/LocalFlow.app/Contents/marker"
+          echo legacy > "$preview_home/.local/share/applications/localflow.desktop"
+          echo legacy > "$preview_home/.local/bin/lf"
+          # The consumer's shebang interpreter (stock /bin/bash, 3.2 on macOS),
+          # not the runner's PATH bash.
+          /bin/bash -c 'echo "installer shell: /bin/bash $BASH_VERSION"'
+          run() { env HOME="$preview_home" PATH="$PATH" /bin/bash scripts/install_gpui_preview.sh "$@"; }
+          run --archive "$archive" --sha256 "$archive.sha256" --no-launch
+          run --archive "$archive" --sha256 "$archive.sha256" --no-launch
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            app="$preview_home/Applications/LocalFlow Preview.app"
+            codesign --verify --deep --strict "$app"
+            test "$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" = com.cortexrnd.localflow.desktop-preview
+            env -i PATH=/usr/bin:/bin HOME="$preview_home" "$app/Contents/MacOS/lf-desktop" --version
+          else
+            "$preview_home/.local/bin/localflow-preview" --version
+            desktop-file-validate "$preview_home/.local/share/applications/localflow-preview.desktop"
+            if grep -q -- --engine "$preview_home/.local/share/applications/localflow-preview.desktop"; then exit 1; fi
+          fi
+          run --uninstall
+          test ! -e "$preview_home/Applications/LocalFlow Preview.app"
+          test ! -e "$preview_home/.local/share/localflow-preview"
+          test ! -e "$preview_home/.local/bin/localflow-preview"
+          test ! -e "$preview_home/.local/share/applications/localflow-preview.desktop"
+          test "$(cat "$preview_home/Applications/LocalFlow.app/Contents/marker")" = legacy
+          test "$(cat "$preview_home/.local/share/applications/localflow.desktop")" = legacy
+          test "$(cat "$preview_home/.local/bin/lf")" = legacy
+          test ! -e "$preview_home/.localflow"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpui-preview-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/gpui-preview/${{ env.ASSET }}
+            ${{ runner.temp }}/gpui-preview/${{ env.ASSET }}.sha256
+          if-no-files-found: error
+          retention-days: 14

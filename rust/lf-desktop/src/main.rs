@@ -13,6 +13,10 @@ use lf_desktop::page::Page;
 fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let env_sandbox = std::env::var("LOCALFLOW_SANDBOX").is_ok_and(|v| v == "1" || v == "true");
+    #[cfg(feature = "runtime")]
+    if let Some(code) = speech_helper(env_sandbox) {
+        return code;
+    }
     let args = match args::parse(std::env::args().skip(1), env_sandbox) {
         Ok(args) => args,
         Err(err) => {
@@ -92,4 +96,49 @@ fn main() -> ExitCode {
         instance,
     });
     ExitCode::SUCCESS
+}
+
+/// The same-executable speech helper (`lf-desktop --speech-helper`).
+///
+/// On macOS `lf_stt::runtime::hub_speech` runs the speech model in a child
+/// process spawned as `current_exe() --speech-helper`, exactly as `lf-hub`
+/// does, so the packaged app keeps one signed identity. It is dispatched
+/// before argument parsing, data resolution or any window, takes no other
+/// argument and is never part of the sandbox (which never starts a speech
+/// engine). Returns `None` when this process is not the helper. Not listed in
+/// `USAGE`: it is an internal protocol endpoint, not a user command.
+#[cfg(feature = "runtime")]
+fn speech_helper(env_sandbox: bool) -> Option<ExitCode> {
+    let mut argv = std::env::args_os().skip(1);
+    if argv.next().as_deref() != Some(std::ffi::OsStr::new("--speech-helper")) {
+        return None;
+    }
+    if argv.next().is_some() {
+        eprintln!("lf-desktop: --speech-helper takes no other arguments");
+        return Some(ExitCode::from(2));
+    }
+    if env_sandbox {
+        eprintln!(
+            "lf-desktop: the speech helper can't run in the sandbox: \
+             the sandbox never starts a speech engine (LOCALFLOW_SANDBOX is set)"
+        );
+        return Some(ExitCode::from(2));
+    }
+    log::info!("starting speech helper");
+    Some(
+        match lf_stt::helper::serve_stdio(|config| {
+            lf_stt::runtime::SpeechAdapter::from_config(&config)
+                .map(|engine| {
+                    std::sync::Arc::new(engine)
+                        as std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>
+                })
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("speech helper: {error}");
+                ExitCode::from(1)
+            }
+        },
+    )
 }

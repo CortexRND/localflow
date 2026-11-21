@@ -9,11 +9,16 @@ on:
       - scripts/release-assets.sh
       - scripts/build_rust_app.sh
       - scripts/macos_launchagent.sh
+      - scripts/build_gpui_package.sh
+      - scripts/verify_gpui_package.sh
+      - scripts/install_gpui_preview.sh
+      - scripts/gpui_preview_assets.sh
       - rust/lf-ui/src/launch_agent.rs
       - rust/lf-ui/src/mac/app.rs
       - tests/test_rust_packaging.py
       - tests/test_installer_workflow.py
       - tests/test_installer_stubs.py
+      - tests/test_gpui_packaging.py
       - .github/workflows/installers.yml
   pull_request:
     paths:
@@ -23,11 +28,16 @@ on:
       - scripts/release-assets.sh
       - scripts/build_rust_app.sh
       - scripts/macos_launchagent.sh
+      - scripts/build_gpui_package.sh
+      - scripts/verify_gpui_package.sh
+      - scripts/install_gpui_preview.sh
+      - scripts/gpui_preview_assets.sh
       - rust/lf-ui/src/launch_agent.rs
       - rust/lf-ui/src/mac/app.rs
       - tests/test_rust_packaging.py
       - tests/test_installer_workflow.py
       - tests/test_installer_stubs.py
+      - tests/test_gpui_packaging.py
       - .github/workflows/installers.yml
   workflow_dispatch:
 
@@ -40,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check install.sh and release-assets.sh
-        run: shellcheck install.sh scripts/release-assets.sh scripts/build_rust_app.sh scripts/macos_launchagent.sh
+        run: shellcheck install.sh scripts/release-assets.sh scripts/build_rust_app.sh scripts/macos_launchagent.sh scripts/build_gpui_package.sh scripts/verify_gpui_package.sh scripts/install_gpui_preview.sh scripts/gpui_preview_assets.sh
 
   rust-macos:
     runs-on: macos-latest
