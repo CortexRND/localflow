@@ -90,7 +90,7 @@ reason and the removal condition are in `vendor/xattr-shim/src/lib.rs`.
 |---|---|
 | Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, Mesa llvmpipe). Native rendering was not verified interactively: first paint was transparent under X11/VNC, and under Cage/Wayland redraws appeared only after a resize |
 | macOS | Expected to build (GPUI's Metal backend; the code has no Linux-only parts). Not verified in this PR. `lf-hub` stays the macOS app |
-| Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. Windows hotkeys and tray are not ported |
+| Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. This packaging change adds neither Windows hotkeys nor the tray |
 
 Linux build packages (Debian/Ubuntu names): `build-essential cmake clang pkg-config
 libasound2-dev libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev
@@ -536,7 +536,8 @@ These are tracked in `docs/gpui-migration.md`:
 - The engine runs only on LocalFlow's own data folders, has no tray item, and
   runs only in builds made with `--features runtime` (the preview package is one).
 - Wayland global shortcuts are not possible (see above). On Windows only the
-  preview package is built; Windows global hotkeys and the tray are not ported.
+  preview package is built; the packaging change adds neither Windows global
+  hotkeys nor the tray.
 - The Python runtime still writes protocol-1 status, so Home shows it as
   "Running · status limited".
 - `lf-hub` / the Python Hub and this window don't route to each other until the
