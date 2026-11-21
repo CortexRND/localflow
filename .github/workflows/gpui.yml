@@ -135,3 +135,15 @@ jobs:
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --locked
       - name: Type-check lf-desktop (runtime feature)
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --features runtime --locked
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/lf-desktop
+      - name: Type-check lf-desktop and Windows tray
+        run: cargo check --manifest-path "$env:MANIFEST" --workspace --all-targets --locked

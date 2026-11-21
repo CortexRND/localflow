@@ -65,6 +65,19 @@ An unknown argument, or `--engine` where it can't run, exits with status 2. A fi
 launch with no setup marker in the config (and no `--page`) opens the wizard,
 using the Hub's `hub_route::plan_initial_route` policy.
 
+### System tray
+
+On Linux and Windows, LocalFlow shows a tray item while the desktop window is
+running. Right-click it for runtime status, **Open LocalFlow**, the dictation
+switch and **Quit LocalFlow**. The switch uses the active config (the isolated
+config in sandbox mode). **Paste last transcript** is enabled only while this
+window's opt-in dictation engine is running; it never sends commands to another
+runtime. Closing the last window still quits the app.
+
+On Linux the tray uses the session D-Bus and needs a StatusNotifierItem host,
+such as KDE Plasma or GNOME with an AppIndicator extension. If the host is
+unavailable, the window still runs. macOS keeps the existing AppKit menu.
+
 The crate is a **standalone Cargo workspace** with its own `Cargo.lock`, so GPUI's
 dependency tree and system libraries stay out of the `rust/` workspace and its CI.
 `.github/workflows/gpui.yml` is an additive workflow that only runs when this crate
@@ -73,6 +86,7 @@ or one of its path dependencies changes:
 - **Linux:** fmt, then clippy, the headless tests (including the shim's) and the
   build, each for the default build and for `--features runtime`.
 - **macOS:** the shim tests and a full type-check of both builds.
+- **Windows:** a type-check of the desktop and its native tray.
 
 The runtime feature adds `lf-stt` (whisper.cpp needs CMake and libclang) and
 `lf-ui/runtime`; its tests use temp directories and fakes only (no audio, keyboard

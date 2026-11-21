@@ -18,6 +18,8 @@ use crate::page::{Page, NAV_FOOTER, NAV_GROUPS};
 use crate::pages;
 use crate::remote::Health;
 use crate::theme::{size as tsize, space, text, theme, Theme, Tone};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::tray;
 use crate::ui::{self, assets::Assets, Button};
 
 /// Theme tone of a runtime signal.
@@ -253,6 +255,10 @@ pub struct Shell {
     pub engine: Option<Engine>,
     /// A background stop (close/quit) is running.
     stopping: bool,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    tray: Option<(tray::Tray, tray::View)>,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    tray_task: Option<gpui::Task<()>>,
 }
 
 impl Focusable for Shell {
@@ -382,6 +388,10 @@ impl Shell {
             probing: false,
             engine,
             stopping: false,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            tray: None,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            tray_task: None,
         };
         if let Some(notice) = launch.notice {
             shell.toast(notice.into(), None, cx);
@@ -520,6 +530,120 @@ impl Shell {
                 v.update(cx, |_, cx| cx.notify());
             }
             cx.notify();
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        self.update_tray();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn tray_view(&self) -> tray::View {
+        tray::View::new(
+            &self.runtime,
+            lf_runtime::settings::dictation_enabled(&self.cx.services.config()),
+            self.engine.as_ref().map(Engine::state),
+        )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn update_tray(&mut self) {
+        if self.tray.is_none() {
+            return;
+        }
+        let view = self.tray_view();
+        if let Some((icon, previous)) = &mut self.tray {
+            if *previous != view {
+                icon.update(view.clone());
+                *previous = view;
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn start_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = self.tray_view();
+        let initial = view.clone();
+        let (actions, events) = async_channel::unbounded();
+        self.tray_task = Some(cx.spawn_in(window, async move |this, cx| {
+            #[cfg(target_os = "linux")]
+            let result = cx
+                .background_executor()
+                .spawn(async move { tray::Tray::new(initial, actions) })
+                .await;
+            #[cfg(target_os = "windows")]
+            let result = tray::Tray::new(initial, actions);
+            let icon = match result {
+                Ok(icon) => icon,
+                Err(error) => {
+                    log::warn!("LocalFlow tray unavailable: {error:#}");
+                    return;
+                }
+            };
+            if this
+                .update_in(cx, |shell, _, _| {
+                    shell.tray = Some((icon, view));
+                    shell.update_tray();
+                })
+                .is_err()
+            {
+                return;
+            }
+            while let Ok(action) = events.recv().await {
+                if this
+                    .update_in(cx, |shell, window, cx| {
+                        shell.tray_action(action, window, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn tray_action(&mut self, action: tray::Action, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::controllers::engine::MenuCommand;
+
+        if self.stopping {
+            return;
+        }
+        match action {
+            tray::Action::Open => window.activate_window(),
+            tray::Action::Quit => {
+                window.activate_window();
+                self.request_close(true, window, cx);
+            }
+            tray::Action::ToggleDictation => match self.engine.as_ref().map(Engine::state) {
+                Some(OwnEngine::Running) => {
+                    if let Some(engine) = &self.engine {
+                        engine.menu_command(MenuCommand::ToggleDictation);
+                    }
+                }
+                Some(OwnEngine::Starting | OwnEngine::Stopping) => {}
+                _ => {
+                    if let Err(error) = self.cx.services.update(|current| {
+                        let mut updated = current.clone();
+                        let enabled = lf_runtime::settings::dictation_enabled(current);
+                        updated.set_field("dictation_enabled", serde_json::json!(!enabled));
+                        Ok(updated)
+                    }) {
+                        window.activate_window();
+                        self.toast(
+                            format!("Couldn't switch dictation: {error}").into(),
+                            None,
+                            cx,
+                        );
+                    }
+                    self.refresh_views(cx);
+                    self.update_tray();
+                    self.probe_runtime(cx);
+                }
+            },
+            tray::Action::PasteLast => {
+                if let Some(engine) = &self.engine {
+                    engine.menu_command(MenuCommand::PasteLast);
+                }
+            }
         }
     }
 
@@ -1609,6 +1733,8 @@ pub fn run(launch: Launch) {
                                 .unwrap_or(true)
                         });
                         Shell::start_instance_poll(window, cx);
+                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        shell.start_tray(window, cx);
                         // Losing the window releases a setup microphone test
                         // (also one still opening) and cancels a trial;
                         // nothing captures in the background. After a system
