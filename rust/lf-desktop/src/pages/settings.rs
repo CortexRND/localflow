@@ -9,8 +9,10 @@ use gpui::{div, prelude::*, ClipboardItem, Context, Entity, SharedString, Window
 use serde_json::{json, Value};
 
 use crate::app::{Confirm, PageCx};
+use crate::controllers::assistant::{mask_secrets, Assistant};
 use crate::controllers::history;
 use crate::controllers::models::data_leaves_text;
+use crate::controllers::runtime_state::SimulatedState;
 use crate::controllers::settings::{self as ctl, Control, Spec, Tab, SPECS};
 use crate::page::Page;
 use crate::pages::{column, header, page};
@@ -19,6 +21,7 @@ use crate::theme::{space, theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::select::{Select, SelectEvent};
 use crate::ui::{self, Button, Switch};
+use lf_ui::hub_settings::{self as hs, Status};
 
 pub struct SettingsPage {
     pcx: PageCx,
@@ -31,6 +34,11 @@ pub struct SettingsPage {
     /// Last value pushed into each text field; a field whose text differs is
     /// being edited and is left alone by config syncs.
     synced: HashMap<usize, String>,
+    assistant: Assistant,
+    request: Entity<TextInput>,
+    /// The config the assistant's preview was computed against.
+    seen_config: Value,
+    simulated: Entity<Select>,
 }
 
 fn spec_index(spec: &Spec) -> usize {
@@ -42,6 +50,33 @@ fn spec_index(spec: &Spec) -> usize {
 
 impl SettingsPage {
     pub fn new(pcx: PageCx, cx: &mut Context<Self>) -> Self {
+        let request = cx.new(|cx| {
+            TextInput::new(cx, hs::PLACEHOLDER)
+                .multiline(2, 4)
+                .max_chars(hs::MAX_DRAFT_CHARS)
+                .label("Describe a change")
+        });
+        let simulated = cx.new(|cx| {
+            Select::new(
+                cx,
+                SimulatedState::ALL
+                    .iter()
+                    .map(|s| SharedString::from(s.label()))
+                    .collect(),
+                Some(0),
+            )
+            .width(240.)
+        });
+        cx.subscribe(&simulated, |this, _, event, cx| {
+            let SelectEvent::Changed(i) = event;
+            if let Some(state) = SimulatedState::ALL.get(*i) {
+                this.pcx.services.simulated_runtime.set(*state);
+                this.pcx.reprobe(cx);
+            }
+        })
+        .detach();
+        let assistant = Assistant::new(pcx.services.assistant.clone());
+        let seen_config = lf_core::config::config_to_dict(&pcx.services.config());
         let mut page = SettingsPage {
             pcx,
             tab: Tab::General,
@@ -51,6 +86,10 @@ impl SettingsPage {
             restart: Vec::new(),
             mics: None,
             synced: HashMap::new(),
+            assistant,
+            request,
+            seen_config,
+            simulated,
         };
         for (i, spec) in SPECS.iter().enumerate() {
             match spec.control {
@@ -83,13 +122,302 @@ impl SettingsPage {
             }
         }
         page.load_mics(cx);
+        page.load_assistant_state(cx);
         page.sync(cx);
         page
     }
 
+    /// The assistant's undo summary, via `Request::Refresh` on the settings
+    /// worker (never on this thread; no preview or network request).
+    fn load_assistant_state(&mut self, cx: &mut Context<Self>) {
+        let Ok((epoch, receiver)) = self.assistant.begin_refresh() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let completion = cx
+                .background_executor()
+                .spawn(async move { receiver.recv().ok() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(completion) = completion {
+                    if this.assistant.refresh_done(epoch, completion) {
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.note_config(cx);
         self.sync(cx);
         cx.notify();
+    }
+
+    /// Settings moved under the assistant (manual row, Home, another
+    /// process): a preview or pending answer becomes stale.
+    fn note_config(&mut self, _: &mut Context<Self>) {
+        // Our own Apply/Undo is being written: its completion updates the
+        // baseline, so the change it makes can't make its preview stale.
+        if self.assistant.writing {
+            return;
+        }
+        let now = lf_core::config::config_to_dict(&self.pcx.services.config());
+        if now != self.seen_config {
+            self.seen_config = now;
+            self.assistant.settings_changed();
+        }
+    }
+
+    // ------------------------------------------------------- assistant ---
+
+    fn preview(&mut self, cx: &mut Context<Self>) {
+        let text = self.request.read(cx).text().to_string();
+        let Some((token, request)) = self.assistant.start_preview(&text) else {
+            cx.notify();
+            return;
+        };
+        let agent = self.assistant.agent();
+        cx.spawn(async move |this, cx| {
+            let (result, model) = cx
+                .background_executor()
+                .spawn(async move { Assistant::propose(agent.as_ref(), &request) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.assistant.preview_done(token, result, model);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn write(
+        &mut self,
+        request: lf_ui::backends::settings_worker::Request,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = match self.assistant.dispatch(request) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.assistant.writing = false;
+                self.assistant.state.failed(&error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let completion = cx
+                .background_executor()
+                .spawn(async move { receiver.recv().ok() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(completion) = completion else {
+                    this.assistant.writing = false;
+                    this.assistant.state.failed("The settings worker stopped.");
+                    cx.notify();
+                    return;
+                };
+                let changed = this.assistant.completion(completion);
+                if this.assistant.state.status == Status::Applied {
+                    this.request.update(cx, |i, cx| i.clear(cx));
+                }
+                if changed {
+                    this.pcx.services.reload_config();
+                    this.seen_config = lf_core::config::config_to_dict(&this.pcx.services.config());
+                    this.pcx.config_changed(cx);
+                    this.sync(cx);
+                    if !this.assistant.undo_skipped.is_empty() {
+                        this.pcx.toast(this.assistant.message(), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_assistant(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let t = theme(cx).clone();
+        let a = &self.assistant;
+        let undo_tip = a
+            .state
+            .undo_lines
+            .as_ref()
+            .map(|lines| mask_secrets(&format!("Undo: {}", lines.join(", "))))
+            .unwrap_or_else(|| hs::NOTHING_TO_UNDO.to_string());
+        let undo = Button::new("assistant-undo", hs::UNDO_TITLE)
+            .ghost()
+            .small()
+            .icon("undo-2")
+            .disabled(a.state.undo_lines.is_none() || a.writing || a.state.busy())
+            .tooltip(undo_tip)
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some(request) = this.assistant.begin_undo() {
+                    this.write(request, cx);
+                }
+            }));
+        let toggle = Button::new("assistant-open", if a.expanded { "Hide" } else { "Open" })
+            .small()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.assistant.expanded = !this.assistant.expanded;
+                cx.notify();
+            }));
+        let mut card = ui::card(&t).flex_col().gap(space::s5()).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(space::s4())
+                .child(ui::icon("sparkles", t.icon_accent))
+                .child(ui::heading(&t, hs::HEADING).flex_1())
+                .child(undo)
+                .child(toggle),
+        );
+        if !a.expanded {
+            return card;
+        }
+        let busy = a.state.busy();
+        let model_note = if self.pcx.services.is_sandbox() {
+            "Sandbox: answers come from a fixed script; no model is contacted.".to_string()
+        } else {
+            mask_secrets(
+                &hs::model_note(a.state.model.as_deref()).replace("your Mac", "this computer"),
+            )
+        };
+        card = card
+            .child(ui::secondary(&t, hs::INTRO))
+            .child(self.request.clone())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::s4())
+                    .child(ui::supporting(&t, model_note).flex_1())
+                    .when(busy, |d| {
+                        d.child(ui::supporting(&t, hs::BUSY_PREVIEW)).child(
+                            Button::new("assistant-cancel-busy", "Cancel")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.assistant.cancel();
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("assistant-preview", "Preview")
+                            .primary()
+                            .small()
+                            .busy(busy)
+                            .disabled(a.writing)
+                            .on_click(cx.listener(|this, _, _, cx| this.preview(cx))),
+                    ),
+            );
+        match a.state.status {
+            Status::Preview => {
+                let lines = a.lines();
+                let mut preview = div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::s3())
+                    .child(ui::label(&t, hs::PREVIEW_TITLE));
+                if lines.is_empty() {
+                    preview =
+                        preview.child(ui::secondary(&t, "Nothing to change for that request."));
+                }
+                for line in lines {
+                    preview = preview.child(ui::status_dot(&t, Tone::Accent, line));
+                }
+                let warnings = a.warnings();
+                if !warnings.is_empty() {
+                    preview = preview.child(ui::label(&t, hs::WARNINGS_TITLE));
+                    for warning in warnings {
+                        preview = preview.child(
+                            ui::supporting(&t, hs::warning_text(&warning))
+                                .text_color(t.tone(Tone::Warning).0),
+                        );
+                    }
+                }
+                for note in a.notes() {
+                    preview = preview.child(ui::supporting(&t, hs::skipped_text(&note)));
+                }
+                if let Some(error) = &a.apply_error {
+                    preview = preview.child(ui::banner(&t, Tone::Error, error.clone(), None));
+                }
+                let empty = a.state.proposal.as_ref().is_none_or(|p| p.is_empty());
+                preview = preview.child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(space::s4())
+                        .child(
+                            Button::new("assistant-cancel", "Cancel")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.assistant.cancel();
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("assistant-apply", "Apply")
+                                .primary()
+                                .small()
+                                .busy(a.writing)
+                                .disabled(empty)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(request) = this.assistant.begin_apply() {
+                                        this.write(request, cx);
+                                    }
+                                })),
+                        ),
+                );
+                card = card.child(preview);
+            }
+            Status::Applied => {
+                card = card.child(ui::banner(&t, Tone::Success, a.message(), None));
+                for line in a.lines() {
+                    card = card.child(ui::supporting(&t, line));
+                }
+                if !a.undo_skipped.is_empty() {
+                    card = card.child(ui::banner(
+                        &t,
+                        Tone::Warning,
+                        format!(
+                            "Kept because they changed since: {}",
+                            a.undo_skipped.join("; ")
+                        ),
+                        None,
+                    ));
+                }
+            }
+            Status::Error => {
+                let stale =
+                    a.state.message == hs::STALE_PREVIEW || a.state.message == hs::STALE_PENDING;
+                card = card.child(ui::banner(
+                    &t,
+                    Tone::Error,
+                    if stale {
+                        a.message()
+                    } else {
+                        format!("{}: {}", hs::ERROR_TITLE, a.message())
+                    },
+                    Some(
+                        Button::new(
+                            "assistant-retry",
+                            if stale { "Preview again" } else { "Try again" },
+                        )
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.preview(cx)))
+                        .into_any_element(),
+                    ),
+                ));
+            }
+            _ => {}
+        }
+        card
     }
 
     pub fn open_tab(&mut self, target: &str, cx: &mut Context<Self>) {
@@ -188,6 +516,7 @@ impl SettingsPage {
         match ctl::save(&self.pcx.services.config_file, spec, value) {
             Ok(saved) => {
                 self.pcx.services.set_cached_config(saved);
+                self.note_config(cx);
                 self.errors.remove(&i);
                 self.synced.remove(&i);
                 if spec.restart && !self.restart.contains(&i) {
@@ -340,12 +669,12 @@ impl SettingsPage {
                 out.push(ui::setting_row(
                     &t,
                     "Setup",
-                    "Download speech models and test your microphone with `lf setup` in a terminal. The checklist on Home shows what's ready.",
+                    "Pick and download a speech model, test your microphone, choose cleanup and a shortcut. Nothing changes until you apply.",
                     {
                         let pcx = self.pcx.clone();
-                        Button::new("setup-home", "Setup steps")
+                        Button::new("setup-again", "Run setup again")
                             .small()
-                            .on_click(move |_, _, cx| pcx.navigate(Page::Home, None, cx))
+                            .on_click(move |_, _, cx| pcx.open_setup(cx))
                             .into_any_element()
                     },
                     None,
@@ -465,6 +794,18 @@ impl SettingsPage {
                     self.path_row("Config file", root.config_path.clone(), false, cx)
                         .into_any_element(),
                 );
+                if services.is_sandbox() {
+                    out.push(
+                        ui::setting_row(
+                            &t,
+                            "Simulated runtime state",
+                            "Sandbox only: step Home and the sidebar through every dictation state for review.",
+                            self.simulated.clone().into_any_element(),
+                            Some((Tone::Warning, "Simulated".into())),
+                        )
+                        .into_any_element(),
+                    );
+                }
                 let mut keys = ui::section(
                     &t,
                     "Current settings",
@@ -552,7 +893,10 @@ impl Render for SettingsPage {
                 None,
             ));
         }
-        let mut body = div().child(tabs).child(rows);
+        let mut body = div()
+            .child(self.render_assistant(cx))
+            .child(tabs)
+            .child(rows);
         for el in bottom {
             body = body.child(el);
         }

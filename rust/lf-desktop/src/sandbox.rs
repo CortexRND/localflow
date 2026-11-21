@@ -141,28 +141,61 @@ const SNIPPETS: &[(&str, &str, bool)] = &[
     ("sign off", "Best regards,\nSam", false),
 ];
 
+/// Entries of `dir` other than the live instance directory (which holds the
+/// window lock and must survive a reset).
+fn content_entries(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        if entry.file_name() != crate::controllers::instance::SANDBOX_DIR {
+            out.push(entry.path());
+        }
+    }
+    Ok(out)
+}
+
+/// `dir` may be used as a sandbox: absent, empty, or seeded by us. Call
+/// before taking the instance lock inside it.
+pub fn check_dir(dir: &Path) -> Result<()> {
+    if dir.join(SANDBOX_MARKER).exists() || content_entries(dir)?.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} exists and is not a LocalFlow sandbox; choose an empty directory",
+        dir.display()
+    )
+}
+
 /// Seed `dir` unless already seeded (or `reset`). Returns the data root.
+///
+/// The caller holds the sandbox's instance lock, so no other window uses
+/// the data being reset; the instance directory itself is kept.
 pub fn prepare(dir: &Path, reset: bool) -> Result<DataRoot> {
     let marker = dir.join(SANDBOX_MARKER);
     if reset && dir.exists() {
         // Only ever delete a directory we seeded ourselves.
         anyhow::ensure!(
-            marker.exists(),
+            marker.exists() || content_entries(dir)?.is_empty(),
             "{} is not a LocalFlow sandbox (no {SANDBOX_MARKER}); refusing to reset it",
             dir.display()
         );
-        fs::remove_dir_all(dir).with_context(|| format!("remove {}", dir.display()))?;
+        for path in content_entries(dir)? {
+            let removed = if path.is_dir() && !path.is_symlink() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            removed.with_context(|| format!("remove {}", path.display()))?;
+        }
     }
     let root = DataRoot::sandbox(dir);
     if marker.exists() {
         return Ok(root);
     }
-    if dir.exists() && fs::read_dir(dir)?.next().is_some() {
-        anyhow::bail!(
-            "{} exists and is not a LocalFlow sandbox; choose an empty directory",
-            dir.display()
-        );
-    }
+    check_dir(dir)?;
     fs::create_dir_all(&root.localflow_dir)?;
     seed(&root)?;
     fs::write(&marker, MARKER_TEXT)?;
@@ -271,6 +304,327 @@ pub fn meeting_client(root: &DataRoot) -> FakeMeetingClient {
     client
 }
 
+// ------------------------------------------------- simulated model work ---
+
+/// The fixed sandbox trial transcript.
+pub const SIMULATED_TRANSCRIPT: &str = "This is a simulated transcript. No audio was recorded.";
+
+/// The sandbox's one simulated model inventory: which speech models are
+/// "downloaded" and which models the simulated Ollama has. Storage,
+/// downloads, setup inspection and cleanup pulls all read and write it.
+pub struct SimSpeech {
+    installed: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    ollama: std::sync::Mutex<Vec<String>>,
+}
+
+/// The simulated repo a speech model is stored in (native layout: every
+/// Whisper size is one GGML file in the whisper.cpp repo).
+pub fn sim_repo(model_id: &str) -> &'static str {
+    if model_id.starts_with("parakeet") {
+        lf_stt_repo::PARAKEET_ONNX
+    } else {
+        lf_stt_repo::WHISPER_CPP
+    }
+}
+
+/// Repo names of `lf_stt::model_storage` (not linked in default builds).
+pub mod lf_stt_repo {
+    pub const WHISPER_CPP: &str = "ggerganov/whisper.cpp";
+    pub const PARAKEET_ONNX: &str = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8";
+}
+
+impl SimSpeech {
+    /// Base and Small Whisper plus Parakeet (simulated as leased by a
+    /// running LocalFlow); Ollama has two cleanup models.
+    pub fn seeded() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(SimSpeech {
+            installed: std::sync::Mutex::new(
+                ["fw-base", "fw-small", "parakeet-v2"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            ),
+            ollama: std::sync::Mutex::new(vec!["llama3.2:3b".into(), "qwen3:4b".into()]),
+        })
+    }
+
+    fn installed(&self) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<String>> {
+        self.installed.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub fn is_installed(&self, model_id: &str) -> bool {
+        self.installed().contains(model_id)
+    }
+
+    pub fn ollama_models(&self) -> Vec<String> {
+        self.ollama
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+/// Sandbox speech storage over [`SimSpeech`]: one row per simulated repo,
+/// with the same protection rules as the real cache (selected in the
+/// sandbox config, or leased by a "running" LocalFlow).
+pub struct SimStorage {
+    state: std::sync::Arc<SimSpeech>,
+}
+
+impl SimStorage {
+    pub fn new(state: std::sync::Arc<SimSpeech>) -> Self {
+        SimStorage { state }
+    }
+
+    fn status(repo: &str, config: &Config) -> &'static str {
+        if repo == lf_stt_repo::PARAKEET_ONNX {
+            return "In use"; // simulated lease of a running LocalFlow
+        }
+        let backend = config.field_str("stt_backend").unwrap_or("");
+        let selected = match repo {
+            lf_stt_repo::WHISPER_CPP => !matches!(backend, "parakeet" | "parakeet-onnx"),
+            _ => false,
+        };
+        if selected {
+            "Selected"
+        } else {
+            ""
+        }
+    }
+}
+
+impl crate::controllers::model_storage::SpeechStorage for SimStorage {
+    fn inventory(
+        &self,
+        config: &Config,
+    ) -> std::result::Result<crate::controllers::model_storage::Inventory, String> {
+        let installed = self.state.installed().clone();
+        let mut models = Vec::new();
+        for repo in [lf_stt_repo::WHISPER_CPP, lf_stt_repo::PARAKEET_ONNX] {
+            let ids: Vec<&String> = installed.iter().filter(|id| sim_repo(id) == repo).collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let size: u64 = ids
+                .iter()
+                .filter_map(|id| lf_ui::setup_flow::stt_model_by_id(id))
+                .map(|m| u64::from(m.size_mb) * 1_000_000)
+                .sum();
+            let label = if repo == lf_stt_repo::WHISPER_CPP {
+                format!(
+                    "Whisper GGML (example: {})",
+                    ids.iter()
+                        .map(|id| id.trim_start_matches("fw-"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                "Parakeet v2 (example)".to_string()
+            };
+            models.push(crate::controllers::model_storage::StoredModel {
+                repo: repo.into(),
+                label,
+                size_bytes: size,
+                status: Self::status(repo, config).into(),
+            });
+        }
+        Ok(crate::controllers::model_storage::Inventory {
+            cache_dir: None,
+            models,
+        })
+    }
+
+    fn delete(&self, repo: &str, config: &Config) -> std::result::Result<u64, String> {
+        let inventory = self.inventory(config)?;
+        let Some(model) = inventory.models.iter().find(|m| m.repo == repo) else {
+            return Err("That isn't a speech model LocalFlow manages.".into());
+        };
+        if let Some(reason) = model.protection_reason() {
+            return Err(reason.into());
+        }
+        self.state.installed().retain(|id| sim_repo(id) != repo);
+        Ok(model.size_bytes)
+    }
+}
+
+/// Setup/model operations for the sandbox over [`SimSpeech`]: downloads tick
+/// to 100 % over about three seconds, a pull adds its model to the simulated
+/// Ollama, the trial returns a fixed transcript. No audio, network, model
+/// files or keyring.
+pub struct SimSetupBackend {
+    state: std::sync::Arc<SimSpeech>,
+    step: std::time::Duration,
+}
+
+impl SimSetupBackend {
+    pub fn new() -> Self {
+        Self::with_state(SimSpeech::seeded(), std::time::Duration::from_millis(100))
+    }
+
+    pub fn with_step(step: std::time::Duration) -> Self {
+        Self::with_state(SimSpeech::seeded(), step)
+    }
+
+    pub fn with_state(state: std::sync::Arc<SimSpeech>, step: std::time::Duration) -> Self {
+        SimSetupBackend { state, step }
+    }
+
+    fn tick(
+        &self,
+        total: u64,
+        status: &str,
+        progress: &lf_ui::setup_backend::ProgressCallback,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> std::result::Result<(), String> {
+        const STEPS: u64 = 30;
+        for i in 0..=STEPS {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return Err("Download cancelled.".into());
+            }
+            progress(lf_ui::setup_backend::DownloadProgress {
+                done: total * i / STEPS,
+                total,
+                status: status.into(),
+            });
+            std::thread::sleep(self.step);
+        }
+        Ok(())
+    }
+}
+
+impl Default for SimSetupBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl lf_ui::setup_backend::SetupModelBackend for SimSetupBackend {
+    fn speech_format(&self, _: &lf_ui::setup_flow::SttModel) -> Option<&'static str> {
+        Some("Simulated")
+    }
+    fn speech_downloads(
+        &self,
+        models: &[lf_ui::setup_flow::SttModel],
+    ) -> std::result::Result<std::collections::HashMap<String, bool>, String> {
+        Ok(models
+            .iter()
+            .map(|m| (m.id.clone(), self.state.is_installed(&m.id)))
+            .collect())
+    }
+    fn download_speech(
+        &self,
+        model: &lf_ui::setup_flow::SttModel,
+        progress: lf_ui::setup_backend::ProgressCallback,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::result::Result<(), String> {
+        self.tick(
+            u64::from(model.size_mb) * 1_000_000,
+            "Simulated download",
+            &progress,
+            &cancel,
+        )?;
+        self.state.installed().insert(model.id.clone());
+        Ok(())
+    }
+    fn ollama(&self, _: &str) -> std::result::Result<(bool, Vec<String>), String> {
+        Ok((true, self.state.ollama_models()))
+    }
+    fn pull_cleanup(
+        &self,
+        _: &str,
+        model_id: &str,
+        progress: lf_ui::setup_backend::ProgressCallback,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::result::Result<(), String> {
+        self.tick(2_000_000_000, "Simulated pull", &progress, &cancel)?;
+        let mut ollama = self.state.ollama.lock().unwrap_or_else(|p| p.into_inner());
+        if !ollama.iter().any(|m| m == model_id) {
+            ollama.push(model_id.to_string());
+        }
+        Ok(())
+    }
+    fn try_dictation(
+        &self,
+        model: &lf_ui::setup_flow::SttModel,
+        device: Option<&str>,
+        language: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        self.try_dictation_cancellable(
+            model,
+            device,
+            language,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    }
+    fn try_dictation_cancellable(
+        &self,
+        _: &lf_ui::setup_flow::SttModel,
+        _: Option<&str>,
+        _: Option<&str>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::result::Result<String, String> {
+        for _ in 0..15 {
+            lf_providers::transfer::check_cancel(&cancel)?;
+            std::thread::sleep(self.step);
+        }
+        Ok(SIMULATED_TRANSCRIPT.into())
+    }
+}
+
+/// A canned microphone level curve; the real microphone is never opened.
+pub struct SimMeterInput;
+
+struct SimMeter(std::time::Instant);
+
+impl crate::controllers::setup_flow::Meter for SimMeter {
+    fn level(&self) -> f64 {
+        let t = self.0.elapsed().as_secs_f64();
+        0.05 + 0.04 * (t * 3.0).sin().abs()
+    }
+    fn stop(&mut self) {}
+}
+
+impl crate::controllers::setup_flow::MeterInput for SimMeterInput {
+    fn open(
+        &self,
+        _: Option<&str>,
+    ) -> std::result::Result<Box<dyn crate::controllers::setup_flow::Meter>, String> {
+        Ok(Box::new(SimMeter(std::time::Instant::now())))
+    }
+}
+
+/// The sandbox machine: Linux, two example microphones, Ollama installed.
+pub fn setup_platform() -> lf_ui::setup_flow::FakeSetupPlatform {
+    lf_ui::setup_flow::FakeSetupPlatform {
+        system: if cfg!(target_os = "macos") {
+            "Darwin"
+        } else {
+            "Linux"
+        }
+        .into(),
+        machine: std::env::consts::ARCH.into(),
+        commands: vec!["ffmpeg".into(), "xdotool".into()],
+        ollama_installed: true,
+        ollama_running: Some(true),
+        input_devices: Ok(vec![
+            "Built-in Microphone (example)".into(),
+            "USB Headset (example)".into(),
+        ]),
+        hardware: Ok(lf_ui::setup_flow::HardwareInfo::new(
+            if cfg!(target_os = "macos") {
+                "Darwin"
+            } else {
+                "Linux"
+            },
+            std::env::consts::ARCH,
+            16.0,
+            false,
+            120.0,
+        )),
+        ..lf_ui::setup_flow::FakeSetupPlatform::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +656,152 @@ mod tests {
         assert!(prepare(dir.path(), false).is_err());
         assert!(prepare(dir.path(), true).is_err());
         assert!(dir.path().join("precious.txt").exists());
+    }
+
+    #[test]
+    fn simulated_model_work_is_offline_cancellable_and_flagged() {
+        use lf_ui::setup_backend::SetupModelBackend;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        let backend = SimSetupBackend::with_step(std::time::Duration::from_millis(1));
+        let model = lf_ui::setup_flow::stt_model_by_id("fw-medium").unwrap();
+        let before = backend
+            .speech_downloads(std::slice::from_ref(&model))
+            .unwrap();
+        assert!(!before["fw-medium"]);
+        let ticks = Arc::new(Mutex::new(Vec::new()));
+        let seen = ticks.clone();
+        backend
+            .download_speech(
+                &model,
+                Box::new(move |p| seen.lock().unwrap().push(p.done)),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert_eq!(
+            *ticks.lock().unwrap().last().unwrap(),
+            u64::from(model.size_mb) * 1_000_000
+        );
+        assert!(
+            backend
+                .speech_downloads(std::slice::from_ref(&model))
+                .unwrap()["fw-medium"]
+        );
+        let cancel = Arc::new(AtomicBool::new(true));
+        let small = lf_ui::setup_flow::stt_model_by_id("fw-large-v3").unwrap();
+        assert!(backend
+            .download_speech(&small, Box::new(|_| {}), cancel.clone())
+            .is_err());
+        assert!(
+            !backend
+                .speech_downloads(std::slice::from_ref(&small))
+                .unwrap()["fw-large-v3"]
+        );
+        assert_eq!(
+            backend.try_dictation(&model, None, None).unwrap(),
+            SIMULATED_TRANSCRIPT
+        );
+        assert!(backend
+            .try_dictation_cancellable(&model, None, None, cancel)
+            .is_err());
+        assert_eq!(backend.speech_format(&model), Some("Simulated"));
+        let mut meter =
+            crate::controllers::setup_flow::MeterInput::open(&SimMeterInput, None).unwrap();
+        assert!(meter.level() > 0.0);
+        meter.stop();
+    }
+
+    #[test]
+    fn sandbox_download_delete_setup_and_cleanup_share_one_inventory() {
+        use crate::controllers::model_storage::SpeechStorage;
+        use lf_ui::setup_backend::SetupModelBackend;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let state = SimSpeech::seeded();
+        let storage = SimStorage::new(state.clone());
+        let backend = SimSetupBackend::with_state(state, std::time::Duration::from_millis(1));
+        let models: Vec<_> = ["fw-base", "fw-small", "fw-medium"]
+            .iter()
+            .map(|id| lf_ui::setup_flow::stt_model_by_id(id).unwrap())
+            .collect();
+        let mut config = Config::defaults_for(false);
+        config.set_field("stt_backend", json!("faster-whisper"));
+        let whisper = |storage: &SimStorage, config: &Config| {
+            storage
+                .inventory(config)
+                .unwrap()
+                .models
+                .into_iter()
+                .find(|m| m.repo == lf_stt_repo::WHISPER_CPP)
+        };
+        let before = whisper(&storage, &config).unwrap();
+        assert_eq!(before.status, "Selected");
+        assert!(storage
+            .delete(lf_stt_repo::WHISPER_CPP, &config)
+            .unwrap_err()
+            .contains("Choose another"));
+        assert!(storage
+            .delete(lf_stt_repo::PARAKEET_ONNX, &config)
+            .unwrap_err()
+            .contains("running LocalFlow"));
+        // A download shows up in storage too.
+        backend
+            .download_speech(
+                &models[2],
+                Box::new(|_| {}),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let grown = whisper(&storage, &config).unwrap();
+        assert!(grown.size_bytes > before.size_bytes);
+        assert!(grown.label.contains("medium"));
+        // Deleting (once not selected) makes setup and the catalogue agree.
+        config.set_field("stt_backend", json!("parakeet"));
+        let freed = storage.delete(lf_stt_repo::WHISPER_CPP, &config).unwrap();
+        assert_eq!(freed, grown.size_bytes);
+        let inspected = backend.speech_downloads(&models).unwrap();
+        assert!(
+            inspected.values().all(|installed| !installed),
+            "{inspected:?}"
+        );
+        assert!(whisper(&storage, &config).is_none());
+        assert!(
+            storage.delete(lf_stt_repo::WHISPER_CPP, &config).is_err(),
+            "already gone"
+        );
+        // A cleanup pull lands in the simulated Ollama list.
+        assert!(!backend
+            .ollama("")
+            .unwrap()
+            .1
+            .contains(&"gemma3:4b".to_string()));
+        backend
+            .pull_cleanup(
+                "",
+                "gemma3:4b",
+                Box::new(|_| {}),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(backend
+            .ollama("")
+            .unwrap()
+            .1
+            .contains(&"gemma3:4b".to_string()));
+        // A cancelled pull adds nothing.
+        assert!(backend
+            .pull_cleanup(
+                "",
+                "qwen2.5:7b",
+                Box::new(|_| {}),
+                Arc::new(AtomicBool::new(true))
+            )
+            .is_err());
+        assert!(!backend
+            .ollama("")
+            .unwrap()
+            .1
+            .contains(&"qwen2.5:7b".to_string()));
     }
 
     #[test]

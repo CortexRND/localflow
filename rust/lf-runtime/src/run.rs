@@ -14,7 +14,7 @@ use lf_core::{
     config::Config, dictionary::DictionaryStore, history::HistoryStore, hotphrases::HotPhraseStore,
     symbols::discover_commands,
 };
-use lf_input::{hub::KeyboardHub, paste::Injector};
+use lf_input::{hub::KeyboardHub, paste::Injector, InputError, InputWarning};
 use lf_providers::{
     factory::{build_llm, BuildOptions},
     CoreSecrets,
@@ -28,7 +28,7 @@ use crate::menubar::{MenuActions, MenuState};
 use crate::pipeline::Vocabulary;
 use crate::settings::{bool_field, dictation_enabled, load_runtime_config, toggle_dictation};
 use crate::singleinstance::{acquire_at, lock_file_path, SingleInstance};
-use crate::status::{last_text_path, read_last_text, status_path, write_state};
+use crate::status::{last_text_path, read_last_text, status_path, ListenerFact, StatusReporter};
 use crate::warmup::LlmWarmer;
 use crate::worker::{LlmFactory, SttFactory, VocabularyFn, WorkItem, Worker};
 
@@ -41,7 +41,12 @@ pub struct RunOptions {
 
 pub type ToggleStore = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
 type KeyboardSource = Arc<
-    dyn Fn(&KeyboardHub, lf_input::listener::WarningSink, Arc<AtomicBool>) -> Result<(), String>
+    dyn Fn(
+            &KeyboardHub,
+            lf_input::listener::WarningSink,
+            Arc<AtomicBool>,
+            lf_input::listener::ReadySink,
+        ) -> Result<(), InputError>
         + Send
         + Sync,
 >;
@@ -80,9 +85,17 @@ pub struct RuntimeHandle {
     worker_done: Option<std::sync::mpsc::Receiver<()>>,
     listener: Option<JoinHandle<Result<(), String>>>,
     lock: Option<SingleInstance>,
+    status: Option<Arc<StatusReporter>>,
 }
 
 impl RuntimeHandle {
+    /// The status-file `instance` of this running runtime: proof for the
+    /// process owning this handle that a status file is its current
+    /// runtime's (not an earlier start's). `None` once shut down.
+    pub fn status_instance(&self) -> Option<String> {
+        self.status.as_ref().map(|s| s.instance().to_string())
+    }
+
     pub fn apply_config(&self, config: &Config) {
         self.live.apply(config);
     }
@@ -108,6 +121,11 @@ impl RuntimeHandle {
         }
         let _ = self.work.send(WorkItem::Shutdown);
         let finished = self.finish_worker(timeout);
+        // Readers see an explicit stop, not a stale "ok" listener.
+        if let Some(status) = self.status.take() {
+            status.set_listener(ListenerFact::Dead, "LocalFlow stopped");
+            status.set_state("stopped");
+        }
         self.lock.take();
         finished
     }
@@ -172,9 +190,18 @@ pub fn start_with_menu(
 }
 
 fn keyboard_source(prompt: bool) -> KeyboardSource {
-    Arc::new(move |hub, warn, stop| {
-        lf_input::listener::run_cancellable(hub, warn, stop, prompt).map_err(|e| e.to_string())
+    Arc::new(move |hub, warn, stop, ready| {
+        lf_input::listener::run_cancellable_with_ready(hub, warn, stop, prompt, ready)
     })
+}
+
+/// The listener fact an exit reason stands for.
+fn listener_failure(error: &InputError) -> ListenerFact {
+    match error {
+        InputError::TapCreateFailed => ListenerFact::Denied,
+        InputError::Unsupported(_) => ListenerFact::Unsupported,
+        InputError::Backend(_) => ListenerFact::Dead,
+    }
 }
 
 pub fn default_vocabulary(config: &Config) -> VocabularyFn {
@@ -207,17 +234,25 @@ fn start_at(
     paths: RuntimePaths,
     listen: KeyboardSource,
 ) -> Result<Option<RuntimeHandle>> {
-    let Some(lock) = acquire_at(&paths.lock)? else {
+    let Some(mut lock) = acquire_at(&paths.lock)? else {
         return Ok(None);
     };
     let config = Arc::new(load_runtime_config(paths.config_source.as_deref())?);
     let history_enabled = bool_field(&config, "history_enabled", true);
-    let _ = write_state("idle", &paths.status);
+    let lock_identity = lock.identity().unwrap_or_default();
+    let status = Arc::new(
+        StatusReporter::new(
+            &paths.status,
+            config.field_str("input_device").unwrap_or(""),
+        )
+        .with_lock_identity(&lock_identity),
+    );
+    status.publish();
     let (work_tx, work_rx) = work_queue();
     let state_menu = menu.clone();
     let toggle_path = paths.config.clone();
     let history_path = paths.history.clone();
-    let state_path = paths.status;
+    let state_status = status.clone();
     let live_slot: Arc<Mutex<Weak<LiveSettings>>> = Arc::default();
     let toggle_live = live_slot.clone();
     let toggle = toggle.unwrap_or_else(|| {
@@ -241,7 +276,7 @@ fn start_at(
         play_sound: options.play_sound,
         frontmost: Arc::new(crate::context::frontmost_app),
         on_state: Some(Arc::new(move |state: &str| {
-            let _ = write_state(state, &state_path);
+            state_status.set_state(state);
             state_menu.change(|m| m.app_state = state.to_string());
         })),
         latest_text: Arc::new(move |fallback: &str| {
@@ -291,6 +326,7 @@ fn start_at(
         worker_done: None,
         listener: None,
         lock: Some(lock),
+        status: Some(status.clone()),
     };
     let worker_live = live.clone();
     let deliver_controller = controller.clone();
@@ -332,17 +368,26 @@ fn start_at(
     live.set_hub(hub.clone());
     let apply_live = live.clone();
     let tick_live = live.clone();
+    let beat = status.clone();
+    let mic_status = status.clone();
     let loader_path = paths.config_source.clone();
     handle.watch = Some(
         ConfigWatcher::new(
             paths.config.clone(),
             Arc::new(move || load_runtime_config(loader_path.as_deref())),
             Arc::new(move |fresh| {
+                mic_status.set_mic_configured(fresh.field_str("input_device").unwrap_or(""));
                 apply_live.apply(&fresh);
             }),
         )
         .with_tick(
-            Arc::new(move || tick_live.retry()),
+            // Always wake on the interval so the status heartbeat stays fresh
+            // while this runtime lives; deferred rebinding retries meanwhile.
+            Arc::new(move || {
+                tick_live.retry();
+                beat.beat();
+                true
+            }),
             crate::live::DEFAULT_INTERVAL,
         )
         .start(),
@@ -352,28 +397,52 @@ fn start_at(
     }
     let listener_stop = handle.stop.clone();
     let warning_menu = menu.clone();
+    let listener_status = status;
+    let listener_controller = controller.clone();
     handle.listener = Some(
         std::thread::Builder::new()
             .name("localflow-keyboard".into())
             .spawn(move || {
-                let warn = Arc::new(move |warning| {
+                let warn_status = listener_status.clone();
+                let warn = Arc::new(move |warning: InputWarning| {
                     log::warn!("{warning}");
+                    match warning {
+                        InputWarning::InputMonitoringDenied => {
+                            warn_status.add_warning("input-monitoring")
+                        }
+                        InputWarning::DeadTap => {
+                            warn_status.listener_dead("dead-tap", &warning.to_string())
+                        }
+                    }
                     warning_menu
                         .change(|m| m.input_warning = Some("⚠︎ Input Monitoring needed".into()));
                 });
-                let result = listen(&hub, warn, listener_stop.clone());
+                // Only the platform's own confirmation marks the listener ok.
+                let ready_status = listener_status.clone();
+                let ready: lf_input::listener::ReadySink =
+                    Arc::new(move || ready_status.set_listener(ListenerFact::Ok, ""));
+                let result = listen(&hub, warn, listener_stop.clone(), ready);
                 if !listener_stop.load(Ordering::Acquire) {
-                    log::warn!(
-                        "keyboard listener stopped: {}",
-                        result
-                            .as_ref()
-                            .err()
-                            .map(String::as_str)
-                            .unwrap_or("unexpected exit")
-                    );
-                    menu.change(|m| m.input_warning = Some("⚠︎ Input Monitoring needed".into()));
+                    let reason = result
+                        .as_ref()
+                        .err()
+                        .map(InputError::to_string)
+                        .unwrap_or_else(|| "unexpected exit".into());
+                    log::warn!("keyboard listener stopped: {reason}");
+                    let fact = result
+                        .as_ref()
+                        .err()
+                        .map_or(ListenerFact::Dead, listener_failure);
+                    listener_status.set_listener(fact, &reason);
+                    // Hold ends, command and hands-free are discarded.
+                    crate::app::listener_lost(&hub, &listener_controller);
+                    let note = match fact {
+                        ListenerFact::Unsupported => "⚠︎ Global shortcuts unavailable",
+                        _ => "⚠︎ Input Monitoring needed",
+                    };
+                    menu.change(|m| m.input_warning = Some(note.into()));
                 }
-                result
+                result.map_err(|e| e.to_string())
             })?,
     );
     Ok(Some(handle))
@@ -466,7 +535,7 @@ mod tests {
             MenuState::new(None, true),
             None,
             RuntimePaths::user().unwrap(),
-            Arc::new(|_, _, _| Err("test listener".into())),
+            Arc::new(|_, _, _, _| Err(InputError::Backend("test listener".into()))),
         )
         .unwrap()
         .unwrap();
@@ -571,7 +640,8 @@ mod tests {
             count.fetch_add(1, Ordering::SeqCst);
             Ok(blocked.clone())
         });
-        let listener: KeyboardSource = Arc::new(|_, _, _| Err("test listener".into()));
+        let listener: KeyboardSource =
+            Arc::new(|_, _, _, _| Err(InputError::Backend("test listener".into())));
         let mut runtime = start_at(
             opts,
             MenuState::new(None, true),
@@ -631,7 +701,7 @@ mod tests {
             MenuState::new(None, true),
             None,
             paths(root.path()),
-            Arc::new(|_, _, _| Err("permission denied".into())),
+            Arc::new(|_, _, _, _| Err(InputError::TapCreateFailed)),
         )
         .unwrap()
         .unwrap();
@@ -642,6 +712,11 @@ mod tests {
             .input_warning
             .unwrap()
             .contains("Input Monitoring needed"));
+        let status = crate::status::StatusFile::read(&paths(root.path()).status)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.listener, Some(ListenerFact::Denied));
+        assert!(status.warnings.contains(&"listener".to_string()));
         assert!(!recording.load(Ordering::Acquire));
         runtime.controller.note_start();
         received.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -649,6 +724,279 @@ mod tests {
         runtime.shutdown();
         assert!(!recording.load(Ordering::Acquire));
     }
+    #[test]
+    fn a_failing_listener_ends_toggle_mode_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.set_field("command_names", serde_json::json!([]));
+        config.set_field("skills_dirs", serde_json::json!([]));
+        config.set_field("cleanup_enabled", serde_json::json!(false));
+        lf_core::config::save_config(&config, Some(&paths(root.path()).config)).unwrap();
+        let recording = Arc::new(AtomicBool::new(false));
+        let (started, capture_started) = mpsc::channel();
+        let (fail, failure) = mpsc::channel::<()>();
+        let failure = Mutex::new(failure);
+        let mut runtime = start_at(
+            options(Box::new(Audio {
+                recording: recording.clone(),
+                started,
+            })),
+            MenuState::new(None, true),
+            None,
+            paths(root.path()),
+            Arc::new(move |_, _, _, ready| {
+                ready();
+                // The source dies (X connection lost) while hands-free
+                // recording runs.
+                failure.lock().unwrap().recv().unwrap();
+                Err(InputError::Backend("X connection closed".into()))
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        runtime.controller.note_toggle();
+        capture_started
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        assert!(recording.load(Ordering::Acquire));
+        fail.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while recording.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "capture kept running after the shortcuts disappeared"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status = crate::status::StatusFile::read(&paths(root.path()).status)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.listener, Some(ListenerFact::Dead));
+        runtime.shutdown();
+    }
+
+    /// How a fake platform registration ended.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Registration {
+        /// The test completed it; the listener then ran until stopped.
+        Registered,
+        /// The runtime stopped first: the listener returned without ready.
+        Stopped,
+        /// The test's gate was dropped (e.g. an assertion unwound).
+        Released,
+        /// Nobody completed or stopped it in time.
+        TimedOut,
+    }
+
+    /// Upper bound for any wait inside the fake listener.
+    const FAKE_LISTENER_WAIT: Duration = Duration::from_secs(10);
+
+    /// The test's side of a fake platform registration. Every wait in the
+    /// fake listener is bounded and honours the runtime's `stop`, so
+    /// `RuntimeHandle::drop` (which joins the listener) can never be
+    /// stranded; dropping the gate (also on an assertion unwind) releases
+    /// a listener still waiting.
+    struct RegistrationGate {
+        entered: mpsc::Receiver<()>,
+        register: mpsc::Sender<()>,
+        ended: mpsc::Receiver<Registration>,
+    }
+
+    impl RegistrationGate {
+        fn wait_entered(&self) {
+            self.entered
+                .recv_timeout(Duration::from_secs(3))
+                .expect("the listener never started registering");
+        }
+        fn register(&self) {
+            self.register.send(()).expect("the listener already ended");
+        }
+        fn ended(&self) -> Option<Registration> {
+            self.ended.recv_timeout(Duration::from_secs(3)).ok()
+        }
+    }
+
+    /// A fake platform listener that reports ready only when the test
+    /// completes its registration through the returned gate.
+    fn gated_listener() -> (KeyboardSource, RegistrationGate) {
+        let (entered_tx, entered) = mpsc::channel();
+        let (register, registered) = mpsc::channel::<()>();
+        let (ended_tx, ended) = mpsc::channel();
+        let registered = Mutex::new(registered);
+        let source: KeyboardSource = Arc::new(move |_, _, stop, ready| {
+            let _ = entered_tx.send(());
+            let deadline = std::time::Instant::now() + FAKE_LISTENER_WAIT;
+            let registered = registered.lock().unwrap_or_else(|p| p.into_inner());
+            let outcome = loop {
+                if stop.load(Ordering::Acquire) {
+                    break Registration::Stopped;
+                }
+                match registered.recv_timeout(Duration::from_millis(5)) {
+                    Ok(()) => break Registration::Registered,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break Registration::Released,
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                        if std::time::Instant::now() >= deadline =>
+                    {
+                        break Registration::TimedOut
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            };
+            let result = match outcome {
+                Registration::Registered => {
+                    ready();
+                    while !stop.load(Ordering::Acquire) {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Ok(())
+                }
+                Registration::Stopped => Ok(()),
+                Registration::Released | Registration::TimedOut => {
+                    Err(InputError::Backend("fake registration abandoned".into()))
+                }
+            };
+            let _ = ended_tx.send(outcome);
+            result
+        });
+        (
+            source,
+            RegistrationGate {
+                entered,
+                register,
+                ended,
+            },
+        )
+    }
+
+    fn offline_config(root: &std::path::Path) {
+        let mut config = Config::default();
+        config.set_field("command_names", serde_json::json!([]));
+        config.set_field("skills_dirs", serde_json::json!([]));
+        config.set_field("cleanup_enabled", serde_json::json!(false));
+        lf_core::config::save_config(&config, Some(&paths(root).config)).unwrap();
+    }
+
+    fn start_gated(root: &std::path::Path, listener: KeyboardSource) -> RuntimeHandle {
+        let (started, _) = mpsc::channel();
+        start_at(
+            options(Box::new(Audio {
+                recording: Arc::new(AtomicBool::new(false)),
+                started,
+            })),
+            MenuState::new(None, true),
+            None,
+            paths(root),
+            listener,
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn listener_is_ok_only_after_platform_registration_and_stop_is_explicit() {
+        use crate::status::StatusFile;
+        let root = tempfile::tempdir().unwrap();
+        offline_config(root.path());
+        let (listener, gate) = gated_listener();
+        let mut runtime = start_gated(root.path(), listener);
+        let status_path = paths(root.path()).status;
+        gate.wait_entered();
+        let before = StatusFile::read(&status_path).unwrap().unwrap();
+        assert_eq!(
+            before.instance,
+            runtime.status_instance(),
+            "the handle proves the file"
+        );
+        // Read the lock record through the runtime's own locked handle: on
+        // Windows the lock is mandatory, so a second handle can't read it
+        // while held.
+        let held = runtime
+            .lock
+            .as_mut()
+            .expect("the runtime holds the lock")
+            .identity()
+            .expect("the held lock's record is readable through its handle");
+        let pid = std::process::id().to_string();
+        assert_eq!(held.split_whitespace().next(), Some(pid.as_str()));
+        assert_eq!(
+            before.lock_identity.as_deref(),
+            Some(held.trim()),
+            "bound to this lock acquisition"
+        );
+        assert_eq!(
+            before.listener,
+            Some(ListenerFact::Starting),
+            "a spawned listener thread is not a listening one"
+        );
+        gate.register();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let now = StatusFile::read(&status_path).unwrap().unwrap();
+            if now.listener == Some(ListenerFact::Ok) {
+                assert_eq!(now.instance, before.instance);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "listener never ok");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        runtime.shutdown();
+        assert_eq!(gate.ended(), Some(Registration::Registered));
+        assert_eq!(runtime.status_instance(), None, "no proof after shutdown");
+        let after = StatusFile::read(&status_path).unwrap().unwrap();
+        assert_eq!(after.state.as_deref(), Some("stopped"));
+        assert_eq!(after.listener, Some(ListenerFact::Dead));
+        // Released now: an ordinary reader sees the same acquisition record.
+        let lock = paths(root.path()).lock;
+        assert_eq!(
+            crate::singleinstance::read_holder_at(&lock).0,
+            Some(std::process::id())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock)
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            before.lock_identity.as_deref()
+        );
+    }
+
+    #[test]
+    fn shutdown_before_platform_registration_never_strands_the_handle() {
+        use crate::status::StatusFile;
+        let root = tempfile::tempdir().unwrap();
+        offline_config(root.path());
+        // The gate (and its sender) stays alive throughout: only `stop` can
+        // end the listener's wait.
+        let (listener, gate) = gated_listener();
+        let runtime = start_gated(root.path(), listener);
+        gate.wait_entered();
+        // Drop the handle on a helper thread so a regression fails this test
+        // after a bounded wait instead of hanging it; the gate is dropped on
+        // that failure path too, releasing the listener.
+        let (done_tx, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "RuntimeHandle::drop was stranded by a listener still registering"
+        );
+        assert_eq!(gate.ended(), Some(Registration::Stopped));
+        let after = StatusFile::read(&paths(root.path()).status)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state.as_deref(), Some("stopped"));
+        assert_eq!(
+            after.listener,
+            Some(ListenerFact::Dead),
+            "never reported ok"
+        );
+    }
+
     #[test]
     fn speech_loads_at_recording_start_not_at_startup() {
         struct SignalLoad(mpsc::Sender<()>);
@@ -683,7 +1031,7 @@ mod tests {
             MenuState::new(None, true),
             None,
             paths(root.path()),
-            Arc::new(|_, _, _| Err("test listener".into())),
+            Arc::new(|_, _, _, _| Err(InputError::Backend("test listener".into()))),
         )
         .unwrap()
         .unwrap();
@@ -707,7 +1055,7 @@ mod tests {
             MenuState::new(None, true),
             None,
             paths(root.path()),
-            Arc::new(|_, _, _| panic!("must not start a second listener"))
+            Arc::new(|_, _, _, _| panic!("must not start a second listener"))
         )
         .unwrap()
         .is_none());

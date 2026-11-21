@@ -8,6 +8,7 @@ pub mod meetings;
 pub mod models;
 pub mod prompts;
 pub mod settings;
+pub mod setup;
 pub mod snippets;
 pub mod style;
 

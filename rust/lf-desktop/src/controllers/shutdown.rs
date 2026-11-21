@@ -98,8 +98,60 @@ pub fn finish(
     }
 }
 
+/// What still keeps the window from closing, checked fresh right before it
+/// does (never from an earlier snapshot): running model jobs, an in-flight
+/// model deletion, and persistent writes (`writes_idle` comes from
+/// `lf_ui::shutdown::wait_for_pending_writes`).
+pub fn remaining_work(
+    downloads: &crate::controllers::jobs::Downloads,
+    writes_idle: bool,
+) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if downloads.any_running() {
+        out.push("A model download is still running.");
+    }
+    if downloads.deleting() {
+        out.push("A speech model is still being deleted.");
+    }
+    if !writes_idle {
+        out.push("A settings or key change is still being saved.");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closing_rechecks_work_that_started_after_the_drain() {
+        use super::remaining_work;
+        use crate::controllers::jobs::{speech_key, Downloads};
+        let downloads = Downloads::new();
+        assert!(remaining_work(&downloads, true).is_empty());
+        // Work that appears after the one-time drain is still reported.
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        downloads.start(
+            &speech_key("fw-base"),
+            Box::new(move |_, _| {
+                let _ = gate.recv();
+                Ok(())
+            }),
+        );
+        assert_eq!(
+            remaining_work(&downloads, true),
+            vec!["A model download is still running."]
+        );
+        go.send(()).unwrap();
+        assert!(downloads.wait_idle(std::time::Duration::from_secs(3)));
+        let guard = downloads.begin_delete().unwrap();
+        assert_eq!(
+            remaining_work(&downloads, false).len(),
+            2,
+            "deletion + pending write"
+        );
+        drop(guard);
+        assert!(remaining_work(&downloads, true).is_empty());
+    }
+
     use super::*;
     use lf_core::hotphrases::HotPhraseStore;
     use lf_core::phrases_model::{PhrasesModel, PhrasesSettings};

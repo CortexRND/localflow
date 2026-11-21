@@ -5,11 +5,15 @@ A native desktop window for LocalFlow, drawn with [GPUI](https://crates.io/crate
 history SQLite, `dictionary.json`, `hot_phrases.json`, keyring) and talks to the
 existing local HTTP service for Ask, Meetings and Prompts.
 
-**The migration is not complete.** This crate is step 1 of a staged migration: a
-parallel GPUI front end whose library and config workflows are connected to the real
-stores. It isn't the default launcher and it doesn't replace `lf hub`, `lf-hub` (the
-macOS AppKit Hub), `lf setup` or the Python runtime. Installers and launch
-behaviour are unchanged, and this window does not run dictation itself.
+**The migration is not complete.** This crate covers steps 1 and 2 of a staged
+migration: a parallel GPUI front end connected to the real stores, plus the
+runtime/setup parity work (setup wizard, model storage, key import, Test
+connection, settings assistant, runtime status, single-instance routing and an
+opt-in in-window engine). It isn't the default launcher and it doesn't replace
+`lf hub`, `lf-hub` (the macOS AppKit Hub), `lf setup` or the Python runtime.
+Installers, packaging and launch behaviour are unchanged. By default this window
+does not run dictation; a `--features runtime` build can, after `--engine` and an
+explicit **Start here**.
 
 ## Migration sequence and acceptance gates
 
@@ -19,8 +23,8 @@ gate holds. The full feature matrix is in
 
 | Step | PR scope | Acceptance gate before the next step |
 |---|---|---|
-| **1. Parallel front end** (this PR) | Native app beside the existing ones. Home, History, Dictionary, Snippets, Style, Settings and Models & keys are connected to the real stores and config. Ask, Meetings and Prompts use the existing local HTTP service. Isolated `--sandbox`. Dedicated `gpui.yml` CI | Linux and macOS CI green (`gpui.yml`). Legacy runtime, launchers and installers unchanged. Existing CI changed only by the Windows `whisper-rs-sys` CMake-cache cleanup in `rust.yml`. UI testing for this PR was waived by the owner; native rendering on screen is unverified (later steps keep their validation gates) |
-| 2. Runtime and global-input parity | Setup wizard (model downloads, mic level, trial). Model storage. Settings assistant. Key import and Test LLM. Real runtime status (input device, listening, warnings) from the engine instead of HTTP reachability. Global hotkeys on Linux in the Rust engine. Single instance and `page-request.json` routing | Every capability the Python Hub and `lf-hub` offer works here, or the owner waives it in writing. Dictation readiness is shown only from a runtime signal |
+| **1. Parallel front end** (done) | Native app beside the existing ones. Home, History, Dictionary, Snippets, Style, Settings and Models & keys are connected to the real stores and config. Ask, Meetings and Prompts use the existing local HTTP service. Isolated `--sandbox`. Dedicated `gpui.yml` CI | Linux and macOS CI green (`gpui.yml`). Legacy runtime, launchers and installers unchanged. Existing CI changed only by the Windows `whisper-rs-sys` CMake-cache cleanup in `rust.yml`. UI testing for this PR was waived by the owner; native rendering on screen is unverified (later steps keep their validation gates) |
+| **2. Runtime and global-input parity** (this PR) | Setup wizard (checks, mic level, model choice/download, cleanup, shortcut, trial, apply). Model storage. Settings assistant. Key import and Test connection. Runtime status from the runtime's own status file (protocol 2) instead of HTTP reachability. Linux X11 global hotkeys in the Rust engine. Single instance and page routing. Opt-in engine behind `--features runtime` + `--engine` | Every capability the Python Hub and `lf-hub` offer works here, or the owner waives it in writing. Dictation readiness is shown only from a runtime signal. Interactive and macOS runtime QA are still open (UI probing on the development VM was waived by the owner) |
 | 3. Packaging | Installers build and ship a release `lf-desktop`. System-library requirements documented per distribution. macOS app bundle and signing | Clean install, upgrade and uninstall on each supported platform. Existing installs keep working |
 | 4. Opt-in, then default-launch cutover | First an opt-in (`lf hub --gpui` or a config flag). After a soak period, `lf hub`, `lf phrases` and `lf setup` prefer `lf-desktop`, with a fallback to the current UIs | The data-safety hash check passes. Accessibility is accepted (GPUI has no accessibility tree today). Light and dark screenshots of every page are reviewed. The owner agrees |
 | 5. Legacy retirement | Remove the Tk Hub and the AppKit Hub paths that are no longer launched, and controller code duplicated from `lf_ui::mac` | One release cycle on the new default without a rollback |
@@ -36,27 +40,41 @@ LF_DESKTOP_RELEASE=1 scripts/run_gpui.sh                          # optimised bu
 cargo test   --manifest-path rust/lf-desktop/Cargo.toml --workspace
 cargo fmt    --manifest-path rust/lf-desktop/Cargo.toml --all -- --check
 cargo clippy --manifest-path rust/lf-desktop/Cargo.toml --workspace --all-targets -- -D warnings
+
+# Runtime-enabled build: native speech engine (whisper.cpp / Parakeet ONNX),
+# model inspection/download/delete, the setup trial and the opt-in engine.
+cargo build  --manifest-path rust/lf-desktop/Cargo.toml --features runtime
+cargo test   --manifest-path rust/lf-desktop/Cargo.toml --workspace --features runtime
+rust/lf-desktop/target/debug/lf-desktop --engine     # then press "Start here" on Home
 ```
 
 `lf-desktop --help` lists the options:
 
 | Option | Effect |
 |---|---|
-| `--page <PAGE>` | `home`, `history`, `dictionary`, `snippets` (also `"Hot Phrases"`), `style`, `ask`, `meetings`, `prompts`, `models`, `settings`. An unknown page opens Home with a notice |
-| `--setup` | Opens Home with the setup checklist expanded |
+| `--page <PAGE>` | `home`, `history`, `dictionary`, `snippets` (also `"Hot Phrases"`), `style`, `ask`, `meetings`, `prompts`, `models`, `settings`, `setup`. An unknown page opens Home with a notice |
+| `--setup` | Opens the setup wizard (or hands it to the window already open) |
+| `--engine` | Lets this window run dictation (Home → **Start here**). Needs a `--features runtime` build; refused with the rebuild command otherwise, and always refused with `--sandbox`. Nothing starts until you press Start |
 | `--sandbox` | Uses isolated example data and in-process fake services (also `LOCALFLOW_SANDBOX=1`) |
 | `--data-dir <DIR>` | Sandbox directory, only valid with `--sandbox` |
-| `--sandbox-reset` | Re-seeds the sandbox directory |
+| `--sandbox-reset` | Re-seeds the sandbox directory (refused while that sandbox is open in another window) |
 
-An unknown argument exits with status 2.
+An unknown argument, or `--engine` where it can't run, exits with status 2. A first
+launch with no setup marker in the config (and no `--page`) opens the wizard,
+using the Hub's `hub_route::plan_initial_route` policy.
 
 The crate is a **standalone Cargo workspace** with its own `Cargo.lock`, so GPUI's
 dependency tree and system libraries stay out of the `rust/` workspace and its CI.
 `.github/workflows/gpui.yml` is an additive workflow that only runs when this crate
 or one of its path dependencies changes:
 
-- **Linux:** fmt, clippy, the headless tests (including the shim's) and the build.
-- **macOS:** the shim tests and a full type-check.
+- **Linux:** fmt, then clippy, the headless tests (including the shim's) and the
+  build, each for the default build and for `--features runtime`.
+- **macOS:** the shim tests and a full type-check of both builds.
+
+The runtime feature adds `lf-stt` (whisper.cpp needs CMake and libclang) and
+`lf-ui/runtime`; its tests use temp directories and fakes only (no audio, keyboard
+hook, model download or keyring).
 
 `vendor/xattr-shim` is a member of this workspace and contains no unsafe code. GPUI's
 tar dependency requires `xattr 0.2`, whose last release reads `libc::ENOATTR`,
@@ -111,11 +129,119 @@ meantime, are kept. The running LocalFlow runtime reads the same file.
 - Keys live in memory only. The OS keyring is never read or written.
 - Ask, Meetings and Prompts use the existing in-process fakes, and no socket is
   opened. Ask answers with a labelled keyword match over the example history.
+- Setup, model storage, key import, Test connection and the runtime status are
+  simulated: downloads tick to 100 % in about 3 s, the microphone meter plays a
+  canned curve (the microphone is never opened), the trial returns a fixed
+  transcript, key import scans a fixed example environment, Test connection
+  answers OK after 400 ms without a socket. Each simulated result carries a
+  "Simulated" token. Settings → Advanced has a sandbox-only selector that steps
+  Home and the sidebar through every runtime state.
+- The settings assistant is the real native agent over the sandbox files with a
+  scripted offline chat client ("turn off sounds", "casual tone", "hold right
+  control", "add Kubernetes").
+- `--engine` is refused: no microphone, keyboard listener, engine or HTTP server
+  is ever started in a sandbox.
 - A permanent banner and the window title say "Sandbox".
+
+## Single window and page routing
+
+One window runs per mode and data folder. The lock is an OS advisory lock
+(`lf_runtime::singleinstance`, held for the whole process, so a crash never
+leaves a stale lock and nothing compares PIDs). A second launch writes its page
+(or `Setup`) with `lf_ui::hub_route::RequestFile` (whitelisted page ids, atomic
+tmp + rename, per-consumer claim, 20 s TTL) and exits 0; the open window raises
+itself and navigates within 250 ms. A request that arrives while the setup
+overlay or a dialog is open is applied when it closes. If the owner exits between
+the lock attempt and the hand-off, the new launch takes the lock and opens the
+window itself, so a launch is never lost. The request file has one slot: two
+launches within the same 250 ms poll leave only the later page (last wins).
+
+| Mode | Lock and request directory |
+|---|---|
+| Real | `~/.localflow/desktop/` (`main-app.lock`, `page-request.json`) — separate from the legacy Hub's `~/.localflow/main-app.lock`, so `lf-hub` and the Python Hub keep their own routing until cutover |
+| Sandbox | `<sandbox dir>/desktop-instance/` — kept by `--sandbox-reset`, which is refused while that sandbox is open |
+
+## Setup wizard
+
+**Run setup** on Home's checklist, **Run setup again** in Settings → General,
+`--setup`, `--page setup`, a routed `Setup` request or a first launch open a
+full-window, seven-step wizard: Checkup, Microphone, Speech model, Cleanup,
+Shortcut, Try it, Review. It is built on `lf_ui::setup_flow` (`initial_choices`,
+`run_checks`, `available_stt_models`, `recommend`, `config_update`) and
+`lf_ui::setup_backend::FlowModelBackend`.
+
+- Nothing is written until **Apply and finish**. Apply reloads the config under
+  `config_write::with_lock` and writes only the fields the user changed since
+  setup opened, so other edits — including newer values of setup fields the
+  user left alone, such as other shortcuts or the recording limit — are kept. A
+  changed field that was also changed elsewhere is reported as a conflict and
+  nothing is saved; applying again replaces it explicitly. A failure keeps every
+  choice. Closing keeps the draft for the session (Home then offers **Resume
+  setup**).
+- The microphone opens only after **Test microphone** (a metering stream; no
+  audio is kept) and is released on leaving the step, Back, closing, the window
+  losing focus (also while the device is still opening — press Test again after
+  a permission prompt), or quit. The trial records at most 5 s after the model
+  loads, is cancelled by the same events, keeps "Try again" disabled until the
+  cancelled worker has returned, never writes History and never pastes.
+- The Linux checkup adds the global-shortcut session (X11 / Wayland) and the
+  paste helper (`xdotool` / `wtype`).
+- Cleanup: **With Ollama** (Ollama models, pulled on request) or **No
+  cleanup**; when a remote provider is active the choice is **Keep ‹provider›**
+  or **No cleanup** — switching provider stays in Models & keys.
+- Start at login is never changed here (macOS: `lf agent install/uninstall`).
+- Downloads, the trial and model deletes are refused while a runtime reports it
+  is recording or transcribing.
+- **Default build:** the microphone test works; speech inspection, download and
+  the trial say they need `--features runtime` (choices are still saved).
+  **Runtime build:** they run for real against the Hugging Face cache.
+
+## Models & keys
+
+- **Speech → Models on this computer:** each catalogue model for this machine
+  shows Not downloaded / Downloading (progress, Cancel) / Failed (Retry) /
+  Downloaded (Use) / In use. Opening the tab inspects local speech-model files
+  and asks the configured Ollama for its model list (one HTTP request); no model
+  file is downloaded until you click Download. Stored model folders (from
+  `lf_stt::model_storage`) can be deleted after a confirmation; the selected
+  model and models leased by a running LocalFlow (`stt_lease`) are protected,
+  and protection is re-checked at delete time. Use on a model that isn't
+  downloaded saves the choice and says it isn't downloaded. Default builds show
+  why these actions need the runtime feature.
+- **Providers → Import keys…:** scans the environment (on click) or a chosen /
+  typed `.env` file (literal `NAME=value` lines only), lists one row per key with
+  provider, source variable and "Replaces saved key", defaults from
+  `models_layout::import_states`. Key values are never shown, logged or put in
+  messages. Importing never changes the active provider. A provider whose key
+  comes from `LOCALFLOW_PROVIDER_KEY_<ID>` can't be imported (the saved key would
+  never be used).
+- **Test connection** (Cleanup tab and provider rows): only on click, on a
+  background thread, with a 10 s timeout. The provider in use is tested as
+  configured: it is built by the runtime's own factory
+  (`lf_providers::factory::build_llm`, so the configured endpoint, model and
+  endpoint-bound key are used) and asked for its model list (`healthcheck`:
+  Ollama `GET /api/tags`, OpenAI-compatible list models). Other provider rows
+  are tested as their preset with the saved key through
+  `ProviderKeys::test_llm` (the same model-list probe). No prompt or user text is
+  sent. The result is one of the three fixed sentences from `lf_providers::keys`.
+- A key save or provider switch closes its editor only if that same editor is
+  still open and nothing new was typed into it; an editor reopened or edited
+  while the change was saving keeps its draft and shows the result.
+
+## Settings assistant
+
+"Tell LocalFlow what to change" sits above the Settings tabs (collapsed by
+default). It uses `hub_settings::SettingsPageState` and the native settings agent
+on this window's explicit config, dictionary and undo files (loopback Ollama
+only). Preview runs on a worker; **Apply** and **Undo** run through
+`settings_worker::dispatch`. A preview made stale by any settings change can't be
+applied; an apply the agent refuses keeps the preview and shows why; Undo skips
+(and lists) settings that changed since. Secret-looking tokens in model output
+are masked. The manual Settings rows are unchanged.
 
 ## Runtime connection
 
-The app doesn't run the speech engine. It reports what it finds:
+The app reports what it finds:
 
 - **Local service.** It checks `GET http://{[server] host}:{[server] port}/healthz`
   (default `127.0.0.1:8756`) every 5 s on a background thread. When the service
@@ -125,16 +251,81 @@ The app doesn't run the speech engine. It reports what it finds:
   local service isn't running at …" with **Try again**. They never show empty data
   as if it were real. Start the service with `localflow` (the desktop runtime) or
   `lf serve`.
-- **Dictation.** The sidebar and the Home card report three things separately:
-  - the config, meaning whether `[dictation] enabled` is set and which shortcut is configured;
-  - whether the local service is reachable;
-  - input capability, which is always shown as unverified.
-
-  `/healthz` can be served by the API alone, so a reachable service never counts as
-  proof that a runtime is listening to the microphone or the global shortcut. That
-  holds on Linux and on macOS. Real runtime status arrives in step 2.
+- **Dictation.** Home and the sidebar read `~/.localflow/status.json` every second
+  (and this window's engine, when it runs one). Protocol 2, written by the Rust
+  runtime, keeps `state`/`since`/`pid` and adds `protocol`, `instance`,
+  `heartbeat` (every 5 s), `listener` (`starting` → `ok` only after the platform
+  accepted the keyboard listener; `denied` / `dead` / `unsupported` when it failed
+  or stopped), `session`, `mic.configured` / `mic.observed` and `warnings`. States:
+  Not running, Starting, **Shortcut listening** (protocol 2 + listener ok + fresh
+  heartbeat + proof the file belongs to the *current* runtime: either this
+  window's own engine, whose live `RuntimeHandle` reports the file's `instance`,
+  or — for an external runtime — the file's PID actually holding
+  `localflow.lock` (kernel `/proc/locks`, device + inode, without taking the
+  lock) *and* the file's `lock` identity matching the lock file's current
+  acquisition), Recording, Transcribing, Needs attention, Not responding (dead
+  PID, a lock that is free or held by another process, a file from an earlier
+  lock acquisition — same-process restart or recycled PID — or a heartbeat older
+  than 15 s) and status limited (the Python runtime and older Rust builds
+  still write protocol 1, which is never shown as ready). Without a usable file
+  Home claims only what it can prove: a missing file is Not running unless
+  its own proven runtime is starting or another process holds `localflow.lock`
+  ("Another LocalFlow handles dictation"). Without ownership proof, an unreadable
+  file is "LocalFlow's status can't be read"; a reported status with unverifiable
+  ownership is "status limited". While this window's
+  engine is starting, or runs but hasn't published its own instance yet, Home
+  says Starting whatever an older file claims. Limitation: on macOS an
+  *external* runtime's lock owner can't be read without taking the lock (flock
+  locks report no owner PID through `F_GETLK`), so an external runtime there
+  stays "status limited"; this window's own engine is verified by its
+  instance. On btrfs subvolumes `stat` and `/proc/locks` report different
+  devices, so an external runtime there shows as not responding (never ready).
+  "Shortcut listening" is the strongest claim: the microphone and speech model are
+  checked when dictation starts, and the configured and observed microphone are
+  shown separately. `/healthz` is a separate "Local service" line and never
+  changes the lead or the sidebar dot.
+- **Engine** (`--features runtime` + `--engine`, not in the sandbox): Home shows
+  **Start here** / **Stop**. It reuses `lf_ui::embedded::EmbeddedRuntime` on
+  LocalFlow's own data, starts only on that click, only with dictation on and
+  setup done, and never when another process is *proven* to hold
+  `localflow.lock` (that runtime is left alone and never stopped from here). A
+  PID recorded in `status.json` or the lock file alone, or a lock owner that
+  can't be read (macOS), never blocks Start; the engine's own lock decides.
+  Closing the window asks first, then stops only what this window started
+  (engine, model downloads) on a background thread with bounded waits. While it
+  stops, a "Stopping LocalFlow…" cover blocks clicks, keyboard shortcuts, page
+  routing from a second launch and the setup wizard. Right before the window
+  closes, running downloads, an in-flight model deletion and pending settings or
+  key writes are checked again (not from the earlier snapshot); late work keeps
+  the window open with the reason. If stopping isn't confirmed (still stopping,
+  or the engine failed while stopping) the window stays open, keeps ownership,
+  and says so: Cancel keeps it open (close again to retry), **Quit anyway** ends
+  the app without waiting.
+  If the shortcut listener dies while recording, held keys are treated as
+  released: a hold recording ends normally and is transcribed, while a
+  hands-free/toggle or command recording is discarded instead of left running.
 - **Store-backed pages** (Home, History, Dictionary, Snippets, Style, Settings,
   Models) work without the service.
+
+## Linux global shortcuts
+
+The Rust runtime (`lf-input`) now listens on **X11** with listen-only XInput2 raw
+key events through the pure-Rust `x11rb` connection: no grab, no subprocess, no
+root, `input` group or `/dev/input` access. It feeds the existing `KeyboardHub`
+(hold-to-talk including a bare modifier key-up, toggle and chords, left/right
+modifiers, auto-repeat suppression), releases held keys when it stops, and
+re-reads the keymap on `MappingNotify`. It requires the server to agree to
+XInput 2.1 or newer (before 2.1, raw events stop during another client's grab,
+which could lose a release); older servers get an explicit "unsupported" with
+the reason. Key events are never logged and no text
+is collected. **Wayland** sessions (`WAYLAND_DISPLAY`, even with XWayland) are
+reported as unsupported with the reason — compositors don't let apps see keys
+pressed in other apps — instead of claiming XWayland coverage. A session without
+a display is unsupported too. Pasting still needs `xdotool` (X11) or `wtype`
+(Wayland); Home and the setup checkup say when it's missing. macOS keeps its
+CGEventTap and Input Monitoring checks; the listener is reported ready only
+once the tap is installed with Input Monitoring granted (otherwise it stays
+"starting" next to the permission warning).
 
 ## Keyboard
 
@@ -148,7 +339,7 @@ The app doesn't run the speech engine. It reports what it finds:
 | Enter / Space | Activate the focused button, switch, segment, row or menu item |
 | Up / Down | Move between sidebar pages (when the sidebar is focused), history rows, or menu items |
 | Delete, Ctrl+C | Delete (with confirmation) or copy the selected History entry |
-| Escape | Close the dialog, menu or toast, or clear the History search |
+| Escape | Close the dialog, menu or toast, close the setup wizard (the draft is kept), or clear the History search |
 | Ctrl+Q / Ctrl+W | Quit (waits for pending writes) / close the window |
 
 Text fields handle Unicode graphemes, IME composition, mouse and keyboard selection,
@@ -170,8 +361,15 @@ These are tracked in `docs/gpui-migration.md`:
 
 - GPUI 0.2.2 doesn't publish an accessibility tree, so screen readers can't read
   the app. Keyboard and visual focus work.
-- The setup wizard isn't included: no model downloads, mic test or trial.
-- There's no in-window dictation and no tray item.
-- The settings assistant isn't included.
-- The app doesn't take part in single-instance or `page-request.json` routing.
-- Speech-model storage management isn't included.
+- None of the scope-2 UI was exercised interactively: owner-waived UI probing on
+  the development VM; behaviour is covered by controller, sandbox and CLI
+  subprocess tests. macOS runtime behaviour (tap readiness, engine, Metal
+  whisper) is type-checked in CI only.
+- The engine runs only on LocalFlow's own data folders, has no tray item, and
+  runs only in builds made with `--features runtime` (not packaged yet).
+- Wayland global shortcuts are not possible (see above). Windows isn't targeted.
+- The Python runtime still writes protocol-1 status, so Home shows it as
+  "Running · status limited".
+- `lf-hub` / the Python Hub and this window don't route to each other until the
+  cutover (separate lock namespaces on purpose).
+- Packaging, default-launch cutover and legacy retirement are later steps.

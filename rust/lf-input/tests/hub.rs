@@ -94,6 +94,55 @@ fn routes_hold_and_command_key_events() {
 }
 
 #[test]
+fn end_of_input_ends_a_hold_but_cancels_an_unfinished_command() {
+    let log: Log = Default::default();
+    let shortcuts = Shortcuts {
+        hold_key: "f19".into(),
+        command_key: "alt_r".into(),
+        toggle_combo: "<ctrl>+<alt>+t".into(),
+        ..Default::default()
+    };
+    let (hub, _) = hub(shortcuts, &log);
+    // Command mode entered, key still held, then the source is gone.
+    hub.press(k("alt_r"));
+    hub.fire_command_timer();
+    hub.end_of_input();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["command-down", "command-cancel"],
+        "never command-up"
+    );
+    // Idempotent; a later physical key-up of that key submits nothing.
+    hub.end_of_input();
+    hub.release(k("alt_r"));
+    assert_eq!(log.lock().unwrap().len(), 2);
+
+    // Command key pressed but timer not fired yet: disarmed, nothing fires.
+    log.lock().unwrap().clear();
+    hub.press(k("alt_r"));
+    hub.end_of_input();
+    hub.fire_command_timer();
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+
+    // A held dictation key still ends normally.
+    hub.press(k("f19"));
+    hub.end_of_input();
+    assert_eq!(*log.lock().unwrap(), vec!["dictation-down", "dictation-up"]);
+
+    // Partial chords are forgotten: no stale toggle completion afterwards.
+    log.lock().unwrap().clear();
+    hub.press(k("ctrl"));
+    hub.press(k("alt"));
+    hub.end_of_input();
+    hub.press(k("t"));
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+    // ...while a full fresh chord still works.
+    hub.release(k("t"));
+    tap_chord(&hub, &["ctrl", "alt", "t"]);
+    assert_eq!(*log.lock().unwrap(), vec!["toggle"]);
+}
+
+#[test]
 fn release_racing_the_command_timer_is_delivered_after_command_down() {
     let log: Log = Default::default();
     let shortcuts = Shortcuts {

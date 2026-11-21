@@ -10,12 +10,26 @@ use gpui::{
     WindowBounds, WindowOptions,
 };
 
+use crate::controllers::engine::Engine;
+use crate::controllers::instance::{Instance, Route};
+use crate::controllers::runtime_state::{self, OwnEngine, RuntimeView, Signal};
 use crate::data::Services;
 use crate::page::{Page, NAV_FOOTER, NAV_GROUPS};
 use crate::pages;
 use crate::remote::Health;
 use crate::theme::{size as tsize, space, text, theme, Theme, Tone};
 use crate::ui::{self, assets::Assets, Button};
+
+/// Theme tone of a runtime signal.
+pub fn signal_tone(signal: Signal) -> Tone {
+    match signal {
+        Signal::Success => Tone::Success,
+        Signal::Info => Tone::Info,
+        Signal::Warning => Tone::Warning,
+        Signal::Danger | Signal::Recording => Tone::Error,
+        Signal::Neutral => Tone::Neutral,
+    }
+}
 
 actions!(
     localflow,
@@ -50,6 +64,8 @@ pub struct Launch {
     pub page: Page,
     pub setup: bool,
     pub notice: Option<String>,
+    /// The window lock for this data root, held for the whole process.
+    pub instance: Instance,
 }
 
 pub struct Toast {
@@ -81,6 +97,12 @@ pub struct PageCx {
     /// The page on screen (written by the shell); lets pages check this
     /// without reading the shell entity, which may be mid-update.
     pub current_page: Rc<std::cell::RefCell<Page>>,
+    /// Latest runtime view (written by the shell's probe).
+    pub runtime: Rc<std::cell::RefCell<RuntimeView>>,
+    /// This window's engine state (written by the shell).
+    pub engine: Rc<std::cell::RefCell<Option<OwnEngine>>>,
+    /// A setup draft is waiting (Home shows Resume setup).
+    pub setup_draft: Rc<std::cell::Cell<bool>>,
 }
 
 impl PageCx {
@@ -128,6 +150,53 @@ impl PageCx {
     pub fn recheck_health(&self, cx: &mut App) {
         self.with_shell(cx, |shell, cx| shell.check_health(cx));
     }
+    /// Open (or resume) the setup wizard overlay.
+    pub fn open_setup(&self, cx: &mut App) {
+        self.with_shell(cx, |shell, cx| shell.show_setup(cx));
+    }
+    /// Hide the overlay; the draft stays for the session.
+    pub fn close_setup(&self, cx: &mut App) {
+        self.with_shell(cx, |shell, cx| shell.hide_setup(cx));
+    }
+    /// Apply finished: drop the draft and show Home.
+    pub fn setup_applied(&self, cx: &mut App) {
+        self.with_shell(cx, |shell, cx| {
+            shell.setup_view = None;
+            shell.hide_setup(cx);
+            shell.navigate(Page::Home, None, cx);
+            shell.probe_runtime(cx);
+        });
+    }
+    pub fn runtime(&self) -> RuntimeView {
+        self.runtime.borrow().clone()
+    }
+    /// Why trial/download/delete must wait (dictation mid-gesture).
+    pub fn runtime_busy(&self) -> Option<&'static str> {
+        self.runtime.borrow().busy_reason()
+    }
+    pub fn engine_state(&self) -> Option<OwnEngine> {
+        self.engine.borrow().clone()
+    }
+    pub fn engine_start(&self, cx: &mut App) {
+        self.with_shell(cx, |shell, cx| {
+            if let Some(engine) = &shell.engine {
+                engine.start();
+            }
+            shell.probe_runtime(cx);
+        });
+    }
+    pub fn engine_stop(&self, cx: &mut App) {
+        self.with_shell(cx, |shell, cx| {
+            if let Some(engine) = &shell.engine {
+                engine.stop();
+            }
+            shell.probe_runtime(cx);
+        });
+    }
+    /// The sandbox's simulated runtime state changed (Settings → Advanced).
+    pub fn reprobe(&self, cx: &mut App) {
+        self.with_shell(cx, |shell, cx| shell.probe_runtime(cx));
+    }
     pub fn set_pending_prompts(&self, n: usize, cx: &mut App) {
         self.with_shell(cx, move |shell, cx| {
             if shell.pending_prompts != n {
@@ -173,6 +242,17 @@ pub struct Shell {
     force_close: bool,
     config_mtime: Option<SystemTime>,
     setup: bool,
+    instance: Instance,
+    /// The wizard (kept while hidden: the draft survives for the session).
+    pub setup_view: Option<Entity<pages::setup::SetupView>>,
+    setup_visible: bool,
+    /// A routed page that arrived behind the overlay or a dialog.
+    queued: Option<Route>,
+    pub runtime: RuntimeView,
+    probing: bool,
+    pub engine: Option<Engine>,
+    /// A background stop (close/quit) is running.
+    stopping: bool,
 }
 
 impl Focusable for Shell {
@@ -185,6 +265,71 @@ fn mtime(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Config and machine facts for the runtime view (no probing here).
+pub fn runtime_context(services: &Services) -> runtime_state::Context {
+    let config = services.config();
+    runtime_state::Context {
+        enabled: config.field_bool("dictation_enabled").unwrap_or(true),
+        key: lf_ui::hub_model::format_hotkey(config.field_str("hotkey")),
+        session: if services.is_sandbox() {
+            runtime_state::Session::X11
+        } else {
+            runtime_state::Session::detect()
+        },
+        configured_mic: config.field_str("input_device").unwrap_or("").to_string(),
+        missing_paste_tool: None,
+    }
+}
+
+/// Before the first probe: "not checked yet" (never ready).
+fn initial_runtime(services: &Services) -> RuntimeView {
+    let context = runtime_context(services);
+    if services.is_sandbox() {
+        return runtime_state::simulated(services.simulated_runtime.get(), &context);
+    }
+    let mut view = runtime_state::derive(
+        &runtime_state::Observation {
+            file: runtime_state::FileObs::Absent,
+            pid_alive: false,
+            lock: lf_runtime::singleinstance::LockProbe::Unknown,
+            lock_identity: None,
+            own_instance: None,
+            now: 0.0,
+            own: OwnEngine::None,
+        },
+        &context,
+    );
+    view.lead = "Checking LocalFlow…".into();
+    view.support = String::new();
+    view.sidebar = (Signal::Neutral, "Checking…".into(), String::new());
+    view
+}
+
+/// The engine exists only for `--features runtime` + `--engine` outside the
+/// sandbox; it never starts by itself.
+fn spawn_engine(services: &Services) -> Option<Engine> {
+    if !services.caps.engine_allowed() {
+        return None;
+    }
+    #[cfg(feature = "runtime")]
+    {
+        match crate::controllers::engine::EmbeddedBackend::new(&services.root)
+            .map_err(std::io::Error::other)
+            .and_then(Engine::spawn)
+        {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                eprintln!("lf-desktop: dictation engine unavailable: {error}");
+                None
+            }
+        }
+    }
+    #[cfg(not(feature = "runtime"))]
+    {
+        None
+    }
+}
+
 impl Shell {
     fn new(launch: Launch, cx: &mut Context<Self>) -> Self {
         let services = Rc::new(launch.services);
@@ -193,11 +338,18 @@ impl Shell {
         } else {
             Health::Unknown
         };
+        let runtime = initial_runtime(&services);
+        let engine = spawn_engine(&services);
         let page_cx = PageCx {
             services: services.clone(),
             shell: cx.weak_entity(),
             status: Rc::new(std::cell::RefCell::new(initial.clone())),
             current_page: Rc::new(std::cell::RefCell::new(launch.page)),
+            runtime: Rc::new(std::cell::RefCell::new(runtime.clone())),
+            engine: Rc::new(std::cell::RefCell::new(
+                engine.as_ref().map(|e: &Engine| e.state()),
+            )),
+            setup_draft: Rc::new(std::cell::Cell::new(false)),
         };
         let config_mtime = mtime(&services.root.config_path);
         let mut shell = Shell {
@@ -222,13 +374,153 @@ impl Shell {
             force_close: false,
             config_mtime,
             setup: launch.setup,
+            instance: launch.instance,
+            setup_view: None,
+            setup_visible: false,
+            queued: None,
+            runtime,
+            probing: false,
+            engine,
+            stopping: false,
         };
         if let Some(notice) = launch.notice {
             shell.toast(notice.into(), None, cx);
         }
+        if launch.setup {
+            shell.show_setup(cx);
+        }
         shell.check_health(cx);
+        shell.probe_runtime(cx);
         shell.start_timers(cx);
         shell
+    }
+
+    // ------------------------------------------------------------ setup ---
+
+    pub fn show_setup(&mut self, cx: &mut Context<Self>) {
+        if self.stopping {
+            return;
+        }
+        match &self.setup_view {
+            // Resumed: refresh the read-only facts (choices are kept).
+            Some(view) if !self.setup_visible => view.update(cx, |v, cx| v.resume(cx)),
+            Some(_) => {}
+            None => {
+                let pcx = self.cx.clone();
+                self.setup_view = Some(cx.new(|cx| pages::setup::SetupView::new(pcx, cx)));
+            }
+        }
+        self.setup_visible = true;
+        cx.notify();
+    }
+
+    pub fn hide_setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.setup_view {
+            view.update(cx, |v, cx| v.release_audio(cx));
+        }
+        self.setup_visible = false;
+        self.cx.setup_draft.set(self.setup_dirty(cx));
+        self.refresh_views(cx);
+        self.apply_queued(cx);
+        cx.notify();
+    }
+
+    fn setup_dirty(&self, cx: &App) -> bool {
+        self.setup_view.as_ref().is_some_and(|v| v.read(cx).dirty())
+    }
+
+    // ---------------------------------------------------------- routing ---
+
+    /// Requests from a second launch: raise, then go there (queued while the
+    /// overlay or a dialog is open).
+    fn poll_instance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stopping {
+            // Leave the request in place (TTL-bounded): it is routed if the
+            // close fails, and no setup or page opens meanwhile.
+            return;
+        }
+        let Some(route) = self.instance.take_request() else {
+            return;
+        };
+        window.activate_window();
+        match route {
+            Route::Setup if self.confirm.is_none() => self.show_setup(cx),
+            route if self.setup_visible || self.confirm.is_some() => {
+                self.queued = Some(route);
+            }
+            Route::Page(page) => self.navigate(page, None, cx),
+            Route::Setup => self.queued = Some(route),
+        }
+    }
+
+    fn apply_queued(&mut self, cx: &mut Context<Self>) {
+        if self.setup_visible || self.confirm.is_some() {
+            return;
+        }
+        match self.queued.take() {
+            Some(Route::Page(page)) => {
+                self.navigate(page, None, cx);
+                self.toast(format!("Opened {}", page.label()).into(), None, cx);
+            }
+            Some(Route::Setup) => self.show_setup(cx),
+            None => {}
+        }
+    }
+
+    // ---------------------------------------------------------- runtime ---
+
+    pub fn probe_runtime(&mut self, cx: &mut Context<Self>) {
+        let services = self.cx.services.clone();
+        let own = self.engine.as_ref().map(Engine::state);
+        *self.cx.engine.borrow_mut() = own.clone();
+        let context = runtime_context(&services);
+        if services.is_sandbox() {
+            let view = runtime_state::simulated(services.simulated_runtime.get(), &context);
+            self.set_runtime(view, cx);
+            return;
+        }
+        if self.probing {
+            return;
+        }
+        self.probing = true;
+        let root = services.root.clone();
+        let own = own.unwrap_or(OwnEngine::None);
+        let own_instance = self.engine.as_ref().and_then(Engine::instance);
+        cx.spawn(async move |this, cx| {
+            let view = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut context = context;
+                    context.missing_paste_tool =
+                        runtime_state::missing_paste_tool(context.session, &|tool| {
+                            lf_ui::setup_flow::SetupPlatform::which(
+                                &lf_ui::setup_flow::HostPlatform,
+                                tool,
+                            )
+                        });
+                    runtime_state::derive(
+                        &runtime_state::observe(&root, own, own_instance),
+                        &context,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.probing = false;
+                shell.set_runtime(view, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn set_runtime(&mut self, view: RuntimeView, cx: &mut Context<Self>) {
+        if self.runtime != view {
+            *self.cx.runtime.borrow_mut() = view.clone();
+            self.runtime = view;
+            if let Some(View::Home(v)) = self.find(Page::Home) {
+                v.update(cx, |_, cx| cx.notify());
+            }
+            cx.notify();
+        }
     }
 
     fn start_timers(&mut self, cx: &mut Context<Self>) {
@@ -245,6 +537,28 @@ impl Shell {
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             let Ok(()) = this.update(cx, |shell, cx| shell.check_health(cx)) else {
+                break;
+            };
+        })
+        .detach();
+        // Runtime signals every second (status file, lock holder, engine).
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let Ok(()) = this.update(cx, |shell, cx| shell.probe_runtime(cx)) else {
+                break;
+            };
+        })
+        .detach();
+    }
+
+    /// Page requests from other launches, every 250 ms (needs the window).
+    fn start_instance_poll(window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let Ok(()) = this.update_in(cx, |shell, window, cx| shell.poll_instance(window, cx))
+            else {
                 break;
             };
         })
@@ -300,8 +614,16 @@ impl Shell {
     }
 
     pub fn navigate(&mut self, page: Page, target: Option<&'static str>, cx: &mut Context<Self>) {
-        if self.confirm.is_some() {
-            return; // a dialog is open: no navigation behind it
+        if self.stopping {
+            return; // quiesced while closing
+        }
+        if self.confirm.is_some() || self.setup_visible {
+            // A dialog or the setup overlay is open: no navigation behind it
+            // (routed requests are queued and applied when it closes).
+            if self.setup_visible && self.confirm.is_none() {
+                self.queued = Some(Route::Page(page));
+            }
+            return;
         }
         let leaving = self.page;
         if leaving == Page::Snippets && page != Page::Snippets {
@@ -430,7 +752,8 @@ impl Shell {
     }
 
     fn go_index(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.confirm.is_some() {
+        // Pages behind a dialog or the setup overlay take no shortcuts.
+        if self.confirm.is_some() || self.setup_visible || self.stopping {
             return;
         }
         if let Some(page) = Page::sidebar_order().get(index).copied() {
@@ -455,7 +778,8 @@ impl Shell {
     }
 
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.is_some() {
+        // Pages behind a dialog or the setup overlay take no shortcuts.
+        if self.confirm.is_some() || self.setup_visible || self.stopping {
             return;
         }
         match self.find(self.page) {
@@ -467,7 +791,8 @@ impl Shell {
     }
 
     fn new_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.is_some() {
+        // Pages behind a dialog or the setup overlay take no shortcuts.
+        if self.confirm.is_some() || self.setup_visible || self.stopping {
             return;
         }
         match self.find(self.page) {
@@ -479,6 +804,9 @@ impl Shell {
     }
 
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stopping {
+            return;
+        }
         if self.confirm.is_some() {
             // Cancel: the action is never run.
             self.close_dialog(false, window, cx);
@@ -488,6 +816,12 @@ impl Shell {
             cx.notify();
             return;
         }
+        if self.setup_visible {
+            if let Some(view) = self.setup_view.clone() {
+                view.update(cx, |v, cx| v.close(cx));
+            }
+            return;
+        }
         match self.find(self.page) {
             Some(View::History(v)) => v.update(cx, |p, cx| p.clear_search(window, cx)),
             _ => cx.propagate(),
@@ -495,7 +829,8 @@ impl Shell {
     }
 
     fn nav_step(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.is_some() {
+        // Pages behind a dialog or the setup overlay take no shortcuts.
+        if self.confirm.is_some() || self.setup_visible || self.stopping {
             return;
         }
         if !self.nav_focus.contains_focused(window, cx) {
@@ -512,8 +847,6 @@ impl Shell {
     // ---------------------------------------------------------------- views ---
 
     fn render_sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let services = &self.cx.services;
-        let config = services.config();
         let nav_item = |page: Page, cx: &mut Context<Self>| {
             let selected = self.page == page;
             let (sz, lh) = text::body();
@@ -577,22 +910,10 @@ impl Shell {
         for page in NAV_FOOTER {
             footer = footer.child(nav_item(page, cx));
         }
-        // Status row: dictation config and service reachability, shown on
-        // every page. It never claims a runtime is listening.
-        let status_view = crate::controllers::status::describe(
-            services.is_sandbox(),
-            config.field_bool("dictation_enabled").unwrap_or(true),
-            &lf_ui::hub_model::format_hotkey(config.field_str("hotkey")),
-            &self.health,
-            &services.remote.base_url(&config),
-            cfg!(target_os = "macos"),
-        );
-        let (level, line1, line2) = status_view.sidebar;
-        let tone = match level {
-            crate::controllers::status::Level::Ok => Tone::Success,
-            crate::controllers::status::Level::Warn => Tone::Warning,
-            crate::controllers::status::Level::Neutral => Tone::Neutral,
-        };
+        // Status row: what a runtime itself reports (status file, lock,
+        // this window's engine). HTTP reachability never changes it.
+        let (signal, line1, line2) = self.runtime.sidebar.clone();
+        let tone = signal_tone(signal);
         let status = ui::row_button(t, "status-row", false)
             .flex_col()
             .gap(space::s1())
@@ -733,24 +1054,195 @@ impl Shell {
         if self.force_close {
             return true;
         }
+        if self.stopping {
+            return false; // a background stop is running; it closes when done
+        }
         let check = self.prepare_close(cx);
-        if check.ok() {
+        let pending = self.pending_work(cx);
+        if check.ok() && pending.is_empty() {
             self.force_close = true;
+            self.release_setup_audio(cx);
             return true;
         }
         let shell = cx.weak_entity();
-        self.confirm = Some(Confirm {
-            title: "Some changes weren't saved".into(),
-            body: format!(
-                "{} Keep the window open to fix this, or close anyway and lose them.",
-                check.message()
+        let (title, body) = if check.ok() {
+            (
+                if quit {
+                    "Quit LocalFlow?"
+                } else {
+                    "Close LocalFlow?"
+                },
+                pending.join(" "),
             )
-            .into(),
+        } else {
+            (
+                "Some changes weren't saved",
+                format!(
+                    "{} {} Keep the window open to fix this, or close anyway and lose them.",
+                    check.message(),
+                    pending.join(" ")
+                ),
+            )
+        };
+        self.confirm = Some(Confirm {
+            title: title.into(),
+            body: body.into(),
             verb: if quit { "Quit anyway" } else { "Close anyway" }.into(),
             destructive: true,
             on_confirm: Rc::new(move |window, cx| {
                 // Runs inside the shell's own listener: defer the shell update.
                 let handle = window.window_handle();
+                let shell = shell.clone();
+                cx.defer(move |cx| {
+                    let _ = shell.update(cx, |s, cx| s.begin_stop(quit, handle, cx));
+                });
+            }),
+        });
+        self.dialog_armed = false;
+        window.refresh();
+        cx.notify();
+        false
+    }
+
+    /// Work a close would stop, in words (empty when nothing is running).
+    fn pending_work(&self, cx: &App) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.engine.as_ref().is_some_and(Engine::active) {
+            out.push("Dictation running in this window will stop.".to_string());
+        }
+        let downloads = self.cx.services.downloads.running();
+        if !downloads.is_empty() {
+            out.push(format!(
+                "{} model download{} will be cancelled.",
+                downloads.len(),
+                if downloads.len() == 1 { "" } else { "s" }
+            ));
+        }
+        if self.cx.services.downloads.deleting() {
+            out.push("A speech model is being deleted; closing waits for it.".into());
+        }
+        // Key, provider, setup or settings writes on workers (registered as
+        // pending writes); a zero-length check, no waiting here.
+        if !lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO) {
+            out.push("A settings or key change is still being saved; closing waits for it.".into());
+        }
+        if self.setup_dirty(cx) {
+            out.push("Your setup choices haven't been applied and will be discarded.".into());
+        }
+        out
+    }
+
+    fn release_setup_audio(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.setup_view {
+            view.update(cx, |v, cx| v.release_audio(cx));
+        }
+    }
+
+    /// Stop what this window started — cancel model jobs, stop the engine —
+    /// on the background executor with bounded waits, then close. If
+    /// stopping isn't confirmed, the window stays open, keeps the engine
+    /// (so a later close waits for it again), and says so, offering an
+    /// explicit force quit instead of claiming it finished.
+    fn begin_stop(&mut self, quit: bool, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
+        if self.stopping {
+            return;
+        }
+        self.stopping = true;
+        self.release_setup_audio(cx);
+        // Quiesce: pages are covered (render), shell actions and routed
+        // pages are refused, and focus leaves any page control, until the
+        // stop finishes or fails.
+        let focus = self.focus.clone();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.focus(&focus));
+        });
+        let downloads = self.cx.services.downloads.clone();
+        let engine = self.engine.take();
+        cx.spawn(async move |this, cx| {
+            let (jobs_stopped, engine_outcome, engine) = cx
+                .background_executor()
+                .spawn(async move {
+                    // Downloads are cancelled; deletions and persistent writes
+                    // (keys, provider, setup, settings) are waited for.
+                    downloads.cancel_all();
+                    let jobs_stopped = downloads.wait_idle(Duration::from_secs(3))
+                        && lf_ui::shutdown::wait_for_pending_writes(Duration::from_secs(3));
+                    let (outcome, engine) = match engine {
+                        Some(mut engine) => {
+                            let outcome = engine.shutdown(crate::controllers::engine::STOP_WAIT);
+                            (outcome, Some(engine))
+                        }
+                        None => (crate::controllers::engine::Stopped::Done, None),
+                    };
+                    (jobs_stopped, outcome, engine)
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                use crate::controllers::engine::Stopped;
+                shell.stopping = false;
+                // Fresh check: anything that started after the drain keeps
+                // the window open (never an obsolete snapshot).
+                let late = crate::controllers::shutdown::remaining_work(
+                    &shell.cx.services.downloads,
+                    lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO),
+                );
+                if jobs_stopped && engine_outcome == Stopped::Done && !late.is_empty() {
+                    shell.show_stop_problem(quit, handle, late.join(" "), cx);
+                    return;
+                }
+                if jobs_stopped && engine_outcome == Stopped::Done {
+                    shell.force_close = true;
+                    cx.defer(move |cx| {
+                        if quit {
+                            cx.quit();
+                        } else {
+                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        }
+                    });
+                    return;
+                }
+                // Keep ownership of whatever didn't confirm it stopped
+                // (a crashed engine stays unconfirmed on the next close too).
+                if engine_outcome != Stopped::Done {
+                    shell.engine = engine;
+                }
+                let mut problems = Vec::new();
+                if !jobs_stopped {
+                    problems.push(
+                        "A model download, model deletion or settings/key write hasn't finished.",
+                    );
+                }
+                match engine_outcome {
+                    Stopped::Pending => problems.push("Dictation in this window is still stopping."),
+                    Stopped::Crashed => problems.push(
+                        "The dictation engine failed while stopping, so it isn't confirmed that the microphone and keyboard listener were released.",
+                    ),
+                    Stopped::Done => {}
+                }
+                shell.show_stop_problem(quit, handle, problems.join(" "), cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn show_stop_problem(
+        &mut self,
+        quit: bool,
+        handle: gpui::AnyWindowHandle,
+        problems: String,
+        cx: &mut Context<Self>,
+    ) {
+        let shell = cx.weak_entity();
+        self.confirm = Some(Confirm {
+            title: "LocalFlow hasn't finished stopping".into(),
+            body: format!(
+                "{problems} Cancel keeps the window open; close it again to retry. Quitting anyway ends the app now without waiting."
+            )
+            .into(),
+            verb: if quit { "Quit anyway" } else { "Close anyway" }.into(),
+            destructive: true,
+            on_confirm: Rc::new(move |_, cx| {
                 let shell = shell.clone();
                 cx.defer(move |cx| {
                     let _ = shell.update(cx, |s, _| s.force_close = true);
@@ -763,9 +1255,7 @@ impl Shell {
             }),
         });
         self.dialog_armed = false;
-        window.refresh();
         cx.notify();
-        false
     }
 
     /// Ctrl+Q / Ctrl+W.
@@ -792,6 +1282,7 @@ impl Shell {
         if run {
             (confirm.on_confirm)(window, cx);
         }
+        self.apply_queued(cx);
         cx.notify();
     }
 
@@ -888,8 +1379,24 @@ impl Render for Shell {
         }
         self.ensure_view(self.page, cx);
         let sandbox = self.cx.services.is_sandbox();
-        let sidebar = self.render_sidebar(&t, cx);
-        let page = self.page_element();
+        let overlay = self
+            .setup_view
+            .clone()
+            .filter(|_| self.setup_visible)
+            .map(|v| v.into_any_element());
+        let main = match overlay {
+            Some(overlay) => div().flex().flex_1().min_h_0().child(overlay),
+            None => {
+                let sidebar = self.render_sidebar(&t, cx);
+                let page = self.page_element();
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(sidebar)
+                    .child(div().flex_1().min_w_0().h_full().child(page))
+            }
+        };
         let toast = self.render_toast(&t, cx);
         let confirm = self.render_confirm(&t, cx);
         let (sz, lh) = text::body();
@@ -966,16 +1473,31 @@ impl Render for Shell {
                         )),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(sidebar)
-                    .child(div().flex_1().min_w_0().h_full().child(page)),
-            )
+            .child(main)
             .children(toast)
             .children(confirm)
+            // While closing: everything under the scrim takes no clicks.
+            .when(self.stopping, |d| {
+                d.child(
+                    div()
+                        .id("stopping-scrim")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(t.scrim)
+                        .child(
+                            div()
+                                .px(space::s8())
+                                .py(space::s6())
+                                .rounded(tsize::radius_container())
+                                .bg(t.bg_popover)
+                                .child(ui::label(&t, "Stopping LocalFlow…")),
+                        ),
+                )
+            })
     }
 }
 
@@ -1086,6 +1608,19 @@ pub fn run(launch: Launch) {
                             weak.update(cx, |s, cx| s.should_close(false, window, cx))
                                 .unwrap_or(true)
                         });
+                        Shell::start_instance_poll(window, cx);
+                        // Losing the window releases a setup microphone test
+                        // (also one still opening) and cancels a trial;
+                        // nothing captures in the background. After a system
+                        // permission prompt the user presses Test again.
+                        cx.observe_window_activation(window, |shell, window, cx| {
+                            if !window.is_window_active() {
+                                if let Some(view) = shell.setup_view.clone() {
+                                    view.update(cx, |v, cx| v.release_audio(cx));
+                                }
+                            }
+                        })
+                        .detach();
                         // Follow the system light/dark setting live.
                         cx.observe_window_appearance(window, |_, window, cx| {
                             let want = Theme::for_appearance(window.appearance());

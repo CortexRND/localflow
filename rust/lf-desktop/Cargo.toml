@@ -20,12 +20,23 @@ path = "src/main.rs"
 name = "lf_desktop"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Opt-in native engine: speech-model download/inspection/delete, the setup
+# microphone trial and in-window dictation (`--engine`). Forwards to the
+# shared `lf-ui/runtime` stack; the default build stays a front end only.
+runtime = ["lf-ui/runtime", "dep:lf-stt"]
+
 [dependencies]
 gpui = "=0.2.2"
 lf-core = { path = "../lf-core" }
 lf-ui = { path = "../lf-ui" }
 lf-providers = { path = "../lf-providers" }
 lf-audio = { path = "../lf-audio" }
+lf-runtime = { path = "../lf-runtime" }
+lf-input = { path = "../lf-input" }
+lf-agent = { path = "../lf-agent" }
+lf-stt = { path = "../lf-stt", optional = true, features = ["setup"] }
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 anyhow = "1"
@@ -33,7 +44,13 @@ serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 unicode-segmentation = "1"
 log = "0.4"
+# Assistant output redaction (already in the lockfile through lf-ui).
+regex = "1"
 env_logger = "0.11"
+
+# Runtime-status probe: signal-0 liveness check of the PID a status file names.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

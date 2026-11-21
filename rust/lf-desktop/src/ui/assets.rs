@@ -59,6 +59,7 @@ icons!(
     "file-text",
     "play",
     "sparkles",
+    "circle",
 );
 
 pub const BRAND: &[u8] = include_bytes!("../../assets/brand.svg");

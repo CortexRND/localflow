@@ -17,13 +17,13 @@ Each PR leaves every existing entry point working.
 
 | PR | Scope | Status |
 |---|---|---|
-| **1. Parallel GPUI front end** (this one) | Standalone crate `rust/lf-desktop` (pinned `gpui = 0.2.2`, own `Cargo.lock`, outside the `rust/` workspace). One token and component layer. Library and config workflows connected to the real stores. Ask, Meetings and Prompts over the existing local HTTP service. Isolated persistent `--sandbox`. Controller, store and editing tests. Additive `gpui.yml` CI (Linux full, macOS type-check). `scripts/run_gpui.sh` | Done |
-| 2. Runtime and global-input parity | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Not started |
+| **1. Parallel GPUI front end** | Standalone crate `rust/lf-desktop` (pinned `gpui = 0.2.2`, own `Cargo.lock`, outside the `rust/` workspace). One token and component layer. Library and config workflows connected to the real stores. Ask, Meetings and Prompts over the existing local HTTP service. Isolated persistent `--sandbox`. Controller, store and editing tests. Additive `gpui.yml` CI (Linux full, macOS type-check). `scripts/run_gpui.sh` | Done |
+| **2. Runtime and global-input parity** (this one) | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
 | 3. Packaging | Installers build and ship a release `lf-desktop`. Per-distribution system libraries. macOS bundle and signing | Not started |
 | 4. Opt-in, then default-launch cutover | An opt-in flag first. Then `lf hub` / `lf phrases` / `lf setup` prefer `lf-desktop`, with a fallback. `lf-hub` on Linux points to it | Not started. Needs the gates below and the owner's agreement |
 | 5. Legacy retirement | Remove the launch paths that are no longer used and the controller code duplicated from `lf_ui::mac` (done on macOS). Bundle Figtree. Screen-reader support once GPUI has an accessibility tree | Not started |
 
-## Feature matrix (PR 1)
+## Feature matrix (after PR 2)
 
 Legend:
 
@@ -34,9 +34,11 @@ Legend:
 | Area | Capability | lf-desktop | Data path | Existing path still available |
 |---|---|---|---|---|
 | Home | Dictation on/off | Works | `[dictation] enabled` through `config_write` | `lf dictation on/off`, Hub |
-| Home | Config state, service reachability and input capability as three separate lines | Works. Reachability comes from `/healthz`. Input capability is always "unverified": a reachable API never counts as dictation readiness, on any platform | config + HTTP | — |
+| Home | Runtime state (not running, starting, shortcut listening, recording, transcribing, needs attention, not responding, running/status limited), shortcut session line, configured vs observed microphone, warnings, local service as a separate line | Works from the runtime's own `status.json` (protocol 2: listener, session, mic, warnings, 5 s heartbeat) plus PID liveness and proof the file is the current runtime's: this window's engine matches the file `instance` its live `RuntimeHandle` reports (any platform); an external runtime must hold `localflow.lock` (Linux `/proc/locks`, device + inode, read-only) with a matching lock-acquisition identity. External runtimes on macOS, where the lock owner can't be read, show as "status limited". A missing file is "not running" unless another process is proven to hold the lock ("another LocalFlow handles dictation"); an unreadable file says the status can't be read. `/healthz`, config `enabled`, a live PID alone or a spawned thread never mean "listening". Protocol-1 writers (Python, older Rust) show as "Running · status limited" | `status.json`, `localflow.lock` | Python menu bar, `lf-hub` |
 | Home | Stats, recent dictations, copy | Works | `HistoryStore::stats/recent` | `lf stats`, Hub |
-| Home | Setup checklist with links to the right page | Works (read-only checks) | config, history, health | `lf setup` |
+| Home | Setup checklist with links to the right page, **Run / Resume setup** | Works. The Shortcut step is done only when a runtime reports its listener | config, history, runtime status | `lf setup` |
+| Home | In-window engine Start / Stop | Works in `--features runtime` builds launched with `--engine` (never in the sandbox, never automatically). Reuses `lf_ui::embedded::EmbeddedRuntime`; refuses only when another process is proven to hold `localflow.lock` (a recorded PID or an unreadable lock owner never blocks Start) and never stops it. Closing stops only this window's work behind a "Stopping LocalFlow…" cover that blocks input and routing, then re-checks downloads, deletions and pending writes right before closing | `EmbeddedRuntime` | `localflow`, `lf run` |
+| Setup | 7-step wizard: checkup, microphone choice + level test, speech model choice/recommendation/inspection/download, cleanup, conflict-checked shortcut, bounded trial, review + apply | Works. Default build: mic test and all choices; inspection, download and trial say they need `--features runtime`. Runtime build: real. Apply writes only the setup sections under `config_write::with_lock`; start at login is left to `lf agent` | `setup_flow`, `FlowModelBackend`, `lf_audio` meter | `lf setup`, `lf-hub --setup` |
 | History | Search (debounced, background), paging, details | Works | `HistoryStore::recent(limit, query, offset)` | `lf history`, Hub |
 | History | Copy final or original text | Works | clipboard | Hub |
 | History | Delete one, clear all (with confirmation) | Works | `HistoryStore::delete/clear` | Hub |
@@ -49,13 +51,15 @@ Legend:
 | Settings | Every row in `controllers::settings::SPECS` | Works with validation | `apply_config_update`. Shortcuts are normalised and conflict-checked through `lf_core::shortcuts` | `lf config`, Hub |
 | Settings | Sounds and meeting detection on Linux | Honest-off | — | — |
 | Settings | Data locations, what leaves the device, clear history, read-only current config | Works | — | — |
-| Settings | Settings assistant (natural-language change) | Missing (PR 2) | — | `lf tweak`, Hub |
+| Settings | Settings assistant (natural-language change): preview, explicit apply, undo that keeps newer edits, stale-preview and conflict handling | Works (native agent on explicit paths, loopback Ollama; writes through `settings_worker::dispatch`). Sandbox: native agent with a scripted offline chat | `hub_settings`, `settings_agent_native`, `settings_worker` | `lf tweak`, Hub |
+| Settings | Run setup again; sandbox-only simulated runtime state selector | Works | — | — |
 | Settings | Launch at login | Honest-off on Linux; macOS points to `lf agent` | — | `lf agent install` |
 | Models | Speech engine and model size | Works (`models_layout::set_speech`; MLX refused off Apple silicon) | `[stt]` | `lf stt`, Hub |
-| Models | Speech model download and delete | Missing (PR 2); the page says so | — | `lf setup`, Hub |
+| Models | Speech models on this computer: installed / downloading (progress, cancel) / failed (retry) / in use; download, use, delete with confirmation | Works in `--features runtime` builds (default build explains the rebuild). Delete is refused for the selected model and for models leased by a running LocalFlow, re-checked at delete time; only managed, non-symlinked cache folders are removed | `lf_stt::model_storage`, `stt_lease`, `FlowModelBackend` | `lf setup`, Hub |
 | Models | Cleanup model: Ollama installed list, or a typed model ID | Works (background list, `cleanup_picker` states) | `[llm] model` | `lf llm`, Hub |
-| Models | Provider keys: add or replace (masked, cleared after save), remove (with confirmation), use or activate | Works through `ProviderKeys` and the OS keyring. Key values are never shown or kept | keyring + `[llm]` | `lf keys`, `lf llm use`, Hub |
-| Models | Import keys from `.env` / environment, Test LLM | Missing (PR 2) | — | `lf keys import`, Hub |
+| Models | Provider keys: add or replace (masked, cleared after save), remove (with confirmation), use or activate | Works through `ProviderKeys` and the OS keyring. Key values are never shown or kept. Key presence is read on a worker and cached (render never touches the keyring); save, use, remove and import run on workers too | keyring + `[llm]` | `lf keys`, `lf llm use`, Hub |
+| Models | Import keys from the environment or a `.env` file (selection, overwrite marker, counts) | Works. Values never shown or logged; active provider unchanged; providers overridden by `LOCALFLOW_PROVIDER_KEY_<ID>` can't be imported | `keys::detect_imports`, `ProviderKeys::save_imports` | `lf keys import`, Hub |
+| Models | Test connection | Works on click only, background, 10 s timeout, model-list probe, no prompt sent, three fixed result sentences. The provider in use is probed as configured (`factory::build_llm` + `healthcheck`, keeping its endpoint and endpoint-bound key); other rows probe their preset with the saved key (`ProviderKeys::test_llm`) | provider HTTP | Hub |
 | Ask | Question and answer, examples, time filter, citations to History or vault files, Stop | Works when the service is up. Offline banner and retry otherwise | `HttpAskBackend` → `/api/recall` | `lf recall`, Hub |
 | Ask | Source filter | Honest-off (the adapter refuses restricted sets) | — | — |
 | Meetings | Feature off: explanation and turn-on button | Works (says a restart is needed) | `[features] meetings` | `lf config` |
@@ -65,9 +69,10 @@ Legend:
 | Prompts | Dispatch to Orca | CLI only (the page says so) | — | `lf prompts dispatch` |
 | Shell | Sidebar with 10 destinations, light/dark from the system, keyboard map, toasts, confirmation dialogs, minimum window size 960 × 640 | Works | — | — |
 | Shell | Narrow layout (below 1100 px): History list or detail with Back | Works (History) | — | — |
-| Shell | Single instance and `page-request.json` routing | Missing (PR 2). It runs beside the Hub without conflict | — | Hub |
+| Shell | Single instance and page routing (including Setup) | Works per mode and data folder: OS lock held for the process, `hub_route::RequestFile` hand-off, requests queued behind the overlay or a dialog; if the owner exits mid hand-off the new window consumes and routes the newest request. Own namespace (`~/.localflow/desktop/`, `<sandbox>/desktop-instance/`), so it still runs beside the legacy Hub without routing to it | `singleinstance`, `hub_route` | Hub |
 | Shell | Screen-reader tree | Not possible with GPUI 0.2.2 (no accessibility API) | — | `lf-hub` on macOS |
-| Dictation | In-window "Dictate here", tray, Linux global hotkeys in the Rust engine | Missing (engine work) | — | Python runtime |
+| Dictation | Linux global hotkeys in the Rust engine | Works on X11 (listen-only XInput2 raw events via `x11rb`, no grab or extra permission; hold, toggle, chords, sides, repeat suppression, clean stop). Wayland: explicit "unsupported" with the reason. Listener readiness is published only after the platform accepted it. If the listener dies, held keys count as released: a hold recording ends and is transcribed; a toggle or command recording is discarded | `lf_input::linux` | Python runtime |
+| Dictation | Tray item; Windows global hotkeys | Missing | — | Python runtime |
 
 Wispr Flow features that LocalFlow doesn't plan (account, team sharing, sync, mobile,
 cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
@@ -75,16 +80,20 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
 ## Cutover gates (all required before PR 4)
 
 1. **Parity.** Every row marked Missing above that the Python Hub or `lf-hub` offers
-   works in `lf-desktop`, or the owner explicitly waives it: the setup wizard,
-   model storage, the settings assistant, key import, Test LLM, and single-instance
-   and page routing.
+   works in `lf-desktop`, or the owner explicitly waives it. PR 2 implemented the
+   setup wizard, model storage, the settings assistant, key import, Test LLM, and
+   single-instance and page routing; they still need interactive review on Linux
+   (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
+   rows (tray item, Windows hotkeys, History retry) need a decision.
 2. **Data safety.** A script compares the real config file, `~/.localflow` and the
    keyring by hash before and after a scripted sandbox session, and finds them
    unchanged. In real mode, every write goes through `config_write` or the
    existing store APIs. The unit tests in `data.rs`, `sandbox.rs` and
    `controllers/*` cover this already.
 3. **Platforms.** The app builds and passes tests on Linux (X11 and Wayland) and
-   macOS in CI. Today `gpui.yml` runs the full suite on Linux and type-checks macOS. Launching it on a machine with no GPU shows a clear error, not a
+   macOS in CI. Today `gpui.yml` runs fmt, clippy, tests and the build for both the
+   default and the `--features runtime` build on Linux, and type-checks both on
+   macOS. Launching it on a machine with no GPU shows a clear error, not a
    crash.
 4. **Launch integration.** `lf hub --page X` opens `lf-desktop` on page X when
    it's installed and falls back to the current UI otherwise. Two launches hand
@@ -93,8 +102,10 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    requirements are documented per distribution. The `rust/` workspace CI matrix
    isn't weakened.
 6. **Honest runtime status.** Home and the sidebar report listening, input device
-   and warnings from a runtime signal (PR 2). HTTP reachability alone is never
-   shown as dictation readiness.
+   and warnings from a runtime signal (PR 2: status-file protocol 2 from the Rust
+   runtime). HTTP reachability alone is never shown as dictation readiness. Before
+   cutover the Python runtime either writes protocol 2 or stays labelled
+   "status limited".
 7. **Accessibility.** Either GPUI exposes an accessibility tree and it's wired up,
    or the owner accepts keyboard-only support and `lf-hub` stays the recommended
    macOS app for screen-reader users.
@@ -109,4 +120,11 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
 | `src/remote.rs` | `Remote::Http`, which uses the configured host and port and the token from the explicit token path, or `Remote::Sandbox` (fakes). All calls block, so they run on GPUI's background executor and results come back with a generation check |
 | `src/controllers/` | Portable page logic with no GPUI types. Tested with `cargo test` and no display needed |
 | `src/ui/` | The only styling layer: tokens (`theme.rs`), buttons, switches, segmented controls, selects, text input and banners. A test fails if a colour literal appears outside `theme.rs` |
-| `src/pages/` | One module per destination, built only from `ui/` |
+| `src/pages/` | One module per destination, built only from `ui/`; `pages/setup.rs` is the setup overlay |
+| `src/launch.rs`, `controllers/instance.rs` | Window lock first, then sandbox prepare/reset; page hand-off |
+| `controllers/capabilities.rs` | The three launch facts (sandbox, runtime feature, `--engine`) that decide what may run |
+| `controllers/runtime_state.rs`, `controllers/engine.rs` | Runtime observation → truthful status; the opt-in engine owner thread |
+| `controllers/setup_flow.rs`, `jobs.rs`, `model_storage.rs`, `key_import.rs`, `assistant.rs` | Wizard state machine, shared download registry, model storage, key import / preset Test connection, settings assistant |
+| `controllers/provider_ops.rs` | Models-page adapter over the existing provider APIs (no new shared API): import sessions, the one-mutation gate, editor lifetimes, Test connection targets (configured vs preset), sandbox Ollama listing and `.env` fixture |
+| `rust/lf-input/src/linux.rs` | X11 raw-key source and the platform-independent translation/pump it feeds the hub with |
+| `rust/lf-runtime/src/status.rs` | Status-file protocol 2 (`StatusReporter`, `StatusFile`) |

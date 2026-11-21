@@ -360,6 +360,45 @@ impl KeyboardHub {
         self.deliver();
     }
 
+    /// The key source ended (a clean stop or a failure): let go of every key
+    /// it still reported as held. This is not a physical key-up, so it never
+    /// completes what only a real release may complete: a held dictation key
+    /// ends its hold normally (`on_up`, the clip is transcribed), but a
+    /// command recording in progress is cancelled (`on_command_cancel`),
+    /// never submitted, and a pending command timer is disarmed. Safe to call
+    /// more than once and from any listener backend.
+    pub fn end_of_input(&self) {
+        {
+            let mut st = self.lock();
+            let actions = &self.inner.actions;
+            let mut fired = Vec::new();
+            if st.held_key_down {
+                st.held_key_down = false;
+                fired.push(actions.on_up.clone());
+            }
+            if st.command_timer.is_some() {
+                self.cancel_timer(&mut st);
+            }
+            if st.command_key_down {
+                st.command_key_down = false;
+                fired.push(actions.on_command_cancel.clone());
+            }
+            st.pressed.clear();
+            st.pressed_raw.clear();
+            if let Some(toggle) = st.bindings.toggle.as_mut() {
+                toggle.state.clear();
+            }
+            for combo in st.bindings.combos.iter_mut() {
+                combo.state.clear();
+            }
+            if st.pending.is_some() {
+                self.apply_pending_locked(&mut st);
+            }
+            self.enqueue(fired);
+        }
+        self.deliver();
+    }
+
     /// Fire the command-mode timer now (what the timer thread does on expiry).
     pub fn fire_command_timer(&self) {
         self.fire_command_timer_with_gap(|| {});

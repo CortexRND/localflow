@@ -1,6 +1,6 @@
-//! New-user setup guidance: honest checks with one action each. This is a
-//! checklist over existing configuration, not the 7-step setup wizard (which
-//! stays in `lf setup` / `lf-hub --setup` until a later PR).
+//! New-user setup guidance on Home: honest checks with one action each, over
+//! the saved configuration and runtime signals. The 7-step wizard itself is
+//! `controllers::setup_flow` (Run setup / Resume setup).
 
 use lf_core::config::Config;
 use lf_ui::models_layout;
@@ -33,12 +33,20 @@ pub fn configured(root: &DataRoot) -> bool {
         .unwrap_or(false)
 }
 
-pub fn steps(root: &DataRoot, config: &Config, health: &Health, dictations: i64) -> Vec<Step> {
+/// `listening`: a runtime confirmed its shortcut listener (protocol-2 status
+/// with a fresh heartbeat); nothing else marks the shortcut step done.
+pub fn steps(
+    root: &DataRoot,
+    config: &Config,
+    health: &Health,
+    dictations: i64,
+    listening: bool,
+) -> Vec<Step> {
     let mut out = Vec::new();
     out.push(Step {
         title: "Speech model",
         detail: format!(
-            "{} — downloads happen in `lf setup` for now.",
+            "{} — download or change it in Models & keys.",
             models_layout::speech_summary(config)
         ),
         state: if configured(root) {
@@ -71,15 +79,21 @@ pub fn steps(root: &DataRoot, config: &Config, health: &Health, dictations: i64)
         state: State::Done,
         action: Some(("Change", Page::Settings, Some("input"))),
     });
+    let key = lf_ui::hub_model::format_hotkey(config.field_str("hotkey"));
     out.push(Step {
         title: "Shortcut",
-        detail: format!(
-            "Set to {}. {} This window can't check that it's working.",
-            lf_ui::hub_model::format_hotkey(config.field_str("hotkey")),
-            crate::controllers::status::shortcut_note(cfg!(target_os = "macos"))
-        ),
-        // Configured, but not verifiable from here: never shown as done.
-        state: State::Unavailable,
+        detail: if listening {
+            format!("Set to {key}. A running LocalFlow is listening for it.")
+        } else {
+            format!(
+                "Set to {key}. Not confirmed: no running LocalFlow reports its shortcut listener yet."
+            )
+        },
+        state: if listening {
+            State::Done
+        } else {
+            State::Unavailable
+        },
         action: Some(("Shortcuts", Page::Settings, Some("shortcuts"))),
     });
     out.push(Step {
@@ -119,8 +133,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = DataRoot::sandbox(dir.path());
         let config = Config::defaults_for(false);
-        let s = steps(&root, &config, &Health::Offline, 0);
+        let s = steps(&root, &config, &Health::Offline, 0, false);
         assert_eq!(s[0].state, State::Todo, "no config file: not configured");
+        let shortcut = |s: &[Step]| s.iter().find(|s| s.title == "Shortcut").unwrap().state;
+        assert_eq!(
+            shortcut(&s),
+            State::Unavailable,
+            "never done without a listener"
+        );
+        assert_eq!(
+            shortcut(&steps(&root, &config, &Health::Online, 0, false)),
+            State::Unavailable,
+            "HTTP health is not a listener"
+        );
+        assert_eq!(
+            shortcut(&steps(&root, &config, &Health::Offline, 0, true)),
+            State::Done
+        );
         assert_eq!(
             s.iter()
                 .find(|s| s.title == "LocalFlow service")
@@ -129,7 +158,7 @@ mod tests {
             State::Todo
         );
         lf_core::config::save_config(&config, Some(&root.config_path)).unwrap();
-        let s = steps(&root, &config, &Health::Online, 3);
+        let s = steps(&root, &config, &Health::Online, 3, false);
         assert_eq!(s[0].state, State::Done);
         assert!(s
             .iter()
