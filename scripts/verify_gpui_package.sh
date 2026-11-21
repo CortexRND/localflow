@@ -492,7 +492,8 @@ windows_abi() {
     sys="$(windows_system_dir)" || die "SYSTEMROOT is not set; run this on Windows"
     for file in "$tree"/*.dll; do bundled+=("$(printf '%s' "${file##*/}" | tr '[:upper:]' '[:lower:]')"); done
     for file in "$tree"/lf-desktop.exe "$tree"/*.dll; do
-        imports="$(pe_imports "$file")"
+        # Explicit: errexit is off when the caller captures this function's output.
+        imports="$(pe_imports "$file")" || exit 1
         while IFS= read -r need; do
             [[ -n "$need" ]] || continue
             if [[ "$need" =~ $WINDOWS_VC_RUNTIME_RE ]]; then

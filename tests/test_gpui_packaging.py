@@ -186,6 +186,8 @@ elif name == "ldd":
         else:
             print(f"\t{lib} => not found")
 elif name == "llvm-readobj":
+    if "READOBJ_FAIL" in fault and a[-1].endswith("onnxruntime.dll"):
+        sys.exit("llvm-readobj: error: unreadable image")
     m = meta(a[-1])
     print(f"File: {a[-1]}\nFormat: {m['format']}\nArch: x86_64\nAddressSize: 64bit")
     for dll in m["imports"]:
@@ -481,6 +483,9 @@ def test_windows_verifier_rejects_extra_files_and_other_hosts(windows, tmp_path)
         z.writestr("LocalFlow Preview/plugins/extra.dll", "x")
     result = _run("verify_gpui_package.sh", env, tampered)
     assert result.returncode != 0 and "unexpected files in the Windows package" in result.stderr, result.stderr
+    # An image llvm-readobj cannot read fails the check, never passes as import-free.
+    result = _run("verify_gpui_package.sh", dict(env, FAULTS="READOBJ_FAIL"), out / name)
+    assert result.returncode != 0 and "llvm-readobj failed" in result.stderr, result.stderr
     linux = dict(env, FAKE_OS="Linux")
     result = _run("verify_gpui_package.sh", linux, out / name)
     assert result.returncode != 0 and "verify it on that platform (this is linux-x86_64)" in result.stderr
