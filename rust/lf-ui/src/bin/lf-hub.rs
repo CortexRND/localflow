@@ -1,4 +1,5 @@
-//! Native LocalFlow Hub shell (macOS only).
+//! Native LocalFlow Hub shell (macOS). On Linux it opens LocalFlow Preview
+//! (`lf-desktop`) when the preview package is installed.
 
 use lf_ui::hub_route::canonical_page;
 use std::process::ExitCode;
@@ -51,7 +52,41 @@ fn run(options: LaunchOptions) -> ExitCode {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux has no AppKit Hub: open LocalFlow Preview (`lf-desktop`) instead,
+/// found and probed by `lf_ui::desktop_launch`. `exec` keeps the environment
+/// (`HOME`, `LOCALFLOW_CONFIG`, `LOCALFLOW_SANDBOX`, which `lf-desktop` honours
+/// itself). On failure: an install hint and exit 1, never another fallback.
+#[cfg(target_os = "linux")]
+fn run(options: LaunchOptions) -> ExitCode {
+    use lf_ui::desktop_launch;
+    use std::os::unix::process::CommandExt;
+
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let current = std::env::current_exe().ok();
+    let exe = match desktop_launch::resolve(
+        std::env::var_os(desktop_launch::BIN_ENV).as_deref(),
+        home.as_deref(),
+        current.as_deref(),
+        desktop_launch::PROBE_TIMEOUT,
+    ) {
+        Ok(exe) => exe,
+        Err(problem) => {
+            eprintln!("lf-hub: {problem}. {}", desktop_launch::INSTALL_HINT);
+            return ExitCode::from(1);
+        }
+    };
+    let error = std::process::Command::new(&exe)
+        .args(desktop_launch::child_args(options.page, options.setup))
+        .exec();
+    eprintln!(
+        "lf-hub: couldn't start LocalFlow Preview ({}). {}",
+        error.kind(),
+        desktop_launch::INSTALL_HINT
+    );
+    ExitCode::from(1)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn run(_options: LaunchOptions) -> ExitCode {
     eprintln!("lf-hub: the native Hub is only supported on macOS");
     ExitCode::from(1)
@@ -143,5 +178,19 @@ mod tests {
         );
         assert_eq!(parse(&["--page=setup"]), Ok(Some("Setup")));
         assert!(parse(&["unknown"]).is_err());
+    }
+
+    #[test]
+    fn linux_preview_argv_comes_only_from_parsed_options() {
+        let child = |args: &[&str]| {
+            let options = parse_args(args.iter().map(|arg| (*arg).to_string())).unwrap();
+            lf_ui::desktop_launch::child_args(options.page, options.setup)
+        };
+        // No page: lf-desktop keeps its own first-run wizard policy.
+        assert!(child(&[]).is_empty());
+        assert_eq!(child(&["--page", "hot phrases"]), ["--page", "Hot Phrases"]);
+        assert_eq!(child(&["--page=nope"]), ["--page", "Home"]);
+        assert_eq!(child(&["--setup", "--page=History"]), ["--setup"]);
+        assert_eq!(child(&["--page=setup"]), ["--page", "Setup"]);
     }
 }

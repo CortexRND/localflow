@@ -32,8 +32,9 @@ ENVIRONMENT:
     LOCALFLOW_CONFIG      Real config file (honoured in real mode, as everywhere in LocalFlow)
 
 One window runs per data folder: a second launch sends its page to it.
-This app runs beside the existing LocalFlow launchers; it does not replace
-`lf hub`, `lf-hub` or the Python runtime.";
+This app runs beside the existing LocalFlow windows. `lf hub`, `lf phrases`
+and `lf setup` open it only when asked (`--gpui` or LOCALFLOW_UI=gpui); on
+Linux, `lf-hub` opens it. It does not replace the Python runtime.";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Args {

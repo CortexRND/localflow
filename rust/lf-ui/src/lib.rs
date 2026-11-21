@@ -5,6 +5,7 @@
 pub mod ask_layout;
 pub mod backends;
 pub mod config_write;
+pub mod desktop_launch;
 #[cfg(feature = "runtime")]
 pub mod embedded;
 pub mod hot_phrases_editor;
