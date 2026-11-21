@@ -319,10 +319,17 @@ verify_linux() {
         done < <(elf_needed "$file")
         # The loader must resolve bundled libraries inside the package and the
         # rest from the system, with no inherited search path or preload.
-        local ldd_out name path
+        local ldd_out line name path
         ldd_out="$(env -u LD_LIBRARY_PATH -u LD_PRELOAD -u LD_AUDIT ldd "$file")" || die "ldd failed for ${file#"$tree"/}"
         if grep -q 'not found' <<<"$ldd_out"; then die "unresolved libraries for ${file#"$tree"/}: $ldd_out"; fi
-        while read -r name _ path _; do
+        while IFS= read -r line; do
+            # "<name> => <path> (0x<load address>)". The path may contain
+            # whitespace or parentheses, so cut only at " => " and at the
+            # final " (0x...)" instead of splitting on whitespace.
+            line="${line#"${line%%[![:space:]]*}"}"
+            name="${line%% => *}"
+            path="${line#* => }"
+            path="${path% (0x*)}"
             [[ -n "$path" && "$path" == /* ]] || continue
             if [[ " ${bundled[*]} " == *" $name "* ]]; then
                 [[ "$path" -ef "$tree/lib/$name" ]] || die "$name resolves to $path, not the bundled copy"

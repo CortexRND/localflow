@@ -156,6 +156,10 @@ elif name == "ldd":
                 break
         if found and "LDD_BUILD_TREE" in fault:
             print(f"\t{lib} => /build/target/release/{lib} (0x0)")
+        elif found and "LDD_SPACED_BUILD_TREE" in fault:
+            print(f"\t{lib} => /build/spaced dir (x)/{lib} (0x00007f0000000000)")
+        elif lib == "libasound.so.2" and "LDD_SPACED_SYSTEM" in fault:
+            print(f"\t{lib} => /opt/odd dir (x)/{lib} (0x00007f0000000000)")
         elif found:
             print(f"\t{lib} => {found} (0x0)")
             queue += [(found, n) for n in meta(found)["needed"]]
@@ -313,6 +317,11 @@ def test_linux_builder_bundles_verifies_and_records_the_abi(fake, tmp_path):
     ("BAD_RUNPATH", "search path is '/build/target/release'"),
     ("NEW_GLIBC", "needs glibc 2.39, newer than the documented 2.35"),
     ("LDD_BUILD_TREE", "not the bundled copy"),
+    # Full resolved paths, whitespace and parentheses included, are judged.
+    ("LDD_SPACED_BUILD_TREE",
+     "libsherpa-onnx-c-api.so resolves to /build/spaced dir (x)/libsherpa-onnx-c-api.so, not the bundled copy"),
+    ("LDD_SPACED_SYSTEM",
+     "libasound.so.2 resolves outside the system library directories: /opt/odd dir (x)/libasound.so.2"),
 ])
 def test_linux_builder_fails_closed_and_keeps_the_previous_output(fake, tmp_path, fault, message):
     _, env = fake
@@ -325,6 +334,23 @@ def test_linux_builder_fails_closed_and_keeps_the_previous_output(fake, tmp_path
     assert message in result.stderr, result.stderr
     assert previous.read_text() == "previous release"
     assert sorted(p.name for p in out.iterdir()) == [previous.name], "no staging left behind"
+
+
+@LINUX_ONLY
+def test_linux_archive_verifies_from_a_temporary_directory_with_spaces(fake, tmp_path):
+    # The verifier extracts into $TMPDIR; bundled libraries then resolve to
+    # paths containing whitespace and parentheses, which must still match.
+    _, env = fake
+    spaced = tmp_path / "spaced temporary (dir)"
+    spaced.mkdir()
+    env["TMPDIR"] = str(spaced)
+    out = tmp_path / "out"
+    result = _build(env, out)
+    assert result.returncode == 0, result.stderr + result.stdout
+    archive = out / _asset("linux-x86_64")
+    result = _run("verify_gpui_package.sh", env, archive)
+    assert result.returncode == 0, result.stderr
+    assert f"Verified {archive.name}" in result.stdout
 
 
 @LINUX_ONLY
