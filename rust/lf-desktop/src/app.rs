@@ -640,7 +640,24 @@ impl Shell {
                 }
             },
             tray::Action::PasteLast => {
-                if let Some(engine) = &self.engine {
+                if let Some(engine) = self
+                    .engine
+                    .as_ref()
+                    .filter(|e| e.state() == OwnEngine::Running)
+                {
+                    #[cfg(target_os = "windows")]
+                    if !self
+                        .tray
+                        .as_ref()
+                        .is_some_and(|(icon, _)| icon.restore_paste_target())
+                    {
+                        self.toast(
+                            "Couldn't restore the window to paste into.".into(),
+                            None,
+                            cx,
+                        );
+                        return;
+                    }
                     engine.menu_command(MenuCommand::PasteLast);
                 }
             }

@@ -57,6 +57,7 @@ ksni = { version = "0.3.2", default-features = false, features = ["async-io", "b
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = { version = "0.21.2", default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 # Runtime-status probe: signal-0 liveness check of the PID a status file names.
 [target.'cfg(unix)'.dependencies]
