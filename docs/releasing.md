@@ -90,6 +90,22 @@ git diff rust/lf-desktop/Cargo.lock   # expect only local path package versions 
 inherited from the root workspace. `tests/test_release_default.py` fails if any
 source-less (path) package in the desktop lock differs from its manifest version.
 
+**Before tagging a new release `vX.Y.Z`**, also align the LocalFlow Preview
+versions with the tag, then refresh the desktop lock as above:
+
+1. Set `version = "X.Y.Z"` in `rust/lf-desktop/Cargo.toml` (its own version,
+   not inherited).
+2. Set `PREVIEW_RELEASE="vX.Y.Z"` in `scripts/install_gpui_preview.sh`.
+3. Run the `cargo metadata` refresh above and commit the updated
+   `rust/lf-desktop/Cargo.lock`.
+
+Otherwise the tag's preview publishing fails closed:
+`scripts/gpui_preview_assets.sh` refuses a tag that doesn't match
+`rust/lf-desktop/Cargo.toml`'s version, and the archives are named after that
+version. `tests/test_gpui_packaging.py` checks that `PREVIEW_RELEASE` matches
+the desktop version, and `tests/test_release_default.py` checks the lock and the
+release version.
+
 ## Tag-triggered assets
 
 After the release branch is merged, a maintainer can tag its commit and push:
@@ -121,6 +137,31 @@ The source archives are reproducible and the tag version must match
 Before announcing the release, confirm that the published
 `raw.githubusercontent.com/CortexRND/localflow/v0.2.2/install.sh` and
 `install.ps1` hash to the README digests.
+
+### LocalFlow Preview assets
+
+The same tag push also builds the additive LocalFlow Preview (native GPUI)
+packages. The `gpui-preview` job (tags and manual runs only, never pull
+requests) calls `.github/workflows/gpui-package.yml`, which builds and
+verifies them natively on `ubuntu-22.04`, `macos-latest` and
+`macos-15-intel`. After both it and the `build` job above succeed, the
+tag-only `publish-gpui-preview` job runs `scripts/gpui_preview_assets.sh` and
+uploads to the release that `build` created (it never creates one):
+
+- `LocalFlow-Preview-0.2.2-linux-x86_64.tar.gz`
+- `LocalFlow-Preview-0.2.2-macos-arm64.tar.gz`
+- `LocalFlow-Preview-0.2.2-macos-x86_64.tar.gz`
+- `SHA256SUMS-gpui-preview` (covers exactly those three, by their uploaded names)
+
+`SHA256SUMS` and the five assets above are untouched; `install.sh` keeps
+trusting only `SHA256SUMS`, and a preview failure can't block or change them.
+`scripts/gpui_preview_assets.sh` refuses to stage anything if the tag doesn't
+match `rust/lf-desktop/Cargo.toml`'s version, if the downloaded artifacts aren't
+exactly one per platform, or if an archive is missing, extra, misnamed, doesn't
+match its build checksum or doesn't hold its platform's layout. The macOS
+bundles are ad-hoc signed only (no Developer ID or notarisation); say so in
+the release notes. `scripts/install_gpui_preview.sh` installs from these assets
+(`rust/lf-desktop/README.md`).
 
 ### macOS DMG note for release notes
 
