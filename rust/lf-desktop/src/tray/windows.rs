@@ -41,8 +41,9 @@ impl Tray {
             &PredefinedMenuItem::separator(),
             &quit,
         ])?;
+        let from_pixels = Icon::from_rgba;
         let icon = TrayIconBuilder::new()
-            .with_icon(Icon::from_rgba(icon_pixels()?, ICON_SIZE, ICON_SIZE)?)
+            .with_icon(from_pixels(icon_pixels()?, ICON_SIZE, ICON_SIZE)?)
             .with_tooltip("LocalFlow")
             .with_menu(Box::new(menu))
             .build()?;
