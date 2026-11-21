@@ -74,7 +74,8 @@ Legend:
 | Shell | Single instance and page routing (including Setup) | Works per mode and data folder: OS lock held for the process, `hub_route::RequestFile` hand-off, requests queued behind the overlay or a dialog; if the owner exits mid hand-off the new window consumes and routes the newest request. Own namespace (`~/.localflow/desktop/`, `<sandbox>/desktop-instance/`), so it still runs beside the legacy Hub without routing to it | `singleinstance`, `hub_route` | Hub |
 | Shell | Screen-reader tree | Not possible with GPUI 0.2.2 (no accessibility API) | — | `lf-hub` on macOS |
 | Dictation | Linux global hotkeys in the Rust engine | Works on X11 (listen-only XInput2 raw events via `x11rb`, no grab or extra permission; hold, toggle, chords, sides, repeat suppression, clean stop). Wayland: explicit "unsupported" with the reason. Listener readiness is published only after the platform accepted it. If the listener dies, held keys count as released: a hold recording ends and is transcribed; a toggle or command recording is discarded | `lf_input::linux` | Python runtime |
-| Dictation | Tray item; Windows global hotkeys | Missing | — | Python runtime |
+| Dictation | Windows global hotkeys in the Rust engine | Listen-only Win32 keyboard hook on the current desktop; supports hold-to-talk, chords, sided modifiers, repeat suppression, and clean stop. Printable shortcuts use virtual keys with US punctuation mappings | `lf_input::listener` | Python runtime |
+| Dictation | Tray item | Missing | — | Python runtime |
 
 Wispr Flow features that LocalFlow doesn't plan (account, team sharing, sync, mobile,
 cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
@@ -86,7 +87,7 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    setup wizard, model storage, the settings assistant, key import, Test LLM, and
    single-instance and page routing; they still need interactive review on Linux
    (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
-   rows (tray item, Windows hotkeys, History retry) need a decision.
+   rows (tray item, History retry) need a decision.
 2. **Data safety.** A script compares the real config file, `~/.localflow` and the
    keyring by hash before and after a scripted sandbox session, and finds them
    unchanged. In real mode, every write goes through `config_write` or the
