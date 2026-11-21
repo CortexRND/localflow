@@ -71,5 +71,7 @@ jobs:
           localflow/mcp_server.py
           tests/test_mcp_server.py
           tests/test_gpui_packaging.py
+          localflow/desktop_launch.py
+          tests/test_desktop_launch.py
       - name: Test
         run: pytest -q

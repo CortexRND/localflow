@@ -31,9 +31,15 @@ ENVIRONMENT:
     LOCALFLOW_SANDBOX=1   Same as --sandbox
     LOCALFLOW_CONFIG      Real config file (honoured in real mode, as everywhere in LocalFlow)
 
+EXIT STATUS (launch-status: 1):
+    0   The window closed, or the request was handed to the open window
+    1   No window could be opened (display, lock or data error)
+    2   Invalid arguments
+
 One window runs per data folder: a second launch sends its page to it.
-This app runs beside the existing LocalFlow launchers; it does not replace
-`lf hub`, `lf-hub` or the Python runtime.";
+This app runs beside the existing LocalFlow windows. `lf hub`, `lf phrases`
+and `lf setup` open it only when asked (`--gpui` or LOCALFLOW_UI=gpui); on
+Linux, `lf-hub` opens it. It does not replace the Python runtime.";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Args {
@@ -178,5 +184,14 @@ mod tests {
         let env = parse(vec!["--engine".to_string()], true).unwrap();
         assert!(check_engine(&env, true).is_err());
         assert!(check_engine(&p(&[]).unwrap(), false).is_ok());
+    }
+
+    #[test]
+    fn help_promises_the_launch_status_the_launchers_probe_for() {
+        // `lf --gpui` and Linux `lf-hub` only trust exit 0 from a build whose
+        // --help passes this probe; Scope 3 builds (no marker) are refused.
+        assert!(lf_ui::desktop_launch::help_has_interface(USAGE));
+        let scope3 = USAGE.replace(lf_ui::desktop_launch::LAUNCH_STATUS_MARKER, "EXIT STATUS:");
+        assert!(!lf_ui::desktop_launch::help_has_interface(&scope3));
     }
 }

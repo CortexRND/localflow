@@ -28,7 +28,7 @@ from rich.table import Table
 from rich.text import Text
 
 from localflow import api as api_logic
-from localflow import provider_keys
+from localflow import desktop_launch, provider_keys
 from localflow import recall as recall_module
 from localflow.apitoken import read as read_api_token
 from localflow.config import (
@@ -402,10 +402,20 @@ def stats_command() -> None:
     show_default=True,
     help="Hub page to open.",
 )
-def hub_command(page: str) -> None:
+@desktop_launch.ui_options
+@click.pass_context
+def hub_command(ctx, page: str, ui_gpui: bool, ui_legacy: bool) -> None:
     """Open the native history and settings hub."""
+    flag = desktop_launch.flag_choice(ui_gpui, ui_legacy)
     page = canonical_page(page) or DEFAULT_PAGE
-    subprocess.Popen([sys.executable, "-m", "localflow.hub_window", "--page", page])
+    # Bare `lf hub` sends no page to LocalFlow Preview, so its first-run
+    # wizard still opens; the legacy Hub always gets the canonical page.
+    explicit = ctx.get_parameter_source("page") is not click.core.ParameterSource.DEFAULT
+    desktop_launch.launch(
+        flag,
+        lambda: subprocess.Popen([sys.executable, "-m", "localflow.hub_window", "--page", page]),
+        page=page if explicit else None,
+    )
 
 
 def _tweak_agent():
@@ -1160,11 +1170,18 @@ def token_command() -> None:
 
 
 @cli.group(invoke_without_command=True, hidden=True)
-def phrases() -> None:
+@desktop_launch.ui_options
+def phrases(ui_gpui: bool, ui_legacy: bool) -> None:
     """Manage hot phrases (no subcommand = open the Hub's Hot Phrases page)."""
     ctx = click.get_current_context()
     if ctx.invoked_subcommand is not None:
         return
+    desktop_launch.launch(
+        desktop_launch.flag_choice(ui_gpui, ui_legacy), _open_legacy_phrases, page="Hot Phrases"
+    )
+
+
+def _open_legacy_phrases() -> None:
     try:
         from localflow.phrases_window import main as window_main
 
@@ -1543,6 +1560,7 @@ def _setup_cli(
     default=None,
     help="Cleanup level (light or medium).",
 )
+@desktop_launch.ui_options
 @click.pass_context
 def setup(
     ctx,
@@ -1551,6 +1569,8 @@ def setup(
     stt_id: str | None,
     llm_id: str | None,
     cleanup_level: str | None,
+    ui_gpui: bool,
+    ui_legacy: bool,
 ) -> None:
     """Open the setup window or configure LocalFlow in the terminal."""
     if ctx.invoked_subcommand is not None:
@@ -1567,6 +1587,13 @@ def setup(
     if cli_mode:
         _setup_cli(stt_id, llm_id, yes, cleanup_level)
         return
+    # The window path only: --cli and the subcommands never reach the selector.
+    desktop_launch.launch(
+        desktop_launch.flag_choice(ui_gpui, ui_legacy), _open_legacy_setup, setup=True
+    )
+
+
+def _open_legacy_setup() -> None:
     from localflow.setup_window import main as window_main
 
     try:

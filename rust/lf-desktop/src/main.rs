@@ -88,14 +88,16 @@ fn main() -> ExitCode {
         lf_ui::hub_route::plan_initial_route(configured, args.page.map(|p| p.route())),
         Ok(lf_ui::hub_route::InitialRoute::Setup { .. })
     );
-    app::run(Launch {
+    let status = app::run(Launch {
         services,
         page: args.page.unwrap_or(Page::Home),
         setup: args.setup || first_run,
         notice,
         instance,
     });
-    ExitCode::SUCCESS
+    // Non-zero when no window opened, so `lf --gpui` falls back instead of
+    // mistaking it for a hand-off (see USAGE's EXIT STATUS).
+    ExitCode::from(status.exit_code())
 }
 
 /// The same-executable speech helper (`lf-desktop --speech-helper`).
