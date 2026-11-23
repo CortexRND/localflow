@@ -131,12 +131,14 @@ mod tests {
         mkdir_parents(&nested).unwrap();
         assert!(nested.is_dir());
         // ENOTDIR is not FileNotFoundError, so Python names the leaf too.
+        // Windows reports the path as not found, so Python walks up to the file.
         let leaf = file.join("x").join("y");
+        let named = if cfg!(windows) { &file } else { &leaf };
         let error = mkdir_parents(&leaf).unwrap_err();
         assert!(
             error
                 .to_string()
-                .ends_with(&str_repr(&leaf.to_string_lossy())),
+                .ends_with(&str_repr(&named.to_string_lossy())),
             "{error}"
         );
     }
