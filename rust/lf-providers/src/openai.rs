@@ -50,6 +50,17 @@ pub fn uses_max_completion_tokens(model: &str) -> bool {
 /// any reply text is written.
 pub const REASONING_REPLY_BUDGET: i64 = 4096;
 
+/// Whether `model` is an o-series reasoning model for the reply budget:
+/// the same id rule as [`uses_max_completion_tokens`], after one `vendor/`
+/// prefix (OpenRouter's `openai/o4-mini`). Only the budget uses this; the
+/// wire field for a prefixed id stays `max_tokens`, which such routers map
+/// themselves, and the bound still covers the model's hidden reasoning.
+pub fn is_reasoning_model(model: &str) -> bool {
+    let id = model.trim();
+    let id = id.split_once('/').map_or(id, |(_, rest)| rest);
+    uses_max_completion_tokens(id)
+}
+
 impl OpenAiCompatLlm {
     pub fn new(
         base_url: &str,
@@ -204,7 +215,7 @@ impl LlmProvider for OpenAiCompatLlm {
     }
 
     fn reply_budget(&self, visible: i64) -> i64 {
-        if uses_max_completion_tokens(&self.model) {
+        if is_reasoning_model(&self.model) {
             visible.max(REASONING_REPLY_BUDGET)
         } else {
             visible
@@ -319,6 +330,65 @@ mod tests {
         let gpt = OpenAiCompatLlm::new(&url, "gpt-4o-mini", "k", 5, None);
         gpt.complete("s", "u", Some(gpt.reply_budget(800))).unwrap();
         assert_eq!(server.request(2).json()["max_tokens"], 800);
+    }
+
+    #[test]
+    fn prefixed_reasoning_ids_get_the_budget_but_keep_max_tokens() {
+        let reasoning = [
+            "openai/o4-mini",
+            "openai/o1",
+            "openai/o1-mini",
+            "openai/o3-mini",
+            "openai/o3-mini-2025-01-31",
+            "o1-preview",
+            "o3",
+        ];
+        let plain = [
+            "openai/gpt-4o-mini",
+            "openai/gpt-4.1",
+            "meta-llama/llama-3.3-70b-instruct",
+            "openai/omni-moderation-latest",
+            "openai/o",
+            "gpt-4o-mini",
+        ];
+        let server = MockServer::start(
+            (0..reasoning.len() + plain.len() + 1)
+                .map(|_| MockResponse::json(200, OK_BODY))
+                .collect(),
+        );
+        let url = format!("{}/v1", server.url());
+        let mut n = 0;
+        for model in reasoning {
+            let llm = OpenAiCompatLlm::new(&url, model, "k", 5, None);
+            assert_eq!(llm.reply_budget(800), REASONING_REPLY_BUDGET, "{model}");
+            llm.complete("s", "u", Some(llm.reply_budget(800))).unwrap();
+            let body = server.request(n).json();
+            n += 1;
+            // Prefixed ids keep the router's `max_tokens`; bare ids use the
+            // OpenAI field. Either way the reasoning allowance is sent.
+            let (field, other) = if model.contains('/') {
+                ("max_tokens", "max_completion_tokens")
+            } else {
+                ("max_completion_tokens", "max_tokens")
+            };
+            assert_eq!(body[field], REASONING_REPLY_BUDGET, "{model}");
+            assert!(body.get(other).is_none(), "{model}");
+        }
+        for model in plain {
+            let llm = OpenAiCompatLlm::new(&url, model, "k", 5, None);
+            assert_eq!(llm.reply_budget(800), 800, "{model}");
+            llm.complete("s", "u", Some(llm.reply_budget(800))).unwrap();
+            let body = server.request(n).json();
+            n += 1;
+            assert_eq!(body["max_tokens"], 800, "{model}");
+            assert!(body.get("max_completion_tokens").is_none(), "{model}");
+        }
+        // A direct explicit bound on a prefixed reasoning id is unchanged.
+        let prefixed = OpenAiCompatLlm::new(&url, "openai/o4-mini", "k", 5, None);
+        prefixed.complete("s", "u", Some(800)).unwrap();
+        let body = server.request(n).json();
+        assert_eq!(body["max_tokens"], 800);
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]
