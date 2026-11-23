@@ -780,6 +780,53 @@ fn words(text: &str) -> Vec<String> {
     out
 }
 
+/// Words that frame a question about the history ("what have I dictated
+/// about …") rather than name its topic.
+const FRAMING: &[&str] = &[
+    "dictate",
+    "dictated",
+    "dictation",
+    "dictations",
+    "mention",
+    "mentioned",
+    "talk",
+    "talked",
+    "write",
+    "wrote",
+    "written",
+];
+
+/// The sandbox model's search terms for a question: its topic only.
+///
+/// When the question has "about", the topic is what follows the last one
+/// ("What have I dictated about the launch?" -> `launch`). Otherwise framing
+/// words are dropped. Either way, framing words are kept when they are all
+/// there is, so a search for the word "dictated" itself still works.
+fn question_topic(question: &str) -> Vec<String> {
+    let lower = question.to_lowercase();
+    let after_about = tokens(&lower)
+        .collect::<Vec<_>>()
+        .iter()
+        .rposition(|t| t == "about")
+        .map(|at| tokens(&lower).skip(at + 1).collect::<Vec<_>>().join(" "))
+        .map(|rest| words(&rest))
+        .filter(|terms| !terms.is_empty());
+    if let Some(terms) = after_about {
+        return terms;
+    }
+    let all = words(&lower);
+    let topic: Vec<String> = all
+        .iter()
+        .filter(|w| !FRAMING.contains(&w.as_str()))
+        .cloned()
+        .collect();
+    if topic.is_empty() {
+        all
+    } else {
+        topic
+    }
+}
+
 /// A search query from `terms` that `ask_agent::validate_args` accepts: at
 /// most `max` Unicode characters (not bytes), whole terms joined by spaces,
 /// in order. A term that doesn't fit is skipped, never ending the query, so
@@ -1092,7 +1139,7 @@ impl lf_providers::LlmProvider for SandboxModel {
             // no topic word at all lists the latest dictations (no query).
             // A detailed question is cut to what the tool accepts.
             let query = bounded_query(
-                &words(&question),
+                &question_topic(&question),
                 crate::controllers::ask_agent::MAX_ARG_CHARS,
             );
             let tool = if wants_prompts {
@@ -1512,6 +1559,51 @@ mod tests {
         assert_eq!(search(json!({"query": "fail"}))["count"], 1);
         assert_eq!(words("What did I say about git and CI?"), ["git", "ci"]);
         assert_eq!(term_score(&words("ci"), "Check the readiness probe"), 0);
+    }
+
+    /// The built-in "What have I dictated about the launch?" once searched
+    /// for its framing words too ("have" matched "Happy birthday! Hope you
+    /// have a great day."). It must search the topic only and, since no
+    /// example mentions a launch, say so without citing anything.
+    #[test]
+    fn built_in_launch_question_searches_its_topic_and_cites_nothing() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        let question = lf_ui::backends::ask::EXAMPLES
+            .iter()
+            .find(|q| q.contains("launch"))
+            .expect("built-in launch question");
+        assert_eq!(question_topic(question), ["launch"]);
+        // The framing word is still searchable when it is the topic.
+        assert_eq!(
+            question_topic("What did I dictate about dictated notes?"),
+            ["dictated", "notes"]
+        );
+        assert_eq!(question_topic("dictated"), ["dictated"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let events = sandbox_ask(&root, question, "Any time");
+        let calls: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, args, .. } => Some((name.as_str(), args.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].0, "search_dictations");
+        assert!(calls[0].1.contains("query: \"launch\""), "{}", calls[0].1);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { id: 1, ok: true, summary, .. } if summary == "0 results"
+        )));
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(done.turn.error.is_empty(), "{}", done.turn.error);
+        assert_eq!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
+        assert!(done.turn.citations.is_empty(), "{:?}", done.turn.citations);
     }
 
     /// A detailed question has more distinct terms than one query may hold
