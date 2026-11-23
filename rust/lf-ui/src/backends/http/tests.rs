@@ -243,6 +243,33 @@ fn prompts_use_server_side_transitions_and_empty_lists() {
 }
 
 #[test]
+fn recall_timeout_is_300s_by_default_and_can_only_be_shortened() {
+    let server = Server::new();
+    assert_eq!(HttpAskBackend::new(server.http()).recall_timeout, 300);
+    assert_eq!(
+        HttpAskBackend::new(server.http())
+            .with_recall_timeout(0)
+            .recall_timeout,
+        1
+    );
+    assert_eq!(
+        HttpAskBackend::new(server.http())
+            .with_recall_timeout(10_000)
+            .recall_timeout,
+        RECALL_TIMEOUT_SECS
+    );
+    // A shortened timeout really bounds the request.
+    server.backend.delay_ms.store(2500, Ordering::SeqCst);
+    let mut ask = HttpAskBackend::new(server.http()).with_recall_timeout(1);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        ask.ask("q", "Any time", None, None).error,
+        ERROR_UNREACHABLE
+    );
+    assert!(started.elapsed() < Duration::from_millis(2400));
+}
+
+#[test]
 fn recall_maps_answer_citations_validation_and_conversation() {
     let server = Server::new();
     let mut ask = HttpAskBackend::new(server.http());

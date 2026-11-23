@@ -57,6 +57,9 @@ pub const LIMITS: Limits = Limits {
     run_deadline: Duration::from_secs(180),
     model_timeout: Duration::from_secs(60),
 };
+/// Least time left for starting a model request or the recall fallback
+/// (their timeouts are whole seconds).
+pub const MIN_STEP_BUDGET: Duration = Duration::from_secs(1);
 /// `max_tokens` for each model reply.
 pub const MAX_REPLY_TOKENS: i64 = 800;
 /// `num_ctx` for Ollama: the same as the service's recall model.
@@ -625,17 +628,24 @@ pub enum AgentEvent {
 /// sandbox: `sandbox::SandboxAgent`.
 pub trait AgentBackend: Send {
     fn simulated(&self) -> bool;
-    /// Start the tools (blocking, bounded, cancellable).
-    fn connect(&self, cancel: &AtomicBool) -> Result<Box<dyn ToolTransport>, McpError>;
+    /// Start the tools (blocking, bounded, cancellable). With a `deadline`
+    /// (an Ask run's), nothing waits past it ([`McpError::Deadline`]); the
+    /// standalone probe passes `None` and keeps the per-phase caps only.
+    fn connect(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Result<Box<dyn ToolTransport>, McpError>;
     /// The configured model with this request timeout in seconds.
     fn model(&self, timeout_secs: i64) -> Result<Box<dyn LlmProvider>, String>;
-    /// The existing recall answer (`Remote::ask`).
-    fn recall(&self, question: &str, filter: &str) -> Turn;
+    /// The existing recall answer (`Remote::ask`), its request bounded by
+    /// `budget` (what is left of the run).
+    fn recall(&self, question: &str, filter: &str, budget: Duration) -> Turn;
 }
 
 /// Start the tools once and report whether they work.
 pub fn probe(backend: &dyn AgentBackend, cancel: &AtomicBool) -> McpStatus {
-    match backend.connect(cancel) {
+    match backend.connect(cancel, None) {
         Ok(_) if backend.simulated() => McpStatus::Simulated,
         Ok(tools) => McpStatus::Connected {
             tools: tools.tools().len(),
@@ -828,21 +838,24 @@ pub fn answer(
         }));
         return;
     };
+    // One monotonic deadline for the whole run: starting the tools, every
+    // model request, every tool wait and the recall fallback.
+    let deadline = Instant::now() + limits.run_deadline;
     emit(AgentEvent::Thinking);
-    let mut tools = match backend.connect(cancel) {
+    let mut tools = match backend.connect(cancel, Some(deadline)) {
         Ok(tools) => tools,
         Err(McpError::Cancelled) => return,
+        Err(_) if stopped() => return,
+        // Out of time, not a tools failure: no status change, no fallback.
+        Err(McpError::Deadline) => return finish_turn(timed_out(&turn, limits), cancel, emit),
         Err(e) => {
-            if stopped() {
-                return;
-            }
             emit(AgentEvent::Status(McpStatus::from_error(&e)));
             let note = if e.is_missing() {
                 NOTE_RECALL_MISSING
             } else {
                 NOTE_RECALL_FAILED
             };
-            return fallback(backend, question, note, cancel, emit);
+            return fallback(backend, question, note, limits, deadline, cancel, emit);
         }
     };
     if stopped() {
@@ -860,7 +873,6 @@ pub fn answer(
         ..Scope::default()
     };
     let available = tools.tools();
-    let started = Instant::now();
     let mut steps: Vec<Step> = Vec::new();
     let mut seen: Vec<Seen> = Vec::new();
     let mut calls = 0usize;
@@ -868,13 +880,9 @@ pub fn answer(
         if stopped() {
             return;
         }
-        let left = limits.run_deadline.saturating_sub(started.elapsed());
-        if left < Duration::from_secs(1) {
-            turn.error = format!(
-                "Ask ran out of time after {} seconds. Try a narrower question.",
-                limits.run_deadline.as_secs()
-            );
-            return finish_turn(turn, cancel, emit);
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left < MIN_STEP_BUDGET {
+            return finish_turn(timed_out(&turn, limits), cancel, emit);
         }
         if step > 0 {
             emit(AgentEvent::Thinking);
@@ -892,6 +900,11 @@ pub fn answer(
         });
         if stopped() {
             return;
+        }
+        // The request's timeout is within the deadline; a reply that still
+        // arrives after it is ignored.
+        if Instant::now() >= deadline {
+            return finish_turn(timed_out(&turn, limits), cancel, emit);
         }
         let Ok(reply) = reply else {
             // The error text may carry an endpoint; it is not shown or logged.
@@ -952,13 +965,25 @@ pub fn answer(
                     }
                 };
                 let t0 = Instant::now();
-                let result = tools.call(&name, &args, cancel);
+                let result = tools.call_until(&name, &args, cancel, deadline);
                 let millis = t0.elapsed().as_millis() as u64;
                 if stopped() {
                     return;
                 }
                 match result {
                     Err(McpError::Cancelled) => return,
+                    // Out of time: the running card completes, the run ends
+                    // with a timeout (the tools didn't fail; no fallback).
+                    Err(McpError::Deadline) => {
+                        emit(AgentEvent::ToolFinished {
+                            id,
+                            ok: false,
+                            summary: "Ran out of time".into(),
+                            preview: String::new(),
+                            millis,
+                        });
+                        return finish_turn(timed_out(&turn, limits), cancel, emit);
+                    }
                     Err(e) if e.is_fatal() => {
                         emit(AgentEvent::ToolFinished {
                             id,
@@ -969,7 +994,15 @@ pub fn answer(
                         });
                         emit(AgentEvent::Status(McpStatus::from_error(&e)));
                         drop(tools);
-                        return fallback(backend, question, NOTE_RECALL_FAILED, cancel, emit);
+                        return fallback(
+                            backend,
+                            question,
+                            NOTE_RECALL_FAILED,
+                            limits,
+                            deadline,
+                            cancel,
+                            emit,
+                        );
                     }
                     Err(e) => {
                         let message = e.to_string();
@@ -1031,16 +1064,43 @@ fn finish_turn(turn: Turn, cancel: &AtomicBool, emit: &mut dyn FnMut(AgentEvent)
     }
 }
 
+/// The finished turn when the run's deadline passed.
+fn timed_out(turn: &Turn, limits: &Limits) -> Turn {
+    let mut out = Turn::new(turn.question.clone());
+    out.error = format!(
+        "Ask ran out of time after {} seconds. Try a narrower question.",
+        limits.run_deadline.as_secs()
+    );
+    out
+}
+
+/// Basic recall within what is left of the run: never started once the
+/// run is stopped or has less than [`MIN_STEP_BUDGET`] left (that is a
+/// timeout, not a recall answer), its request is bounded by the rest, and
+/// a result arriving after the deadline is dropped.
 fn fallback(
     backend: &dyn AgentBackend,
     question: &Question,
     note: &str,
+    limits: &Limits,
+    deadline: Instant,
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(AgentEvent),
 ) {
-    let turn = backend.recall(question.text.trim(), &question.filter);
     if cancel.load(Ordering::Relaxed) {
         return;
+    }
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left < MIN_STEP_BUDGET {
+        let turn = Turn::new(question.text.trim());
+        return finish_turn(timed_out(&turn, limits), cancel, emit);
+    }
+    let turn = backend.recall(question.text.trim(), &question.filter, left);
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    if Instant::now() >= deadline {
+        return finish_turn(timed_out(&turn, limits), cancel, emit);
     }
     emit(AgentEvent::Finished(Answer {
         turn,
@@ -1144,6 +1204,12 @@ pub(crate) mod tests {
         pub connect_error: Option<McpError>,
         pub recalls: Arc<Mutex<Vec<(String, String)>>>,
         pub gate: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
+        /// The `budget` each recall got.
+        pub recall_budgets: Arc<Mutex<Vec<Duration>>>,
+        /// The `deadline` each connect got.
+        pub connect_deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
+        /// Handed out by the next connect instead of [`FakeTools`].
+        pub transport: Mutex<Option<Box<dyn ToolTransport>>>,
     }
 
     impl Harness {
@@ -1161,9 +1227,17 @@ pub(crate) mod tests {
         fn simulated(&self) -> bool {
             false
         }
-        fn connect(&self, _: &AtomicBool) -> Result<Box<dyn ToolTransport>, McpError> {
+        fn connect(
+            &self,
+            _: &AtomicBool,
+            deadline: Option<Instant>,
+        ) -> Result<Box<dyn ToolTransport>, McpError> {
+            self.connect_deadlines.lock().unwrap().push(deadline);
             if let Some(e) = &self.connect_error {
                 return Err(e.clone());
+            }
+            if let Some(transport) = self.transport.lock().unwrap().take() {
+                return Ok(transport);
             }
             Ok(Box::new(FakeTools {
                 outputs: self.outputs.clone(),
@@ -1178,7 +1252,8 @@ pub(crate) mod tests {
                 timeout: timeout_secs,
             }))
         }
-        fn recall(&self, question: &str, filter: &str) -> Turn {
+        fn recall(&self, question: &str, filter: &str, budget: Duration) -> Turn {
+            self.recall_budgets.lock().unwrap().push(budget);
             self.recalls
                 .lock()
                 .unwrap()
@@ -1502,6 +1577,120 @@ pub(crate) mod tests {
         release.send(()).unwrap();
         worker.join().unwrap();
         assert!(rx.try_iter().next().is_none());
+    }
+
+    fn timed_out_turn(events: &[AgentEvent]) {
+        let done = finished(events);
+        assert!(
+            done.turn.error.starts_with("Ask ran out of time"),
+            "{:?}",
+            done.turn
+        );
+        assert_eq!((done.via, done.note.as_deref()), (Via::Tools, None));
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Status(_))),
+            "running out of time is not a tools failure"
+        );
+    }
+
+    #[test]
+    fn deadline_starts_before_connect_and_exhausted_connect_never_recalls() {
+        let h = Harness {
+            connect_error: Some(McpError::Deadline),
+            ..Harness::default()
+        };
+        let before = Instant::now();
+        let events = run(&h, &q("x", "Any time"));
+        let after = Instant::now();
+        timed_out_turn(&events);
+        assert!(h.recalls.lock().unwrap().is_empty());
+        assert!(h.prompts.lock().unwrap().is_empty());
+        // The connect got the run's absolute deadline.
+        let deadline = h.connect_deadlines.lock().unwrap()[0].unwrap();
+        assert!(
+            deadline >= before + LIMITS.run_deadline && deadline <= after + LIMITS.run_deadline
+        );
+        // The standalone probe keeps its own caps only.
+        probe(&h, &AtomicBool::new(false));
+        assert_eq!(h.connect_deadlines.lock().unwrap()[1], None);
+    }
+
+    #[test]
+    fn exhausted_tool_wait_completes_the_card_and_never_recalls() {
+        let h = Harness::script(&["{\"tool\": \"search_dictations\"}"]);
+        h.outputs.lock().unwrap().push_back(Err(McpError::Deadline));
+        let events = run(&h, &q("x", "Any time"));
+        timed_out_turn(&events[2..]);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { id: 1, ok: false, summary, .. } if summary == "Ran out of time"
+        )));
+        assert!(h.recalls.lock().unwrap().is_empty());
+        // The page's state: the card is complete, not left running.
+        let mut c = crate::controllers::ask::Conversation::default();
+        let g = c.begin("x");
+        for e in events {
+            c.apply(g, e);
+        }
+        assert_eq!(
+            c.turns[0].cards[0].status,
+            crate::controllers::ask::CardStatus::Error
+        );
+    }
+
+    #[test]
+    fn fallback_gets_the_remaining_budget_and_none_when_exhausted() {
+        let h = Harness {
+            connect_error: Some(McpError::Missing),
+            ..Harness::default()
+        };
+        let events = run(&h, &q("x", "Any time"));
+        assert_eq!(finished(&events).via, Via::Recall);
+        let budget = h.recall_budgets.lock().unwrap()[0];
+        assert!(budget <= LIMITS.run_deadline, "{budget:?}");
+        assert!(
+            budget > LIMITS.run_deadline - Duration::from_secs(5),
+            "{budget:?}"
+        );
+        // Less than a second left: a timeout, never a recall started late.
+        for error in [McpError::Missing, McpError::Closed] {
+            let h = Harness {
+                connect_error: Some(error),
+                ..Harness::default()
+            };
+            let limits = Limits {
+                run_deadline: Duration::from_millis(500),
+                ..LIMITS
+            };
+            let mut events = Vec::new();
+            answer(
+                &h,
+                &q("x", "Any time"),
+                &limits,
+                &AtomicBool::new(false),
+                &mut |e| events.push(e),
+            );
+            assert!(finished(&events)
+                .turn
+                .error
+                .starts_with("Ask ran out of time"));
+            assert!(h.recalls.lock().unwrap().is_empty());
+        }
+        // Stopped: no recall either.
+        let h = Harness {
+            connect_error: Some(McpError::Missing),
+            ..Harness::default()
+        };
+        let mut events = Vec::new();
+        answer(
+            &h,
+            &q("x", "Any time"),
+            &LIMITS,
+            &AtomicBool::new(true),
+            &mut |e| events.push(e),
+        );
+        assert!(h.recalls.lock().unwrap().is_empty());
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Finished(_))));
     }
 
     #[test]

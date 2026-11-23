@@ -676,12 +676,16 @@ impl crate::controllers::ask_agent::AgentBackend for SandboxAgent {
     fn connect(
         &self,
         cancel: &std::sync::atomic::AtomicBool,
+        deadline: Option<std::time::Instant>,
     ) -> Result<
         Box<dyn crate::controllers::mcp_client::ToolTransport>,
         crate::controllers::mcp_client::McpError,
     > {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(crate::controllers::mcp_client::McpError::Cancelled);
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(crate::controllers::mcp_client::McpError::Deadline);
         }
         Ok(Box::new(SandboxTools {
             root: self.root.clone(),
@@ -696,7 +700,13 @@ impl crate::controllers::ask_agent::AgentBackend for SandboxAgent {
         }))
     }
 
-    fn recall(&self, question: &str, _: &str) -> lf_ui::backends::ask::Turn {
+    /// In-process and instant: the budget has nothing to bound.
+    fn recall(
+        &self,
+        question: &str,
+        _: &str,
+        _: std::time::Duration,
+    ) -> lf_ui::backends::ask::Turn {
         crate::remote::sandbox_answer(&self.root, question)
     }
 }
@@ -1084,9 +1094,43 @@ impl crate::controllers::mcp_client::ToolTransport for SandboxTools {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::controllers::mcp_client::ToolOutput, crate::controllers::mcp_client::McpError>
     {
+        self.paced_call(name, arguments, cancel, None)
+    }
+
+    fn call_until(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &std::sync::atomic::AtomicBool,
+        deadline: std::time::Instant,
+    ) -> Result<crate::controllers::mcp_client::ToolOutput, crate::controllers::mcp_client::McpError>
+    {
+        self.paced_call(name, arguments, cancel, Some(deadline))
+    }
+}
+
+impl SandboxTools {
+    /// The UI pacing never waits past the Ask run's `deadline`.
+    fn paced_call(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &std::sync::atomic::AtomicBool,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::controllers::mcp_client::ToolOutput, crate::controllers::mcp_client::McpError>
+    {
         use crate::controllers::mcp_client::McpError;
-        if !pause(self.latency, cancel) {
+        let pace = match deadline {
+            Some(d) => self
+                .latency
+                .min(d.saturating_duration_since(std::time::Instant::now())),
+            None => self.latency,
+        };
+        if !pause(pace, cancel) {
             return Err(McpError::Cancelled);
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(McpError::Deadline);
         }
         Ok(match name {
             "search_dictations" => self.search_dictations(arguments),
@@ -1705,6 +1749,43 @@ mod tests {
             bounded_query(&words("What did I say about git?"), 200),
             "git"
         );
+    }
+
+    #[test]
+    fn sandbox_pacing_never_outlasts_the_run_deadline() {
+        use crate::controllers::mcp_client::{McpError, ToolTransport};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: Duration::from_secs(30),
+        };
+        let started = Instant::now();
+        assert_eq!(
+            tools
+                .call_until(
+                    "search_dictations",
+                    &json!({}),
+                    &AtomicBool::new(false),
+                    Instant::now() + Duration::from_millis(100),
+                )
+                .err(),
+            Some(McpError::Deadline)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let agent = SandboxAgent::new(root, Arc::new(seed_prompt_queue()), Duration::ZERO);
+        use crate::controllers::ask_agent::AgentBackend;
+        assert_eq!(
+            agent
+                .connect(&AtomicBool::new(false), Some(Instant::now()))
+                .err(),
+            Some(McpError::Deadline)
+        );
+        assert!(agent.connect(&AtomicBool::new(false), None).is_ok());
     }
 
     #[test]

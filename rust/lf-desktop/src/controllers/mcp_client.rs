@@ -147,6 +147,9 @@ pub enum McpError {
     /// A tool this session does not offer.
     UnknownTool,
     Cancelled,
+    /// The Ask run's overall deadline passed while waiting (versus
+    /// [`McpError::Timeout`], a per-step cap of a server that was slow).
+    Deadline,
 }
 
 impl McpError {
@@ -183,6 +186,7 @@ impl std::fmt::Display for McpError {
             }
             McpError::UnknownTool => f.write_str("tool not offered by this server"),
             McpError::Cancelled => f.write_str("stopped"),
+            McpError::Deadline => f.write_str("ran out of time"),
         }
     }
 }
@@ -235,6 +239,49 @@ pub trait ToolTransport: Send {
         arguments: &Value,
         cancel: &AtomicBool,
     ) -> Result<ToolOutput, McpError>;
+
+    /// [`ToolTransport::call`] that never waits past `deadline` (the Ask
+    /// run's) and then fails with [`McpError::Deadline`]. The default suits
+    /// in-memory transports that don't block: it refuses to start after the
+    /// deadline and drops a result that arrives after it. Transports that
+    /// wait (the stdio session, the paced sandbox) cap the wait itself.
+    fn call_until(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<ToolOutput, McpError> {
+        if Instant::now() >= deadline {
+            return Err(McpError::Deadline);
+        }
+        let result = self.call(name, arguments, cancel);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(McpError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(McpError::Deadline);
+        }
+        result
+    }
+}
+
+/// How long a wait capped at `cap` may take, given the run's `deadline`:
+/// `(wait, deadline_binds)`, or [`McpError::Deadline`] when it has passed.
+pub fn capped_wait(cap: Duration, deadline: Option<Instant>) -> Result<(Duration, bool), McpError> {
+    match deadline {
+        None => Ok((cap, false)),
+        Some(deadline) => {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                Err(McpError::Deadline)
+            } else if left <= cap {
+                Ok((left, true))
+            } else {
+                Ok((cap, false))
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------------- resolve ---
@@ -551,6 +598,17 @@ impl StdioSession {
     /// Start `command` and complete the handshake within [`START_TIMEOUT`]
     /// (spawn + `initialize`) plus [`START_TIMEOUT`] (`tools/list`).
     pub fn spawn(command: &McpCommand, cancel: &AtomicBool) -> Result<Self, McpError> {
+        Self::spawn_until(command, cancel, None)
+    }
+
+    /// [`StdioSession::spawn`] whose two handshake phases also stop at the
+    /// Ask run's `deadline` ([`McpError::Deadline`]).
+    pub fn spawn_until(
+        command: &McpCommand,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Result<Self, McpError> {
+        capped_wait(START_TIMEOUT, deadline)?;
         let mut cmd = server_command(command, std::env::var_os(CONFIG_ENV), std::env::current_dir)?;
         let mut child = cmd
             .spawn()
@@ -559,7 +617,7 @@ impl StdioSession {
             drop(ChildGuard(Some(child)));
             return Err(McpError::Spawn("no pipes".into()));
         };
-        Self::handshake(stdout, stdin, Some(child), cancel)
+        Self::handshake_until(stdout, stdin, Some(child), cancel, deadline)
     }
 
     /// Handshake over arbitrary pipes (tests use in-memory ones).
@@ -568,6 +626,17 @@ impl StdioSession {
         writer: impl Write + Send + 'static,
         child: Option<Child>,
         cancel: &AtomicBool,
+    ) -> Result<Self, McpError> {
+        Self::handshake_until(reader, writer, child, cancel, None)
+    }
+
+    /// [`StdioSession::handshake`] that also stops at `deadline`.
+    pub fn handshake_until(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        child: Option<Child>,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
     ) -> Result<Self, McpError> {
         let mut session = StdioSession {
             writer: Some(spawn_writer(writer)),
@@ -587,6 +656,7 @@ impl StdioSession {
             START_TIMEOUT,
             "the server to start",
             cancel,
+            deadline,
         )?;
         let version = init.get("protocolVersion").and_then(Value::as_str);
         if !version.is_some_and(|v| PROTOCOL_VERSIONS.contains(&v)) {
@@ -599,6 +669,7 @@ impl StdioSession {
             START_TIMEOUT,
             "the tool list",
             cancel,
+            deadline,
         )?;
         session.tools = accepted_tools(&listed);
         if session.tools.is_empty() {
@@ -621,7 +692,8 @@ impl StdioSession {
         self.send(&json!({"jsonrpc": "2.0", "method": method}))
     }
 
-    /// One request and its reply's `result`, within `timeout`.
+    /// One request and its reply's `result`, within `timeout` and the run's
+    /// `deadline` (whichever comes first; nothing is sent once it passed).
     fn request(
         &mut self,
         method: &str,
@@ -629,15 +701,17 @@ impl StdioSession {
         timeout: Duration,
         what: &'static str,
         cancel: &AtomicBool,
+        deadline: Option<Instant>,
     ) -> Result<Value, McpError> {
         if self.dead {
             return Err(McpError::Closed);
         }
+        let (wait, binds) = capped_wait(timeout, deadline)?;
         self.next_id += 1;
         let id = self.next_id;
         let result = self
             .send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-            .and_then(|_| self.wait_for(id, timeout, what, cancel));
+            .and_then(|_| self.wait_for(id, wait, binds, what, cancel));
         if result.as_ref().err().is_some_and(McpError::is_fatal) {
             self.dead = true;
         }
@@ -648,6 +722,7 @@ impl StdioSession {
         &mut self,
         id: i64,
         timeout: Duration,
+        run_deadline_binds: bool,
         what: &'static str,
         cancel: &AtomicBool,
     ) -> Result<Value, McpError> {
@@ -659,7 +734,11 @@ impl StdioSession {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(McpError::Timeout(what));
+                return Err(if run_deadline_binds {
+                    McpError::Deadline
+                } else {
+                    McpError::Timeout(what)
+                });
             }
             let line = match self.lines.recv_timeout(left.min(POLL)) {
                 Ok(line) => line,
@@ -713,6 +792,28 @@ impl ToolTransport for StdioSession {
         arguments: &Value,
         cancel: &AtomicBool,
     ) -> Result<ToolOutput, McpError> {
+        self.call_tool(name, arguments, cancel, None)
+    }
+
+    fn call_until(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<ToolOutput, McpError> {
+        self.call_tool(name, arguments, cancel, Some(deadline))
+    }
+}
+
+impl StdioSession {
+    fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Result<ToolOutput, McpError> {
         if !self.tools.iter().any(|t| t == name) {
             return Err(McpError::UnknownTool);
         }
@@ -722,6 +823,7 @@ impl ToolTransport for StdioSession {
             TOOL_TIMEOUT,
             "the tool",
             cancel,
+            deadline,
         )?;
         Ok(tool_output(&result))
     }
@@ -780,12 +882,23 @@ pub fn connect(
     candidates: &Result<Vec<McpCommand>, McpError>,
     cancel: &AtomicBool,
 ) -> Result<StdioSession, McpError> {
+    connect_until(candidates, cancel, None)
+}
+
+/// [`connect`] within the Ask run's `deadline`: no candidate is started
+/// once it passed, and each handshake stops at it ([`McpError::Deadline`]).
+pub fn connect_until(
+    candidates: &Result<Vec<McpCommand>, McpError>,
+    cancel: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<StdioSession, McpError> {
     let commands = candidates.as_ref().map_err(Clone::clone)?;
     let mut last = McpError::Missing;
     for command in commands {
-        match StdioSession::spawn(command, cancel) {
+        match StdioSession::spawn_until(command, cancel, deadline) {
             Ok(session) => return Ok(session),
             Err(McpError::Cancelled) => return Err(McpError::Cancelled),
+            Err(McpError::Deadline) => return Err(McpError::Deadline),
             Err(e) => {
                 log::info!("Ask tools: {} unavailable: {e}", command.label());
                 last = e;
@@ -949,6 +1062,126 @@ mod tests {
         );
         assert!(seen[1].get("id").is_none(), "initialized is a notification");
         assert_eq!(seen[0]["params"]["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn run_deadline_caps_handshake_and_waits_as_its_own_error() {
+        // Per-phase cap binds when the deadline is far, the deadline when near.
+        assert_eq!(capped_wait(START_TIMEOUT, None), Ok((START_TIMEOUT, false)));
+        let far = Instant::now() + Duration::from_secs(600);
+        assert_eq!(
+            capped_wait(START_TIMEOUT, Some(far)),
+            Ok((START_TIMEOUT, false))
+        );
+        let (wait, binds) =
+            capped_wait(START_TIMEOUT, Some(Instant::now() + Duration::from_secs(1))).unwrap();
+        assert!(binds && wait <= Duration::from_secs(1));
+        assert_eq!(
+            capped_wait(START_TIMEOUT, Some(Instant::now())),
+            Err(McpError::Deadline)
+        );
+        // A silent server: the handshake stops at the run's deadline, long
+        // before START_TIMEOUT, with Deadline (not Timeout or Cancelled).
+        let (reader, writer, _) = fake_server(|_| vec![]);
+        let started = Instant::now();
+        assert_eq!(
+            StdioSession::handshake_until(
+                reader,
+                writer,
+                None,
+                &AtomicBool::new(false),
+                Some(Instant::now() + Duration::from_millis(300)),
+            )
+            .err(),
+            Some(McpError::Deadline)
+        );
+        assert!(started.elapsed() < START_TIMEOUT);
+        // A server that answers `initialize` only: the tools/list phase is
+        // capped by the same deadline.
+        let (reader, writer, _) = fake_server(|m| {
+            if m["method"] == "initialize" {
+                standard(m)
+            } else {
+                vec![]
+            }
+        });
+        assert_eq!(
+            StdioSession::handshake_until(
+                reader,
+                writer,
+                None,
+                &AtomicBool::new(false),
+                Some(Instant::now() + Duration::from_millis(300)),
+            )
+            .err(),
+            Some(McpError::Deadline)
+        );
+        assert!(McpError::Deadline.is_fatal() && !McpError::Deadline.is_missing());
+    }
+
+    /// End to end over real pipes: the model asks for a tool, the server
+    /// never answers it, and the run stops at its own deadline (far below
+    /// TOOL_TIMEOUT) with a completed card and no recall.
+    #[test]
+    fn real_pipe_tool_wait_stops_at_the_run_deadline_without_recall() {
+        use crate::controllers::ask_agent::tests::Harness;
+        use crate::controllers::ask_agent::{answer, AgentEvent, Limits, Question, LIMITS};
+        let (reader, writer, _) = fake_server(|m| {
+            if m["method"] == "tools/call" {
+                vec![]
+            } else {
+                standard(m)
+            }
+        });
+        let cancel = AtomicBool::new(false);
+        let session = StdioSession::handshake(reader, writer, None, &cancel).unwrap();
+        let h = Harness::script(&["{\"tool\": \"search_dictations\"}"]);
+        *h.transport.lock().unwrap() = Some(Box::new(session));
+        let limits = Limits {
+            run_deadline: Duration::from_millis(1500),
+            ..LIMITS
+        };
+        let question = Question {
+            text: "x".into(),
+            filter: "Any time".into(),
+            context: Vec::new(),
+        };
+        let started = Instant::now();
+        let mut events = Vec::new();
+        answer(&h, &question, &limits, &cancel, &mut |e| events.push(e));
+        let took = started.elapsed();
+        assert!(took >= Duration::from_secs(1), "{took:?}");
+        assert!(took < TOOL_TIMEOUT / 2, "{took:?}");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { ok: false, summary, .. } if summary == "Ran out of time"
+        )));
+        match events.last() {
+            Some(AgentEvent::Finished(done)) => {
+                assert!(done.turn.error.starts_with("Ask ran out of time"))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(h.recalls.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_candidate_is_started_after_the_deadline() {
+        let started = Instant::now();
+        assert_eq!(
+            connect_until(
+                &Ok(vec![McpCommand {
+                    program: PathBuf::from("/bin/cat"),
+                    kind: McpKind::LocalflowMcp,
+                }]),
+                &AtomicBool::new(false),
+                Some(Instant::now()),
+            )
+            .err(),
+            Some(McpError::Deadline)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

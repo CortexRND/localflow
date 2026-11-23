@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lf_core::config::Config;
 use lf_providers::factory::BuildOptions;
@@ -154,11 +154,26 @@ impl Remote {
 
     /// Ask one question (stateless: the page keeps the conversation).
     pub fn ask(&self, config: &Config, question: &str, time_filter: &str) -> Turn {
+        self.ask_within(config, question, time_filter, None)
+    }
+
+    /// [`Remote::ask`] whose `/api/recall` request is bounded by `budget`
+    /// (whole seconds, rounded down; `None` keeps the default timeout).
+    pub fn ask_within(
+        &self,
+        config: &Config,
+        question: &str,
+        time_filter: &str,
+        budget: Option<Duration>,
+    ) -> Turn {
         match self {
             Remote::Sandbox { root, .. } => sandbox_answer(root, question),
             Remote::Http { .. } => match self.transport(config) {
                 Ok(transport) => {
                     let mut backend = HttpAskBackend::new(transport);
+                    if let Some(budget) = budget {
+                        backend = backend.with_recall_timeout(budget.as_secs());
+                    }
                     backend.ask(question, time_filter, None::<&BTreeSet<String>>, None)
                 }
                 Err(_) => {
@@ -190,8 +205,12 @@ impl AgentBackend for LocalAgent {
         false
     }
 
-    fn connect(&self, cancel: &AtomicBool) -> Result<Box<dyn ToolTransport>, McpError> {
-        mcp_client::connect(&mcp_client::discover(), cancel)
+    fn connect(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Result<Box<dyn ToolTransport>, McpError> {
+        mcp_client::connect_until(&mcp_client::discover(), cancel, deadline)
             .map(|session| Box::new(session) as Box<dyn ToolTransport>)
     }
 
@@ -206,8 +225,9 @@ impl AgentBackend for LocalAgent {
             .map_err(|e| e.message())
     }
 
-    fn recall(&self, question: &str, filter: &str) -> Turn {
-        self.remote.ask(&self.config, question, filter)
+    fn recall(&self, question: &str, filter: &str, budget: Duration) -> Turn {
+        self.remote
+            .ask_within(&self.config, question, filter, Some(budget))
     }
 }
 

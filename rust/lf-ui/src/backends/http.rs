@@ -294,14 +294,27 @@ impl PromptQueue for HttpPromptQueue {
 pub struct HttpAskBackend {
     http: HttpTransport,
     turns: Vec<Turn>,
+    /// Whole-request timeout of `/api/recall`, in seconds.
+    recall_timeout: u64,
 }
+
+/// Default `/api/recall` timeout in seconds.
+pub const RECALL_TIMEOUT_SECS: u64 = 300;
 
 impl HttpAskBackend {
     pub fn new(http: HttpTransport) -> Self {
         Self {
             http,
             turns: Vec::new(),
+            recall_timeout: RECALL_TIMEOUT_SECS,
         }
+    }
+
+    /// A shorter `/api/recall` timeout (seconds, at least 1, at most the
+    /// default), for a caller with its own deadline.
+    pub fn with_recall_timeout(mut self, secs: u64) -> Self {
+        self.recall_timeout = secs.clamp(1, RECALL_TIMEOUT_SECS);
+        self
     }
 }
 
@@ -342,7 +355,7 @@ impl AskBackend for HttpAskBackend {
                 &["api", "recall"],
                 &[],
                 Some(json!({"question":question,"since":since,"k":8,"llm":true})),
-                300,
+                self.recall_timeout,
             ) {
                 Ok(value) => {
                     if let Some(answer) = value.get("answer").and_then(Value::as_str) {

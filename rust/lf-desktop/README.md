@@ -662,10 +662,16 @@ the last three answered turns as context.
   `num_ctx` 8192), from the desktop process. With a cloud provider, the tool
   results shown in the cards (dictations and work prompts) are sent to it, as
   the note under the composer says. Ask never switches to another model.
-- **Limits.** Starting the server and `initialize`: 5 s. `tools/list`: 5 s.
-  Each tool call: 15 s. Each model request: at most 60 s, set per request as
-  the provider's HTTP timeout and capped by what is left of the run's
-  180-second deadline. At most 6 model completions per question (the last
+- **Limits.** Each question has one 180-second deadline, started before the
+  server is looked for. Everything below is also capped by what is left of
+  it: starting the server and `initialize` (5 s per candidate), `tools/list`
+  (5 s), each tool call (15 s), each model request (at most 60 s, set per
+  request as the provider's HTTP timeout) and the basic-recall fallback's
+  `/api/recall` request (otherwise 300 s). When the deadline passes, the
+  running tool card ends as "Ran out of time" and the answer says Ask ran out
+  of time; basic recall is not started then (nor with under a second left).
+  The tools check when the page opens keeps its own 5 s caps. At most 6 model
+  completions per question (the last
   one may only answer, and no extra completion is made after it) and 8 tool
   calls. Replies are capped at 800 tokens, a JSON-RPC line at 1 MiB, and the
   result text sent to the model at 6,000 characters per call. Ollama
