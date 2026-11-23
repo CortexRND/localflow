@@ -1358,39 +1358,77 @@ def test_cli_stt_download_runtime_gate(rust_build, sandbox, model, module):
     assert rust.returncode == 1 and not rust.stdout
 
 
+def _git_blob_id(body):
+    return hashlib.sha1(b"blob %d\0" % len(body) + body).hexdigest()
+
+
+def _lfs_pointer(body):
+    oid = hashlib.sha256(body).hexdigest()
+    return f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {len(body)}\n".encode()
+
+
 class _SpeechHub(BaseHTTPRequestHandler):
     repo = "Systran/faster-whisper-tiny"
     sha = "a" * 40
     content: ClassVar[dict[str, bytes]] = {"config.json": b"{}", "data/vocabulary.txt": b"mock"}
+    # Git LFS payloads: the Git blob ID hashes the pointer file, the cache key
+    # is the SHA-256 of the payload (HF `lfs.sha256` / HEAD `X-Linked-Etag`).
+    lfs: ClassVar[dict[str, bytes]] = {"model.bin": bytes(range(256)) * 3}
+    corrupt = False
 
-    def _reply(self, body, *, etag=None):
+    @classmethod
+    def files(cls):
+        return {**cls.content, **cls.lfs}
+
+    @classmethod
+    def blob_keys(cls):
+        return {_git_blob_id(body) for body in cls.content.values()} | {
+            hashlib.sha256(body).hexdigest() for body in cls.lfs.values()
+        }
+
+    def _reply(self, body, *, etag=None, lfs=False):
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         if etag:
             self.send_header("X-Repo-Commit", self.sha)
             self.send_header("ETag", f'"{etag}"')
+            if lfs:
+                self.send_header("X-Linked-Etag", f'"{etag}"')
+                self.send_header("X-Linked-Size", str(len(body)))
         else:
             self.send_header("Content-Type", "application/json")
         self.end_headers()
         if self.command != "HEAD":
+            if lfs and self.corrupt:
+                body = bytes([body[0] ^ 0xFF]) + body[1:]
             self.wfile.write(body)
 
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == f"/api/models/{self.repo}":
-            self._reply(json.dumps({
-                "id": self.repo, "sha": self.sha,
-                "siblings": [
-                    {"rfilename": name, "size": len(body), "blobId": hashlib.sha1(body).hexdigest()}
-                    for name, body in self.content.items()
-                ],
-            }).encode())
+            siblings = [
+                {"rfilename": name, "size": len(body), "blobId": _git_blob_id(body)}
+                for name, body in self.content.items()
+            ]
+            for name, body in self.lfs.items():
+                pointer = _lfs_pointer(body)
+                siblings.append({
+                    "rfilename": name, "size": len(body), "blobId": _git_blob_id(pointer),
+                    "lfs": {"sha256": hashlib.sha256(body).hexdigest(), "size": len(body),
+                            "pointerSize": len(pointer)},
+                })
+            self._reply(json.dumps({"id": self.repo, "sha": self.sha, "siblings": siblings}).encode())
             return
         for revision in ("main", self.sha):
             prefix = f"/{self.repo}/resolve/{revision}/"
-            if path.startswith(prefix) and path[len(prefix):] in self.content:
-                body = self.content[path[len(prefix):]]
-                self._reply(body, etag=hashlib.sha1(body).hexdigest())
+            name = path[len(prefix):] if path.startswith(prefix) else None
+            if name in self.content:
+                body = self.content[name]
+                self._reply(body, etag=_git_blob_id(body))
+                return
+            if name in self.lfs:
+                body = self.lfs[name]
+                self._reply(body, etag=hashlib.sha256(body).hexdigest(), lfs=True)
                 return
         self.send_error(404)
 
@@ -1423,15 +1461,34 @@ def test_cli_stt_download_shared_snapshot(rust_build, sandbox):
                 return {str(path.relative_to(snapshot).as_posix()): path.read_bytes()
                         for path in snapshot.rglob("*") if path.is_file()}
 
+            def blob_keys():
+                return {path.name for path in (repo / "blobs").iterdir() if path.is_file()}
+
             python = _python_cli(sandbox, *args, env=env)
             assert python.returncode == 0, python.stderr
-            assert contents() == _SpeechHub.content
+            assert contents() == _SpeechHub.files()
+            python_blobs = blob_keys()
+            assert python_blobs == _SpeechHub.blob_keys()
             shutil.rmtree(cache)
             rust = lf(rust_build, sandbox, *args, env=env)
             assert _cli_output(rust) == _cli_output(python)
-            assert contents() == _SpeechHub.content
+            assert contents() == _SpeechHub.files()
+            assert blob_keys() == python_blobs
+            assert sandbox["config"].read_bytes() == before
+
+            # A corrupted LFS payload of the right size fails the SHA-256 check
+            # and never lands in the cache under its LFS oid.
+            shutil.rmtree(cache)
+            _SpeechHub.corrupt = True
+            rust = lf(rust_build, sandbox, *args, env=env)
+            assert rust.returncode != 0
+            assert "Model integrity check failed: model.bin" in rust.stdout + rust.stderr
+            oid = hashlib.sha256(_SpeechHub.lfs["model.bin"]).hexdigest()
+            assert not (repo / "blobs" / oid).exists()
+            assert not (repo / "snapshots" / _SpeechHub.sha / "model.bin").exists()
             assert sandbox["config"].read_bytes() == before
         finally:
+            _SpeechHub.corrupt = False
             server.shutdown()
             thread.join()
 
