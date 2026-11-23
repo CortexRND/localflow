@@ -189,13 +189,14 @@ session shim resolves the original ORT export in its loaded Mach-O image to
 avoid recursive dyld interposition. A failed repaired attempt disables further
 shim cases rather than repeatedly crashing or claiming options were measured.
 
-# LocalFlow Rust port (Stage 1, optional)
+# LocalFlow Rust workspace
 
-This directory holds an **optional** Rust implementation of LocalFlow's local
-data layer and a small command-line client, `lf-rs`. **The Python package
-remains the default and the only shipped LocalFlow**: the app, server,
-dictation runtime, hotkeys, audio, meetings and every UI are Python. Nothing in
-the installers, LaunchAgents or Python CI depends on this directory.
+This directory holds the Rust implementation of LocalFlow: the `lf-hub` macOS
+app that the installer ships by default (see the packaging section above), a
+small command-line client, `lf-rs`, and the supporting crates. **On macOS the
+Rust app is the shipped default; the Python package remains the shipped
+default on Linux and Windows**, where this workspace's CLI and libraries build
+but no application installer consumes them.
 
 | Crate | Contents |
 | --- | --- |
@@ -211,6 +212,7 @@ the installers, LaunchAgents or Python CI depends on this directory.
 | `lf-input` | global hotkeys (`KeyboardHub`, pynput-compatible key names, order-insensitive chords, macOS CGEventTap with the Input Monitoring checks) and paste/clipboard (`Injector`) |
 | `lf-runtime` | the dictation controller state machine, worker and text pipeline, live config reload, the `dictation_enabled` switch, menu bar model + macOS NSStatusItem, single-instance lock; parity driver `lf-runtime/examples/runtime_parity.rs` |
 | `lf-server` | optional axum HTTP server, embedded web UI, auth, config/provider/key APIs and runtime backend interface (see `lf-server/README.md`) |
+| `lf-ui` | native Hub pages, settings/setup flows and shared UI primitives; builds the `lf-hub` binary (AppKit on macOS) that the macOS installer ships |
 
 ### Dictation runtime (`lf-input`, `lf-runtime`)
 
@@ -221,8 +223,8 @@ Audio and speech-to-text come in through the `AudioSource` and
 `SpeechEngine` traits (`lf-runtime/src/engine.rs`). `lf-stt`'s optional `runtime`
 feature supplies real lf-audio capture and SttSlot adapters, a worker factory
 and `run_options` ([integration and HTTP stacking](lf-stt/README.md#dictation-runtime-optional));
-`lf_runtime::run::run` wires everything,
-and no binary ships it yet.
+`lf_runtime::run::run` wires everything, and
+`lf-hub` runs it on macOS.
 
 Everything is event-driven. The controller blocks on its channel and only
 sets a deadline for the double-tap window and the max-duration timer. The
@@ -375,9 +377,9 @@ meeting formatting/writer bytes and Python/Rust prompt-queue round trips.
 
 ## Meetings / Ask / Settings agent
 
-These three crates are libraries: there is no CLI/UI integration yet. Optional
-HTTP integration is provided by `lf-meetings-backend`, explicitly injected into
-`lf-server`; it is not installed in the default `lf-rs serve` backend.
+These three crates are libraries; `lf-hub` injects them into its embedded
+`lf-server` through `lf-meetings-backend` on macOS. They are not installed in
+the default `lf-rs serve` backend.
 They preserve Python prompts and on-disk formats (including history SQLite,
 meeting Markdown, `queue.json` and `settings-undo.json`). Providers,
 transcription, audio sources and watcher notifications are injectable;
@@ -421,8 +423,8 @@ offline transducer API and downloaded prebuilt libraries, not a local
 sherpa build. HF downloads use the standard shared blobs/snapshots cache and
 the same `HF_HUB_CACHE`/`HUGGINGFACE_HUB_CACHE`/`HF_HOME`/`XDG_CACHE_HOME`
 precedence as Python. The factory maps Python provider IDs to the native
-counterparts without changing model size; the engines are not yet wired into
-`lf-rs` or the Python app.
+counterparts without changing model size; `lf-hub` uses them on macOS, and
+they are not wired into `lf-rs` or the Python app.
 
 Benchmark (downloads models and the fixed Parakeet `test_wavs/0.wav`):
 
@@ -466,15 +468,16 @@ it skips clips below the verified 512-sample FFT frame and warms up on load.
 Transcripts/timing need not be bit-identical across models/backends. See the
 [STT README](lf-stt/README.md) for storage parity and lifecycle details.
 
-## Known gaps (Stage 1)
+## Known gaps
 
-This is not a full application port:
+Outside the shipped macOS `lf-hub` app this is not a full application port:
 
-* no Hub, setup or native settings windows;
-  `serve` hosts the web UI and core APIs; `lf-stt`'s optional `server` feature
+* `lf-hub` ships on macOS only; on Linux and Windows there is no Hub, setup or
+  native settings window — `serve` hosts the web UI and core APIs, and
+  `lf-stt`'s optional `server` feature
   provides an opt-in transcription backend adapter ([integration](lf-stt/README.md#http-backend-optional));
   other runtime routes return explicit unavailable-backend errors until linked;
-  the dictation runtime (`lf-runtime`) is a library with no `dictate` binary yet;
+  `lf-rs` has no `dictate` command (the dictation runtime runs inside `lf-hub`);
 * hotkeys and the menu bar are implemented on macOS only: on Linux and
   Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
   tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
