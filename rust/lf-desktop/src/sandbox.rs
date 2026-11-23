@@ -625,6 +625,458 @@ pub fn setup_platform() -> lf_ui::setup_flow::FakeSetupPlatform {
     }
 }
 
+// ------------------------------------------------------------ Ask tools ---
+
+/// Sandbox Ask: fake LocalFlow tools over the sandbox history and prompt
+/// queue, a scripted model, and `remote::sandbox_answer` as the fallback.
+/// No process is started and nothing leaves the process.
+pub struct SandboxAgent {
+    root: DataRoot,
+    prompts: std::sync::Arc<FakePromptQueue>,
+    latency: std::time::Duration,
+}
+
+impl SandboxAgent {
+    /// `latency` paces each fake tool call and model step so the UI's
+    /// thinking and running states are visible; tests pass zero.
+    pub fn new(
+        root: DataRoot,
+        prompts: std::sync::Arc<FakePromptQueue>,
+        latency: std::time::Duration,
+    ) -> Self {
+        SandboxAgent {
+            root,
+            prompts,
+            latency,
+        }
+    }
+}
+
+/// Wait `latency` in short slices; `false` when stopped meanwhile.
+fn pause(latency: std::time::Duration, cancel: &std::sync::atomic::AtomicBool) -> bool {
+    use std::sync::atomic::Ordering;
+    let end = std::time::Instant::now() + latency;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(crate::controllers::mcp_client::POLL));
+    }
+}
+
+impl crate::controllers::ask_agent::AgentBackend for SandboxAgent {
+    fn simulated(&self) -> bool {
+        true
+    }
+
+    fn connect(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<
+        Box<dyn crate::controllers::mcp_client::ToolTransport>,
+        crate::controllers::mcp_client::McpError,
+    > {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::controllers::mcp_client::McpError::Cancelled);
+        }
+        Ok(Box::new(SandboxTools {
+            root: self.root.clone(),
+            prompts: self.prompts.clone(),
+            latency: self.latency,
+        }))
+    }
+
+    fn model(&self, _: i64) -> Result<Box<dyn lf_providers::LlmProvider>, String> {
+        Ok(Box::new(SandboxModel {
+            latency: self.latency,
+        }))
+    }
+
+    fn recall(&self, question: &str, _: &str) -> lf_ui::backends::ask::Turn {
+        crate::remote::sandbox_answer(&self.root, question)
+    }
+}
+
+/// The four LocalFlow tools over sandbox data, with the Python server's
+/// result shapes (`localflow/mcp_server.py`).
+pub struct SandboxTools {
+    root: DataRoot,
+    prompts: std::sync::Arc<FakePromptQueue>,
+    latency: std::time::Duration,
+}
+
+fn local_when(ts: f64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(ts as i64, 0)
+        .single()
+        .map(|t| t.format("%Y-%m-%dT%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+/// `recall.parse_since` (+ one day for a named `until` day), epoch seconds.
+fn bound(value: Option<&str>, end: bool, now: chrono::DateTime<chrono::Local>) -> Option<f64> {
+    use chrono::TimeZone;
+    let text = value?.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+    let midnight = |d: chrono::NaiveDate| {
+        chrono::Local
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+            .earliest()
+            .map(|t| t.timestamp() as f64)
+    };
+    let day = 86_400.0;
+    let extra = if end { day } else { 0.0 };
+    match text.as_str() {
+        "today" => midnight(now.date_naive()).map(|t| t + extra),
+        "yesterday" => midnight(now.date_naive()).map(|t| t - day + extra),
+        _ => {
+            if let Some(n) = text
+                .strip_suffix('d')
+                .and_then(|n| n.trim().parse::<f64>().ok())
+            {
+                Some(now.timestamp() as f64 - n * day)
+            } else {
+                chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+                    .ok()
+                    .and_then(midnight)
+                    .map(|t| t + extra)
+            }
+        }
+    }
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() > 3)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn tool_error(text: impl Into<String>) -> crate::controllers::mcp_client::ToolOutput {
+    crate::controllers::mcp_client::ToolOutput {
+        is_error: true,
+        text: text.into(),
+        structured: None,
+    }
+}
+
+fn tool_ok(data: Value) -> crate::controllers::mcp_client::ToolOutput {
+    crate::controllers::mcp_client::ToolOutput {
+        is_error: false,
+        text: data.to_string(),
+        structured: Some(data),
+    }
+}
+
+impl SandboxTools {
+    fn search_dictations(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let s = |k: &str| args.get(k).and_then(Value::as_str);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(10)
+            .clamp(1, 50) as usize;
+        let now = chrono::Local::now();
+        let (since, until) = (bound(s("since"), false, now), bound(s("until"), true, now));
+        let Ok(store) = open_history(&self.root) else {
+            return tool_error("cannot read dictation history");
+        };
+        let entries = store.recent(200, None, 0).unwrap_or_default();
+        let app = s("app")
+            .map(str::to_lowercase)
+            .filter(|a| !a.trim().is_empty());
+        let terms = words(s("query").unwrap_or(""));
+        let mut hits: Vec<(usize, &lf_core::history::HistoryEntry)> = entries
+            .iter()
+            .filter(|e| e.status == "ok")
+            .filter(|e| since.is_none_or(|t| e.ts >= t) && until.is_none_or(|t| e.ts < t))
+            .filter(|e| s("kind").is_none_or(|k| e.kind == k))
+            .filter(|e| {
+                app.as_ref().is_none_or(|a| {
+                    e.app_name
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(a.as_str())
+                        || e.bundle_id.as_deref() == s("app")
+                })
+            })
+            .map(|e| {
+                let text = format!("{} {}", e.final_text, e.raw_text).to_lowercase();
+                (
+                    terms.iter().filter(|t| text.contains(t.as_str())).count(),
+                    e,
+                )
+            })
+            .filter(|(score, _)| terms.is_empty() || *score > 0)
+            .collect();
+        // Stable: newest first within one score.
+        hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        let results: Vec<Value> = hits
+            .iter()
+            .take(limit)
+            .map(|(_, e)| {
+                json!({
+                    "id": e.id,
+                    "when": local_when(e.ts),
+                    "kind": e.kind,
+                    "app": e.app_name.clone().unwrap_or_default(),
+                    "category": e.category.clone().unwrap_or_default(),
+                    "words": e.words,
+                    "duration_s": e.duration_s,
+                    "snippet": e.final_text.chars().take(160).collect::<String>(),
+                })
+            })
+            .collect();
+        tool_ok(json!({
+            "count": results.len(),
+            "match": if terms.is_empty() { "recent" } else { "ranked" },
+            "results": results,
+        }))
+    }
+
+    fn get_dictation(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let id = args.get("id").and_then(Value::as_i64).unwrap_or_default();
+        let entry = open_history(&self.root)
+            .ok()
+            .and_then(|store| store.get(id).ok().flatten());
+        let Some(e) = entry else {
+            return tool_error(format!("no dictation with id {id}"));
+        };
+        tool_ok(json!({
+            "id": e.id,
+            "when": local_when(e.ts),
+            "kind": e.kind,
+            "status": e.status,
+            "app": e.app_name.clone().unwrap_or_default(),
+            "bundle_id": e.bundle_id.clone().unwrap_or_default(),
+            "category": e.category.clone().unwrap_or_default(),
+            "words": e.words,
+            "duration_s": e.duration_s,
+            "final_text": e.final_text,
+            "raw_text": e.raw_text,
+            "truncated": false,
+        }))
+    }
+
+    fn prompt_fields(entry: &Map<String, Value>) -> Value {
+        let f = |k: &str| {
+            entry
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        json!({
+            "id": f("id"),
+            "title": f("title"),
+            "meeting": f("meeting"),
+            "status": f("status"),
+            "created": f("created"),
+        })
+    }
+
+    fn search_prompts(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let status = args.get("status").and_then(Value::as_str);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(10)
+            .clamp(1, 50) as usize;
+        let terms = words(args.get("query").and_then(Value::as_str).unwrap_or(""));
+        let Ok(mut entries) = self.prompts.list(status) else {
+            return tool_error("prompt queue unreadable");
+        };
+        entries.sort_by(|a, b| {
+            let created = |e: &Map<String, Value>| {
+                e.get("created")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            created(b).cmp(&created(a))
+        });
+        let results: Vec<Value> = entries
+            .iter()
+            .filter(|e| {
+                let text = format!(
+                    "{} {}",
+                    e.get("title").and_then(Value::as_str).unwrap_or(""),
+                    e.get("meeting").and_then(Value::as_str).unwrap_or("")
+                )
+                .to_lowercase();
+                terms.is_empty() || terms.iter().any(|t| text.contains(t.as_str()))
+            })
+            .take(limit)
+            .map(|e| {
+                let mut v = Self::prompt_fields(e);
+                v["snippet"] = json!("Example prompt.");
+                v
+            })
+            .collect();
+        tool_ok(json!({
+            "count": results.len(),
+            "match": if terms.is_empty() { "recent" } else { "ranked" },
+            "results": results,
+        }))
+    }
+
+    fn get_prompt(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+        match self.prompts.get(id) {
+            Ok(Some(entry)) => {
+                let mut v = Self::prompt_fields(&entry);
+                v["body"] = json!("Example prompt.");
+                v["error"] = json!(entry.get("error").and_then(Value::as_str).unwrap_or(""));
+                v["truncated"] = json!(false);
+                tool_ok(v)
+            }
+            _ => tool_error(format!("no work prompt with id {id:?}")),
+        }
+    }
+}
+
+impl crate::controllers::mcp_client::ToolTransport for SandboxTools {
+    fn tools(&self) -> Vec<String> {
+        crate::controllers::mcp_client::ALLOWED_TOOLS
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    }
+
+    fn call(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::controllers::mcp_client::ToolOutput, crate::controllers::mcp_client::McpError>
+    {
+        use crate::controllers::mcp_client::McpError;
+        if !pause(self.latency, cancel) {
+            return Err(McpError::Cancelled);
+        }
+        Ok(match name {
+            "search_dictations" => self.search_dictations(arguments),
+            "get_dictation" => self.get_dictation(arguments),
+            "search_prompts" => self.search_prompts(arguments),
+            "get_prompt" => self.get_prompt(arguments),
+            _ => return Err(McpError::UnknownTool),
+        })
+    }
+}
+
+/// A scripted model that reads only its prompt, like a real one: search,
+/// open the best dictation, answer from it (or list matching work prompts).
+pub struct SandboxModel {
+    latency: std::time::Duration,
+}
+
+impl lf_providers::LlmProvider for SandboxModel {
+    fn id(&self) -> &'static str {
+        "sandbox"
+    }
+
+    fn offline(&self) -> bool {
+        true
+    }
+
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        _: Option<i64>,
+    ) -> Result<String, lf_providers::ProviderError> {
+        use crate::controllers::ask_agent::{prompt_question, prompt_results};
+        // UI pacing only (never in tests): a model step takes a moment.
+        std::thread::sleep(self.latency);
+        let question = prompt_question(user).unwrap_or("").to_lowercase();
+        let results = prompt_results(user);
+        let final_only = system.contains("can't call any more tools");
+        let no_answer = json!({"answer": lf_ui::backends::ask::NO_ANSWER}).to_string();
+        let parse = |body: &str| serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+        let wants_prompts = ["prompt", "next step", "task"]
+            .iter()
+            .any(|w| question.contains(w))
+            && system.contains("search_prompts");
+        let Some((name, status, body)) = results.last() else {
+            if final_only {
+                return Ok(no_answer);
+            }
+            let query = words(&question).join(" ");
+            let tool = if wants_prompts {
+                "search_prompts"
+            } else {
+                "search_dictations"
+            };
+            let arguments = if wants_prompts {
+                json!({})
+            } else {
+                json!({"query": query, "limit": 5})
+            };
+            return Ok(json!({"tool": tool, "arguments": arguments}).to_string());
+        };
+        let data = parse(body);
+        let reply = match (name.as_str(), status.as_str()) {
+            ("search_dictations", "ok") => {
+                match data.pointer("/results/0/id").and_then(Value::as_i64) {
+                    Some(id) if !final_only => {
+                        json!({"tool": "get_dictation", "arguments": {"id": id}})
+                    }
+                    _ => return Ok(no_answer),
+                }
+            }
+            ("get_dictation", "ok") => {
+                let text: String = data["final_text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect();
+                json!({
+                    "answer": format!(
+                        "Sandbox answer (scripted model, no network): your {} dictation says “{}”",
+                        data["app"].as_str().unwrap_or("example"),
+                        text
+                    ),
+                    "sources": [data["id"]],
+                })
+            }
+            ("search_prompts", "ok") => {
+                let titles: Vec<&str> = data["results"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r["title"].as_str())
+                    .collect();
+                if titles.is_empty() {
+                    return Ok(no_answer);
+                }
+                json!({"answer": format!(
+                    "Sandbox answer (scripted model, no network): your example work prompts are: {}.",
+                    titles.join("; ")
+                )})
+            }
+            _ => return Ok(no_answer),
+        };
+        Ok(reply.to_string())
+    }
+
+    fn list_models(&self) -> Result<Vec<lf_providers::ModelInfo>, lf_providers::ProviderError> {
+        Ok(Vec::new())
+    }
+
+    fn healthcheck(&self) -> lf_providers::Health {
+        lf_providers::Health::ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +1262,126 @@ mod tests {
         let all = queue.list(None).unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(queue.list(Some("failed")).unwrap().len(), 1);
+    }
+
+    fn sandbox_ask(
+        root: &DataRoot,
+        text: &str,
+        filter: &str,
+    ) -> Vec<crate::controllers::ask_agent::AgentEvent> {
+        use crate::controllers::ask_agent::{answer, Question, LIMITS};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let agent = SandboxAgent::new(
+            root.clone(),
+            Arc::new(seed_prompt_queue()),
+            std::time::Duration::ZERO,
+        );
+        let mut events = Vec::new();
+        let question = Question {
+            text: text.into(),
+            filter: filter.into(),
+            context: Vec::new(),
+        };
+        answer(
+            &agent,
+            &question,
+            &LIMITS,
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+        );
+        events
+    }
+
+    #[test]
+    fn sandbox_ask_runs_the_tool_loop_offline() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        use crate::controllers::mcp_client::McpStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let events = sandbox_ask(&root, "When did the Kubernetes rollout fail?", "Any time");
+        assert!(events.contains(&AgentEvent::Status(McpStatus::Simulated)));
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["search_dictations", "get_dictation"]);
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(done
+            .turn
+            .answer
+            .starts_with("Sandbox answer (scripted model"));
+        assert!(done.turn.answer.contains("Kubernetes"));
+        let id: i64 = done.turn.citations[0].reference.parse().unwrap();
+        let entry = open_history(&root).unwrap().get(id).unwrap().unwrap();
+        assert!(entry.final_text.contains("Kubernetes"));
+
+        let events = sandbox_ask(&root, "What are my next steps for the project?", "Any time");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert!(
+            done.turn.answer.contains("cutover checklist"),
+            "{}",
+            done.turn.answer
+        );
+
+        // With a time range, prompts are not searched; nothing found is said so.
+        let events = sandbox_ask(&root, "zebra quantum", "Past week");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
+        assert!(done.turn.citations.is_empty());
+    }
+
+    #[test]
+    fn sandbox_tools_follow_the_server_shapes_and_bounds() {
+        use crate::controllers::mcp_client::ToolTransport;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: std::time::Duration::ZERO,
+        };
+        let cancel = AtomicBool::new(false);
+        let recent = tools
+            .call("search_dictations", &json!({"limit": 2}), &cancel)
+            .unwrap();
+        let data = recent.structured.unwrap();
+        assert_eq!(
+            (data["count"].as_i64(), data["match"].as_str()),
+            (Some(2), Some("recent"))
+        );
+        // Every example is from the last few hours: none before today's start minus a day.
+        let old = tools
+            .call(
+                "search_dictations",
+                &json!({"until": "2000-01-01"}),
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(old.structured.unwrap()["count"], 0);
+        let missing = tools
+            .call("get_dictation", &json!({"id": 999_999}), &cancel)
+            .unwrap();
+        assert!(missing.is_error);
+        let failed = tools
+            .call("search_prompts", &json!({"status": "failed"}), &cancel)
+            .unwrap();
+        assert_eq!(failed.structured.unwrap()["count"], 1);
+        assert!(tools.call("exec", &json!({}), &cancel).is_err());
+        assert!(tools
+            .call("search_dictations", &json!({}), &AtomicBool::new(true))
+            .is_err());
     }
 }

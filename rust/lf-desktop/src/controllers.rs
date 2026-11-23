@@ -1,5 +1,7 @@
 //! Portable page logic. No GPUI types here, so all of it is unit-tested.
 
+pub mod ask;
+pub mod ask_agent;
 pub mod assistant;
 pub mod capabilities;
 pub mod dictionary;
@@ -8,6 +10,7 @@ pub mod history;
 pub mod instance;
 pub mod jobs;
 pub mod key_import;
+pub mod mcp_client;
 pub mod meetings;
 pub mod model_storage;
 pub mod models;

@@ -965,6 +965,12 @@ impl Shell {
         }
         match self.find(self.page) {
             Some(View::History(v)) => v.update(cx, |p, cx| p.clear_search(window, cx)),
+            // Escape stops a running Ask question; otherwise it passes on.
+            Some(View::Ask(v)) => {
+                if !v.update(cx, |p, cx| p.escape(cx)) {
+                    cx.propagate();
+                }
+            }
             _ => cx.propagate(),
         }
     }
