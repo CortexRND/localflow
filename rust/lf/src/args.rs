@@ -1,4 +1,5 @@
-//! Command-line grammar. Names, flags and defaults follow `localflow/cli.py`.
+//! Command-line grammar. Names, flags, defaults and hidden commands follow
+//! `localflow/cli.py`.
 
 use std::path::PathBuf;
 
@@ -60,6 +61,100 @@ pub enum Command {
         #[arg(long = "json")]
         json: bool,
     },
+    /// Control meeting transcription sessions.
+    #[command(subcommand)]
+    Meeting(MeetingCommand),
+    /// Review work prompts from meetings and dispatch them to Orca.
+    #[command(subcommand)]
+    Prompts(PromptsCommand),
+    /// Ask a question across your dictations, meeting transcripts and notes.
+    #[command(hide = true)]
+    Recall(RecallArgs),
+}
+
+// Required arguments, `--k` and `--status` are optional/plain strings here and
+// validated by the commands, so their errors end with click's `Error: …` line.
+
+#[derive(Debug, Subcommand)]
+pub enum MeetingCommand {
+    /// Start transcribing a meeting. Without --title the notes are named from
+    /// the meeting when it stops; a given --title (even "Meeting") is kept.
+    Start {
+        /// Note title.
+        #[arg(long, short = 't', allow_hyphen_values = true)]
+        title: Option<String>,
+        /// Zoom/Teams/... (default: auto-detected).
+        #[arg(long, short = 'c', default_value = "", allow_hyphen_values = true)]
+        category: String,
+    },
+    /// Stop, summarize, and write notes to the vault.
+    Stop,
+    /// Dismiss the current meeting-detected banner.
+    Dismiss,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PromptsCommand {
+    /// List queued work prompts.
+    #[command(hide = true)]
+    List {
+        /// Only show prompts with this status.
+        #[arg(long, short = 's', allow_hyphen_values = true)]
+        status: Option<String>,
+    },
+    /// Print the full text of prompt PROMPT_ID.
+    #[command(hide = true)]
+    Show {
+        #[arg(value_name = "PROMPT_ID")]
+        prompt_id: Option<String>,
+    },
+    /// Approve prompts IDS for dispatch (retries a failed one, clearing its error).
+    #[command(hide = true)]
+    Approve {
+        #[arg(value_name = "IDS")]
+        ids: Vec<String>,
+    },
+    /// Reject prompts IDS (pending or failed) so they are never dispatched.
+    #[command(hide = true)]
+    Reject {
+        #[arg(value_name = "IDS")]
+        ids: Vec<String>,
+    },
+    /// Dispatch approved prompts IDS (or --all) to Orca worktrees.
+    Dispatch {
+        #[arg(value_name = "IDS")]
+        ids: Vec<String>,
+        /// Dispatch every approved prompt.
+        #[arg(long)]
+        all: bool,
+        /// Orca repo selector (default: config.orca_repo).
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        repo: String,
+        /// Agent to run (default: config.orca_agent).
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        agent: String,
+        /// Show what would be dispatched; change nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct RecallArgs {
+    #[arg(value_name = "QUESTION")]
+    pub question: Option<String>,
+    /// today, yesterday, 7d, 30d or YYYY-MM-DD.
+    #[arg(long, allow_hyphen_values = true)]
+    pub since: Option<String>,
+    /// Passages to retrieve (1-20).
+    #[arg(long, default_value = "8", allow_hyphen_values = true)]
+    pub k: String,
+    /// Only show the ranked matching passages.
+    #[arg(long = "no-llm")]
+    pub no_llm: bool,
+    /// Machine-readable output.
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]

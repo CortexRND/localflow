@@ -546,6 +546,82 @@ fn status_without_server_is_clear_and_never_creates_a_token() {
 }
 
 #[test]
+fn meeting_prompts_and_recall_in_an_empty_sandbox() {
+    let sandbox = Sandbox::new();
+    assert_home_is_sandboxed(&sandbox);
+    let port = TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    assert_eq!(
+        code(&sandbox.run(&["config", "set", "server.port", &port])),
+        0
+    );
+    let env = [("COLUMNS", "200")];
+    for args in [
+        &["meeting", "start", "-t", "Standup"][..],
+        &["meeting", "stop"],
+        &["meeting", "dismiss"],
+    ] {
+        let down = sandbox.run_with(args, &env, "");
+        assert_eq!(
+            (code(&down), stdout(&down), stderr(&down)),
+            (
+                1,
+                "server not running — open LocalFlow.app (it starts the server) or run: lf serve\n"
+                    .to_string(),
+                String::new()
+            ),
+            "{args:?}"
+        );
+    }
+
+    let queue = sandbox.home().join(".localflow").join("queue.json");
+    let listed = sandbox.run_with(&["prompts", "list"], &env, "");
+    assert_eq!(
+        stdout(&listed),
+        format!("no prompts queued ({})\n", queue.display())
+    );
+    let unknown = sandbox.run_with(&["prompts", "approve", "abc123"], &env, "");
+    assert_eq!(
+        (code(&unknown), stdout(&unknown)),
+        (
+            1,
+            "unknown prompt abc123 — list them with: lf prompts list\n".to_string()
+        )
+    );
+    let dispatch = sandbox.run_with(&["prompts", "dispatch", "--all"], &env, "");
+    assert_eq!(code(&dispatch), 1);
+    assert!(stdout(&dispatch).starts_with("no repo configured — set orca_repo in "));
+    let nothing = sandbox.run_with(
+        &["prompts", "dispatch", "--all", "--repo", "id:r"],
+        &env,
+        "",
+    );
+    assert_eq!(
+        (code(&nothing), stdout(&nothing)),
+        (0, "no approved prompts to dispatch\n".to_string())
+    );
+    assert!(!queue.exists());
+
+    let none = sandbox.run_with(&["recall", "launch pricing", "--no-llm"], &env, "");
+    assert_eq!(
+        (code(&none), stdout(&none)),
+        (0, "I couldn't find that in your history.\n".to_string())
+    );
+    let json = sandbox.run_with(&["recall", "launch", "--no-llm", "--json"], &env, "");
+    assert_eq!(
+        stdout(&json),
+        "{\n  \"answer\": null,\n  \"citations\": []\n}\n"
+    );
+    let empty = sandbox.run(&["recall", ""]);
+    assert_eq!(code(&empty), 2);
+    assert!(stderr(&empty).ends_with("Error: question is empty\n"));
+}
+
+#[test]
 fn serve_rejects_a_saved_port_that_would_wrap() {
     let sandbox = Sandbox::new();
     assert_eq!(

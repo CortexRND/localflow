@@ -136,9 +136,33 @@ fn updated_config(request: &Value) -> Result<Config> {
     config::apply_config_update(&base, request.get("update").unwrap_or(&json!({})))
 }
 
+/// `lf::richfmt` output for one Rich `console.print` call: `kind` is
+/// `markup` (a str), `text` (`Text(str)`) or `table` (`Table(box=None)`).
+fn rich(request: &Value) -> Result<Value> {
+    let width = arg(request, "width")?.as_u64().context("width")? as usize;
+    let console = lf::richfmt::Console { width };
+    Ok(Value::String(match text(request, "kind")? {
+        "markup" => console.markup(text(request, "text")?),
+        "text" => console.text(text(request, "text")?),
+        "table" => {
+            let headers = strings(request.get("headers"));
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            let rows: Vec<Vec<String>> = arg(request, "rows")?
+                .as_array()
+                .context("rows")?
+                .iter()
+                .map(|row| strings(Some(row)))
+                .collect();
+            console.table(&headers, &rows)
+        }
+        other => bail!("unknown rich kind {other:?}"),
+    }))
+}
+
 fn handle(request: &Value) -> Result<Value> {
     let op = text(request, "op")?;
     match op {
+        "rich" => rich(request),
         "config_defaults" => Ok(config::config_to_dict(&Config::default())),
         "config_update" => Ok(config::config_to_dict(&updated_config(request)?)),
         "shortcut_normalize" => Ok(json!(lf_core::shortcuts::normalize_optional_combo(

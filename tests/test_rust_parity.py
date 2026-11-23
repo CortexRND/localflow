@@ -2010,6 +2010,476 @@ def test_cli_status(rust_build, sandbox, py_env):
         server.server_close()
 
 
+# ------------------------------------------- meeting / prompts / recall ---
+
+# Both CLIs print through Rich (Python) or its emulation (Rust): a fixed
+# COLUMNS keeps the soft-wrap width independent of the terminal running
+# pytest, and UTF-8 mode stops Windows pipes from using the ANSI code page.
+_RICH_ENV = {"COLUMNS": "80", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",
+             "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
+
+
+def _clis(rust_build, sandbox, *args, env=None, reset=None):
+    """Run the Python CLI, then lf-rs, in the same sandbox with the same args.
+
+    `reset` runs between the two, to restore state the Python run changed."""
+    env = {**_RICH_ENV, **(env or {})}
+    python = subprocess.run(
+        [sys.executable, "-m", "localflow.cli", *args], cwd=ROOT, input="",
+        env={**sandbox["env"], **env}, check=False, capture_output=True, text=True,
+        encoding="utf-8", timeout=120,
+    )
+    if reset is not None:
+        reset()
+    return lf(rust_build, sandbox, *args, env=env), python
+
+
+def _usage_error(result):
+    """Exit code, stdout and click's closing `Error: ...` line (the `Usage:`
+    preamble names a different program)."""
+    return result.returncode, result.stdout, result.stderr.splitlines()[-1:]
+
+
+def _rich_reference(case: dict) -> str:
+    """What a non-terminal, colourless Rich console of `width` prints."""
+    import io
+
+    from rich.console import Console as RichConsole
+    from rich.table import Table
+    from rich.text import Text
+
+    console = RichConsole(file=io.StringIO(), width=case["width"], no_color=True, force_terminal=False,
+                          legacy_windows=False, color_system=None)
+    if case["kind"] == "table":
+        table = Table(box=None, header_style="dim")
+        for header in case["headers"]:
+            table.add_column(header)
+        for row in case["rows"]:
+            table.add_row(*row)
+        console.print(table)
+    else:
+        console.print(case["text"] if case["kind"] == "markup" else Text(case["text"]))
+    return console.file.getvalue()
+
+
+def test_rich_console_emulation(rust_build, sandbox):
+    import random
+
+    pieces = ["a", "word", "longerword", "x" * 30, " ", "  ", "\t", "\n", "-", "/", "é", "漢字", "—", "…", "●",
+              "[red]", "[/red]", "[bold]", "[/bold]", "\\[", "[WIP]", "[1]", "[link]", "]", "[", "\\", "\x07", "\r"]
+    rng = random.Random(1234)
+
+    def text(n):
+        return "".join(rng.choice(pieces) for _ in range(rng.randint(0, n)))
+
+    cases = [
+        {"kind": "markup", "width": 80, "text": "[red]server not running[/red] — open [bold]LocalFlow.app[/bold] x"},
+        {"kind": "text", "width": 10, "text": "[1] Fri Nov 13 09:00 · meeting · Launch — \"launch [bold]\""},
+        {"kind": "table", "width": 80, "headers": ["id", "title"], "rows": [["1", "x " * 60], ["2", ""]]},
+    ]
+    for _ in range(400):
+        kind = rng.choice(["markup", "text", "table", "table"])
+        width = rng.choice([5, 10, 20, 40, 79, 80])
+        if kind == "table":
+            headers = rng.sample(["id", "status", "title", "meeting", "created"], rng.randint(1, 5))
+            rows = [[text(12) for _ in headers] for _ in range(rng.randint(0, 4))]
+            cases.append({"kind": kind, "width": width, "headers": headers, "rows": rows})
+        else:
+            cases.append({"kind": kind, "width": width, "text": text(25)})
+    # Markup Rich rejects (an unmatched closing tag) is a documented gap.
+    checked = []
+    for case in cases:
+        try:
+            checked.append((case, _rich_reference(case)))
+        except Exception as exc:  # noqa: BLE001 - rich.errors.MarkupError
+            assert type(exc).__name__ == "MarkupError"
+    results = drive(rust_build, sandbox, [{"op": "rich", **case} for case, _ in checked])
+    for (case, expected), result in zip(checked, results):
+        assert result == expected, case
+    assert len(checked) > 200
+
+
+class _MeetingServer(BaseHTTPRequestHandler):
+    replies: ClassVar[dict] = {}
+    seen: ClassVar[list] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        self.seen.append({
+            "method": self.command, "path": self.path,
+            "token": self.headers.get("X-Localflow-Token"),
+            "json": json.loads(raw) if raw else None,
+        })
+        status, body = self.replies.get(self.path, (404, {"detail": "Not Found"}))
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json" if not isinstance(body, bytes) else "text/plain")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def _meeting_clis(rust_build, sandbox, *args):
+    """Both CLIs against the fake server; also what each one sent."""
+    _MeetingServer.seen.clear()
+    python_sent: list = []
+    rust, python = _clis(rust_build, sandbox, *args, reset=lambda: python_sent.extend(_MeetingServer.seen))
+    return rust, python, python_sent, _MeetingServer.seen[len(python_sent):]
+
+
+def test_cli_meeting(rust_build, sandbox):
+    paths = _require_isolated(rust_build, sandbox, "token_path")
+    port = _free_port()
+    save_config(Config(server_port=port), sandbox["config"])
+    down_rust, down_python = _clis(rust_build, sandbox, "meeting", "dismiss")
+    assert _cli_output(down_rust) == _cli_output(down_python) == (
+        1, "server not running — open LocalFlow.app (it starts the server) or run: lf serve\n", "",
+    )
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), _MeetingServer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    long_path = str(sandbox["root"] / "vault" / ("very-long-folder-name-" * 3) / "2026-11-13 0900 Sprint planning.md")
+    cases = [
+        (("meeting", "start"), {"/meeting/start": (200, {"category": "Zoom", "ok": True})}),
+        (("meeting", "start", "-t", "Meeting", "-c", "Teams"), {"/meeting/start": (200, {"category": "Teams"})}),
+        (("meeting", "start", "--title", "Sprint [wip] review", "--category", ""),
+         {"/meeting/start": (200, {"category": "[bold]auto[/bold] detected"})}),
+        (("meeting", "stop",), {"/meeting/stop": (200, {"segments": 12, "notes_path": long_path, "log_path": "log.md"})}),
+        (("meeting", "dismiss"), {"/meeting/dismiss": (200, {})}),
+        (("meeting", "stop"), {"/meeting/stop": (409, {"detail": "no meeting in progress"})}),
+        (("meeting", "stop"), {"/meeting/stop": (500, b"<html>oops</html>")}),
+        (("meeting", "start"), {"/meeting/start": (400, {"error": "no detail key"})}),
+        (("meeting", "start"), {"/meeting/start": (422, {"detail": [{"loc": ["body", "title"], "msg": "bad"}]})}),
+        (("meeting", "dismiss"), {"/meeting/dismiss": (401, ["not", "an", "object"])}),
+    ]
+    try:
+        for token in (None, "tok-meeting"):
+            if token:
+                token_path = Path(paths["token_path"])
+                token_path.parent.mkdir(parents=True, exist_ok=True)
+                token_path.write_text(token + "\n", encoding="utf-8")
+            for args, replies in cases:
+                _MeetingServer.replies = replies
+                rust, python, python_sent, rust_sent = _meeting_clis(rust_build, sandbox, *args)
+                assert _cli_output(rust) == _cli_output(python), args
+                assert rust_sent == python_sent, args
+                assert [r["token"] for r in rust_sent] == [token]
+                assert rust.stderr == ""
+                if replies is cases[0][1]:
+                    assert rust.stdout == "● transcribing — category Zoom. Stop with: lf meeting stop\n"
+        assert python_sent[0]["json"] is None  # stop/dismiss send no body
+        starts = []
+        for args, replies in cases[:3]:
+            _MeetingServer.replies = replies
+            starts.append(_meeting_clis(rust_build, sandbox, *args)[3][0]["json"])
+        assert starts == [
+            {"title": "Meeting", "category": "", "auto_title": True},
+            {"title": "Meeting", "category": "Teams", "auto_title": False},
+            {"title": "Sprint [wip] review", "category": "", "auto_title": False},
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _seed_prompt_queue(home: Path) -> Path:
+    """A queue in every status, written by the Python PromptQueue."""
+    from localflow import dispatch as py_dispatch
+
+    prompts = [py_dispatch.WorkPrompt(title, f"Do the {n} thing carefully.") for n, title in enumerate([
+        "Fix launch pricing tests",
+        "Write the end-to-end migration plan for the billing service and every reporting dashboard",
+        "Review the [docs] page and [WIP] notes",
+        "Retry the flaky sync",
+        "Drop the old exporter",
+        "Ship the dark mode toggle",
+    ])]
+    paths = py_dispatch.write_prompts(prompts, "Sprint planning", datetime(2026, 11, 13, 9, 0),
+                                      home / "projs" / "prompts" / "meetings")
+    queue = py_dispatch.PromptQueue(home / ".localflow" / "queue.json")
+    entries = queue.add(prompts, paths, "Sprint planning")
+    ids = [e["id"] for e in entries]
+    queue.set_status(ids[1], "approved")
+    queue.set_status(ids[2], "dispatched", worktree="repo::/wt/docs", handle="term-docs", repo="id:r")
+    queue.set_status(ids[3], "failed", error="orca exited 1: boom", worktree="repo::/wt/stale", handle="term-old")
+    queue.set_status(ids[4], "rejected")
+    queue.set_status(ids[5], "dispatched", worktree="", handle="", repo="id:r")
+    return queue.path
+
+
+def _prompt_clis(rust_build, sandbox, queue_path: Path, *args, env=None):
+    """Both CLIs from the same queue file; the queue each one left behind."""
+    before = queue_path.read_bytes()
+    after: list[bytes] = []
+
+    def reset():
+        after.append(queue_path.read_bytes())
+        queue_path.write_bytes(before)
+
+    rust, python = _clis(rust_build, sandbox, *args, env=env, reset=reset)
+    return rust, python, queue_path.read_bytes(), after[0]
+
+
+def test_cli_prompts_list_show_and_review(rust_build, sandbox):
+    paths = _require_isolated(rust_build, sandbox, "history_path")
+    home = Path(paths["history_path"]).parent.parent
+    assert home == sandbox["home"]
+    queue_path = home / ".localflow" / "queue.json"
+    for args in (("prompts", "list"), ("prompts", "list", "-s", "failed")):
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _cli_output(rust) == _cli_output(python)
+        assert rust.returncode == 0 and str(queue_path) in rust.stdout.replace("\n", "")
+    assert not queue_path.exists()
+
+    queue_path = _seed_prompt_queue(home)
+    from localflow import dispatch as py_dispatch
+    ids = [e["id"] for e in py_dispatch.PromptQueue(queue_path).list()]
+    pending, approved, dispatched, failed, rejected, bare = ids
+    missing_file = Path(py_dispatch.PromptQueue(queue_path).get(rejected)["path"])
+    missing_file.unlink()
+    read_only = [
+        ("prompts", "list"), ("prompts", "list", "--status", "pending"), ("prompts", "list", "-s", "dispatched"),
+        ("prompts", "list", "--status", "approved"),
+        ("prompts", "show", pending), ("prompts", "show", dispatched), ("prompts", "show", bare),
+        ("prompts", "show", rejected), ("prompts", "show", "nope"),
+    ]
+    for columns in ("80", "60", "200"):
+        for args in read_only:
+            rust, python, rust_queue, python_queue = _prompt_clis(
+                rust_build, sandbox, queue_path, *args, env={"COLUMNS": columns})
+            assert _cli_output(rust) == _cli_output(python), (columns, args)
+            assert rust_queue == python_queue
+    # Rich reads `[docs]` in a title as a style tag; `[WIP]` (uppercase) is text.
+    wide = _clis(rust_build, sandbox, "prompts", "list", env={"COLUMNS": "200"})[0].stdout
+    assert "Review the  page and [WIP] notes" in wide
+
+    mutating = [
+        ("prompts", "approve", pending), ("prompts", "reject", pending),
+        ("prompts", "approve", failed), ("prompts", "reject", failed),
+        ("prompts", "approve", approved), ("prompts", "reject", dispatched),
+        ("prompts", "approve", pending, rejected, failed), ("prompts", "approve", pending, "nope", failed),
+        ("prompts", "reject", "nope"),
+    ]
+    for args in mutating:
+        rust, python, rust_queue, python_queue = _prompt_clis(rust_build, sandbox, queue_path, *args)
+        assert _cli_output(rust) == _cli_output(python), args
+        assert rust_queue == python_queue, args
+    retried = _prompt_clis(rust_build, sandbox, queue_path, "prompts", "approve", failed)[2]
+    entry = next(e for e in json.loads(retried) if e["id"] == failed)
+    assert (entry["status"], entry["error"], entry["worktree"], entry["handle"]) == ("approved", "", "", "")
+
+    for args in (("prompts", "list", "--status", "bogus"), ("prompts", "show"), ("prompts", "approve"),
+                 ("prompts", "reject")):
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2
+
+
+_FAKE_ORCA = """\
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_ORCA_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(args) + "\\n")
+if args[:2] == ["status", "--json"]:
+    print("SecCodeCheckValidity: noise", file=sys.stderr)
+    running = os.environ.get("FAKE_ORCA_MODE") != "stopped"
+    print(json.dumps({"result": {"app": {"running": running}, "runtime": {"reachable": True}}}))
+elif args[:2] == ["worktree", "create"]:
+    name = args[args.index("--name") + 1]
+    if "retry" in name:
+        print("creating worktree\\nfatal: repo is busy  ", file=sys.stderr)
+        sys.exit(3)
+    worktree = {"worktreeId": "repo::/wt/" + name}
+    print("noise " + json.dumps({"ok": True, "result": {"worktree": worktree, "agentTerminalHandle": "term-" + name}}))
+"""
+
+
+def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+    paths = _require_isolated(rust_build, sandbox, "history_path")
+    home = Path(paths["history_path"]).parent.parent
+    queue_path = _seed_prompt_queue(home)
+    from localflow import dispatch as py_dispatch
+    ids = [e["id"] for e in py_dispatch.PromptQueue(queue_path).list()]
+    pending, approved, _dispatched, failed, _rejected, _bare = ids
+    no_orca = tmp_path / "no-orca"
+    no_orca.mkdir()
+    env = {"PATH": str(no_orca)}
+
+    def check(*args, env=env, code=None):
+        rust, python, rust_queue, python_queue = _prompt_clis(rust_build, sandbox, queue_path, *args, env=env)
+        assert _cli_output(rust) == _cli_output(python), args
+        assert rust_queue == python_queue, args
+        if code is not None:
+            assert rust.returncode == code, rust.stdout
+        return rust, rust_queue
+
+    check("prompts", "dispatch", "--all", code=1)  # no repo configured
+    check("prompts", "dispatch", "--repo", "id:r", code=1)  # nothing selected
+    check("prompts", "dispatch", approved, "--all", "--repo", "id:r", code=1)
+    check("prompts", "dispatch", approved, pending, failed, "--repo", "id:r", code=1)
+    check("prompts", "dispatch", approved, "nope", "--repo", "id:r", code=1)
+    for columns in ("80", "40"):
+        check("prompts", "dispatch", "--all", "--repo", "id:" + "r" * 30, "--agent", "codex", "--dry-run",
+              env={**env, "COLUMNS": columns}, code=0)
+    check("prompts", "dispatch", "--all", "--repo", "id:r", code=1)  # orca not on PATH
+    save_config(Config(orca_repo="id:configured", orca_agent="claude"), sandbox["config"])
+    check("prompts", "dispatch", approved, "--dry-run", code=0)
+    no_approved = py_dispatch.PromptQueue(queue_path)
+    no_approved.set_status(approved, "rejected")
+    check("prompts", "dispatch", "--all", code=0)
+    no_approved.set_status(approved, "approved", expect=("rejected",))
+    if os.name == "nt":
+        return  # subprocess needs a real orca.exe; the rest is covered on POSIX
+
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    (bin_dir / "fake_orca.py").write_text(_FAKE_ORCA, encoding="utf-8")
+    orca = bin_dir / "orca"
+    orca.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{bin_dir / "fake_orca.py"}" "$@"\n', encoding="utf-8")
+    orca.chmod(0o755)
+    log = tmp_path / "orca.log"
+    orca_env = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""), "FAKE_ORCA_LOG": str(log)}
+    check("prompts", "dispatch", "--all", env={**orca_env, "FAKE_ORCA_MODE": "stopped"}, code=1)
+    queue = py_dispatch.PromptQueue(queue_path)
+
+    def dispatched_with_orca(*args, code):
+        log.write_text("", encoding="utf-8")
+        _, rust_queue = check(*args, env=orca_env, code=code)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert lines[: len(lines) // 2] == lines[len(lines) // 2:]  # same orca calls from both
+        return [json.loads(line) for line in lines[: len(lines) // 2]], {e["id"]: e for e in json.loads(rust_queue)}
+
+    # One success and one failure ("retry" makes the fake orca exit 3).
+    queue.set_status(failed, "approved")
+    calls, entries = dispatched_with_orca("prompts", "dispatch", "--all", "--agent", "codex", code=1)
+    assert calls[0] == ["status", "--json"]
+    assert calls[1][:8] == ["worktree", "create", "--repo", "id:configured", "--name",
+                            "write-the-end-to-end-migration-plan-for", "--agent", "codex"]
+    assert calls[1][8:] == ["--prompt", "Do the 1 thing carefully.", "--no-parent", "--setup", "run", "--json"]
+    assert entries[approved]["status"] == "dispatched"
+    assert entries[approved]["worktree"] == "repo::/wt/write-the-end-to-end-migration-plan-for"
+    assert (entries[failed]["status"], entries[failed]["error"]) == ("failed", "orca exited 3: fatal: repo is busy")
+    queue.set_status(pending, "approved")
+    calls, entries = dispatched_with_orca("prompts", "dispatch", pending, code=0)
+    assert [call[:2] for call in calls] == [["status", "--json"], ["worktree", "create"]]
+    assert entries[pending]["handle"] == "term-fix-launch-pricing-tests"
+
+
+_NOTES = {
+    ("Notes", "2026-11-13 0900 Launch.md"): "---\ntags: [x]\n---\n# Launch\nPricing budget owners agreed: café budget.",
+    ("Notes", "Zoom", "2026-10-02 1400 Retro.md"): "Retro on launch pricing and the [bold] budget",
+    ("Transcripts", "2026-11-13 0900 Launch (transcript).md"):
+        "# Launch\n\n**[00:00]** launch pricing budget review\n\n**[01:05]** owners agreed on launch pricing",
+}
+
+
+def _seed_recall(sandbox, *, base_url: str, history: bool = True) -> None:
+    vault = sandbox["root"] / "vault"
+    for parts, body in _NOTES.items():
+        path = vault.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    store = HistoryStore(sandbox["home"] / ".localflow" / "history.sqlite", sandbox["home"] / ".localflow" / "clips")
+    now = datetime.now().timestamp()
+    for days, text in [(1.25, "launch pricing budget for the café"), (3.5, "launch pricing owners"),
+                       (10.5, "unrelated groceries"), (40.5, "launch pricing budget " * 40)]:
+        store.add(kind="dictate", app_name="Editor", final_text=text, ts=now - days * DAY)
+    save_config(Config(vault_path=str(vault), notes_folder="Notes", logs_folder="Transcripts",
+                       llm_provider="ollama", llm_base_url=base_url, history_enabled=history), sandbox["config"])
+
+
+class _FakeOllama(BaseHTTPRequestHandler):
+    status: ClassVar[int] = 200
+    reply: ClassVar[str] = ""
+    prompts: ClassVar[list] = []
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        self.prompts.append((self.path, body["model"], body["prompt"]))
+        data = json.dumps({"response": self.reply}).encode()
+        self.send_response(self.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_cli_recall_search_and_errors(rust_build, sandbox):
+    _require_isolated(rust_build, sandbox, "history_path")
+    _seed_recall(sandbox, base_url=f"http://127.0.0.1:{_free_port()}")
+    for args in [
+        ("recall", "launch pricing", "--no-llm"), ("recall", "launch pricing", "--no-llm", "--json"),
+        ("recall", "launch pricing", "--no-llm", "--since", "7d"), ("recall", "launch", "--no-llm", "--k", "2"),
+        ("recall", '"launch pricing" café', "--no-llm", "--json", "--since", "2026-01-01"),
+        ("recall", "budget", "--no-llm", "--since", "today"), ("recall", "nonexistent", "--no-llm"),
+        ("recall", "nonexistent", "--json"), ("recall", "nonexistent"), ("recall", "launch", "--no-llm", "--k", "20"),
+    ]:
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _cli_output(rust) == _cli_output(python), args
+        assert rust.returncode == 0
+        if args == ("recall", "launch pricing", "--no-llm"):
+            assert rust.stdout.startswith("\nSources\n[1] ")
+            assert "dictation · Editor — " in rust.stdout and "meeting · Launch — " in rust.stdout
+    for args in [("recall", ""), ("recall", "  "), ("recall", "x", "--since", "Bogus"), ("recall", "x", "--k", "0"),
+                 ("recall", "x", "--k", "21"), ("recall", "x", "--k", "abc"), ("recall",), ("recall", "--k", "0")]:
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2
+
+    # Unreachable LLM: the passages still print; the logged reason carries
+    # OS-specific connection text, so only its prefix is compared.
+    rust, python = _clis(rust_build, sandbox, "recall", "launch pricing")
+    assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout)
+    assert "LLM unavailable — showing matching passages only." in rust.stdout
+    prefix = "recall: LLM unavailable, returning passages only: Ollama completion failed: "
+    assert rust.stderr.startswith(prefix) and python.stderr.startswith(prefix)
+
+    save_config(Config(vault_path=str(sandbox["root"] / "vault"), notes_folder="Notes", logs_folder="Transcripts",
+                       history_enabled=False), sandbox["config"])
+    for args in [("recall", "launch pricing", "--no-llm"), ("recall", "groceries", "--no-llm", "--json")]:
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _cli_output(rust) == _cli_output(python), args
+    assert "dictation" not in rust.stdout
+
+
+def test_cli_recall_llm_answers(rust_build, sandbox):
+    _require_isolated(rust_build, sandbox, "history_path")
+    port = _free_port()
+    _seed_recall(sandbox, base_url=f"http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeOllama)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        for status, reply, flags in [
+            (200, "Launch pricing was agreed [1], with owners in [2; 9] .", ()),
+            (200, "Launch pricing was agreed [1], with owners in [2; 9] .", ("--json",)),
+            (200, "I couldn't find that in your history", ()),
+            (200, "", ("--json",)),
+            (500, "", ()),
+            (200, "[9]", ()),
+        ]:
+            _FakeOllama.status, _FakeOllama.reply = status, reply
+            _FakeOllama.prompts.clear()
+            rust, python = _clis(rust_build, sandbox, "recall", "launch pricing budget", "--k", "3", *flags)
+            assert _cli_output(rust) == _cli_output(python), (status, reply, flags)
+            assert rust.returncode == 0
+            if flags == () and reply.startswith("Launch"):
+                assert rust.stdout.startswith("Launch pricing was agreed [1], with owners in [2].\n\nSources\n")
+            # One identical prompt (passages, local times, question) from each.
+            assert len(_FakeOllama.prompts) == 2 and _FakeOllama.prompts[0] == _FakeOllama.prompts[1]
+            assert _FakeOllama.prompts[0][:2] == ("/api/generate", Config().llm_model)
+            assert bool(rust.stderr) == (status == 500 or not reply)  # empty replies are errors too
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # ---------------------------------------------------- audio / STT storage ---
 
 

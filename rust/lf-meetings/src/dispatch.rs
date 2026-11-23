@@ -21,7 +21,9 @@ pub fn default_prompts_dir() -> Result<PathBuf> {
     Ok(lf_core::home::python_home()?.join("projs/prompts/meetings"))
 }
 pub fn queue_path() -> Result<PathBuf> {
-    Ok(lf_core::home::python_home()?.join(".localflow/queue.json"))
+    Ok(lf_core::home::python_home()?
+        .join(".localflow")
+        .join("queue.json"))
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkPrompt {

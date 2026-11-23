@@ -297,7 +297,18 @@ lf-rs keys list | import [--file PATH] [--yes]
 lf-rs secret set NAME | unset NAME | status
 lf-rs status [--json]
 lf-rs serve [--host HOST] [--port PORT]
+lf-rs meeting start [-t TITLE] [-c CATEGORY] | stop | dismiss
+lf-rs prompts list [-s STATUS] | show ID | approve ID... | reject ID...
+lf-rs prompts dispatch [ID...] [--all] [--repo R] [--agent A] [--dry-run]
+lf-rs recall QUESTION [--since today|yesterday|7d|YYYY-MM-DD] [--k 1-20] [--no-llm] [--json]
 ```
+
+* `meeting` posts to the running server (API token read, never created);
+  `prompts` works on the shared `~/.localflow/queue.json` and dispatches
+  through the `orca` CLI; `recall` searches history, transcripts and notes
+  locally and asks the configured LLM unless `--no-llm`. Their Rich console
+  output (wrapping at `COLUMNS`, tables) is reproduced by `lf/src/richfmt.rs`;
+  `prompts list/show/approve/reject` and `recall` are hidden, as in Python.
 
 * `config get` without a key prints the full v2 TOML (`config show`).
   `config set` reads VALUE as the type of the key's current value, exactly
@@ -539,7 +550,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
-  `meeting`, `models`, `stt`, `setup`, `tweak`, `recall`, `prompts`,
+  `watch`, `notes`, `open`, `models`, `stt`, `setup`, `tweak`,
   `history retry`, `token`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;
