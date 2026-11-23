@@ -44,6 +44,12 @@ pub fn uses_max_completion_tokens(model: &str) -> bool {
     digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(&b'-'))
 }
 
+/// Total `max_completion_tokens` a reasoning model gets when a caller asks
+/// for a reply budget ([`LlmProvider::reply_budget`]): the bound also covers
+/// invisible reasoning tokens, so a visible-sized cap can be used up before
+/// any reply text is written.
+pub const REASONING_REPLY_BUDGET: i64 = 4096;
+
 impl OpenAiCompatLlm {
     pub fn new(
         base_url: &str,
@@ -196,6 +202,14 @@ impl LlmProvider for OpenAiCompatLlm {
             Err(exc) => Health::failed(exc.to_string()),
         }
     }
+
+    fn reply_budget(&self, visible: i64) -> i64 {
+        if uses_max_completion_tokens(&self.model) {
+            visible.max(REASONING_REPLY_BUDGET)
+        } else {
+            visible
+        }
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +291,34 @@ mod tests {
         let llm = OpenAiCompatLlm::new("https://x/v1", "o4-mini", "", 5, None);
         let body = llm.chat_body("s", "u", None);
         assert!(body.get("max_tokens").is_none() && body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn reply_budget_is_opt_in_and_reasoning_aware() {
+        let reasoning = OpenAiCompatLlm::new("https://x/v1", "o4-mini", "", 5, None);
+        let plain = OpenAiCompatLlm::new("https://x/v1", "gpt-4o-mini", "", 5, None);
+        assert_eq!(reasoning.reply_budget(800), REASONING_REPLY_BUDGET);
+        assert_eq!(reasoning.reply_budget(10_000), 10_000, "never lowered");
+        assert_eq!(plain.reply_budget(800), 800);
+        // Opted in: the larger allowance reaches the wire.
+        let server = MockServer::start(vec![
+            MockResponse::json(200, OK_BODY),
+            MockResponse::json(200, OK_BODY),
+            MockResponse::json(200, OK_BODY),
+        ]);
+        let url = format!("{}/v1", server.url());
+        let o4 = OpenAiCompatLlm::new(&url, "o4-mini", "k", 5, None);
+        o4.complete("s", "u", Some(o4.reply_budget(800))).unwrap();
+        assert_eq!(
+            server.request(0).json()["max_completion_tokens"],
+            REASONING_REPLY_BUDGET
+        );
+        // A direct explicit bound is sent unchanged.
+        o4.complete("s", "u", Some(800)).unwrap();
+        assert_eq!(server.request(1).json()["max_completion_tokens"], 800);
+        let gpt = OpenAiCompatLlm::new(&url, "gpt-4o-mini", "k", 5, None);
+        gpt.complete("s", "u", Some(gpt.reply_budget(800))).unwrap();
+        assert_eq!(server.request(2).json()["max_tokens"], 800);
     }
 
     #[test]

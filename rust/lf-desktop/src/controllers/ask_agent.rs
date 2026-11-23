@@ -60,7 +60,9 @@ pub const LIMITS: Limits = Limits {
 /// Least time left for starting a model request or the recall fallback
 /// (their timeouts are whole seconds).
 pub const MIN_STEP_BUDGET: Duration = Duration::from_secs(1);
-/// `max_tokens` for each model reply.
+/// Visible reply tokens for each model reply, passed through
+/// `LlmProvider::reply_budget` (OpenAI o-series: a 4096 total that also
+/// covers hidden reasoning; every other model: exactly this).
 pub const MAX_REPLY_TOKENS: i64 = 800;
 /// `num_ctx` for Ollama: the same as the service's recall model.
 pub const RECALL_NUM_CTX: i64 = 8192;
@@ -927,7 +929,9 @@ pub fn answer(
             llm.complete(
                 &system_prompt(&offered, final_only, limits),
                 &user_prompt(question, &scope, &steps),
-                Some(MAX_REPLY_TOKENS),
+                // Visible reply size; a reasoning model's bound also covers
+                // its hidden reasoning, so the provider may raise it.
+                Some(llm.reply_budget(MAX_REPLY_TOKENS)),
             )
             .map_err(|e| e.to_string())
         });
@@ -1186,6 +1190,88 @@ pub(crate) mod tests {
         }
         fn healthcheck(&self) -> Health {
             Health::ok()
+        }
+    }
+
+    /// A model that answers at once and records the bound it was given;
+    /// `reasoning` mimics a provider that raises Ask's reply budget.
+    struct BudgetModel {
+        reasoning: bool,
+        bounds: Arc<Mutex<Vec<Option<i64>>>>,
+    }
+
+    impl LlmProvider for BudgetModel {
+        fn id(&self) -> &'static str {
+            "budget"
+        }
+        fn offline(&self) -> bool {
+            true
+        }
+        fn complete(&self, _: &str, _: &str, bound: Option<i64>) -> Result<String, ProviderError> {
+            self.bounds.lock().unwrap().push(bound);
+            Ok("{\"answer\": \"ok\"}".into())
+        }
+        fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(Vec::new())
+        }
+        fn healthcheck(&self) -> Health {
+            Health::ok()
+        }
+        fn reply_budget(&self, visible: i64) -> i64 {
+            if self.reasoning {
+                visible.max(4096)
+            } else {
+                visible
+            }
+        }
+    }
+
+    struct BudgetBackend(BudgetModel);
+
+    impl AgentBackend for BudgetBackend {
+        fn simulated(&self) -> bool {
+            false
+        }
+        fn connect(
+            &self,
+            cancel: &AtomicBool,
+            deadline: Option<Instant>,
+        ) -> Result<Box<dyn ToolTransport>, McpError> {
+            Harness::default().connect(cancel, deadline)
+        }
+        fn model(&self, _: i64) -> Result<Box<dyn LlmProvider>, String> {
+            Ok(Box::new(BudgetModel {
+                reasoning: self.0.reasoning,
+                bounds: self.0.bounds.clone(),
+            }))
+        }
+        fn recall(&self, question: &str, _: &str, _: Duration) -> Turn {
+            Turn::new(question)
+        }
+    }
+
+    #[test]
+    fn ask_opts_into_the_provider_reply_budget() {
+        for (reasoning, expected) in [(true, 4096), (false, MAX_REPLY_TOKENS)] {
+            let bounds = Arc::new(Mutex::new(Vec::new()));
+            let backend = BudgetBackend(BudgetModel {
+                reasoning,
+                bounds: bounds.clone(),
+            });
+            let mut events = Vec::new();
+            let question = Question {
+                text: "x".into(),
+                filter: "Any time".into(),
+                context: Vec::new(),
+            };
+            answer(
+                &backend,
+                &question,
+                &LIMITS,
+                &AtomicBool::new(false),
+                &mut |e| events.push(e),
+            );
+            assert_eq!(*bounds.lock().unwrap(), vec![Some(expected)]);
         }
     }
 
