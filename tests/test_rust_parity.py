@@ -2756,23 +2756,21 @@ def _restore(roots, state: dict) -> None:
 
 def _both_clis(rust_build, roots, python, env, *args, rust_env=None, as_python=lambda content: content):
     """The Python CLI, then lf-rs, from the same state of `roots`; asserts
-    equal output and equal files afterwards (file contents through
-    `as_python`, as `roots` may start with what lf-rs wrote) and returns
-    `(rust, python)`."""
-
-    def snapshot():
-        return {
-            path: tuple(as_python(part) if isinstance(part, bytes) else part for part in entry)
-            for path, entry in _snapshot(*roots).items()
-        }
-
+    equal output and equal files afterwards and returns `(rust, python)`.
+    Where Python changed files, lf-rs's contents are compared through `as_python`."""
     before = _snapshot(*roots)
     py = _run_cli([str(python), "-m", "localflow.cli", *args], env)
-    py_after = snapshot()
+    py_after = _snapshot(*roots)
     _restore(roots, before)
     rs = _run_cli([str(rust_build[0]), *args], rust_env or env)
     assert _cli_output(rs) == _cli_output(py), args
-    assert snapshot() == py_after, args
+    rs_after = _snapshot(*roots)
+    if py_after != before:
+        rs_after = {
+            path: tuple(as_python(part) if isinstance(part, bytes) else part for part in entry)
+            for path, entry in rs_after.items()
+        }
+    assert rs_after == py_after, args
     return rs, py
 
 
@@ -2958,10 +2956,8 @@ def test_cli_agent_win32_run_key(rust_build, sandbox):
             rs = _run_cli([str(rust_build[0]), "agent", *args], env)
             assert tuple(map(as_python, _cli_output(rs)[1:])) == tuple(map(as_python, _cli_output(py)[1:])), args
             rs_after = read()
-            # `before` may hold the value lf-rs installed, so both sides are mapped.
-            rs_after, py_after = (
-                value and (value[0].replace(script, beside), value[1]) for value in (rs_after, py_after)
-            )
+            if rs_after and py_after != before:
+                rs_after = (rs_after[0].replace(script, beside), rs_after[1])
             assert rs_after == py_after, args
             assert rs.returncode == py.returncode == 0, args
         _run_cli([str(rust_build[0]), "agent", "install"], env)
