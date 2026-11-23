@@ -67,14 +67,16 @@ def test_collection_paths_map_to_gnome_keyring_files(gates, tmp_path):
 def test_daemon_keyrings_follow_its_environment(gates, tmp_path):
     safety, _ = gates
     home = tmp_path / "home"
+    data = tmp_path / "data"
+    other = tmp_path / "other"
     expected = home / ".local/share/keyrings"
     assert safety.daemon_keyrings({}, home) == expected
     assert safety.daemon_keyrings({"XDG_DATA_HOME": "relative"}, home) == expected
-    assert safety.daemon_keyrings({"XDG_DATA_HOME": "/data"}, home) == Path("/data/keyrings")
-    assert safety.daemon_keyrings({"HOME": "/other"}, home) == Path("/other/.local/share/keyrings")
+    assert safety.daemon_keyrings({"XDG_DATA_HOME": str(data)}, home) == data / "keyrings"
+    assert safety.daemon_keyrings({"HOME": str(other)}, home) == other / ".local/share/keyrings"
     assert safety.legacy_keyrings({}, home) == home / ".gnome2/keyrings"
-    assert safety.legacy_keyrings({"XDG_DATA_HOME": "/data"}, home) == home / ".gnome2/keyrings"
-    assert safety.legacy_keyrings({"HOME": "/other"}, home) == Path("/other/.gnome2/keyrings")
+    assert safety.legacy_keyrings({"XDG_DATA_HOME": str(data)}, home) == home / ".gnome2/keyrings"
+    assert safety.legacy_keyrings({"HOME": str(other)}, home) == other / ".gnome2/keyrings"
 
 
 def test_capture_requires_unit_gpui_scale(gates):
