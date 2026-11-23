@@ -229,35 +229,38 @@ mod tests {
     #[test]
     fn probes_ignore_the_working_directory() {
         let planted = tempfile::tempdir().unwrap();
-        let empty = tempfile::tempdir().unwrap();
         let marker = planted.path().join("imported");
         let body = format!(
             "open({:?}, 'a').write(__name__ + '\\n')\n",
             marker.to_str().unwrap()
         );
         fs::create_dir_all(planted.path().join("importlib")).unwrap();
-        fs::create_dir_all(planted.path().join("localflow")).unwrap();
+        fs::create_dir_all(planted.path().join("lf_probe_planted")).unwrap();
         for file in [
             "json.py",
             "platform.py",
             "importlib/__init__.py",
-            "localflow/__init__.py",
+            "lf_probe_planted/__init__.py",
         ] {
             fs::write(planted.path().join(file), &body).unwrap();
         }
-        let run = |source: &str, dir: &Path| {
+        let run = |source: &str| {
             candidates()
                 .into_iter()
-                .find_map(|python| probe(&python, source).current_dir(dir).output().ok())
+                .find_map(|python| {
+                    probe(&python, source)
+                        .current_dir(planted.path())
+                        .output()
+                        .ok()
+                })
                 .expect("no Python interpreter could be started")
                 .status
         };
-        assert!(run("import importlib.util, json, platform", planted.path()).success());
-        // A `localflow` package in the working directory is not an install.
-        assert_eq!(
-            run(IMPORT_PROBE, planted.path()).success(),
-            run(IMPORT_PROBE, empty.path()).success()
-        );
+        assert!(run("import importlib.util, json, platform").success());
+        // A checkout in the working directory is not an install.
+        assert!(run("import importlib.util\n\
+             sys.exit(importlib.util.find_spec('lf_probe_planted') is not None)")
+        .success());
         assert!(!marker.exists(), "{}", fs::read_to_string(&marker).unwrap());
     }
 
