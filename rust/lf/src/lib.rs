@@ -20,6 +20,7 @@ mod cmd_keys;
 mod cmd_llm;
 mod cmd_serve;
 mod cmd_status;
+mod cmd_stt;
 pub mod pyfmt;
 
 pub use clipboard::{Clipboard, SystemClipboard};
@@ -189,9 +190,24 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Serve { host, port } => cmd_serve::run(host, port, io),
         Command::Config(command) => cmd_config::run(command, io),
         Command::Dict(command) => cmd_dict::run(command, io),
+        Command::Dictation { action } => {
+            use args::DictationAction;
+            use lf_core::config::{load_config, save_config};
+            let mut config = load_config()?;
+            if !matches!(action, DictationAction::Status) {
+                config.set_field(
+                    "dictation_enabled",
+                    serde_json::json!(matches!(action, DictationAction::On)),
+                );
+                save_config(&config, None)?;
+            }
+            let enabled = config.field_bool("dictation_enabled").unwrap_or(true);
+            outln!(io.out, "Dictation: {}", if enabled { "on" } else { "off" })
+        }
         Command::History(args) => cmd_history::run(args, io),
         Command::Stats => cmd_history::stats(io),
         Command::Llm(command) => cmd_llm::run(command, io),
+        Command::Stt(command) => cmd_stt::run(command, io),
         Command::Keys(command) => cmd_keys::run(command, io),
         Command::Status { json } => cmd_status::run(json, io),
     }

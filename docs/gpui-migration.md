@@ -38,7 +38,7 @@ Legend:
 
 | Area | Capability | lf-desktop | Data path | Existing path still available |
 |---|---|---|---|---|
-| Home | Dictation on/off | Works | `[dictation] enabled` through `config_write` | `lf dictation on/off`, Hub |
+| Home | Dictation on/off | Works | `[dictation] enabled` through `config_write` | `lf dictation on/off`, `lf-rs dictation on/off/status`, Hub |
 | Home | Runtime state (not running, starting, shortcut listening, recording, transcribing, needs attention, not responding, running/status limited), shortcut session line, configured vs observed microphone, warnings, local service as a separate line | Works from the runtime's own `status.json` (protocol 2: listener, session, mic, warnings, 5 s heartbeat) plus PID liveness and proof the file is the current runtime's: this window's engine matches the file `instance` its live `RuntimeHandle` reports (any platform); an external runtime must hold `localflow.lock` (Linux `/proc/locks`, device + inode, read-only) with a matching lock-acquisition identity. External runtimes on macOS, where the lock owner can't be read, show as "status limited". A missing file is "not running" unless another process is proven to hold the lock ("another LocalFlow handles dictation"); an unreadable file says the status can't be read. `/healthz`, config `enabled`, a live PID alone or a spawned thread never mean "listening". Protocol-1 writers (Python, older Rust) show as "Running · status limited" | `status.json`, `localflow.lock` | Python menu bar, `lf-hub` |
 | Home | Stats, recent dictations, copy | Works | `HistoryStore::stats/recent` | `lf stats`, Hub |
 | Home | Setup checklist with links to the right page, **Run / Resume setup** | Works. The Shortcut step is done only when a runtime reports its listener | config, history, runtime status | `lf setup` |
@@ -59,8 +59,8 @@ Legend:
 | Settings | Settings assistant (natural-language change): preview, explicit apply, undo that keeps newer edits, stale-preview and conflict handling | Works (native agent on explicit paths, loopback Ollama; writes through `settings_worker::dispatch`). Sandbox: native agent with a scripted offline chat | `hub_settings`, `settings_agent_native`, `settings_worker` | `lf tweak`, Hub |
 | Settings | Run setup again; sandbox-only simulated runtime state selector | Works | — | — |
 | Settings | Launch at login | Honest-off on Linux; macOS points to `lf agent` | — | `lf agent install` |
-| Models | Speech engine and model size | Works (`models_layout::set_speech`; MLX refused off Apple silicon) | `[stt]` | `lf stt`, Hub |
-| Models | Speech models on this computer: installed / downloading (progress, cancel) / failed (retry) / in use; download, use, delete with confirmation | Works in `--features runtime` builds (default build explains the rebuild). Delete is refused for the selected model and for models leased by a running LocalFlow, re-checked at delete time; only managed, non-symlinked cache folders are removed | `lf_stt::model_storage`, `stt_lease`, `FlowModelBackend` | `lf setup`, Hub |
+| Models | Speech engine and model size | Works (`models_layout::set_speech`; MLX refused off Apple silicon) | `[stt]` | `lf stt`, `lf-rs stt list/use`, Hub |
+| Models | Speech models on this computer: installed / downloading (progress, cancel) / failed (retry) / in use; download, use, delete with confirmation | Works in `--features runtime` builds (default build explains the rebuild). Delete is refused for the selected model and for models leased by a running LocalFlow, re-checked at delete time; only managed, non-symlinked cache folders are removed | `lf_stt::model_storage`, `stt_lease`, `FlowModelBackend` | `lf setup`, `lf-rs stt download` (Python catalog), Hub |
 | Models | Cleanup model: Ollama installed list, or a typed model ID | Works (background list, `cleanup_picker` states) | `[llm] model` | `lf llm`, Hub |
 | Models | Provider keys: add or replace (masked, cleared after save), remove (with confirmation), use or activate | Works through `ProviderKeys` and the OS keyring. Key values are never shown or kept. Key presence is read on a worker and cached (render never touches the keyring); save, use, remove and import run on workers too | keyring + `[llm]` | `lf keys`, `lf llm use`, Hub |
 | Models | Import keys from the environment or a `.env` file (selection, overwrite marker, counts) | Works. Values never shown or logged; active provider unchanged; providers overridden by `LOCALFLOW_PROVIDER_KEY_<ID>` can't be imported | `keys::detect_imports`, `ProviderKeys::save_imports` | `lf keys import`, Hub |
@@ -155,13 +155,19 @@ dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24 -dpi 96 -extension Co
 ```
 
 Use new artifact directories each run. Gate 2 requires a persistent GNOME
-Keyring default collection in the current session. Run it with LocalFlow and other
+Keyring default collection in the current session; it fails unless the `default`
+alias resolves to a collection whose `<name>.keyring` file is in the monitored
+keyrings directory used by the running daemon, and it refuses to run while a legacy
+`~/.gnome2/keyrings` directory exists. Run it with LocalFlow and other
 writers to the monitored stores stopped. It adds a word to the **sandbox**
 Dictionary and checks that the real config (including legacy fallback),
 `~/.localflow`, and the GNOME Keyring backing files did not change. `before.json`
 and `after.json` contain only per-store HMAC-SHA256 digests with a per-run key;
 compare them only within the same run. Other keyring backends are not supported by
 this script. Gate 8 writes 44 PNGs (10 pages and Setup × two themes × two sizes).
+It launches `lf-desktop` with `GPUI_X11_SCALE_FACTOR=1` (which GPUI reads before
+`Xft.dpi` and RandR) and fails if the process did not get it, so host HiDPI
+settings cannot change the captured layout.
 Review the PNGs for legibility and layout at both sizes; capture success alone
 does not complete the review.
 
