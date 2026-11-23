@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,6 +181,21 @@ def test_configuration_and_provider_contract(servers):
     compare(servers, "/api/config", "PUT")
     compare(servers, "/api/config", "PUT", [])
     compare(servers, "/api/autostart", "POST", {"enabled": "true"})
+
+
+def test_rust_put_keeps_config_edits_made_after_startup(servers, sandbox):
+    rust, config = servers[1], sandbox["config"]
+    config.write_text(
+        'config_version = 2\n[features]\nmeetings = false\n[meetings]\nwatch = false\n[llm]\nmodel = "edited-outside"\n',
+        encoding="utf-8",
+    )
+    status, put, _ = rust.request("/api/config", "PUT", {"dictation": {"sample_rate": 22050}})
+    assert status == 200, put
+    saved = tomllib.loads(config.read_text(encoding="utf-8"))
+    for values in [put, rust.request("/api/config")[1], saved]:
+        assert values["llm"]["model"] == "edited-outside"
+        assert values["dictation"]["sample_rate"] == 22050
+        assert values["features"]["meetings"] is False
 
 
 def test_secrets_reject_unknown_and_never_expose_values(servers):
