@@ -35,6 +35,7 @@ mod cmd_setup;
 mod cmd_status;
 mod cmd_stt;
 mod cmd_tweak;
+mod native;
 pub mod pyfmt;
 mod pyfs;
 mod python;

@@ -19,7 +19,7 @@ use crate::args::AgentCommand;
 use crate::pyfmt::{plist_xml, py_strip, str_repr, Plist};
 use crate::pyfs::{mkdir_parents, unlink, write_text, PyOsError};
 use crate::richfmt::Console;
-use crate::{python, CliError, Io};
+use crate::{native, python, CliError, Io};
 
 const LABEL: &str = "com.cortexrnd.localflow";
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
@@ -282,9 +282,15 @@ fn launchctl<S: AsRef<OsStr>>(args: &[S]) -> Result<Launchctl> {
 }
 
 /// `launchagent.install`: write the plist, trim the logs and (re)load it.
+/// A native install owns the shared label (its Hub manages start on login),
+/// so neither its agent nor that of its `LocalFlow.app` is replaced.
 fn darwin_install(io: &mut Io<'_>) -> Result<PathBuf> {
-    let program = install_program("localflow")?;
     let path = plist_path()?;
+    let app = python_home()?.join("Applications").join("LocalFlow.app");
+    if native::is_native_agent(&path) || native::is_native_app(&app) {
+        return Err(RuntimeError(native::NATIVE_AGENT.to_string()).into());
+    }
+    let program = install_program("localflow")?;
     let logs = log_dir()?;
     if let Some(parent) = path.parent() {
         mkdir_parents(parent)?;
