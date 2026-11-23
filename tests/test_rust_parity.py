@@ -2754,16 +2754,25 @@ def _restore(roots, state: dict) -> None:
             Path(name).chmod(entry[1])
 
 
-def _both_clis(rust_build, roots, python, env, *args, rust_env=None):
+def _both_clis(rust_build, roots, python, env, *args, rust_env=None, as_python=lambda content: content):
     """The Python CLI, then lf-rs, from the same state of `roots`; asserts
-    equal output and equal files afterwards and returns `(rust, python)`."""
+    equal output and equal files afterwards (file contents through
+    `as_python`, as `roots` may start with what lf-rs wrote) and returns
+    `(rust, python)`."""
+
+    def snapshot():
+        return {
+            path: tuple(as_python(part) if isinstance(part, bytes) else part for part in entry)
+            for path, entry in _snapshot(*roots).items()
+        }
+
     before = _snapshot(*roots)
     py = _run_cli([str(python), "-m", "localflow.cli", *args], env)
-    py_after = _snapshot(*roots)
+    py_after = snapshot()
     _restore(roots, before)
     rs = _run_cli([str(rust_build[0]), *args], rust_env or env)
     assert _cli_output(rs) == _cli_output(py), args
-    assert _snapshot(*roots) == py_after, args
+    assert snapshot() == py_after, args
     return rs, py
 
 
@@ -2775,16 +2784,22 @@ def _user_config_dir(python, env) -> Path:
 
 def test_cli_agent_linux_autostart(rust_build, sandbox):
     python, env = _same_python(sandbox)
-    _install_or_skip(python)
+    # Python names `localflow` next to `sys.executable`; lf-rs names it next to
+    # the script that exists, which is in Scripts\\ for a non-venv Windows Python.
+    ours, theirs = (
+        f'Exec="{directory / "localflow"}"'.replace("\\", "\\\\").encode()
+        for directory in (_install_or_skip(python).parent, python.parent)
+    )
     env["LOCALFLOW_PLATFORM"] = "linux"
     autostart = _user_config_dir(python, env) / "autostart"
     roots = [autostart]
     for args in (("status",), ("install",), ("status",), ("install",), ("uninstall",), ("uninstall",)):
-        rust, _ = _both_clis(rust_build, roots, python, env, "agent", *args)
+        rust, _ = _both_clis(
+            rust_build, roots, python, env, "agent", *args, as_python=lambda content: content.replace(ours, theirs)
+        )
         assert rust.returncode == 0 and rust.stderr == "", args
         if args == ("install",):
-            program = str(python.parent / "localflow").replace("\\", "\\\\")
-            assert f'Exec="{program}"' in (autostart / "localflow.desktop").read_text()
+            assert ours in (autostart / "localflow.desktop").read_bytes()
             assert "\ninstalled" not in rust.stdout and rust.stdout.startswith("installed: ")
     assert _both_clis(rust_build, roots, python, env, "agent", "status")[0].stdout == "not installed\n"
 
@@ -2943,7 +2958,11 @@ def test_cli_agent_win32_run_key(rust_build, sandbox):
             rs = _run_cli([str(rust_build[0]), "agent", *args], env)
             assert tuple(map(as_python, _cli_output(rs)[1:])) == tuple(map(as_python, _cli_output(py)[1:])), args
             rs_after = read()
-            assert (rs_after and (rs_after[0].replace(script, beside), rs_after[1])) == py_after, args
+            # `before` may hold the value lf-rs installed, so both sides are mapped.
+            rs_after, py_after = (
+                value and (value[0].replace(script, beside), value[1]) for value in (rs_after, py_after)
+            )
+            assert rs_after == py_after, args
             assert rs.returncode == py.returncode == 0, args
         _run_cli([str(rust_build[0]), "agent", "install"], env)
         assert read() == (f'"{script}"', winreg.REG_SZ)
