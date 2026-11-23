@@ -61,9 +61,17 @@ any status poller.
 
 ## HTTP backend (optional)
 
-Enable `server` and pass `SttBackend::new(inner_backend)` from `lf_stt::server`
-to `lf_server::ServerState::load_with_backend(Arc::new(backend))`. This is an
-opt-in library integration, not a change to the `lf-rs serve` default backend.
+The `server` Cargo feature is off by default for library consumers of
+`lf-stt`. The `lf-rs` CLI enables it (`rust/lf/Cargo.toml` depends on
+`lf-stt` with `features = ["runtime", "server"]`), and `lf-rs serve` uses it
+by default: `rust/lf/src/cmd_serve.rs` wraps its `MeetingsBackend` as
+`SttBackend<MeetingsBackend>` and binds that via
+`ServerState::load_with_backend`, so the served `/transcribe` route is handled
+by this adapter without any extra flag.
+
+Other hosts opt in by enabling the `server` feature on their `lf-stt`
+dependency and passing `SttBackend::new(inner_backend)` from `lf_stt::server`
+to `lf_server::ServerState::load_with_backend(Arc::new(backend))`.
 Every other route and autostart status delegates unchanged to `inner_backend`.
 Provider availability follows compiled engine features; loaded state comes
 from a mutex-protected `SttSlot`. Requests sharing that slot serialize model
