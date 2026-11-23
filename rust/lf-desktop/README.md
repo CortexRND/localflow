@@ -494,6 +494,15 @@ applied; an apply the agent refuses keeps the preview and shows why; Undo skips
 (and lists) settings that changed since. Secret-looking tokens in model output
 are masked. The manual Settings rows are unchanged.
 
+## Appearance
+
+Settings → General → **Appearance** picks System, Light or Dark (default
+System, which follows the OS light/dark setting live). The choice applies to
+every open window at once and is stored on its own in `appearance.json` in the
+window's instance directory (`<localflow dir>/desktop/`, or inside the sandbox
+directory), never in `config.toml`. A missing or unreadable file means System;
+if saving fails, the row says so and the choice still applies for the session.
+
 ## Runtime connection
 
 The app reports what it finds:

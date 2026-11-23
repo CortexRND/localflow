@@ -33,7 +33,7 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 use super::{icon, ring};
-use crate::theme::{size, space, text, theme};
+use crate::theme::{elevation, size, space, text, theme};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectEvent {
@@ -227,7 +227,9 @@ impl Render for Select {
             t.text
         };
         let hover = t.hover;
+        let trigger_hover = t.bg_muted;
         let ring_style = ring(&t);
+        let control_shadow = elevation::control(&t);
         let trigger = div()
             .id("select-trigger")
             .flex()
@@ -244,13 +246,20 @@ impl Render for Select {
             } else {
                 t.border_control
             })
-            .bg(if self.disabled { t.bg_muted } else { t.bg_card })
+            .bg(if self.disabled {
+                t.bg_muted
+            } else {
+                t.bg_control
+            })
             .text_size(sz)
             .line_height(lh)
             .text_color(fg)
+            .when(!focused && !self.disabled, move |d| {
+                d.shadow(control_shadow)
+            })
             .when(focused, move |d| d.shadow(ring_style.clone()))
             .when(!self.disabled, move |d| {
-                d.cursor_pointer().hover(move |s| s.bg(hover))
+                d.cursor_pointer().hover(move |s| s.bg(trigger_hover))
             })
             .on_click(cx.listener(|this, _, window, cx| {
                 window.focus(&this.focus);
@@ -317,11 +326,11 @@ impl Render for Select {
                         .max_h(px(320.))
                         .overflow_y_scroll()
                         .p(space::s2())
-                        .rounded(size::radius_element())
+                        .rounded(size::radius_group())
                         .border_1()
                         .border_color(t.border)
                         .bg(t.bg_popover)
-                        .shadow_lg()
+                        .shadow(elevation::popover(&t))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.open = false;
                             cx.notify();

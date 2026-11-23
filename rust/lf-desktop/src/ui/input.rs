@@ -1180,7 +1180,11 @@ impl Render for TextInput {
             .rounded(tsize::radius_element())
             .border_1()
             .border_color(border)
-            .bg(if self.disabled { t.bg_muted } else { t.bg_card })
+            .bg(if self.disabled {
+                t.bg_muted
+            } else {
+                t.bg_control
+            })
             .text_size(font)
             .line_height(line)
             .text_color(t.text);
@@ -1190,8 +1194,8 @@ impl Render for TextInput {
             root = root.h(tsize::control_md());
         }
         if focused {
-            // 2 px focus ring (border plus outline shadow-free ring).
-            root = root.border_2().px(space::s5() - px(1.));
+            // Accent edge plus the shared soft focus ring (no layout shift).
+            root = root.shadow(super::ring(&t));
         }
         if !self.disabled {
             root = root

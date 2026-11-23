@@ -1,4 +1,8 @@
 //! Reusable native components. Pages build only from these and theme tokens.
+//!
+//! The look follows macOS: inset grouped lists on a calm surface, neutral
+//! controls with a hairline and a faint shadow, one accent for the primary
+//! action, selection and focus.
 
 pub mod assets;
 pub mod input;
@@ -9,10 +13,10 @@ use std::rc::Rc;
 
 use gpui::{
     div, point, prelude::*, px, svg, AnyElement, App, BoxShadow, ClickEvent, Div, ElementId,
-    FocusHandle, FontWeight, Hsla, IntoElement, SharedString, Stateful, Window,
+    FocusHandle, FontWeight, Hsla, IntoElement, Pixels, SharedString, Stateful, Window,
 };
 
-use crate::theme::{size, space, text, theme, Theme, Tone};
+use crate::theme::{elevation, size, space, text, theme, Theme, Tone};
 
 pub type Handler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 /// Callback with a value (switch state, chosen index, tab).
@@ -25,14 +29,23 @@ pub fn handler(f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Hand
     Rc::new(f)
 }
 
-/// The 2 px accent focus ring (drawn outside the box; no layout shift).
+/// The focus ring: a solid 2 px accent edge inside a soft accent halo
+/// (drawn outside the box; no layout shift).
 pub fn ring(t: &Theme) -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: t.accent,
-        offset: point(px(0.), px(0.)),
-        blur_radius: px(0.),
-        spread_radius: px(2.),
-    }]
+    vec![
+        BoxShadow {
+            color: t.focus_ring,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(4.),
+        },
+        BoxShadow {
+            color: t.icon_accent,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(2.),
+        },
+    ]
 }
 
 pub fn icon(name: &str, color: Hsla) -> gpui::Svg {
@@ -53,6 +66,19 @@ pub fn brand(t: &Theme) -> gpui::Svg {
         .size(size::icon_lg())
         .flex_none()
         .text_color(t.accent)
+}
+
+/// A rounded square holding a glyph (Home's status tile, empty states).
+pub fn glyph_tile(name: &str, fg: Hsla, bg: Hsla) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(40.))
+        .rounded(size::radius_group())
+        .bg(bg)
+        .child(icon_lg(name, fg))
 }
 
 // ------------------------------------------------------------------ text ---
@@ -246,18 +272,21 @@ impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = theme(cx).clone();
         let inactive = self.disabled || self.busy;
-        let (bg, fg, border, hover) = match self.variant {
-            Variant::Primary => (t.accent, t.text_on_accent, t.accent, t.accent_hover),
-            Variant::Secondary => (t.bg_card, t.text, t.border_control, t.hover),
-            Variant::Ghost => (
-                gpui::transparent_black(),
-                t.text,
-                gpui::transparent_black(),
-                t.hover,
+        let clear = gpui::transparent_black();
+        // (fill, label, hairline, hover fill, pressed fill)
+        let (bg, fg, border, hover, pressed) = match self.variant {
+            Variant::Primary => (
+                t.accent,
+                t.text_on_accent,
+                t.accent,
+                t.accent_hover,
+                t.accent_hover,
             ),
+            Variant::Secondary => (t.bg_control, t.text, t.separator, t.bg_muted, t.bg_muted),
+            Variant::Ghost => (clear, t.text_accent, clear, t.hover, t.pressed),
             Variant::Destructive => {
                 let (fg, bg) = t.tone(Tone::Error);
-                (bg, fg, bg, bg.opacity(0.8))
+                (bg, fg, bg, bg.opacity(0.8), bg.opacity(0.65))
             }
         };
         let (bg, fg, border) = if self.disabled {
@@ -268,6 +297,7 @@ impl RenderOnce for Button {
         } else {
             (bg, fg, border)
         };
+        let raised = self.variant == Variant::Secondary && !self.disabled;
         let height = if self.small {
             size::control_sm()
         } else {
@@ -293,10 +323,12 @@ impl RenderOnce for Button {
             .border_1()
             .border_color(border)
             .bg(bg)
+            .when(raised, |d| d.shadow(elevation::control(&t)))
             .text_color(fg)
             .text_size(sz)
             .line_height(lh)
             .font_weight(FontWeight::MEDIUM)
+            .whitespace_nowrap()
             .when_some(icon_name, |el, name| el.child(icon(name, fg)))
             .child(self.label.clone());
         if !inactive {
@@ -307,11 +339,8 @@ impl RenderOnce for Button {
             el = el
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
+                .active(move |s| s.bg(pressed))
                 .focus(move |s| s.shadow(ring.clone()));
-            if self.variant == Variant::Ghost || self.variant == Variant::Secondary {
-                let pressed = t.pressed;
-                el = el.active(move |s| s.bg(pressed));
-            }
             if let Some(f) = self.on_click {
                 el = el.on_click(move |e, w, cx| f(e, w, cx));
             }
@@ -365,7 +394,7 @@ impl RenderOnce for IconButton {
         } else {
             t.icon_secondary
         };
-        let hover = t.hover;
+        let (hover, pressed) = (t.hover, t.pressed);
         let ring = ring(&t);
         let label = self.label.clone();
         let mut el = div()
@@ -375,7 +404,7 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .size(size::control_sm())
-            .rounded(size::radius_element())
+            .rounded(size::radius_inner())
             .child(icon(self.icon, color))
             .tooltip(move |_, cx| Tooltip::view(label.clone(), cx));
         if !self.disabled {
@@ -383,6 +412,7 @@ impl RenderOnce for IconButton {
                 .tab_index(0)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
+                .active(move |s| s.bg(pressed))
                 .focus(move |s| s.shadow(ring.clone()));
             if let Some(f) = self.on_click {
                 el = el.on_click(move |e, w, cx| f(e, w, cx));
@@ -392,7 +422,7 @@ impl RenderOnce for IconButton {
     }
 }
 
-/// Tooltip view.
+/// Tooltip view: a small popover with a hairline and a soft shadow.
 pub struct Tooltip(SharedString);
 
 impl Tooltip {
@@ -409,8 +439,11 @@ impl Render for Tooltip {
             .px(space::s4())
             .py(space::s2())
             .rounded(size::radius_inner())
-            .bg(t.bg_inverted)
-            .text_color(t.text_inverted)
+            .border_1()
+            .border_color(t.border)
+            .bg(t.bg_popover)
+            .shadow(elevation::popover(&t))
+            .text_color(t.text)
             .text_size(sz)
             .line_height(lh)
             .max_w(px(320.))
@@ -452,12 +485,15 @@ impl Switch {
 impl RenderOnce for Switch {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = theme(cx).clone();
-        let (track, knob, border) = match (self.on, self.disabled) {
-            (true, false) => (t.accent, t.text_on_accent, t.accent),
-            (false, false) => (t.bg_card, t.border_control, t.border_control),
-            (true, true) => (t.text_disabled, t.bg_card, t.text_disabled),
-            (false, true) => (t.bg_muted, t.text_disabled, t.text_disabled),
+        // Off keeps a >= 3:1 boundary; disabled drops the accent entirely.
+        let (track, border) = match (self.on, self.disabled) {
+            (true, false) => (t.accent, t.accent),
+            (false, false) => (t.bg_muted, t.border_control),
+            (true, true) => (t.text_disabled, t.text_disabled),
+            (false, true) => (t.bg_muted, t.text_disabled),
         };
+        let knob = t.knob;
+        let knob_shadow = elevation::raised(&t);
         let ring = ring(&t);
         let on = self.on;
         let label = self.label.clone();
@@ -466,15 +502,22 @@ impl RenderOnce for Switch {
             .flex()
             .flex_none()
             .items_center()
-            .w(px(36.))
-            .h(px(20.))
-            .px(px(2.))
+            .w(px(38.))
+            .h(px(22.))
+            .px(px(1.))
             .rounded_full()
             .border_1()
             .border_color(border)
             .bg(track)
             .when(on, |d| d.justify_end())
-            .child(div().size(px(14.)).rounded_full().bg(knob))
+            .child(
+                div()
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(knob)
+                    .shadow(knob_shadow)
+                    .when(self.disabled, |d| d.opacity(0.7)),
+            )
             .tooltip(move |_, cx| {
                 Tooltip::view(
                     format!("{label}: {}", if on { "On" } else { "Off" }).into(),
@@ -529,61 +572,90 @@ impl Segmented {
     }
 }
 
+/// One segment of a muted track: the selected one is a raised surface with
+/// a shadow and a heavier weight (never colour alone).
+fn segment(
+    t: &Theme,
+    id: ElementId,
+    label: impl IntoElement,
+    selected: bool,
+    disabled: bool,
+) -> Stateful<Div> {
+    let (sz, lh) = text::body();
+    // A disabled selection stays recognizable (fill, shadow, weight) but sits
+    // on the control fill with secondary text so its label stays readable;
+    // the raised fill is too close to the disabled text colour in Dark.
+    let fg = if disabled && selected {
+        t.text_secondary
+    } else if disabled {
+        t.text_disabled
+    } else if selected {
+        t.text
+    } else {
+        t.tone(Tone::Neutral).0
+    };
+    let ring = ring(t);
+    let hover = t.hover;
+    let mut seg = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(space::s5())
+        .rounded(size::radius_inner())
+        .text_size(sz)
+        .line_height(lh)
+        .text_color(fg)
+        .whitespace_nowrap()
+        .when(selected, |d| {
+            d.bg(if disabled { t.bg_control } else { t.bg_raised })
+                .shadow(elevation::raised(t))
+                .font_weight(FontWeight::SEMIBOLD)
+        })
+        .when(!selected, |d| d.font_weight(FontWeight::MEDIUM))
+        .child(label);
+    if !disabled {
+        seg = seg
+            .tab_index(0)
+            .cursor_pointer()
+            .when(!selected, move |d| d.hover(move |s| s.bg(hover)))
+            .focus(move |s| s.shadow(ring.clone()));
+    }
+    seg
+}
+
+/// The muted track segments sit on.
+fn segment_track(t: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .h(size::control_md())
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded(size::radius_element())
+        .bg(t.bg_muted)
+}
+
 impl RenderOnce for Segmented {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = theme(cx).clone();
-        let (sz, lh) = text::body();
         let id = self.id.clone();
-        div()
+        let disabled = self.disabled;
+        let on_select = self.on_select.clone();
+        let selected_index = self.selected;
+        segment_track(&t)
             .id(self.id)
-            .flex()
-            .flex_none()
-            .h(size::control_md())
-            .p(px(2.))
-            .gap(px(2.))
-            .rounded(size::radius_element())
-            .bg(t.bg_muted)
             .children(self.options.into_iter().enumerate().map(|(i, option)| {
-                let selected = self.selected == Some(i);
-                let fg = if self.disabled {
-                    t.text_disabled
-                } else if selected {
-                    t.text
-                } else {
-                    t.text_secondary
-                };
-                let ring = ring(&t);
-                let hover = t.hover;
-                let mut seg = div()
-                    .id(ElementId::NamedInteger(
-                        format!("{id:?}-seg").into(),
-                        i as u64,
-                    ))
-                    .flex()
-                    .items_center()
-                    .gap(space::s2())
-                    .px(space::s5())
-                    .rounded(px(6.))
-                    .text_size(sz)
-                    .line_height(lh)
-                    .text_color(fg)
-                    .when(selected, |d| {
-                        d.bg(t.bg_card)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .border_1()
-                            .border_color(t.border)
-                    })
-                    .when(selected && !self.disabled, |d| {
-                        d.child(icon("check", t.icon_accent).size(px(12.)))
-                    })
-                    .child(option);
-                if !self.disabled {
-                    seg = seg
-                        .tab_index(0)
-                        .cursor_pointer()
-                        .when(!selected, move |d| d.hover(move |s| s.bg(hover)))
-                        .focus(move |s| s.shadow(ring.clone()));
-                    if let Some(f) = self.on_select.clone() {
+                let selected = selected_index == Some(i);
+                let mut seg = segment(
+                    &t,
+                    ElementId::NamedInteger(format!("{id:?}-seg").into(), i as u64),
+                    option,
+                    selected,
+                    disabled,
+                );
+                if !disabled {
+                    if let Some(f) = on_select.clone() {
                         seg = seg.on_click(move |_, w, cx| f(i, w, cx));
                     }
                 }
@@ -602,11 +674,11 @@ pub fn keycap(t: &Theme, s: impl Into<SharedString>) -> Div {
         .h(px(22.))
         .px(space::s3())
         .rounded(size::radius_inner())
-        .border_1()
-        .border_color(t.border)
         .bg(t.bg_muted)
+        .shadow(elevation::control(t))
         .font_family(text::MONO_FAMILY)
         .text_size(sz)
+        .font_weight(FontWeight::MEDIUM)
         .text_color(t.text)
         .child(s.into())
 }
@@ -618,8 +690,18 @@ pub fn keys(t: &Theme, combo: &str) -> Div {
     }
     div()
         .flex()
+        .items_center()
         .gap(space::s2())
         .children(combo.split(" + ").map(|k| keycap(t, k.to_string())))
+}
+
+/// The bare dot of a status tone.
+pub fn dot(t: &Theme, tone: Tone) -> Div {
+    div()
+        .size(px(8.))
+        .flex_none()
+        .rounded_full()
+        .bg(t.dot(tone))
 }
 
 pub fn status_dot(t: &Theme, tone: Tone, word: impl Into<SharedString>) -> Div {
@@ -631,28 +713,25 @@ pub fn status_dot(t: &Theme, tone: Tone, word: impl Into<SharedString>) -> Div {
         .text_size(sz)
         .line_height(lh)
         .text_color(t.text)
-        .child(
-            div()
-                .size(px(8.))
-                .flex_none()
-                .rounded_full()
-                .bg(t.dot(tone)),
-        )
+        .child(dot(t, tone))
         .child(word.into())
 }
 
+/// A tinted capsule.
 pub fn token(t: &Theme, tone: Tone, s: impl Into<SharedString>) -> Div {
     let (fg, bg) = t.tone(tone);
     let (sz, lh) = text::supporting();
     div()
         .flex_none()
-        .px(space::s3())
-        .rounded(size::radius_inner())
+        .px(space::s4())
+        .py(px(1.))
+        .rounded_full()
         .bg(bg)
         .text_color(fg)
         .text_size(sz)
         .line_height(lh)
         .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
         .child(s.into())
 }
 
@@ -662,7 +741,7 @@ pub fn badge(t: &Theme, n: usize) -> Div {
         .flex_none()
         .min_w(px(20.))
         .h(px(18.))
-        .px(space::s2())
+        .px(space::s3())
         .flex()
         .items_center()
         .justify_center()
@@ -684,38 +763,38 @@ pub fn progress(t: &Theme, fraction: Option<f32>) -> Div {
         .w_full()
         .h(px(4.))
         .flex_none()
-        .rounded(size::radius_inner())
+        .rounded_full()
         .bg(t.bg_muted)
         .overflow_hidden()
         .child(
             div()
                 .h_full()
                 .w(fill)
-                .rounded(size::radius_inner())
+                .rounded_full()
                 .bg(t.accent)
                 .when(fraction.is_none(), |d| d.opacity(0.6)),
         )
 }
 
-/// An 8 px microphone level meter (0.0–1.0) in a tone's dot colour.
+/// A 6 px microphone level meter (0.0–1.0) in a tone's dot colour.
 pub fn level_meter(t: &Theme, level: f32, tone: Tone) -> Div {
     div()
         .w_full()
-        .h(px(8.))
+        .h(px(6.))
         .flex_none()
-        .rounded(size::radius_inner())
+        .rounded_full()
         .bg(t.bg_muted)
         .overflow_hidden()
         .child(
             div()
                 .h_full()
                 .w(gpui::relative(level.clamp(0.0, 1.0)))
-                .rounded(size::radius_inner())
+                .rounded_full()
                 .bg(t.dot(tone)),
         )
 }
 
-/// A persistent condition strip: icon, sentence, optional action.
+/// A persistent condition strip: tinted, icon-led, optional action.
 pub fn banner(
     t: &Theme,
     tone: Tone,
@@ -735,11 +814,12 @@ pub fn banner(
         .items_center()
         .gap(space::s5())
         .w_full()
+        .min_h(size::row())
         .px(space::s6())
         .py(space::s4())
-        .rounded(size::radius_element())
+        .rounded(size::radius_group())
         .bg(bg)
-        .text_color(fg)
+        .text_color(t.text)
         .text_size(sz)
         .line_height(lh)
         .child(icon(name, fg))
@@ -759,53 +839,97 @@ pub fn empty_state(
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(space::s4())
+        .gap(space::s3())
         .py(space::s12())
         .px(space::s8())
         .w_full()
-        .child(icon_lg(icon_name, t.icon_secondary))
+        .child(
+            div()
+                .pb(space::s2())
+                .child(glyph_tile(icon_name, t.icon_secondary, t.bg_muted)),
+        )
         .child(heading(t, heading_text))
         .child(secondary(t, detail).text_center().max_w(px(420.)))
         .when_some(action, |d, a| d.child(div().pt(space::s4()).child(a)))
 }
 
-/// Section: heading, optional supporting line and action, then content.
+/// Section: heading, optional supporting line and action, then content
+/// (usually one group).
 pub fn section(
     t: &Theme,
     heading_text: impl Into<SharedString>,
     support: Option<SharedString>,
     action: Option<AnyElement>,
 ) -> Div {
-    div().flex().flex_col().gap(space::s5()).w_full().child(
+    div().flex().flex_col().gap(space::s4()).w_full().child(
         div()
             .flex()
             .items_end()
             .justify_between()
             .gap(space::s6())
+            .min_h(size::control_sm())
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(space::s1())
+                    .min_w_0()
                     .child(heading(t, heading_text))
-                    .when_some(support, |d, s| d.child(secondary(t, s))),
+                    .when_some(support, |d, s| d.child(supporting(t, s))),
             )
             .when_some(action, |d, a| d.child(a)),
     )
 }
 
-/// A list container with dividers between rows (rows supplied by the page).
-pub fn list(t: &Theme) -> Div {
+// ----------------------------------------------------------------- groups ---
+
+/// An inset grouped container: card fill, group radius, hairline, clipped.
+/// The 4 px inner padding keeps row hover fills inside the rounded corners
+/// and leaves room for a focused row's ring, so the clip never hides it.
+pub fn group(t: &Theme) -> Div {
     div()
         .flex()
         .flex_col()
         .w_full()
-        .border_t_1()
-        .border_b_1()
+        .p(space::s2())
+        .rounded(size::radius_group())
+        .border_1()
         .border_color(t.border)
+        .bg(t.bg_card)
+        .overflow_hidden()
 }
 
-/// One settings row: label + description at left, control at right.
+/// A hairline that starts `inset` from the group's left edge.
+pub fn separator(t: &Theme, inset: Pixels) -> Div {
+    div().h(px(1.)).flex_none().ml(inset).bg(t.separator)
+}
+
+/// The horizontal inset of rows inside a group.
+pub fn row_inset() -> Pixels {
+    space::s6()
+}
+
+/// A group whose rows are separated by inset hairlines starting at the text
+/// line (`inset` from the left edge; [`row_inset`] for rows without a
+/// leading glyph).
+pub fn group_rows(t: &Theme, rows: impl IntoIterator<Item = AnyElement>, inset: Pixels) -> Div {
+    let mut out = group(t);
+    for (i, row) in rows.into_iter().enumerate() {
+        if i > 0 {
+            out = out.child(separator(t, inset));
+        }
+        out = out.child(row);
+    }
+    out
+}
+
+/// A list container (rows supplied by the page, which separates them).
+pub fn list(t: &Theme) -> Div {
+    group(t)
+}
+
+/// One settings row: label + description at left, control at right. Sits
+/// inside a group (see [`group_rows`]).
 pub fn setting_row(
     t: &Theme,
     label_text: impl Into<SharedString>,
@@ -819,9 +943,9 @@ pub fn setting_row(
         .justify_between()
         .gap(space::s8())
         .w_full()
+        .min_h(size::row())
+        .px(row_inset())
         .py(space::s5())
-        .border_b_1()
-        .border_color(t.border)
         .child(
             div()
                 .flex()
@@ -854,17 +978,17 @@ pub fn card(t: &Theme) -> Div {
     div()
         .flex()
         .w_full()
-        .p(space::s8())
+        .p(space::s7())
         .rounded(size::radius_container())
         .border_1()
         .border_color(t.border)
         .bg(t.bg_card)
 }
 
-/// Clickable row with hover, focus ring and selection bar.
+/// Clickable row with hover, focus ring and a soft selection fill.
 pub fn row_button(t: &Theme, id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
     let ring = ring(t);
-    let hover = t.hover;
+    let (hover, pressed) = (t.hover, t.pressed);
     div()
         .id(id)
         .relative()
@@ -874,10 +998,14 @@ pub fn row_button(t: &Theme, id: impl Into<ElementId>, selected: bool) -> Statef
         .cursor_pointer()
         .when(selected, |d| d.bg(t.selected))
         .when(!selected, move |d| d.hover(move |s| s.bg(hover)))
+        .active(move |s| s.bg(pressed))
         .focus(move |s| s.shadow(ring.clone()))
 }
 
-/// Underlined text tabs.
+/// Page tabs as a quiet wrapping strip of capsules, deliberately unlike the
+/// [`Segmented`] control: no track, the selected tab is a filled capsule in
+/// a heavier weight (not colour alone), the others are plain secondary text.
+/// Wraps onto a second line rather than overflowing a narrow window.
 pub fn tabs<T: Copy + PartialEq + 'static>(
     t: &Theme,
     id: &'static str,
@@ -888,36 +1016,40 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
     let (sz, lh) = text::body();
     div()
         .flex()
-        .gap(space::s6())
+        .flex_wrap()
+        .items_center()
+        .gap(space::s2())
         .w_full()
-        .border_b_1()
-        .border_color(t.border)
         .children(items.iter().enumerate().map(|(i, (value, name))| {
             let selected = *value == current;
             let value = *value;
             let f = on_select.clone();
             let ring = ring(t);
+            let hover = t.hover;
+            let strong = t.text;
             div()
                 .id(ElementId::NamedInteger(id.into(), i as u64))
                 .tab_index(0)
                 .cursor_pointer()
-                .pb(space::s4())
-                .pt(space::s2())
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(size::control_sm())
+                .px(space::s5())
+                .rounded_full()
                 .text_size(sz)
                 .line_height(lh)
-                .border_b_2()
-                .border_color(if selected {
-                    t.accent
-                } else {
-                    gpui::transparent_black()
+                .whitespace_nowrap()
+                .when(selected, |d| {
+                    d.bg(t.bg_muted)
+                        .text_color(t.text)
+                        .font_weight(FontWeight::SEMIBOLD)
                 })
-                .text_color(if selected {
-                    t.text_accent
-                } else {
-                    t.text_secondary
+                .when(!selected, move |d| {
+                    d.text_color(t.text_secondary)
+                        .font_weight(FontWeight::MEDIUM)
+                        .hover(move |s| s.bg(hover).text_color(strong))
                 })
-                .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
-                .hover(|s| s.opacity(0.85))
                 .focus(move |s| s.shadow(ring.clone()))
                 .on_click(move |_, w, cx| f(value, w, cx))
                 .child(*name)

@@ -7,6 +7,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod app;
+pub mod appearance;
 pub mod args;
 pub mod controllers;
 pub mod data;
