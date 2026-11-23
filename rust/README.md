@@ -301,6 +301,8 @@ lf-rs meeting start [-t TITLE] [-c CATEGORY] | stop | dismiss
 lf-rs prompts list [-s STATUS] | show ID | approve ID... | reject ID...
 lf-rs prompts dispatch [ID...] [--all] [--repo R] [--agent A] [--dry-run]
 lf-rs recall QUESTION [--since today|yesterday|7d|YYYY-MM-DD] [--k 1-20] [--no-llm] [--json]
+lf-rs token
+lf-rs hub [--page PAGE] [--gpui | --legacy]
 lf-rs tweak REQUEST [--yes] | --undo
 lf-rs agent install | uninstall | status
 lf-rs setup install-app
@@ -329,6 +331,12 @@ lf-rs setup install-app
   locally and asks the configured LLM unless `--no-llm`. Their Rich console
   output (wrapping at `COLUMNS`, tables) is reproduced by `lf/src/richfmt.rs`;
   `prompts list/show/approve/reject` and `recall` are hidden, as in Python.
+* `token` prints the API token and never creates it (exit 1 with a hint when
+  there is none). `hub` follows `localflow/desktop_launch.py`
+  (`lf/src/desktop_launch.rs`): `--gpui`/`LOCALFLOW_UI=gpui` opens LocalFlow
+  Preview under the same discovery, probe and notice rules; the legacy window
+  is `python -m localflow.hub_window --page PAGE` from the Python install
+  (the one `setup install-app` uses).
 * `tweak` asks the loopback Ollama (the saved `llm.base_url` when the
   provider is `ollama` and the URL is loopback, else `localhost:11434`)
   through `lf-agent`, prints the escaped preview with its `WARNING:` and
@@ -578,7 +586,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
   `watch`, `notes`, `open`, `models`, `stt`, bare `setup`,
-  `history retry`, `token`, …);
+  `history retry`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;
 * `config set` refuses non-finite floats and integers outside the 64-bit

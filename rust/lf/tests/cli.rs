@@ -644,3 +644,193 @@ fn serve_does_not_announce_readiness_when_binding_fails() {
     assert!(!stderr(&output).is_empty());
     assert!(stdout(&output).is_empty());
 }
+
+fn token_file(sandbox: &Sandbox) -> PathBuf {
+    // platformdirs: XDG_CONFIG_HOME on Unix and macOS, local AppData on Windows.
+    let base = if cfg!(windows) {
+        sandbox.root().join("local")
+    } else {
+        sandbox.root().join("xdg-config")
+    };
+    base.join("localflow").join("api-token")
+}
+
+#[test]
+fn token_prints_the_stripped_token_and_never_creates_one() {
+    let sandbox = Sandbox::new();
+    let token = token_file(&sandbox);
+    let hint = "no API token yet — start the server once: open LocalFlow.app or run lf serve\n";
+    let run = || sandbox.run_with(&["token"], &[("COLUMNS", "80"), ("NO_COLOR", "1")], "");
+    let missing = run();
+    assert_eq!(
+        (code(&missing), stdout(&missing), stderr(&missing)),
+        (1, hint.to_string(), String::new())
+    );
+    assert!(!token.exists());
+    std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+    std::fs::write(&token, b" \n\t ").unwrap();
+    let blank = run();
+    assert_eq!((code(&blank), stdout(&blank)), (1, hint.to_string()));
+    std::fs::write(&token, b"  tok-123 \r\n").unwrap();
+    let found = run();
+    assert_eq!(
+        (code(&found), stdout(&found), stderr(&found)),
+        (0, "tok-123\n".to_string(), String::new())
+    );
+}
+
+#[test]
+fn hub_usage_errors_and_sandbox_refusal() {
+    let sandbox = Sandbox::new();
+    let bad = sandbox.run(&["hub", "--page", "nope"]);
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).ends_with(
+        "Error: Invalid value for '--page': 'nope' is not one of 'home', 'ask', 'hot phrases', \
+         'dictionary', 'prompts', 'meetings', 'history', 'style', 'models', 'settings'.\n"
+    ));
+    let both = sandbox.run(&["hub", "--gpui", "--legacy"]);
+    assert_eq!(
+        (code(&both), stderr(&both)),
+        (
+            2,
+            "Error: --gpui and --legacy can't be used together\n".to_string()
+        )
+    );
+    let refused = sandbox.run_with(
+        &["hub", "--page", "ask"],
+        &[("LOCALFLOW_UI", "gpui"), ("LOCALFLOW_SANDBOX", "true")],
+        "",
+    );
+    assert_eq!(code(&refused), 1);
+    assert!(stderr(&refused).starts_with("Error: LOCALFLOW_SANDBOX is set, and `lf` opens"));
+    assert!(stdout(&refused).is_empty());
+}
+
+#[cfg(unix)]
+mod hub_unix {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::time::{Duration, Instant};
+
+    fn script(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A fake Python install whose `-m localflow.hub_window` records its argv.
+    fn fake_python(dir: &Path, has_module: bool) -> PathBuf {
+        let record = dir.join("legacy.txt");
+        let python = dir.join("bin").join("python3");
+        let found = if has_module { 0 } else { 1 };
+        script(
+            &python,
+            &format!(
+                "if [ \"$1\" = -c ]; then exit {found}; fi\necho \"$*\" >> '{}'",
+                record.display()
+            ),
+        );
+        record
+    }
+
+    fn lines(record: &Path, count: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let text = std::fs::read_to_string(record).unwrap_or_default();
+            let lines: Vec<String> = text.lines().map(String::from).collect();
+            if lines.len() >= count || Instant::now() > deadline {
+                return lines;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    const GOOD_HELP: &str =
+        "lf-desktop\n    --page <PAGE>  x\n    --setup  x\nEXIT STATUS (launch-status: 1):\n";
+
+    #[test]
+    fn hub_opens_legacy_through_the_python_install_and_gpui_when_selected() {
+        let sandbox = Sandbox::new();
+        let empty = sandbox.root().join("empty-path");
+        std::fs::create_dir_all(&empty).unwrap();
+        let venv = sandbox.root().join("venv");
+        let other = sandbox.root().join("other");
+        let unused = fake_python(&venv, false);
+        let record = fake_python(&other, true);
+        let path = other.join("bin");
+        let env = [
+            ("VIRTUAL_ENV", venv.to_str().unwrap()),
+            ("PATH", path.to_str().unwrap()),
+        ];
+
+        let nowhere = [
+            ("VIRTUAL_ENV", empty.to_str().unwrap()),
+            ("PATH", empty.to_str().unwrap()),
+        ];
+        let none = sandbox.run_with(&["hub"], &nowhere, "");
+        assert_eq!(
+            (code(&none), stderr(&none)),
+            (
+                1,
+                "Error: no Python LocalFlow install found; activate its virtualenv or put \
+                 its lf on PATH\n"
+                    .to_string()
+            )
+        );
+
+        let bare = sandbox.run_with(&["hub"], &env, "");
+        assert_eq!(
+            (code(&bare), stdout(&bare), stderr(&bare)),
+            (0, String::new(), String::new())
+        );
+        let mut with_ui = env.to_vec();
+        with_ui.push(("LOCALFLOW_UI", " Bogus "));
+        let noticed = sandbox.run_with(&["hub", "--page", "hot phrases"], &with_ui, "");
+        assert_eq!(
+            (code(&noticed), stderr(&noticed)),
+            (
+                0,
+                "lf: LOCALFLOW_UI must be gpui or legacy; opening the legacy window.\n".into()
+            )
+        );
+        assert_eq!(
+            lines(&record, 2),
+            [
+                "-m localflow.hub_window --page Home",
+                "-m localflow.hub_window --page Hot Phrases"
+            ]
+        );
+        assert!(!unused.exists(), "the venv without localflow is skipped");
+
+        let desktop = sandbox.root().join("desktop").join("lf-desktop");
+        let launched = sandbox.root().join("desktop.txt");
+        script(
+            &desktop,
+            &format!(
+                "echo \"$*\" >> '{}'\nif [ \"$1\" = --help ]; then printf '%s' '{GOOD_HELP}'; exit 0; fi",
+                launched.display()
+            ),
+        );
+        let mut gpui = env.to_vec();
+        gpui.push(("LOCALFLOW_DESKTOP_BIN", desktop.to_str().unwrap()));
+        for args in [&["hub", "--gpui"][..], &["hub", "--gpui", "--page", "home"]] {
+            let run = sandbox.run_with(args, &gpui, "");
+            assert_eq!((code(&run), stderr(&run)), (0, String::new()), "{args:?}");
+        }
+        assert_eq!(lines(&launched, 4), ["--help", "", "--help", "--page Home"]);
+
+        let mut relative = env.to_vec();
+        relative.push(("LOCALFLOW_DESKTOP_BIN", "lf-desktop"));
+        let bad = sandbox.run_with(&["hub", "--gpui", "--page", "Ask"], &relative, "");
+        assert_eq!(
+            (code(&bad), stderr(&bad)),
+            (
+                0,
+                "lf: LOCALFLOW_DESKTOP_BIN must be an absolute path to an executable \
+                 lf-desktop; opening the legacy window.\n"
+                    .into()
+            )
+        );
+        assert_eq!(lines(&record, 3)[2], "-m localflow.hub_window --page Ask");
+    }
+}
