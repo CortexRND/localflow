@@ -15,6 +15,7 @@ name = "lf-rs"
 path = "src/main.rs"
 
 [dependencies]
+lf-agent = { path = "../lf-agent" }
 lf-ask = { path = "../lf-ask" }
 lf-core = { path = "../lf-core" }
 lf-meetings = { path = "../lf-meetings", features = ["capture"] }

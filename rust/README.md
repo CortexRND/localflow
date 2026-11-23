@@ -300,6 +300,7 @@ lf-rs meeting start [-t TITLE] [-c CATEGORY] | stop | dismiss
 lf-rs prompts list [-s STATUS] | show ID | approve ID... | reject ID...
 lf-rs prompts dispatch [ID...] [--all] [--repo R] [--agent A] [--dry-run]
 lf-rs recall QUESTION [--since today|yesterday|7d|YYYY-MM-DD] [--k 1-20] [--no-llm] [--json]
+lf-rs tweak REQUEST [--yes] | --undo
 lf-rs agent install | uninstall | status
 lf-rs setup install-app
 ```
@@ -327,6 +328,13 @@ lf-rs setup install-app
   locally and asks the configured LLM unless `--no-llm`. Their Rich console
   output (wrapping at `COLUMNS`, tables) is reproduced by `lf/src/richfmt.rs`;
   `prompts list/show/approve/reject` and `recall` are hidden, as in Python.
+* `tweak` asks the loopback Ollama (the saved `llm.base_url` when the
+  provider is `ollama` and the URL is loopback, else `localhost:11434`)
+  through `lf-agent`, prints the escaped preview with its `WARNING:` and
+  `skipped:` lines, and applies only after `Apply these changes? [y/N]` (or
+  `--yes`); `--undo` reverts the last batch from
+  `~/.localflow/settings-undo.json`, never calling the model. Config,
+  dictionary and undo record are interchangeable with Python's `lf tweak`.
 
 * `config get` without a key prints the full v2 TOML (`config show`).
   `config set` reads VALUE as the type of the key's current value, exactly
@@ -556,7 +564,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
-  `watch`, `notes`, `open`, `models`, `stt`, bare `setup`, `tweak`,
+  `watch`, `notes`, `open`, `models`, `stt`, bare `setup`,
   `history retry`, `keys import`, `secret`, `token`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;
