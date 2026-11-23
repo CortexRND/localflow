@@ -2,7 +2,7 @@
 //!
 //! The look follows macOS: inset grouped lists on a calm surface, neutral
 //! controls with a hairline and a faint shadow, one accent for the primary
-//! action, selection and focus.
+//! action and selection, and a neutral focus edge.
 
 pub mod assets;
 pub mod input;
@@ -29,23 +29,30 @@ pub fn handler(f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Hand
     Rc::new(f)
 }
 
-/// The focus ring: a solid 2 px accent edge inside a soft accent halo
-/// (drawn outside the box; no layout shift).
+/// The focus ring: a single solid 2 px neutral edge, no halo (drawn
+/// outside the box; no layout shift). Only for controls with an opaque
+/// fill; transparent controls use [`ring_over`].
 pub fn ring(t: &Theme) -> Vec<BoxShadow> {
-    vec![
-        BoxShadow {
-            color: t.focus_ring,
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(4.),
-        },
-        BoxShadow {
-            color: t.icon_accent,
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(2.),
-        },
-    ]
+    vec![BoxShadow {
+        color: t.focus,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+    }]
+}
+
+/// [`ring`] for a control without an opaque fill of its own. GPUI paints a
+/// shadow as a filled shape that shows through a transparent background, so
+/// a second zero-spread shadow in `fill` restores the interior.
+pub fn ring_over(t: &Theme, fill: Hsla) -> Vec<BoxShadow> {
+    let mut shadows = ring(t);
+    shadows.push(BoxShadow {
+        color: fill,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(0.),
+    });
+    shadows
 }
 
 pub fn icon(name: &str, color: Hsla) -> gpui::Svg {
@@ -309,7 +316,11 @@ impl RenderOnce for Button {
         } else {
             self.icon
         };
-        let ring = ring(&t);
+        let ring = if self.variant == Variant::Ghost {
+            ring_over(&t, t.bg_card)
+        } else {
+            ring(&t)
+        };
         let mut el = div()
             .id(self.id)
             .flex()
@@ -395,7 +406,7 @@ impl RenderOnce for IconButton {
             t.icon_secondary
         };
         let (hover, pressed) = (t.hover, t.pressed);
-        let ring = ring(&t);
+        let ring = ring_over(&t, t.bg_card);
         let label = self.label.clone();
         let mut el = div()
             .id(self.id)
@@ -594,7 +605,7 @@ fn segment(
     } else {
         t.tone(Tone::Neutral).0
     };
-    let ring = ring(t);
+    let ring = ring_over(t, t.bg_muted);
     let hover = t.hover;
     let mut seg = div()
         .id(id)
@@ -982,7 +993,7 @@ pub fn card(t: &Theme) -> Div {
 
 /// Clickable row with hover, focus ring and a soft selection fill.
 pub fn row_button(t: &Theme, id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
-    let ring = ring(t);
+    let ring = ring_over(t, t.bg_card);
     let (hover, pressed) = (t.hover, t.pressed);
     div()
         .id(id)
@@ -1019,7 +1030,7 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
             let selected = *value == current;
             let value = *value;
             let f = on_select.clone();
-            let ring = ring(t);
+            let ring = ring_over(t, t.bg_card);
             let hover = t.hover;
             let strong = t.text;
             div()
