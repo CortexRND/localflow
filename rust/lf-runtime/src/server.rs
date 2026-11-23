@@ -131,7 +131,11 @@ impl DictationBackend {
             return Ok(raw);
         }
         let llm = if clean {
-            (self.build_llm)(config)
+            let fast = config
+                .uses_light_cleanup()
+                .then(|| config.fast_model_config())
+                .flatten();
+            (self.build_llm)(fast.as_ref().unwrap_or(config))
         } else {
             None
         };

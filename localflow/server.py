@@ -69,7 +69,13 @@ from localflow.meetings import (
     title_client,
 )
 from localflow.platform import current
-from localflow.providers.factory import build_llm, build_stt, build_workprompts_llm
+from localflow.providers.factory import (
+    build_fast_llm,
+    build_llm,
+    build_stt,
+    build_workprompts_llm,
+    fast_model_config,
+)
 from localflow.secrets import SecretsUnavailable
 from localflow.stt import Transcriber
 from localflow.symbols import apply_spoken_symbols
@@ -322,9 +328,9 @@ def _borrowed_transcriber():
 def _get_cleaner() -> Cleaner:
     global _cleaner
     if _cleaner is None:
-        with _lock:
+        with _config_lock:
             if _cleaner is None:
-                _cleaner = Cleaner(_ollama)
+                _cleaner = Cleaner(_ollama, build_fast_llm(_config, builder=build_llm))
     return _cleaner
 
 
@@ -934,9 +940,8 @@ async def meeting_stop() -> dict:
         if _config.sounds_enabled:
             sounds.play("stop")
         _watcher.resume()
-        # The current cleanup model (rebuilt on every config reload) and the
-        # config it was built from, taken together under the lock a reload
-        # holds, so summary and title use one coherent, up-to-date snapshot.
+        # Snapshot the summary client and config together before a reload can
+        # change the provider or model for the title.
         with _config_lock:
             summarizer = _summarizer
             config = _config
@@ -949,9 +954,17 @@ async def meeting_stop() -> dict:
         auto_title = bool(meta.get("title_auto"))
         if auto_title:
             # Never fails the save: any problem gives "Meeting Nov 16, 10:30 AM".
-            # Its own client (same provider/model/key) with a short timeout.
+            title_llm = summarizer.llm
+            fast_config = fast_model_config(config)
+            if fast_config is not None:
+                try:
+                    title_llm = build_llm(fast_config, timeout=300, num_ctx=8192)
+                except Exception as exc:
+                    log.warning("meeting title client unavailable (%s); using the date",
+                                type(exc).__name__)
+                    title_llm = None
             title, title_from_model = generate_title(
-                title_client(summarizer.llm), transcript, user_notes, session.started_at,
+                title_client(title_llm), transcript, user_notes, session.started_at,
             )
         extra: dict = {}
         if config.work_prompts:

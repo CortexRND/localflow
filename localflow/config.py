@@ -27,6 +27,7 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "provider": "llm_provider",
         "base_url": "llm_base_url",
         "model": "llm_model",
+        "fast_model": "llm_fast_model",
         "api_key_ref": "llm_key_ref",
         "cleanup_enabled": "cleanup_enabled",
         "cleanup_timeout": "cleanup_timeout",
@@ -107,6 +108,7 @@ class Config:
     llm_provider: str = "ollama"       # ollama | openai-compatible | entry-point id
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3.2:3b"
+    llm_fast_model: str = ""
     # Name (never the value) of the endpoint-bound key snapshot written by
     # provider activation (see llm_activation); "" = legacy `llm_api_key`.
     llm_key_ref: str = ""
@@ -388,6 +390,7 @@ _FIELD_TYPES = {
     "dictation_enabled": bool,
     "dictation_toggle_hotkey": str,
     "llm_key_ref": str,
+    "llm_fast_model": str,
     "paste_last_hotkey": str,
     "command_hotkey": str,
     "polish_hotkey": str,

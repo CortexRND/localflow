@@ -22,6 +22,7 @@ pub type WarmFn = Arc<dyn Fn(&Config) -> Result<(), String> + Send + Sync>;
 struct WarmState {
     in_flight: bool,
     last_ok: Option<Instant>,
+    last_fast_ok: Option<Instant>,
 }
 
 /// Single-flight, throttled warm-ups on a background thread.
@@ -73,12 +74,24 @@ impl LlmWarmer {
     /// Never blocks: spawns a warm-up unless it does not apply, one is in
     /// flight, or one succeeded within the interval. The handle is for tests.
     pub fn on_recording_start(&self, kind: JobKind, config: &Config) -> Option<JoinHandle<()>> {
+        let fast = if kind == JobKind::Dictate && config.uses_light_cleanup() {
+            config.fast_model_config()
+        } else {
+            None
+        };
+        let use_fast = fast.is_some();
+        let config = fast.as_ref().unwrap_or(config);
         if !wants_ollama_warm_up(kind, config) {
             return None;
         }
         {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let fresh = state.last_ok.is_some_and(|at| at.elapsed() < self.interval);
+            let last = if use_fast {
+                state.last_fast_ok
+            } else {
+                state.last_ok
+            };
+            let fresh = last.is_some_and(|at| at.elapsed() < self.interval);
             if state.in_flight || fresh {
                 return None;
             }
@@ -94,7 +107,12 @@ impl LlmWarmer {
                 state.in_flight = false;
                 match result {
                     Ok(()) => {
-                        state.last_ok = Some(Instant::now());
+                        let last = if use_fast {
+                            &mut state.last_fast_ok
+                        } else {
+                            &mut state.last_ok
+                        };
+                        *last = Some(Instant::now());
                         log::debug!("cleanup LLM warmed in {}ms", started.elapsed().as_millis());
                     }
                     Err(error) => log::debug!("cleanup LLM warm-up skipped: {error}"),
@@ -137,6 +155,25 @@ mod tests {
             result.clone()
         }));
         (warmer, calls)
+    }
+
+    #[test]
+    fn light_dictation_warms_fast_model_and_commands_warm_main() {
+        let (tx, rx) = mpsc::channel();
+        let warmer = LlmWarmer::new(Arc::new(move |config| {
+            tx.send(str_field(config, "llm_model")).unwrap();
+            Ok(())
+        }));
+        let mut config = ollama_config();
+        config.set_field("llm_fast_model", serde_json::json!("fast"));
+        for kind in [JobKind::Dictate, JobKind::Command] {
+            warmer
+                .on_recording_start(kind, &config)
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["fast", "gemma4"]);
     }
 
     #[test]

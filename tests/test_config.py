@@ -308,6 +308,15 @@ def test_config_to_dict_and_partial_update():
     assert original.server_port == 8756
 
 
+def test_fast_model_config_is_optional_and_round_trips(isolated_config):
+    original = Config()
+    assert config.config_to_dict(original)["llm"]["fast_model"] == ""
+    updated = config.apply_config_update(original, {"llm": {"fast_model": "fast-model"}})
+    config.save_config(updated)
+    assert config.load_config().llm_fast_model == "fast-model"
+    assert config.load_config().llm_model == original.llm_model
+
+
 @pytest.mark.parametrize(
     "update, message",
     [

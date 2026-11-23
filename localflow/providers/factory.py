@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from localflow import llm_activation
 from localflow.config import Config
 from localflow.providers import registry
@@ -54,6 +56,18 @@ def build_llm(
     provider_class = registry.llm_provider_class(config.llm_provider)
     # Third-party providers must accept base_url= and model= keyword arguments.
     return provider_class(base_url=config.llm_base_url, model=config.llm_model)
+
+
+def fast_model_config(config: Config) -> Config | None:
+    model = config.llm_fast_model.strip()
+    if not model or model == config.llm_model:
+        return None
+    return replace(config, llm_model=model)
+
+
+def build_fast_llm(config: Config, *, builder=build_llm) -> LLMProvider | None:
+    fast = fast_model_config(config)
+    return builder(fast) if fast is not None else None
 
 
 def build_stt(config: Config) -> Transcriber:
