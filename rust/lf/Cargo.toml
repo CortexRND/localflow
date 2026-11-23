@@ -22,7 +22,7 @@ lf-providers = { path = "../lf-providers" }
 lf-runtime = { path = "../lf-runtime" }
 lf-server = { path = "../lf-server" }
 lf-stt = { path = "../lf-stt", features = ["runtime", "server", "setup"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

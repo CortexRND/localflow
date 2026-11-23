@@ -219,6 +219,95 @@ fn cancel_aborts_stalled_download_and_removes_partial_not_cache() {
         .contains("cancelled"));
 }
 
+/// A future that resolves once `fire` is called from another thread.
+#[derive(Clone, Default)]
+struct Trigger(Arc<Mutex<(bool, Option<std::task::Waker>)>>);
+impl Trigger {
+    fn fire(&self) {
+        let mut state = self.0.lock().unwrap();
+        state.0 = true;
+        if let Some(waker) = state.1.take() {
+            waker.wake();
+        }
+    }
+    async fn wait(self) {
+        std::future::poll_fn(|cx| {
+            let mut state = self.0.lock().unwrap();
+            if state.0 {
+                return std::task::Poll::Ready(());
+            }
+            state.1 = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        })
+        .await
+    }
+}
+
+#[test]
+fn snapshot_interrupt_drops_active_transfer_and_writes_no_ref() {
+    let root = tempfile::tempdir().unwrap();
+    let (ready, entered) = mpsc::channel();
+    let (closed, disconnected) = mpsc::channel();
+    let (url, server) = server(vec![
+        Reply::Body(200, metadata(&vec![0; 1000])),
+        Reply::Stall(closed),
+    ]);
+    let trigger = Trigger::default();
+    let interrupt = trigger.clone().wait();
+    let path = root.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        download_snapshot(
+            "test/native",
+            &path,
+            &url,
+            |done, _| {
+                if done == 1000 {
+                    ready.send(()).unwrap();
+                }
+            },
+            interrupt,
+        )
+    });
+    entered.recv_timeout(Duration::from_secs(3)).unwrap();
+    let repo = root.path().join("models--test--native");
+    let partial = std::fs::read_dir(repo.join("blobs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(partial.path()).unwrap(), vec![0; 1000]);
+    trigger.fire();
+    assert_eq!(worker.join().unwrap(), Err(INTERRUPTED.to_owned()));
+    // The transfer future was dropped: connection closed, temp file gone.
+    assert!(disconnected.recv_timeout(Duration::from_secs(2)).unwrap());
+    server.join().unwrap();
+    assert!(!partial.path().exists());
+    assert_eq!(std::fs::read_dir(repo.join("blobs")).unwrap().count(), 0);
+    assert!(!repo.join("refs").exists());
+    assert_eq!(
+        std::fs::read_dir(repo.join("snapshots").join("a".repeat(40)))
+            .unwrap()
+            .count(),
+        0
+    );
+    // An interrupt that never fires leaves a normal snapshot download intact.
+    let bytes = b"snapshot weights";
+    let (url, server) = self::server(vec![
+        Reply::Body(200, metadata(bytes)),
+        Reply::Body(200, String::from_utf8_lossy(bytes).into_owned()),
+    ]);
+    download_snapshot(
+        "test/native",
+        root.path(),
+        &url,
+        |_, _| {},
+        std::future::pending(),
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert!(model().inspect(root.path()).installed);
+}
+
 #[test]
 fn native_formats_are_separate_from_python_and_require_all_onnx_files() {
     #[cfg(feature = "whisper")]

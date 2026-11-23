@@ -1,4 +1,5 @@
 //! Native engine artifacts in the standard, Python-compatible HF cache layout.
+use std::future::Future;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -325,21 +326,40 @@ impl NativeModel {
     }
 }
 
+/// Error returned by [`download_snapshot`] when its `interrupt` resolved.
+pub const INTERRUPTED: &str = "Download interrupted.";
+
 /// Download an entire Python STT catalog repository into the shared HF cache.
+///
+/// `interrupt` is polled first and before every step of the transfer, so a
+/// signal listener registers before any temporary file exists. Once it
+/// resolves, the in-flight transfer future is dropped (its `NamedTempFile`
+/// is removed and no blob, snapshot link or ref is written for it) and
+/// [`INTERRUPTED`] is returned.
 pub fn download_snapshot(
     repo: &str,
     root: &Path,
     endpoint: &str,
     progress: impl FnMut(u64, u64),
+    interrupt: impl Future<Output = ()>,
 ) -> Result<(), String> {
     if !valid_repo_id(repo) {
         return Err("Invalid HF model repository ID.".into());
     }
     let cancel = AtomicBool::new(false);
-    transfer::run(
-        &cancel,
-        NativeModel::download_inner(repo, None, root, endpoint, progress, &cancel),
-    )
+    transfer::run(&cancel, async {
+        let mut interrupt = std::pin::pin!(interrupt);
+        let mut operation = std::pin::pin!(NativeModel::download_inner(
+            repo, None, root, endpoint, progress, &cancel
+        ));
+        std::future::poll_fn(|cx| {
+            if interrupt.as_mut().poll(cx).is_ready() {
+                return std::task::Poll::Ready(Err(INTERRUPTED.to_owned()));
+            }
+            operation.as_mut().poll(cx)
+        })
+        .await
+    })
 }
 
 fn valid_artifact_path(name: &str) -> bool {

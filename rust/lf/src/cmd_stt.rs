@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::args::{SttCommand, SttDevice};
-use crate::{fail, outln, pyfmt, Io};
+use crate::{fail, outln, pyfmt, CliError, Io};
 
 pub fn run(command: SttCommand, io: &mut Io<'_>) -> Result<()> {
     match command {
@@ -224,21 +224,36 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
     let mut progress = None;
     let terminal = std::io::stdout().is_terminal();
     let width = console_width();
-    let result = setup_downloads::download_snapshot(&repo, &cache, &endpoint, |done, total| {
-        progress = Some((done, total));
-        if terminal {
-            let _ = write!(
-                io.out,
-                "\r\x1b[2K{}",
-                progress_line(model_id, progress, width)
-            );
-            let _ = io.out.flush();
-        }
-    });
+    let result = setup_downloads::download_snapshot(
+        &repo,
+        &cache,
+        &endpoint,
+        |done, total| {
+            progress = Some((done, total));
+            if terminal {
+                let _ = write!(
+                    io.out,
+                    "\r\x1b[2K{}",
+                    progress_line(model_id, progress, width)
+                );
+                let _ = io.out.flush();
+            }
+        },
+        ctrl_c(),
+    );
     if terminal && progress.is_some() {
         write!(io.out, "\r\x1b[2K")?;
     }
     outln!(io.out, "{}", progress_line(model_id, progress, width))?;
+    if result
+        .as_ref()
+        .is_err_and(|error| error == setup_downloads::INTERRUPTED)
+    {
+        // click: KeyboardInterrupt -> blank line + "Aborted!" on stderr, exit 1.
+        outln!(io.err)?;
+        outln!(io.err, "Aborted!")?;
+        return Err(CliError::Exit(1).into());
+    }
     if let Err(error) = result {
         let lower = error.to_lowercase();
         let message: String = if [
@@ -265,6 +280,16 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
         return fail(message);
     }
     outln!(io.out, "downloaded {model_id}")
+}
+
+/// Resolves on Ctrl+C. The handler is registered on first poll by `stt
+/// download`'s transfer, so other commands keep the default Ctrl+C behavior.
+/// If registration fails the default handler is still in place and this
+/// never resolves.
+async fn ctrl_c() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 fn progress_line(model_id: &str, progress: Option<(u64, u64)>, width: usize) -> String {
