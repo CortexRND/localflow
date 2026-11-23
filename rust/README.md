@@ -1,3 +1,15 @@
+# Rust MCP server (opt-in)
+
+Run `cargo build --locked --manifest-path rust/Cargo.toml --bin localflow-mcp`
+from the repository root, then point your MCP client's stdio command at the
+absolute path to `rust/target/debug/localflow-mcp` (add `.exe` on Windows).
+It exposes the same four read-only dictation and work-prompt tools as the
+Python server, on the same local files, without a network or model call.
+The Python `localflow-mcp` entry point, `lf mcp`, and installers are unchanged.
+
+To compare both servers on isolated fixtures after building the binary, run
+`python -m pytest -q tests/test_rust_mcp.py` from the repository root.
+
 # Speech helper (Rust macOS Hub)
 
 The Rust macOS Hub defaults to a same-executable speech child:
@@ -275,6 +287,8 @@ Names, flags, defaults and messages follow the Python `lf` (`localflow/cli.py`).
 ```
 lf-rs config path | show | get [SECTION.KEY] | set SECTION.KEY VALUE | migrate
 lf-rs dict list | add WORD | add --from X --to Y | remove WORD_OR_FROM | import FILE.csv|FILE.json
+lf-rs dictation on | off | status
+lf-rs stt list [--json] | use PROVIDER [MODEL] [--device auto|cpu|cuda] | download MODEL_ID
 lf-rs history [--limit N] [--search TEXT]
 lf-rs history list [--limit 20] | search QUERY [--limit 100]
 lf-rs history copy ID|last | raw ID|last | delete ID|last | clear [--yes] | stats
@@ -314,6 +328,12 @@ lf-rs serve [--host HOST] [--port PORT]
   error); `secret status` reports whether `llm_api_key` and `fireworks_api_key`
   are configured, honouring the `LOCALFLOW_<NAME>` and `FIREWORKS_API_KEY`
   overrides.
+* `dictation` uses the shared enabled setting. `stt use` updates the shared STT
+  settings without loading a model; `stt download` fills the Hugging Face cache
+  without selecting the model. `stt list` checks Python runtime availability
+  and plug-ins in the active virtual environment or the Python installation
+  associated with `lf` on PATH, falling back to Python on PATH. If no Python
+  installation is found, the built-in providers are listed as unavailable.
 * Errors print `Error: …` to stderr and exit 1; usage errors exit 2.
 
 ## Local data compatibility and safety

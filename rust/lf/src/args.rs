@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Optional Rust client for LocalFlow's local config, dictionary and history.
 ///
@@ -32,6 +32,11 @@ pub enum Command {
     /// Manage personal vocabulary and transcription corrections.
     #[command(subcommand)]
     Dict(DictCommand),
+    /// Enable, disable or inspect dictation without quitting LocalFlow.
+    Dictation {
+        #[arg(value_enum)]
+        action: DictationAction,
+    },
     /// Search and manage local dictation history.
     History(HistoryArgs),
     /// Show dictation statistics (same as `history stats`).
@@ -40,6 +45,9 @@ pub enum Command {
     /// Inspect and select language-model providers.
     #[command(subcommand)]
     Llm(LlmCommand),
+    /// Inspect and select speech-to-text providers.
+    #[command(subcommand)]
+    Stt(SttCommand),
     /// Import and inspect inference provider keys in the system keychain.
     #[command(subcommand)]
     Keys(KeysCommand),
@@ -52,6 +60,41 @@ pub enum Command {
         #[arg(long = "json")]
         json: bool,
     },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum DictationAction {
+    On,
+    Off,
+    Status,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum SttDevice {
+    Auto,
+    Cpu,
+    Cuda,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SttCommand {
+    /// List STT providers and models.
+    #[command(hide = true)]
+    List {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Select an STT provider, optional MODEL, and DEVICE.
+    #[command(hide = true)]
+    Use {
+        provider: String,
+        model: Option<String>,
+        #[arg(long, value_enum, default_value = "auto")]
+        device: SttDevice,
+    },
+    /// Download a catalog speech model without selecting it.
+    Download { model_id: String },
 }
 
 #[derive(Debug, Subcommand)]
