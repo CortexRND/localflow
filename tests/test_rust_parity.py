@@ -3002,6 +3002,27 @@ def test_cli_install_commands_skip_an_unrelated_virtualenv(rust_build, sandbox, 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
+def test_cli_setup_install_app_for_a_python_with_scripts_elsewhere(rust_build, sandbox, tmp_path):
+    """As in a `pip install --user`: the interpreter imports localflow but the
+    `localflow` script is not next to it, so only `agent install` refuses."""
+    real, env = _same_python(sandbox)
+    user = _stub_python(tmp_path / "user-bin", f'exec {shlex.quote(str(real))} "$@"')
+    env.pop("VIRTUAL_ENV", None)
+    env["PATH"] = str(user)
+    home = sandbox["home"]
+    rust = _run_cli([str(rust_build[0]), "setup", "install-app"], env)
+    assert rust.returncode == 0 and rust.stderr == ""
+    for name, module in (("LocalFlow Setup", "setup_window"), ("LocalFlow", "main_app")):
+        launcher = home / "Applications" / f"{name}.app" / "Contents" / "MacOS" / "launcher"
+        assert launcher.read_text() == (
+            f'#!/bin/bash\nexec {shlex.quote(str(user / "python3"))} -m localflow.{module} "$@"\n')
+    autostart = _user_config_dir(real, env) / "autostart"
+    rust = _run_cli([str(rust_build[0]), "agent", "install"], {**env, "LOCALFLOW_PLATFORM": "linux"})
+    assert (rust.returncode, " ".join(rust.stdout.split())) == (1, f"error: {_NO_INSTALL}")
+    assert not autostart.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
 def test_cli_install_commands_refuse_without_a_python_install(rust_build, sandbox, tmp_path):
     real, env = _same_python(sandbox)
     # PATH holds only a python3 without LocalFlow and the fake launchctl.

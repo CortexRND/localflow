@@ -315,7 +315,9 @@ lf-rs setup install-app
   `Scripts\` on Windows. `agent install` starts that script at login, also
   where Python would name a missing `localflow.exe` next to a Windows
   interpreter outside a virtualenv. `setup install-app` writes that
-  interpreter where Python writes its own `sys.executable`. Without an install they exit 1 and change nothing, so
+  interpreter where Python writes its own `sys.executable`, and also accepts
+  one that only imports `localflow` (a `pip install --user`, whose scripts
+  live elsewhere). Without an install they exit 1 and change nothing, so
   they never touch a native install's app bundle or login job. Bare `setup`
   and `setup uninstall-app` are not ported.
 

@@ -5,6 +5,7 @@
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// Interpreter file name the discovery looks for.
 pub(crate) const PYTHON: &str = if cfg!(windows) {
@@ -104,7 +105,9 @@ fn find_script_in(venv: Option<&OsStr>, path: &OsStr) -> Option<PathBuf> {
 }
 
 /// The interpreter of the Python LocalFlow install for this environment,
-/// whose modules `setup install-app` launches. Nothing is run.
+/// whose modules `setup install-app` launches: the first with the
+/// `localflow` script or, as in a `pip install --user` whose scripts live
+/// elsewhere, able to import `localflow`.
 pub(crate) fn find_interpreter() -> Option<PathBuf> {
     find_interpreter_in(
         env::var_os("VIRTUAL_ENV").as_deref(),
@@ -113,7 +116,24 @@ pub(crate) fn find_interpreter() -> Option<PathBuf> {
 }
 
 fn find_interpreter_in(venv: Option<&OsStr>, path: &OsStr) -> Option<PathBuf> {
-    interpreters_in(venv, path).find(|python| script_of(python).is_some())
+    interpreters_in(venv, path)
+        .find(|python| script_of(python).is_some() || imports_localflow(python))
+}
+
+/// The working directory is left off `sys.path`: a source checkout there is
+/// not an install.
+const IMPORT_PROBE: &str = "import importlib.util, sys\n\
+sys.path[:] = [entry for entry in sys.path if entry]\n\
+sys.exit(importlib.util.find_spec('localflow') is None)";
+
+fn imports_localflow(python: &Path) -> bool {
+    Command::new(python)
+        .args(["-c", IMPORT_PROBE])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]
@@ -196,5 +216,30 @@ mod tests {
             find_script_in(None, &path),
             Some(install.canonicalize().unwrap().join(SCRIPT))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_without_the_script_must_import_localflow() {
+        let root = tempfile::tempdir().unwrap();
+        // Stand-ins that fail and pass the import probe.
+        let stub = |name: &str, program: &str| {
+            let (_, bin) = tree(root.path(), name, &[]);
+            let target = ["/bin", "/usr/bin"]
+                .map(|dir| Path::new(dir).join(program))
+                .into_iter()
+                .find(|path| path.is_file())
+                .unwrap();
+            std::os::unix::fs::symlink(target, bin.join(PYTHON)).unwrap();
+            bin
+        };
+        let (unrelated, user_install) = (stub("unrelated", "false"), stub("user", "true"));
+        let path = env::join_paths([&unrelated, &user_install]).unwrap();
+        assert_eq!(
+            find_interpreter_in(None, &path),
+            Some(user_install.join(PYTHON))
+        );
+        assert_eq!(find_interpreter_in(None, unrelated.as_os_str()), None);
+        assert_eq!(find_script_in(None, &path), None);
     }
 }
