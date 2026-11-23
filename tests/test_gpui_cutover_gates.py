@@ -55,7 +55,8 @@ def test_collection_file_decodes_gnome_keyring_object_paths(gates, tmp_path):
     prefix = "/org/freedesktop/secrets/collection/"
     assert safety.collection_file(prefix + "login", tmp_path) == tmp_path / "login.keyring"
     assert safety.collection_file(prefix + "my_5fkeys_20x", tmp_path) == tmp_path / "my_keys x.keyring"
-    assert safety.collection_file(prefix + "caf_c3_a9", tmp_path) == tmp_path / "caf\u00e9.keyring"
+    accented = safety.collection_file(prefix + "caf_c3_a9", tmp_path)
+    assert os.fsencode(accented.name) == "caf\u00e9.keyring".encode()
     assert safety.collection_file("/", tmp_path) is None
     assert safety.collection_file(prefix + "login/1", tmp_path) is None
 
