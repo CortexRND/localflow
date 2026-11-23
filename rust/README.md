@@ -1,3 +1,15 @@
+# Rust MCP server (opt-in)
+
+Run `cargo build --locked --manifest-path rust/Cargo.toml --bin localflow-mcp`
+from the repository root, then point your MCP client's stdio command at the
+absolute path to `rust/target/debug/localflow-mcp` (add `.exe` on Windows).
+It exposes the same four read-only dictation and work-prompt tools as the
+Python server, on the same local files, without a network or model call.
+The Python `localflow-mcp` entry point, `lf mcp`, and installers are unchanged.
+
+To compare both servers on isolated fixtures after building the binary, run
+`python -m pytest -q tests/test_rust_mcp.py` from the repository root.
+
 # Speech helper (Rust macOS Hub)
 
 The Rust macOS Hub defaults to a same-executable speech child:

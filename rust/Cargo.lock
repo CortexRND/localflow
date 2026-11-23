@@ -2149,6 +2149,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
+name = "localflow-mcp"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lf-ask",
+ "lf-core",
+ "serde_json",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

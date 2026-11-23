@@ -285,9 +285,9 @@ jobs:
           cargo clippy -p lf-meetings --features capture --all-targets -- -D warnings
           cargo test -p lf-meetings --features capture
 
-      - name: Build lf-rs
+      - name: Build lf-rs and localflow-mcp
         working-directory: rust
-        run: cargo build --bin lf-rs
+        run: cargo build --bin lf-rs --bin localflow-mcp
 
       - uses: actions/setup-python@v5
         with:
@@ -303,4 +303,4 @@ jobs:
           python -m pip install --no-deps -e .
 
       - name: Rust/Python parity tests
-        run: python -m pytest -q -s tests/test_rust_parity.py tests/test_rust_server.py
+        run: python -m pytest -q -s tests/test_rust_parity.py tests/test_rust_server.py tests/test_rust_mcp.py
