@@ -151,9 +151,6 @@ impl HttpTransport {
     }
 }
 
-/// Seconds `start` waits, since the backend loads the speech model before replying.
-const MEETING_START_TIMEOUT_SECS: u64 = 300;
-
 pub struct HttpMeetingClient(pub HttpTransport);
 
 impl HttpMeetingClient {
@@ -205,12 +202,8 @@ impl MeetingClient for HttpMeetingClient {
         if let Some(value) = auto_title {
             body["auto_title"] = Value::Bool(value);
         }
-        self.request(
-            Method::POST,
-            "start",
-            Some(body),
-            MEETING_START_TIMEOUT_SECS,
-        )
+        // Start loads (and may download) the speech model first; the CLIs wait as long.
+        self.request(Method::POST, "start", Some(body), 600)
     }
     fn save_notes(&self, notes: &str) -> MeetingResult<Value> {
         self.request(Method::POST, "notes", Some(json!({"notes": notes})), 3)
