@@ -74,6 +74,9 @@ def window_manager():
 def sandbox_window(binary, sandbox, *route):
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
+    # Pin the X11 scale so captured pixels equal the logical viewport, even if
+    # the caller's ~/.Xresources sets a HiDPI Xft.dpi.
+    env["GPUI_X11_SCALE_FACTOR"] = "1"
     if not env.get("XDG_RUNTIME_DIR"):
         runtime = sandbox.parent / "runtime"
         runtime.mkdir(mode=0o700, exist_ok=True)
