@@ -484,8 +484,12 @@ many successful clips to retain. History is enabled by default. Agents can
 search it read-only through the [MCP server](#mcp-server-for-agents).
 
 Open the native hub with `lf hub` to browse history, edit the dictionary and
-cleanup styles, or review the selected models. The CLI can search and manage
-history without opening the hub:
+cleanup styles, or review the selected models. If you installed the separate
+LocalFlow Preview (native GPUI app, [`rust/lf-desktop`](rust/lf-desktop/README.md)),
+`lf hub --gpui`, `lf phrases --gpui` and `lf setup --gpui` open it instead, or set
+`LOCALFLOW_UI=gpui`; anything missing or wrong falls back to the usual window.
+The default is unchanged, and `--legacy` always opens the usual window. The
+CLI can search and manage history without opening the hub:
 
 ```bash
 lf history list

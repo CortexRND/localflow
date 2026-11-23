@@ -1551,7 +1551,45 @@ fn pick_font(cx: &App) -> SharedString {
     ".SystemUIFont".into()
 }
 
-pub fn run(launch: Launch) {
+/// How [`run`] ended, for the process exit status. Launchers (`lf --gpui`,
+/// `lf-hub` on Linux) read exit 0 as "a window is up or the request was
+/// handed to the open one", so a window that never opened must not be 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunStatus {
+    /// The window opened (and later closed normally).
+    Closed,
+    /// No window could be opened.
+    WindowFailed,
+}
+
+impl RunStatus {
+    /// Exit code: 0 for a normal close, 1 when no window could open.
+    pub fn exit_code(self) -> u8 {
+        match self {
+            RunStatus::Closed => 0,
+            RunStatus::WindowFailed => 1,
+        }
+    }
+}
+
+/// Record a failed `open_window`: report it and mark the run failed. On macOS
+/// GPUI's quit is `NSApp terminate:`, which exits the process with status 0
+/// and never returns from [`run`], so there the failure status exits directly.
+/// At this point no window or engine has started; services were already opened
+/// before [`run`], so this makes no claim about earlier data writes.
+fn window_failed(error: &dyn std::fmt::Display, status: &std::cell::Cell<RunStatus>) {
+    eprintln!("lf-desktop: couldn't open a window: {error:#}");
+    status.set(RunStatus::WindowFailed);
+    if cfg!(target_os = "macos") {
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        std::process::exit(i32::from(RunStatus::WindowFailed.exit_code()));
+    }
+}
+
+pub fn run(launch: Launch) -> RunStatus {
+    let status = Rc::new(std::cell::Cell::new(RunStatus::Closed));
+    let seen = status.clone();
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
@@ -1637,7 +1675,7 @@ pub fn run(launch: Launch) {
                     });
                 }
                 Err(err) => {
-                    eprintln!("lf-desktop: couldn't open a window: {err:#}");
+                    window_failed(&err, &seen);
                     cx.quit();
                 }
             }
@@ -1649,6 +1687,7 @@ pub fn run(launch: Launch) {
             })
             .detach();
         });
+    status.get()
 }
 
 /// Next index in a focus trap of `len` stops (wraps; starts at the first
@@ -1664,7 +1703,25 @@ pub fn trap_step(current: Option<usize>, len: usize, forward: bool) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::trap_step;
+    use super::{trap_step, RunStatus};
+
+    #[test]
+    fn only_a_failed_window_exits_non_zero() {
+        // 0 is what launchers read as "window up or handed off".
+        assert_eq!(RunStatus::Closed.exit_code(), 0);
+        assert_eq!(RunStatus::WindowFailed.exit_code(), 1);
+    }
+
+    // On macOS `window_failed` exits the process itself (GPUI's quit there
+    // never returns from `run`), so the recording path is checked elsewhere.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_window_that_fails_to_open_is_recorded_for_the_exit_status() {
+        let status = std::cell::Cell::new(RunStatus::Closed);
+        super::window_failed(&"no display", &status);
+        assert_eq!(status.get(), RunStatus::WindowFailed);
+        assert_ne!(status.get().exit_code(), 0);
+    }
 
     #[test]
     fn dialog_focus_trap_cycles_within_its_buttons() {
