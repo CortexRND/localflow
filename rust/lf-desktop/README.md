@@ -639,7 +639,9 @@ the last three answered turns as context.
   `localflow-mcp`, then for `lf` (only next to a `localflow` entry point, so an
   unrelated `lf` is never started), then for `python3`/`python`. The server is
   started without a shell, with fixed arguments, from its own directory, and
-  with stderr discarded.
+  with stderr discarded. A relative `LOCALFLOW_CONFIG` is made absolute against
+  the desktop's working directory first, so the server reads the same config
+  file (if that fails, the server isn't started and basic recall answers).
 - **Only the four tools.** A tool is used only if the server marks it read-only
   and advertises the same input schema as `localflow/mcp_server.py`. Arguments
   are checked locally (types, enums, 200-character strings, `limit` at most 10).

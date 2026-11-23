@@ -141,6 +141,9 @@ pub enum McpError {
     Rpc(i64),
     /// None of the allowed tools is offered with the expected schema.
     NoTools,
+    /// A relative `LOCALFLOW_CONFIG` couldn't be made absolute, so the
+    /// server isn't started (it would read a different config file).
+    ConfigUnresolved,
     /// A tool this session does not offer.
     UnknownTool,
     Cancelled,
@@ -175,6 +178,9 @@ impl std::fmt::Display for McpError {
             McpError::Protocol(e) => write!(f, "protocol error: {e}"),
             McpError::Rpc(code) => write!(f, "the server rejected the request (error {code})"),
             McpError::NoTools => f.write_str("the server offers none of the expected tools"),
+            McpError::ConfigUnresolved => {
+                write!(f, "couldn't resolve the relative {CONFIG_ENV} path")
+            }
             McpError::UnknownTool => f.write_str("tool not offered by this server"),
             McpError::Cancelled => f.write_str("stopped"),
         }
@@ -445,33 +451,85 @@ fn spawn_writer(mut writer: impl Write + Send + 'static) -> mpsc::Sender<Vec<u8>
     tx
 }
 
+/// The config override the desktop and the server must both honour.
+pub const CONFIG_ENV: &str = "LOCALFLOW_CONFIG";
+
+/// `LOCALFLOW_CONFIG` for a child started in another directory.
+///
+/// The desktop (`lf_core::config::try_config_path`) and the Python server
+/// (`localflow.config.config_path`) both use a non-empty value as a path,
+/// relative to their own cwd. The server runs from its executable's
+/// directory, so a relative value would name a different (usually missing)
+/// file there, and the server would fall back to defaults, e.g. history
+/// enabled although the desktop's config disables it. A relative value is
+/// therefore made absolute against the desktop's cwd (`Some(path)` to set
+/// on the child); unset, empty and absolute values are inherited unchanged
+/// (`None`). If the desktop's cwd can't be read, the server is not started
+/// at all rather than reading another file.
+pub fn child_config_override(
+    value: Option<OsString>,
+    desktop_cwd: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<Option<PathBuf>, McpError> {
+    let Some(value) = value.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        return Ok(None);
+    }
+    let resolved = desktop_cwd()
+        .map(|cwd| cwd.join(&path))
+        .map_err(|_| McpError::ConfigUnresolved)?;
+    // E.g. a Windows drive-relative `C:x.toml` stays relative: refuse it.
+    if resolved.is_absolute() {
+        Ok(Some(resolved))
+    } else {
+        Err(McpError::ConfigUnresolved)
+    }
+}
+
+/// The server's `Command`: fixed arguments, no shell, its own directory as
+/// cwd (never the inherited one: `python -m` imports from it), the
+/// desktop's config file, piped stdin/stdout, stderr discarded.
+fn server_command(
+    command: &McpCommand,
+    config_env: Option<OsString>,
+    desktop_cwd: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<Command, McpError> {
+    let config = child_config_override(config_env, desktop_cwd)?;
+    let mut cmd = Command::new(&command.program);
+    cmd.args(command.kind.args())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(dir) = command.program.parent() {
+        cmd.current_dir(dir);
+    }
+    if let Some(config) = config {
+        cmd.env(CONFIG_ENV, config);
+    }
+    if command.kind == McpKind::PythonModule {
+        cmd.env("PYTHONSAFEPATH", "1");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    Ok(cmd)
+}
+
 impl StdioSession {
     /// Start `command` and complete the handshake within [`START_TIMEOUT`]
     /// (spawn + `initialize`) plus [`START_TIMEOUT`] (`tools/list`).
     pub fn spawn(command: &McpCommand, cancel: &AtomicBool) -> Result<Self, McpError> {
-        let mut cmd = Command::new(&command.program);
-        cmd.args(command.kind.args())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // Never the inherited cwd: `python -m` imports from it.
-        if let Some(dir) = command.program.parent() {
-            cmd.current_dir(dir);
-        }
-        if command.kind == McpKind::PythonModule {
-            cmd.env("PYTHONSAFEPATH", "1");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        let mut cmd = server_command(command, std::env::var_os(CONFIG_ENV), std::env::current_dir)?;
         let mut child = cmd
             .spawn()
             .map_err(|e| McpError::Spawn(e.kind().to_string()))?;
@@ -1050,6 +1108,94 @@ mod tests {
             McpStatus::Failed(_)
         ));
         let _ = mcp;
+    }
+
+    #[test]
+    fn relative_config_override_is_resolved_against_the_desktop_cwd() {
+        let desktop = std::env::temp_dir().join("lf-desktop-cwd");
+        let cwd = || -> std::io::Result<PathBuf> { Ok(desktop.clone()) };
+        let unreadable =
+            || -> std::io::Result<PathBuf> { Err(std::io::ErrorKind::NotFound.into()) };
+        // Unset, empty and absolute values are inherited as they are.
+        assert_eq!(child_config_override(None, cwd), Ok(None));
+        assert_eq!(child_config_override(Some("".into()), unreadable), Ok(None));
+        let absolute = desktop.join("abs.toml");
+        assert_eq!(
+            child_config_override(Some(absolute.into()), unreadable),
+            Ok(None)
+        );
+        // Relative: absolute against the desktop's cwd, never dropped.
+        assert_eq!(
+            child_config_override(Some("conf/config.toml".into()), cwd),
+            Ok(Some(desktop.join("conf/config.toml")))
+        );
+        assert_eq!(
+            child_config_override(Some("../up.toml".into()), cwd),
+            Ok(Some(desktop.join("../up.toml")))
+        );
+        // Fail closed when the desktop's cwd can't be read.
+        assert_eq!(
+            child_config_override(Some("config.toml".into()), unreadable),
+            Err(McpError::ConfigUnresolved)
+        );
+        assert!(!McpError::ConfigUnresolved.is_missing());
+        assert!(matches!(
+            McpStatus::from_error(&McpError::ConfigUnresolved),
+            McpStatus::Failed(_)
+        ));
+    }
+
+    /// End to end with a real child process: the desktop's relative
+    /// `LOCALFLOW_CONFIG` names a file (history disabled) outside the
+    /// server's cwd, and the child reads that same file. The variable is set
+    /// on the child's `Command` only, never on this test process.
+    #[cfg(unix)]
+    #[test]
+    fn child_started_elsewhere_reads_the_desktops_relative_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let desktop_cwd = dir.path().join("desktop");
+        let config = desktop_cwd.join("conf").join("config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "[history]\nenabled = false\n").unwrap();
+        // The "server" lives elsewhere and reports its cwd and what its
+        // `LOCALFLOW_CONFIG` names, relative to that cwd as Python would.
+        let server_dir = dir.path().join("venv").join("bin");
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let server = server_dir.join("localflow-mcp");
+        std::fs::write(
+            &server,
+            "#!/bin/sh\npwd\nprintf '%s\\n' \"$LOCALFLOW_CONFIG\"\ncat \"$LOCALFLOW_CONFIG\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The same relative name would be missing from the server's cwd.
+        assert!(!server_dir.join("conf/config.toml").exists());
+        let command = McpCommand {
+            program: server.clone(),
+            kind: McpKind::LocalflowMcp,
+        };
+        let cwd = desktop_cwd.clone();
+        let mut cmd =
+            server_command(&command, Some("conf/config.toml".into()), move || Ok(cwd)).unwrap();
+        let output = cmd.output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            std::fs::canonicalize(lines[0]).unwrap(),
+            server_dir.canonicalize().unwrap(),
+            "the server still runs from its own directory"
+        );
+        assert_eq!(PathBuf::from(lines[1]), config);
+        assert!(text.contains("[history]\nenabled = false"), "{text}");
+        // Unreadable desktop cwd: nothing is started.
+        assert_eq!(
+            server_command(&command, Some("conf/config.toml".into()), || {
+                Err(std::io::ErrorKind::NotFound.into())
+            })
+            .err(),
+            Some(McpError::ConfigUnresolved)
+        );
     }
 
     /// A venv's `bin/python` is a symlink to a system interpreter; launching
