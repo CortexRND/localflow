@@ -1,6 +1,5 @@
 use std::env;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
@@ -335,26 +334,8 @@ print(json.dumps(result))
 // Availability and entry points describe the installed Python runtime, not Rust
 // engine features. Only probe that boundary; config, catalogs and downloads are native.
 fn probe_python(mode: &str, provider: &str) -> Value {
-    let python = if cfg!(windows) {
-        "python.exe"
-    } else {
-        "python3"
-    };
-    let launcher = if cfg!(windows) { "lf.exe" } else { "lf" };
-    let venv = env::var_os("VIRTUAL_ENV").map(|root| {
-        Path::new(&root)
-            .join(if cfg!(windows) { "Scripts" } else { "bin" })
-            .join(python)
-    });
-    let path = env::var_os("PATH").unwrap_or_default();
-    let installed = env::split_paths(&path).find_map(|dir| {
-        let binary = dir.join(launcher).canonicalize().ok()?;
-        let python = binary.with_file_name(python);
-        python.is_file().then_some(python)
-    });
-    venv.into_iter()
-        .chain(installed)
-        .chain([PathBuf::from(python), PathBuf::from("python")])
+    crate::python::candidates()
+        .into_iter()
         .find_map(|interpreter| {
             let output = Command::new(interpreter)
                 .args(["-c", PROBE, mode, provider])

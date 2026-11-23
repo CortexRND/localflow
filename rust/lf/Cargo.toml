@@ -36,10 +36,17 @@ log = { workspace = true }
 reqwest = { workspace = true }
 # Clipboard for `history copy`/`history raw`; image support is not needed.
 arboard = { version = "3", default-features = false }
+# zlib for the PNGs of the `setup install-app` icon (macOS).
+flate2 = "1"
+
+[target.'cfg(unix)'.dependencies]
+# `agent` (launchd) needs the uid for `gui/<uid>` and log ownership checks.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# `stt download` matches Rich's ASCII progress bar on legacy (non-VT) consoles.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+# `stt download` matches Rich's ASCII progress bar on legacy (non-VT) consoles;
+# `agent` writes the HKCU Run value.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Registry"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
