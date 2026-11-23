@@ -2535,6 +2535,16 @@ def test_cli_tweak_migrates_legacy_config(rust_build, sandbox, tweak_ollama):
         assert sorted(p.name for p in paths["config"].parent.iterdir()) == ["config.toml"]
         _tweak_restore(sandbox, [None, None, None, legacy.encode()])
 
+    # A request propose refuses still leaves the migrated config: Python's
+    # `localflow.cli` runs load_config() at import, before any argument is
+    # checked. The second survives the CLI's blank check: \x01, U+200B and \x7f
+    # are control/format characters, not whitespace.
+    for request, message in [("a" * 501, "Keep the request under 500 characters."),
+                             ("\x01​ \x7f", "Tell LocalFlow what to change.")]:
+        rust, state = _assert_tweak_same(rust_build, sandbox, request, "--yes")
+        assert (rust.returncode, rust.stdout, rust.stderr) == (1, "", f"Error: {message}\n")
+        assert state["config"] is not None and state["legacy"] == legacy.encode()
+
     # --undo migrates first too. The record says Sounds went On → Off; only the
     # legacy file (Off, unlike the default On) makes that undoable.
     _tweak_restore(sandbox, [None, None, None, legacy.replace("false", "true", 1).encode()])
