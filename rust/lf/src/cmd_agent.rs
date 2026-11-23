@@ -160,8 +160,17 @@ fn autostart_path() -> Result<PathBuf> {
     Ok(base.join("autostart").join("localflow.desktop"))
 }
 
+/// `Path(sys.executable).parent / name` for the Python LocalFlow install.
+/// Without one nothing is installed: a native install's login job must not
+/// be replaced by one for a missing script.
+fn install_program(name: &str) -> Result<PathBuf> {
+    let python =
+        python::find_install().ok_or_else(|| RuntimeError(python::NO_INSTALL.to_string()))?;
+    Ok(python.with_file_name(name))
+}
+
 fn linux_install() -> Result<PathBuf> {
-    let program = python::sibling("localflow");
+    let program = install_program("localflow")?;
     let path = autostart_path()?;
     if let Some(parent) = path.parent() {
         mkdir_parents(parent)?;
@@ -272,7 +281,7 @@ fn launchctl<S: AsRef<OsStr>>(args: &[S]) -> Result<Launchctl> {
 
 /// `launchagent.install`: write the plist, trim the logs and (re)load it.
 fn darwin_install(io: &mut Io<'_>) -> Result<PathBuf> {
-    let program = python::sibling("localflow");
+    let program = install_program("localflow")?;
     let path = plist_path()?;
     let logs = log_dir()?;
     if let Some(parent) = path.parent() {
@@ -449,7 +458,6 @@ mod win32 {
     };
 
     use crate::pyfs::PyOsError;
-    use crate::python;
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -491,7 +499,7 @@ mod win32 {
     }
 
     pub(super) fn install() -> Result<PathBuf> {
-        let program = python::sibling("localflow.exe");
+        let program = super::install_program("localflow.exe")?;
         let key = RunKey::open(KEY_SET_VALUE)?;
         let name = wide("localflow");
         let data = wide(&format!("\"{}\"", program.to_string_lossy()));

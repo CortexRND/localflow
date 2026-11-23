@@ -12,7 +12,7 @@ use crate::args::SetupCommand;
 use crate::pyfmt::{plist_xml, shlex_quote, Plist};
 use crate::pyfs::{mkdir_parents, write_bytes, write_text, PyOsError};
 use crate::richfmt::Console;
-use crate::{python, Io};
+use crate::{fail, python, Io};
 
 /// One bundle `install_app` writes.
 struct Bundle<'a> {
@@ -42,9 +42,13 @@ pub(crate) fn run(command: SetupCommand, io: &mut Io<'_>) -> Result<()> {
     match command {
         SetupCommand::InstallApp => {
             let console = Console::detect();
-            // `install_app`'s defaults: `~/Applications` and `sys.executable`.
+            // `sys.executable` of the Python LocalFlow install; without one a
+            // native install's signed LocalFlow.app must stay untouched.
+            let Some(python) = python::find_install() else {
+                return fail(python::NO_INSTALL);
+            };
+            // `install_app`'s default `dest_dir`.
             let dest = expand_user(&Path::new("~").join("Applications"))?;
-            let python = python::find().unwrap_or_else(|| PathBuf::from(python::PYTHON));
             for bundle in &BUNDLES {
                 let path = install_app(&dest, &python.to_string_lossy(), bundle)?;
                 write!(
