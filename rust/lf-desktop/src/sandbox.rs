@@ -889,16 +889,36 @@ fn bounded_query(terms: &[String], max: usize) -> String {
     query
 }
 
+/// Japanese (kanji/Han, hiragana, katakana) is written without spaces, so a
+/// whole sentence is one token and word rules can't find a phrase in it.
+fn unspaced_script(c: char) -> bool {
+    matches!(c as u32,
+        0x3005 | 0x3007            // 々 〇
+        | 0x3040..=0x309F          // hiragana
+        | 0x30A0..=0x30FF          // katakana
+        | 0x31F0..=0x31FF          // katakana phonetic extensions
+        | 0xFF66..=0xFF9F          // half-width katakana
+        | 0x3400..=0x4DBF          // CJK extension A
+        | 0x4E00..=0x9FFF          // CJK unified ideographs
+        | 0xF900..=0xFAFF          // CJK compatibility ideographs
+        | 0x20000..=0x3134F // CJK extensions B–G
+    )
+}
+
 /// How many `terms` occur in `text`. Terms under four characters must be a
 /// whole word (so "git" doesn't match inside "digital"); longer ones may
 /// start a word, as the old substring match allowed ("fail" -> "failed").
+/// A term with Japanese characters may occur anywhere inside a word
+/// ("午後二時" in "会議は木曜日の午後二時に移動しました").
 fn term_score(terms: &[String], text: &str) -> usize {
     let present: Vec<String> = tokens(text).collect();
     terms
         .iter()
         .filter(|t| {
             present.iter().any(|w| {
-                if t.chars().count() < 4 {
+                if t.chars().any(unspaced_script) {
+                    w.contains(t.as_str())
+                } else if t.chars().count() < 4 {
                     w == *t
                 } else {
                     w.starts_with(t.as_str())
@@ -1862,6 +1882,73 @@ mod tests {
             Some(McpError::Deadline)
         );
         assert!(agent.connect(&AtomicBool::new(false), None).is_ok());
+    }
+
+    /// An unspaced Japanese sentence is one token: a phrase from its middle
+    /// must still find it, without loosening ASCII word matching.
+    #[test]
+    fn japanese_phrases_match_inside_unspaced_sentences() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        use crate::controllers::mcp_client::ToolTransport;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let entries = open_history(&root).unwrap().recent(100, None, 0).unwrap();
+        let meeting = entries
+            .iter()
+            .find(|e| e.final_text == "会議は木曜日の午後二時に移動しました。")
+            .unwrap();
+
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: std::time::Duration::ZERO,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut search = |query: &str| {
+            tools
+                .call("search_dictations", &json!({ "query": query }), &cancel)
+                .unwrap()
+                .structured
+                .unwrap()
+        };
+        for phrase in [
+            "午後二時",
+            "木曜日",
+            "移動",
+            "会議は木曜日の午後二時に移動しました",
+        ] {
+            let found = search(phrase);
+            assert_eq!(found["count"], 1, "{phrase}");
+            assert_eq!(found["results"][0]["id"], meeting.id, "{phrase}");
+        }
+        assert_eq!(search("午前九時")["count"], 0);
+
+        // Through the production Ask agent.
+        let events = sandbox_ask(&root, "午後二時", "Any time");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert_eq!(done.turn.citations.len(), 1);
+        assert_eq!(done.turn.citations[0].reference, meeting.id.to_string());
+        assert!(
+            done.turn.answer.contains("午後二時"),
+            "{}",
+            done.turn.answer
+        );
+
+        // ASCII semantics unchanged.
+        let t = |s: &str| vec![s.to_string()];
+        assert_eq!(
+            term_score(&t("午後二時"), "会議は木曜日の午後二時に移動しました。"),
+            1
+        );
+        assert_eq!(term_score(&t("git"), "digital git"), 1);
+        assert_eq!(term_score(&t("git"), "digital"), 0);
+        assert_eq!(term_score(&t("fail"), "failed"), 1);
+        assert_eq!(term_score(&t("fail"), "unfailing"), 0);
     }
 
     #[test]
