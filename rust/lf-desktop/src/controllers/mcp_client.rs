@@ -766,22 +766,44 @@ impl StdioSession {
         what: &'static str,
         cancel: &AtomicBool,
     ) -> Result<Value, McpError> {
+        Self::wait_with_clock(
+            &self.lines,
+            Instant::now,
+            id,
+            until,
+            run_deadline_binds,
+            what,
+            cancel,
+        )
+    }
+
+    /// [`StdioSession::wait_for`] with the clock passed in, so a test can
+    /// make time reach `until` while a line is being received.
+    fn wait_with_clock(
+        lines: &mpsc::Receiver<Line>,
+        now: impl Fn() -> Instant,
+        id: i64,
+        until: Instant,
+        run_deadline_binds: bool,
+        what: &'static str,
+        cancel: &AtomicBool,
+    ) -> Result<Value, McpError> {
         let mut skipped = 0;
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(McpError::Cancelled);
             }
-            let left = until.saturating_duration_since(Instant::now());
+            let left = until.saturating_duration_since(now());
             if left.is_zero() {
                 return Err(expired(run_deadline_binds, what));
             }
-            let line = match self.lines.recv_timeout(left.min(POLL)) {
+            let line = match lines.recv_timeout(left.min(POLL)) {
                 Ok(line) => line,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err(McpError::Closed),
             };
             // A line that only became available at or after the end is late.
-            if Instant::now() >= until {
+            if now() >= until {
                 return Err(expired(run_deadline_binds, what));
             }
             let bytes = match line {
@@ -1174,6 +1196,70 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), format!("{message}\n").into_bytes());
         session.notify("notifications/initialized").unwrap();
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// The end is still ahead when the wait starts and the queue is empty;
+    /// the valid, matching reply only arrives after the end has passed
+    /// (simulated time moves past it, then the line is enqueued). The reply
+    /// is read from the queue but rejected by the post-receive check.
+    #[test]
+    fn a_reply_arriving_after_the_end_is_rejected() {
+        let reply = json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        let start = Instant::now();
+        let until = start + Duration::from_secs(60);
+        let late = until + Duration::from_millis(1);
+        for (binds, want) in [
+            (true, McpError::Deadline),
+            (false, McpError::Timeout("the tool")),
+        ] {
+            let (tx, rx) = mpsc::sync_channel(1);
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            // First reading (the pre-receive check): snapshot `start`, then
+            // move simulated time past the end and let the reply arrive
+            // late. Every later reading is past the end.
+            let reads = std::cell::Cell::new(0u32);
+            let clock = || {
+                reads.set(reads.get() + 1);
+                if reads.get() == 1 {
+                    tx.send(Line::Data(format!("{reply}\n").into_bytes()))
+                        .unwrap();
+                    start
+                } else {
+                    late
+                }
+            };
+            let result = StdioSession::wait_with_clock(
+                &rx,
+                clock,
+                1,
+                until,
+                binds,
+                "the tool",
+                &AtomicBool::new(false),
+            );
+            assert_eq!(result.err(), Some(want));
+            assert!(reads.get() >= 2, "the clock was read after receiving");
+            // The line was consumed (the sender is still alive: Empty, not
+            // Disconnected).
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            drop(tx);
+        }
+        // Control: with the end never reached, the same reply is accepted.
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Line::Data(format!("{reply}\n").into_bytes()))
+            .unwrap();
+        assert_eq!(
+            StdioSession::wait_with_clock(
+                &rx,
+                || start,
+                1,
+                until,
+                true,
+                "the tool",
+                &AtomicBool::new(false),
+            ),
+            Ok(json!({}))
+        );
     }
 
     #[test]
