@@ -35,6 +35,10 @@ reqwest = { workspace = true }
 # Clipboard for `history copy`/`history raw`; image support is not needed.
 arboard = { version = "3", default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+# `stt download` matches Rich's ASCII progress bar on legacy (non-VT) consoles.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # The parity example serializes lf-core values generically.

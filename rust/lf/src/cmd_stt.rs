@@ -224,6 +224,7 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
     let mut progress = None;
     let terminal = std::io::stdout().is_terminal();
     let width = console_width();
+    let ascii = legacy_windows_console();
     let result = setup_downloads::download_snapshot(
         &repo,
         &cache,
@@ -234,7 +235,7 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
                 let _ = write!(
                     io.out,
                     "\r\x1b[2K{}",
-                    progress_line(model_id, progress, width)
+                    progress_line(model_id, progress, width, ascii)
                 );
                 let _ = io.out.flush();
             }
@@ -244,7 +245,11 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
     if terminal && progress.is_some() {
         write!(io.out, "\r\x1b[2K")?;
     }
-    outln!(io.out, "{}", progress_line(model_id, progress, width))?;
+    outln!(
+        io.out,
+        "{}",
+        progress_line(model_id, progress, width, ascii)
+    )?;
     if result
         .as_ref()
         .is_err_and(|error| error == setup_downloads::INTERRUPTED)
@@ -292,7 +297,32 @@ async fn ctrl_c() {
     }
 }
 
-fn progress_line(model_id: &str, progress: Option<(u64, u64)>, width: usize) -> String {
+/// Rich's `legacy_windows`: on Windows, stdout is not a console with VT
+/// processing enabled (`rich._windows.get_windows_console_features`), which
+/// includes redirected or captured stdout. Rich then draws its bar in ASCII.
+#[cfg(windows)]
+fn legacy_windows_console() -> bool {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
+    };
+    let mut mode = 0;
+    // SAFETY: GetStdHandle takes no pointers; GetConsoleMode only writes the
+    // u32 out-parameter and fails cleanly for invalid or non-console handles.
+    let ok = unsafe { GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mut mode) } != 0;
+    !ok || mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0
+}
+
+#[cfg(not(windows))]
+fn legacy_windows_console() -> bool {
+    false
+}
+
+fn progress_line(
+    model_id: &str,
+    progress: Option<(u64, u64)>,
+    width: usize,
+    ascii: bool,
+) -> String {
     let title = format!("Downloading {model_id}");
     let (fraction, detail, remaining) = match progress {
         Some((done, total)) => (
@@ -312,10 +342,11 @@ fn progress_line(model_id: &str, progress: Option<(u64, u64)>, width: usize) -> 
     let half_cells = (fraction * width as f64 * 2.).round_ties_even() as usize;
     let full = half_cells / 2;
     let half = half_cells % 2;
+    let (bar, half_bar) = if ascii { ("-", " ") } else { ("━", "╸") };
     let bar = format!(
         "{}{}{}",
-        "━".repeat(full),
-        "╸".repeat(half),
+        bar.repeat(full),
+        half_bar.repeat(half),
         " ".repeat(width - full - half)
     );
     let percent = (fraction * 100.).round_ties_even() as u8;
@@ -401,4 +432,23 @@ fn probe_python(mode: &str, provider: &str) -> Value {
             serde_json::from_slice(&output.stdout).ok()
         })
         .unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_line;
+
+    #[test]
+    fn progress_bar_uses_rich_ascii_glyphs_on_legacy_windows() {
+        let progress = Some((1, 16));
+        let rest = " ".repeat(37);
+        assert_eq!(
+            progress_line("m", progress, 80, false),
+            format!("Downloading m ━━╸{rest}   6% 0/0 MB -:--:--")
+        );
+        assert_eq!(
+            progress_line("m", progress, 80, true),
+            format!("Downloading m -- {rest}   6% 0/0 MB -:--:--")
+        );
+    }
 }
