@@ -23,6 +23,7 @@ use lf_ui::backends::settings_agent::SettingsAgent;
 use crate::controllers::capabilities::Capabilities;
 use crate::controllers::jobs::Downloads;
 use crate::controllers::model_storage::SpeechStorage;
+use crate::controllers::retry::{RetryBackend, RetryJobs};
 use crate::controllers::runtime_state::SimulatedState;
 use crate::controllers::setup_flow::SetupDeps;
 use crate::remote::Remote;
@@ -254,6 +255,10 @@ pub struct Services {
     pub assistant: Arc<dyn SettingsAgent>,
     /// Sandbox-only: which runtime state Home simulates.
     pub simulated_runtime: std::cell::Cell<SimulatedState>,
+    /// History retry models: native (runtime), unavailable, or simulated.
+    pub retry: Arc<dyn RetryBackend>,
+    /// The process's one History retry job and its last result.
+    pub retry_jobs: RetryJobs,
 }
 
 impl Services {
@@ -339,7 +344,14 @@ impl Services {
                 ),
             )
         };
+        let retry: Arc<dyn RetryBackend> = if root.is_sandbox() {
+            Arc::new(crate::sandbox::SimRetry::new(storage.clone()))
+        } else {
+            real_retry(&secrets)
+        };
         Ok(Services {
+            retry,
+            retry_jobs: RetryJobs::new(),
             dictionary: DictionaryStore::new(Some(root.dictionary_path.clone())),
             config_file,
             config: RefCell::new(config),
@@ -421,6 +433,18 @@ fn real_storage(caps: &Capabilities) -> Arc<dyn SpeechStorage> {
     Arc::new(crate::controllers::model_storage::UnavailableStorage {
         reason: caps.native_speech_reason().unwrap_or_default(),
     })
+}
+
+#[cfg(feature = "runtime")]
+fn real_retry(secrets: &Arc<dyn SecretStore + Send + Sync>) -> Arc<dyn RetryBackend> {
+    Arc::new(crate::controllers::retry::NativeRetry {
+        secrets: secrets.clone(),
+    })
+}
+
+#[cfg(not(feature = "runtime"))]
+fn real_retry(_: &Arc<dyn SecretStore + Send + Sync>) -> Arc<dyn RetryBackend> {
+    Arc::new(crate::controllers::retry::UnavailableRetry)
 }
 
 /// Open history for reading and editing regardless of `[history] enabled`

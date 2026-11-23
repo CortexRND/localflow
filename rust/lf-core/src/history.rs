@@ -414,6 +414,85 @@ impl HistoryStore {
         if !self.enabled {
             return Ok(false);
         }
+        let (assignments, mut values) = Self::assignments(changes)?;
+        if assignments.is_empty() {
+            return Ok(self.get(entry_id)?.is_some());
+        }
+        values.push(rusqlite::types::Value::Integer(entry_id));
+        let sql = format!(
+            "UPDATE dictations SET {} WHERE id = ?",
+            assignments.join(", ")
+        );
+        let _held = self.guard();
+        self.with_write_connection(|c| {
+            let changed = c.execute(&sql, rusqlite::params_from_iter(values.iter()))?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// Apply `changes` only if the row still equals `expected` in every
+    /// column, in one statement inside one IMMEDIATE transaction. Row ids are
+    /// reused after a clear or a delete of the newest row, so matching the
+    /// whole snapshot (time, kind, app context, text, status, audio) refuses
+    /// a deleted, replaced or concurrently edited row instead of overwriting
+    /// a different dictation. Returns the updated row, read in the same
+    /// transaction, or `None` when nothing matched (or history is disabled).
+    pub fn update_if_unchanged(
+        &self,
+        expected: &HistoryEntry,
+        changes: &EntryUpdate,
+    ) -> Result<Option<HistoryEntry>> {
+        if !self.enabled {
+            return Ok(None);
+        }
+        let (assignments, mut values) = Self::assignments(changes)?;
+        use rusqlite::types::Value as V;
+        let text = |s: &Option<String>| s.clone().map_or(V::Null, V::Text);
+        values.extend([
+            V::Integer(expected.id),
+            V::Real(expected.ts),
+            V::Text(expected.kind.clone()),
+            text(&expected.app_name),
+            text(&expected.bundle_id),
+            text(&expected.category),
+            V::Real(expected.duration_s),
+            V::Text(expected.raw_text.clone()),
+            V::Text(expected.final_text.clone()),
+            V::Integer(expected.words),
+            V::Text(expected.status.clone()),
+            text(&expected.audio_path),
+        ]);
+        // With nothing to change, a no-op assignment still checks the match.
+        let set = if assignments.is_empty() {
+            "id = id".to_string()
+        } else {
+            assignments.join(", ")
+        };
+        let sql = format!(
+            "UPDATE dictations SET {set} WHERE id = ? AND ts = ? AND kind = ? \
+             AND app_name IS ? AND bundle_id IS ? AND category IS ? AND duration_s = ? \
+             AND raw_text = ? AND final_text = ? AND words = ? AND status = ? \
+             AND audio_path IS ?"
+        );
+        let _held = self.guard();
+        self.with_write_connection(|c| {
+            if c.execute(&sql, rusqlite::params_from_iter(values.iter()))? == 0 {
+                return Ok(None);
+            }
+            Ok(c.query_row(
+                "SELECT * FROM dictations WHERE id = ?",
+                [expected.id],
+                HistoryEntry::from_row,
+            )
+            .optional()?)
+        })
+    }
+
+    /// `SET` clauses and their values for an [`EntryUpdate`] (`words`
+    /// follows `final_text`).
+    fn assignments(
+        changes: &EntryUpdate,
+    ) -> Result<(Vec<&'static str>, Vec<rusqlite::types::Value>)> {
         let mut assignments: Vec<&str> = Vec::new();
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
         use rusqlite::types::Value as V;
@@ -443,19 +522,7 @@ impl HistoryStore {
             assignments.push("audio_path = ?");
             values.push(V::Text(audio.clone()));
         }
-        if assignments.is_empty() {
-            return Ok(self.get(entry_id)?.is_some());
-        }
-        values.push(V::Integer(entry_id));
-        let sql = format!(
-            "UPDATE dictations SET {} WHERE id = ?",
-            assignments.join(", ")
-        );
-        let _held = self.guard();
-        self.with_write_connection(|c| {
-            let changed = c.execute(&sql, rusqlite::params_from_iter(values.iter()))?;
-            Ok(changed > 0)
-        })
+        Ok((assignments, values))
     }
 
     /// Newest first; `query` filters raw/final text with a literal,
@@ -1169,6 +1236,152 @@ mod tests {
                 }
             )
             .unwrap());
+    }
+
+    fn retried() -> EntryUpdate {
+        EntryUpdate {
+            status: Some("ok".into()),
+            raw_text: Some("new raw".into()),
+            final_text: Some("New final text.".into()),
+            ..Default::default()
+        }
+    }
+
+    fn failed_clip_row(s: &HistoryStore) -> HistoryEntry {
+        let mut new = entry("dictate", "failed", "");
+        new.app_name = Some("Mail".into());
+        new.bundle_id = Some("com.apple.mail".into());
+        new.category = Some("email".into());
+        new.duration_s = 3.25;
+        new.audio_path = Some("/clips/a.wav".into());
+        let id = s.add(&new).unwrap().unwrap();
+        s.get(id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn conditional_update_changes_only_a_matching_row_and_keeps_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let other = s.add(&entry("dictate", "ok", "keep me")).unwrap().unwrap();
+        let before_other = s.get(other).unwrap().unwrap();
+        let original = failed_clip_row(&s);
+        let updated = s
+            .update_if_unchanged(&original, &retried())
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.get(original.id).unwrap().as_ref(), Some(&updated));
+        assert_eq!(
+            (
+                updated.status.as_str(),
+                updated.raw_text.as_str(),
+                updated.final_text.as_str(),
+                updated.words
+            ),
+            ("ok", "new raw", "New final text.", 3)
+        );
+        let unchanged = HistoryEntry {
+            status: original.status.clone(),
+            raw_text: original.raw_text.clone(),
+            final_text: original.final_text.clone(),
+            words: original.words,
+            ..updated.clone()
+        };
+        assert_eq!(unchanged, original, "every other column is preserved");
+        assert_eq!(s.get(other).unwrap().unwrap(), before_other);
+        assert_eq!(s.recent(10, None, 0).unwrap().len(), 2, "no row is added");
+        // The stale snapshot no longer matches: a second commit is refused.
+        assert!(s
+            .update_if_unchanged(&original, &retried())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn conditional_update_refuses_any_differing_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let original = failed_clip_row(&s);
+        let edits: [fn(&mut HistoryEntry); 12] = [
+            |e| e.ts += 1.0,
+            |e| e.kind = "command".into(),
+            |e| e.app_name = None,
+            |e| e.bundle_id = Some("other".into()),
+            |e| e.category = Some("work".into()),
+            |e| e.duration_s = 9.0,
+            |e| e.raw_text = "edited".into(),
+            |e| e.final_text = "edited".into(),
+            |e| e.words = 7,
+            |e| e.status = "silent".into(),
+            |e| e.audio_path = None,
+            |e| e.audio_path = Some("/clips/b.wav".into()),
+        ];
+        for edit in edits {
+            let mut stale = original.clone();
+            edit(&mut stale);
+            assert!(s.update_if_unchanged(&stale, &retried()).unwrap().is_none());
+            assert_eq!(s.get(original.id).unwrap().unwrap(), original);
+        }
+        // A concurrent edit (another retry, the CLI) wins over this snapshot.
+        assert!(s
+            .update(
+                original.id,
+                &EntryUpdate {
+                    raw_text: Some("other retry".into()),
+                    ..Default::default()
+                }
+            )
+            .unwrap());
+        assert!(s
+            .update_if_unchanged(&original, &retried())
+            .unwrap()
+            .is_none());
+        assert_eq!(s.get(original.id).unwrap().unwrap().raw_text, "other retry");
+    }
+
+    #[test]
+    fn conditional_update_never_touches_a_deleted_or_reused_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let original = failed_clip_row(&s);
+        assert!(s.delete(original.id).unwrap());
+        assert!(s
+            .update_if_unchanged(&original, &retried())
+            .unwrap()
+            .is_none());
+        assert!(s.recent(10, None, 0).unwrap().is_empty(), "nothing created");
+        // Clear, then a new dictation takes the same id (no AUTOINCREMENT).
+        let original = failed_clip_row(&s);
+        s.clear().unwrap();
+        let mut reuse = entry("dictate", "failed", "");
+        reuse.audio_path = original.audio_path.clone();
+        let reused = s.add(&reuse).unwrap().unwrap();
+        assert_eq!(reused, original.id, "SQLite reuses the id");
+        let before = s.get(reused).unwrap().unwrap();
+        assert!(s
+            .update_if_unchanged(&original, &retried())
+            .unwrap()
+            .is_none());
+        assert_eq!(s.get(reused).unwrap().unwrap(), before);
+        let disabled = HistoryStore::open(Some(s.path.clone()), None, false).unwrap();
+        assert!(disabled
+            .update_if_unchanged(&before, &retried())
+            .unwrap()
+            .is_none());
+        assert_eq!(s.get(reused).unwrap().unwrap(), before);
+    }
+
+    #[test]
+    fn conditional_update_waits_for_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = std::sync::Arc::new(store(&dir));
+        let original = failed_clip_row(&s);
+        let db = s.path.clone();
+        let shared = s.clone();
+        let expected = original.clone();
+        let updated = waits_for_external_writer(&db, move || {
+            shared.update_if_unchanged(&expected, &retried())
+        });
+        assert_eq!(updated.unwrap().final_text, "New final text.");
     }
 
     #[test]

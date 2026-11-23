@@ -1121,9 +1121,17 @@ impl Shell {
         if self.cx.services.downloads.deleting() {
             out.push("A speech model is being deleted; closing waits for it.".into());
         }
+        // A History retry is a registered write too, but it isn't a setting.
+        let retrying = self.cx.services.retry_jobs.running().is_some();
+        if retrying {
+            out.push(
+                "A dictation is being retried; closing waits briefly for it, and speech recognition can't be interrupted."
+                    .into(),
+            );
+        }
         // Key, provider, setup or settings writes on workers (registered as
         // pending writes); a zero-length check, no waiting here.
-        if !lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO) {
+        if !retrying && !lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO) {
             out.push("A settings or key change is still being saved; closing waits for it.".into());
         }
         if self.setup_dirty(cx) {
@@ -1184,6 +1192,7 @@ impl Shell {
                 // the window open (never an obsolete snapshot).
                 let late = crate::controllers::shutdown::remaining_work(
                     &shell.cx.services.downloads,
+                    &shell.cx.services.retry_jobs,
                     lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO),
                 );
                 if jobs_stopped && engine_outcome == Stopped::Done && !late.is_empty() {
@@ -1208,6 +1217,9 @@ impl Shell {
                 }
                 let mut problems = Vec::new();
                 if !jobs_stopped {
+                    if shell.cx.services.retry_jobs.running().is_some() {
+                        problems.push(crate::controllers::shutdown::RETRY_RUNNING);
+                    }
                     problems.push(
                         "A model download, model deletion or settings/key write hasn't finished.",
                     );

@@ -247,6 +247,15 @@ fn seed(root: &DataRoot) -> Result<()> {
         entry.status = (*status).into();
         entry.duration_s = 4.0 + (text.len() as f64 / 12.0);
         entry.ts = Some(now - (*minutes as f64) * 60.0);
+        if *status == "failed" {
+            // A synthetic tone (well above the -50 dBFS silence gate) so the
+            // failed example can be retried; written inside the sandbox clips.
+            let tone: Vec<f32> = (0..24_000)
+                .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 220.0 / 16_000.0).sin() * 0.1)
+                .collect();
+            entry.duration_s = tone.len() as f64 / 16_000.0;
+            entry.audio_path = Some(history.write_clip(&tone, 16_000)?.to_string_lossy().into());
+        }
         history.add(&entry)?;
     }
 
@@ -447,6 +456,71 @@ impl crate::controllers::model_storage::SpeechStorage for SimStorage {
     }
 }
 
+/// The fixed sandbox History retry transcript.
+pub const SIMULATED_RETRY: &str = "this is a simulated retry no audio was transcribed";
+
+/// Sandbox History retry: the real pipeline (sandbox dictionary, snippets,
+/// row app context) over a fixed fake transcript, never a model. "Opening"
+/// the model succeeds only while the simulated inventory lists the selected
+/// backend's repo, so deleting it on Models & keys shows "not downloaded".
+/// No cleanup provider (a real one could make an HTTP call) and no keys.
+pub struct SimRetry {
+    storage: std::sync::Arc<dyn crate::controllers::model_storage::SpeechStorage>,
+}
+
+impl SimRetry {
+    pub fn new(
+        storage: std::sync::Arc<dyn crate::controllers::model_storage::SpeechStorage>,
+    ) -> Self {
+        SimRetry { storage }
+    }
+}
+
+struct SimRetrySpeech;
+
+impl lf_runtime::engine::SpeechEngine for SimRetrySpeech {
+    fn load(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+    fn transcribe(&self, _: &[f32], _: Option<&str>) -> std::result::Result<String, String> {
+        Ok(SIMULATED_RETRY.into())
+    }
+    fn unload(&self) {}
+}
+
+impl crate::controllers::retry::RetryBackend for SimRetry {
+    fn unavailable(&self) -> Option<String> {
+        None
+    }
+    fn open(
+        &self,
+        config: &Config,
+    ) -> std::result::Result<std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>, String> {
+        let backend = config.field_str("stt_backend").unwrap_or("");
+        let repo = if backend.starts_with("parakeet") {
+            lf_stt_repo::PARAKEET_ONNX
+        } else {
+            lf_stt_repo::WHISPER_CPP
+        };
+        if !self
+            .storage
+            .inventory(config)?
+            .models
+            .iter()
+            .any(|m| m.repo == repo)
+        {
+            return Err("The selected speech model isn't downloaded (sandbox example). Download it in Models & keys, then try again.".into());
+        }
+        Ok(std::sync::Arc::new(SimRetrySpeech))
+    }
+    fn llm(&self, _: &Config) -> Option<Box<dyn lf_providers::LlmProvider>> {
+        None
+    }
+    fn simulated(&self) -> bool {
+        true
+    }
+}
+
 /// Setup/model operations for the sandbox over [`SimSpeech`]: downloads tick
 /// to 100 % over about three seconds, a pull adds its model to the simulated
 /// Ollama, the trial returns a fixed transcript. No audio, network, model
@@ -628,6 +702,66 @@ pub fn setup_platform() -> lf_ui::setup_flow::FakeSetupPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_retry_is_a_labelled_simulation_over_sandbox_data_only() {
+        use crate::controllers::model_storage::SpeechStorage;
+        use crate::controllers::retry::{retry_entry, RetryBackend, RetryKey};
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        assert!(services.retry.simulated());
+        assert!(services.retry.unavailable().is_none());
+        assert!(
+            services.retry.llm(&services.config()).is_none(),
+            "no provider"
+        );
+        let history = open_history(&root).unwrap();
+        let failed: Vec<_> = history
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.status == "failed")
+            .collect();
+        assert_eq!(failed.len(), 1);
+        let entry = failed[0].clone();
+        let shown = crate::controllers::retry::view(
+            &entry,
+            services.retry.as_ref(),
+            &services.config(),
+            &services.retry_jobs,
+        );
+        assert!(shown.blocked.is_none());
+        assert!(shown
+            .note
+            .starts_with(crate::controllers::retry::SIMULATED_NOTE));
+        let clip = std::path::PathBuf::from(entry.audio_path.clone().unwrap());
+        assert!(clip.starts_with(&root.clips_dir) && clip.is_file());
+        let updated = retry_entry(
+            &root,
+            &services.config(),
+            RetryKey::of(&entry),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+        assert_eq!(updated.id, entry.id);
+        assert_eq!(history.recent(100, None, 0).unwrap().len(), HISTORY.len());
+
+        // Without the simulated Whisper model, "open" refuses honestly.
+        let sim = SimSpeech::seeded();
+        let storage = std::sync::Arc::new(SimStorage::new(sim));
+        let mut other = Config::defaults_for(false);
+        other.set_field("stt_backend", json!("parakeet"));
+        storage.delete(lf_stt_repo::WHISPER_CPP, &other).unwrap();
+        let retry = SimRetry::new(storage);
+        let error = retry.open(&services.config()).err().unwrap();
+        assert!(error.contains("isn't downloaded"), "{error}");
+        for path in services.root.all_paths() {
+            assert!(path.starts_with(dir.path()));
+        }
+    }
 
     #[test]
     fn seeding_is_isolated_persistent_and_resettable() {

@@ -140,6 +140,28 @@ pub fn hub_speech(config: &Config) -> Arc<dyn SpeechEngine> {
     }
 }
 
+/// [`hub_speech`] for an already installed model only, for one-off work
+/// such as retrying a saved clip. The configured model's files are checked
+/// here first (no weights are loaded). On macOS the model still runs in the
+/// same-executable helper, which is asked for a cache-only load: a helper
+/// that doesn't know that request fails before loading anything instead of
+/// falling back to an auto-downloading load. Elsewhere it runs in process
+/// with [`SpeechAdapter::from_config_cached`]. Neither path downloads.
+pub fn hub_speech_cached(config: &Config) -> Result<Arc<dyn SpeechEngine>, String> {
+    let local = SpeechAdapter::from_config_cached(config).map_err(|e| format!("{e:#}"))?;
+    if cfg!(target_os = "macos")
+        && std::env::var("LOCALFLOW_SPEECH_IN_PROCESS").as_deref() != Ok("1")
+    {
+        drop(local);
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        Ok(Arc::new(crate::helper::HelperSpeechEngine::cached(
+            exe, config,
+        )))
+    } else {
+        Ok(Arc::new(local))
+    }
+}
+
 struct UnavailableSpeech(String);
 impl SpeechEngine for UnavailableSpeech {
     fn loaded(&self) -> bool {
@@ -158,6 +180,19 @@ impl SpeechAdapter {
     pub fn from_config(config: &Config) -> Result<Self> {
         validate_sample_rate(config)?;
         Ok(Self::from_spec(factory::from_config(config, None)?))
+    }
+
+    /// The configured model from the user's HF cache only (see
+    /// [`factory::from_config_cached`]); scoped leases as usual.
+    pub fn from_config_cached(config: &Config) -> Result<Self> {
+        Self::from_config_cached_at(config, &crate::model_storage::hf_hub_cache(None))
+    }
+
+    fn from_config_cached_at(config: &Config, cache_root: &std::path::Path) -> Result<Self> {
+        validate_sample_rate(config)?;
+        Ok(Self::from_spec(factory::from_config_cached(
+            config, None, cache_root,
+        )?))
     }
 
     /// Injection seam for custom engines, including offline fakes.
@@ -523,6 +558,36 @@ mod tests {
             .fields
             .insert("stt_backend".into(), serde_json::json!("plugin"));
         assert!(stt_factory()(&config).is_err());
+    }
+
+    #[test]
+    fn cached_adapter_checks_rate_then_installed_files_without_loading() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config
+            .fields
+            .insert("model_size".into(), serde_json::json!("tiny"));
+        config
+            .fields
+            .insert("sample_rate".into(), serde_json::json!(44100));
+        let error = SpeechAdapter::from_config_cached_at(&config, cache.path())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("sample_rate"), "{error}");
+        config
+            .fields
+            .insert("sample_rate".into(), serde_json::json!(16000));
+        assert!(SpeechAdapter::from_config_cached_at(&config, cache.path()).is_err());
+        if cfg!(feature = "whisper") {
+            crate::downloads::install_for_test(
+                cache.path(),
+                crate::model_storage::WHISPER_CPP_REPO,
+                &[("ggml-tiny.bin", b"weights")],
+            );
+            let adapter = SpeechAdapter::from_config_cached_at(&config, cache.path()).unwrap();
+            assert!(!adapter.loaded(), "construction loads no weights");
+        }
     }
 
     #[cfg(feature = "server")]

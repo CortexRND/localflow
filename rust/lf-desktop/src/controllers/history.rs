@@ -21,6 +21,38 @@ pub struct Loaded {
     pub stats: Option<Stats>,
 }
 
+/// One background History read, stamped when it was dispatched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadTicket {
+    /// The page's request generation (newer requests supersede it).
+    pub generation: u64,
+    /// `RetryJobs::seq` at dispatch: the retries already committed.
+    pub retry_seq: u64,
+}
+
+/// What to do with a read when it arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// A newer request superseded it: drop its rows and its error.
+    Obsolete,
+    /// A retry committed while it ran, so its rows may predate that
+    /// commit: read the same query and offset again instead.
+    Reread,
+    Apply,
+}
+
+impl ReadTicket {
+    pub fn judge(&self, generation: u64, retry_seq: u64) -> Delivery {
+        if self.generation != generation {
+            Delivery::Obsolete
+        } else if self.retry_seq != retry_seq {
+            Delivery::Reread
+        } else {
+            Delivery::Apply
+        }
+    }
+}
+
 /// Search `query` (empty = everything) from `offset`. Blocking.
 pub fn load(
     root: &DataRoot,
@@ -113,6 +145,25 @@ impl Listing {
             .iter()
             .find(|e| e.id == id)
             .or(self.cited.as_ref().filter(|c| c.id == id))
+    }
+
+    /// A row changed in the store (a finished retry): swap it in where it
+    /// is, listed or cited. Order, the page cursor and which row is cited are
+    /// unchanged; a row that is neither (same id but another timestamp, i.e.
+    /// a reused id) is left alone. Returns whether anything was replaced.
+    pub fn replace(&mut self, entry: HistoryEntry) -> bool {
+        let same = |e: &HistoryEntry| e.id == entry.id && e.ts == entry.ts;
+        if let Some(slot) = self.entries.iter_mut().find(|e| same(e)) {
+            *slot = entry;
+            return true;
+        }
+        match self.cited.as_mut() {
+            Some(cited) if same(cited) => {
+                *cited = entry;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The entry was deleted from the store. Returns its list index. A
@@ -279,6 +330,35 @@ mod tests {
         assert_eq!(list.remove(all[100].id), None);
         assert_eq!(list.next_offset(), 50);
         assert!(list.find(all[100].id).is_none());
+    }
+
+    #[test]
+    fn replacing_a_retried_row_keeps_order_cursor_and_citation() {
+        let (_d, root) = seeded(120);
+        let all = open_history(&root).unwrap().recent(1000, None, 0).unwrap();
+        let mut list = Listing::default();
+        list.apply(load(&root, 1, "", 0, false).unwrap());
+        list.cite(all[100].clone());
+        let order = ids(&list.entries);
+        let mut retried = list.entries[7].clone();
+        retried.final_text = "Retried.".into();
+        assert!(list.replace(retried.clone()));
+        assert_eq!(ids(&list.entries), order);
+        assert_eq!(list.entries[7], retried);
+        assert_eq!(list.next_offset(), 50);
+        let mut cited = all[100].clone();
+        cited.status = "ok".into();
+        assert!(list.replace(cited.clone()));
+        assert_eq!(list.find(cited.id), Some(&cited));
+        assert_eq!(list.next_offset(), 50, "still cited, not paged");
+        assert!(!list.in_pages(cited.id));
+        // A reused id (another timestamp) or an unknown row changes nothing.
+        let before = list.clone();
+        let mut reused = retried.clone();
+        reused.ts += 5.0;
+        assert!(!list.replace(reused));
+        assert!(!list.replace(all[110].clone()));
+        assert_eq!(list, before);
     }
 
     #[test]
