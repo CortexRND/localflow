@@ -87,6 +87,10 @@ pub struct Conversation {
     pub pending: Option<AgentTurn>,
     pub generation: u64,
     pub status: McpStatus,
+    /// The banner's "Try again" health check still running (its number);
+    /// the shared health is the result from before it.
+    health_retry: Option<u64>,
+    health_retries: u64,
 }
 
 impl Default for Conversation {
@@ -96,6 +100,8 @@ impl Default for Conversation {
             pending: None,
             generation: 0,
             status: McpStatus::Checking,
+            health_retry: None,
+            health_retries: 0,
         }
     }
 }
@@ -343,6 +349,10 @@ impl Conversation {
         if *health == Health::Simulated {
             return Notice::Sandbox;
         }
+        // "Try again" is checking the service: `health` is the old result.
+        if self.health_retry.is_some() {
+            return Notice::None;
+        }
         let tools = match &self.status {
             McpStatus::Checking | McpStatus::Connected { .. } | McpStatus::Simulated => {
                 return Notice::None
@@ -356,6 +366,26 @@ impl Conversation {
         match health {
             Health::Offline => Notice::Unreachable { tools },
             Health::Unknown | Health::Online | Health::Simulated => Notice::None,
+        }
+    }
+}
+
+impl Conversation {
+    /// "Try again" started a health check; returns its number.
+    pub fn begin_health_retry(&mut self) -> u64 {
+        self.health_retries += 1;
+        self.health_retry = Some(self.health_retries);
+        self.health_retries
+    }
+
+    /// Health check `retry` stored its result; `false` (no change) when a
+    /// later "Try again" is still running.
+    pub fn finish_health_retry(&mut self, retry: u64) -> bool {
+        if self.health_retry == Some(retry) {
+            self.health_retry = None;
+            true
+        } else {
+            false
         }
     }
 }
@@ -594,6 +624,53 @@ mod tests {
         let g = c.begin("q");
         c.apply(g, AgentEvent::Status(McpStatus::Connected { tools: 4 }));
         assert_eq!(c.notice(&Health::Offline), Notice::None);
+    }
+
+    /// "Try again" with `LOCALFLOW_MCP_BIN=off`: the tools settle at once
+    /// while the health check is still running, so the shared health is the
+    /// old Offline. No warning until that check stores its result.
+    #[test]
+    fn retry_waits_for_its_health_check_after_the_tools_settle() {
+        let mut c = with_status(McpStatus::Off);
+        assert!(matches!(
+            c.notice(&Health::Offline),
+            Notice::Unreachable { .. }
+        ));
+        // Try again: health check started, the tools probe reruns.
+        let retry = c.begin_health_retry();
+        c.status = McpStatus::Checking;
+        assert_eq!(c.notice(&Health::Offline), Notice::None);
+        // The probe finishes first (Off resolves immediately).
+        c.status = McpStatus::Off;
+        assert_eq!(c.notice(&Health::Offline), Notice::None, "health pending");
+        // The check finishes, still offline: the warning returns.
+        assert!(c.finish_health_retry(retry));
+        assert_eq!(
+            c.notice(&Health::Offline),
+            Notice::Unreachable {
+                tools: "are turned off"
+            }
+        );
+        // Again, and this time the service is up: no warning.
+        let retry = c.begin_health_retry();
+        assert_eq!(c.notice(&Health::Offline), Notice::None);
+        assert!(c.finish_health_retry(retry));
+        assert_eq!(c.notice(&Health::Online), Notice::None);
+        // Two clicks: only the latest check's result ends the wait.
+        let first = c.begin_health_retry();
+        let second = c.begin_health_retry();
+        assert!(!c.finish_health_retry(first));
+        assert_eq!(c.notice(&Health::Offline), Notice::None);
+        assert!(c.finish_health_retry(second));
+        assert!(matches!(
+            c.notice(&Health::Offline),
+            Notice::Unreachable { .. }
+        ));
+        // Without a click (periodic polling) nothing is suppressed, and the
+        // sandbox note is unaffected by a retry.
+        assert_eq!(c.health_retry, None);
+        c.begin_health_retry();
+        assert_eq!(c.notice(&Health::Simulated), Notice::Sandbox);
     }
 
     #[test]

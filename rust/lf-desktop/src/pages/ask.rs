@@ -780,8 +780,19 @@ impl Render for AskPage {
                         .icon("refresh-cw")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             // Recheck both paths; a running question
-                            // reports the tools' status itself.
-                            pcx.recheck_health(cx);
+                            // reports the tools' status itself. No warning
+                            // until this health check has stored its result
+                            // (the tools may settle first).
+                            let retry = this.convo.begin_health_retry();
+                            let ask = cx.weak_entity();
+                            pcx.recheck_health_then(cx, move |cx| {
+                                let _ = ask.update(cx, |this, cx| {
+                                    if this.convo.finish_health_retry(retry) {
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                            cx.notify();
                             if !this.convo.running() {
                                 this.probe(cx);
                             }
