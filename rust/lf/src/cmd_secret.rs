@@ -6,7 +6,7 @@ use anyhow::Result;
 use lf_core::secrets::{self, SecretsUnavailable};
 
 use crate::args::SecretCommand;
-use crate::{fail, outln, prompt, CliError, Io};
+use crate::{abort, fail, outln, prompt, Io};
 
 /// The secrets `secret status` reports, in Python's order.
 const STATUS_NAMES: [&str; 2] = ["llm_api_key", "fireworks_api_key"];
@@ -15,8 +15,7 @@ pub(crate) fn run(command: SecretCommand, io: &mut Io<'_>) -> Result<()> {
     match command {
         SecretCommand::Set { name } => {
             let Some(value) = prompt::hidden("secret", io)? else {
-                outln!(io.err, "Aborted!")?;
-                return Err(CliError::Exit(1).into());
+                return abort(io);
             };
             secrets::set_secret(&name, &value).or_else(unavailable)?;
             outln!(io.out, "stored {name}")

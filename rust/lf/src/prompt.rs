@@ -1,37 +1,10 @@
-//! Ports of click's `confirm` and hidden `prompt` over [`Io`].
+//! Port of click's hidden `prompt` over [`Io`].
 
 use std::io::BufRead;
 
 use anyhow::Result;
 
-use crate::pyfmt::py_strip;
 use crate::{outln, Io};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Answer {
-    Yes,
-    No,
-    /// End of input: click raises `Abort` (`Aborted!`, exit 1).
-    Aborted,
-}
-
-/// `click.confirm(text, default=False)`: y/yes or n/no (any case, surrounding
-/// whitespace ignored); empty means no; anything else prints
-/// `Error: invalid input` (to stdout, like click) and asks again.
-pub(crate) fn confirm(text: &str, io: &mut Io<'_>) -> Result<Answer> {
-    loop {
-        write!(io.out, "{text} [y/N]: ")?;
-        io.out.flush()?;
-        let Some(line) = read_line(io.input)? else {
-            return Ok(Answer::Aborted);
-        };
-        match py_strip(&line).to_lowercase().as_str() {
-            "y" | "yes" => return Ok(Answer::Yes),
-            "n" | "no" | "" => return Ok(Answer::No),
-            _ => outln!(io.out, "Error: invalid input")?,
-        }
-    }
-}
 
 /// `click.prompt(text, hide_input=True)` with no default: an empty answer asks
 /// again; `None` at end of input (click's `Abort`, after its newline). From a
@@ -111,28 +84,6 @@ mod tests {
             String::from_utf8(out).unwrap(),
             String::from_utf8(err).unwrap(),
         )
-    }
-
-    #[test]
-    fn confirm_answers() {
-        for (input, answer) in [
-            ("y\n", Answer::Yes),
-            (" YES \r\n", Answer::Yes),
-            ("n\n", Answer::No),
-            ("No", Answer::No),
-            ("\n", Answer::No),
-            ("", Answer::Aborted),
-        ] {
-            let (got, out, _) = with_io(input, |io| confirm("Q?", io).unwrap());
-            assert_eq!(got, answer, "{input:?}");
-            assert_eq!(out, "Q? [y/N]: ", "{input:?}");
-        }
-        let (got, out, err) = with_io("maybe\nyes\n", |io| confirm("Q?", io).unwrap());
-        assert_eq!(got, Answer::Yes);
-        assert_eq!(out, "Q? [y/N]: Error: invalid input\nQ? [y/N]: ");
-        assert!(err.is_empty());
-        let (got, _, _) = with_io("maybe\n", |io| confirm("Q?", io).unwrap());
-        assert_eq!(got, Answer::Aborted);
     }
 
     #[test]

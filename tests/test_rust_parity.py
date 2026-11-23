@@ -1226,7 +1226,7 @@ def test_token_read_never_creates(rust_build, sandbox):
 def test_cli_help_and_usage_errors(rust_build, sandbox):
     result = lf(rust_build, sandbox, "--help")
     assert result.returncode == 0
-    for name in ("config", "dict", "history", "llm", "keys", "status"):
+    for name in ("config", "dict", "history", "llm", "keys", "status", "tweak"):
         assert name in result.stdout
     assert lf(rust_build, sandbox, "history", "clear", "--help").returncode == 0
     assert lf(rust_build, sandbox, "bogus").returncode == 2
@@ -2044,19 +2044,20 @@ _RICH_ENV = {"COLUMNS": "80", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",
              "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
 
 
-def _clis(rust_build, sandbox, *args, env=None, reset=None):
-    """Run the Python CLI, then lf-rs, in the same sandbox with the same args.
+def _clis(rust_build, sandbox, *args, env=None, reset=None, input_text=""):
+    """Run the Python CLI, then lf-rs, in the same sandbox with the same args
+    and stdin.
 
     `reset` runs between the two, to restore state the Python run changed."""
     env = {**_RICH_ENV, **(env or {})}
     python = subprocess.run(
-        [sys.executable, "-m", "localflow.cli", *args], cwd=ROOT, input="",
+        [sys.executable, "-m", "localflow.cli", *args], cwd=ROOT, input=input_text,
         env={**sandbox["env"], **env}, check=False, capture_output=True, text=True,
         encoding="utf-8", timeout=120,
     )
     if reset is not None:
         reset()
-    return lf(rust_build, sandbox, *args, env=env), python
+    return lf(rust_build, sandbox, *args, env=env, input_text=input_text), python
 
 
 def _usage_error(result):
@@ -2503,6 +2504,348 @@ def test_cli_recall_llm_answers(rust_build, sandbox):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ------------------------------------------------------------------ tweak ---
+
+
+class _FakeTweakOllama(BaseHTTPRequestHandler):
+    """`GET /api/tags` and `POST /api/chat` for the Settings agent; a bytes
+    body is sent as is, anything else as JSON."""
+
+    tags: ClassVar[tuple] = (200, {"models": [{"name": "llama3:8b"}, {"name": "gemma4:e4b"}]})
+    chat: ClassVar[tuple] = (200, {"message": {}})
+    requests: ClassVar[list] = []
+
+    def _send(self, status, body):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/api/tags":
+            self._send(*self.tags)
+        else:
+            self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        self.requests.append((self.path, body))
+        self._send(*self.chat)
+
+    def log_message(self, *args):
+        pass
+
+
+def _tool_calls(*calls):
+    return (200, {"message": {"role": "assistant", "content": "", "tool_calls": [
+        {"function": {"name": name, "arguments": arguments}} for name, arguments in calls
+    ]}})
+
+
+def _tweak_paths(sandbox):
+    data = sandbox["home"] / ".localflow"
+    return {"config": sandbox["config"], "dictionary": data / "dictionary.json",
+            "undo": data / "settings-undo.json", "legacy": sandbox["home"] / ".localflow.toml"}
+
+
+def _tweak_state(sandbox):
+    """Config and legacy bytes, the parsed dictionary (Python writes it in text
+    mode, so with CRLF on Windows; Rust writes LF), and the parsed undo record
+    without its timestamp."""
+    state = {}
+    for name, path in _tweak_paths(sandbox).items():
+        data = path.read_bytes() if path.exists() else None
+        if name in ("dictionary", "undo") and data is not None:
+            data = json.loads(data)
+        if name == "undo" and data is not None:
+            assert isinstance(data.pop("created"), (int, float))
+        state[name] = data
+    return state
+
+
+def _tweak_restore(sandbox, saved):
+    for path, data in zip(_tweak_paths(sandbox).values(), saved, strict=True):
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+
+def _tweak_clis(rust_build, sandbox, *args, input_text=""):
+    """`_clis` for `tweak`: both CLIs start from the same files, which are put
+    back afterwards; returns the two results and the files each left behind."""
+    saved = [p.read_bytes() if p.exists() else None for p in _tweak_paths(sandbox).values()]
+    states = {}
+
+    def reset():
+        states["python"] = _tweak_state(sandbox)
+        _tweak_restore(sandbox, saved)
+
+    _FakeTweakOllama.requests.clear()
+    rust, python = _clis(rust_build, sandbox, "tweak", *args, reset=reset, input_text=input_text)
+    states["rust"] = _tweak_state(sandbox)
+    _tweak_restore(sandbox, saved)
+    return rust, python, states["python"], states["rust"]
+
+
+def _assert_tweak_same(rust_build, sandbox, *args, input_text=""):
+    rust, python, python_state, rust_state = _tweak_clis(rust_build, sandbox, *args, input_text=input_text)
+    assert _cli_output(rust) == _cli_output(python), args
+    assert rust_state == python_state, args
+    # Both CLIs sent the identical chat request (model, messages, tools, options).
+    requests = _FakeTweakOllama.requests
+    assert len(requests) in (0, 2), requests
+    if requests:
+        assert requests[0] == requests[1]
+        assert requests[0][0] == "/api/chat"
+    return rust, rust_state
+
+
+@pytest.fixture
+def tweak_ollama(rust_build, sandbox):
+    """A fake loopback Ollama the saved config points both CLIs at."""
+    # The dictionary and the undo record live in ~/.localflow.
+    _require_isolated(rust_build, sandbox, "dictionary_path")
+    port = _free_port()
+    save_config(Config(llm_provider="ollama", llm_base_url=f"http://127.0.0.1:{port}"), sandbox["config"])
+    _FakeTweakOllama.tags = (200, {"models": [{"name": "llama3:8b"}, {"name": "gemma4:e4b"}]})
+    _FakeTweakOllama.chat = (200, {"message": {}})
+    _FakeTweakOllama.requests.clear()
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeTweakOllama)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+_TWEAK_FULL = _tool_calls(
+    ("set_setting", {"key": "sounds_enabled", "value": "off"}),
+    ("add_dictionary_word", {"word": "Kubernetes"}),
+    ("add_replacement", {"spoken": "gonna", "written": "going to"}),
+)
+_TWEAK_FULL_REQUEST = "turn off sounds, learn Kubernetes and write gonna as going to"
+
+
+def test_cli_tweak_usage_errors(rust_build, sandbox, tweak_ollama):
+    before = _tweak_state(sandbox)
+    for args in [(), ("   ",), ("--yes",), ("-y",), ("--undo", "turn off sounds"), ("turn off sounds", "--undo"),
+                 ("--undo", "--yes"), ("--yes", "--undo"), ("-y", "--undo")]:
+        rust, python, python_state, rust_state = _tweak_clis(rust_build, sandbox, *args, input_text="y\n")
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2 and rust.stdout == "", args
+        assert rust_state == python_state == before
+        assert _FakeTweakOllama.requests == []
+    # Parser-level errors: clap words these itself, as for the other commands.
+    for args in [("--bogus", "x"), ("--yes=1", "a"), ("a", "b")]:
+        rust, python, python_state, rust_state = _tweak_clis(rust_build, sandbox, *args, input_text="y\n")
+        assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout) == (2, ""), args
+        assert rust_state == python_state == before
+        assert _FakeTweakOllama.requests == []
+    assert lf(rust_build, sandbox, "tweak", "--help").returncode == 0
+
+
+def test_cli_tweak_preview_and_confirm(rust_build, sandbox, tweak_ollama):
+    _FakeTweakOllama.chat = _TWEAK_FULL
+    for input_text, applied in [("n\n", False), ("\n", False), ("", False), ("maybe\ny\n", True),
+                                ("maybe\n", False), (" YES \n", True), ("y\n", True)]:
+        rust, state = _assert_tweak_same(rust_build, sandbox, _TWEAK_FULL_REQUEST, input_text=input_text)
+        assert rust.stdout.startswith("Preview (runs on your computer with gemma4:e4b):\n  Sounds: On → Off\n")
+        assert "Apply these changes? [y/N]: " in rust.stdout
+        assert ("Applied 3 changes.\nUndo with: lf tweak --undo\n" in rust.stdout) == applied
+        assert rust.returncode == (1 if input_text in ("", "maybe\n") else 0)
+        assert (state["undo"] is not None) == applied
+        if applied:
+            assert state["undo"] == {"version": 1, "settings": [
+                {"key": "sounds_enabled", "before": True, "after": False}],
+                "words": ["Kubernetes"], "replacements": [{"spoken": "gonna", "written": "going to"}]}
+    eof, _ = _assert_tweak_same(rust_build, sandbox, _TWEAK_FULL_REQUEST)
+    assert eof.stderr == "Aborted!\n" and eof.stdout.endswith("[y/N]: ")
+
+    rust, _ = _assert_tweak_same(rust_build, sandbox, _TWEAK_FULL_REQUEST, "--yes")
+    assert "Apply these changes?" not in rust.stdout
+    assert "  Dictionary: — → add “Kubernetes”\n  Replacement: “gonna” → “going to”\n" in rust.stdout
+    assert "  WARNING: Sounds: On → Off — Check: turns Sounds off.\n" in rust.stdout
+
+
+def test_cli_tweak_warnings_skips_and_escaping(rust_build, sandbox, tweak_ollama):
+    cases = [
+        # Shortcut and switch-off warnings.
+        ("set the polish shortcut to ctrl alt p and set cleanup level to none", _tool_calls(
+            ("set_setting", {"key": "polish_hotkey", "value": "<ctrl>+<alt>+p"}),
+            ("set_setting", {"key": "cleanup_level", "value": "none"}),
+        )),
+        # An invalid call, an unknown tool and an unrequested change next to a valid one.
+        ("turn off sounds", _tool_calls(
+            ("set_setting", {"key": "sounds_enabled", "value": "off"}),
+            ("set_setting", {"key": "server_port", "value": "9999"}),
+            ("delete_everything‮", {}),
+            ("add_dictionary_word", {"word": "Kubernetes"}),
+            ("set_setting", {"key": "sounds_enabled", "value": "on"}),
+        )),
+        # Model text safe_text escapes: arrows, bidi controls, astral characters.
+        ("learn Zoë and turn off sounds", _tool_calls(
+            ("add_dictionary_word", {"word": "Zoë"}),
+            ("set_setting", {"key": "sounds_enabled", "value": False}),
+            ("set_setting", {"key": "sounds→x\U0001f600", "value": "off"}),
+            ("add_replacement", {"spoken": "Zoë", "written": "a→b"}),
+        )),
+        # A shortcut clash is skipped with its reason.
+        ("set the polish shortcut to ctrl alt 2 and turn off sounds", _tool_calls(
+            ("set_setting", {"key": "polish_hotkey", "value": "<ctrl>+<alt>+2"}),
+            ("set_setting", {"key": "sounds_enabled", "value": "off"}),
+        )),
+    ]
+    for request, chat in cases:
+        _FakeTweakOllama.chat = chat
+        for flags in [("--yes",), ()]:
+            rust, _ = _assert_tweak_same(rust_build, sandbox, request, *flags, input_text="n\n")
+            assert rust.stdout.startswith("Preview (runs on your computer with gemma4:e4b):\n") or rust.returncode == 1
+    _FakeTweakOllama.chat = cases[0][1]
+    assert "  WARNING: " in _assert_tweak_same(rust_build, sandbox, cases[0][0], "--yes")[0].stdout
+    _FakeTweakOllama.chat = cases[1][1]
+    assert "  skipped: " in _assert_tweak_same(rust_build, sandbox, cases[1][0], "--yes")[0].stdout
+    _FakeTweakOllama.chat = cases[2][1]
+    assert "\\u" in _assert_tweak_same(rust_build, sandbox, cases[2][0], "--yes")[0].stdout
+    _FakeTweakOllama.chat = cases[3][1]
+    clash = _assert_tweak_same(rust_build, sandbox, cases[3][0], "--yes")[0].stdout
+    assert "  skipped: Polish shortcut: Ctrl+Option+2 is already the Prompt shortcut\n" in clash
+
+
+def test_cli_tweak_undo_interop(rust_build, sandbox, tweak_ollama):
+    paths = _tweak_paths(sandbox)
+    start = [p.read_bytes() if p.exists() else None for p in paths.values()]
+    _FakeTweakOllama.chat = _TWEAK_FULL
+
+    nothing, _ = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert (nothing.returncode, nothing.stderr) == (1, "Error: There's no change to undo.\n")
+
+    # Python applies, lf-rs undoes; then lf-rs applies, Python undoes.
+    runs = {}
+    for applier, undoer in [("python", "rust"), ("rust", "python")]:
+        _tweak_restore(sandbox, start)
+        run = {"python": lambda *a: _python_cli(sandbox, "tweak", *a, env=_RICH_ENV),
+               "rust": lambda *a: lf(rust_build, sandbox, "tweak", *a, env=_RICH_ENV)}
+        applied = run[applier](_TWEAK_FULL_REQUEST, "--yes")
+        after_apply = _tweak_state(sandbox)
+        undone = run[undoer]("--undo")
+        runs[applier] = (_cli_output(applied), after_apply, _cli_output(undone), _tweak_state(sandbox))
+    assert runs["python"] == runs["rust"]
+    _, after_apply, undone, after_undo = runs["python"]
+    assert after_apply["undo"]["words"] == ["Kubernetes"]
+    assert undone == (0, "  Sounds: On\n  Removed word “Kubernetes”\n  Removed replacement “gonna”\n"
+                         "Undid the last change.\n", "")
+    assert after_undo["undo"] is None
+    assert after_undo["config"] == start[0]
+
+    # Changed again since the apply: undo leaves it alone and says so.
+    _tweak_restore(sandbox, start)
+    assert _python_cli(sandbox, "tweak", _TWEAK_FULL_REQUEST, "--yes", env=_RICH_ENV).returncode == 0
+    save_config(Config(llm_provider="ollama", llm_base_url=tweak_ollama), paths["config"])
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert "Left alone: Sounds (changed to On since)." in rust.stdout
+    # Everything changed since: nothing to undo.
+    _tweak_restore(sandbox, start)
+    assert lf(rust_build, sandbox, "tweak", "turn off sounds", "--yes", env=_RICH_ENV).returncode == 0
+    save_config(Config(llm_provider="ollama", llm_base_url=tweak_ollama), paths["config"])
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert rust.returncode == 1 and rust.stderr.startswith("Error: Nothing to undo: everything was changed")
+
+
+def test_cli_tweak_migrates_legacy_config(rust_build, sandbox, tweak_ollama):
+    # Only a v1 ~/.localflow.toml: both CLIs migrate it (left in place) before
+    # previewing. It has no fireworks_api_key, so the keyring step (unreachable
+    # in the sandbox) never runs.
+    paths = _tweak_paths(sandbox)
+    paths["config"].unlink()
+    legacy = "".join(f"{key} = {py_config._toml_value(value)}\n" for key, value in {
+        "sounds_enabled": False, "cleanup_enabled": False, "paste_method": "clipboard",
+        "ollama_url": tweak_ollama,
+    }.items())
+    paths["legacy"].write_bytes(legacy.encode())
+    home_files = sorted(p.name for p in sandbox["home"].iterdir())
+    _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "on"}))
+
+    rust, state = _assert_tweak_same(rust_build, sandbox, "turn on sounds", "--yes")
+    assert rust.returncode == 0 and rust.stderr == ""
+    assert rust.stdout.startswith("Preview (runs on your computer with gemma4:e4b):\n  Sounds: Off → On\n")
+    assert state["legacy"] == legacy.encode()
+    migrated = tomllib.loads(state["config"].decode())
+    assert migrated["hotkey"]["sounds"] is True
+    assert migrated["llm"]["cleanup_enabled"] is False and migrated["llm"]["base_url"] == tweak_ollama
+    assert state["undo"]["settings"] == [{"key": "sounds_enabled", "before": False, "after": True}]
+    # Nothing else (no backup or renamed legacy file) is left behind.
+    assert not paths["config"].exists()
+    for run in (lambda: _python_cli(sandbox, "tweak", "turn on sounds", "--yes", env=_RICH_ENV),
+                lambda: lf(rust_build, sandbox, "tweak", "turn on sounds", "--yes", env=_RICH_ENV)):
+        assert run().returncode == 0
+        assert set(p.name for p in sandbox["home"].iterdir()) - set(home_files) <= {".localflow"}
+        assert sorted(p.name for p in paths["config"].parent.iterdir()) == ["config.toml"]
+        _tweak_restore(sandbox, [None, None, None, legacy.encode()])
+
+    # A request propose refuses still leaves the migrated config: Python's
+    # `localflow.cli` runs load_config() at import, before any argument is
+    # checked. The second survives the CLI's blank check: \x01, U+200B and \x7f
+    # are control/format characters, not whitespace.
+    for request, message in [("a" * 501, "Keep the request under 500 characters."),
+                             ("\x01​ \x7f", "Tell LocalFlow what to change.")]:
+        rust, state = _assert_tweak_same(rust_build, sandbox, request, "--yes")
+        assert (rust.returncode, rust.stdout, rust.stderr) == (1, "", f"Error: {message}\n")
+        assert state["config"] is not None and state["legacy"] == legacy.encode()
+
+    # --undo migrates first too. The record says Sounds went On → Off; only the
+    # legacy file (Off, unlike the default On) makes that undoable.
+    _tweak_restore(sandbox, [None, None, None, legacy.replace("false", "true", 1).encode()])
+    _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "off"}))
+    assert lf(rust_build, sandbox, "tweak", "turn off sounds", "--yes", env=_RICH_ENV).returncode == 0
+    paths["config"].unlink()
+    paths["legacy"].write_bytes(legacy.encode())
+    rust, state = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert (rust.returncode, rust.stdout, rust.stderr) == (0, "  Sounds: On\nUndid the last change.\n", "")
+    assert tomllib.loads(state["config"].decode())["hotkey"]["sounds"] is True
+    assert state["legacy"] == legacy.encode()
+
+
+def test_cli_tweak_errors(rust_build, sandbox, tweak_ollama):
+    models = (200, {"models": [{"name": "gemma4:e4b"}]})
+    for tags, chat in [
+        ((500, {"error": "boom"}), _TWEAK_FULL),
+        ((200, {"models": []}), _TWEAK_FULL),
+        ((200, {"models": [{"name": "bad name!"}]}), _TWEAK_FULL),
+        ((200, b"not json"), _TWEAK_FULL),
+        ((200, {"nope": 1}), _TWEAK_FULL),
+        (models, (404, {"error": "model \"gemma4:e4b\" not found, try pulling it first"})),
+        (models, (400, {"error": "registry.ollama.ai/library/gemma4:e4b does not support tools"})),
+        (models, (500, "<html>→</html>".encode())),
+        (models, (500, {"error": "line one\nline two ‮"})),
+        (models, (200, b"[]")),
+        (models, (200, {"message": "text"})),
+        (models, (200, {"message": {"role": "assistant", "content": "Sure! I turned off sounds."}})),
+        (models, (200, {"message": {"tool_calls": {"function": {}}}})),
+        (models, _tool_calls(*[("set_setting", {"key": "sounds_enabled", "value": "off"})] * 11)),
+        (models, _tool_calls(("set_setting", {"key": "server_port", "value": "1"}),
+                             ("add_dictionary_word", {"word": "Kubernetes"}))),
+        (models, _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "on"}))),
+    ]:
+        _FakeTweakOllama.tags, _FakeTweakOllama.chat = tags, chat
+        rust, _ = _assert_tweak_same(rust_build, sandbox, "turn off sounds", "--yes")
+        assert rust.returncode == 1 and rust.stdout == "", (tags, chat)
+        assert rust.stderr.startswith("Error: ") and rust.stderr.count("\n") == 1, rust.stderr
+    assert "Nothing to change: Sounds is already On" in rust.stderr
+
+    # Nothing listening: both name the same loopback URL (no OS error text).
+    save_config(Config(llm_provider="ollama", llm_base_url=f"http://127.0.0.1:{_free_port()}/"), sandbox["config"])
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "turn off sounds", "--yes")
+    assert rust.stderr.startswith("Error: Couldn't reach Ollama at http://127.0.0.1:")
+    # Control characters only: the agent, not click, refuses it.
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "\x01\x02")
+    assert rust.stderr == "Error: Tell LocalFlow what to change.\n"
 
 
 # ---------------------------------------------------- audio / STT storage ---

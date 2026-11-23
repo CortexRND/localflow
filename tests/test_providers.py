@@ -6,12 +6,14 @@ import pytest
 import requests
 
 from localflow.cleanup import Cleaner
+from localflow.config import Config
 from localflow.providers.base import (
     LLMProvider,
     ModelInfo,
     ProviderError,
     STTProvider,
 )
+from localflow.providers.factory import build_fast_llm, build_llm
 from localflow.providers.llm_ollama import OllamaLLM
 from localflow.providers.llm_openai_compat import OpenAICompatLLM
 from localflow.providers.registry import (
@@ -314,6 +316,29 @@ def test_cleaner_uses_provider_and_preserves_fallback():
 
     assert Cleaner(FakeLLM(error=RuntimeError("failed"))).clean("input") == "input"
     assert Cleaner(FakeLLM(result="")).clean("input") == "input"
+
+
+@pytest.mark.parametrize("fast_model", ["", "  ", "  fast-model  "])
+def test_only_light_cleanup_uses_fast_model(monkeypatch, fast_model):
+    calls = []
+
+    def post(url, *, json, timeout):
+        calls.append((url, json["model"], timeout))
+        return FakeResponse({"response": "cleaned"})
+
+    monkeypatch.setattr(requests, "post", post)
+    config = Config(
+        llm_base_url="http://localhost:1234", llm_model="main-model",
+        llm_fast_model=fast_model, cleanup_timeout=17,
+    )
+    cleaner = Cleaner(build_llm(config), build_fast_llm(config))
+    assert cleaner.clean("light cleanup") == "cleaned"
+    assert cleaner.clean("medium cleanup", level="medium") == "cleaned"
+    assert cleaner.clean("no cleanup", level="none") == "no cleanup"
+    assert calls == [
+        ("http://localhost:1234/api/generate", fast_model.strip() or "main-model", 17),
+        ("http://localhost:1234/api/generate", "main-model", 17),
+    ]
 
 
 def test_work_prompt_generator_without_provider_is_unavailable():
