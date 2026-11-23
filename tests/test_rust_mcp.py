@@ -201,6 +201,16 @@ def test_ranked_limit_counts_dictations_not_passages(sandbox):
     assert {hit["id"] for hit in result["structuredContent"]["results"]} == {long_id, short_id}
 
 
+def test_long_dictation_substring_snippet(sandbox):
+    home, _, _ = sandbox
+    history = HistoryStore(home / ".localflow" / "history.sqlite")
+    history.add(kind="dictate", final_text="left " * 20 + "cucumber " + "right " * 45)
+    reply, = compare(sandbox, call("search_dictations", query="cumb"))
+    result = reply["structuredContent"]
+    assert result["match"] == "substring"
+    assert "cucumber" in result["results"][0]["snippet"]
+
+
 @pytest.mark.parametrize("state", ["v2-disabled", "legacy-disabled", "missing", "uninitialized", "newer"])
 def test_history_state(sandbox, state):
     home, config, _ = sandbox

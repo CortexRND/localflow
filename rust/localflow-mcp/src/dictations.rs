@@ -136,7 +136,8 @@ pub fn search(
                 .into_iter()
                 .find(|s| s.to_lowercase().contains(&needle))
             {
-                hits.push(hit(row, substring_snippet(text, &needle))?);
+                let centered = substring_snippet(text, &needle);
+                hits.push(hit(row, snippet(&centered, &Default::default()))?);
                 if hits.len() >= limit {
                     break;
                 }
