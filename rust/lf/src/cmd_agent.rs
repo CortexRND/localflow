@@ -579,8 +579,10 @@ mod win32 {
             _ => {
                 // REG_SZ and REG_EXPAND_SZ: UTF-16 up to the first NUL.
                 let units: Vec<u16> = data
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
                     .take_while(|&unit| unit != 0)
                     .collect();
                 String::from_utf16_lossy(&units)

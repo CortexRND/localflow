@@ -2,6 +2,7 @@
 //! `localflow/appbundle.py` `install_app`, which writes the `LocalFlow
 //! Setup.app` and `LocalFlow.app` launcher bundles into `~/Applications`.
 
+#[cfg(any(unix, test))]
 use std::fs;
 use std::path::{Path, PathBuf};
 
