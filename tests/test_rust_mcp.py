@@ -13,6 +13,14 @@ import pytest
 from localflow.history import HistoryStore
 
 ROOT = Path(__file__).resolve().parents[1]
+# The MCP import chain reaches localflow.meetings, whose top-level
+# `import sounddevice` initializes PortAudio. Read-only MCP tools never use
+# audio, so start Python with a bare module: any audio access raises.
+PYTHON_MCP = (
+    "import runpy, sys, types; "
+    "sys.modules['sounddevice'] = types.ModuleType('sounddevice'); "
+    "runpy.run_module('localflow.mcp_server', run_name='__main__', alter_sys=True)"
+)
 RUST = ROOT / "rust"
 RUST_MCP = RUST / Path(os.environ.get("CARGO_TARGET_DIR") or "target") / "debug" / (
     "localflow-mcp.exe" if os.name == "nt" else "localflow-mcp"
@@ -44,9 +52,6 @@ def sandbox(tmp_path):
         "LOCALFLOW_CONFIG": str(config),
         "PYTHONPATH": str(ROOT),
         "PYTHONIOENCODING": "utf-8",
-        # Importing Python recall can initialize PortAudio. Don't open the real
-        # PulseAudio socket or let the Pulse client create a runtime directory.
-        "PULSE_SERVER": f"unix:{tmp_path / 'no-pulse.sock'}",
     }
     return home, config, env
 
@@ -75,7 +80,7 @@ def compare(sandbox, *requests):
         for msg in requests
     )  # EOF immediately after the last message is valid too.
     outputs = []
-    for command in ([sys.executable, "-m", "localflow.mcp_server"], [str(RUST_MCP)]):
+    for command in ([sys.executable, "-c", PYTHON_MCP], [str(RUST_MCP)]):
         run = subprocess.run(
             command, input=payload, capture_output=True, cwd=ROOT, env=env, timeout=20,
             check=False,
