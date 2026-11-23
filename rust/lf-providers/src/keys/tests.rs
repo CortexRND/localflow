@@ -12,6 +12,27 @@ fn keys<'a>(secrets: &'a MemSecrets, configs: &'a MemConfigs) -> ProviderKeys<'a
     ProviderKeys::new(secrets, configs)
 }
 
+#[test]
+fn activation_clears_fast_model_only_when_endpoint_changes() {
+    let secrets = MemSecrets::with(&[("provider_key_openai", KEY_A), ("provider_key_groq", KEY_B)]);
+    let configs = MemConfigs::new(default_config());
+    let keys = keys(&secrets, &configs);
+    let mut current = cloud_a();
+    current.set_str("llm_base_url", &format!("{OPENAI_URL}/"));
+    current.set_str("llm_fast_model", "fast");
+    let same = keys
+        .activate("openai", None, Some("renamed"), Some(current.clone()))
+        .unwrap();
+    assert_eq!(same.get_str("llm_fast_model"), "fast");
+    for provider in ["groq", "ollama"] {
+        let moved = keys
+            .activate(provider, None, Some("other"), Some(current.clone()))
+            .unwrap();
+        assert_eq!(moved.get_str("llm_fast_model"), "");
+        assert_eq!(configs.current().get_str("llm_fast_model"), "");
+    }
+}
+
 fn cloud_a() -> TestConfig {
     config_with(&[
         ("llm_provider", "openai-compatible"),
