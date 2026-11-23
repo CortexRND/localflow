@@ -22,7 +22,7 @@ struct MeetingCapture;
 
 impl CaptureFactory for MeetingCapture {
     fn transcriber(&self, config: &Config) -> Result<Arc<dyn Transcriber>> {
-        Ok(Arc::new(MeetingSpeech(LazySpeechAdapter::new(
+        Ok(Arc::new(MeetingSpeech(LazySpeechAdapter::for_16k_pcm(
             config.clone(),
         ))))
     }

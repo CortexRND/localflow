@@ -74,8 +74,18 @@ pub struct LazySpeechAdapter {
 
 impl LazySpeechAdapter {
     pub fn new(config: Config) -> Self {
+        Self::with_make(move || SpeechAdapter::from_config(&config))
+    }
+
+    /// For callers that already resample to 16 kHz (meeting capture), so
+    /// the dictation `sample_rate` setting does not apply.
+    pub fn for_16k_pcm(config: Config) -> Self {
+        Self::with_make(move || SpeechAdapter::for_16k_pcm(&config))
+    }
+
+    fn with_make(make: impl Fn() -> Result<SpeechAdapter> + Send + Sync + 'static) -> Self {
         Self {
-            make: Box::new(move || SpeechAdapter::from_config(&config).map_err(|e| e.to_string())),
+            make: Box::new(move || make().map_err(|e| e.to_string())),
             engine: Mutex::new(None),
             loaded: std::sync::atomic::AtomicBool::new(false),
         }
@@ -157,6 +167,11 @@ impl SpeechEngine for UnavailableSpeech {
 impl SpeechAdapter {
     pub fn from_config(config: &Config) -> Result<Self> {
         validate_sample_rate(config)?;
+        Self::for_16k_pcm(config)
+    }
+
+    /// Like [`Self::from_config`], without the dictation `sample_rate` check.
+    pub fn for_16k_pcm(config: &Config) -> Result<Self> {
         Ok(Self::from_spec(factory::from_config(config, None)?))
     }
 
@@ -516,6 +531,9 @@ mod tests {
             .insert("sample_rate".into(), serde_json::json!(48000));
         assert!(RecorderSource::from_config(&config).is_err());
         assert!(SpeechAdapter::from_config(&config).is_err());
+        if cfg!(feature = "whisper") {
+            assert!(SpeechAdapter::for_16k_pcm(&config).is_ok());
+        }
         config
             .fields
             .insert("sample_rate".into(), serde_json::json!(16000));
