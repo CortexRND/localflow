@@ -108,18 +108,29 @@ fn list(json_output: bool, io: &mut Io<'_>) -> Result<()> {
         outln!(
             io.out,
             "{}",
-            wrap_text(&format!("error: {error}"), console_width())
+            wrap_text(
+                &format!("error: {error}"),
+                console_width(legacy_windows_console())
+            )
         )?;
     }
     Ok(())
 }
 
-fn console_width() -> usize {
-    env::var("COLUMNS")
-        .ok()
-        .and_then(|s| s.parse().ok())
+fn console_width(legacy_windows: bool) -> usize {
+    effective_width(
+        env::var("COLUMNS").ok().and_then(|s| s.parse().ok()),
+        legacy_windows,
+    )
+}
+
+/// Rich's `Console` reserves the last column on legacy Windows consoles:
+/// it subtracts `legacy_windows` from `COLUMNS` or the detected width.
+fn effective_width(columns: Option<usize>, legacy_windows: bool) -> usize {
+    columns
         .filter(|&width| width > 0)
         .unwrap_or(80)
+        .saturating_sub(usize::from(legacy_windows))
 }
 
 fn wrap_text(text: &str, width: usize) -> String {
@@ -223,8 +234,8 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
     let cache = model_storage::hf_hub_cache(None);
     let mut progress = None;
     let terminal = std::io::stdout().is_terminal();
-    let width = console_width();
     let ascii = legacy_windows_console();
+    let width = console_width(ascii);
     let result = setup_downloads::download_snapshot(
         &repo,
         &cache,
@@ -436,7 +447,33 @@ fn probe_python(mode: &str, provider: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::progress_line;
+    use super::{effective_width, progress_line};
+
+    #[test]
+    fn legacy_windows_reserves_last_column_like_rich() {
+        assert_eq!(effective_width(Some(80), false), 80);
+        assert_eq!(effective_width(None, false), 80);
+        assert_eq!(effective_width(Some(80), true), 79);
+        assert_eq!(effective_width(None, true), 79);
+        assert_eq!(
+            progress_line(
+                "fw-tiny",
+                Some((1, 1)),
+                effective_width(Some(80), true),
+                true
+            ),
+            format!("Downloading fw-tiny {} 100% 0/0 MB 0:00:00", "-".repeat(39))
+        );
+        assert_eq!(
+            progress_line(
+                "fw-tiny",
+                Some((1, 1)),
+                effective_width(Some(80), false),
+                false
+            ),
+            format!("Downloading fw-tiny {} 100% 0/0 MB 0:00:00", "━".repeat(40))
+        );
+    }
 
     #[test]
     fn progress_bar_uses_rich_ascii_glyphs_on_legacy_windows() {
