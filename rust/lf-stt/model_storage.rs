@@ -85,18 +85,33 @@ pub fn faster_whisper_repo(size: &str) -> Option<String> {
         })
 }
 
+const WHISPER_CATALOG_LABELS: &[(&str, &str)] = &[
+    ("tiny", "Tiny"),
+    ("base", "Base"),
+    ("small", "Small"),
+    ("medium", "Medium"),
+    ("large-v3-turbo", "Large v3 Turbo"),
+    ("large-v3", "Large v3"),
+    ("distil-large-v3", "Distil Large v3"),
+];
+
+/// Repository for a Python STT catalog ID, not an arbitrary model size or path.
+pub fn python_catalog_repo(id: &str) -> Option<String> {
+    if let Some(size) = id.strip_prefix("fw-") {
+        lookup(WHISPER_CATALOG_LABELS, size)?;
+        faster_whisper_repo(size)
+    } else if let Some(size) = id.strip_prefix("mlx-") {
+        mlx_repo(size).map(str::to_owned)
+    } else if id == "parakeet-v2" {
+        Some(PARAKEET_REPO.into())
+    } else {
+        None
+    }
+}
+
 /// In Python insertion order; Rust-only repositories follow the Python catalog.
 pub fn catalog() -> Vec<(String, String)> {
-    let labels = [
-        ("tiny", "Tiny"),
-        ("base", "Base"),
-        ("small", "Small"),
-        ("medium", "Medium"),
-        ("large-v3-turbo", "Large v3 Turbo"),
-        ("large-v3", "Large v3"),
-        ("distil-large-v3", "Distil Large v3"),
-    ];
-    let mut result: Vec<_> = labels
+    let mut result: Vec<_> = WHISPER_CATALOG_LABELS
         .iter()
         .map(|(size, label)| {
             (
@@ -106,7 +121,7 @@ pub fn catalog() -> Vec<(String, String)> {
         })
         .collect();
     result.extend(MLX_REPOS.iter().map(|(size, repo)| {
-        let label = labels.iter().find(|(s, _)| s == size).unwrap().1;
+        let label = lookup(WHISPER_CATALOG_LABELS, size).unwrap();
         (repo.to_string(), format!("Whisper {label} (Apple Silicon)"))
     }));
     result.push((PARAKEET_REPO.into(), "Parakeet v2".into()));

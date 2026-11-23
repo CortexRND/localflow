@@ -75,7 +75,13 @@ pub fn parse_since(value: Option<&Since>, now: NaiveDateTime) -> Result<Option<N
     };
     Ok(Some(parsed.ok_or_else(invalid)?))
 }
-pub(crate) fn timestamp(local: NaiveDateTime) -> f64 {
+/// Whether a recall date bound is relative to the current time, not a calendar day.
+pub fn is_relative_since(text: &str) -> bool {
+    RELATIVE.is_match(&text.trim_matches(python_whitespace).to_lowercase())
+}
+
+/// Convert a naive local datetime to a Unix timestamp using Python's DST rules.
+pub fn timestamp(local: NaiveDateTime) -> f64 {
     if let Some(dt) = Local.from_local_datetime(&local).earliest() {
         return dt.timestamp() as f64 + dt.timestamp_subsec_nanos() as f64 / 1e9;
     }

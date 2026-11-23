@@ -52,7 +52,8 @@ impl RecallResult {
         serde_json::to_value(self).expect("serializable recall result")
     }
 }
-pub(crate) fn local_time(ts: f64) -> Option<DateTime<Local>> {
+/// Convert a Unix timestamp to local time at Python datetime precision.
+pub fn local_time(ts: f64) -> Option<DateTime<Local>> {
     if !ts.is_finite() {
         return None;
     }

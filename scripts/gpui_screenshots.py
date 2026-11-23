@@ -14,6 +14,8 @@ PAGES = (
     "meetings", "prompts", "models", "settings", "setup",
 )
 SIZES = ((1280, 850), (960, 640))
+# GPUI 0.2 on X11 reads this before Xft.dpi and RandR, so it pins captures to scale 1.
+SCALE_ENV = "GPUI_X11_SCALE_FACTOR"
 
 
 def arguments(description):
@@ -74,12 +76,24 @@ def window_manager():
 def sandbox_window(binary, sandbox, *route):
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
-    env["GPUI_X11_SCALE_FACTOR"] = "1"
+    env[SCALE_ENV] = "1"
     if not env.get("XDG_RUNTIME_DIR"):
         runtime = sandbox.parent / "runtime"
         runtime.mkdir(mode=0o700, exist_ok=True)
         env["XDG_RUNTIME_DIR"] = str(runtime)
     process = subprocess.Popen([binary, "--sandbox", "--data-dir", sandbox, *route], env=env)
+    def started_environ():
+        # Popen can return before execve has published the new environment,
+        # so /proc/<pid>/environ is briefly empty; retry until it is populated.
+        if process.poll() is not None:
+            raise RuntimeError(f"Sandbox exited before starting ({process.returncode})")
+        return process_environ(process.pid)
+
+    try:
+        require_unit_scale(wait_for(started_environ, "the sandbox process environment", timeout=5))
+    except BaseException:
+        stop(process)
+        raise
 
     def mapped_window():
         if process.poll() is not None:
@@ -102,6 +116,30 @@ def sandbox_window(binary, sandbox, *route):
             raise RuntimeError(f"Sandbox failed to close cleanly ({process.returncode})")
     finally:
         stop(process)
+
+
+def process_environ(pid):
+    """Return the environment a running process was started with."""
+    with open(f"/proc/{pid}/environ", "rb") as source:
+        return parse_environ(source.read())
+
+
+def parse_environ(raw):
+    pairs = (entry.split(b"=", 1) for entry in raw.split(b"\0") if b"=" in entry)
+    return {os.fsdecode(key): os.fsdecode(value) for key, value in pairs}
+
+
+def require_unit_scale(environ):
+    """Fail unless GPUI on X11 uses scale 1 regardless of host Xft.dpi or RandR."""
+    value = environ.get(SCALE_ENV, "")
+    try:
+        scale = float(value)
+    except ValueError:
+        scale = None
+    if scale != 1.0:
+        raise RuntimeError(
+            f"lf-desktop must run with {SCALE_ENV}=1 so captures are at scale 1 (got {value!r})"
+        )
 
 
 def serve_appearance(theme, ready):

@@ -73,9 +73,23 @@ pub struct LazySpeechAdapter {
 }
 
 impl LazySpeechAdapter {
+    /// For the dictation recorder: rejects a configured `sample_rate` other than 16 kHz.
     pub fn new(config: Config) -> Self {
+        Self::with_factory(move || SpeechAdapter::from_config(&config))
+    }
+
+    /// For callers that resample to 16 kHz PCM themselves (e.g. meeting capture).
+    /// The dictation `sample_rate` setting does not describe that audio, so it is
+    /// not consulted.
+    pub fn for_16khz_pcm(config: Config) -> Self {
+        Self::with_factory(move || {
+            factory::from_config(&config, None).map(SpeechAdapter::from_spec)
+        })
+    }
+
+    fn with_factory(make: impl Fn() -> Result<SpeechAdapter> + Send + Sync + 'static) -> Self {
         Self {
-            make: Box::new(move || SpeechAdapter::from_config(&config).map_err(|e| e.to_string())),
+            make: Box::new(move || make().map_err(|e| e.to_string())),
             engine: Mutex::new(None),
             loaded: std::sync::atomic::AtomicBool::new(false),
         }
@@ -380,6 +394,21 @@ mod tests {
         let missing = LazySpeechAdapter::new(invalid);
         assert!(!missing.loaded());
         assert!(missing.load().is_err());
+    }
+
+    #[test]
+    fn only_the_dictation_constructor_checks_the_dictation_sample_rate() {
+        // An unknown provider fails in the factory before any model download,
+        // so the error shows which check each constructor reached.
+        let mut config = Config::default();
+        config.set_field("sample_rate", serde_json::json!(22050));
+        config.set_field("stt_backend", serde_json::json!("test-unknown"));
+        let dictation = LazySpeechAdapter::new(config.clone()).load().unwrap_err();
+        assert!(dictation.contains("sample_rate = 16000"), "{dictation}");
+        assert_eq!(
+            LazySpeechAdapter::for_16khz_pcm(config).load().unwrap_err(),
+            "unsupported speech provider: test-unknown"
+        );
     }
 
     #[test]
