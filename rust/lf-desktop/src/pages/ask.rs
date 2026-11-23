@@ -31,6 +31,23 @@ use crate::ui::{self, Button};
 /// thinking and running states can be seen. Real mode ignores it.
 const SANDBOX_LATENCY: Duration = Duration::from_millis(450);
 
+/// With tools, Ask searches only dictations and work prompts (no meeting
+/// transcripts), so this replaces the shared meeting example.
+const TOOL_MEETING_SUGGESTION: &str = "Which work prompts came out of my meetings?";
+
+/// Empty-state suggestions: the shared `EXAMPLES` for basic recall; with
+/// tools, any example that needs meeting transcripts is swapped for one the
+/// tools can answer.
+fn suggestions(tools_mode: bool) -> [&'static str; 3] {
+    EXAMPLES.map(|ex| {
+        if tools_mode && ex.to_lowercase().contains("meeting") {
+            TOOL_MEETING_SUGGESTION
+        } else {
+            ex
+        }
+    })
+}
+
 /// The composer's Send/Stop slot (fits either button with its icon).
 const ACTION_WIDTH: f32 = 96.;
 
@@ -581,17 +598,20 @@ impl Render for AskPage {
         });
         let mut convo = div().flex().flex_col().gap(space::s10());
         if self.convo.turns.is_empty() && !running {
-            let examples = EXAMPLES.iter().enumerate().map(|(i, ex)| {
-                let text = ex.to_string();
-                Button::new(("example", i as u64), *ex)
-                    .small()
-                    .icon("sparkles")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.composer
-                            .update(cx, |c, cx| c.set_text(text.clone(), cx));
-                        this.composer.read(cx).focus(window);
-                    }))
-            });
+            let examples = suggestions(tools_mode)
+                .into_iter()
+                .enumerate()
+                .map(|(i, ex)| {
+                    let text = ex.to_string();
+                    Button::new(("example", i as u64), ex)
+                        .small()
+                        .icon("sparkles")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.composer
+                                .update(cx, |c, cx| c.set_text(text.clone(), cx));
+                            this.composer.read(cx).focus(window);
+                        }))
+                });
             convo = convo.child(ui::empty_state(
                 &t,
                 "message-circle-question",
@@ -746,5 +766,24 @@ impl Render for AskPage {
                 )
                 .child(composer),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_suggestions_avoid_meeting_transcripts() {
+        assert_eq!(suggestions(false), EXAMPLES);
+        let tools = suggestions(true);
+        assert!(tools.contains(&TOOL_MEETING_SUGGESTION));
+        // Only the meeting example is replaced; the others keep their order.
+        for (shared, shown) in EXAMPLES.iter().zip(tools) {
+            if !shared.to_lowercase().contains("meeting") {
+                assert_eq!(*shared, shown);
+            }
+        }
+        assert!(!tools.contains(&EXAMPLES[0]), "the transcript question");
     }
 }
