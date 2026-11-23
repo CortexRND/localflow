@@ -198,6 +198,17 @@ def test_rust_put_keeps_config_edits_made_after_startup(servers, sandbox):
         assert values["features"]["meetings"] is False
 
 
+def test_rust_put_rejects_unreadable_config_without_changes(servers, sandbox):
+    rust, config = servers[1], sandbox["config"]
+    remembered = rust.request("/api/config")[1]
+    broken = b"config_version = 2\n[llm\nmodel = \n"
+    config.write_bytes(broken)
+    status, body, _ = rust.request("/api/config", "PUT", {"dictation": {"sample_rate": 22050}})
+    assert (status, body) == (503, {"detail": "could not load config"})
+    assert config.read_bytes() == broken
+    assert rust.request("/api/config")[:2] == (200, remembered)
+
+
 def test_secrets_reject_unknown_and_never_expose_values(servers):
     compare(servers, "/api/secrets")
     compare(servers, "/api/secrets/bogus", "PUT", {"value": "fixture-only"})
