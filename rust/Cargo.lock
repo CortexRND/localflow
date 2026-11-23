@@ -1808,12 +1808,14 @@ dependencies = [
  "lf-core",
  "lf-providers",
  "lf-server",
+ "lf-stt",
  "log",
  "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

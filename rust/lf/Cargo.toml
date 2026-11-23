@@ -18,10 +18,12 @@ path = "src/main.rs"
 lf-core = { path = "../lf-core" }
 lf-providers = { path = "../lf-providers" }
 lf-server = { path = "../lf-server" }
+lf-stt = { path = "../lf-stt", default-features = false, features = ["setup"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+unicode-width = "0.2"
 chrono = { workspace = true }
 # Facade for lf-core's warnings; `run_main` installs a small stderr logger.
 log = { workspace = true }
