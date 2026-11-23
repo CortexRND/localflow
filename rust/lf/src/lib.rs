@@ -4,6 +4,10 @@
 //! commands that work on local files (config, dictionary, history) plus the
 //! provider-key/LLM commands and a read-only `status` that asks the running
 //! server. The `serve` command hosts the Rust dictation and meeting services.
+//! `meeting start|stop|dismiss` POST to the running server, `prompts` reviews
+//! and dispatches the shared work-prompt queue, and `recall` searches local
+//! history, transcripts and notes; their Rich console output is reproduced by
+//! [`richfmt`].
 
 use std::ffi::OsString;
 use std::fmt;
@@ -18,10 +22,14 @@ mod cmd_dict;
 mod cmd_history;
 mod cmd_keys;
 mod cmd_llm;
+mod cmd_meeting;
+mod cmd_prompts;
+mod cmd_recall;
 mod cmd_serve;
 mod cmd_status;
 mod cmd_stt;
 pub mod pyfmt;
+pub mod richfmt;
 
 pub use clipboard::{Clipboard, SystemClipboard};
 
@@ -210,6 +218,9 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Stt(command) => cmd_stt::run(command, io),
         Command::Keys(command) => cmd_keys::run(command, io),
         Command::Status { json } => cmd_status::run(json, io),
+        Command::Meeting(command) => cmd_meeting::run(command, io),
+        Command::Prompts(command) => cmd_prompts::run(command, io),
+        Command::Recall(args) => cmd_recall::run(args, io),
     }
 }
 
@@ -225,9 +236,18 @@ mod tests {
         let help = run_cli(&["--help"]);
         assert_eq!(help.code, 0);
         assert!(help.out.contains("Usage: lf-rs"));
-        for name in ["config", "dict", "history", "llm", "keys", "status"] {
+        for name in [
+            "config", "dict", "history", "llm", "keys", "status", "meeting", "prompts",
+        ] {
             assert!(help.out.contains(name), "{name}");
         }
+        // Hidden like their click counterparts, but still runnable.
+        assert!(!help.out.contains("recall"));
+        let prompts = run_cli(&["prompts", "--help"]);
+        assert!(prompts.out.contains("  dispatch") && !prompts.out.contains("  approve"));
+        assert_eq!(run_cli(&["recall", "--help"]).code, 0);
+        let start = run_cli(&["meeting", "start", "--help"]);
+        assert!(start.out.contains("--title") && start.out.contains("--category"));
         assert!(help.err.is_empty());
         let sub = run_cli(&["history", "clear", "--help"]);
         assert_eq!(sub.code, 0);
@@ -247,10 +267,50 @@ mod tests {
             &["dict", "import"],
             &["llm", "use"],
             &["keys"],
+            &["meeting"],
+            &["meeting", "bogus"],
+            &["prompts"],
+            &["prompts", "dispatch", "--dry-run", "--repo"],
         ] {
             let outcome = run_cli(args);
             assert_eq!(outcome.code, 2, "{args:?}");
             assert!(!outcome.err.is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn new_commands_report_click_usage_errors_before_touching_files() {
+        for (args, message) in [
+            (&["recall"][..], "Missing argument 'QUESTION'."),
+            (&["recall", " \t"], "question is empty"),
+            (
+                &["recall", "x", "--k", "0"],
+                "Invalid value for '--k': 0 is not in the range 1<=x<=20.",
+            ),
+            (
+                &["recall", "--k=x"],
+                "Invalid value for '--k': 'x' is not a valid integer range.",
+            ),
+            (
+                &["recall", "x", "--since", "Soon"],
+                "Invalid value for --since: invalid since value 'Soon'; \
+                 use today, yesterday, 7d, 30d or YYYY-MM-DD",
+            ),
+            (&["prompts", "show"], "Missing argument 'PROMPT_ID'."),
+            (&["prompts", "approve"], "Missing argument 'IDS...'."),
+            (&["prompts", "reject"], "Missing argument 'IDS...'."),
+            (
+                &["prompts", "list", "-s", "done"],
+                "Invalid value for '--status' / '-s': 'done' is not one of \
+                 'pending', 'approved', 'rejected', 'dispatched', 'failed'.",
+            ),
+        ] {
+            let outcome = run_cli(args);
+            assert_eq!(
+                (outcome.code, outcome.out.as_str(), outcome.err.as_str()),
+                (2, "", format!("Error: {message}\n").as_str()),
+                "{args:?}"
+            );
         }
     }
 
