@@ -1818,6 +1818,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2040,6 +2042,7 @@ dependencies = [
  "sha2 0.10.9",
  "sherpa-onnx",
  "tempfile",
+ "tokio",
  "wait-timeout",
  "whisper-rs",
  "windows-sys 0.60.2",
