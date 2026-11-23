@@ -269,6 +269,25 @@ pub fn resolve(
     path: Option<OsString>,
     exe_dir: Option<PathBuf>,
 ) -> Result<Vec<McpCommand>, McpError> {
+    resolve_with(override_value, path, exe_dir, &is_python_shim)
+}
+
+/// macOS's `/usr/bin/python3` (and `python`) is a developer-tools installer
+/// shim, not an interpreter. Never true on other systems.
+pub fn is_python_shim(candidate: &Path) -> bool {
+    cfg!(target_os = "macos") && candidate.starts_with("/usr/bin")
+}
+
+/// [`resolve`] with the Python-shim test injected. `skip_python` filters
+/// only automatically discovered `python3`/`python` candidates, while
+/// searching, so a shim earlier on `PATH` never hides a real interpreter
+/// later on it. The override and the other names are unaffected.
+pub fn resolve_with(
+    override_value: Option<OsString>,
+    path: Option<OsString>,
+    exe_dir: Option<PathBuf>,
+    skip_python: &dyn Fn(&Path) -> bool,
+) -> Result<Vec<McpCommand>, McpError> {
     if let Some(value) = override_value.filter(|v| !v.is_empty()) {
         if value.to_string_lossy().trim().eq_ignore_ascii_case("off") {
             return Err(McpError::Disabled);
@@ -329,11 +348,14 @@ pub fn resolve(
         push(p, McpKind::LfMcp);
     }
     for base in ["python3", "python"] {
-        if let Some(p) = find(base) {
-            // macOS's /usr/bin/python3 is a developer-tools installer shim.
-            if cfg!(target_os = "macos") && p.starts_with("/usr/bin") {
-                continue;
-            }
+        // The first executable in search order that isn't a shim.
+        let python = dirs.iter().find_map(|dir| {
+            exe_names(base)
+                .into_iter()
+                .map(|n| dir.join(n))
+                .find(|p| is_executable(p) && !skip_python(p))
+        });
+        if let Some(p) = python {
             push(p, McpKind::PythonModule);
         }
     }
@@ -1108,6 +1130,70 @@ mod tests {
             McpStatus::Failed(_)
         ));
         let _ = mcp;
+    }
+
+    /// A shim earlier on `PATH` is skipped while searching, so a real
+    /// interpreter later on `PATH` is still found (runs on every OS: the
+    /// shim directory is a temporary one, injected through `resolve_with`).
+    #[test]
+    fn python_shims_never_hide_a_later_interpreter() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = |d: &Path, name: &str| {
+            std::fs::create_dir_all(d).unwrap();
+            let p = d.join(exe_names(name).remove(0));
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            p
+        };
+        let shim_dir = dir.path().join("shim").join("bin");
+        let real_dir = dir.path().join("real").join("bin");
+        let shim3 = make(&shim_dir, "python3");
+        let shim = make(&shim_dir, "python");
+        let real3 = make(&real_dir, "python3");
+        let mcp = make(&shim_dir, "localflow-mcp");
+        let skip = |p: &Path| p.starts_with(&shim_dir);
+        let path = std::env::join_paths([shim_dir.clone(), real_dir.clone()]).unwrap();
+        assert_eq!(
+            resolve_with(None, Some(path.clone()), None, &skip).unwrap(),
+            vec![
+                // Non-Python names in the shim directory are unaffected.
+                McpCommand {
+                    program: mcp,
+                    kind: McpKind::LocalflowMcp
+                },
+                McpCommand {
+                    program: real3.clone(),
+                    kind: McpKind::PythonModule
+                },
+            ],
+            "the shim `python` with no real one later is dropped"
+        );
+        // Without the predicate, search order is plain PATH order.
+        let found = resolve_with(None, Some(path.clone()), None, &|_| false).unwrap();
+        assert_eq!(found[1].program, shim3);
+        assert_eq!(found[2].program, shim);
+        // Only shims: no Python candidate.
+        let only = std::env::join_paths([shim_dir.clone()]).unwrap();
+        let found = resolve_with(None, Some(only), None, &skip).unwrap();
+        assert!(found.iter().all(|c| c.kind != McpKind::PythonModule));
+        // An explicit override is used as given, shim or not.
+        assert_eq!(
+            resolve_with(Some(shim3.clone().into()), Some(path), None, &skip).unwrap(),
+            vec![McpCommand {
+                program: shim3,
+                kind: McpKind::PythonModule
+            }]
+        );
+        // The production predicate only ever matches on macOS.
+        assert_eq!(
+            is_python_shim(Path::new("/usr/bin/python3")),
+            cfg!(target_os = "macos")
+        );
+        assert!(!is_python_shim(&real3));
     }
 
     #[test]
