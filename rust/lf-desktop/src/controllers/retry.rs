@@ -1521,7 +1521,8 @@ mod tests {
         let jobs = RetryJobs::new();
         let mut seen = jobs.seq();
         // Hold the job body instead of running it, to finish it on cue.
-        let held: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::default();
+        type Body = Box<dyn FnOnce() + Send>;
+        let held: Arc<Mutex<Option<Body>>> = Arc::default();
         let slot = held.clone();
         let updated = HistoryEntry {
             final_text: "delivered".into(),

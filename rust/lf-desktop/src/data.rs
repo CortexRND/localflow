@@ -261,6 +261,15 @@ pub struct Services {
     pub retry_jobs: RetryJobs,
 }
 
+/// Storage, setup, Settings assistant and History retry backends, composed
+/// together so sandbox and real runs pick one consistent set.
+type Backends = (
+    Arc<dyn SpeechStorage>,
+    SetupDeps,
+    Arc<dyn SettingsAgent>,
+    Arc<dyn RetryBackend>,
+);
+
 impl Services {
     pub fn open(root: DataRoot) -> Result<Self> {
         let caps = Capabilities::new(root.is_sandbox(), false);
@@ -295,12 +304,7 @@ impl Services {
         };
         let remote = Remote::for_root(&root);
         let undo_path = root.localflow_dir.join("settings-undo.json");
-        let (storage, setup, assistant, retry): (
-            Arc<dyn SpeechStorage>,
-            SetupDeps,
-            Arc<dyn SettingsAgent>,
-            Arc<dyn RetryBackend>,
-        ) = if root.is_sandbox() {
+        let (storage, setup, assistant, retry): Backends = if root.is_sandbox() {
             // One simulated model inventory behind storage, downloads, the
             // setup wizard, Ollama pulls and History retry, so they agree.
             let sim = crate::sandbox::SimSpeech::seeded();
