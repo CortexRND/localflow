@@ -58,6 +58,15 @@ const HISTORY: &[(i64, &str, &str, &str, &str, &str)] = &[
         "ok",
     ),
     (240, "Editor", "work", "", "", "silent"),
+    // Answers the built-in "What have I dictated about the launch?".
+    (
+        300,
+        "Notes",
+        "work",
+        "launch plan announce the desktop preview on monday and share the release notes with the team",
+        "Launch plan: announce the desktop preview on Monday and share the release notes with the team.",
+        "ok",
+    ),
     (
         1500,
         "Browser",
@@ -1649,10 +1658,10 @@ mod tests {
 
     /// The built-in "What have I dictated about the launch?" once searched
     /// for its framing words too ("have" matched "Happy birthday! Hope you
-    /// have a great day."). It must search the topic only and, since no
-    /// example mentions a launch, say so without citing anything.
+    /// have a great day."). It must search the topic only, find the one
+    /// launch example and cite it, never the birthday message.
     #[test]
-    fn built_in_launch_question_searches_its_topic_and_cites_nothing() {
+    fn built_in_launch_question_searches_its_topic_and_cites_the_launch_note() {
         use crate::controllers::ask_agent::{AgentEvent, Via};
         let question = lf_ui::backends::ask::EXAMPLES
             .iter()
@@ -1676,20 +1685,42 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].0, "search_dictations");
         assert!(calls[0].1.contains("query: \"launch\""), "{}", calls[0].1);
+        // One search, then the found dictation is opened.
+        assert_eq!(
+            calls.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["search_dictations", "get_dictation"],
+            "{calls:?}"
+        );
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::ToolFinished { id: 1, ok: true, summary, .. } if summary == "0 results"
+            AgentEvent::ToolFinished { id: 1, ok: true, summary, .. } if summary == "1 result"
         )));
         let Some(AgentEvent::Finished(done)) = events.last() else {
             panic!("unfinished");
         };
         assert_eq!(done.via, Via::Tools);
         assert!(done.turn.error.is_empty(), "{}", done.turn.error);
-        assert_eq!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
-        assert!(done.turn.citations.is_empty(), "{:?}", done.turn.citations);
+        assert_ne!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
+        assert!(
+            done.turn.answer.contains("Launch plan"),
+            "{}",
+            done.turn.answer
+        );
+        assert!(!done.turn.answer.to_lowercase().contains("birthday"));
+        assert_eq!(done.turn.citations.len(), 1, "{:?}", done.turn.citations);
+        let id: i64 = done.turn.citations[0].reference.parse().unwrap();
+        let entry = open_history(&root).unwrap().get(id).unwrap().unwrap();
+        assert!(
+            entry.final_text.starts_with("Launch plan:"),
+            "{}",
+            entry.final_text
+        );
+        assert!(!done.turn.citations[0]
+            .snippet
+            .to_lowercase()
+            .contains("birthday"));
     }
 
     /// A trailing qualifier after "about" is not the topic: "What was that
