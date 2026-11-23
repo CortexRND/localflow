@@ -107,7 +107,9 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    it's installed and falls back to the current UI otherwise. Two launches hand
    over the page instead of opening two windows. 4a implements this behind the
    opt-in (a hand-off exits 0 and is not treated as a failure); verified by
-   fake-executable tests only, not against a real window.
+   fake-executable tests only, not against a real window. `lf-rs hub` follows
+   the same rules with byte-identical notices (`rust/lf/src/desktop_launch.rs`,
+   compared with `lf hub` in `tests/test_rust_parity.py`).
 5. **Packaging.** The installers ship a release `lf-desktop` and its system-library
    requirements are documented per distribution. The `rust/` workspace CI matrix
    isn't weakened. PR 3 ships it as a separate preview package and installer;

@@ -67,6 +67,23 @@ pub enum Command {
     /// Ask a question across your dictations, meeting transcripts and notes.
     #[command(hide = true)]
     Recall(RecallArgs),
+    /// Open the native history and settings hub.
+    #[command(args_override_self = true)]
+    Hub {
+        /// Hub page to open.  [default: Home]
+        #[arg(long, value_name = "PAGE", allow_hyphen_values = true)]
+        page: Option<String>,
+        /// Open LocalFlow Preview (native GPUI app, if installed) instead of
+        /// the legacy window. No screen-reader support yet: use --legacy (or
+        /// lf-hub on macOS).
+        #[arg(long)]
+        gpui: bool,
+        /// Open the legacy window (the default).
+        #[arg(long)]
+        legacy: bool,
+    },
+    /// Print the API token (for a phone bookmark or an iOS Shortcut).
+    Token,
 }
 
 // Required arguments, `--k` and `--status` are optional/plain strings here and
