@@ -1818,6 +1818,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2040,6 +2042,7 @@ dependencies = [
  "sha2 0.10.9",
  "sherpa-onnx",
  "tempfile",
+ "tokio",
  "wait-timeout",
  "whisper-rs",
  "windows-sys 0.60.2",
@@ -2147,6 +2150,17 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "localflow-mcp"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lf-ask",
+ "lf-core",
+ "serde_json",
+]
 
 [[package]]
 name = "lock_api"

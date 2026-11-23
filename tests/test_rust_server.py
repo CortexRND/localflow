@@ -265,8 +265,9 @@ def test_meetings_reads_local_templates_and_handles_session_requests(servers, sa
     assert rust.request("/meeting/stop", "POST")[:2] == (409, {"detail": "no meeting session running"})
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Uses an ALSA virtual microphone")
-def test_meeting_lifecycle_with_virtual_microphone(rust_build, sandbox):
+@contextlib.contextmanager
+def _virtual_mic_meeting(sandbox, title, notes):
+    """`lf-rs serve` with an ALSA /dev/zero mic and a started meeting holding notes."""
     alsa = sandbox["root"] / "asound.conf"
     alsa.write_text(
         'pcm.!default { type file slave.pcm { type null } file "/dev/null" infile "/dev/zero" format "raw" }\n',
@@ -286,14 +287,19 @@ def test_meeting_lifecycle_with_virtual_microphone(rust_build, sandbox):
     port = _free_port()
     command = [str(LF_RS), "serve", "--host", "127.0.0.1", "--port", str(port)]
     with _start(command, env, token_path, sandbox["root"] / "rust-server.log", port) as rust:
-        title = "Sandbox meeting"
         status, body, _ = rust.request("/meeting/start", "POST", {"title": title})
         assert status == 200, body
         assert body["ok"] is True
         assert rust.request("/meeting/status")[1]["session"]["title"] == title
 
-        notes = "Discussed next steps."
         assert rust.request("/meeting/notes", "POST", {"notes": notes})[0] == 200
+        yield rust
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Uses an ALSA virtual microphone")
+def test_meeting_lifecycle_with_virtual_microphone(rust_build, sandbox):
+    notes = "Discussed next steps."
+    with _virtual_mic_meeting(sandbox, "Sandbox meeting", notes) as rust:
         status, body, _ = rust.request("/meeting/stop", "POST")
         assert status == 200, body
         assert body["segments"] == 0
@@ -301,6 +307,29 @@ def test_meeting_lifecycle_with_virtual_microphone(rust_build, sandbox):
         assert notes_path.is_relative_to(sandbox["home"] / "vault")
         assert notes in notes_path.read_text(encoding="utf-8")
         assert rust.request("/meeting/status")[1]["session"] is None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Uses an ALSA virtual microphone")
+def test_sigterm_during_meeting_persists_notes(rust_build, sandbox):
+    title, notes = "Interrupted meeting", "Agreed to ship on Friday."
+    vault = sandbox["home"] / "vault"
+
+    def saved():
+        # The writer pairs each meeting note with a "<name> (transcript).md" log.
+        return sorted(vault.rglob("*.md"))
+
+    with _virtual_mic_meeting(sandbox, title, notes) as rust:
+        # Still recording and nothing written yet: only shutdown can persist it.
+        assert rust.request("/meeting/status")[1]["session"]["title"] == title
+        assert not saved()
+        rust.process.terminate()  # SIGTERM; /meeting/stop is never requested
+        assert rust.process.wait(timeout=30) == 0
+    files = saved()
+    (notes_path,) = [p for p in files if not p.stem.endswith(" (transcript)")]
+    (log_path,) = [p for p in files if p.stem.endswith(" (transcript)")]
+    assert log_path.stem == f"{notes_path.stem} (transcript)"
+    text = notes_path.read_text(encoding="utf-8")
+    assert title in text and notes in text
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc RSS measurement")
