@@ -308,6 +308,49 @@ fn snapshot_interrupt_drops_active_transfer_and_writes_no_ref() {
     assert!(model().inspect(root.path()).installed);
 }
 
+/// Like `tokio::signal::ctrl_c`, the interrupt is a byte written synchronously
+/// (here from the final progress report, just before integrity check and
+/// fsync) that only wakes its listener once the runtime's I/O driver is
+/// polled. The commit must observe it instead of reporting success.
+#[cfg(unix)]
+#[test]
+fn snapshot_interrupt_during_final_commit_publishes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let bytes = b"final weights";
+    let (url, server) = server(vec![
+        Reply::Body(200, metadata(bytes)),
+        Reply::Body(200, String::from_utf8_lossy(bytes).into_owned()),
+    ]);
+    let (mut signal, listener) = std::os::unix::net::UnixStream::pair().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let interrupt = async move {
+        let listener = tokio::net::UnixStream::from_std(listener).unwrap();
+        listener.readable().await.unwrap();
+    };
+    let result = download_snapshot(
+        "test/native",
+        root.path(),
+        &url,
+        |done, total| {
+            if total > 0 && done == total {
+                signal.write_all(b"\x03").unwrap();
+            }
+        },
+        interrupt,
+    );
+    server.join().unwrap();
+    assert_eq!(result, Err(INTERRUPTED.to_owned()));
+    let repo = root.path().join("models--test--native");
+    assert_eq!(std::fs::read_dir(repo.join("blobs")).unwrap().count(), 0);
+    assert!(!repo.join("refs").exists());
+    assert_eq!(
+        std::fs::read_dir(repo.join("snapshots").join("a".repeat(40)))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
 #[test]
 fn native_formats_are_separate_from_python_and_require_all_onnx_files() {
     #[cfg(feature = "whisper")]

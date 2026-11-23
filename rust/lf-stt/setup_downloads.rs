@@ -288,6 +288,12 @@ impl NativeModel {
                 }
                 transfer::check_cancel(cancel)?;
                 temporary.as_file().sync_all().map_err(|e| e.to_string())?;
+                if files.is_none() {
+                    // Let a signal that arrived during fsync interrupt before
+                    // the blob is published (dropping `temporary` removes it).
+                    transfer::checkpoint().await;
+                    transfer::check_cancel(cancel)?;
+                }
                 temporary.persist(&blob).map_err(|e| e.to_string())?;
             }
             let destination = snapshot.join(name);
@@ -317,6 +323,9 @@ impl NativeModel {
                 .min(total);
             progress(done, total);
         }
+        if files.is_none() {
+            transfer::checkpoint().await;
+        }
         transfer::check_cancel(cancel)?;
         hf_hub::Cache::new(root.into())
             .model(repo_id.into())
@@ -335,7 +344,10 @@ pub const INTERRUPTED: &str = "Download interrupted.";
 /// signal listener registers before any temporary file exists. Once it
 /// resolves, the in-flight transfer future is dropped (its `NamedTempFile`
 /// is removed and no blob, snapshot link or ref is written for it) and
-/// [`INTERRUPTED`] is returned.
+/// [`INTERRUPTED`] is returned. The transfer yields to the runtime after each
+/// blocking fsync and before and after the ref write, so a signal delivered
+/// during that synchronous commit work is still observed; blobs already
+/// published stay in the cache.
 pub fn download_snapshot(
     repo: &str,
     root: &Path,
@@ -349,9 +361,14 @@ pub fn download_snapshot(
     let cancel = AtomicBool::new(false);
     transfer::run(&cancel, async {
         let mut interrupt = std::pin::pin!(interrupt);
-        let mut operation = std::pin::pin!(NativeModel::download_inner(
-            repo, None, root, endpoint, progress, &cancel
-        ));
+        let mut operation = std::pin::pin!(async {
+            let result =
+                NativeModel::download_inner(repo, None, root, endpoint, progress, &cancel).await;
+            // A signal during the final ref write still aborts, as in Python
+            // (the completed cache entry is kept).
+            transfer::checkpoint().await;
+            result
+        });
         std::future::poll_fn(|cx| {
             if interrupt.as_mut().poll(cx).is_ready() {
                 return std::task::Poll::Ready(Err(INTERRUPTED.to_owned()));
