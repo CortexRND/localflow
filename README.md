@@ -251,6 +251,8 @@ commands, selection transforms, meeting notes, transcript Q&A and Recall
 answers still use `model`. Whole-utterance hot phrases expand without LLM
 generation, dictionary replacements are deterministic, and hotkey dictation skips
 cleanup for transcripts under five words (HTTP uploads can clean shorter text).
+Switching providers or endpoints through LocalFlow clears the saved `fast_model`,
+so set it again afterward if you want to use one.
 
 On an 8 GB machine, try a single model: run `ollama pull llama3.2:1b`, set
 `model = "llama3.2:1b"` and leave `fast_model` empty. Or set
