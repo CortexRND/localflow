@@ -302,6 +302,7 @@ lf-rs prompts dispatch [ID...] [--all] [--repo R] [--agent A] [--dry-run]
 lf-rs recall QUESTION [--since today|yesterday|7d|YYYY-MM-DD] [--k 1-20] [--no-llm] [--json]
 lf-rs token
 lf-rs hub [--page PAGE] [--gpui | --legacy]
+lf-rs tweak REQUEST [--yes] | --undo
 ```
 
 * `meeting` posts to the running server (API token read, never created);
@@ -316,6 +317,13 @@ lf-rs hub [--page PAGE] [--gpui | --legacy]
   Preview under the same discovery, probe and notice rules; the legacy window
   is `python -m localflow.hub_window --page PAGE` from the Python install
   (found like `stt list` below, checked to have `localflow.hub_window`).
+* `tweak` asks the loopback Ollama (the saved `llm.base_url` when the
+  provider is `ollama` and the URL is loopback, else `localhost:11434`)
+  through `lf-agent`, prints the escaped preview with its `WARNING:` and
+  `skipped:` lines, and applies only after `Apply these changes? [y/N]` (or
+  `--yes`); `--undo` reverts the last batch from
+  `~/.localflow/settings-undo.json`, never calling the model. Config,
+  dictionary and undo record are interchangeable with Python's `lf tweak`.
 
 * `config get` without a key prints the full v2 TOML (`config show`).
   `config set` reads VALUE as the type of the key's current value, exactly
@@ -545,7 +553,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
-  `watch`, `notes`, `open`, `models`, `stt`, `setup`, `tweak`,
+  `watch`, `notes`, `open`, `models`, `stt`, `setup`,
   `history retry`, `keys import`, `secret`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;

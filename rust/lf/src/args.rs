@@ -84,6 +84,11 @@ pub enum Command {
     },
     /// Print the API token (for a phone bookmark or an iOS Shortcut).
     Token,
+    /// Change settings in plain words with a local model, e.g. lf tweak "turn off sounds".
+    ///
+    /// Shows a preview first; nothing changes until you confirm (or pass --yes).
+    /// Runs on this computer through Ollama, whatever cloud provider is active.
+    Tweak(TweakArgs),
 }
 
 // Required arguments, `--k` and `--status` are optional/plain strings here and
@@ -169,6 +174,20 @@ pub struct RecallArgs {
     /// Machine-readable output.
     #[arg(long = "json")]
     pub json: bool,
+}
+
+/// The missing or blank REQUEST and the `--undo` combinations are checked by
+/// the command, like click's in-body `UsageError`s.
+#[derive(Debug, Args)]
+pub struct TweakArgs {
+    #[arg(value_name = "REQUEST")]
+    pub request: Option<String>,
+    /// Apply without asking for confirmation.
+    #[arg(long, short = 'y', overrides_with = "yes")]
+    pub yes: bool,
+    /// Undo the last applied tweak.
+    #[arg(long, overrides_with = "undo")]
+    pub undo: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]

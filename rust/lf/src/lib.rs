@@ -7,7 +7,8 @@
 //! `meeting start|stop|dismiss` POST to the running server, `prompts` reviews
 //! and dispatches the shared work-prompt queue, and `recall` searches local
 //! history, transcripts and notes; their Rich console output is reproduced by
-//! [`richfmt`].
+//! [`richfmt`]. `tweak` previews, applies and undoes plain-language settings
+//! changes through the local `lf-agent` settings agent.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -30,6 +31,7 @@ mod cmd_serve;
 mod cmd_status;
 mod cmd_stt;
 mod cmd_token;
+mod cmd_tweak;
 pub mod desktop_launch;
 pub mod pyfmt;
 mod python_install;
@@ -78,6 +80,32 @@ pub(crate) fn fail<T>(message: impl Into<String>) -> anyhow::Result<T> {
 
 pub(crate) fn usage<T>(message: impl Into<String>) -> anyhow::Result<T> {
     Err(CliError::Usage(message.into()).into())
+}
+
+/// click's `Abort`: `Aborted!` on stderr, exit 1.
+pub(crate) fn abort<T>(io: &mut Io<'_>) -> anyhow::Result<T> {
+    writeln!(io.err, "Aborted!")?;
+    Err(CliError::Exit(1).into())
+}
+
+/// `click.confirm(text, default=False)` on stdout: the answer is stripped and
+/// lowercased; y/yes or n/no, empty means no; anything else prints
+/// `Error: invalid input` (stdout too) and asks again. End of input is click's
+/// `Abort`, with nothing more on stdout.
+pub(crate) fn confirm(text: &str, io: &mut Io<'_>) -> anyhow::Result<bool> {
+    loop {
+        write!(io.out, "{text} [y/N]: ")?;
+        io.out.flush()?;
+        let mut line = String::new();
+        if io.input.read_line(&mut line)? == 0 {
+            return abort(io);
+        }
+        match pyfmt::py_strip(&line).to_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" | "" => return Ok(false),
+            _ => writeln!(io.out, "Error: invalid input")?,
+        }
+    }
 }
 
 /// Write one line to a stream; a closed pipe is not worth a panic.
@@ -174,6 +202,11 @@ where
         }
     };
     let result = dispatch(cli.command, io);
+    report(result, io)
+}
+
+/// Print a command's error the way click does and return the exit status.
+pub(crate) fn report(result: anyhow::Result<()>, io: &mut Io<'_>) -> i32 {
     let code = match result {
         Ok(()) => 0,
         Err(error) => match error.downcast_ref::<CliError>() {
@@ -227,6 +260,7 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Recall(args) => cmd_recall::run(args, io),
         Command::Hub { page, gpui, legacy } => cmd_hub::run(page, gpui, legacy, io),
         Command::Token => cmd_token::run(io),
+        Command::Tweak(args) => cmd_tweak::run(args, io),
     }
 }
 
@@ -244,7 +278,7 @@ mod tests {
         assert!(help.out.contains("Usage: lf-rs"));
         for name in [
             "config", "dict", "history", "llm", "keys", "status", "meeting", "prompts", "hub",
-            "token",
+            "token", "tweak",
         ] {
             assert!(help.out.contains(name), "{name}");
         }
