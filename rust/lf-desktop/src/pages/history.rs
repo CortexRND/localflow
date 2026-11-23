@@ -137,7 +137,9 @@ impl HistoryPage {
         if self.retry_seen != before {
             cx.notify();
         }
-        let running = jobs.running().is_some();
+        // From the same snapshot as the results: a job that finishes right
+        // after this observation is still seen as running, so we poll again.
+        let running = observed.running;
         if !running {
             self.retry_watch = false;
         }

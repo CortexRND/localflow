@@ -378,6 +378,8 @@ pub struct Observed {
     pub updated: Vec<HistoryEntry>,
     /// Results were dropped before being observed: reload the list.
     pub missed: bool,
+    /// A job was still running in this same snapshot: observe again later.
+    pub running: bool,
 }
 
 /// The process's one retry slot. Cheap to clone; every clone shares it.
@@ -418,6 +420,7 @@ impl RetryJobs {
         let oldest = state.finished.front().map_or(state.seq + 1, |f| f.seq);
         let observed = Observed {
             missed: *seen < state.seq && oldest > *seen + 1,
+            running: state.running.is_some(),
             updated: state
                 .finished
                 .iter()
@@ -1277,6 +1280,39 @@ mod tests {
         // The error banner still follows only the latest job's row.
         assert!(jobs.last_for(&cited_entry).is_some());
         assert!(jobs.last_for(&paged_entry).is_none());
+    }
+
+    #[test]
+    fn a_completion_right_after_an_observation_keeps_polling_and_is_delivered() {
+        let f = fixture();
+        let entry = f.retryable();
+        let jobs = RetryJobs::new();
+        let mut seen = jobs.seq();
+        // Hold the job body instead of running it, to finish it on cue.
+        let held: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::default();
+        let slot = held.clone();
+        let updated = HistoryEntry {
+            final_text: "delivered".into(),
+            ..entry.clone()
+        };
+        let result = updated.clone();
+        assert!(jobs.start_with(
+            RetryKey::of(&entry),
+            move || Ok(result),
+            Box::new(move |body| {
+                *slot.lock().unwrap() = Some(body);
+                Ok(())
+            }),
+        ));
+        let first = jobs.observe(&mut seen);
+        assert!(first.running && first.updated.is_empty(), "poll again");
+        // The worker finishes right after that observation.
+        (held.lock().unwrap().take().unwrap())();
+        assert!(jobs.running().is_none());
+        let next = jobs.observe(&mut seen);
+        assert_eq!(next.updated, vec![updated]);
+        assert!(!next.running && !next.missed, "now the watcher may stop");
+        assert_eq!(jobs.observe(&mut seen), Observed::default());
     }
 
     #[test]
