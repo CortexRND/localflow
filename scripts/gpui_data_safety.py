@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -56,9 +57,31 @@ def fingerprint(path, key):
     return digest.hexdigest()
 
 
-def xdg_path(variable, fallback):
-    path = Path(os.environ.get(variable, ""))
+def xdg_path(variable, fallback, environ=os.environ):
+    path = Path(environ.get(variable, ""))
     return path if path.is_absolute() else fallback
+
+
+def keyring_directory(environ):
+    """Mirror gnome-keyring's gkm_util_locate_keyrings_directory for a daemon environment."""
+    home = Path(environ.get("HOME") or Path.home())
+    current = xdg_path("XDG_DATA_HOME", home / ".local/share", environ) / "keyrings"
+    legacy = home / ".gnome2" / "keyrings"
+    return legacy if not current.is_dir() and legacy.is_dir() else current
+
+
+def collection_file(collection, directory):
+    """Map a gnome-keyring collection object path to its backing .keyring file."""
+    prefix = "/org/freedesktop/secrets/collection/"
+    if not collection.startswith(prefix) or "/" in collection[len(prefix):]:
+        return None
+    identifier = re.sub(r"_([0-9a-f]{2})", lambda m: chr(int(m[1], 16)), collection[len(prefix):])
+    return directory / f"{identifier}.keyring"
+
+
+def process_environment(pid):
+    entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    return dict(os.fsdecode(entry).split("=", 1) for entry in entries if b"=" in entry)
 
 
 def monitored_stores():
@@ -68,18 +91,17 @@ def monitored_stores():
     if not home.is_absolute():
         raise RuntimeError("HOME must be an absolute path")
     config = xdg_path("XDG_CONFIG_HOME", home / ".config") / "localflow" / "config.toml"
-    keyrings = xdg_path("XDG_DATA_HOME", home / ".local/share") / "keyrings"
     bus = dbus.SessionBus()
     service = "org.freedesktop.secrets"
     secrets = bus.get_object(service, "/org/freedesktop/secrets")
     collection = secrets.ReadAlias("default", dbus_interface="org.freedesktop.Secret.Service")
     daemon = bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus")
     pid = daemon.GetConnectionUnixProcessID(service, dbus_interface="org.freedesktop.DBus")
-    if (
-        collection == "/"
-        or Path(os.readlink(f"/proc/{pid}/exe")).name != "gnome-keyring-daemon"
-        or not any(keyrings.glob("*.keyring"))
-    ):
+    if Path(os.readlink(f"/proc/{pid}/exe")).name != "gnome-keyring-daemon":
+        raise RuntimeError("An active, persistent GNOME Keyring default collection is required")
+    keyrings = keyring_directory(process_environment(pid))
+    backing = collection_file(str(collection), keyrings)
+    if backing is None or not backing.is_file():
         raise RuntimeError("An active, persistent GNOME Keyring default collection is required")
     return {
         "config": Path(os.environ.get("LOCALFLOW_CONFIG") or config),

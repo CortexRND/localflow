@@ -48,3 +48,21 @@ def test_capture_rejects_blank_wrong_size_and_wrong_theme(gates):
     assert not check("1280 850 1 0.01", "dark", 1280, 850)
     assert not check("1280 850 941 0.85", "dark", 1280, 850)
     assert not check("1280 850 941 0.85", "light", 960, 640)
+
+
+def test_collection_file_decodes_gnome_keyring_object_paths(gates, tmp_path):
+    safety, _ = gates
+    prefix = "/org/freedesktop/secrets/collection/"
+    assert safety.collection_file(prefix + "login", tmp_path) == tmp_path / "login.keyring"
+    assert safety.collection_file(prefix + "my_5fkeys_20x", tmp_path) == tmp_path / "my_keys x.keyring"
+    assert safety.collection_file("/", tmp_path) is None
+    assert safety.collection_file(prefix + "login/1", tmp_path) is None
+
+
+def test_keyring_directory_follows_the_daemon_environment(gates, tmp_path):
+    safety, _ = gates
+    data = tmp_path / "data"
+    assert safety.keyring_directory({"HOME": str(tmp_path), "XDG_DATA_HOME": str(data)}) == data / "keyrings"
+    assert safety.keyring_directory({"HOME": str(tmp_path)}) == tmp_path / ".local/share/keyrings"
+    (tmp_path / ".gnome2/keyrings").mkdir(parents=True)
+    assert safety.keyring_directory({"HOME": str(tmp_path)}) == tmp_path / ".gnome2/keyrings"
