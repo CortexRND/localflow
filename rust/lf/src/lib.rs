@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 use clap::Parser;
 
@@ -18,8 +18,10 @@ mod cmd_dict;
 mod cmd_history;
 mod cmd_keys;
 mod cmd_llm;
+mod cmd_secret;
 mod cmd_serve;
 mod cmd_status;
+mod prompt;
 pub mod pyfmt;
 
 pub use clipboard::{Clipboard, SystemClipboard};
@@ -35,6 +37,9 @@ pub struct Io<'a> {
     pub clipboard: &'a mut dyn Clipboard,
     /// Base URL override for `status` (tests); `None` = from config.
     pub server_url: Option<String>,
+    /// Stdin is a terminal: hidden prompts read from it without echo instead
+    /// of reading a line of `input`.
+    pub terminal: bool,
 }
 
 /// A user-facing failure. `Failed` is click's `ClickException` (prints
@@ -128,6 +133,7 @@ where
     // Unlocked (stderr is unbuffered): holding the lock for the whole run
     // would block log records from other threads until exit.
     let mut err = io::stderr();
+    let terminal = stdin.is_terminal();
     let mut input = stdin.lock();
     let mut clipboard = SystemClipboard;
     let mut io = Io {
@@ -136,6 +142,7 @@ where
         input: &mut input,
         clipboard: &mut clipboard,
         server_url: None,
+        terminal,
     };
     run(args, &mut io)
 }
@@ -193,6 +200,7 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Stats => cmd_history::stats(io),
         Command::Llm(command) => cmd_llm::run(command, io),
         Command::Keys(command) => cmd_keys::run(command, io),
+        Command::Secret(command) => cmd_secret::run(command, io),
         Command::Status { json } => cmd_status::run(json, io),
     }
 }
@@ -213,6 +221,16 @@ mod tests {
             assert!(help.out.contains(name), "{name}");
         }
         assert!(help.err.is_empty());
+        // `secret` is hidden like Python's `@cli.group(hidden=True)`.
+        assert!(!help
+            .out
+            .lines()
+            .any(|l| l.trim_start().starts_with("secret")));
+        let secret = run_cli(&["secret", "--help"]);
+        assert_eq!(secret.code, 0);
+        for name in ["set", "unset", "status"] {
+            assert!(secret.out.contains(name), "{name}");
+        }
         let sub = run_cli(&["history", "clear", "--help"]);
         assert_eq!(sub.code, 0);
         assert!(sub.out.contains("--yes"));
@@ -231,6 +249,10 @@ mod tests {
             &["dict", "import"],
             &["llm", "use"],
             &["keys"],
+            &["keys", "import", "--file"],
+            &["secret"],
+            &["secret", "set"],
+            &["secret", "unset"],
         ] {
             let outcome = run_cli(args);
             assert_eq!(outcome.code, 2, "{args:?}");

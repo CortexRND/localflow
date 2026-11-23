@@ -3,18 +3,21 @@
 //! Reads a JSON array of requests from stdin and writes a JSON array of
 //! results to stdout, one per request: `{"ok": value}` or `{"error": text}`.
 //! Each request is `{"op": name, ...arguments}` and calls the `lf-core`
-//! function of the same purpose; the Python side computes its own result
-//! in-process and compares. Nothing here evaluates Python.
+//! function of the same purpose (`cli` runs `lf::run` in-process against an
+//! in-memory keyring); the Python side computes its own result in-process
+//! and compares. Nothing here evaluates Python.
 
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use lf_core::config::{self, Config};
 use lf_core::dictionary::{self, DictionaryStore};
 use lf_core::history::{EntryUpdate, HistoryStore, NewEntry};
 use lf_core::hotphrases::{self, HotPhraseStore, RenderSteps};
+use lf_core::secrets::{self, FailingKeyring, KeyringBackend, MemoryKeyring};
 use lf_core::{apitoken, formatting, symbols};
 use serde_json::{json, Value};
 
@@ -221,7 +224,82 @@ fn handle(request: &Value) -> Result<Value> {
         ))?),
         "render" => render(request),
         "hot_store" => hot_store(request),
+        "cli" => cli(request),
         other => bail!("unknown op {other:?}"),
+    }
+}
+
+/// Deleting a missing entry fails, as with a real keyring (Python keyring's
+/// `PasswordDeleteError`); `MemoryKeyring` itself treats it as a no-op.
+struct StrictMemory(Arc<MemoryKeyring>);
+
+impl KeyringBackend for StrictMemory {
+    fn get_password(&self, service: &str, name: &str) -> Result<Option<String>> {
+        self.0.get_password(service, name)
+    }
+
+    fn set_password(&self, service: &str, name: &str, value: &str) -> Result<()> {
+        self.0.set_password(service, name, value)
+    }
+
+    fn delete_password(&self, service: &str, name: &str) -> Result<()> {
+        if self.0.value(service, name).is_none() {
+            bail!("Password not found");
+        }
+        self.0.delete_password(service, name)
+    }
+}
+
+/// `lf::run(args)` in-process with `stdin` as input and an in-memory keyring
+/// seeded from `keyring` (`{name: value}`), or a keyring whose every call
+/// fails with `failing_keyring`. Returns `{code, out, err, keyring}`.
+fn cli(request: &Value) -> Result<Value> {
+    let mut argv = vec!["lf-rs".to_string()];
+    argv.extend(strings(request.get("args")));
+    let memory = Arc::new(MemoryKeyring::new());
+    for (name, value) in request
+        .get("keyring")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let value = value.as_str().context("keyring values must be strings")?;
+        memory.set_password(secrets::SERVICE, name, value)?;
+    }
+    let backend: Arc<dyn KeyringBackend> = match opt_text(request, "failing_keyring") {
+        Some(message) => Arc::new(FailingKeyring(message.to_string())),
+        None => Arc::new(StrictMemory(Arc::clone(&memory))),
+    };
+    let previous = secrets::set_keyring_backend(Some(backend));
+    secrets::reset_keyring_warning();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut input = io::Cursor::new(opt_text(request, "stdin").unwrap_or("").as_bytes().to_vec());
+    let mut clipboard = NoClipboard;
+    let code = lf::run(
+        argv,
+        &mut lf::Io {
+            out: &mut out,
+            err: &mut err,
+            input: &mut input,
+            clipboard: &mut clipboard,
+            server_url: None,
+            terminal: false,
+        },
+    );
+    secrets::set_keyring_backend(previous);
+    Ok(json!({
+        "code": code,
+        "out": String::from_utf8(out)?,
+        "err": String::from_utf8(err)?,
+        "keyring": memory.values(secrets::SERVICE),
+    }))
+}
+
+struct NoClipboard;
+
+impl lf::Clipboard for NoClipboard {
+    fn set_text(&mut self, _text: &str) -> Result<()> {
+        bail!("no clipboard in the parity driver")
     }
 }
 
