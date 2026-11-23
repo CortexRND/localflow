@@ -312,10 +312,10 @@ impl HistoryReader {
         sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
         values.push(Value::Integer(limit));
         let mut statement = self.0.prepare(&sql).map_err(history_read_error)?;
-        statement
+        let rows = statement
             .query_map(rusqlite::params_from_iter(values), HistoryEntry::from_row)
-            .map_err(history_read_error)?
-            .collect::<rusqlite::Result<_>>()
+            .map_err(history_read_error)?;
+        rows.collect::<rusqlite::Result<_>>()
             .map_err(history_read_error)
     }
 

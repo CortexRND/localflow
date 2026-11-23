@@ -33,8 +33,9 @@ def sandbox(tmp_path):
     home = tmp_path / "profile"
     home.mkdir()
     config = tmp_path / "config.toml"
+    inherited = ("PATH", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "TMPDIR", "TZ")
     env = {
-        **os.environ,
+        **{key: os.environ[key] for key in inherited if key in os.environ},
         "HOME": str(home),
         "USERPROFILE": str(home),
         "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
@@ -43,6 +44,9 @@ def sandbox(tmp_path):
         "LOCALFLOW_CONFIG": str(config),
         "PYTHONPATH": str(ROOT),
         "PYTHONIOENCODING": "utf-8",
+        # Importing Python recall can initialize PortAudio. Don't open the real
+        # PulseAudio socket or let the Pulse client create a runtime directory.
+        "PULSE_SERVER": f"unix:{tmp_path / 'no-pulse.sock'}",
     }
     return home, config, env
 
