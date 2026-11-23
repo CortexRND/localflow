@@ -1287,7 +1287,9 @@ impl lf_meetings::Transcriber for MeetingSpeech {
 impl lf_meetings_backend::CaptureFactory for Capture {
     fn transcriber(&self, _: &Config) -> Result<Arc<dyn lf_meetings::Transcriber>> {
         self.ensure_allowed()?;
-        Ok(Arc::new(MeetingSpeech(self.speech.current())))
+        let speech = self.speech.current();
+        speech.load().map_err(anyhow::Error::msg)?;
+        Ok(Arc::new(MeetingSpeech(speech)))
     }
     fn microphone(&self, config: &Config) -> Result<Box<dyn lf_meetings::AudioSource>> {
         self.ensure_allowed()?;
@@ -1341,25 +1343,28 @@ mod tests {
 
     #[test]
     fn server_only_speech_tracks_settings_lazily_after_meeting_borrow_ends() {
-        struct Engine(String);
+        struct Engine(String, Arc<Mutex<Vec<String>>>);
         impl SpeechEngine for Engine {
             fn loaded(&self) -> bool {
                 false
             }
             fn load(&self) -> Result<(), String> {
-                panic!("must remain lazy")
+                self.1.lock().unwrap().push(self.0.clone());
+                Ok(())
             }
             fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
                 Ok(self.0.clone())
             }
             fn unload(&self) {}
         }
-        let factory: lf_runtime::worker::SttFactory = Arc::new(|config| {
+        let loads = Arc::new(Mutex::new(Vec::new()));
+        let factory_loads = loads.clone();
+        let factory: lf_runtime::worker::SttFactory = Arc::new(move |config| {
             let model = config.field_str("model_size").unwrap_or_default();
             if model == "invalid" {
                 return Err("selection failed".into());
             }
-            Ok(Arc::new(Engine(model.into())))
+            Ok(Arc::new(Engine(model.into(), factory_loads.clone())))
         });
         let original = Config::default();
         let shared = SharedSpeech::new(factory(&original).unwrap());
@@ -1393,6 +1398,33 @@ mod tests {
             previous.lock().unwrap().field_str("model_size"),
             Some("new-model")
         );
+        // Only the meeting start loaded (its own engine); selection stays lazy.
+        assert_eq!(*loads.lock().unwrap(), [original_model]);
+    }
+
+    #[test]
+    fn meeting_transcriber_fails_when_the_held_engine_cannot_load() {
+        struct Missing;
+        impl SpeechEngine for Missing {
+            fn loaded(&self) -> bool {
+                false
+            }
+            fn load(&self) -> Result<(), String> {
+                Err("model not downloaded".into())
+            }
+            fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+                panic!("never transcribes")
+            }
+            fn unload(&self) {}
+        }
+        let capture = Capture {
+            speech: SharedSpeech::new(Arc::new(Missing)),
+            allowed: Arc::new(AtomicBool::new(true)),
+        };
+        let error = lf_meetings_backend::CaptureFactory::transcriber(&capture, &Config::default())
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "model not downloaded");
     }
 
     #[test]
@@ -1587,13 +1619,15 @@ mod tests {
         thread.join().unwrap();
     }
 
-    struct ModelEngine(String);
+    /// Lazy fake speech; `loaded` stays true once anything loaded it.
+    struct ModelEngine(String, AtomicBool);
     impl SpeechEngine for ModelEngine {
         fn loaded(&self) -> bool {
-            false
+            self.1.load(Ordering::SeqCst)
         }
         fn load(&self) -> Result<(), String> {
-            panic!("activation must keep speech lazy")
+            self.1.store(true, Ordering::SeqCst);
+            Ok(())
         }
         fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
             Ok(self.0.clone())
@@ -1624,6 +1658,7 @@ mod tests {
             Arc::new(|config| {
                 Ok(Arc::new(ModelEngine(
                     config.field_str("model_size").unwrap_or_default().into(),
+                    AtomicBool::new(false),
                 )))
             }),
         )
@@ -1724,7 +1759,10 @@ mod tests {
             runtime.speech.transcribe(&[], None).unwrap(),
             "chosen-model"
         );
+        assert!(!runtime.speech.loaded(), "activation must keep speech lazy");
+        // Starting a meeting loads the selected model up front.
         assert!(capture.transcriber(&fresh).is_ok());
+        assert!(runtime.speech.loaded());
         assert_eq!(watched.lock().unwrap().len(), 1);
         assert_eq!(
             watched.lock().unwrap()[0].field_str("input_device"),
@@ -1803,7 +1841,10 @@ mod tests {
                 return Err("selection failed".into());
             }
             let n = built.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(Arc::new(ModelEngine(format!("{model}#{n}"))))
+            Ok(Arc::new(ModelEngine(
+                format!("{model}#{n}"),
+                AtomicBool::new(false),
+            )))
         })
     }
 
