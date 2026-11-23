@@ -302,6 +302,14 @@ def test_meeting_lifecycle_with_virtual_microphone(rust_build, sandbox):
         assert notes in notes_path.read_text(encoding="utf-8")
         assert rust.request("/meeting/status")[1]["session"] is None
 
+        shutdown_notes = "Saved when the server stopped."
+        assert rust.request("/meeting/start", "POST", {"title": "Shutdown meeting"})[0] == 200
+        assert rust.request("/meeting/notes", "POST", {"notes": shutdown_notes})[0] == 200
+        rust.process.terminate()
+        assert rust.process.wait(timeout=30) == 0
+    meetings = sandbox["home"] / "vault" / "notes" / "meetings"
+    assert any(shutdown_notes in path.read_text(encoding="utf-8") for path in meetings.rglob("*.md"))
+
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc RSS measurement")
 def test_idle_rss(servers):
