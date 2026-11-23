@@ -42,7 +42,7 @@ pub(crate) fn hidden(text: &str, io: &mut Io<'_>) -> Result<Option<String>> {
         let read = if io.terminal {
             write!(io.out, "{text}: ")?;
             io.out.flush()?;
-            match rpassword::read_password() {
+            match read_without_echo() {
                 Ok(value) => Some(value),
                 Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => None,
                 Err(error) => return Err(error.into()),
@@ -61,6 +61,20 @@ pub(crate) fn hidden(text: &str, io: &mut Io<'_>) -> Result<Option<String>> {
             Some(value) => return Ok(Some(value)),
         }
     }
+}
+
+/// One line from the terminal without echo. Like Python's `getpass`, a
+/// process with no controlling terminal reads from stdin, a terminal here.
+fn read_without_echo() -> std::io::Result<String> {
+    #[cfg(unix)]
+    if std::fs::File::open("/dev/tty").is_err() {
+        let config = rpassword::ConfigBuilder::new()
+            .input_file_path("/dev/stdin")
+            .output_writer(std::io::stdout())
+            .build();
+        return rpassword::read_password_with_config(config);
+    }
+    rpassword::read_password()
 }
 
 /// One line without its line ending; `None` at end of input.
