@@ -85,13 +85,15 @@ unavailable, the window still runs.
 
 On macOS the menu bar item uses a template icon (tinted for light and dark menu
 bars) and is not shown in `--sandbox`, so sandbox automation leaves the menu bar
-alone. **Paste last transcript** pastes into the app that was frontmost when you
-chose it: if that app is LocalFlow, unknown, or no longer frontmost when the
-request reaches the window, nothing is pasted, no app is activated and the
-clipboard is untouched; a toast asks you to switch to the target app and choose
-it again. Choosing it again before LocalFlow has handled the first request does
-nothing. Like the paste shortcut, focus can still change in the short moment
-between that check and the paste keystroke. The item is not interactively
+alone. **Paste last transcript** checks the target once, when the window
+handles the request: if the app that was frontmost when you chose it is
+LocalFlow, unknown, or no longer frontmost, nothing is pasted, no app is
+activated and the clipboard is untouched; a toast in the LocalFlow window asks
+you to switch to the target app and choose it again. Choosing it again before
+LocalFlow has handled the first request does nothing. After the check passes,
+the paste goes through the engine queue and a history lookup (which waits if
+the history database is busy) before the paste keystroke, and goes to whichever
+app is frontmost then, as with the paste shortcut. The item is not interactively
 verified on macOS yet (UI QA waived); an earlier native probe exercised the
 status item and its menu callbacks.
 
