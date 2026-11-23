@@ -633,9 +633,10 @@ the last three answered turns as context.
 - **Finding the server.** `LOCALFLOW_MCP_BIN` may be set to an absolute path to
   `localflow-mcp`, to `lf` (run as `lf mcp`) or to a Python interpreter (run as
   `python -m localflow.mcp_server`). The file name decides which. When it is set,
-  nothing else is tried; a relative or non-executable value is an error, and
-  `LOCALFLOW_MCP_BIN=off` turns the tools off. Without it, Ask looks beside the
-  `lf-desktop` executable and then in the absolute `PATH` directories for
+  nothing else is tried. An absolute path that doesn't exist counts as not
+  installed; any other unusable value (relative, a directory, not executable)
+  is an error, and `LOCALFLOW_MCP_BIN=off` turns the tools off. Without it,
+  Ask looks beside the `lf-desktop` executable and then in the absolute `PATH` directories for
   `localflow-mcp`, then for `lf` (only next to a `localflow` entry point, so an
   unrelated `lf` is never started), then for `python3`/`python`. The server is
   started without a shell, with fixed arguments, from its own directory, and
@@ -685,6 +686,13 @@ the last three answered turns as context.
   to the time filter distinguishes "Tools not installed", "Tools off" and
   "Tools unavailable"; click it to check again. A model error is shown as an
   error, never retried on another model.
+- **Warning banner.** The tools (started from the desktop process) don't need
+  the local service, and basic recall doesn't need the tools, so Ask warns only
+  when neither can answer: the tools are not installed, off or failed **and**
+  the service's health check reported it offline. Nothing is shown while
+  either check is still running, when the tools are connected, or when the
+  service is up. "Try again" checks both again. Send stays enabled either way;
+  the question reports what actually answered.
 - **Stop.** Stop (or Escape) discards the running answer and puts the question
   back in the composer. Every wait checks the stop flag every 100 ms, and the
   server (with its process group on Unix) is killed and reaped. A model request

@@ -6,6 +6,7 @@ use lf_ui::backends::ask::{Citation, Turn, ERROR_GENERIC};
 
 use crate::controllers::ask_agent::{AgentEvent, Answer, Via};
 use crate::controllers::mcp_client::McpStatus;
+use crate::remote::Health;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardStatus {
@@ -317,6 +318,57 @@ impl Conversation {
     }
 }
 
+/// The banner above the conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    None,
+    /// Sandbox: example services answer.
+    Sandbox,
+    /// Neither path can answer: the tools are missing, off or failed, and
+    /// the service that basic recall needs reported Offline. The reason
+    /// names what happened to the tools.
+    Unreachable {
+        tools: &'static str,
+    },
+}
+
+impl Conversation {
+    /// Warn only once both checks have settled on "nothing can answer". The
+    /// tools (stdio, from this process) and the service (HTTP) are
+    /// independent: connected tools answer with the service down, and the
+    /// service answers by basic recall without tools. While either is still
+    /// being checked nothing is shown, so the warning never flashes up
+    /// before the tools check finishes.
+    pub fn notice(&self, health: &Health) -> Notice {
+        if *health == Health::Simulated {
+            return Notice::Sandbox;
+        }
+        let tools = match &self.status {
+            McpStatus::Checking | McpStatus::Connected { .. } | McpStatus::Simulated => {
+                return Notice::None
+            }
+            McpStatus::Missing(_) => "aren't installed",
+            McpStatus::Off => "are turned off",
+            // Also reported when a running server stops responding, so
+            // this doesn't say which.
+            McpStatus::Failed(_) => "aren't available",
+        };
+        match health {
+            Health::Offline => Notice::Unreachable { tools },
+            Health::Unknown | Health::Online | Health::Simulated => Notice::None,
+        }
+    }
+}
+
+/// The `Notice::Unreachable` banner text. Only what was checked is named:
+/// the model isn't checked until a question is sent.
+pub fn unreachable_message(tools: &str) -> String {
+    format!(
+        "Ask can't reach your history right now. LocalFlow's tools {tools}, and the \
+         LocalFlow service isn't running. Start LocalFlow, or run lf serve, then try again."
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
     Neutral,
@@ -331,7 +383,7 @@ mod tests {
     use crate::controllers::ask_agent::tests::{ok, Harness};
     use crate::controllers::ask_agent::{answer, Question, LIMITS};
     use crate::controllers::mcp_client::McpError;
-    use lf_ui::backends::ask::Turn;
+    use lf_ui::backends::ask::{Turn, ERROR_UNREACHABLE};
     use serde_json::json;
     use std::sync::atomic::AtomicBool;
 
@@ -483,6 +535,117 @@ mod tests {
             .status_label()
             .0,
         );
+    }
+
+    fn with_status(status: McpStatus) -> Conversation {
+        Conversation {
+            status,
+            ..Conversation::default()
+        }
+    }
+
+    /// Every tools status against every service health.
+    #[test]
+    fn notice_only_when_no_path_can_answer() {
+        let unavailable = [
+            (McpStatus::Missing("not found".into()), "aren't installed"),
+            (McpStatus::Off, "are turned off"),
+            // Failed covers both "didn't start" and "stopped responding".
+            (McpStatus::Failed("no reply".into()), "aren't available"),
+        ];
+        for (status, tools) in unavailable {
+            let c = with_status(status);
+            assert_eq!(c.notice(&Health::Offline), Notice::Unreachable { tools });
+            // Basic recall can still answer, or the service isn't checked yet.
+            assert_eq!(c.notice(&Health::Online), Notice::None);
+            assert_eq!(c.notice(&Health::Unknown), Notice::None);
+            assert_eq!(c.notice(&Health::Simulated), Notice::Sandbox);
+        }
+        // Connected tools answer without the service.
+        for health in [Health::Offline, Health::Unknown, Health::Online] {
+            let c = with_status(McpStatus::Connected { tools: 4 });
+            assert_eq!(c.notice(&health), Notice::None);
+        }
+        assert_eq!(
+            with_status(McpStatus::Simulated).notice(&Health::Simulated),
+            Notice::Sandbox
+        );
+    }
+
+    #[test]
+    fn notice_waits_for_both_checks() {
+        // The page opens Checking with health Unknown; health usually
+        // settles first (Offline), the tools check later.
+        let mut c = Conversation::default();
+        assert_eq!(c.status, McpStatus::Checking);
+        for health in [Health::Unknown, Health::Offline, Health::Online] {
+            assert_eq!(c.notice(&health), Notice::None, "{health:?}");
+        }
+        c.status = McpStatus::Missing("not found".into());
+        assert!(matches!(
+            c.notice(&Health::Offline),
+            Notice::Unreachable { .. }
+        ));
+        // Try again puts the tools back to Checking: the warning goes until
+        // the new result arrives.
+        c.status = McpStatus::Checking;
+        assert_eq!(c.notice(&Health::Offline), Notice::None);
+        // A question reports its own status, which replaces the probe's.
+        let g = c.begin("q");
+        c.apply(g, AgentEvent::Status(McpStatus::Connected { tools: 4 }));
+        assert_eq!(c.notice(&Health::Offline), Notice::None);
+    }
+
+    #[test]
+    fn notice_copy_names_only_what_was_checked() {
+        for tools in ["aren't installed", "are turned off", "aren't available"] {
+            let text = unreachable_message(tools);
+            assert!(text.contains(tools), "{text}");
+            assert!(text.contains("Start LocalFlow") && text.contains("lf serve"));
+            // Plain words: no address or code formatting in the banner.
+            assert!(!text.contains("http") && !text.contains('`'), "{text}");
+            // The model is never checked before a question.
+            assert!(!text.to_lowercase().contains("model"), "{text}");
+        }
+    }
+
+    /// With tools, a question never goes through the service (basic recall
+    /// isn't called), so it answers with the service down and leaves no
+    /// warning; a model failure is a turn error that points at the model,
+    /// not the service.
+    #[test]
+    fn tools_answer_and_model_errors_without_the_service() {
+        let question = Question {
+            text: "q".into(),
+            filter: "Any time".into(),
+            context: Vec::new(),
+        };
+        let h = Harness::script(&["{\"answer\": \"Friday.\", \"sources\": []}"]);
+        let mut c = Conversation::default();
+        let g = c.begin("q");
+        answer(&h, &question, &LIMITS, &AtomicBool::new(false), &mut |e| {
+            c.apply(g, e);
+        });
+        assert!(h.recalls.lock().unwrap().is_empty());
+        assert_eq!(c.turns[0].answer, "Friday.");
+        assert_eq!(c.turns[0].via, Some(Via::Tools));
+        assert_eq!(c.notice(&Health::Offline), Notice::None);
+
+        let h = Harness::default();
+        h.replies
+            .lock()
+            .unwrap()
+            .push_back(Err("connection refused".into()));
+        let g = c.begin("q");
+        answer(&h, &question, &LIMITS, &AtomicBool::new(false), &mut |e| {
+            c.apply(g, e);
+        });
+        assert!(h.recalls.lock().unwrap().is_empty());
+        let error = &c.turns[1].error;
+        assert_eq!(error, ERROR_UNREACHABLE);
+        assert!(error.contains("model") && error.contains("Models page"));
+        assert!(!error.contains("service"));
+        assert_eq!(c.notice(&Health::Offline), Notice::None);
     }
 
     /// The visible mid-tool state, reproduced without sleeps: a worker

@@ -16,12 +16,12 @@ use lf_ui::backends::ask::{
 
 use crate::app::PageCx;
 use crate::controllers::ask::{
-    restored_text, Activity, AgentTurn, CardStatus, Conversation, StatusTone,
+    restored_text, unreachable_message, Activity, AgentTurn, CardStatus, Conversation, Notice,
+    StatusTone,
 };
 use crate::controllers::ask_agent::{self, AgentEvent, Answer, Question, Via, LIMITS};
 use crate::controllers::mcp_client::McpStatus;
-use crate::pages::{header, page, sandbox_note, service_banner};
-use crate::remote::Health;
+use crate::pages::{header, page, sandbox_note};
 use crate::theme::{size, space, theme, Theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::select::Select;
@@ -655,19 +655,32 @@ impl Render for AskPage {
             field,
         } = layout;
         let health = self.pcx.health(cx);
-        let config = self.pcx.services.config();
-        let address = self.pcx.services.remote.base_url(&config);
         let pcx = self.pcx.clone();
         let tools_mode = self.tools_mode();
-        // The service matters only when basic recall answers.
-        let banner = if health == Health::Simulated {
-            Some(sandbox_note(&t))
-        } else if tools_mode {
-            None
-        } else {
-            service_banner(&t, &health, &address, move |_, _, cx| {
-                pcx.recheck_health(cx)
-            })
+        // Send stays enabled whatever this says: the check can be stale, and
+        // a question reports what actually answered.
+        let banner = match self.convo.notice(&health) {
+            Notice::None => None,
+            Notice::Sandbox => Some(sandbox_note(&t)),
+            Notice::Unreachable { tools } => Some(ui::banner(
+                &t,
+                Tone::Warning,
+                unreachable_message(tools),
+                Some(
+                    Button::new("ask-retry", "Try again")
+                        .small()
+                        .icon("refresh-cw")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // Recheck both paths; a running question
+                            // reports the tools' status itself.
+                            pcx.recheck_health(cx);
+                            if !this.convo.running() {
+                                this.probe(cx);
+                            }
+                        }))
+                        .into_any_element(),
+                ),
+            )),
         };
         let running = self.convo.running();
         let clear = (!self.convo.turns.is_empty() || running).then(|| {
