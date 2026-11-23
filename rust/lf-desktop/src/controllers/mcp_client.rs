@@ -266,21 +266,33 @@ pub trait ToolTransport: Send {
     }
 }
 
-/// How long a wait capped at `cap` may take, given the run's `deadline`:
-/// `(wait, deadline_binds)`, or [`McpError::Deadline`] when it has passed.
-pub fn capped_wait(cap: Duration, deadline: Option<Instant>) -> Result<(Duration, bool), McpError> {
+/// The absolute end of one wait that started at `start`: the earlier of
+/// `start + cap` (the phase's own cap) and the run's `deadline`, with
+/// whether the run deadline is the one that applies (it wins a tie), or
+/// [`McpError::Deadline`] when the run deadline has already passed at
+/// `start`. Computed once per request, before anything is encoded or
+/// queued, so the countdown never restarts.
+pub fn effective_deadline(
+    start: Instant,
+    cap: Duration,
+    deadline: Option<Instant>,
+) -> Result<(Instant, bool), McpError> {
+    let phase = start + cap;
     match deadline {
-        None => Ok((cap, false)),
-        Some(deadline) => {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                Err(McpError::Deadline)
-            } else if left <= cap {
-                Ok((left, true))
-            } else {
-                Ok((cap, false))
-            }
-        }
+        None => Ok((phase, false)),
+        Some(run) if run <= start => Err(McpError::Deadline),
+        Some(run) if run <= phase => Ok((run, true)),
+        Some(_) => Ok((phase, false)),
+    }
+}
+
+/// The error of a wait that reached its end: [`McpError::Deadline`] when
+/// the run's deadline was the bound, else the phase's own timeout.
+fn expired(run_deadline_binds: bool, what: &'static str) -> McpError {
+    if run_deadline_binds {
+        McpError::Deadline
+    } else {
+        McpError::Timeout(what)
     }
 }
 
@@ -608,7 +620,8 @@ impl StdioSession {
         cancel: &AtomicBool,
         deadline: Option<Instant>,
     ) -> Result<Self, McpError> {
-        capped_wait(START_TIMEOUT, deadline)?;
+        // Nothing is started once the run's deadline has passed.
+        effective_deadline(Instant::now(), START_TIMEOUT, deadline)?;
         let mut cmd = server_command(command, std::env::var_os(CONFIG_ENV), std::env::current_dir)?;
         let mut child = cmd
             .spawn()
@@ -678,14 +691,39 @@ impl StdioSession {
         Ok(session)
     }
 
-    fn send(&mut self, message: &Value) -> Result<(), McpError> {
+    fn encode(message: &Value) -> Result<Vec<u8>, McpError> {
         let mut bytes = serde_json::to_vec(message)
             .map_err(|_| McpError::Protocol("couldn't encode the request"))?;
         bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn enqueue(&mut self, bytes: Vec<u8>) -> Result<(), McpError> {
         match &self.writer {
             Some(writer) if writer.send(bytes).is_ok() => Ok(()),
             _ => Err(McpError::Closed),
         }
+    }
+
+    fn send(&mut self, message: &Value) -> Result<(), McpError> {
+        let bytes = Self::encode(message)?;
+        self.enqueue(bytes)
+    }
+
+    /// Encode a request and queue it, unless its end (`until`) has passed
+    /// meanwhile: then nothing is sent and the wait's own error is returned.
+    fn send_request(
+        &mut self,
+        message: &Value,
+        until: Instant,
+        run_deadline_binds: bool,
+        what: &'static str,
+    ) -> Result<(), McpError> {
+        let bytes = Self::encode(message)?;
+        if Instant::now() >= until {
+            return Err(expired(run_deadline_binds, what));
+        }
+        self.enqueue(bytes)
     }
 
     fn notify(&mut self, method: &str) -> Result<(), McpError> {
@@ -706,12 +744,14 @@ impl StdioSession {
         if self.dead {
             return Err(McpError::Closed);
         }
-        let (wait, binds) = capped_wait(timeout, deadline)?;
+        // One absolute end, fixed before encoding and queueing the request.
+        let (until, binds) = effective_deadline(Instant::now(), timeout, deadline)?;
         self.next_id += 1;
         let id = self.next_id;
+        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let result = self
-            .send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-            .and_then(|_| self.wait_for(id, wait, binds, what, cancel));
+            .send_request(&message, until, binds, what)
+            .and_then(|_| self.wait_for(id, until, binds, what, cancel));
         if result.as_ref().err().is_some_and(McpError::is_fatal) {
             self.dead = true;
         }
@@ -721,30 +761,29 @@ impl StdioSession {
     fn wait_for(
         &mut self,
         id: i64,
-        timeout: Duration,
+        until: Instant,
         run_deadline_binds: bool,
         what: &'static str,
         cancel: &AtomicBool,
     ) -> Result<Value, McpError> {
-        let deadline = Instant::now() + timeout;
         let mut skipped = 0;
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(McpError::Cancelled);
             }
-            let left = deadline.saturating_duration_since(Instant::now());
+            let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(if run_deadline_binds {
-                    McpError::Deadline
-                } else {
-                    McpError::Timeout(what)
-                });
+                return Err(expired(run_deadline_binds, what));
             }
             let line = match self.lines.recv_timeout(left.min(POLL)) {
                 Ok(line) => line,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err(McpError::Closed),
             };
+            // A line that only became available at or after the end is late.
+            if Instant::now() >= until {
+                return Err(expired(run_deadline_binds, what));
+            }
             let bytes = match line {
                 Line::Data(bytes) => bytes,
                 Line::TooLong => return Err(McpError::Protocol("reply too large")),
@@ -1065,19 +1104,131 @@ mod tests {
     }
 
     #[test]
+    fn effective_deadline_is_absolute_and_the_run_wins_ties() {
+        let start = Instant::now();
+        let cap = Duration::from_secs(5);
+        assert_eq!(
+            effective_deadline(start, cap, None),
+            Ok((start + cap, false))
+        );
+        let near = start + Duration::from_secs(1);
+        assert_eq!(effective_deadline(start, cap, Some(near)), Ok((near, true)));
+        assert_eq!(
+            effective_deadline(start, cap, Some(start + cap)),
+            Ok((start + cap, true)),
+            "a tie is the run's deadline"
+        );
+        let far = start + Duration::from_secs(10);
+        assert_eq!(
+            effective_deadline(start, cap, Some(far)),
+            Ok((start + cap, false))
+        );
+        assert_eq!(
+            effective_deadline(start, cap, Some(start)),
+            Err(McpError::Deadline)
+        );
+        // Fixed by `start`, not by when it is evaluated.
+        let later = effective_deadline(start, cap, None).unwrap().0;
+        assert_eq!(later, start + cap);
+    }
+
+    /// A session whose reader already holds `lines` (no threads, no timing).
+    fn session_with_ready(lines: &[Value]) -> StdioSession {
+        let (tx, rx) = mpsc::sync_channel(INBOUND_LINES.max(lines.len()));
+        for line in lines {
+            tx.send(Line::Data(format!("{line}\n").into_bytes()))
+                .unwrap();
+        }
+        StdioSession {
+            writer: None,
+            lines: rx,
+            _child: ChildGuard(None),
+            next_id: 0,
+            tools: Vec::new(),
+            dead: false,
+        }
+    }
+
+    #[test]
+    fn an_encoded_request_is_not_queued_after_its_end() {
+        let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}});
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let mut session = session_with_ready(&[]);
+        session.writer = Some(tx);
+        let passed = Instant::now();
+        assert_eq!(
+            session.send_request(&message, passed, true, "the tool"),
+            Err(McpError::Deadline)
+        );
+        assert_eq!(
+            session.send_request(&message, passed, false, "the tool"),
+            Err(McpError::Timeout("the tool"))
+        );
+        assert!(rx.try_recv().is_err(), "nothing was queued");
+        // Before the end it is queued as one line; notifications are
+        // unchanged (no end).
+        let ahead = Instant::now() + Duration::from_secs(60);
+        session
+            .send_request(&message, ahead, true, "the tool")
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap(), format!("{message}\n").into_bytes());
+        session.notify("notifications/initialized").unwrap();
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn a_ready_reply_after_the_absolute_end_is_not_accepted() {
+        let reply = json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        let cancel = AtomicBool::new(false);
+        // The end was fixed before the wait started and has passed: the
+        // reply waiting in the queue is late, whichever bound applied.
+        let passed = Instant::now();
+        assert_eq!(
+            session_with_ready(std::slice::from_ref(&reply))
+                .wait_for(1, passed, false, "the tool", &cancel)
+                .err(),
+            Some(McpError::Timeout("the tool"))
+        );
+        assert_eq!(
+            session_with_ready(std::slice::from_ref(&reply))
+                .wait_for(1, passed, true, "the tool", &cancel)
+                .err(),
+            Some(McpError::Deadline)
+        );
+        // Before the end the same ready reply is taken.
+        let ahead = Instant::now() + Duration::from_secs(60);
+        assert!(session_with_ready(std::slice::from_ref(&reply))
+            .wait_for(1, ahead, true, "the tool", &cancel)
+            .is_ok());
+        // Cancellation still wins over a ready reply.
+        assert_eq!(
+            session_with_ready(&[reply])
+                .wait_for(1, ahead, false, "the tool", &AtomicBool::new(true))
+                .err(),
+            Some(McpError::Cancelled)
+        );
+    }
+
+    #[test]
     fn run_deadline_caps_handshake_and_waits_as_its_own_error() {
         // Per-phase cap binds when the deadline is far, the deadline when near.
-        assert_eq!(capped_wait(START_TIMEOUT, None), Ok((START_TIMEOUT, false)));
-        let far = Instant::now() + Duration::from_secs(600);
+        let start = Instant::now();
         assert_eq!(
-            capped_wait(START_TIMEOUT, Some(far)),
-            Ok((START_TIMEOUT, false))
+            effective_deadline(start, START_TIMEOUT, None),
+            Ok((start + START_TIMEOUT, false))
         );
-        let (wait, binds) =
-            capped_wait(START_TIMEOUT, Some(Instant::now() + Duration::from_secs(1))).unwrap();
-        assert!(binds && wait <= Duration::from_secs(1));
+        let far = start + Duration::from_secs(600);
         assert_eq!(
-            capped_wait(START_TIMEOUT, Some(Instant::now())),
+            effective_deadline(start, START_TIMEOUT, Some(far)),
+            Ok((start + START_TIMEOUT, false))
+        );
+        let near = start + Duration::from_secs(1);
+        assert_eq!(
+            effective_deadline(start, START_TIMEOUT, Some(near)),
+            Ok((near, true))
+        );
+        assert_eq!(
+            effective_deadline(start, START_TIMEOUT, Some(start)),
             Err(McpError::Deadline)
         );
         // A silent server: the handshake stops at the run's deadline, long
