@@ -1805,6 +1805,7 @@ dependencies = [
  "arboard",
  "chrono",
  "clap",
+ "lf-ask",
  "lf-core",
  "lf-meetings",
  "lf-meetings-backend",
