@@ -17,6 +17,15 @@ pub fn canonical_backend(provider: &str) -> Result<&'static str> {
     }
 }
 
+/// Python-only device ids fall back to the native default device; native
+/// engines have no CUDA build.
+fn canonical_device(device: &str) -> &str {
+    match device {
+        "cuda" => "auto",
+        device => device,
+    }
+}
+
 pub fn from_config(config: &Config, provider_override: Option<&str>) -> Result<EngineSpec> {
     let backend = canonical_backend(config.field_str("stt_backend").unwrap_or("auto"))?;
     let model = config.field_str("model_size").unwrap_or("base");
@@ -24,8 +33,8 @@ pub fn from_config(config: &Config, provider_override: Option<&str>) -> Result<E
         .field_str("language")
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let provider =
-        provider_override.unwrap_or_else(|| config.field_str("stt_device").unwrap_or("auto"));
+    let provider = provider_override
+        .unwrap_or_else(|| canonical_device(config.field_str("stt_device").unwrap_or("auto")));
     let engine = build_engine(backend, model, language.clone(), provider)?;
     Ok(EngineSpec {
         key: serde_json::to_string(&(backend, model, &language, provider))?,
@@ -113,6 +122,20 @@ mod tests {
         }
         assert!(canonical_backend("").is_err());
         assert!(canonical_backend("plugin").is_err());
+    }
+    #[test]
+    fn python_cuda_device_uses_native_default() {
+        let mut config = Config::default();
+        config.fields.insert("stt_device".into(), json!("cuda"));
+        let cuda = from_config(&config, None);
+        config.fields.insert("stt_device".into(), json!("auto"));
+        let auto = from_config(&config, None);
+        if cfg!(feature = "whisper") {
+            assert_eq!(cuda.unwrap().key, auto.unwrap().key);
+        } else {
+            assert!(cuda.is_err() && auto.is_err());
+        }
+        assert!(from_config(&config, Some("cuda")).is_err());
     }
     #[cfg(feature = "whisper")]
     #[test]
