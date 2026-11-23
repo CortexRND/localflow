@@ -53,7 +53,67 @@ impl ReadTicket {
     }
 }
 
-/// Search `query` (empty = everything) from `offset`. Blocking.
+/// What one History read asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Read {
+    pub offset: i64,
+    pub limit: i64,
+    /// A refresh of the loaded prefix: the selected entry stays shown
+    /// (cited if it no longer matches) instead of being deselected.
+    pub keep_selection: bool,
+}
+
+impl Read {
+    /// One page from `offset` (0 = a new list).
+    pub fn page(offset: i64) -> Self {
+        Read {
+            offset,
+            limit: PAGE_SIZE,
+            keep_selection: false,
+        }
+    }
+
+    /// The first `len` rows again (at least a page), replacing the list.
+    pub fn prefix(len: i64) -> Self {
+        Read {
+            offset: 0,
+            limit: len.max(PAGE_SIZE),
+            keep_selection: true,
+        }
+    }
+
+    /// This read again after a retry commit crossed it. A retry can move a
+    /// row into or out of a search, which shifts filtered offsets: a
+    /// filtered append becomes a reread of everything it would have
+    /// loaded. Unfiltered membership and order never change, and an offset
+    /// 0 read already replaces the list.
+    pub fn again(self, query: &str) -> Self {
+        if self.offset > 0 && !query.trim().is_empty() {
+            Read::prefix(self.offset + self.limit)
+        } else {
+            self
+        }
+    }
+}
+
+/// The read a finished retry needs, given the query the list shows, its
+/// cursor, and the read in flight (if any). Unfiltered rows are just
+/// replaced in place. A filtered list rereads its loaded prefix from the
+/// store (the retried row may have left or joined the search), superseding
+/// an in-flight append but never a new list or search, whose own fence
+/// rereads it.
+pub fn after_retry(listed_query: &str, cursor: i64, in_flight: Option<Read>) -> Option<Read> {
+    if listed_query.trim().is_empty() {
+        return None;
+    }
+    match in_flight {
+        Some(read) if read.offset == 0 => None,
+        Some(read) => Some(Read::prefix(cursor.max(read.offset + read.limit))),
+        None => Some(Read::prefix(cursor)),
+    }
+}
+
+/// Search `query` (empty = everything) from `offset`, one page. Blocking.
 pub fn load(
     root: &DataRoot,
     generation: u64,
@@ -61,11 +121,23 @@ pub fn load(
     offset: i64,
     with_stats: bool,
 ) -> Result<Loaded> {
+    read(root, generation, query, Read::page(offset), with_stats)
+}
+
+/// Search `query` for `read` (its offset and limit). Blocking.
+pub fn read(
+    root: &DataRoot,
+    generation: u64,
+    query: &str,
+    read: Read,
+    with_stats: bool,
+) -> Result<Loaded> {
+    let Read { offset, limit, .. } = read;
     let store = open_history(root)?;
     let q = Some(query.trim()).filter(|q| !q.is_empty());
-    let mut entries = store.recent(PAGE_SIZE + 1, q, offset)?;
-    let more = entries.len() as i64 > PAGE_SIZE;
-    entries.truncate(PAGE_SIZE as usize);
+    let mut entries = store.recent(limit + 1, q, offset)?;
+    let more = entries.len() as i64 > limit;
+    entries.truncate(limit as usize);
     let stats = if with_stats {
         Some(store.stats(None)?)
     } else {
@@ -123,6 +195,17 @@ impl Listing {
             .is_some_and(|c| self.entries.iter().any(|e| e.id == c.id))
         {
             self.cited = None; // its page arrived: it's a normal row now
+        }
+    }
+
+    /// Apply a [`Read::prefix`] refresh. The `selected` entry (as shown
+    /// now, with any in-place update) stays findable: cited if it is no
+    /// longer in the pages.
+    pub fn refresh(&mut self, loaded: Loaded, selected: Option<i64>) {
+        let kept = selected.and_then(|id| self.find(id).cloned());
+        self.apply(loaded);
+        if let Some(entry) = kept.filter(|e| !self.in_pages(e.id)) {
+            self.cited = Some(entry);
         }
     }
 

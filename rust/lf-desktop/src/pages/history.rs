@@ -25,6 +25,10 @@ pub struct HistoryPage {
     /// Backend pages and the detail-only cited entry.
     list: history::Listing,
     loading: bool,
+    /// The last dispatched read (in flight while `loading`).
+    reading: history::Read,
+    /// The query `list` holds results for (the search box may be ahead).
+    listed_query: String,
     error: Option<String>,
     selected: Option<i64>,
     pending_select: Option<i64>,
@@ -54,6 +58,8 @@ impl HistoryPage {
             search,
             list: history::Listing::default(),
             loading: true,
+            reading: history::Read::page(0),
+            listed_query: String::new(),
             error: None,
             selected: None,
             pending_select: None,
@@ -125,6 +131,15 @@ impl HistoryPage {
                 // In place: same position, cursor, selection and citation.
                 self.list.replace(entry);
             }
+            // A search may have gained or lost the row: refresh the loaded
+            // prefix from the store, keeping progress and the selection.
+            let in_flight = self.loading.then_some(self.reading);
+            if let Some(read) =
+                history::after_retry(&self.listed_query, self.list.next_offset(), in_flight)
+            {
+                let query = self.listed_query.clone();
+                self.dispatch(read, query, cx);
+            }
             self.pcx.toast(
                 if self.pcx.services.retry.simulated() {
                     "Simulated transcription saved (no speech model ran)"
@@ -173,11 +188,11 @@ impl HistoryPage {
     /// Load from `offset` (0 replaces the list; otherwise appends).
     fn load(&mut self, offset: i64, cx: &mut Context<Self>) {
         let query = self.query(cx);
-        self.dispatch(offset, query, cx);
+        self.dispatch(history::Read::page(offset), query, cx);
     }
 
-    /// One fenced read of `query` from `offset` (see [`history::ReadTicket`]).
-    fn dispatch(&mut self, offset: i64, query: String, cx: &mut Context<Self>) {
+    /// One fenced read of `query` (see [`history::ReadTicket`]).
+    fn dispatch(&mut self, read: history::Read, query: String, cx: &mut Context<Self>) {
         self.generation += 1;
         let ticket = history::ReadTicket {
             generation: self.generation,
@@ -185,17 +200,16 @@ impl HistoryPage {
         };
         let root = self.pcx.services.root.clone();
         self.loading = true;
+        self.reading = read;
         cx.spawn(async move |this, cx| {
-            let read = query.clone();
+            let q = query.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    history::load(&root, ticket.generation, &read, offset, offset == 0)
+                    history::read(&root, ticket.generation, &q, read, read.offset == 0)
                 })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                this.loaded(ticket, offset, query, result, cx)
-            });
+            let _ = this.update(cx, |this, cx| this.loaded(ticket, read, query, result, cx));
         })
         .detach();
         cx.notify();
@@ -204,17 +218,20 @@ impl HistoryPage {
     fn loaded(
         &mut self,
         ticket: history::ReadTicket,
-        offset: i64,
+        read: history::Read,
         query: String,
         result: anyhow::Result<Loaded>,
         cx: &mut Context<Self>,
     ) {
         // Judged before the result is looked at, so an obsolete request's
         // error is dropped too, and a read that crossed a retry commit is
-        // repeated (same query and offset: an append stays an append).
+        // repeated (same query and intent; see `Read::again`).
         match ticket.judge(self.generation, self.pcx.services.retry_jobs.seq()) {
             history::Delivery::Obsolete => return,
-            history::Delivery::Reread => return self.dispatch(offset, query, cx),
+            history::Delivery::Reread => {
+                let again = read.again(&query);
+                return self.dispatch(again, query, cx);
+            }
             history::Delivery::Apply => {}
         }
         let Ok(loaded) = result else {
@@ -233,7 +250,13 @@ impl HistoryPage {
         if let Some(stats) = &loaded.stats {
             self.total = Some(stats.total_dictations);
         }
-        self.list.apply(loaded);
+        self.listed_query = loaded.query.clone();
+        if read.keep_selection {
+            // The selection as of now (it may have changed during the read).
+            self.list.refresh(loaded, self.selected);
+        } else {
+            self.list.apply(loaded);
+        }
         if let Some(id) = self.pending_select.take() {
             if self.list.in_pages(id) {
                 self.selected = Some(id);

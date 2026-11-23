@@ -1232,6 +1232,190 @@ mod tests {
         assert_eq!(current.judge(6, jobs.seq()), Delivery::Obsolete);
     }
 
+    /// Rows saying `text` (raw and final), each with a saved clip, `ts`
+    /// rising from `base`, oldest first in the result.
+    fn texts(f: &Fixture, base: f64, texts: &[String]) -> Vec<HistoryEntry> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let mut new = NewEntry::new("dictate");
+                new.status = "failed".into();
+                new.raw_text = text.clone();
+                new.final_text = text.clone();
+                new.audio_path = Some(f.clip());
+                new.ts = Some(base + i as f64);
+                let id = f.store.add(&new).unwrap().unwrap();
+                f.store.get(id).unwrap().unwrap()
+            })
+            .collect()
+    }
+
+    fn ids(rows: &[HistoryEntry]) -> Vec<i64> {
+        rows.iter().map(|e| e.id).collect()
+    }
+
+    /// Page `list` to the end, as `Load more` would.
+    fn page_out(f: &Fixture, list: &mut Listing, query: &str) {
+        while list.more {
+            let offset = list.next_offset();
+            list.apply(history::load(&f.root, 9, query, offset, false).unwrap());
+        }
+    }
+
+    fn authoritative(f: &Fixture, query: &str) -> Vec<i64> {
+        ids(&f.store.recent(10_000, Some(query), 0).unwrap())
+    }
+
+    /// The reviewed failure: 51 matches, 50 loaded, a retry removes one
+    /// loaded row from the search. The prefix reread keeps 50 loaded, the
+    /// former 51st match is listed, and the selected row stays in detail.
+    #[test]
+    fn a_retry_that_leaves_a_search_neither_skips_nor_drops_the_selection() {
+        let f = fixture();
+        let base = chrono::Utc::now().timestamp() as f64 + 1000.0;
+        let words: Vec<String> = (0..71)
+            .map(|i| {
+                if i % 4 == 3 {
+                    format!("plain {i}")
+                } else {
+                    format!("needle {i}")
+                }
+            })
+            .collect();
+        texts(&f, base, &words);
+        let before = authoritative(&f, "needle");
+        assert!(before.len() > 51);
+        let jobs = RetryJobs::new();
+        let mut seen = jobs.seq();
+        let mut list = Listing::default();
+        list.apply(history::load(&f.root, 1, "needle", 0, false).unwrap());
+        assert_eq!((list.entries.len(), list.next_offset()), (50, 50));
+        let victim = list.entries[10].clone();
+        let selected = Some(victim.id);
+
+        run(&jobs, &f, &victim, "nothing to find here");
+        let observed = jobs.observe(&mut seen);
+        for entry in observed.updated {
+            assert!(list.replace(entry), "in place first");
+        }
+        let read = history::after_retry("needle", list.next_offset(), None).unwrap();
+        assert_eq!(read, history::Read::prefix(50));
+        list.refresh(
+            history::read(&f.root, 2, "needle", read, false).unwrap(),
+            selected,
+        );
+        let expected: Vec<i64> = before
+            .iter()
+            .copied()
+            .filter(|id| *id != victim.id)
+            .collect();
+        assert_eq!(ids(&list.entries), expected[..50], "the former 51st is in");
+        assert_eq!(list.next_offset(), 50, "loaded progress kept");
+        let shown = list.find(victim.id).expect("still in the detail pane");
+        assert_eq!(shown.final_text, "nothing to find here");
+        assert!(!list.in_pages(victim.id), "cited, not listed");
+        page_out(&f, &mut list, "needle");
+        assert_eq!(ids(&list.entries), expected, "nothing skipped or twice");
+        assert_eq!(expected, authoritative(&f, "needle"));
+    }
+
+    /// A retry that adds a match newer than the loaded prefix: it is listed
+    /// at its place, later pages still line up, the selection is unchanged.
+    #[test]
+    fn a_retry_that_joins_a_search_before_the_loaded_prefix_is_listed() {
+        let f = fixture();
+        let base = chrono::Utc::now().timestamp() as f64 + 1000.0;
+        let mut words: Vec<String> = (0..52).map(|i| format!("needle {i}")).collect();
+        words.push("plain newest".into());
+        let rows = texts(&f, base, &words);
+        let joiner = rows.last().unwrap().clone();
+        let jobs = RetryJobs::new();
+        let mut seen = jobs.seq();
+        let mut list = Listing::default();
+        list.apply(history::load(&f.root, 1, "needle", 0, false).unwrap());
+        assert!(list.more && !list.in_pages(joiner.id));
+        let selected = list.entries[20].id;
+
+        run(&jobs, &f, &joiner, "a needle after all");
+        for entry in jobs.observe(&mut seen).updated {
+            assert!(!list.replace(entry), "not listed yet");
+        }
+        let read = history::after_retry("needle", list.next_offset(), None).unwrap();
+        list.refresh(
+            history::read(&f.root, 2, "needle", read, false).unwrap(),
+            Some(selected),
+        );
+        assert_eq!(list.entries[0].id, joiner.id);
+        assert_eq!(list.entries[0].final_text, "a needle after all");
+        assert_eq!(list.next_offset(), 50);
+        assert!(list.in_pages(selected));
+        page_out(&f, &mut list, "needle");
+        let expected = authoritative(&f, "needle");
+        assert_eq!(expected.len(), 53);
+        assert_eq!(ids(&list.entries), expected);
+    }
+
+    /// A filtered append in flight when a retry commits never restores its
+    /// offset: the observer supersedes it with a reread of everything it
+    /// would have loaded, and if it is delivered first, its fence does the
+    /// same. Unfiltered reads keep the in-place path.
+    #[test]
+    fn a_filtered_append_crossing_a_retry_rereads_its_whole_prefix() {
+        let f = fixture();
+        let base = chrono::Utc::now().timestamp() as f64 + 1000.0;
+        let words: Vec<String> = (0..130).map(|i| format!("needle {i}")).collect();
+        texts(&f, base, &words);
+        let jobs = RetryJobs::new();
+        let mut seen = jobs.seq();
+        let mut list = Listing::default();
+        list.apply(history::load(&f.root, 1, "needle", 0, false).unwrap());
+        let append = history::Read::page(list.next_offset());
+        let ticket = ReadTicket {
+            generation: 2,
+            retry_seq: jobs.seq(),
+        };
+        let victim = list.entries[3].clone();
+        run(&jobs, &f, &victim, "gone from the search");
+
+        // Delivered before the observer looks: its fence rereads the prefix.
+        assert_eq!(ticket.judge(2, jobs.seq()), Delivery::Reread);
+        let again = append.again("needle");
+        assert_eq!(again, history::Read::prefix(100));
+        // Or the observer looks first: the same read, superseding it.
+        assert_eq!(
+            history::after_retry("needle", list.next_offset(), Some(append)),
+            Some(again)
+        );
+        assert_eq!(ticket.judge(3, jobs.seq()), Delivery::Obsolete);
+        for entry in jobs.observe(&mut seen).updated {
+            assert!(list.replace(entry));
+        }
+        list.refresh(
+            history::read(&f.root, 3, "needle", again, false).unwrap(),
+            Some(victim.id),
+        );
+        assert_eq!(list.next_offset(), 100, "the append's progress");
+        assert_eq!(
+            list.find(victim.id).unwrap().final_text,
+            "gone from the search"
+        );
+        // A prefix reread that is itself crossed keeps its length.
+        assert_eq!(again.again("needle"), again);
+        page_out(&f, &mut list, "needle");
+        assert_eq!(ids(&list.entries), authoritative(&f, "needle"));
+        assert_eq!(list.entries.len(), 129);
+
+        // Unfiltered: replaced in place, an append stays an append, and a
+        // new list or search in flight is left to its own fence.
+        assert_eq!(history::after_retry("  ", 50, None), None);
+        assert_eq!(append.again(""), append);
+        assert_eq!(
+            history::after_retry("needle", 50, Some(history::Read::page(0))),
+            None
+        );
+    }
+
     #[test]
     fn completions_before_an_observation_are_each_applied_exactly_once() {
         let f = fixture();
