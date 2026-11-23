@@ -489,4 +489,5 @@ def apply_config_update(config: Config, update: dict) -> Config:
     )
     if endpoint_changed:
         changes["llm_key_ref"] = ""
+        changes.setdefault("llm_fast_model", "")
     return replace(config, **changes)

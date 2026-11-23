@@ -1289,7 +1289,8 @@ pub fn config_to_dict(config: &Config) -> Value {
 
 /// Python `apply_config_update`: validate a sectioned partial update against
 /// the current value types and return the updated copy. An update that moves
-/// the LLM endpoint (provider or normalized base URL) clears `llm_key_ref`.
+/// the LLM endpoint (provider or normalized base URL) clears `llm_key_ref`
+/// and any fast model not supplied in the update.
 pub fn apply_config_update(config: &Config, update: &Value) -> Result<Config> {
     let update = update
         .as_object()
@@ -1366,6 +1367,7 @@ pub fn apply_config_update(config: &Config, update: &Value) -> Result<Config> {
         !py_equal(new_provider, &old_provider) || llm_endpoint(new_url) != llm_endpoint(&old_url);
     if endpoint_changed {
         changes.insert("llm_key_ref".to_string(), json!(""));
+        changes.entry("llm_fast_model").or_insert_with(|| json!(""));
     }
     let mut updated = config.clone();
     for (field, value) in changes {
@@ -2419,6 +2421,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated.field_str("llm_key_ref"), Some(""));
+    }
+
+    #[test]
+    fn apply_update_drops_old_fast_model_on_endpoint_change() {
+        let original = with(
+            &Config::defaults_for(false),
+            &[("llm_fast_model", json!("old-fast"))],
+        );
+        for (llm, expected) in [
+            (
+                json!({"model": "new-primary", "base_url": "http://localhost:11434/"}),
+                "old-fast",
+            ),
+            (json!({"provider": "openai-compatible"}), ""),
+            (json!({"base_url": "http://localhost:11435"}), ""),
+            (
+                json!({"base_url": "http://localhost:11435", "fast_model": "new-fast"}),
+                "new-fast",
+            ),
+        ] {
+            let updated = apply_config_update(&original, &json!({"llm": llm})).unwrap();
+            assert_eq!(updated.field_str("llm_fast_model"), Some(expected));
+        }
     }
 
     #[test]
