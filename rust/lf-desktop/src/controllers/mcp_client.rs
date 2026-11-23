@@ -352,6 +352,19 @@ pub fn resolve_with(
             return Err(McpError::Disabled);
         }
         let program = PathBuf::from(value);
+        // An absolute path that positively doesn't exist (the file system
+        // says NotFound) is a missing server, like an empty search: basic
+        // recall answers with the "not installed" note. Anything else wrong
+        // with the value (relative, not a file, not executable, unreadable)
+        // stays an invalid override.
+        if program.is_absolute()
+            && std::fs::metadata(&program)
+                .err()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        {
+            log::info!("Ask tools: {OVERRIDE_ENV} names no file");
+            return Err(McpError::Missing);
+        }
         if !program.is_absolute() || !is_executable(&program) {
             log::warn!("Ask tools: {OVERRIDE_ENV} ignored (not an absolute executable path)");
             return Err(McpError::InvalidOverride);
@@ -1555,18 +1568,49 @@ mod tests {
             resolve(None, Some(path.clone()), Some(exe_dir)).unwrap()[0].program,
             own
         );
-        // Overrides: absolute and executable only; `off`; nothing else tried.
+        // Overrides: absolute and executable only; `off`; nothing else tried
+        // (even with a server on PATH).
         assert_eq!(
             resolve(Some("localflow-mcp".into()), Some(path.clone()), None),
-            Err(McpError::InvalidOverride)
+            Err(McpError::InvalidOverride),
+            "relative stays invalid"
         );
         assert_eq!(
             resolve(
-                Some(dir.path().join("nope").into()),
+                Some("./missing/localflow-mcp".into()),
                 Some(path.clone()),
                 None
             ),
-            Err(McpError::InvalidOverride)
+            Err(McpError::InvalidOverride),
+            "relative and missing is still invalid, never missing"
+        );
+        // An absolute path to nothing: the server is missing ("not
+        // installed" status and recall note), not "didn't respond".
+        for missing in [
+            dir.path().join("nope"),
+            dir.path().join("gone/bin/localflow-mcp"),
+        ] {
+            let error = resolve(Some(missing.into()), Some(path.clone()), None).unwrap_err();
+            assert_eq!(error, McpError::Missing);
+            assert!(error.is_missing());
+            assert!(matches!(
+                McpStatus::from_error(&error),
+                McpStatus::Missing(_)
+            ));
+        }
+        // An existing path that isn't an executable file stays invalid.
+        assert_eq!(
+            resolve(Some(dir.path().into()), Some(path.clone()), None),
+            Err(McpError::InvalidOverride),
+            "a directory"
+        );
+        let plain = other.join("not-executable");
+        std::fs::write(&plain, "x").unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            resolve(Some(plain.into()), Some(path.clone()), None),
+            Err(McpError::InvalidOverride),
+            "a file without execute permission"
         );
         assert_eq!(
             resolve(Some("OFF".into()), Some(path.clone()), None),
