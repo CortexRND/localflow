@@ -157,7 +157,8 @@ dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24 -dpi 96 -extension Co
 Use new artifact directories each run. Gate 2 requires a persistent GNOME
 Keyring default collection in the current session; it fails unless the `default`
 alias resolves to a collection whose `<name>.keyring` file is in the monitored
-keyrings directory used by the running daemon. Run it with LocalFlow and other
+keyrings directory used by the running daemon, and it refuses to run while a legacy
+`~/.gnome2/keyrings` directory exists. Run it with LocalFlow and other
 writers to the monitored stores stopped. It adds a word to the **sandbox**
 Dictionary and checks that the real config (including legacy fallback),
 `~/.localflow`, and the GNOME Keyring backing files did not change. `before.json`

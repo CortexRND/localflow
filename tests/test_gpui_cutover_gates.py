@@ -72,6 +72,9 @@ def test_daemon_keyrings_follow_its_environment(gates, tmp_path):
     assert safety.daemon_keyrings({"XDG_DATA_HOME": "relative"}, home) == expected
     assert safety.daemon_keyrings({"XDG_DATA_HOME": "/data"}, home) == Path("/data/keyrings")
     assert safety.daemon_keyrings({"HOME": "/other"}, home) == Path("/other/.local/share/keyrings")
+    assert safety.legacy_keyrings({}, home) == home / ".gnome2/keyrings"
+    assert safety.legacy_keyrings({"XDG_DATA_HOME": "/data"}, home) == home / ".gnome2/keyrings"
+    assert safety.legacy_keyrings({"HOME": "/other"}, home) == Path("/other/.gnome2/keyrings")
 
 
 def test_capture_requires_unit_gpui_scale(gates):

@@ -91,6 +91,11 @@ def daemon_keyrings(environ, home):
     return data / "keyrings"
 
 
+def legacy_keyrings(environ, home):
+    """Return the pre-XDG keyrings directory gnome-keyring-daemon may pick at startup."""
+    return Path(environ.get("HOME") or home) / ".gnome2/keyrings"
+
+
 def monitored_stores():
     import dbus
 
@@ -118,10 +123,17 @@ def monitored_stores():
             f"by a file in {keyrings}; Gate 2 cannot detect writes to it"
         )
     with open(f"/proc/{pid}/environ", "rb") as source:
-        daemon_dir = daemon_keyrings(parse_environ(source.read()), home)
+        daemon_env = parse_environ(source.read())
+    daemon_dir = daemon_keyrings(daemon_env, home)
     if daemon_dir.resolve() != keyrings.resolve():
         raise RuntimeError(
             f"gnome-keyring-daemon stores keyrings in {daemon_dir}, not the monitored {keyrings}"
+        )
+    legacy = legacy_keyrings(daemon_env, home)
+    if legacy.exists():
+        raise RuntimeError(
+            f"Legacy keyrings directory {legacy} exists; gnome-keyring-daemon may use it "
+            f"instead of {keyrings}, so Gate 2 cannot tell which keyring is live"
         )
     return {
         "config": Path(os.environ.get("LOCALFLOW_CONFIG") or config),
