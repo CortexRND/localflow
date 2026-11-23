@@ -56,7 +56,7 @@ Legend:
 | Settings | Every row in `controllers::settings::SPECS` | Works with validation | `apply_config_update`. Shortcuts are normalised and conflict-checked through `lf_core::shortcuts` | `lf config`, Hub |
 | Settings | Sounds and meeting detection on Linux | Honest-off | — | — |
 | Settings | Data locations, what leaves the device, clear history, read-only current config | Works | — | — |
-| Settings | Settings assistant (natural-language change): preview, explicit apply, undo that keeps newer edits, stale-preview and conflict handling | Works (native agent on explicit paths, loopback Ollama; writes through `settings_worker::dispatch`). Sandbox: native agent with a scripted offline chat | `hub_settings`, `settings_agent_native`, `settings_worker` | `lf tweak`, Hub |
+| Settings | Settings assistant (natural-language change): preview, explicit apply, undo that keeps newer edits, stale-preview and conflict handling | Works (native agent on explicit paths, loopback Ollama; writes through `settings_worker::dispatch`). Sandbox: native agent with a scripted offline chat | `hub_settings`, `settings_agent_native`, `settings_worker` | `lf tweak`, `lf-rs tweak` (the same `lf-agent`, default config/dictionary/undo paths), Hub |
 | Settings | Run setup again; sandbox-only simulated runtime state selector | Works | — | — |
 | Settings | Launch at login | Honest-off on Linux; macOS points to `lf agent` | — | `lf agent install` |
 | Models | Speech engine and model size | Works (`models_layout::set_speech`; MLX refused off Apple silicon) | `[stt]` | `lf stt`, `lf-rs stt list/use`, Hub |
