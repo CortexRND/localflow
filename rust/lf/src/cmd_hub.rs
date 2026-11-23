@@ -91,7 +91,8 @@ mod tests {
 
     #[test]
     fn pages_match_lf_ui() {
-        let source = include_str!("../../lf-ui/src/hub_route.rs");
+        // A Windows checkout may have CRLF line endings.
+        let source = include_str!("../../lf-ui/src/hub_route.rs").replace("\r\n", "\n");
         let quoted: Vec<String> = HUB_PAGES
             .iter()
             .map(|page| format!("    \"{page}\",\n"))
