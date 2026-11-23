@@ -1769,8 +1769,12 @@ pub fn run(launch: Launch) -> RunStatus {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            // The stored appearance choice decides the very first frame.
+            // The stored appearance choice decides the very first frame:
+            // native chrome first (no window exists yet, so no appearance
+            // handler can re-enter), then the palette, so System resolves
+            // against what the chrome will show.
             let mode = crate::appearance::load(&launch.services.root);
+            crate::native_appearance::set(mode);
             let mut base = Theme::for_mode(mode, cx.window_appearance());
             base.font_family = pick_font(cx);
             cx.set_global(base);

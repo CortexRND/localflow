@@ -59,6 +59,12 @@ ksni = { version = "0.3.2", default-features = false, features = ["async-io", "b
 tray-icon = { version = "0.21.2", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
+# Native titlebar follows the chosen appearance (src/native_appearance.rs).
+# Versions already in the lockfile through GPUI's dependency tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSResponder"] }
+
 # Runtime-status probe: signal-0 liveness check of the PID a status file names.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

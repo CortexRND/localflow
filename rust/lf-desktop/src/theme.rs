@@ -386,9 +386,28 @@ pub fn theme(cx: &App) -> &Theme {
     cx.global::<Theme>()
 }
 
-/// Switch every window to `mode` now (System re-resolves from the current
-/// OS appearance). Keeps the font chosen at startup.
+/// Switch every window to `mode` (System re-resolves from the current OS
+/// appearance). Keeps the font chosen at startup.
+///
+/// Where native chrome follows the choice (macOS), the native appearance is
+/// changed first, from a main-thread task outside this update: AppKit can
+/// call GPUI's window appearance handler synchronously, which borrows the app
+/// again. The palette is resolved afterwards, so System reads the inherited
+/// OS appearance rather than the previously forced one. Tasks run in order,
+/// so the last choice wins.
 pub fn apply_mode(mode: AppearanceMode, cx: &mut App) {
+    if crate::native_appearance::SUPPORTED {
+        cx.spawn(async move |cx| {
+            crate::native_appearance::set(mode);
+            let _ = cx.update(|cx| resolve_mode(mode, cx));
+        })
+        .detach();
+    } else {
+        resolve_mode(mode, cx);
+    }
+}
+
+fn resolve_mode(mode: AppearanceMode, cx: &mut App) {
     let next = theme(cx).with_mode(mode, cx.window_appearance());
     cx.set_global(next);
     cx.refresh_windows();

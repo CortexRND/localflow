@@ -12,6 +12,7 @@ pub mod args;
 pub mod controllers;
 pub mod data;
 pub mod launch;
+mod native_appearance;
 pub mod page;
 pub mod pages;
 pub mod remote;
