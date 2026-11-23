@@ -44,3 +44,12 @@ pub fn error(error: &(dyn std::error::Error + 'static)) -> String {
 pub async fn pause() {
     tokio::time::sleep(Duration::from_millis(25)).await;
 }
+/// Yield once to the runtime. Only meaningful inside the top-level future of
+/// [`run`]: its current-thread `block_on` parks on the I/O/signal driver and
+/// then wakes deferred tasks between root polls, so a signal that arrived
+/// during blocking work wakes its listener before the caller resumes and
+/// commits the next step. Tokio's `yield_now` makes no such guarantee for
+/// other runtimes or for callers nested in arbitrary combinators.
+pub async fn checkpoint() {
+    tokio::task::yield_now().await;
+}

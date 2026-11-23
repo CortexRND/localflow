@@ -4,8 +4,9 @@ Skipped unless `cargo` is on PATH and a prebuilt `lf-rs` exists in the cargo
 target dir (CARGO_TARGET_DIR is honoured); with LF_RUST_PARITY_REQUIRED=1 a
 missing toolchain or build fails instead. A session fixture rebuilds `lf-rs`
 and the `parity` example driver (rust/lf/examples/parity.rs), which answers
-JSON requests on stdin with JSON on stdout. Python is never evaluated from
-Rust: each test computes the Python result in-process and compares.
+JSON requests on stdin with JSON on stdout. Each test computes the Python
+oracle separately, either in process or through the Python CLI. Rust's STT
+commands probe the Python installation only for runtime and plug-in discovery.
 
 Every Rust process runs with a temporary HOME/USERPROFILE/XDG/AppData,
 LOCALFLOW_CONFIG and empty LOCALFLOW_<SECRET> overrides (so the keyring is
@@ -17,8 +18,10 @@ from __future__ import annotations
 import importlib
 import json
 import ast
+import hashlib
 import types
 import os
+import platform
 import shutil
 import socket
 import sqlite3
@@ -31,6 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -1226,6 +1230,301 @@ def test_cli_help_and_usage_errors(rust_build, sandbox):
     assert lf(rust_build, sandbox, "history", "list", "--limit", "1001").returncode == 2
     assert lf(rust_build, sandbox, "config", "set", "llm.model").returncode == 2
     assert "panicked" not in lf(rust_build, sandbox, "config", "get", "x").stderr
+
+
+def _python_cli(sandbox, *args, env=None):
+    return subprocess.run(
+        [sys.executable, "-m", "localflow.cli", *args],
+        cwd=ROOT, env={**sandbox["env"], **(env or {})}, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
+    )
+
+
+def _stt_probes_same_python(sandbox):
+    return {
+        "VIRTUAL_ENV": sys.prefix,
+        "PATH": str(Path(sys.executable).parent) + os.pathsep + sandbox["env"].get("PATH", ""),
+    }
+
+
+def _cli_output(result):
+    return result.returncode, result.stdout, result.stderr
+
+
+def test_cli_dictation(rust_build, sandbox):
+    path = sandbox["config"]
+    for action, state in (
+        ("status", "on"), ("off", "off"), ("status", "off"), ("on", "on"),
+    ):
+        before = path.read_bytes() if path.exists() else None
+        python = _python_cli(sandbox, "dictation", action)
+        expected = path.read_bytes() if path.exists() else None
+        if before is None:
+            path.unlink(missing_ok=True)
+        elif action != "status":
+            path.write_bytes(before)
+        rust = lf(rust_build, sandbox, "dictation", action)
+        assert _cli_output(rust) == _cli_output(python) == (0, f"Dictation: {state}\n", "")
+        assert (path.read_bytes() if path.exists() else None) == expected
+        if action == "status":
+            assert expected == before
+    assert lf(rust_build, sandbox, "dictation", "bad").returncode == (
+        _python_cli(sandbox, "dictation", "bad").returncode
+    ) == 2
+
+
+@pytest.mark.parametrize("provider", ["auto", "mlx", "parakeet", "bad"])
+def test_cli_stt_list(rust_build, sandbox, provider):
+    path = sandbox["config"]
+    save_config(Config(stt_backend=provider), path)
+    before = path.read_bytes()
+    env = _stt_probes_same_python(sandbox)
+    for flags in ((), ("--json",)):
+        args = ("stt", "list", *flags)
+        assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == (
+            _cli_output(_python_cli(sandbox, *args, env=env))
+        )
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("options", [
+    ("auto",), ("mlx", "tiny", "--device", "cpu"),
+    ("parakeet", "", "--device", "cuda"), ("not-a-provider",),
+])
+def test_cli_stt_use(rust_build, sandbox, options):
+    path = sandbox["config"]
+    save_config(Config(model_size="small", stt_device="cpu", dictation_enabled=False), path)
+    before = path.read_bytes()
+    env = _stt_probes_same_python(sandbox)
+    python = _python_cli(sandbox, "stt", "use", *options, env=env)
+    expected = path.read_bytes()
+    path.write_bytes(before)
+    rust = lf(rust_build, sandbox, "stt", "use", *options, env=env)
+    assert _cli_output(rust) == _cli_output(python)
+    assert path.read_bytes() == expected
+    if options == ("not-a-provider",):
+        assert rust.returncode == 1 and expected == before
+    else:
+        assert rust.returncode == 0
+
+
+def test_cli_stt_python_plugin(rust_build, sandbox):
+    packages = sandbox["root"] / "site-packages"
+    metadata = packages / "speech_plugin-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\ndemo = speech_plugin:Demo\n", encoding="utf-8",
+    )
+    (packages / "speech_plugin.py").write_text(
+        "from localflow.providers.base import ModelInfo\n"
+        "class Demo:\n"
+        "    offline = False\n"
+        "    def list_models(self):\n"
+        "        return [ModelInfo('demo-1', 'Démo', True)]\n",
+        encoding="utf-8",
+    )
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    args = ("stt", "use", "demo", "demo-1")
+    python = _python_cli(sandbox, *args, env=env)
+    assert python.returncode == 0, python.stderr
+    expected = sandbox["config"].read_bytes()
+    sandbox["config"].unlink()
+    assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == _cli_output(python)
+    assert sandbox["config"].read_bytes() == expected
+    args = ("stt", "list", "--json")
+    assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == (
+        _cli_output(_python_cli(sandbox, *args, env=env))
+    )
+
+
+def test_cli_stt_download_rejects_unknown_model(rust_build, sandbox):
+    args = ("stt", "download", "tiny")
+    python = _python_cli(sandbox, *args)
+    rust = lf(rust_build, sandbox, *args)
+    assert _cli_output(rust) == _cli_output(python) == (1, "", "Error: unknown speech model: tiny\n")
+    assert not sandbox["config"].exists()
+
+
+@pytest.mark.parametrize("model,module", [("mlx-tiny", "mlx_whisper"), ("parakeet-v2", "parakeet_mlx")])
+def test_cli_stt_download_runtime_gate(rust_build, sandbox, model, module):
+    if sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        if importlib.util.find_spec(module) is not None:
+            pytest.skip("the installed Apple Silicon runtime passes the download gate")
+    args = ("stt", "download", model)
+    env = {**_stt_probes_same_python(sandbox), "HF_HUB_OFFLINE": "1"}
+    python = _python_cli(sandbox, *args, env=env)
+    rust = lf(rust_build, sandbox, *args, env=env)
+    assert _cli_output(rust) == _cli_output(python)
+    assert rust.returncode == 1 and not rust.stdout
+
+
+def _git_blob_id(body):
+    return hashlib.sha1(b"blob %d\0" % len(body) + body).hexdigest()
+
+
+def _lfs_pointer(body):
+    oid = hashlib.sha256(body).hexdigest()
+    return f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {len(body)}\n".encode()
+
+
+class _SpeechHub(BaseHTTPRequestHandler):
+    repo = "Systran/faster-whisper-tiny"
+    sha = "a" * 40
+    content: ClassVar[dict[str, bytes]] = {"config.json": b"{}", "data/vocabulary.txt": b"mock"}
+    # Git LFS payloads: the Git blob ID hashes the pointer file, the cache key
+    # is the SHA-256 of the payload (HF `lfs.sha256` / HEAD `X-Linked-Etag`).
+    lfs: ClassVar[dict[str, bytes]] = {"model.bin": bytes(range(256)) * 3}
+    corrupt = False
+
+    @classmethod
+    def files(cls):
+        return {**cls.content, **cls.lfs}
+
+    @classmethod
+    def blob_keys(cls):
+        return {_git_blob_id(body) for body in cls.content.values()} | {
+            hashlib.sha256(body).hexdigest() for body in cls.lfs.values()
+        }
+
+    def _reply(self, body, *, etag=None, lfs=False):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        if etag:
+            self.send_header("X-Repo-Commit", self.sha)
+            self.send_header("ETag", f'"{etag}"')
+            if lfs:
+                self.send_header("X-Linked-Etag", f'"{etag}"')
+                self.send_header("X-Linked-Size", str(len(body)))
+        else:
+            self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        if self.command != "HEAD":
+            if lfs and self.corrupt:
+                body = bytes([body[0] ^ 0xFF]) + body[1:]
+            self.wfile.write(body)
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if path == f"/api/models/{self.repo}":
+            siblings = [
+                {"rfilename": name, "size": len(body), "blobId": _git_blob_id(body)}
+                for name, body in self.content.items()
+            ]
+            for name, body in self.lfs.items():
+                pointer = _lfs_pointer(body)
+                siblings.append({
+                    "rfilename": name, "size": len(body), "blobId": _git_blob_id(pointer),
+                    "lfs": {"sha256": hashlib.sha256(body).hexdigest(), "size": len(body),
+                            "pointerSize": len(pointer)},
+                })
+            self._reply(json.dumps({"id": self.repo, "sha": self.sha, "siblings": siblings}).encode())
+            return
+        for revision in ("main", self.sha):
+            prefix = f"/{self.repo}/resolve/{revision}/"
+            name = path[len(prefix):] if path.startswith(prefix) else None
+            if name in self.content:
+                body = self.content[name]
+                self._reply(body, etag=_git_blob_id(body))
+                return
+            if name in self.lfs:
+                body = self.lfs[name]
+                self._reply(body, etag=hashlib.sha256(body).hexdigest(), lfs=True)
+                return
+        self.send_error(404)
+
+    do_HEAD = do_GET
+
+    def log_message(self, *args):
+        pass
+
+
+def test_cli_stt_download_shared_snapshot(rust_build, sandbox):
+    cache = sandbox["root"] / "hf"
+    save_config(Config(stt_backend="faster-whisper", model_size="small"), sandbox["config"])
+    before = sandbox["config"].read_bytes()
+    args = ("stt", "download", "fw-tiny")
+    with ThreadingHTTPServer(("127.0.0.1", 0), _SpeechHub) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            env = {
+                "HF_ENDPOINT": f"http://127.0.0.1:{server.server_port}", "HF_HOME": str(cache),
+                "HF_HUB_CACHE": str(cache / "hub"), "HF_TOKEN": "", "HF_TOKEN_PATH": str(cache / "token"),
+                # A nonempty HF_HUB_OFFLINE wins over the legacy flag (huggingface_hub
+                # reads `HF_HUB_OFFLINE or TRANSFORMERS_OFFLINE`), so this stays online.
+                "HF_HUB_OFFLINE": "0", "TRANSFORMERS_OFFLINE": "1",
+                "HF_HUB_DISABLE_XET": "1", "NO_PROXY": "127.0.0.1",
+                "COLUMNS": "80", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+            }
+            repo = cache / "hub" / "models--Systran--faster-whisper-tiny"
+
+            def contents():
+                assert (repo / "refs" / "main").read_text(encoding="ascii") == _SpeechHub.sha
+                snapshot = repo / "snapshots" / _SpeechHub.sha
+                return {str(path.relative_to(snapshot).as_posix()): path.read_bytes()
+                        for path in snapshot.rglob("*") if path.is_file()}
+
+            def blob_keys():
+                return {path.name for path in (repo / "blobs").iterdir() if path.is_file()}
+
+            python = _python_cli(sandbox, *args, env=env)
+            assert python.returncode == 0, python.stderr
+            assert contents() == _SpeechHub.files()
+            python_blobs = blob_keys()
+            assert python_blobs == _SpeechHub.blob_keys()
+            shutil.rmtree(cache)
+            rust = lf(rust_build, sandbox, *args, env=env)
+            assert _cli_output(rust) == _cli_output(python)
+            assert contents() == _SpeechHub.files()
+            assert blob_keys() == python_blobs
+            assert sandbox["config"].read_bytes() == before
+
+            # A corrupted LFS payload of the right size fails the SHA-256 check
+            # and never lands in the cache under its LFS oid.
+            shutil.rmtree(cache)
+            _SpeechHub.corrupt = True
+            rust = lf(rust_build, sandbox, *args, env=env)
+            assert rust.returncode != 0
+            assert "Model integrity check failed: model.bin" in rust.stdout + rust.stderr
+            oid = hashlib.sha256(_SpeechHub.lfs["model.bin"]).hexdigest()
+            assert not (repo / "blobs" / oid).exists()
+            assert not (repo / "snapshots" / _SpeechHub.sha / "model.bin").exists()
+            assert sandbox["config"].read_bytes() == before
+        finally:
+            _SpeechHub.corrupt = False
+            server.shutdown()
+            thread.join()
+
+
+def test_cli_stt_download_offline_legacy_fallback(rust_build, sandbox):
+    # An empty HF_HUB_OFFLINE falls back to TRANSFORMERS_OFFLINE, matched with
+    # Python's Unicode str.upper() ("yeſ".upper() == "YES"), so both go offline.
+    cache = sandbox["root"] / "hf"
+    args = ("stt", "download", "fw-tiny")
+    with ThreadingHTTPServer(("127.0.0.1", 0), _SpeechHub) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            env = {
+                "HF_ENDPOINT": f"http://127.0.0.1:{server.server_port}", "HF_HOME": str(cache),
+                "HF_HUB_CACHE": str(cache / "hub"), "HF_TOKEN": "", "HF_TOKEN_PATH": str(cache / "token"),
+                "HF_HUB_OFFLINE": "", "TRANSFORMERS_OFFLINE": "yeſ",
+                "HF_HUB_DISABLE_XET": "1", "NO_PROXY": "127.0.0.1",
+                "COLUMNS": "80", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+            }
+            python = _python_cli(sandbox, *args, env=env)
+            assert python.returncode != 0
+            assert "offline mode is enabled" in python.stdout + python.stderr
+            rust = lf(rust_build, sandbox, *args, env=env)
+            # Python also logs "Model download failed" plus a traceback (an intentional
+            # fidelity limit); the user-facing Click error must match exactly.
+            assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout)
+            assert rust.stderr.startswith("Error:")
+            assert python.stderr.endswith(rust.stderr)
+            assert not (cache / "hub" / "models--Systran--faster-whisper-tiny" / "snapshots").exists()
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 def test_cli_config_get_set(rust_build, sandbox, py_env):

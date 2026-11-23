@@ -1,0 +1,13 @@
+[package]
+name = "localflow-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lf-core = { path = "../lf-core" }
+lf-ask = { path = "../lf-ask" }
+anyhow.workspace = true
+chrono.workspace = true
+serde_json.workspace = true

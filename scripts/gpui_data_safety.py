@@ -4,12 +4,14 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from gpui_screenshots import (
     arguments,
+    parse_environ,
     sandbox_window,
     wait_for,
     window_manager,
@@ -61,6 +63,39 @@ def xdg_path(variable, fallback):
     return path if path.is_absolute() else fallback
 
 
+COLLECTION_PREFIX = "/org/freedesktop/secrets/collection/"
+
+
+def collection_keyring(keyrings, collection):
+    """Map a gnome-keyring collection object path to its backing file.
+
+    gnome-keyring names collections after their file (``login.keyring`` is
+    ``.../collection/login``) and escapes other bytes in the path as ``_xx`` hex.
+    """
+    collection = str(collection)
+    name = collection.removeprefix(COLLECTION_PREFIX)
+    if name == collection or not name or "/" in name:
+        return None
+    raw = re.sub(rb"_([0-9a-fA-F]{2})", lambda match: bytes.fromhex(match[1].decode()), name.encode())
+    filename = os.fsdecode(raw)
+    if "/" in filename or filename in (".", ".."):
+        return None
+    return keyrings / f"{filename}.keyring"
+
+
+def daemon_keyrings(environ, home):
+    """Return the keyrings directory gnome-keyring-daemon uses for its environment."""
+    data = Path(environ.get("XDG_DATA_HOME", ""))
+    if not data.is_absolute():
+        data = Path(environ.get("HOME") or home) / ".local/share"
+    return data / "keyrings"
+
+
+def legacy_keyrings(environ, home):
+    """Return the pre-XDG keyrings directory gnome-keyring-daemon may pick at startup."""
+    return Path(environ.get("HOME") or home) / ".gnome2/keyrings"
+
+
 def monitored_stores():
     import dbus
 
@@ -75,12 +110,31 @@ def monitored_stores():
     collection = secrets.ReadAlias("default", dbus_interface="org.freedesktop.Secret.Service")
     daemon = bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus")
     pid = daemon.GetConnectionUnixProcessID(service, dbus_interface="org.freedesktop.DBus")
-    if (
-        collection == "/"
-        or Path(os.readlink(f"/proc/{pid}/exe")).name != "gnome-keyring-daemon"
-        or not any(keyrings.glob("*.keyring"))
-    ):
+    if collection == "/" or Path(os.readlink(f"/proc/{pid}/exe")).name != "gnome-keyring-daemon":
         raise RuntimeError("An active, persistent GNOME Keyring default collection is required")
+    label = bus.get_object(service, collection).Get(
+        "org.freedesktop.Secret.Collection", "Label",
+        dbus_interface="org.freedesktop.DBus.Properties",
+    )
+    backing = collection_keyring(keyrings, collection)
+    if backing is None or not backing.is_file():
+        raise RuntimeError(
+            f"The default keyring collection {str(label)!r} ({collection}) is not backed "
+            f"by a file in {keyrings}; Gate 2 cannot detect writes to it"
+        )
+    with open(f"/proc/{pid}/environ", "rb") as source:
+        daemon_env = parse_environ(source.read())
+    daemon_dir = daemon_keyrings(daemon_env, home)
+    if daemon_dir.resolve() != keyrings.resolve():
+        raise RuntimeError(
+            f"gnome-keyring-daemon stores keyrings in {daemon_dir}, not the monitored {keyrings}"
+        )
+    legacy = legacy_keyrings(daemon_env, home)
+    if legacy.exists():
+        raise RuntimeError(
+            f"Legacy keyrings directory {legacy} exists; gnome-keyring-daemon may use it "
+            f"instead of {keyrings}, so Gate 2 cannot tell which keyring is live"
+        )
     return {
         "config": Path(os.environ.get("LOCALFLOW_CONFIG") or config),
         "legacy_config": home / ".localflow.toml",

@@ -27,8 +27,10 @@ keep-old-on-failure behavior. Independent scoped leases protect both snapshots
 during reload (and any shared HTTP users); dropping the last reference releases
 the slot. Access to each native engine is serialized.
 
-Native audio and models use **16 kHz**. Config-based constructors reject other
+Native audio and models use **16 kHz**. Config-based dictation constructors reject other
 `sample_rate` values instead of letting the runtime miscalculate duration/gates.
+`LazySpeechAdapter::for_16khz_pcm` (used by `lf-rs serve` meetings, whose
+capture resamples to 16 kHz itself) does not consult that dictation setting.
 Set `[dictation] sample_rate = 16000`; input-device changes require rebuilding
 the audio source/restarting the runtime. No microphone or real-model tests run
 automatically; fakes cover snapshots, prompts, reload/failure, sharing and leases.
@@ -59,9 +61,17 @@ any status poller.
 
 ## HTTP backend (optional)
 
-Enable `server` and pass `SttBackend::new(inner_backend)` from `lf_stt::server`
-to `lf_server::ServerState::load_with_backend(Arc::new(backend))`. This is an
-opt-in library integration, not a change to the `lf-rs serve` default backend.
+The `server` Cargo feature is off by default for library consumers of
+`lf-stt`. The `lf-rs` CLI enables it (`rust/lf/Cargo.toml` depends on
+`lf-stt` with `features = ["runtime", "server"]`), and `lf-rs serve` uses it
+by default: `rust/lf/src/cmd_serve.rs` wraps its `MeetingsBackend` as
+`SttBackend<MeetingsBackend>` and binds that via
+`ServerState::load_with_backend`, so the served `/transcribe` route is handled
+by this adapter without any extra flag.
+
+Other hosts opt in by enabling the `server` feature on their `lf-stt`
+dependency and passing `SttBackend::new(inner_backend)` from `lf_stt::server`
+to `lf_server::ServerState::load_with_backend(Arc::new(backend))`.
 Every other route and autostart status delegates unchanged to `inner_backend`.
 Provider availability follows compiled engine features; loaded state comes
 from a mutex-protected `SttSlot`. Requests sharing that slot serialize model
@@ -113,6 +123,11 @@ not the aliased Python backend. CPU is the non-macOS default; macOS defaults to
 Metal for Whisper and CPU for Parakeet (CoreML measured slower to load and
 transcribe, with higher RSS, on Apple Silicon). Device overrides are auto/cpu/metal
 for Whisper and auto/cpu/coreml for Parakeet (accelerators require macOS).
+Neither native engine has a CUDA path. A saved `stt_device = "cuda"` (valid
+for Python's faster-whisper) runs the native engine on **CPU**, with one log
+warning per process; the config file is not rewritten, the engine key records
+`cpu`, and `/api/status` still reports the saved `cuda` value. An explicit
+`provider_override` of `cuda` is still rejected.
 
 Whisper uses `whisper-rs 0.16` with `log_backend` and once-installed whisper/GGML
 logging hooks; print/progress/timestamp output is off. Decode defaults are
