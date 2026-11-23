@@ -83,7 +83,8 @@ def collection_file(keyrings, collection):
     prefix = "/org/freedesktop/secrets/collection/"
     if not collection.startswith(prefix):
         return None
-    name = re.sub(r"_([0-9a-fA-F]{2})", lambda m: chr(int(m[1], 16)), collection[len(prefix):])
+    escaped = os.fsencode(collection[len(prefix):])
+    name = os.fsdecode(re.sub(rb"_([0-9a-fA-F]{2})", lambda m: bytes.fromhex(m[1].decode()), escaped))
     if not name or "/" in name or name in (".", ".."):
         return None
     return keyrings / f"{name}.keyring"
