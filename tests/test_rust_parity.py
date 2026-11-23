@@ -2922,8 +2922,11 @@ def test_cli_agent_win32_run_key(rust_build, sandbox):
     # script that exists, which is in Scripts\\ for a non-venv Python.
     script, beside = str(_install_or_skip(python)), str(python.parent / "localflow.exe")
 
+    def squeeze(text):  # Rich folds the two paths at different columns
+        return "".join(text.split())
+
     def as_python(text):
-        return text if script == beside else "".join(text.split()).replace(script, beside)
+        return text if script == beside else squeeze(text).replace(squeeze(script), squeeze(beside))
 
     env["LOCALFLOW_PLATFORM"] = "win32"
     original = read()
@@ -2937,7 +2940,7 @@ def test_cli_agent_win32_run_key(rust_build, sandbox):
             rs = _run_cli([str(rust_build[0]), "agent", *args], env)
             assert tuple(map(as_python, _cli_output(rs)[1:])) == tuple(map(as_python, _cli_output(py)[1:])), args
             rs_after = read()
-            assert (rs_after and (as_python(rs_after[0]), rs_after[1])) == py_after, args
+            assert (rs_after and (rs_after[0].replace(script, beside), rs_after[1])) == py_after, args
             assert rs.returncode == py.returncode == 0, args
         _run_cli([str(rust_build[0]), "agent", "install"], env)
         assert read() == (f'"{script}"', winreg.REG_SZ)
