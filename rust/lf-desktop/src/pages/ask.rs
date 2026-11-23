@@ -51,6 +51,49 @@ fn suggestions(tools_mode: bool) -> [&'static str; 3] {
 /// The composer's Send/Stop slot (fits either button with its icon).
 const ACTION_WIDTH: f32 = 96.;
 
+/// Definite pixel widths (auto widths are measured intrinsically, which
+/// shrinks the multiline input to its placeholder). The banner, transcript
+/// and composer share one centred `column`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AskLayout {
+    /// The window minus the shell's sidebar.
+    pane: Pixels,
+    /// The column every block shares, centred in `pane` with at least `s10`
+    /// on each side.
+    column: Pixels,
+    /// The question input: the column minus the Send/Stop slot and its gap.
+    field: Pixels,
+}
+
+impl AskLayout {
+    fn for_viewport(width: Pixels) -> Self {
+        let at_least_zero = |w: Pixels| if w > px(0.) { w } else { px(0.) };
+        let pane = at_least_zero(width - px(size::SIDEBAR));
+        let inner = at_least_zero(pane - space::s10() * 2.);
+        let column = if inner < px(size::COLUMN) {
+            inner
+        } else {
+            px(size::COLUMN)
+        };
+        let field = at_least_zero(column - px(ACTION_WIDTH) - space::s4());
+        AskLayout {
+            pane,
+            column,
+            field,
+        }
+    }
+
+    /// A pane-wide line, inset by `s10`, that centres a `column`-wide block.
+    fn line(&self) -> gpui::Div {
+        div()
+            .w(self.pane)
+            .flex()
+            .flex_row()
+            .justify_center()
+            .px(space::s10())
+    }
+}
+
 /// `ui::row_button` on an opaque fill, with `ui::surface_ring`: the focus
 /// ring is a shadow painted under the row, so a transparent row (or a
 /// translucent hover/pressed fill) would show the ring colour through it
@@ -605,20 +648,12 @@ impl AskPage {
 impl Render for AskPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        // Definite pixel widths: percentage and auto widths are measured
-        // intrinsically here, which left the question bubble, the empty state
-        // and the input sized to their content. The pane is the window minus
-        // the shell's sidebar; both the scroll line and the composer row are
-        // inset by `s10` on each side.
-        let at_least_zero = |w: Pixels| if w > px(0.) { w } else { px(0.) };
-        let pane = at_least_zero(window.viewport_size().width - px(size::SIDEBAR));
-        let inner = at_least_zero(pane - space::s10() * 2.);
-        let column = if inner < px(size::COLUMN) {
-            inner
-        } else {
-            px(size::COLUMN)
-        };
-        let field = at_least_zero(inner - px(ACTION_WIDTH) - space::s4());
+        let layout = AskLayout::for_viewport(window.viewport_size().width);
+        let AskLayout {
+            pane,
+            column,
+            field,
+        } = layout;
         let health = self.pcx.health(cx);
         let config = self.pcx.services.config();
         let address = self.pcx.services.remote.base_url(&config);
@@ -725,20 +760,19 @@ impl Render for AskPage {
              the short preview in the card. Questions are kept until you close this window.",
             ask_agent::MODEL_RESULT_CHARS
         );
-        let composer = div()
+        // The background and top border span the pane; the rows sit in the
+        // transcript's column.
+        let composer_rows = div()
+            .w(column)
             .flex()
             .flex_col()
             .gap(space::s4())
-            .px(space::s10())
-            .py(space::s6())
-            .border_t_1()
-            .border_color(t.border)
-            .bg(t.bg_surface)
             .child(
                 // The input gets every pixel the button slot leaves (its
-                // intrinsic width would be only the placeholder's).
+                // intrinsic width would be only the placeholder's), so Send
+                // stays beside it at the column's right edge.
                 div()
-                    .w(inner)
+                    .w(column)
                     .flex()
                     .flex_row()
                     .items_end()
@@ -783,6 +817,13 @@ impl Render for AskPage {
                     ),
             )
             .child(ui::supporting(&t, privacy));
+        let composer = layout
+            .line()
+            .py(space::s6())
+            .border_t_1()
+            .border_color(t.border)
+            .bg(t.bg_surface)
+            .child(composer_rows);
         page(
             header(
                 &t,
@@ -794,7 +835,12 @@ impl Render for AskPage {
                 .flex()
                 .flex_col()
                 .size_full()
-                .children(banner.map(|b| div().px(space::s10()).pt(space::s5()).child(b)))
+                .children(banner.map(|b| {
+                    layout
+                        .line()
+                        .pt(space::s5())
+                        .child(div().w(column).child(b))
+                }))
                 .child(
                     div()
                         .id("ask-scroll")
@@ -802,17 +848,7 @@ impl Render for AskPage {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .child(
-                            // The pane-wide line the column centres in.
-                            div()
-                                .w(pane)
-                                .flex()
-                                .flex_row()
-                                .justify_center()
-                                .px(space::s10())
-                                .py(space::s8())
-                                .child(convo.w(column)),
-                        ),
+                        .child(layout.line().py(space::s8()).child(convo.w(column))),
                 )
                 .child(composer),
         )
@@ -835,5 +871,35 @@ mod tests {
             }
         }
         assert!(!tools.contains(&EXAMPLES[0]), "the transcript question");
+    }
+
+    #[test]
+    fn layout_shares_one_column() {
+        // Wide window: the column caps at 760 and is centred, so the
+        // banner, transcript and composer share both outer edges (the
+        // composer row was 1166 wide here, 203 px past each transcript edge).
+        let wide = AskLayout::for_viewport(px(1470.));
+        assert_eq!(wide.pane, px(1230.));
+        assert_eq!(wide.column, px(size::COLUMN));
+        assert_eq!(wide.field, px(656.));
+        // 235 px each side once centred.
+        assert_eq!(wide.pane - wide.column, px(470.));
+        // Small window (960x640): the column is the inset pane and the input
+        // keeps a usable width beside Send.
+        let small = AskLayout::for_viewport(px(960.));
+        assert_eq!(small.pane, px(720.));
+        assert_eq!(small.column, px(656.));
+        assert_eq!(small.field, px(552.));
+        assert_eq!(small.pane - small.column, space::s10() * 2.);
+        // Send/Stop sits right beside the input, ending on the column edge.
+        for l in [wide, small] {
+            assert_eq!(l.field + space::s4() + px(ACTION_WIDTH), l.column);
+        }
+        // Narrower than the sidebar: nothing negative.
+        let tiny = AskLayout::for_viewport(px(200.));
+        assert_eq!(
+            (tiny.pane, tiny.column, tiny.field),
+            (px(0.), px(0.), px(0.))
+        );
     }
 }
