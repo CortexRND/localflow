@@ -66,6 +66,8 @@ pub struct Palette {
     pub text_on_accent: u32,
     pub text_inverted: u32,
     pub icon_secondary: u32,
+    /// Accent for non-text marks (icons, focus ring edge, progress fill):
+    /// >= 3:1 on every surface it sits on.
     pub icon_accent: u32,
     /// Accent fill (primary buttons, switch track, selection).
     pub accent: u32,
@@ -670,6 +672,8 @@ mod tests {
                 mark(p.border_control, bg, "control boundary");
             }
             mark(p.accent, p.bg_card, "on switch / selection in a group");
+            // Progress fill on its muted track (ui::progress, both variants).
+            mark(p.icon_accent, p.bg_muted, "progress fill on track");
             // The solid edge of the focus ring, wherever a control sits.
             for bg in [p.bg_body, p.bg_surface, p.bg_card, p.bg_popover] {
                 mark(p.icon_accent, bg, "focus ring edge");

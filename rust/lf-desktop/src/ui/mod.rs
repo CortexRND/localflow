@@ -754,6 +754,8 @@ pub fn badge(t: &Theme, n: usize) -> Div {
 }
 
 /// A 4 px progress track. `None` = indeterminate (a short accent segment).
+/// The fill is a non-text mark, so it uses `icon_accent` at full opacity
+/// (>= 3:1 on the muted track in both palettes).
 pub fn progress(t: &Theme, fraction: Option<f32>) -> Div {
     let fill = match fraction {
         Some(f) => gpui::relative(f.clamp(0.0, 1.0)),
@@ -766,14 +768,7 @@ pub fn progress(t: &Theme, fraction: Option<f32>) -> Div {
         .rounded_full()
         .bg(t.bg_muted)
         .overflow_hidden()
-        .child(
-            div()
-                .h_full()
-                .w(fill)
-                .rounded_full()
-                .bg(t.accent)
-                .when(fraction.is_none(), |d| d.opacity(0.6)),
-        )
+        .child(div().h_full().w(fill).rounded_full().bg(t.icon_accent))
 }
 
 /// A 6 px microphone level meter (0.0–1.0) in a tone's dot colour.
