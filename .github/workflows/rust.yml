@@ -295,11 +295,12 @@ jobs:
           cache: pip
 
       # Include the HTTP host dependencies for real-server contract tests.
-      # Install the package without the heavy speech/UI dependencies.
+      # Include faster-whisper because localflow.models imports its model table.
+      # Install the package without the remaining heavy speech/UI dependencies.
       - name: Install Python parity dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest numpy platformdirs keyring requests sounddevice fastapi uvicorn python-multipart click rich huggingface_hub
+          python -m pip install pytest numpy platformdirs keyring requests sounddevice fastapi uvicorn python-multipart click rich huggingface_hub faster-whisper
           python -m pip install --no-deps -e .
 
       - name: Rust/Python parity tests
