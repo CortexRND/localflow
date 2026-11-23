@@ -377,17 +377,20 @@ meeting formatting/writer bytes and Python/Rust prompt-queue round trips.
 
 ## Meetings / Ask / Settings agent
 
-These three crates are libraries; `lf-hub` injects them into its embedded
-`lf-server` through `lf-meetings-backend` on macOS. They are not installed in
-the default `lf-rs serve` backend.
+Both `lf-rs serve` and the embedded macOS `lf-hub` server wire these routes
+through `lf-meetings-backend`. The headless CLI supports explicit meeting
+start/stop with microphone capture and configured system audio, but does not
+run the desktop meeting watcher or manage platform autostart. For dictation,
+`POST /transcribe` uses ffmpeg and loads the configured native speech model on
+demand.
 They preserve Python prompts and on-disk formats (including history SQLite,
 meeting Markdown, `queue.json` and `settings-undo.json`). Providers,
 transcription, audio sources and watcher notifications are injectable;
 `lf-meetings` does not depend on a particular speech-to-text implementation.
 
-Real CPAL audio capture and macOS ScreenCaptureKit/CoreAudio adapters require
-the opt-in `lf-meetings/capture` feature on every platform. Default workspace
-builds need no ALSA development headers; enabling capture on Linux does.
+Real CPAL audio capture and macOS ScreenCaptureKit/CoreAudio adapters are
+available to `lf-rs serve`, which enables `lf-meetings/capture`. Building
+`lf-rs` on Linux requires ALSA development headers.
 macOS/Windows CI compiles the hardware paths with `capture` and runs only
 device-free tests. Real microphone, loopback, ScreenCaptureKit permissions
 and CoreAudio hardware behavior are not run in CI.
