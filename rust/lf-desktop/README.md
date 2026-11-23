@@ -69,6 +69,19 @@ An unknown argument, or `--engine` where it can't run, exits with status 2. A fi
 launch with no setup marker in the config (and no `--page`) opens the wizard,
 using the Hub's `hub_route::plan_initial_route` policy.
 
+### System tray
+
+On Linux and Windows, LocalFlow shows a tray item while the desktop window is
+running. Right-click it for runtime status, **Open LocalFlow**, the dictation
+switch and **Quit LocalFlow**. The switch uses the active config (the isolated
+config in sandbox mode). **Paste last transcript** is enabled only while this
+window's opt-in dictation engine is running; it never sends commands to another
+runtime. Closing the last window still quits the app.
+
+On Linux the tray uses the session D-Bus and needs a StatusNotifierItem host,
+such as KDE Plasma or GNOME with an AppIndicator extension. If the host is
+unavailable, the window still runs. macOS keeps the existing AppKit menu.
+
 The crate is a **standalone Cargo workspace** with its own `Cargo.lock`, so GPUI's
 dependency tree and system libraries stay out of the `rust/` workspace and its CI.
 `.github/workflows/gpui.yml` is an additive workflow that only runs when this crate
@@ -77,6 +90,7 @@ or one of its path dependencies changes:
 - **Linux:** fmt, then clippy, the headless tests (including the shim's) and the
   build, each for the default build and for `--features runtime`.
 - **macOS:** the shim tests and a full type-check of both builds.
+- **Windows:** a type-check of the desktop and its native tray.
 
 The runtime feature adds `lf-stt` (whisper.cpp needs CMake and libclang) and
 `lf-ui/runtime`; its tests use temp directories and fakes only (no audio, keyboard
@@ -94,7 +108,7 @@ reason and the removal condition are in `vendor/xattr-shim/src/lib.rs`.
 |---|---|
 | Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, Mesa llvmpipe). Native rendering was not verified interactively: first paint was transparent under X11/VNC, and under Cage/Wayland redraws appeared only after a resize |
 | macOS | Expected to build (GPUI's Metal backend; the code has no Linux-only parts). Not verified in this PR. `lf-hub` stays the macOS app |
-| Windows | Not targeted |
+| Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. This packaging change adds neither Windows hotkeys nor the tray |
 
 Linux build packages (Debian/Ubuntu names): `build-essential cmake clang pkg-config
 libasound2-dev libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev
@@ -113,7 +127,8 @@ binary.
 
 `scripts/build_gpui_package.sh` builds a ready-to-run package of a release
 `lf-desktop` **with** `--features runtime`, natively for the machine it runs on
-(Linux x86_64, macOS arm64 or macOS x86_64; `CARGO_BUILD_TARGET` is refused, as
+(Linux x86_64, macOS arm64, macOS x86_64 or Windows x86_64 under Git Bash with
+MSVC; `CARGO_BUILD_TARGET` is refused, as
 in `scripts/build_rust_app.sh`). It builds in `rust/lf-desktop/target` unless
 `CARGO_TARGET_DIR` is set, and writes to `dist/gpui-preview/` or the absolute
 directory you pass:
@@ -122,6 +137,7 @@ directory you pass:
 |---|---|
 | `LocalFlow-Preview-<ver>-linux-x86_64.tar.gz` | `localflow-preview/`: `bin/lf-desktop`, `lib/` (Sherpa-ONNX C and C++ API and ONNX Runtime `.so` files), `share/applications/localflow-preview.desktop`, `share/icons/localflow-preview.png`, `README.txt`, `MANIFEST.json` (version, measured ABI requirements, SHA-256 of every file) |
 | `LocalFlow-Preview-<ver>-macos-arm64.tar.gz`, `LocalFlow-Preview-<ver>-macos-x86_64.tar.gz` | `LocalFlow Preview.app` |
+| `LocalFlow-Preview-<ver>-windows-x86_64.zip` | `LocalFlow Preview\`: `lf-desktop.exe` (static CRT, no Visual C++ Redistributable), the Sherpa-ONNX C/C++ API and ONNX Runtime DLLs next to it, `README.txt`, `MANIFEST.json`. Unzip and run; there is no installer |
 
 Each archive comes with `<asset>.sha256`. Nothing in the output directory is
 replaced until `scripts/verify_gpui_package.sh` has extracted the archive into
@@ -147,12 +163,20 @@ a fresh directory and checked the extracted copy:
   the bundle ad-hoc signed with the designated requirement
   `identifier "com.cortexrnd.localflow.desktop-preview"`, and
   `codesign --verify --deep --strict` on the extracted copy.
+- **Windows:** one flat folder; `llvm-readobj --coff-imports` on the `.exe`
+  and every DLL finds only bundled DLLs or DLLs in `System32` (and
+  `api-ms-win-*` sets), never `VCRUNTIME*`/`MSVCP*`; the imports and files
+  match `MANIFEST.json`. The CLI smoke checks run with only `System32` on
+  `PATH`. Zips are written and read with `bsdtar` (`System32\tar.exe`).
 
 `.github/workflows/gpui-package.yml` runs this on `ubuntu-22.04`,
-`macos-latest` (arm64) and `macos-15-intel` (x86_64), re-verifies a copy
-outside the checkout, runs the installer below twice and then `--uninstall` in
-a temporary `HOME` (with `--no-launch`), and uploads `gpui-preview-<platform>`
-artifacts. It runs on pull requests and pushes to `main` that touch the
+`macos-latest` (arm64), `macos-15-intel` (x86_64) and `windows-latest`,
+re-verifies a copy outside the checkout, runs the installer below twice and
+then `--uninstall` in a temporary `HOME` (with `--no-launch`; Linux and macOS),
+and uploads `gpui-preview-<platform>` artifacts. On Windows it instead unzips
+the archive with `Expand-Archive`, starts `lf-desktop.exe --sandbox` and
+requires a window that stays up for 5 s (screenshot in the
+`windows-launch-screenshot` artifact), then stops it. It runs on pull requests and pushes to `main` that touch the
 package inputs, and on manual dispatch; `mac-installer.yml` calls it only for
 release tags and manual runs, so a pull request builds the native legs once.
 On release tags `mac-installer.yml` publishes them (see `docs/releasing.md`).
@@ -625,7 +649,9 @@ These are tracked in `docs/gpui-migration.md`:
   whisper) is type-checked in CI only.
 - The engine runs only on LocalFlow's own data folders, has no tray item, and
   runs only in builds made with `--features runtime` (the preview package is one).
-- Wayland global shortcuts are not possible (see above). Windows isn't targeted.
+- Wayland global shortcuts are not possible (see above). On Windows only the
+  preview package is built; the packaging change adds neither Windows global
+  hotkeys nor the tray.
 - The Python runtime still writes protocol-1 status, so Home shows it as
   "Running · status limited".
 - `lf-hub` / the Python Hub and this window don't route to each other until the

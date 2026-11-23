@@ -49,8 +49,8 @@ The CLI uses two async workers and at most sixteen blocking workers.
 
 The backend receives a coherent config snapshot plus the original method,
 path, query, headers and body (including multipart boundaries). It owns runtime
-validation/lifecycle. TODO: connect the independently ported meeting,
-transcription, recall, prompts and platform crates. Registered backend routes:
+validation/lifecycle. `lf-rs serve` links the transcription and meeting
+backends, including recall and prompts. Registered backend routes:
 
 * `/transcribe` (including the 25 MiB Content-Length rejection)
 * `/meeting/templates`, `/meeting/status`, `/meeting/start`, `/meeting/notes`,
@@ -58,12 +58,11 @@ transcription, recall, prompts and platform crates. Registered backend routes:
 * `/api/recall`, `/prompts`, `/prompts/{entry_id}/approve` and `/reject`
 * `/api/autostart` POST
 
-The default `UnavailableBackend` returns HTTP 503 with Python's HTTPException
-JSON **shape**, e.g. `{"detail":"meeting backend unavailable"}`. Python has no
-single universal unavailable-backend message/status: these are explicit migration
-errors, not simulated successful responses. STT `available` is false, `loaded`
-is false and autostart is `unavailable`. The settings agent is native-only in
-this Python revision (no HTTP route); future routes should accompany its backend.
+Standalone `lf-server` callers that do not supply a backend still get
+`UnavailableBackend`, which returns HTTP 503 with Python's HTTPException JSON
+shape, for example `{"detail":"meeting backend unavailable"}`. The headless CLI
+does not implement platform autostart or background meeting detection. The
+settings agent remains native-only (no HTTP route).
 
 Not implemented: Python provider entry-point plugins, external config-file
 watching/runtime lease eviction, or runtime route validation without a linked

@@ -200,6 +200,12 @@ impl<B: Backend> Backend for SttBackend<B> {
             self.inner.handle(request)
         }
     }
+    fn while_idle(&self, action: &mut dyn FnMut()) -> bool {
+        self.inner.while_idle(action)
+    }
+    fn shutdown(&self, config: &Config) -> Result<()> {
+        self.inner.shutdown(config)
+    }
     fn stt_available(&self, provider: &str) -> bool {
         factory::backend_available(provider)
     }

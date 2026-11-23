@@ -13,6 +13,8 @@ on:
   push:
     paths:
       - "rust/lf-desktop/**"
+      - "scripts/gpui_data_safety.py"
+      - "scripts/gpui_screenshots.py"
       # Path dependencies of lf-desktop (directly, through lf-ui, or through
       # the `runtime` feature's lf-ui/runtime and lf-stt).
       - "rust/lf-core/**"
@@ -34,6 +36,8 @@ on:
   pull_request:
     paths:
       - "rust/lf-desktop/**"
+      - "scripts/gpui_data_safety.py"
+      - "scripts/gpui_screenshots.py"
       # Path dependencies of lf-desktop (directly, through lf-ui, or through
       # the `runtime` feature's lf-ui/runtime and lf-stt).
       - "rust/lf-core/**"
@@ -109,6 +113,46 @@ jobs:
         run: cargo test --manifest-path "$MANIFEST" --workspace --features runtime --locked
       - name: Build lf-desktop (runtime feature)
         run: cargo build --manifest-path "$MANIFEST" --locked --features runtime --bin lf-desktop
+      - name: Install cutover gate tools
+        id: cutover-deps
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth x11-utils xdotool openbox imagemagick mesa-vulkan-drivers \
+            dbus-x11 gnome-keyring libsecret-tools python3-dbus python3-gi
+      - name: Gate 2 — sandbox data safety
+        env:
+          RUST_LOG: error
+        run: |
+          export HOME="$(mktemp -d "$RUNNER_TEMP/gpui-home.XXXXXX")"
+          export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share"
+          export XDG_RUNTIME_DIR="$HOME" LOCALFLOW_CONFIG=""
+          mkdir -p "$XDG_CONFIG_HOME/localflow" "$HOME/.localflow"
+          printf '# Gate 2 fixture\n' > "$XDG_CONFIG_HOME/localflow/config.toml"
+          printf '{"words": [], "replacements": {}}\n' > "$HOME/.localflow/dictionary.json"
+          dbus-run-session -- bash -e -o pipefail -c '
+            printf %s cutover-fixture | gnome-keyring-daemon --unlock --components=secrets
+            printf %s cutover-fixture | timeout 10 secret-tool store \
+              --label="Cutover fixture" service localflow username cutover_fixture
+            xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" /usr/bin/python3 \
+              scripts/gpui_data_safety.py rust/lf-desktop/target/debug/lf-desktop artifacts/gpui-data-safety
+          '
+      - name: Gate 8 — sandbox screenshot matrix
+        if: ${{ !cancelled() && steps.cutover-deps.outcome == 'success' }}
+        env:
+          RUST_LOG: error
+        run: |
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24 -dpi 96 -extension Composite' \
+            /usr/bin/python3 scripts/gpui_screenshots.py rust/lf-desktop/target/debug/lf-desktop artifacts/gpui-screenshots
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.cutover-deps.outcome == 'success' }}
+        with:
+          name: gpui-data-safety
+          path: artifacts/gpui-data-safety/*.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.cutover-deps.outcome == 'success' }}
+        with:
+          name: gpui-screenshots
+          path: artifacts/gpui-screenshots/*.png
 
   macos:
     # Verifies the macOS cfg paths (GPUI Metal backend, xattr shim, CGEventTap
@@ -135,3 +179,15 @@ jobs:
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --locked
       - name: Type-check lf-desktop (runtime feature)
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --features runtime --locked
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/lf-desktop
+      - name: Type-check lf-desktop and Windows tray
+        run: cargo check --manifest-path "$env:MANIFEST" -p lf-desktop --all-targets --locked

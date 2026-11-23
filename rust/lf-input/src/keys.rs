@@ -94,8 +94,8 @@ impl Key {
 
     /// `getattr(keyboard.Key, name)` or a single character (`_key_from_name`).
     pub fn from_name(name: &str) -> Option<Key> {
-        // macOS: `Key.alt_gr` is the same vk (0x3D) as `Key.alt_r`.
-        if cfg!(target_os = "macos") && name == "alt_gr" {
+        // macOS and Windows deliver AltGr as the right Alt key.
+        if cfg!(any(target_os = "macos", target_os = "windows")) && name == "alt_gr" {
             return Some(Key::Mod(Modifier::Alt, Side::Right));
         }
         let (base, side) = match name {

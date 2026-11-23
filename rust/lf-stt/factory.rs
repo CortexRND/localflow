@@ -44,8 +44,7 @@ fn spec(
         .field_str("language")
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let provider =
-        provider_override.unwrap_or_else(|| config.field_str("stt_device").unwrap_or("auto"));
+    let provider = provider_override.unwrap_or_else(|| saved_device(config));
     let engine = build_engine(backend, model, language.clone(), provider, cache_root)?;
     Ok(EngineSpec {
         key: serde_json::to_string(&(backend, model, &language, provider))?,
@@ -53,6 +52,23 @@ fn spec(
         model_size: model.into(),
         engine,
     })
+}
+
+/// The saved `stt_device`, as a native engine provider. `cuda` is a valid
+/// Python setting (faster-whisper honors it), but no native engine has a CUDA
+/// path, so it runs on CPU; the config itself is left untouched. Explicit
+/// provider overrides are not mapped and still reject `cuda`.
+fn saved_device(config: &Config) -> &str {
+    match config.field_str("stt_device").unwrap_or("auto") {
+        "cuda" => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log::warn!("stt_device = \"cuda\" is not supported by native engines; using CPU");
+            });
+            "cpu"
+        }
+        device => device,
+    }
 }
 
 fn build_engine(
@@ -141,6 +157,28 @@ mod tests {
         assert!(canonical_backend("").is_err());
         assert!(canonical_backend("plugin").is_err());
     }
+    #[test]
+    fn saved_cuda_runs_native_engines_on_cpu_but_explicit_cuda_is_rejected() {
+        for (backend, enabled) in [
+            ("faster-whisper", cfg!(feature = "whisper")),
+            ("parakeet", cfg!(feature = "parakeet")),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let mut config = Config::default();
+            config.set_field("stt_backend", json!(backend));
+            config.set_field("stt_device", json!("cuda"));
+            let spec = from_config(&config, None).unwrap();
+            assert!(!spec.engine.loaded());
+            // Same snapshot as an explicit CPU request; nothing claims CUDA.
+            assert_eq!(spec.key, from_config(&config, Some("cpu")).unwrap().key);
+            assert!(!spec.key.contains("cuda"));
+            assert!(from_config(&config, Some("cuda")).is_err());
+            // The saved setting is not rewritten.
+            assert_eq!(config.field_str("stt_device"), Some("cuda"));
+        }
+    }
     #[cfg(feature = "whisper")]
     #[test]
     fn cached_specs_keep_the_configured_model_and_refuse_missing_files() {
@@ -169,6 +207,32 @@ mod tests {
             .fields
             .insert("stt_backend".into(), json!("parakeet"));
         assert!(from_config_cached(&config, Some("cpu"), cache.path()).is_err());
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn cached_saved_cuda_gets_the_same_cpu_spec_as_normal_construction() {
+        let cache = tempfile::tempdir().unwrap();
+        crate::downloads::install_for_test(
+            cache.path(),
+            crate::model_storage::WHISPER_CPP_REPO,
+            &[("ggml-base.bin", b"fake weights")],
+        );
+        let mut config = Config::default();
+        config.set_field("stt_backend", json!("faster-whisper"));
+        config.set_field("model_size", json!("base"));
+        config.set_field("stt_device", json!("cuda"));
+        let cached = from_config_cached(&config, None, cache.path()).unwrap();
+        let plain = from_config(&config, None).unwrap();
+        assert_eq!(
+            (&cached.key, &cached.backend, &cached.model_size),
+            (&plain.key, &plain.backend, &plain.model_size)
+        );
+        assert_eq!(cached.key, from_config(&config, Some("cpu")).unwrap().key);
+        assert!(!cached.key.contains("cuda"));
+        assert!(!cached.engine.loaded(), "nothing loaded or downloaded");
+        assert!(from_config_cached(&config, Some("cuda"), cache.path()).is_err());
+        assert_eq!(config.field_str("stt_device"), Some("cuda"));
     }
 
     #[cfg(feature = "whisper")]

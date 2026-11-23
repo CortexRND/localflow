@@ -31,12 +31,23 @@ pub enum Started {
 pub trait EngineBackend: Send + 'static {
     fn start(&mut self) -> Result<Started, String>;
     fn stop(&mut self);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn menu_command(&mut self, _command: MenuCommand) {}
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuCommand {
+    ToggleDictation,
+    PasteLast,
 }
 
 enum Command {
     Start,
     Stop,
     Shutdown,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    Menu(MenuCommand),
 }
 
 pub struct Engine {
@@ -114,6 +125,10 @@ impl Engine {
                             set(OwnEngine::None);
                         }
                         Command::Shutdown => break,
+                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        Command::Menu(command) if running => backend.menu_command(command),
+                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        Command::Menu(_) => {}
                     }
                 }
                 if running {
@@ -157,6 +172,13 @@ impl Engine {
 
     pub fn stop(&self) {
         let _ = self.commands.send(Command::Stop);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(crate) fn menu_command(&self, command: MenuCommand) {
+        if self.state() == OwnEngine::Running {
+            let _ = self.commands.send(Command::Menu(command));
+        }
     }
 
     /// Whether this window's engine is doing anything a close would stop.
@@ -299,6 +321,16 @@ impl EngineBackend for EmbeddedBackend {
             runtime.shutdown();
         }
     }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn menu_command(&mut self, command: MenuCommand) {
+        if let Some(runtime) = self.runtime.as_ref().and_then(|r| r.runtime.as_ref()) {
+            match command {
+                MenuCommand::ToggleDictation => runtime.controller.note_dictation_toggle(),
+                MenuCommand::PasteLast => runtime.controller.note_paste_last(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +419,47 @@ mod tests {
             0,
             "never stops a runtime it didn't start"
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn tray_commands_run_only_while_the_owned_engine_is_running() {
+        struct MenuBackend(Sender<MenuCommand>);
+
+        impl EngineBackend for MenuBackend {
+            fn start(&mut self) -> Result<Started, String> {
+                Ok(Started::Running {
+                    instance: "fake-instance".into(),
+                })
+            }
+
+            fn stop(&mut self) {}
+
+            fn menu_command(&mut self, command: MenuCommand) {
+                self.0.send(command).unwrap();
+            }
+        }
+
+        let (sent, received) = mpsc::channel();
+        let mut engine = Engine::spawn(MenuBackend(sent)).unwrap();
+        engine.menu_command(MenuCommand::PasteLast);
+        engine.start();
+        wait_for(&engine, |state| *state == OwnEngine::Running);
+        engine.menu_command(MenuCommand::ToggleDictation);
+        engine.menu_command(MenuCommand::PasteLast);
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            MenuCommand::ToggleDictation
+        );
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            MenuCommand::PasteLast
+        );
+        engine.stop();
+        wait_for(&engine, |state| *state == OwnEngine::None);
+        engine.menu_command(MenuCommand::PasteLast);
+        assert_eq!(engine.shutdown(Duration::from_secs(2)), Stopped::Done);
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

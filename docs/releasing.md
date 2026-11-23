@@ -151,7 +151,8 @@ uploads to the release that `build` created (it never creates one):
 - `LocalFlow-Preview-0.2.2-linux-x86_64.tar.gz`
 - `LocalFlow-Preview-0.2.2-macos-arm64.tar.gz`
 - `LocalFlow-Preview-0.2.2-macos-x86_64.tar.gz`
-- `SHA256SUMS-gpui-preview` (covers exactly those three, by their uploaded names)
+- `LocalFlow-Preview-0.2.2-windows-x86_64.zip`
+- `SHA256SUMS-gpui-preview` (covers exactly those four, by their uploaded names)
 
 `SHA256SUMS` and the five assets above are untouched; `install.sh` keeps
 trusting only `SHA256SUMS`, and a preview failure can't block or change them.

@@ -6,6 +6,7 @@
 #   LocalFlow-Preview-<ver>-linux-x86_64.tar.gz   localflow-preview/{bin,lib,share}, MANIFEST.json
 #   LocalFlow-Preview-<ver>-macos-arm64.tar.gz    LocalFlow Preview.app (ad-hoc signed)
 #   LocalFlow-Preview-<ver>-macos-x86_64.tar.gz   LocalFlow Preview.app (ad-hoc signed)
+#   LocalFlow-Preview-<ver>-windows-x86_64.zip    LocalFlow Preview/ (lf-desktop.exe, DLLs, MANIFEST.json)
 #
 # plus <archive>.sha256. <ver> is rust/lf-desktop/Cargo.toml's version. The
 # archive is verified (scripts/verify_gpui_package.sh) after extraction into a
@@ -14,7 +15,8 @@
 # Usage: scripts/build_gpui_package.sh [<absolute output dir>]   (default dist/gpui-preview)
 #
 # This is additive: it does not touch scripts/build_rust_app.sh, the legacy
-# LocalFlow.app (com.cortexrnd.localflow.app), its login agent or install.sh.
+# LocalFlow.app (com.cortexrnd.localflow.app), its login agent, install.sh or
+# install.ps1. On Windows it runs under Git Bash (MSYS2) with the MSVC toolchain.
 # The preview bundle has its own identity and never carries LocalFlowRuntime.
 set -euo pipefail
 
@@ -28,13 +30,16 @@ case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) os=linux arch=x86_64 ext=so ;;
     Darwin-arm64) os=macos arch=arm64 ext=dylib ;;
     Darwin-x86_64) os=macos arch=x86_64 ext=dylib ;;
-    *) echo "LocalFlow Preview packages are built for Linux x86_64 and macOS arm64/x86_64 only." >&2; exit 1 ;;
+    MINGW*-x86_64|MSYS*-x86_64) os=windows arch=x86_64 ext=dll ;;
+    *) echo "LocalFlow Preview packages are built for Linux x86_64, macOS arm64/x86_64 and Windows x86_64 only." >&2; exit 1 ;;
 esac
 OUT="${1:-$ROOT/dist/gpui-preview}"
+# Git Bash hands Windows paths (D:\a\_temp) through unchanged; normalise them.
+if [[ "$os" == windows ]] && command -v cygpath >/dev/null 2>&1; then OUT="$(cygpath -u "$OUT")"; fi
 [[ $# -le 1 && "$OUT" == /* ]] || { echo "Supply an absolute output directory." >&2; exit 2; }
 version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$MANIFEST" | head -n 1)"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Cannot read the lf-desktop version from $MANIFEST." >&2; exit 1; }
-asset="LocalFlow-Preview-$version-$os-$arch.tar.gz"
+if [[ "$os" == windows ]]; then asset="LocalFlow-Preview-$version-$os-$arch.zip"; else asset="LocalFlow-Preview-$version-$os-$arch.tar.gz"; fi
 
 # macOS: build for at least 13.0, the API minimum of what the binary uses, so
 # the executable's own recorded minimum is honest. lf-desktop strongly links
@@ -55,6 +60,12 @@ if [[ "$os" == macos ]]; then
     fi
     export MACOSX_DEPLOYMENT_TARGET="$target"
 fi
+# Windows: link the C runtime statically (the Sherpa/ORT DLLs are the
+# static-CRT "MT" builds too), so the package needs no Visual C++
+# Redistributable; the verifier refuses any VCRUNTIME/MSVCP import.
+if [[ "$os" == windows ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+fi
 
 # The desktop app is its own Cargo workspace; keep its canonical target dir
 # (as cargo would) unless the caller chose one explicitly.
@@ -62,8 +73,16 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/lf-desktop/target}"
 mkdir -p "$CARGO_TARGET_DIR" "$OUT"
 CARGO_TARGET_DIR="$(cd "$CARGO_TARGET_DIR" && pwd)"
 export CARGO_TARGET_DIR
+# cargo is a native Windows program: give it C:/... rather than /c/....
+if [[ "$os" == windows ]] && command -v cygpath >/dev/null 2>&1; then CARGO_TARGET_DIR="$(cygpath -m "$CARGO_TARGET_DIR")"; fi
 release="$CARGO_TARGET_DIR/release"
-required=("libsherpa-onnx-c-api.$ext" "libonnxruntime.$ext")
+if [[ "$os" == windows ]]; then
+    exe="lf-desktop.exe"
+    required=("sherpa-onnx-c-api.dll" "onnxruntime.dll")
+else
+    exe="lf-desktop"
+    required=("libsherpa-onnx-c-api.$ext" "libonnxruntime.$ext")
+fi
 
 # Rust caches may keep fingerprints while pruning the native libraries the
 # sherpa-onnx-sys build script copies next to the binary, or leave a partly
@@ -99,8 +118,38 @@ sha256_line() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi
 }
 
+# Write MANIFEST.json for package tree $1 (name $2, os $3): identity, the
+# measured key=value requirements in $4 and the SHA-256 of every file.
+write_manifest() {
+    local tree="$1" name="$2" os="$3" abi="$4" key value rel digest
+    {
+        printf '{\n'
+        printf '  "name": "%s",\n' "$name"
+        printf '  "app": "lf-desktop",\n'
+        printf '  "version": "%s",\n' "$version"
+        printf '  "os": "%s",\n' "$os"
+        printf '  "arch": "x86_64",\n'
+        while IFS='=' read -r key value; do
+            printf '  "%s": "%s",\n' "$key" "$value"
+        done <<<"$abi"
+        printf '  "files": {\n'
+        (cd "$tree" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | {
+            first=1
+            while IFS= read -r rel; do
+                read -r digest _ < <(cd "$tree" && sha256_line "$rel")
+                [[ "$first" -eq 1 ]] || printf ',\n'
+                printf '    "%s": "%s"' "$rel" "$digest"
+                first=0
+            done
+            printf '\n'
+        }
+        printf '  }\n}\n'
+    } >"$stage/MANIFEST.json"
+    mv "$stage/MANIFEST.json" "$tree/MANIFEST.json"
+}
+
 build_linux() {
-    local tree="$stage/pkg/localflow-preview" lib rel digest
+    local tree="$stage/pkg/localflow-preview" lib
     mkdir -p "$tree/bin" "$tree/lib" "$tree/share/applications" "$tree/share/icons"
     cp "$release/lf-desktop" "$tree/bin/lf-desktop"
     chmod 755 "$tree/bin/lf-desktop"
@@ -138,32 +187,7 @@ Requires glibc and libstdc++ at least as new as MANIFEST.json records, plus
 the system libraries it lists and a working Vulkan driver, Wayland or X11,
 and fontconfig. See rust/lf-desktop/README.md for distribution packages.
 EOF
-    local key value abi
-    abi="$(bash "$ROOT/scripts/verify_gpui_package.sh" --linux-abi "$tree")"
-    {
-        printf '{\n'
-        printf '  "name": "localflow-preview",\n'
-        printf '  "app": "lf-desktop",\n'
-        printf '  "version": "%s",\n' "$version"
-        printf '  "os": "linux",\n'
-        printf '  "arch": "x86_64",\n'
-        while IFS='=' read -r key value; do
-            printf '  "%s": "%s",\n' "$key" "$value"
-        done <<<"$abi"
-        printf '  "files": {\n'
-        (cd "$tree" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | {
-            first=1
-            while IFS= read -r rel; do
-                read -r digest _ < <(cd "$tree" && sha256_line "$rel")
-                [[ "$first" -eq 1 ]] || printf ',\n'
-                printf '    "%s": "%s"' "$rel" "$digest"
-                first=0
-            done
-            printf '\n'
-        }
-        printf '  }\n}\n'
-    } >"$stage/MANIFEST.json"
-    mv "$stage/MANIFEST.json" "$tree/MANIFEST.json"
+    write_manifest "$tree" localflow-preview linux "$(bash "$ROOT/scripts/verify_gpui_package.sh" --linux-abi "$tree")"
     tar -C "$stage/pkg" --owner=0 --group=0 --numeric-owner -czf "$stage/$asset" localflow-preview
 }
 
@@ -230,6 +254,37 @@ build_macos() {
     codesign --force -s - --identifier "$PREVIEW_ID" --requirements "=$requirement" "$bundle"
     codesign --verify --deep --strict --verbose=2 "$bundle"
     COPYFILE_DISABLE=1 tar -C "$stage/pkg" -czf "$stage/$asset" "LocalFlow Preview.app"
+}
+
+build_windows() {
+    local tree="$stage/pkg/LocalFlow Preview" lib tar abi
+    mkdir -p "$tree"
+    cp "$release/$exe" "$tree/$exe"
+    # Every runtime DLL sherpa-onnx-sys copied next to the binary (C and C++
+    # API, ONNX Runtime and its shared provider loader). Windows loads them
+    # from the executable's directory, so no search path is recorded.
+    for lib in "$release"/*.dll; do cp "$lib" "$tree/"; done
+    cat >"$tree/README.txt" <<EOF
+LocalFlow Preview $version (native GPUI desktop app, Windows x86_64)
+
+This is a preview beside the existing LocalFlow launchers; it does not replace
+lf, lf hub, lf setup, install.ps1 or the Python runtime, and it starts nothing
+on login. No installer: unzip this folder anywhere you like.
+
+Run:
+    lf-desktop.exe              (front end over your LocalFlow data)
+    lf-desktop.exe --engine     (also allow dictation in this window; press Start)
+    lf-desktop.exe --sandbox    (example data only)
+
+Requires Windows 10 or later (x64) with a Direct3D 11 capable GPU or driver.
+The C runtime is linked statically; no Visual C++ Redistributable is needed.
+This build is not code-signed, so SmartScreen may ask before the first run.
+Remove it by deleting the folder; your LocalFlow data is kept.
+EOF
+    abi="$(bash "$ROOT/scripts/verify_gpui_package.sh" --windows-abi "$tree")"
+    write_manifest "$tree" localflow-preview windows "$abi"
+    tar="$(bash "$ROOT/scripts/verify_gpui_package.sh" --zip-tool)"
+    (cd "$stage/pkg" && "$tar" --format zip -cf "../$asset" "LocalFlow Preview")
 }
 
 "build_$os"
