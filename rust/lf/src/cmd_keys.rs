@@ -42,8 +42,13 @@ fn import(file: Option<&Path>, yes: bool, io: &mut Io<'_>) -> Result<()> {
         check_file_option(file)?;
     }
     // The process environment; entries that are not Unicode can't be keys.
+    // Windows names are case-insensitive: upper-cased, as in Python's `os.environ`.
     let environ: BTreeMap<String, String> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .map(|(name, value)| match cfg!(windows) {
+            true => (name.to_uppercase(), value),
+            false => (name, value),
+        })
         .collect();
     let Ok(candidates) = detect_imports(file, &environ) else {
         return fail("Unable to read the selected key file");

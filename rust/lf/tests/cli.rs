@@ -445,6 +445,20 @@ fn keys_import_reports_and_validates_without_saving() {
     }
 }
 
+/// Windows environment names are case-insensitive; Python sees them upper-cased.
+#[cfg(windows)]
+#[test]
+fn keys_import_finds_mixed_case_environment_names() {
+    let sandbox = Sandbox::new();
+    let env = [("Groq_Api_Key", "gsk-env-secret-4321")];
+    let declined = sandbox.run_with(&["keys", "import"], &env, "n\n");
+    assert_eq!(code(&declined), 0, "{}", stderr(&declined));
+    assert_eq!(
+        stdout(&declined),
+        "Groq: ••••4321 (environment: GROQ_API_KEY)\nSave this key? [y/N]: Saved 0 key(s)\n"
+    );
+}
+
 #[test]
 fn secret_status_uses_env_overrides_and_group_is_hidden() {
     let sandbox = Sandbox::new();
