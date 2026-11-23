@@ -48,12 +48,13 @@ impl Sandbox {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lf-rs"));
         command.args(args);
         for (key, _) in std::env::vars_os() {
-            let key = key.to_string_lossy().into_owned();
-            if key.starts_with("LOCALFLOW_")
-                || key.starts_with("XDG_")
-                || key.ends_with("_API_KEY")
-                || key == "DISPLAY"
-                || key == "WAYLAND_DISPLAY"
+            // Windows names are case-insensitive, so match them upper-cased.
+            let name = key.to_string_lossy().to_uppercase();
+            if name.starts_with("LOCALFLOW_")
+                || name.starts_with("XDG_")
+                || name.ends_with("_API_KEY")
+                || name == "DISPLAY"
+                || name == "WAYLAND_DISPLAY"
             {
                 command.env_remove(&key);
             }
