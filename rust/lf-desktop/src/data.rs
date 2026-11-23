@@ -295,20 +295,21 @@ impl Services {
         };
         let remote = Remote::for_root(&root);
         let undo_path = root.localflow_dir.join("settings-undo.json");
-        let (storage, setup, assistant): (
+        let (storage, setup, assistant, retry): (
             Arc<dyn SpeechStorage>,
             SetupDeps,
             Arc<dyn SettingsAgent>,
+            Arc<dyn RetryBackend>,
         ) = if root.is_sandbox() {
             // One simulated model inventory behind storage, downloads, the
-            // setup wizard and Ollama pulls, so they always agree.
+            // setup wizard, Ollama pulls and History retry, so they agree.
             let sim = crate::sandbox::SimSpeech::seeded();
             (
                 Arc::new(crate::sandbox::SimStorage::new(sim.clone())),
                 SetupDeps {
                     platform: Arc::new(crate::sandbox::setup_platform()),
                     models: Arc::new(crate::sandbox::SimSetupBackend::with_state(
-                        sim,
+                        sim.clone(),
                         std::time::Duration::from_millis(100),
                     )),
                     meter: Arc::new(crate::sandbox::SimMeterInput),
@@ -324,6 +325,7 @@ impl Services {
                     root.dictionary_path.clone(),
                     undo_path,
                 ),
+                Arc::new(crate::sandbox::SimRetry::new(sim)),
             )
         } else {
             (
@@ -342,12 +344,8 @@ impl Services {
                     root.dictionary_path.clone(),
                     undo_path,
                 ),
+                real_retry(&secrets),
             )
-        };
-        let retry: Arc<dyn RetryBackend> = if root.is_sandbox() {
-            Arc::new(crate::sandbox::SimRetry::new(storage.clone()))
-        } else {
-            real_retry(&secrets)
         };
         Ok(Services {
             retry,

@@ -466,18 +466,40 @@ pub const SIMULATED_RETRY: &str = "this is a simulated retry no audio was transc
 
 /// Sandbox History retry: the real pipeline (sandbox dictionary, snippets,
 /// row app context) over a fixed fake transcript, never a model. "Opening"
-/// the model succeeds only while the simulated inventory lists the selected
-/// backend's repo, so deleting it on Models & keys shows "not downloaded".
-/// No cleanup provider (a real one could make an HTTP call) and no keys.
+/// the model succeeds only while the shared [`SimSpeech`] inventory has the
+/// exact configured model (like native cache-only retry, which needs that
+/// one file, not merely its repo), so a missing size or a deleted repo shows
+/// "not downloaded". No cleanup provider (a real one could make an HTTP
+/// call) and no keys.
 pub struct SimRetry {
-    storage: std::sync::Arc<dyn crate::controllers::model_storage::SpeechStorage>,
+    state: std::sync::Arc<SimSpeech>,
 }
 
 impl SimRetry {
-    pub fn new(
-        storage: std::sync::Arc<dyn crate::controllers::model_storage::SpeechStorage>,
-    ) -> Self {
-        SimRetry { storage }
+    pub fn new(state: std::sync::Arc<SimSpeech>) -> Self {
+        SimRetry { state }
+    }
+}
+
+/// The simulated inventory id of the configured speech model, mirroring the
+/// native factory (`lf_stt::factory::canonical_backend`, not linked here):
+/// missing `stt_backend` is `auto`, missing `model_size` is `base`; every
+/// Whisper alias selects the whisper.cpp GGML file of that size (the `fw-*`
+/// catalog entry), Parakeet ignores the size. Unknown backends and sizes
+/// outside the catalog are errors, never another model.
+pub fn sim_model_id(config: &Config) -> std::result::Result<String, String> {
+    let backend = config.field_str("stt_backend").unwrap_or("auto");
+    let size = config.field_str("model_size").unwrap_or("base");
+    let id = match backend {
+        "auto" | "faster-whisper" | "mlx" | "mlx-whisper" | "whisper-cpp" => format!("fw-{size}"),
+        "parakeet" | "parakeet-onnx" => "parakeet-v2".to_string(),
+        _ => return Err(format!("unsupported speech provider: {backend}")),
+    };
+    match lf_ui::setup_flow::stt_model_by_id(&id) {
+        Some(_) => Ok(id),
+        None => Err(format!(
+            "The selected speech model ({backend} {size}) isn't available in the sandbox example."
+        )),
     }
 }
 
@@ -501,19 +523,7 @@ impl crate::controllers::retry::RetryBackend for SimRetry {
         &self,
         config: &Config,
     ) -> std::result::Result<std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>, String> {
-        let backend = config.field_str("stt_backend").unwrap_or("");
-        let repo = if backend.starts_with("parakeet") {
-            lf_stt_repo::PARAKEET_ONNX
-        } else {
-            lf_stt_repo::WHISPER_CPP
-        };
-        if !self
-            .storage
-            .inventory(config)?
-            .models
-            .iter()
-            .any(|m| m.repo == repo)
-        {
+        if !self.state.is_installed(&sim_model_id(config)?) {
             return Err("The selected speech model isn't downloaded (sandbox example). Download it in Models & keys, then try again.".into());
         }
         Ok(std::sync::Arc::new(SimRetrySpeech))
@@ -752,16 +762,144 @@ mod tests {
 
         // Without the simulated Whisper model, "open" refuses honestly.
         let sim = SimSpeech::seeded();
-        let storage = std::sync::Arc::new(SimStorage::new(sim));
+        let storage = std::sync::Arc::new(SimStorage::new(sim.clone()));
         let mut other = Config::defaults_for(false);
         other.set_field("stt_backend", json!("parakeet"));
         storage.delete(lf_stt_repo::WHISPER_CPP, &other).unwrap();
-        let retry = SimRetry::new(storage);
+        let retry = SimRetry::new(sim);
         let error = retry.open(&services.config()).err().unwrap();
         assert!(error.contains("isn't downloaded"), "{error}");
         for path in services.root.all_paths() {
             assert!(path.starts_with(dir.path()));
         }
+    }
+
+    /// Retry needs the exact configured model in the one shared simulated
+    /// inventory (as native cache-only retry needs that exact file), not
+    /// merely another size in the same whisper.cpp repo.
+    #[test]
+    fn sandbox_retry_requires_the_exact_selected_simulated_model() {
+        use crate::controllers::retry::{retry_entry, RetryKey};
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        let failed = open_history(&root)
+            .unwrap()
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "failed")
+            .unwrap();
+        let entry = || failed.clone();
+        let with = |backend: &str, size: &str| {
+            let mut c = services.config();
+            c.set_field("stt_backend", json!(backend));
+            c.set_field("model_size", json!(size));
+            c
+        };
+        let not_downloaded = |config: &Config| {
+            let error = services.retry.open(config).err().unwrap();
+            assert!(error.contains("isn't downloaded"), "{error}");
+        };
+
+        // Seeded fw-base: retry works.
+        let base = with("faster-whisper", "base");
+        services.retry.open(&base).unwrap();
+        let first = entry();
+        let updated =
+            retry_entry(&root, &base, RetryKey::of(&first), services.retry.as_ref()).unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+
+        // Medium/large are not downloaded although the whisper.cpp repo is
+        // (fw-base, fw-small), under every supported Whisper alias.
+        assert!(services
+            .storage
+            .inventory(&base)
+            .unwrap()
+            .models
+            .iter()
+            .any(|m| m.repo == lf_stt_repo::WHISPER_CPP));
+        for backend in [
+            "faster-whisper",
+            "auto",
+            "mlx",
+            "mlx-whisper",
+            "whisper-cpp",
+        ] {
+            not_downloaded(&with(backend, "medium"));
+            not_downloaded(&with(backend, "large-v3"));
+        }
+        let medium = with("faster-whisper", "medium");
+        let err = retry_entry(
+            &root,
+            &medium,
+            RetryKey::of(&entry()),
+            services.retry.as_ref(),
+        );
+        assert!(err.is_err());
+
+        // Simulated download (through the services' own setup backend, so
+        // the same shared inventory) of exactly medium makes medium work.
+        let model = lf_ui::setup_flow::stt_model_by_id("fw-medium").unwrap();
+        services
+            .setup
+            .models
+            .download_speech(
+                &model,
+                Box::new(|_| {}),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .unwrap();
+        services.retry.open(&medium).unwrap();
+        services.retry.open(&with("mlx-whisper", "medium")).unwrap();
+        not_downloaded(&with("faster-whisper", "large-v3"));
+        let again = retry_entry(
+            &root,
+            &medium,
+            RetryKey::of(&entry()),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(again.status, "ok");
+
+        // Deleting the simulated repo (with Parakeet selected, so Whisper
+        // isn't protected) makes it fail again.
+        services
+            .storage
+            .delete(lf_stt_repo::WHISPER_CPP, &with("parakeet", "base"))
+            .unwrap();
+        not_downloaded(&medium);
+        not_downloaded(&base);
+        // Parakeet ignores the size and is still seeded.
+        services.retry.open(&with("parakeet", "medium")).unwrap();
+        services.retry.open(&with("parakeet-onnx", "base")).unwrap();
+
+        // Unsupported or unknown identities never select another model.
+        for (backend, size) in [
+            ("whisper", "base"),
+            ("openai", "base"),
+            ("", "base"),
+            ("faster-whisper", "huge"),
+            ("faster-whisper", ""),
+        ] {
+            let error = services.retry.open(&with(backend, size)).err().unwrap();
+            assert!(
+                !error.contains("isn't downloaded"),
+                "{backend}/{size}: {error}"
+            );
+        }
+        assert_eq!(
+            sim_model_id(&with("whisper", "base")).unwrap_err(),
+            "unsupported speech provider: whisper"
+        );
+        // Missing fields follow the native defaults (auto, base).
+        let mut bare = Config::defaults_for(false);
+        bare.fields.remove("stt_backend");
+        bare.fields.remove("model_size");
+        assert_eq!(sim_model_id(&bare).unwrap(), "fw-base");
+        assert!(services.retry.llm(&medium).is_none());
+        assert!(services.retry.simulated());
     }
 
     /// A relative `--sandbox` root must not leave cwd-relative clip paths in
