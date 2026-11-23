@@ -254,7 +254,12 @@ fn seed(root: &DataRoot) -> Result<()> {
                 .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 220.0 / 16_000.0).sin() * 0.1)
                 .collect();
             entry.duration_s = tone.len() as f64 / 16_000.0;
-            entry.audio_path = Some(history.write_clip(&tone, 16_000)?.to_string_lossy().into());
+            // Persist an absolute path: a relative `--sandbox` root would
+            // otherwise store a cwd-relative path that breaks on relaunch.
+            let clip = history.write_clip(&tone, 16_000)?;
+            let clip =
+                fs::canonicalize(&clip).with_context(|| format!("resolve {}", clip.display()))?;
+            entry.audio_path = Some(clip.to_string_lossy().into());
         }
         history.add(&entry)?;
     }
@@ -756,6 +761,61 @@ mod tests {
         assert!(error.contains("isn't downloaded"), "{error}");
         for path in services.root.all_paths() {
             assert!(path.starts_with(dir.path()));
+        }
+    }
+
+    /// A relative `--sandbox` root must not leave cwd-relative clip paths in
+    /// SQLite: relaunching the same root by absolute path (as from another
+    /// working directory) still finds the clip and retries as a simulation.
+    #[cfg(unix)]
+    #[test]
+    fn relative_sandbox_root_saves_a_clip_path_that_survives_relaunch() {
+        use crate::controllers::retry::{retry_entry, RetryKey};
+        let dir = tempfile::tempdir().unwrap();
+        let absolute = fs::canonicalize(dir.path()).unwrap().join("sb");
+        // Reach the tempdir relative to the current cwd, without chdir.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(absolute.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+
+        let seeded = prepare(&relative, false).unwrap();
+        assert!(seeded.clips_dir.is_relative(), "root kept as given");
+        let stored = open_history(&seeded)
+            .unwrap()
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "failed")
+            .unwrap();
+        let clip = std::path::PathBuf::from(stored.audio_path.clone().unwrap());
+        assert!(clip.is_absolute(), "{}", clip.display());
+        assert!(clip.starts_with(absolute.join("")), "{}", clip.display());
+
+        // Relaunch by absolute path: no reseed, same row, real loader.
+        let root = prepare(&absolute, false).unwrap();
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        assert!(services.retry.simulated());
+        let entry = open_history(&root)
+            .unwrap()
+            .get(stored.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.audio_path, stored.audio_path);
+        let updated = retry_entry(
+            &root,
+            &services.config(),
+            RetryKey::of(&entry),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+        for path in services.root.all_paths() {
+            assert!(path.starts_with(&absolute));
         }
     }
 
