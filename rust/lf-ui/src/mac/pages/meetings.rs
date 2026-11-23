@@ -2411,16 +2411,30 @@ mod tests {
             matches!(&start.kind, EventKind::Start { notes, result: Ok(_) } if notes == "agenda")
         );
 
+        // A status read from before the notes save, delivered after it below.
+        let stale = client.status().unwrap();
+        assert_eq!(stale["session"]["user_notes"], "agenda");
+
         let typed = "agenda\n- typed while starting";
         page.state.notes_edited_at(typed.into(), Instant::now());
         page.state.apply_event(start);
         assert!(page.state.notes_dirty.get());
 
-        // The notes save and the status poll may finish in either order.
-        let first = receive(&page);
-        page.state.apply_event(first);
-        let second = receive(&page);
-        page.state.apply_event(second);
+        let (first, second) = (receive(&page), receive(&page));
+        let (saved, status) = if matches!(first.kind, EventKind::Notes { .. }) {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert!(matches!(saved.kind, EventKind::Notes { result: Ok(_), .. }));
+        page.state.apply_event(saved);
+        assert!(!page.state.notes_dirty.get());
+        page.state.apply_event(Event {
+            generation: page.state.generation.get(),
+            kind: EventKind::Status(Ok(stale)),
+        });
+        assert_eq!(page.snapshot().notes, typed);
+        page.state.apply_event(status);
 
         assert_eq!(client.status().unwrap()["session"]["user_notes"], typed);
         assert_eq!(page.snapshot().notes, typed);
