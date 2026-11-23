@@ -2298,7 +2298,7 @@ def _tool_calls(*calls):
 def _tweak_paths(sandbox):
     data = sandbox["home"] / ".localflow"
     return {"config": sandbox["config"], "dictionary": data / "dictionary.json",
-            "undo": data / "settings-undo.json"}
+            "undo": data / "settings-undo.json", "legacy": sandbox["home"] / ".localflow.toml"}
 
 
 def _tweak_state(sandbox):
@@ -2502,6 +2502,50 @@ def test_cli_tweak_undo_interop(rust_build, sandbox, tweak_ollama):
     save_config(Config(llm_provider="ollama", llm_base_url=tweak_ollama), paths["config"])
     rust, _ = _assert_tweak_same(rust_build, sandbox, "--undo")
     assert rust.returncode == 1 and rust.stderr.startswith("Error: Nothing to undo: everything was changed")
+
+
+def test_cli_tweak_migrates_legacy_config(rust_build, sandbox, tweak_ollama):
+    # Only a v1 ~/.localflow.toml: both CLIs migrate it (left in place) before
+    # previewing. It has no fireworks_api_key, so the keyring step (unreachable
+    # in the sandbox) never runs.
+    paths = _tweak_paths(sandbox)
+    paths["config"].unlink()
+    legacy = "".join(f"{key} = {py_config._toml_value(value)}\n" for key, value in {
+        "sounds_enabled": False, "cleanup_enabled": False, "paste_method": "clipboard",
+        "ollama_url": tweak_ollama,
+    }.items())
+    paths["legacy"].write_text(legacy, encoding="utf-8")
+    home_files = sorted(p.name for p in sandbox["home"].iterdir())
+    _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "on"}))
+
+    rust, state = _assert_tweak_same(rust_build, sandbox, "turn on sounds", "--yes")
+    assert rust.returncode == 0 and rust.stderr == ""
+    assert rust.stdout.startswith("Preview (runs on your computer with gemma4:e4b):\n  Sounds: Off → On\n")
+    assert state["legacy"] == legacy.encode()
+    migrated = tomllib.loads(state["config"].decode())
+    assert migrated["hotkey"]["sounds"] is True
+    assert migrated["llm"]["cleanup_enabled"] is False and migrated["llm"]["base_url"] == tweak_ollama
+    assert state["undo"]["settings"] == [{"key": "sounds_enabled", "before": False, "after": True}]
+    # Nothing else (no backup or renamed legacy file) is left behind.
+    assert not paths["config"].exists()
+    for run in (lambda: _python_cli(sandbox, "tweak", "turn on sounds", "--yes", env=_RICH_ENV),
+                lambda: lf(rust_build, sandbox, "tweak", "turn on sounds", "--yes", env=_RICH_ENV)):
+        assert run().returncode == 0
+        assert set(p.name for p in sandbox["home"].iterdir()) - set(home_files) <= {".localflow"}
+        assert sorted(p.name for p in paths["config"].parent.iterdir()) == ["config.toml"]
+        _tweak_restore(sandbox, [None, None, None, legacy.encode()])
+
+    # --undo migrates first too. The record says Sounds went On → Off; only the
+    # legacy file (Off, unlike the default On) makes that undoable.
+    _tweak_restore(sandbox, [None, None, None, legacy.replace("false", "true", 1).encode()])
+    _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "off"}))
+    assert lf(rust_build, sandbox, "tweak", "turn off sounds", "--yes", env=_RICH_ENV).returncode == 0
+    paths["config"].unlink()
+    paths["legacy"].write_text(legacy, encoding="utf-8")
+    rust, state = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert (rust.returncode, rust.stdout, rust.stderr) == (0, "  Sounds: On\nUndid the last change.\n", "")
+    assert tomllib.loads(state["config"].decode())["hotkey"]["sounds"] is True
+    assert state["legacy"] == legacy.encode()
 
 
 def test_cli_tweak_errors(rust_build, sandbox, tweak_ollama):

@@ -3,7 +3,7 @@
 //! `--yes`; every line from the model, Ollama, the config or the undo record is
 //! escaped with `safe_text`, as Python does.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use lf_agent::{safe_text, ChatClient, OllamaClient, SettingsAgent};
 use lf_core::{config, dictionary};
 
@@ -16,6 +16,9 @@ const MAX_DISPLAY_CHARS: usize = 300;
 
 pub(crate) fn run(args: TweakArgs, io: &mut Io<'_>) -> Result<()> {
     run_with(args, io, || {
+        // Python's agent reads through `load_config()`, which first migrates a
+        // legacy `~/.localflow.toml` into the v2 file this agent then reads.
+        config::load_config().map_err(|e| anyhow!("Couldn't read your settings ({e})."))?;
         Ok(SettingsAgent::new(
             OllamaClient::new()?,
             config::try_config_path()?,
