@@ -115,6 +115,11 @@ not the aliased Python backend. CPU is the non-macOS default; macOS defaults to
 Metal for Whisper and CPU for Parakeet (CoreML measured slower to load and
 transcribe, with higher RSS, on Apple Silicon). Device overrides are auto/cpu/metal
 for Whisper and auto/cpu/coreml for Parakeet (accelerators require macOS).
+Neither native engine has a CUDA path. A saved `stt_device = "cuda"` (valid
+for Python's faster-whisper) runs the native engine on **CPU**, with one log
+warning per process; the config file is not rewritten, the engine key records
+`cpu`, and `/api/status` still reports the saved `cuda` value. An explicit
+`provider_override` of `cuda` is still rejected.
 
 Whisper uses `whisper-rs 0.16` with `log_backend` and once-installed whisper/GGML
 logging hooks; print/progress/timestamp output is off. Decode defaults are
