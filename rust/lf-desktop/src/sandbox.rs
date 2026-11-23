@@ -780,6 +780,36 @@ fn words(text: &str) -> Vec<String> {
     out
 }
 
+/// A search query from `terms` that `ask_agent::validate_args` accepts: at
+/// most `max` Unicode characters (not bytes), whole terms joined by spaces,
+/// in order. A term that doesn't fit is skipped, never ending the query, so
+/// later terms that fit are still searched. Only when no whole term fits at
+/// all is the first one cut to `max` characters: still a prefix of the word
+/// (long terms match word starts), so an explicit topic never turns into an
+/// unfiltered listing. Empty only for no terms.
+fn bounded_query(terms: &[String], max: usize) -> String {
+    let mut query = String::new();
+    let mut used = 0;
+    for term in terms {
+        let len = term.chars().count();
+        let extra = if used == 0 { len } else { len + 1 };
+        if len == 0 || used + extra > max {
+            continue;
+        }
+        if used > 0 {
+            query.push(' ');
+        }
+        query.push_str(term);
+        used += extra;
+    }
+    if query.is_empty() {
+        if let Some(first) = terms.iter().find(|t| !t.is_empty()) {
+            query = first.chars().take(max).collect();
+        }
+    }
+    query
+}
+
 /// How many `terms` occur in `text`. Terms under four characters must be a
 /// whole word (so "git" doesn't match inside "digital"); longer ones may
 /// start a word, as the old substring match allowed ("fail" -> "failed").
@@ -1060,7 +1090,11 @@ impl lf_providers::LlmProvider for SandboxModel {
             }
             // Short topic words ("git") stay in the query. A question with
             // no topic word at all lists the latest dictations (no query).
-            let query = words(&question).join(" ");
+            // A detailed question is cut to what the tool accepts.
+            let query = bounded_query(
+                &words(&question),
+                crate::controllers::ask_agent::MAX_ARG_CHARS,
+            );
             let tool = if wants_prompts {
                 "search_prompts"
             } else {
@@ -1478,6 +1512,107 @@ mod tests {
         assert_eq!(search(json!({"query": "fail"}))["count"], 1);
         assert_eq!(words("What did I say about git and CI?"), ["git", "ci"]);
         assert_eq!(term_score(&words("ci"), "Check the readiness probe"), 0);
+    }
+
+    /// A detailed question has more distinct terms than one query may hold
+    /// (`MAX_ARG_CHARS`): the first search must still pass validation, run
+    /// and answer from the fixture, not be rejected into "not found".
+    #[test]
+    fn detailed_questions_still_search_within_the_argument_limit() {
+        use crate::controllers::ask_agent::{
+            spec, validate_args, AgentEvent, Scope, Via, MAX_ARG_CHARS,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let fillers: Vec<String> = (0..40).map(|i| format!("zylophant{i:02}")).collect();
+        let question = format!(
+            "When did the Kubernetes rollout fail, considering {}?",
+            fillers.join(" ")
+        );
+        let terms = words(&question);
+        assert!(
+            terms.join(" ").chars().count() > MAX_ARG_CHARS,
+            "the unbounded query would be rejected"
+        );
+        let query = bounded_query(&terms, MAX_ARG_CHARS);
+        assert!(query.chars().count() <= MAX_ARG_CHARS);
+        assert!(query.starts_with("kubernetes rollout fail"));
+        assert!(validate_args(
+            spec("search_dictations").unwrap(),
+            &json!({"query": query, "limit": 5}),
+            &Scope::default()
+        )
+        .is_ok());
+
+        // The production loop: the first search runs and succeeds.
+        let events = sandbox_ask(&root, &question, "Any time");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolFinished {
+                    id: 1,
+                    ok: true,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["search_dictations", "get_dictation"]);
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(
+            done.turn.answer.contains("Kubernetes"),
+            "{}",
+            done.turn.answer
+        );
+        let cite = &done.turn.citations[0];
+        assert_eq!(cite.source, "dictation");
+        let entry = open_history(&root)
+            .unwrap()
+            .get(cite.reference.parse().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(entry.final_text.contains("Kubernetes rollout failed"));
+    }
+
+    #[test]
+    fn bounded_queries_count_characters_and_keep_overlong_topics() {
+        let s = |v: &[&str]| v.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        // Unicode: characters, not bytes, and whole terms only.
+        let wide: Vec<String> = (0..60).map(|i| format!("日本語{i:02}")).collect();
+        let query = bounded_query(&wide, 200);
+        assert!(query.len() > 200, "more bytes than characters");
+        assert!(query.chars().count() <= 200);
+        assert!(query.split(' ').all(|t| wide.contains(&t.to_string())));
+        assert_eq!(query.split(' ').count(), 33, "5 chars, then 6 with a space");
+        // An overlong first term is skipped, not the end of the query.
+        let long = "a".repeat(250);
+        assert_eq!(bounded_query(&s(&[&long, "git", "ci"]), 200), "git ci");
+        assert_eq!(bounded_query(&s(&["git", &long, "ci"]), 200), "git ci");
+        // Only overlong terms: a prefix of the first, never no query at all.
+        let only = bounded_query(&s(&[&"é".repeat(250), &long]), 200);
+        assert_eq!(only, "é".repeat(200));
+        // Exactly at the limit, and the existing cases.
+        let exact = "b".repeat(196);
+        assert_eq!(
+            bounded_query(&s(&[&exact, "git"]), 200),
+            format!("{exact} git")
+        );
+        assert_eq!(bounded_query(&s(&[&exact, "gits"]), 200), exact);
+        assert_eq!(bounded_query(&[], 200), "");
+        assert_eq!(
+            bounded_query(&words("What did I say about git?"), 200),
+            "git"
+        );
     }
 
     #[test]
