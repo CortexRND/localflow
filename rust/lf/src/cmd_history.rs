@@ -8,9 +8,8 @@ use lf_core::history::{HistoryEntry, HistoryStore};
 
 use crate::args::{HistoryArgs, HistoryCommand};
 use crate::cmd_config::parse_py_int;
-use crate::prompt::{self, Answer};
 use crate::pyfmt;
-use crate::{fail, outln, CliError, Io};
+use crate::{abort, confirm, fail, outln, Io};
 
 /// `HistoryStore(enabled=load_config().history_enabled)`.
 fn open_store() -> Result<HistoryStore> {
@@ -74,16 +73,8 @@ pub(crate) fn run_with(store: &HistoryStore, args: HistoryArgs, io: &mut Io<'_>)
             outln!(io.out, "Deleted history entry {}.", entry.id)
         }
         Some(HistoryCommand::Clear { yes }) => {
-            if !yes {
-                let answer = prompt::confirm("Delete all history entries and stored clips?", io)?;
-                if answer != Answer::Yes {
-                    // This command has always ended the prompt line at end of input.
-                    if answer == Answer::Aborted {
-                        outln!(io.out)?;
-                    }
-                    outln!(io.err, "Aborted!")?;
-                    return Err(CliError::Exit(1).into());
-                }
+            if !yes && !confirm("Delete all history entries and stored clips?", io)? {
+                return abort(io);
             }
             let count = store.clear()?;
             outln!(io.out, "Cleared {count} history entries.")
@@ -219,6 +210,7 @@ fn show_stats(store: &HistoryStore, io: &mut Io<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testing::FakeClipboard;
+    use crate::CliError;
     use lf_core::history::NewEntry;
     use std::io::Cursor;
 

@@ -10,9 +10,8 @@ use lf_providers::keys::{detect_imports, get_preset};
 use lf_providers::{ProviderKeys, PRESETS};
 
 use crate::args::KeysCommand;
-use crate::prompt::{self, Answer};
 use crate::pyfmt::str_repr;
-use crate::{fail, outln, usage, CliError, Io};
+use crate::{confirm, fail, outln, usage, Io};
 
 pub(crate) fn run(command: KeysCommand, io: &mut Io<'_>) -> Result<()> {
     match command {
@@ -66,16 +65,7 @@ fn import(file: Option<&Path>, yes: bool, io: &mut Io<'_>) -> Result<()> {
             candidate.masked_value(),
             candidate.source
         )?;
-        let save = yes
-            || match prompt::confirm("Save this key?", io)? {
-                Answer::Yes => true,
-                Answer::No => false,
-                Answer::Aborted => {
-                    outln!(io.err, "Aborted!")?;
-                    return Err(CliError::Exit(1).into());
-                }
-            };
-        if save {
+        if yes || confirm("Save this key?", io)? {
             confirmed.push(candidate);
         }
     }

@@ -46,6 +46,7 @@ pub const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("provider", "llm_provider"),
             ("base_url", "llm_base_url"),
             ("model", "llm_model"),
+            ("fast_model", "llm_fast_model"),
             ("api_key_ref", "llm_key_ref"),
             ("cleanup_enabled", "cleanup_enabled"),
             ("cleanup_timeout", "cleanup_timeout"),
@@ -167,6 +168,7 @@ const FIELD_TYPES: &[(&str, FieldType)] = &[
     ("dictation_enabled", FieldType::Bool),
     ("dictation_toggle_hotkey", FieldType::Str),
     ("llm_key_ref", FieldType::Str),
+    ("llm_fast_model", FieldType::Str),
     ("paste_last_hotkey", FieldType::Str),
     ("command_hotkey", FieldType::Str),
     ("polish_hotkey", FieldType::Str),
@@ -224,7 +226,7 @@ impl Config {
         } else {
             "<ctrl>+<shift>+v"
         };
-        let entries: [(&str, Value); 59] = [
+        let entries: [(&str, Value); 60] = [
             ("model_size", json!("base")),
             ("stt_backend", json!("auto")),
             ("language", Value::Null),
@@ -232,6 +234,7 @@ impl Config {
             ("llm_provider", json!("ollama")),
             ("llm_base_url", json!("http://localhost:11434")),
             ("llm_model", json!("llama3.2:3b")),
+            ("llm_fast_model", json!("")),
             ("llm_key_ref", json!("")),
             ("cleanup_enabled", json!(true)),
             ("cleanup_level", json!("light")),
@@ -319,6 +322,21 @@ impl Config {
     /// The field as a string, when it holds one.
     pub fn field_str(&self, field: &str) -> Option<&str> {
         self.field(field).and_then(Value::as_str)
+    }
+
+    pub fn fast_model_config(&self) -> Option<Self> {
+        let model = self.field_str("llm_fast_model")?.trim();
+        if model.is_empty() || self.field_str("llm_model") == Some(model) {
+            return None;
+        }
+        let mut config = self.clone();
+        config.set_field("llm_model", json!(model));
+        Some(config)
+    }
+
+    pub fn uses_light_cleanup(&self) -> bool {
+        self.field_bool("cleanup_enabled").unwrap_or(true)
+            && self.field_str("cleanup_level") == Some("light")
     }
 
     /// The field as a bool, when it holds one.
@@ -1271,7 +1289,8 @@ pub fn config_to_dict(config: &Config) -> Value {
 
 /// Python `apply_config_update`: validate a sectioned partial update against
 /// the current value types and return the updated copy. An update that moves
-/// the LLM endpoint (provider or normalized base URL) clears `llm_key_ref`.
+/// the LLM endpoint (provider or normalized base URL) clears `llm_key_ref`
+/// and any fast model not supplied in the update.
 pub fn apply_config_update(config: &Config, update: &Value) -> Result<Config> {
     let update = update
         .as_object()
@@ -1348,6 +1367,7 @@ pub fn apply_config_update(config: &Config, update: &Value) -> Result<Config> {
         !py_equal(new_provider, &old_provider) || llm_endpoint(new_url) != llm_endpoint(&old_url);
     if endpoint_changed {
         changes.insert("llm_key_ref".to_string(), json!(""));
+        changes.entry("llm_fast_model").or_insert_with(|| json!(""));
     }
     let mut updated = config.clone();
     for (field, value) in changes {
@@ -1621,7 +1641,7 @@ mod tests {
         assert!(!win_is_fully_qualified("\\\\?\\UNC\\"));
     }
 
-    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\n\n[setup]\nversion = 0\n";
+    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\nfast_model = \"\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\n\n[setup]\nversion = 0\n";
 
     const VALID_REF: &str = "llm_activation_openai_0123456789abcdef0123456789abcdef";
 
@@ -1717,7 +1737,7 @@ mod tests {
         let names = field_names();
         let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len());
-        assert_eq!(names.len(), 59);
+        assert_eq!(names.len(), 60);
         let default_names: std::collections::BTreeSet<&str> =
             defaults.fields.keys().map(String::as_str).collect();
         assert_eq!(unique, default_names);
@@ -1791,6 +1811,7 @@ mod tests {
                 ("llm_provider", json!("openai-compatible")),
                 ("llm_base_url", json!("https://example.test/v1")),
                 ("llm_model", json!("model")),
+                ("llm_fast_model", json!("small-model")),
                 ("llm_key_ref", json!(VALID_REF)),
                 ("cleanup_enabled", json!(false)),
                 ("cleanup_level", json!("medium")),
@@ -2403,6 +2424,29 @@ mod tests {
     }
 
     #[test]
+    fn apply_update_drops_old_fast_model_on_endpoint_change() {
+        let original = with(
+            &Config::defaults_for(false),
+            &[("llm_fast_model", json!("old-fast"))],
+        );
+        for (llm, expected) in [
+            (
+                json!({"model": "new-primary", "base_url": "http://localhost:11434/"}),
+                "old-fast",
+            ),
+            (json!({"provider": "openai-compatible"}), ""),
+            (json!({"base_url": "http://localhost:11435"}), ""),
+            (
+                json!({"base_url": "http://localhost:11435", "fast_model": "new-fast"}),
+                "new-fast",
+            ),
+        ] {
+            let updated = apply_config_update(&original, &json!({"llm": llm})).unwrap();
+            assert_eq!(updated.field_str("llm_fast_model"), Some(expected));
+        }
+    }
+
+    #[test]
     fn config_field_and_valid_keys() {
         assert_eq!(config_field("server.port"), Some(("server", "server_port")));
         assert_eq!(
@@ -2414,7 +2458,7 @@ mod tests {
         assert_eq!(config_field("server.port.extra"), None);
         assert_eq!(config_field(""), None);
         let keys = valid_config_keys();
-        assert_eq!(keys.len(), 59);
+        assert_eq!(keys.len(), 60);
         assert_eq!(keys[0], "stt.provider");
         assert_eq!(keys.last().unwrap(), "setup.version");
         assert_eq!(
