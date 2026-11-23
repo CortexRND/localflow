@@ -37,21 +37,29 @@ pub(crate) fn candidates() -> Vec<PathBuf> {
 }
 
 fn candidates_in(venv: Option<&OsStr>, path: &OsStr) -> Vec<PathBuf> {
-    let launcher = if cfg!(windows) { "lf.exe" } else { "lf" };
-    let venv = venv.map(|root| {
+    venv_python(venv)
+        .into_iter()
+        .chain(beside_launchers(path).next())
+        .chain([PathBuf::from(PYTHON), PathBuf::from("python")])
+        .collect()
+}
+
+fn venv_python(venv: Option<&OsStr>) -> Option<PathBuf> {
+    venv.map(|root| {
         Path::new(root)
             .join(if cfg!(windows) { "Scripts" } else { "bin" })
             .join(PYTHON)
-    });
-    let installed = env::split_paths(path).find_map(|dir| {
+    })
+}
+
+/// The interpreter next to each `lf` launcher on PATH (symlinks resolved).
+fn beside_launchers(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    let launcher = if cfg!(windows) { "lf.exe" } else { "lf" };
+    env::split_paths(path).filter_map(move |dir| {
         let binary = dir.join(launcher).canonicalize().ok()?;
         let python = binary.with_file_name(PYTHON);
         python.is_file().then_some(python)
-    });
-    venv.into_iter()
-        .chain(installed)
-        .chain([PathBuf::from(PYTHON), PathBuf::from("python")])
-        .collect()
+    })
 }
 
 /// Whether the `localflow` script is installed for `python`: next to it, or
@@ -69,21 +77,18 @@ pub(crate) fn find_install() -> Option<PathBuf> {
     )
 }
 
-/// The first of the candidates for `venv` and `path` (bare names tried in
-/// each PATH directory) that exists and has the `localflow` script next to
-/// it. Nothing is run.
+/// The first interpreter that exists and has the `localflow` script: the
+/// venv's, the one next to any `lf` on PATH (another program may be called
+/// `lf` too), then `python3` and `python` in each PATH directory. Nothing is
+/// run.
 fn find_install_in(venv: Option<&OsStr>, path: &OsStr) -> Option<PathBuf> {
-    candidates_in(venv, path)
+    let bare = [PYTHON, "python"]
         .into_iter()
-        .flat_map(|candidate| {
-            if candidate.components().count() > 1 {
-                vec![candidate]
-            } else {
-                env::split_paths(path)
-                    .map(|dir| dir.join(&candidate))
-                    .collect()
-            }
-        })
+        .flat_map(|name| env::split_paths(path).map(move |dir| dir.join(name)));
+    venv_python(venv)
+        .into_iter()
+        .chain(beside_launchers(path))
+        .chain(bare)
         .find(|python| python.is_file() && has_script(python))
 }
 
@@ -137,5 +142,21 @@ mod tests {
         let bare_only = env::join_paths([&bare]).unwrap();
         assert_eq!(find_install_in(Some(other.as_os_str()), &bare_only), None);
         assert_eq!(find_install_in(None, OsStr::new("")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_is_found_behind_a_later_lf_on_path() {
+        let root = tempfile::tempdir().unwrap();
+        // Another program called `lf` next to an unrelated python3 comes first.
+        let (_, other) = tree(root.path(), "other", &["lf", PYTHON]);
+        let (_, install) = tree(root.path(), "install", &["lf", PYTHON, SCRIPT]);
+        let (_, links) = tree(root.path(), "links", &[]);
+        std::os::unix::fs::symlink(install.join("lf"), links.join("lf")).unwrap();
+        let path = env::join_paths([&other, &links]).unwrap();
+        assert_eq!(
+            find_install_in(None, &path),
+            Some(install.canonicalize().unwrap().join(PYTHON))
+        );
     }
 }
