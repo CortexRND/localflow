@@ -381,11 +381,12 @@ def test_local_writer_bytes_collisions_and_queue_cross_read(rust_build, sandbox,
     assert_same(queue.get(added[0]["id"]), changed)
 
 
-def lf(rust_build, sandbox, *args, input_text: str | None = None, env=None):
+def lf(rust_build, sandbox, *args, input_text: str | None = None, env=None, cwd=None):
     binary, _ = rust_build
     return subprocess.run(
         [str(binary), *args],
         check=False,
+        cwd=cwd,
         input=input_text if input_text is not None else "",
         capture_output=True,
         text=True,
@@ -1337,6 +1338,40 @@ def test_cli_stt_python_plugin(rust_build, sandbox):
     assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == (
         _cli_output(_python_cli(sandbox, *args, env=env))
     )
+
+
+@pytest.mark.parametrize("args", [
+    ("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "not-a-provider"),
+    ("stt", "download", "mlx-tiny"),
+])
+def test_cli_stt_probes_ignore_working_directory(rust_build, sandbox, args):
+    if args[1] == "download" and sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        if importlib.util.find_spec("mlx_whisper") is not None:
+            pytest.skip("the installed Apple Silicon runtime passes the download gate")
+    planted = sandbox["root"] / "planted"
+    marker = sandbox["root"] / "imported"
+    metadata = planted / "planted-0.1.dist-info"
+    for package in (planted / "importlib", planted / "mlx_whisper", metadata):
+        package.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\nplanted = planted_plugin:Planted\n", encoding="utf-8",
+    )
+    for module in (
+        "json.py", "platform.py", "dataclasses.py", "contextlib.py", "importlib/__init__.py",
+        "planted_plugin.py", "mlx_whisper/__init__.py",
+    ):
+        (planted / module).write_text(
+            f"with open({str(marker)!r}, 'a', encoding='utf-8') as f:\n    f.write({module!r} + '\\n')\n",
+            encoding="utf-8",
+        )
+    path = sandbox["config"]
+    save_config(Config(model_size="small", stt_device="cpu", dictation_enabled=False), path)
+    before = path.read_bytes()
+    env = {**_stt_probes_same_python(sandbox), "HF_HUB_OFFLINE": "1"}
+    rust = lf(rust_build, sandbox, *args, env=env, cwd=planted)
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    assert path.read_bytes() == before
+    assert _cli_output(rust) == _cli_output(_python_cli(sandbox, *args, env=env))
 
 
 def test_cli_stt_download_rejects_unknown_model(rust_build, sandbox):

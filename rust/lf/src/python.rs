@@ -120,15 +120,23 @@ fn find_interpreter_in(venv: Option<&OsStr>, path: &OsStr) -> Option<PathBuf> {
         .find(|python| script_of(python).is_some() || imports_localflow(python))
 }
 
-/// The working directory is left off `sys.path`: a source checkout there is
-/// not an install.
-const IMPORT_PROBE: &str = "import importlib.util, sys\n\
-sys.path[:] = [entry for entry in sys.path if entry]\n\
+/// `python -c source` with the working directory, which `-c` puts first on
+/// `sys.path`, dropped before anything but the builtin `sys` is imported:
+/// the Python CLI never imports from it, and a source checkout there is not
+/// an install.
+pub(crate) fn probe(python: &Path, source: &str) -> Command {
+    let mut command = Command::new(python);
+    command.arg("-c").arg(format!(
+        "import sys\nsys.path[:] = [entry for entry in sys.path if entry]\n{source}"
+    ));
+    command
+}
+
+const IMPORT_PROBE: &str = "import importlib.util\n\
 sys.exit(importlib.util.find_spec('localflow') is None)";
 
 fn imports_localflow(python: &Path) -> bool {
-    Command::new(python)
-        .args(["-c", IMPORT_PROBE])
+    probe(python, IMPORT_PROBE)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -216,6 +224,41 @@ mod tests {
             find_script_in(None, &path),
             Some(install.canonicalize().unwrap().join(SCRIPT))
         );
+    }
+
+    #[test]
+    fn probes_ignore_the_working_directory() {
+        let planted = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let marker = planted.path().join("imported");
+        let body = format!(
+            "open({:?}, 'a').write(__name__ + '\\n')\n",
+            marker.to_str().unwrap()
+        );
+        fs::create_dir_all(planted.path().join("importlib")).unwrap();
+        fs::create_dir_all(planted.path().join("localflow")).unwrap();
+        for file in [
+            "json.py",
+            "platform.py",
+            "importlib/__init__.py",
+            "localflow/__init__.py",
+        ] {
+            fs::write(planted.path().join(file), &body).unwrap();
+        }
+        let run = |source: &str, dir: &Path| {
+            candidates()
+                .into_iter()
+                .find_map(|python| probe(&python, source).current_dir(dir).output().ok())
+                .expect("no Python interpreter could be started")
+                .status
+        };
+        assert!(run("import importlib.util, json, platform", planted.path()).success());
+        // A `localflow` package in the working directory is not an install.
+        assert_eq!(
+            run(IMPORT_PROBE, planted.path()).success(),
+            run(IMPORT_PROBE, empty.path()).success()
+        );
+        assert!(!marker.exists(), "{}", fs::read_to_string(&marker).unwrap());
     }
 
     #[cfg(unix)]
