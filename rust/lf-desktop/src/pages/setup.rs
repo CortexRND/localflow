@@ -578,7 +578,7 @@ impl SetupView {
     }
 
     fn render_track(&self, t: &Theme, flow: &SetupFlow, cx: &mut Context<Self>) -> gpui::Div {
-        let mut track = div().flex().items_center().gap(space::s1());
+        let mut track = div().flex().items_center();
         for step in Step::ALL {
             let done_or_current = step.index() <= flow.step.index() || flow.visited(step);
             let problem = flow.visited(step)
@@ -604,8 +604,8 @@ impl SetupView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .h(space::s6())
-                .px(space::s1())
+                .h(space::s8())
+                .min_w(space::s8())
                 .tooltip(move |_, cx| ui::Tooltip::view(step.label().into(), cx))
                 .child(div().w(width).h(space::s3()).rounded_full().bg(color));
             let segment = if flow.visited(step) {
