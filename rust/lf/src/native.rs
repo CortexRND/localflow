@@ -23,11 +23,12 @@ pub(crate) const NATIVE_AGENT: &str =
 /// native one (leaving `lf-hub` behind) is not native.
 pub(crate) fn is_native_app(app: &Path) -> bool {
     let contents = app.join("Contents");
-    let xml = fs::read(contents.join("Info.plist"))
-        .map(|plist| String::from_utf8_lossy(&plist).into_owned())
+    let info = plist::Value::from_file(contents.join("Info.plist"))
+        .ok()
+        .and_then(plist::Value::into_dictionary)
         .unwrap_or_default();
-    let string = |key| after_key(&xml, key).and_then(string_value);
-    if string("LocalFlowRuntime").is_some_and(|runtime| runtime == "rust") {
+    let string = |key| info.get(key).and_then(plist::Value::as_string);
+    if string("LocalFlowRuntime") == Some("rust") {
         return true;
     }
     match string("CFBundleExecutable") {
@@ -39,31 +40,12 @@ pub(crate) fn is_native_app(app: &Path) -> bool {
 /// A native login agent: its `ProgramArguments[0]` ends with
 /// `/Contents/MacOS/lf-hub` (`is_rust` in `scripts/macos_launchagent.sh`).
 pub(crate) fn is_native_agent(plist: &Path) -> bool {
-    let Ok(xml) = fs::read(plist) else {
-        return false;
-    };
-    after_key(&String::from_utf8_lossy(&xml), "ProgramArguments")
-        .and_then(|rest| rest.strip_prefix("<array>"))
-        .and_then(|array| string_value(array.trim_start()))
+    plist::Value::from_file(plist)
+        .ok()
+        .and_then(plist::Value::into_dictionary)
+        .and_then(|agent| agent.get("ProgramArguments")?.as_array()?.first().cloned())
+        .and_then(plist::Value::into_string)
         .is_some_and(|program| program.ends_with("/Contents/MacOS/lf-hub"))
-}
-
-/// The XML after the first `<key>{key}</key>`, leading whitespace dropped.
-fn after_key<'a>(xml: &'a str, key: &str) -> Option<&'a str> {
-    let tag = format!("<key>{key}</key>");
-    let start = xml.find(&tag)? + tag.len();
-    Some(xml[start..].trim_start())
-}
-
-/// The unescaped text of the `<string>` element `xml` starts with.
-fn string_value(xml: &str) -> Option<String> {
-    let rest = xml.strip_prefix("<string>")?;
-    let text = &rest[..rest.find("</string>")?];
-    Some(
-        text.replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&"),
-    )
 }
 
 #[cfg(test)]
@@ -106,6 +88,7 @@ mod tests {
             (None, None, false, false),
         ] {
             fs::write(contents.join("Info.plist"), info_plist(executable, runtime)).unwrap();
+            assert!(plist::Value::from_file(contents.join("Info.plist")).is_ok());
             let _ = fs::remove_file(&hub);
             if file {
                 fs::write(&hub, "").unwrap();
@@ -115,6 +98,14 @@ mod tests {
                 native,
                 "{executable:?} {runtime:?} {file}"
             );
+        }
+        // A binary Info.plist (`plutil -convert binary1`) is read too.
+        for (runtime, native) in [("python", false), ("rust", true)] {
+            let mut info = plist::Dictionary::new();
+            info.insert("CFBundleExecutable".into(), "launcher".into());
+            info.insert("LocalFlowRuntime".into(), runtime.into());
+            plist::to_file_binary(contents.join("Info.plist"), &info).unwrap();
+            assert_eq!(is_native_app(&app), native, "binary {runtime}");
         }
         // No Info.plist at all: the `lf-hub` file decides.
         fs::remove_file(contents.join("Info.plist")).unwrap();
@@ -172,17 +163,25 @@ mod tests {
             ),
         ] {
             fs::write(&plist, &xml).unwrap();
+            assert!(plist::Value::from_file(&plist).is_ok(), "{xml}");
             assert_eq!(is_native_agent(&plist), native, "{xml}");
         }
-    }
-
-    #[test]
-    fn strings_are_unescaped() {
-        let xml = "<key>K</key>\n\t<string>a &amp;lt; &lt;b&gt;</string>";
-        assert_eq!(
-            after_key(xml, "K").and_then(string_value),
-            Some("a &lt; <b>".to_string())
-        );
-        assert_eq!(after_key(xml, "J"), None);
+        // A binary plist (`plutil -convert binary1`).
+        for (program, native) in [
+            (
+                "/Users/a/Applications/LocalFlow.app/Contents/MacOS/lf-hub",
+                true,
+            ),
+            ("/Users/a/.venv/bin/localflow", false),
+        ] {
+            let mut agent = plist::Dictionary::new();
+            agent.insert("Label".into(), "com.cortexrnd.localflow".into());
+            agent.insert(
+                "ProgramArguments".into(),
+                plist::Value::Array(vec![program.into()]),
+            );
+            plist::to_file_binary(&plist, &agent).unwrap();
+            assert_eq!(is_native_agent(&plist), native, "binary {program}");
+        }
     }
 }
