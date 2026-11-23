@@ -3496,10 +3496,14 @@ def test_cli_install_commands_leave_a_native_install_alone(rust_build, sandbox, 
     refused("setup", "install-app")
     refused("agent", "install")
 
-    # Either marker makes the bundle native; the agent then refuses with no plist.
-    for marks in ({"marker": False}, {"executable": False}):
+    # CFBundleExecutable = lf-hub alone, the LocalFlowRuntime marker alone, or
+    # an lf-hub file with no Info.plist makes the bundle native; the agent then
+    # refuses with no plist.
+    for marks in ({"marker": False}, {"executable": False}, {}):
         reset()
         _native_app(app, **marks)
+        if not marks:
+            (app / "Contents" / "Info.plist").unlink()
         refused("setup", "install-app")
         refused("agent", "install")
 
@@ -3510,13 +3514,18 @@ def test_cli_install_commands_leave_a_native_install_alone(rust_build, sandbox, 
 
     # Control: Python launcher bundles and agent are (re)written as before.
     reset()
-    for _ in range(2):
+    # The second round runs with an lf-hub left behind in the Python bundle
+    # (a native bundle the old lf-rs overwrote): Info.plist still says launcher.
+    for leftover in (False, True):
+        if leftover:
+            hub.write_bytes(b"\x7fELF")
         rust = _run_cli([str(rust_build[0]), "setup", "install-app"], env)
         assert (rust.returncode, rust.stderr) == (0, ""), rust.stdout
         log.write_text("")
         rust = _run_cli([str(rust_build[0]), "agent", "install"], env)
         assert (rust.returncode, rust.stderr) == (0, ""), rust.stdout
         assert log.read_text().splitlines()[0] == f"bootout gui/{os.getuid()}/com.cortexrnd.localflow"
+        assert hub.exists() == leftover
     assert f"<string>{install / 'localflow'}</string>" in plist.read_text()
     assert (app / "Contents" / "MacOS" / "launcher").read_text() == (
         f'#!/bin/bash\nexec {shlex.quote(str(install / "python3"))} -m localflow.main_app "$@"\n')

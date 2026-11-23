@@ -16,19 +16,24 @@ pub(crate) const NATIVE_AGENT: &str =
     "the LocalFlow login agent belongs to the native LocalFlow app; \
      lf-rs will not replace it. To switch back to Python run: LOCALFLOW_RUNTIME=python ./install.sh";
 
-/// A native bundle: it holds `Contents/MacOS/lf-hub`, or its `Info.plist`
-/// has `LocalFlowRuntime` = `rust` (the marker `install.sh` checks).
+/// A native bundle: its `Info.plist` has `LocalFlowRuntime` = `rust` (the
+/// marker `install.sh` checks); otherwise its `CFBundleExecutable` is
+/// `lf-hub`; only without a readable `CFBundleExecutable` does a
+/// `Contents/MacOS/lf-hub` file decide, so a Python bundle written over a
+/// native one (leaving `lf-hub` behind) is not native.
 pub(crate) fn is_native_app(app: &Path) -> bool {
     let contents = app.join("Contents");
-    if fs::symlink_metadata(contents.join("MacOS").join("lf-hub")).is_ok() {
+    let xml = fs::read(contents.join("Info.plist"))
+        .map(|plist| String::from_utf8_lossy(&plist).into_owned())
+        .unwrap_or_default();
+    let string = |key| after_key(&xml, key).and_then(string_value);
+    if string("LocalFlowRuntime").is_some_and(|runtime| runtime == "rust") {
         return true;
     }
-    let Ok(plist) = fs::read(contents.join("Info.plist")) else {
-        return false;
-    };
-    after_key(&String::from_utf8_lossy(&plist), "LocalFlowRuntime")
-        .and_then(string_value)
-        .is_some_and(|runtime| runtime == "rust")
+    match string("CFBundleExecutable") {
+        Some(executable) => executable == "lf-hub",
+        None => fs::symlink_metadata(contents.join("MacOS").join("lf-hub")).is_ok(),
+    }
 }
 
 /// A native login agent: its `ProgramArguments[0]` ends with
@@ -66,34 +71,55 @@ mod tests {
     use super::*;
 
     /// `Info.plist` as `plutil -create xml1` + `plutil -insert` write it.
-    fn info_plist(runtime: Option<&str>) -> String {
-        let marker = runtime
-            .map(|value| format!("\t<key>LocalFlowRuntime</key>\n\t<string>{value}</string>\n"))
-            .unwrap_or_default();
+    fn info_plist(executable: Option<&str>, runtime: Option<&str>) -> String {
+        let entry = |key: &str, value: Option<&str>| {
+            value
+                .map(|value| format!("\t<key>{key}</key>\n\t<string>{value}</string>\n"))
+                .unwrap_or_default()
+        };
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\
-             \t<key>CFBundleExecutable</key>\n\t<string>lf-hub</string>\n{marker}</dict>\n</plist>\n"
+             {}{}</dict>\n</plist>\n",
+            entry("CFBundleExecutable", executable),
+            entry("LocalFlowRuntime", runtime)
         )
     }
 
     #[test]
-    fn native_app_by_executable_or_marker() {
+    fn native_app_by_marker_then_executable_then_file() {
         let root = tempfile::tempdir().unwrap();
         let app = root.path().join("LocalFlow.app");
         assert!(!is_native_app(&app));
         let contents = app.join("Contents");
+        let hub = contents.join("MacOS").join("lf-hub");
         fs::create_dir_all(contents.join("MacOS")).unwrap();
-        fs::write(contents.join("MacOS").join("launcher"), "").unwrap();
-        for (plist, native) in [
-            (info_plist(None), false),
-            (info_plist(Some("python")), false),
-            (info_plist(Some("rust")), true),
+        // (CFBundleExecutable, LocalFlowRuntime, lf-hub file) -> native
+        for (executable, runtime, file, native) in [
+            (Some("launcher"), None, false, false),
+            (Some("launcher"), Some("python"), false, false),
+            (Some("launcher"), Some("rust"), false, true),
+            (Some("lf-hub"), None, false, true),
+            (Some("lf-hub"), Some("python"), false, true),
+            // A Python bundle written over a native one, `lf-hub` left behind.
+            (Some("launcher"), None, true, false),
+            (None, None, true, true),
+            (None, None, false, false),
         ] {
-            fs::write(contents.join("Info.plist"), plist).unwrap();
-            assert_eq!(is_native_app(&app), native);
+            fs::write(contents.join("Info.plist"), info_plist(executable, runtime)).unwrap();
+            let _ = fs::remove_file(&hub);
+            if file {
+                fs::write(&hub, "").unwrap();
+            }
+            assert_eq!(
+                is_native_app(&app),
+                native,
+                "{executable:?} {runtime:?} {file}"
+            );
         }
+        // No Info.plist at all: the `lf-hub` file decides.
         fs::remove_file(contents.join("Info.plist")).unwrap();
-        fs::write(contents.join("MacOS").join("lf-hub"), "").unwrap();
+        assert!(!is_native_app(&app));
+        fs::write(&hub, "").unwrap();
         assert!(is_native_app(&app));
     }
 
