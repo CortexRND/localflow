@@ -67,6 +67,34 @@ pub enum Command {
     /// Ask a question across your dictations, meeting transcripts and notes.
     #[command(hide = true)]
     Recall(RecallArgs),
+    // `agent` and `setup` docs are verbatim click docstrings (periods kept):
+    // `clickfmt` renders click's usage errors from them.
+    /// Alias of `lf autostart` (launchd LaunchAgent on macOS).
+    #[command(subcommand, hide = true, verbatim_doc_comment)]
+    Agent(AgentCommand),
+    /// Open the setup window or configure LocalFlow in the terminal.
+    #[command(subcommand, verbatim_doc_comment)]
+    Setup(SetupCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Alias of `lf autostart install` (launchd LaunchAgent on macOS).
+    #[command(verbatim_doc_comment)]
+    Install,
+    /// Alias of `lf autostart uninstall` (launchd LaunchAgent on macOS).
+    #[command(verbatim_doc_comment)]
+    Uninstall,
+    /// Alias of `lf autostart status` (launchd LaunchAgent on macOS).
+    #[command(verbatim_doc_comment)]
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SetupCommand {
+    /// Install the setup window as a LocalFlow Setup.app bundle.
+    #[command(verbatim_doc_comment)]
+    InstallApp,
 }
 
 // Required arguments, `--k` and `--status` are optional/plain strings here and

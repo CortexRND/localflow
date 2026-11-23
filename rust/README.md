@@ -300,7 +300,19 @@ lf-rs meeting start [-t TITLE] [-c CATEGORY] | stop | dismiss
 lf-rs prompts list [-s STATUS] | show ID | approve ID... | reject ID...
 lf-rs prompts dispatch [ID...] [--all] [--repo R] [--agent A] [--dry-run]
 lf-rs recall QUESTION [--since today|yesterday|7d|YYYY-MM-DD] [--k 1-20] [--no-llm] [--json]
+lf-rs agent install | uninstall | status
+lf-rs setup install-app
 ```
+
+* `agent` (hidden, as in Python) manages launch at login for
+  `LOCALFLOW_PLATFORM` or the real OS: the freedesktop autostart entry on
+  Linux, the launchd LaunchAgent on macOS (via `launchctl`, trimming its
+  oversized logs) and the HKCU `Run` value on Windows. `setup install-app`
+  writes `~/Applications/LocalFlow Setup.app` and `LocalFlow.app`. Both point
+  at the Python installation `stt` probes (`VIRTUAL_ENV`, then PATH), as
+  Python uses `sys.executable`; bare `setup` and `setup uninstall-app` are
+  not ported. The interpreter path written is the discovered `python3`
+  (`python.exe` on Windows), where Python writes its own `sys.executable`.
 
 * `meeting` posts to the running server (API token read, never created);
   `prompts` works on the shared `~/.localflow/queue.json` and dispatches
@@ -537,7 +549,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
-  `watch`, `notes`, `open`, `models`, `stt`, `setup`, `tweak`,
+  `watch`, `notes`, `open`, `models`, `stt`, bare `setup`, `tweak`,
   `history retry`, `keys import`, `secret`, `token`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;
