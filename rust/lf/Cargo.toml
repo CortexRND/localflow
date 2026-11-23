@@ -36,11 +36,16 @@ log = { workspace = true }
 reqwest = { workspace = true }
 # Clipboard for `history copy`/`history raw`; image support is not needed.
 arboard = { version = "3", default-features = false }
+# `hub --page` folds case like click's `Choice(case_sensitive=False)`.
+caseless = { workspace = true }
+# `hub --gpui` reads the macOS preview bundle's Info.plist (pure Rust).
+plist = "1"
 # zlib for the PNGs of the `setup install-app` icon (macOS).
 flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
-# `agent` (launchd) needs the uid for `gui/<uid>` and log ownership checks.
+# `agent` (launchd) needs the uid for `gui/<uid>` and log ownership checks;
+# `hub --gpui`: `access(X_OK)` and `setsid` for the detached preview window.
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
