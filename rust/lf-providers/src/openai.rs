@@ -28,6 +28,22 @@ impl std::fmt::Debug for OpenAiCompatLlm {
 
 pub const DEFAULT_TIMEOUT: i64 = 120;
 
+/// OpenAI's o-series reasoning models (`o1`, `o3`, `o4-mini`, dated or
+/// variant IDs such as `o1-2024-12-17` or `o3-mini`) reject `max_tokens` on
+/// `/chat/completions` and take the same bound as `max_completion_tokens`.
+/// Matched on the model id: `o`, one or more digits, then the end or `-`.
+/// Every other model (GPT-4o, Llama, provider-prefixed ids such as
+/// OpenRouter's `openai/o4-mini`, which translates the field itself) keeps
+/// `max_tokens`.
+pub fn uses_max_completion_tokens(model: &str) -> bool {
+    let id = model.trim().to_ascii_lowercase();
+    let Some(rest) = id.strip_prefix('o') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(&b'-'))
+}
+
 impl OpenAiCompatLlm {
     pub fn new(
         base_url: &str,
@@ -58,8 +74,14 @@ impl OpenAiCompatLlm {
                 {"role": "user", "content": user},
             ],
         });
+        // No bound sends neither field (basic recall's uncapped call).
         if let Some(max_tokens) = max_tokens {
-            body["max_tokens"] = json!(max_tokens);
+            let field = if uses_max_completion_tokens(&self.model) {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            body[field] = json!(max_tokens);
         }
         if let Some(temperature) = self.temperature {
             body["temperature"] = json!(temperature);
@@ -236,7 +258,59 @@ mod tests {
         );
         let body = request.json();
         assert_eq!(body["max_tokens"], 7);
+        assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(body["temperature"], 0.3);
+    }
+
+    #[test]
+    fn o_series_bound_is_sent_as_max_completion_tokens() {
+        let server = MockServer::start(vec![MockResponse::json(200, OK_BODY)]);
+        OpenAiCompatLlm::new(&format!("{}/v1", server.url()), "o4-mini", "k", 5, None)
+            .complete("sys", "usr", Some(800))
+            .unwrap();
+        let body = server.request(0).json();
+        assert_eq!(body["max_completion_tokens"], 800);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["model"], "o4-mini");
+        assert_eq!(body["messages"][0]["role"], "system");
+        // No bound: neither field (basic recall stays uncapped).
+        let llm = OpenAiCompatLlm::new("https://x/v1", "o4-mini", "", 5, None);
+        let body = llm.chat_body("s", "u", None);
+        assert!(body.get("max_tokens").is_none() && body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn compatible_models_keep_max_tokens() {
+        for model in [
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "llama-3.3-70b-versatile",
+            "openai/o4-mini",
+            "omni-moderation-latest",
+            "o",
+            "o-mini",
+            "o4mini",
+            "",
+        ] {
+            let llm = OpenAiCompatLlm::new("https://x/v1", model, "", 5, None);
+            let body = llm.chat_body("s", "u", Some(7));
+            assert_eq!(body["max_tokens"], 7, "{model}");
+            assert!(body.get("max_completion_tokens").is_none(), "{model}");
+        }
+        for model in [
+            "o1",
+            "o1-mini",
+            "o1-preview",
+            "o1-2024-12-17",
+            "o3",
+            "o3-mini",
+            "o3-mini-2025-01-31",
+            "o4-mini",
+            "O4-Mini-2025-04-16",
+            " o4-mini ",
+        ] {
+            assert!(uses_max_completion_tokens(model), "{model}");
+        }
     }
 
     #[test]
