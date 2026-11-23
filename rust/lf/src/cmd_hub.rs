@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::desktop_launch::{flag_choice, Launcher};
 use crate::pyfmt::str_repr;
-use crate::{fail, python_install, usage, Io};
+use crate::{fail, python, usage, Io};
 
 /// `localflow.hub_route.HUB_PAGES`.
 pub const HUB_PAGES: [&str; 10] = [
@@ -25,8 +25,6 @@ pub const HUB_PAGES: [&str; 10] = [
 ];
 pub const DEFAULT_PAGE: &str = "Home";
 const LEGACY_MODULE: &str = "localflow.hub_window";
-pub const NO_PYTHON: &str =
-    "no Python LocalFlow install found; activate its virtualenv or put its lf on PATH";
 
 /// click's `Choice(HUB_PAGES, case_sensitive=False)`: the canonical name.
 pub fn page_choice(value: &str) -> Result<&'static str> {
@@ -53,15 +51,15 @@ pub(crate) fn run(page: Option<String>, gpui: bool, legacy: bool, io: &mut Io<'_
 }
 
 fn open_legacy(page: &str) -> Result<()> {
-    let Some(python) = python_install::with_module(LEGACY_MODULE) else {
-        return fail(NO_PYTHON);
+    let Some(python) = python::find_interpreter() else {
+        return fail(python::NO_INSTALL);
     };
     match Command::new(python)
         .args(["-m", LEGACY_MODULE, "--page", page])
         .spawn()
     {
         Ok(_) => Ok(()),
-        Err(_) => fail(NO_PYTHON),
+        Err(_) => fail(python::NO_INSTALL),
     }
 }
 

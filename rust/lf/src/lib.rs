@@ -9,6 +9,8 @@
 //! history, transcripts and notes; their Rich console output is reproduced by
 //! [`richfmt`]. `tweak` previews, applies and undoes plain-language settings
 //! changes through the local `lf-agent` settings agent.
+//! `agent` installs launch at login and `setup install-app` the macOS app
+//! bundles, both pointing at the Python installation.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -17,7 +19,9 @@ use std::io::{self, BufRead, Write};
 use clap::Parser;
 
 pub mod args;
+mod clickfmt;
 pub mod clipboard;
+mod cmd_agent;
 mod cmd_config;
 mod cmd_dict;
 mod cmd_history;
@@ -28,13 +32,15 @@ mod cmd_meeting;
 mod cmd_prompts;
 mod cmd_recall;
 mod cmd_serve;
+mod cmd_setup;
 mod cmd_status;
 mod cmd_stt;
 mod cmd_token;
 mod cmd_tweak;
 pub mod desktop_launch;
 pub mod pyfmt;
-mod python_install;
+mod pyfs;
+mod python;
 pub mod richfmt;
 
 pub use clipboard::{Clipboard, SystemClipboard};
@@ -187,9 +193,15 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => {
+            if let Some(text) = clickfmt::usage_error(&args, &error) {
+                let _ = write!(io.err, "{text}");
+                let _ = io.err.flush();
+                return 2;
+            }
             let rendered = error.render().to_string();
             let stream: &mut dyn Write = if error.use_stderr() {
                 &mut *io.err
@@ -261,6 +273,8 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Hub { page, gpui, legacy } => cmd_hub::run(page, gpui, legacy, io),
         Command::Token => cmd_token::run(io),
         Command::Tweak(args) => cmd_tweak::run(args, io),
+        Command::Agent(command) => cmd_agent::run(command, io),
+        Command::Setup(command) => cmd_setup::run(command, io),
     }
 }
 
@@ -294,6 +308,36 @@ mod tests {
         assert_eq!(sub.code, 0);
         assert!(sub.out.contains("--yes"));
         assert_eq!(run_cli(&["--version"]).code, 0);
+        // `agent` is hidden like click's; `setup` is listed.
+        assert!(!help.out.contains("agent") && help.out.contains("setup"));
+        let agent = run_cli(&["agent", "--help"]);
+        assert!(agent.out.contains("install") && agent.out.contains("uninstall"));
+        assert!(run_cli(&["setup", "--help"]).out.contains("install-app"));
+    }
+
+    #[test]
+    fn new_groups_report_click_usage_errors() {
+        for (args, last) in [
+            (
+                &["agent"][..],
+                "  uninstall  Alias of `lf autostart uninstall`",
+            ),
+            (&["agent", "bogus"], "Error: No such command 'bogus'."),
+            (
+                &["setup", "install-app", "extra"],
+                "Error: Got unexpected extra argument (extra)",
+            ),
+            (
+                &["agent", "status", "a", "b"],
+                "Error: Got unexpected extra arguments (a b)",
+            ),
+        ] {
+            let outcome = run_cli(args);
+            assert_eq!((outcome.code, outcome.out.as_str()), (2, ""), "{args:?}");
+            let line = outcome.err.lines().last().unwrap_or_default();
+            assert!(line.starts_with(last), "{args:?}: {line}");
+        }
+        assert_eq!(run_cli(&["setup"]).code, 2);
     }
 
     #[test]

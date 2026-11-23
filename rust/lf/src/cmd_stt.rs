@@ -13,7 +13,7 @@ use crate::args::{SttCommand, SttDevice};
 #[cfg(test)]
 use crate::richfmt::effective_width;
 use crate::richfmt::{console_width, legacy_windows_console, Console};
-use crate::{fail, outln, pyfmt, python_install, CliError, Io};
+use crate::{fail, outln, pyfmt, CliError, Io};
 
 pub fn run(command: SttCommand, io: &mut Io<'_>) -> Result<()> {
     match command {
@@ -334,7 +334,7 @@ print(json.dumps(result))
 // Availability and entry points describe the installed Python runtime, not Rust
 // engine features. Only probe that boundary; config, catalogs and downloads are native.
 fn probe_python(mode: &str, provider: &str) -> Value {
-    python_install::candidates()
+    crate::python::candidates()
         .into_iter()
         .find_map(|interpreter| {
             let output = Command::new(interpreter)

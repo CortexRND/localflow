@@ -22,9 +22,11 @@ import hashlib
 import types
 import os
 import platform
+import shlex
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -3182,3 +3184,434 @@ def test_runtime_single_instance_lock_interoperates(runtime_build, sandbox, monk
     again = singleinstance.acquire("localflow")
     assert again is not None
     again.release()
+
+
+# ---------------------------------------------------------------------------
+# lf agent / lf setup install-app
+# ---------------------------------------------------------------------------
+
+def _same_python(sandbox, bin_dir: Path = Path(sys.executable).parent):
+    """An interpreter in `bin_dir` that the Python CLI runs as `sys.executable`
+    and lf-rs discovers (VIRTUAL_ENV, else PATH) without running it."""
+    env = {key: value for key, value in sandbox["env"].items() if key != "VIRTUAL_ENV"}
+    env.update(_RICH_ENV)
+    name = "python.exe" if os.name == "nt" else "python3"
+    if bin_dir.name == ("Scripts" if os.name == "nt" else "bin") and (bin_dir / name).exists():
+        env["VIRTUAL_ENV"] = str(bin_dir.parent)
+        python = bin_dir / name
+    else:
+        python = bin_dir / Path(sys.executable).name
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return python, env
+
+
+_NO_INSTALL = "no Python LocalFlow install found; activate its virtualenv or put its lf on PATH"
+
+
+def _install_or_skip(python: Path) -> Path:
+    """The `localflow` script lf-rs finds for `python`: next to it, or in
+    Scripts\\ for a non-venv Windows Python. Without one `agent install` refuses."""
+    names = [Path("localflow.exe"), Path("Scripts", "localflow.exe")] if os.name == "nt" else [Path("localflow")]
+    for name in names:
+        if (python.parent / name).exists():
+            return python.parent / name
+    pytest.skip(f"no localflow script for {python}; lf-rs refuses to install")
+
+
+def _stub_python(directory: Path, body: str) -> Path:
+    directory.mkdir(parents=True)
+    (directory / "python3").write_text(f"#!/bin/sh\n{body}\n")
+    (directory / "python3").chmod(0o755)
+    return directory
+
+
+def _fake_launchctl(directory: Path) -> Path:
+    directory.mkdir()
+    (directory / "launchctl").write_text(_FAKE_LAUNCHCTL)
+    (directory / "launchctl").chmod(0o755)
+    return directory
+
+
+def _run_cli(command, env):
+    return subprocess.run(
+        command, cwd=ROOT, input="", env=env, check=False, capture_output=True, text=True,
+        encoding="utf-8", timeout=120,
+    )
+
+
+def _snapshot(*roots: Path) -> dict:
+    """Every directory, file (bytes, and mode on POSIX) and symlink under `roots`."""
+    state = {}
+
+    def mode(path):
+        return stat.S_IMODE(path.lstat().st_mode) if os.name != "nt" else None
+
+    for root in roots:
+        if root.is_symlink() or root.is_file():
+            paths = [root]
+        elif root.is_dir():
+            paths = [root, *root.rglob("*")]
+        else:
+            continue
+        for path in paths:
+            if path.is_symlink():
+                state[str(path)] = ("link", os.readlink(path))
+            elif path.is_dir():
+                state[str(path)] = ("dir", mode(path))
+            elif path.suffix == ".icns":
+                state[str(path)] = ("icns",)  # iconutil output: only its presence is compared
+            else:
+                state[str(path)] = ("file", path.read_bytes(), mode(path))
+    return state
+
+
+def _restore(roots, state: dict) -> None:
+    for root in roots:
+        if root.is_symlink() or root.is_file():
+            root.unlink()
+        elif root.is_dir():
+            shutil.rmtree(root)
+    for name, entry in sorted(state.items()):
+        path = Path(name)
+        if entry[0] == "link":
+            path.symlink_to(entry[1])
+        elif entry[0] == "dir":
+            path.mkdir(exist_ok=True)
+        elif entry[0] == "icns":
+            path.write_bytes(b"")
+        else:
+            path.write_bytes(entry[1])
+            if entry[2] is not None:
+                path.chmod(entry[2])
+    for name, entry in state.items():
+        if entry[0] == "dir" and entry[1] is not None:
+            Path(name).chmod(entry[1])
+
+
+def _both_clis(rust_build, roots, python, env, *args, rust_env=None, as_python=lambda content: content):
+    """The Python CLI, then lf-rs, from the same state of `roots`; asserts
+    equal output and equal files afterwards and returns `(rust, python)`.
+    Where Python changed files, lf-rs's contents are compared through `as_python`."""
+    before = _snapshot(*roots)
+    py = _run_cli([str(python), "-m", "localflow.cli", *args], env)
+    py_after = _snapshot(*roots)
+    _restore(roots, before)
+    rs = _run_cli([str(rust_build[0]), *args], rust_env or env)
+    assert _cli_output(rs) == _cli_output(py), args
+    rs_after = _snapshot(*roots)
+    if py_after != before:
+        rs_after = {
+            path: tuple(as_python(part) if isinstance(part, bytes) else part for part in entry)
+            for path, entry in rs_after.items()
+        }
+    assert rs_after == py_after, args
+    return rs, py
+
+
+def _user_config_dir(python, env) -> Path:
+    out = _run_cli([str(python), "-c", "import platformdirs; print(platformdirs.user_config_dir())"], env)
+    assert out.returncode == 0, out.stderr
+    return Path(out.stdout.strip())
+
+
+def test_cli_agent_linux_autostart(rust_build, sandbox):
+    python, env = _same_python(sandbox)
+    # Python names `localflow` next to `sys.executable`; lf-rs names it next to
+    # the script that exists, which is in Scripts\\ for a non-venv Windows Python.
+    ours, theirs = (
+        f'Exec="{directory / "localflow"}"'.replace("\\", "\\\\").encode()
+        for directory in (_install_or_skip(python).parent, python.parent)
+    )
+    env["LOCALFLOW_PLATFORM"] = "linux"
+    autostart = _user_config_dir(python, env) / "autostart"
+    roots = [autostart]
+    for args in (("status",), ("install",), ("status",), ("install",), ("uninstall",), ("uninstall",)):
+        rust, _ = _both_clis(
+            rust_build, roots, python, env, "agent", *args, as_python=lambda content: content.replace(ours, theirs)
+        )
+        assert rust.returncode == 0 and rust.stderr == "", args
+        if args == ("install",):
+            assert ours in (autostart / "localflow.desktop").read_bytes()
+            assert "\ninstalled" not in rust.stdout and rust.stdout.startswith("installed: ")
+    assert _both_clis(rust_build, roots, python, env, "agent", "status")[0].stdout == "not installed\n"
+
+    # OSError: the autostart folder is a file.
+    shutil.rmtree(autostart)
+    autostart.write_text("x")
+    rust, _ = _both_clis(rust_build, roots, python, env, "agent", "install")
+    assert rust.returncode == 1 and rust.stdout.startswith("error: [")
+    autostart.unlink()
+    if os.name != "nt":
+        (autostart / "localflow.desktop").mkdir(parents=True)
+        rust, _ = _both_clis(rust_build, roots, python, env, "agent", "uninstall")
+        assert rust.returncode == 1 and rust.stdout.startswith("error: [Errno ")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinked interpreter directory")
+def test_cli_agent_linux_exec_escaping(rust_build, sandbox, tmp_path):
+    # An interpreter directory whose path _desktop_exec has to escape.
+    real = Path(sys.executable).parent
+    link = tmp_path / 'py $HOME "q" `x` \\z'
+    link.symlink_to(real.parent, target_is_directory=True)
+    python, env = _same_python(sandbox, link / real.name)
+    seen = _run_cli([str(python), "-c", "import sys; print(sys.executable)"], env)
+    assert seen.returncode == 0, seen.stderr
+    if (seen := seen.stdout.strip()) != str(python):
+        pytest.skip(f"this Python resolves the symlink: sys.executable is {seen}")
+    env["LOCALFLOW_PLATFORM"] = "linux"
+    autostart = _user_config_dir(python, env) / "autostart"
+    _both_clis(rust_build, [autostart], python, env, "agent", "install")
+    text = (autostart / "localflow.desktop").read_text()
+    assert 'py \\$HOME \\"q\\" \\`x\\` \\\\z' in text, text
+
+
+_FAKE_LAUNCHCTL = """#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_LAUNCHCTL_LOG"
+case "$1" in
+  bootout) exit "${FAKE_BOOTOUT_RC:-0}" ;;
+  bootstrap) printf '%s\\n' "$FAKE_BOOTSTRAP_ERR" >&2; exit "${FAKE_BOOTSTRAP_RC:-0}" ;;
+  load) printf '%s\\n' "$FAKE_LOAD_ERR" >&2; exit "${FAKE_LOAD_RC:-0}" ;;
+  print) printf '%s\\n' "$FAKE_PRINT_OUT"; exit "${FAKE_PRINT_RC:-0}" ;;
+esac
+exit 64
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="launchd paths need os.getuid")
+def test_cli_agent_darwin_launchagent(rust_build, sandbox, tmp_path):
+    fake = _fake_launchctl(tmp_path / "fake-bin")
+    python, env = _same_python(sandbox)
+    _install_or_skip(python)
+    env["LOCALFLOW_PLATFORM"] = "darwin"
+    no_launchctl = {**env, "PATH": str(python.parent)}
+    env["PATH"] = str(fake) + os.pathsep + env["PATH"]
+    home = sandbox["home"]
+    roots = [home / "Library", home / ".localflow"]
+    logs = {"python": tmp_path / "python.log", "rust": tmp_path / "rust.log"}
+    plist = home / "Library" / "LaunchAgents" / "com.cortexrnd.localflow.plist"
+    target = f"gui/{os.getuid()}/com.cortexrnd.localflow"
+
+    def agent(*args, **fake_env):
+        """Both CLIs with the fake launchctl; returns lf-rs and its launchctl calls."""
+        for log in logs.values():
+            log.write_text("")
+        side = {**env, **fake_env}
+        rust, _ = _both_clis(
+            rust_build, roots, python, {**side, "FAKE_LAUNCHCTL_LOG": str(logs["python"])}, "agent", *args,
+            rust_env={**side, "FAKE_LAUNCHCTL_LOG": str(logs["rust"])},
+        )
+        calls = logs["rust"].read_text().splitlines()
+        assert calls == logs["python"].read_text().splitlines(), args
+        return rust, calls
+
+    rust, calls = agent("status")
+    assert (rust.stdout, calls) == ("not installed\n", [])
+    rust, calls = agent("install")
+    assert calls == [f"bootout {target}", f"bootstrap gui/{os.getuid()} {plist}"]
+    assert rust.stdout.startswith("installed ") and "KeepAlive" in rust.stdout and rust.returncode == 0
+    assert f"<string>{python.parent / 'localflow'}</string>" in plist.read_text()
+    assert agent("status", FAKE_PRINT_OUT="\tstate = running")[0].stdout == "running (com.cortexrnd.localflow)\n"
+    assert agent("status", FAKE_PRINT_OUT="\tstate = waiting")[0].stdout.startswith("loaded, not running (")
+    rust, calls = agent("status", FAKE_PRINT_RC="113")
+    assert (rust.stdout, calls) == ("not loaded (com.cortexrnd.localflow)\n", [f"print {target}"])
+
+    rust, calls = agent("install", FAKE_BOOTSTRAP_RC="5", FAKE_BOOTSTRAP_ERR="Bootstrap failed: 5: Input/output error")
+    assert rust.returncode == 0 and calls[1:] == [f"bootstrap gui/{os.getuid()} {plist}", f"load -w {plist}"]
+    rust, calls = agent(
+        "install", FAKE_BOOTSTRAP_RC="5", FAKE_BOOTSTRAP_ERR="  Bootstrap failed: 5: Input/output error\n",
+        FAKE_LOAD_RC="1", FAKE_LOAD_ERR="Load failed: [wip] service already loaded " + "x" * 50,
+    )
+    assert rust.returncode == 1 and len(calls) == 3
+    assert " ".join(rust.stdout.split()) == (
+        "error: launchctl bootstrap failed: Bootstrap failed: 5: Input/output error; launchctl load fallback "
+        "also failed: Load failed: service already loaded " + "x" * 50)  # Rich drops the [wip] tag and wraps
+
+    # Oversized launchd logs are trimmed in place; symlinks are left alone.
+    log_dir = home / ".localflow"
+    line = b"0123456789" * 10 + b"\n"
+    (log_dir / "agent.out.log").write_bytes(line * (5 * 1024 * 1024 // len(line) + 50) + b"partial")
+    (log_dir / "agent.err.log").symlink_to(log_dir / "agent.out.log")
+    agent("install")
+    trimmed = (log_dir / "agent.out.log").read_bytes()
+    assert len(trimmed) <= 5 * 1024 * 1024 // 2 and trimmed.startswith(line) and trimmed.endswith(b"partial")
+    assert (log_dir / "agent.err.log").is_symlink()
+
+    rust, calls = agent("uninstall")
+    assert (rust.stdout, calls, plist.exists()) == ("uninstalled\n", [f"bootout {target}"], False)
+    assert agent("uninstall")[1] == [f"bootout {target}"]
+
+    rust, _ = _both_clis(rust_build, roots, python, no_launchctl, "agent", "install")
+    assert (rust.returncode, rust.stdout) == (1, "error: [Errno 2] No such file or directory: 'launchctl'\n")
+
+
+@pytest.mark.skipif(os.name != "nt" or not os.environ.get("GITHUB_ACTIONS"),
+                    reason="writes the real HKCU Run value; Windows CI only")
+def test_cli_agent_win32_run_key(rust_build, sandbox):
+    import winreg
+
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    def read():
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                return winreg.QueryValueEx(key, "localflow")
+        except FileNotFoundError:
+            return None
+
+    def write(saved):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            if saved is not None:
+                winreg.SetValueEx(key, "localflow", 0, saved[1], saved[0])
+                return
+            try:
+                winreg.DeleteValue(key, "localflow")
+            except FileNotFoundError:
+                pass
+
+    python, env = _same_python(sandbox)
+    # Python names `localflow.exe` next to `sys.executable`; lf-rs names the
+    # script that exists, which is in Scripts\\ for a non-venv Python.
+    script, beside = str(_install_or_skip(python)), str(python.parent / "localflow.exe")
+
+    def squeeze(text):  # Rich folds the two paths at different columns
+        return "".join(text.split())
+
+    def as_python(text):
+        return text if script == beside else squeeze(text).replace(squeeze(script), squeeze(beside))
+
+    env["LOCALFLOW_PLATFORM"] = "win32"
+    original = read()
+    try:
+        write(None)
+        for args in (("status",), ("install",), ("status",), ("uninstall",), ("uninstall",), ("status",)):
+            before = read()
+            py = _run_cli([str(python), "-m", "localflow.cli", "agent", *args], env)
+            py_after = read()
+            write(before)
+            rs = _run_cli([str(rust_build[0]), "agent", *args], env)
+            assert tuple(map(as_python, _cli_output(rs)[1:])) == tuple(map(as_python, _cli_output(py)[1:])), args
+            rs_after = read()
+            if rs_after and py_after != before:
+                rs_after = (rs_after[0].replace(script, beside), rs_after[1])
+            assert rs_after == py_after, args
+            assert rs.returncode == py.returncode == 0, args
+        _run_cli([str(rust_build[0]), "agent", "install"], env)
+        assert read() == (f'"{script}"', winreg.REG_SZ)
+    finally:
+        write(original)
+
+
+def test_cli_agent_platform_errors(rust_build, sandbox):
+    python, env = _same_python(sandbox)
+    cases = [("bogus", "unknown platform: 'bogus'")]
+    if os.name != "nt":
+        cases.append(("win32", "No module named 'winreg'"))
+    for selected, message in cases:
+        for args in (("install",), ("status",)):
+            side = {**env, "LOCALFLOW_PLATFORM": selected}
+            py = _run_cli([str(python), "-m", "localflow.cli", "agent", *args], side)
+            rs = _run_cli([str(rust_build[0]), "agent", *args], side)
+            assert _cli_output(rs) == (1, "", f"Error: {message}\n")
+            assert (py.returncode, py.stdout) == (1, "")
+            assert py.stderr.splitlines()[-1].endswith(message)
+
+
+def test_cli_setup_install_app(rust_build, sandbox):
+    python, env = _same_python(sandbox)
+    _install_or_skip(python)
+    apps = sandbox["home"] / "Applications"
+    for _ in range(2):  # the second run rewrites the existing bundles
+        rust, _ = _both_clis(rust_build, [apps], python, env, "setup", "install-app")
+        assert rust.returncode == 0 and rust.stderr == ""
+        assert rust.stdout.replace("\n", "").startswith(f"installed {apps}")
+    main = apps / "LocalFlow.app" / "Contents"
+    launcher = main / "MacOS" / "launcher"
+    assert launcher.read_text() == f'#!/bin/bash\nexec {shlex.quote(str(python))} -m localflow.main_app "$@"\n'
+    if os.name != "nt":
+        assert stat.S_IMODE(launcher.stat().st_mode) == 0o755
+    has_icon = (main / "Resources" / "LocalFlow.icns").exists()
+    assert ("CFBundleIconFile" in (main / "Info.plist").read_text()) == has_icon
+    assert not (apps / "LocalFlow Setup.app" / "Contents" / "Resources").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
+def test_cli_install_commands_skip_an_unrelated_virtualenv(rust_build, sandbox, tmp_path):
+    real, env = _same_python(sandbox)
+    _install_or_skip(real)
+    # VIRTUAL_ENV names a venv without LocalFlow; the real install is first on PATH.
+    other = _stub_python(tmp_path / "other-venv" / "bin", "exit 1")
+    env["VIRTUAL_ENV"] = str(other.parent)
+    # lf-rs then takes the interpreter next to the `lf` on PATH (resolved), else
+    # the bare python3 there; Python runs as that interpreter.
+    launcher = real.parent / "lf"
+    beside_lf = launcher.resolve().parent / "python3"
+    python = beside_lf if launcher.exists() and beside_lf.is_file() else real.parent / "python3"
+    autostart = _user_config_dir(python, env) / "autostart"
+    rust, _ = _both_clis(rust_build, [autostart], python, {**env, "LOCALFLOW_PLATFORM": "linux"}, "agent", "install")
+    assert rust.returncode == 0
+    assert f'Exec="{python.parent / "localflow"}"' in (autostart / "localflow.desktop").read_text()
+    apps = sandbox["home"] / "Applications"
+    rust, _ = _both_clis(rust_build, [apps], python, env, "setup", "install-app")
+    assert rust.returncode == 0
+    launcher_text = (apps / "LocalFlow.app" / "Contents" / "MacOS" / "launcher").read_text()
+    assert shlex.quote(str(python)) in launcher_text and str(other) not in launcher_text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
+def test_cli_setup_install_app_for_a_python_with_scripts_elsewhere(rust_build, sandbox, tmp_path):
+    """As in a `pip install --user`: the interpreter imports localflow but the
+    `localflow` script is not next to it, so only `agent install` refuses."""
+    real, env = _same_python(sandbox)
+    user = _stub_python(tmp_path / "user-bin", f'exec {shlex.quote(str(real))} "$@"')
+    env.pop("VIRTUAL_ENV", None)
+    env["PATH"] = str(user)
+    home = sandbox["home"]
+    rust = _run_cli([str(rust_build[0]), "setup", "install-app"], env)
+    assert rust.returncode == 0 and rust.stderr == ""
+    for name, module in (("LocalFlow Setup", "setup_window"), ("LocalFlow", "main_app")):
+        launcher = home / "Applications" / f"{name}.app" / "Contents" / "MacOS" / "launcher"
+        assert launcher.read_text() == (
+            f'#!/bin/bash\nexec {shlex.quote(str(user / "python3"))} -m localflow.{module} "$@"\n')
+    autostart = _user_config_dir(real, env) / "autostart"
+    rust = _run_cli([str(rust_build[0]), "agent", "install"], {**env, "LOCALFLOW_PLATFORM": "linux"})
+    assert (rust.returncode, " ".join(rust.stdout.split())) == (1, f"error: {_NO_INSTALL}")
+    assert not autostart.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
+def test_cli_install_commands_refuse_without_a_python_install(rust_build, sandbox, tmp_path):
+    real, env = _same_python(sandbox)
+    # PATH holds only a python3 without LocalFlow and the fake launchctl.
+    bare = _stub_python(tmp_path / "bare-bin", "exit 1")
+    fake = _fake_launchctl(tmp_path / "fake-bin")
+    log = tmp_path / "launchctl.log"
+    log.write_text("")
+    env.pop("VIRTUAL_ENV", None)
+    env.update(PATH=os.pathsep.join((str(bare), str(fake))), FAKE_LAUNCHCTL_LOG=str(log))
+    home = sandbox["home"]
+    autostart = _user_config_dir(real, env) / "autostart"
+    for args, extra, roots in (
+        (("agent", "install"), {"LOCALFLOW_PLATFORM": "linux"}, [autostart]),
+        (("agent", "install"), {"LOCALFLOW_PLATFORM": "darwin"}, [home / "Library", home / ".localflow"]),
+        (("setup", "install-app"), {}, [home / "Applications"]),
+    ):
+        before = _snapshot(*roots)
+        rust = _run_cli([str(rust_build[0]), *args], {**env, **extra})
+        if args[0] == "agent":
+            assert (rust.returncode, " ".join(rust.stdout.split()), rust.stderr) == (
+                1, f"error: {_NO_INSTALL}", ""), extra
+        else:
+            assert _cli_output(rust) == (1, "", f"Error: {_NO_INSTALL}\n")
+        assert _snapshot(*roots) == before, args
+    assert log.read_text() == ""
+
+
+def test_cli_agent_setup_usage_and_help(rust_build, sandbox):
+    for args in (("agent",), ("agent", "bogus"), ("setup", "install-app", "extra"),
+                 ("agent", "status", "a", "b"), ("setup", "bogus")):
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2
+    top = lf(rust_build, sandbox, "--help").stdout
+    assert "setup" in top and "agent" not in top
+    assert "install-app" in lf(rust_build, sandbox, "setup", "--help").stdout
