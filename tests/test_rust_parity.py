@@ -2820,8 +2820,9 @@ def test_cli_agent_linux_exec_escaping(rust_build, sandbox, tmp_path):
     link = tmp_path / 'py $HOME "q" `x` \\z'
     link.symlink_to(real.parent, target_is_directory=True)
     python, env = _same_python(sandbox, link / real.name)
-    seen = _run_cli([str(python), "-c", "import sys; print(sys.executable)"], env).stdout.strip()
-    if seen != str(python):
+    seen = _run_cli([str(python), "-c", "import sys; print(sys.executable)"], env)
+    assert seen.returncode == 0, seen.stderr
+    if (seen := seen.stdout.strip()) != str(python):
         pytest.skip(f"this Python resolves the symlink: sys.executable is {seen}")
     env["LOCALFLOW_PLATFORM"] = "linux"
     autostart = _user_config_dir(python, env) / "autostart"
