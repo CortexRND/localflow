@@ -426,8 +426,10 @@ offline transducer API and downloaded prebuilt libraries, not a local
 sherpa build. HF downloads use the standard shared blobs/snapshots cache and
 the same `HF_HUB_CACHE`/`HUGGINGFACE_HUB_CACHE`/`HF_HOME`/`XDG_CACHE_HOME`
 precedence as Python. The factory maps Python provider IDs to the native
-counterparts without changing model size; `lf-hub` uses them on macOS, and
-they are not wired into `lf-rs` or the Python app.
+counterparts without changing model size; `lf-hub` uses them on macOS and
+`lf-rs serve` uses them for `POST /transcribe` and meeting transcription. They
+are not wired into the Python app. Python's `cuda` device runs on the native
+default device (native engines have no CUDA build).
 
 Benchmark (downloads models and the fixed Parakeet `test_wavs/0.wav`):
 
@@ -476,10 +478,9 @@ Transcripts/timing need not be bit-identical across models/backends. See the
 Outside the shipped macOS `lf-hub` app this is not a full application port:
 
 * `lf-hub` ships on macOS only; on Linux and Windows there is no Hub, setup or
-  native settings window — `serve` hosts the web UI and core APIs, and
-  `lf-stt`'s optional `server` feature
-  provides an opt-in transcription backend adapter ([integration](lf-stt/README.md#http-backend-optional));
-  other runtime routes return explicit unavailable-backend errors until linked;
+  native settings window — `serve` hosts the web UI, core APIs, native
+  dictation uploads ([integration](lf-stt/README.md#http-backend-optional))
+  and explicit meeting start/stop, but not the meeting watcher or autostart;
   `lf-rs` has no `dictate` command (the dictation runtime runs inside `lf-hub`);
 * hotkeys and the menu bar are implemented on macOS only: on Linux and
   Windows `lf_input::listener::run_forever` returns `Unsupported`, and no

@@ -61,7 +61,8 @@ any status poller.
 
 Enable `server` and pass `SttBackend::new(inner_backend)` from `lf_stt::server`
 to `lf_server::ServerState::load_with_backend(Arc::new(backend))`. This is an
-opt-in library integration, not a change to the `lf-rs serve` default backend.
+opt-in library feature; `lf-rs serve` enables it with the meetings backend as
+`inner_backend`.
 Every other route and autostart status delegates unchanged to `inner_backend`.
 Provider availability follows compiled engine features; loaded state comes
 from a mutex-protected `SttSlot`. Requests sharing that slot serialize model
