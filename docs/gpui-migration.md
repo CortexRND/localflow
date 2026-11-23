@@ -154,11 +154,14 @@ dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24 -dpi 96 -extension Co
   scripts/gpui_screenshots.py "$binary" artifacts/gpui-screenshots
 ```
 
-Use new artifact directories each run. Gate 2 requires a persistent GNOME
+Use new artifact directories each run. Both scripts pin `GPUI_X11_SCALE_FACTOR=1`
+so a host `Xft.dpi` (for example in `~/.Xresources`) cannot change the captured layout. Gate 2 requires a persistent GNOME
 Keyring default collection in the current session. Run it with LocalFlow and other
 writers to the monitored stores stopped. It adds a word to the **sandbox**
 Dictionary and checks that the real config (including legacy fallback),
-`~/.localflow`, and the GNOME Keyring backing files did not change. `before.json`
+`~/.localflow`, and the GNOME Keyring backing files did not change. The keyring
+directory is read from the running daemon's environment, and the default
+collection's `.keyring` file must exist there. `before.json`
 and `after.json` contain only per-store HMAC-SHA256 digests with a per-run key;
 compare them only within the same run. Other keyring backends are not supported by
 this script. Gate 8 writes 44 PNGs (10 pages and Setup × two themes × two sizes).

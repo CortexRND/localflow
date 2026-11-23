@@ -48,3 +48,16 @@ def test_capture_rejects_blank_wrong_size_and_wrong_theme(gates):
     assert not check("1280 850 1 0.01", "dark", 1280, 850)
     assert not check("1280 850 941 0.85", "dark", 1280, 850)
     assert not check("1280 850 941 0.85", "light", 960, 640)
+
+
+def test_keyring_backing_file_comes_from_the_daemon(gates, tmp_path):
+    safety, _ = gates
+    keyrings = safety.daemon_keyrings(os.getpid())
+    data = os.environ.get("XDG_DATA_HOME", "")
+    expected = Path(data) if Path(data).is_absolute() else Path(os.environ["HOME"]) / ".local/share"
+    assert keyrings == expected / "keyrings"
+    prefix = "/org/freedesktop/secrets/collection/"
+    assert safety.collection_file(tmp_path, prefix + "login") == tmp_path / "login.keyring"
+    assert safety.collection_file(tmp_path, prefix + "my_20keys") == tmp_path / "my keys.keyring"
+    for invalid in ("/", prefix, prefix + "_2e_2e", prefix + "a_2fb", "/org/other/login"):
+        assert safety.collection_file(tmp_path, invalid) is None
