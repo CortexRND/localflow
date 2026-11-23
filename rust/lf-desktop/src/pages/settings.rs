@@ -103,7 +103,8 @@ impl SettingsPage {
             request,
             seen_config,
             simulated,
-            appearance_error: None,
+            // A failure from an earlier visit stays visible.
+            appearance_error: appearance::queue().error(),
         };
         for (i, spec) in SPECS.iter().enumerate() {
             match spec.control {
@@ -697,16 +698,33 @@ impl SettingsPage {
         )
     }
 
-    /// Apply the choice to every window now, then store it. A failed save
-    /// is shown on the row; the choice still applies for this session.
+    /// Apply the choice to every window now, then store it on the
+    /// appearance writer (never on this thread). A failed save is shown on
+    /// the row; the choice still applies for this session.
     fn set_appearance(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+        let queue = appearance::queue();
+        if !queue.needs_save(mode, theme(cx).mode) {
+            return;
+        }
         crate::theme::apply_mode(mode, cx);
-        self.appearance_error = appearance::save(&self.pcx.services.root, mode)
-            .err()
-            .map(|err| {
-                format!("Couldn't save the appearance ({err}). It applies until LocalFlow closes.")
-            });
+        // Registered before queueing; the writer drops it once on disk.
+        let write = Box::new(lf_ui::shutdown::register_pending_write());
+        let receiver = queue.submit(&self.pcx.services.root, mode, write);
+        self.appearance_error = queue.error();
         cx.notify();
+        let Ok(receiver) = receiver else {
+            return;
+        };
+        // Awaited here, so no background thread waits while the disk stalls.
+        cx.spawn(async move |this, cx| {
+            let _ = receiver.recv().await;
+            // The writer records only the latest choice's outcome.
+            let _ = this.update(cx, |this, cx| {
+                this.appearance_error = appearance::queue().error();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn render_extra(&self, cx: &mut Context<Self>) -> Extra {
