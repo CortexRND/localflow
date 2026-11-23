@@ -74,6 +74,7 @@ def window_manager():
 def sandbox_window(binary, sandbox, *route):
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
+    env["GPUI_X11_SCALE_FACTOR"] = "1"
     if not env.get("XDG_RUNTIME_DIR"):
         runtime = sandbox.parent / "runtime"
         runtime.mkdir(mode=0o700, exist_ok=True)
