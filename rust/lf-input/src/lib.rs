@@ -4,7 +4,7 @@
 //! - [`hub`]: the `KeyboardHub` state machine (hold, toggle, chords, command
 //!   mode, deferred rebinding), independent of any OS.
 //! - [`listener`]: the OS event source feeding the hub (CGEventTap on macOS,
-//!   XInput2 raw key events on Linux X11 via [`linux`]).
+//!   XInput2 raw key events on Linux X11, a low-level keyboard hook on Windows).
 //! - [`paste`]: clipboard capture/restore and synthetic paste.
 
 pub mod hub;
@@ -15,6 +15,8 @@ pub mod paste;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub use hub::{BindingWarning, Callback, HubActions, KeyboardHub, Shortcuts};
 pub use keys::{
