@@ -27,8 +27,10 @@ keep-old-on-failure behavior. Independent scoped leases protect both snapshots
 during reload (and any shared HTTP users); dropping the last reference releases
 the slot. Access to each native engine is serialized.
 
-Native audio and models use **16 kHz**. Config-based constructors reject other
+Native audio and models use **16 kHz**. Config-based dictation constructors reject other
 `sample_rate` values instead of letting the runtime miscalculate duration/gates.
+`LazySpeechAdapter::for_16khz_pcm` (used by `lf-rs serve` meetings, whose
+capture resamples to 16 kHz itself) does not consult that dictation setting.
 Set `[dictation] sample_rate = 16000`; input-device changes require rebuilding
 the audio source/restarting the runtime. No microphone or real-model tests run
 automatically; fakes cover snapshots, prompts, reload/failure, sharing and leases.
