@@ -2302,12 +2302,15 @@ def _tweak_paths(sandbox):
 
 
 def _tweak_state(sandbox):
-    """Config and dictionary bytes, and the undo record without its timestamp."""
+    """Config and legacy bytes, the parsed dictionary (Python writes it in text
+    mode, so with CRLF on Windows; Rust writes LF), and the parsed undo record
+    without its timestamp."""
     state = {}
     for name, path in _tweak_paths(sandbox).items():
         data = path.read_bytes() if path.exists() else None
-        if name == "undo" and data is not None:
+        if name in ("dictionary", "undo") and data is not None:
             data = json.loads(data)
+        if name == "undo" and data is not None:
             assert isinstance(data.pop("created"), (int, float))
         state[name] = data
     return state
@@ -2514,7 +2517,7 @@ def test_cli_tweak_migrates_legacy_config(rust_build, sandbox, tweak_ollama):
         "sounds_enabled": False, "cleanup_enabled": False, "paste_method": "clipboard",
         "ollama_url": tweak_ollama,
     }.items())
-    paths["legacy"].write_text(legacy, encoding="utf-8")
+    paths["legacy"].write_bytes(legacy.encode())
     home_files = sorted(p.name for p in sandbox["home"].iterdir())
     _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "on"}))
 
@@ -2551,7 +2554,7 @@ def test_cli_tweak_migrates_legacy_config(rust_build, sandbox, tweak_ollama):
     _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "off"}))
     assert lf(rust_build, sandbox, "tweak", "turn off sounds", "--yes", env=_RICH_ENV).returncode == 0
     paths["config"].unlink()
-    paths["legacy"].write_text(legacy, encoding="utf-8")
+    paths["legacy"].write_bytes(legacy.encode())
     rust, state = _assert_tweak_same(rust_build, sandbox, "--undo")
     assert (rust.returncode, rust.stdout, rust.stderr) == (0, "  Sounds: On\nUndid the last change.\n", "")
     assert tomllib.loads(state["config"].decode())["hotkey"]["sounds"] is True
