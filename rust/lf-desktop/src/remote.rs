@@ -170,7 +170,8 @@ impl Remote {
             Remote::Sandbox { root, .. } => sandbox_answer(root, question),
             Remote::Http { .. } => match self.transport(config) {
                 Ok(transport) => {
-                    let mut backend = HttpAskBackend::new(transport);
+                    // GPUI Ask renders sources-only turns (model unavailable).
+                    let mut backend = HttpAskBackend::new(transport).with_sources_only_replies();
                     if let Some(budget) = budget {
                         backend = backend.with_recall_timeout(budget.as_secs());
                     }

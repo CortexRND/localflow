@@ -64,6 +64,12 @@ pub struct AgentTurn {
 pub const GROUP_CARDS_FROM: usize = 3;
 
 impl AgentTurn {
+    /// Recall matched sources but the model gave no answer (the same
+    /// invariant as `Turn::sources_only`): show no answer prose.
+    pub fn sources_only(&self) -> bool {
+        self.answer.is_empty() && self.error.is_empty() && !self.citations.is_empty()
+    }
+
     pub fn grouped(&self) -> bool {
         self.cards.len() >= GROUP_CARDS_FROM
     }
@@ -550,5 +556,50 @@ mod tests {
         assert_eq!(c.turns[0].via, Some(Via::Recall));
         assert!(c.turns[0].note.as_deref().unwrap().contains("basic recall"));
         assert_eq!(c.turns[0].citations.len(), 1);
+        assert!(!c.turns[0].sources_only());
+    }
+
+    #[test]
+    fn sources_only_recall_turn_has_no_prose_and_keeps_sources() {
+        let mut sources = Turn::new("q");
+        sources.citations = vec![Citation {
+            n: 1,
+            source: "dictation".into(),
+            snippet: "Kubernetes rollout Friday".into(),
+            reference: "12".into(),
+            ..Citation::default()
+        }];
+        let h = Harness {
+            connect_error: Some(McpError::Missing),
+            recall_turn: std::sync::Mutex::new(Some(sources)),
+            ..Harness::default()
+        };
+        let mut c = Conversation::default();
+        let g = c.begin("q");
+        let question = Question {
+            text: "q".into(),
+            filter: "Any time".into(),
+            context: Vec::new(),
+        };
+        answer(&h, &question, &LIMITS, &AtomicBool::new(false), &mut |e| {
+            c.apply(g, e);
+        });
+        let turn = &c.turns[0];
+        assert!(turn.sources_only() && turn.answer.is_empty() && turn.error.is_empty());
+        assert_eq!(turn.citations[0].snippet, "Kubernetes rollout Friday");
+        let note = turn.note.as_deref().unwrap();
+        assert!(!note.contains("Answered") && note.contains("couldn't answer"));
+        // A follow-up never sends the empty answer as an earlier turn.
+        let follow_up = Question {
+            text: "and then?".into(),
+            filter: "Any time".into(),
+            context: c.context(),
+        };
+        let prompt = crate::controllers::ask_agent::user_prompt(
+            &follow_up,
+            &crate::controllers::ask_agent::Scope::default(),
+            &[],
+        );
+        assert!(!prompt.contains("<earlier_turn>"));
     }
 }

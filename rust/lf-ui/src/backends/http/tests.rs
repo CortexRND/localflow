@@ -347,6 +347,58 @@ fn recall_empty_results_and_malformed_response_shapes() {
 }
 
 #[test]
+fn recall_null_answer_with_citations_is_sources_only() {
+    let server = Server::new();
+    let cite = json!({"n":1,"source":"dictation","title":"Slack","app":"Slack",
+        "when":"2026-11-20T10:15","snippet":"Kubernetes rollout Friday","ref":"12"});
+    // Default (the AppKit page): unchanged, `null` is still a generic error.
+    let mut legacy = HttpAskBackend::new(server.http());
+    *server.backend.response.lock().unwrap() =
+        Some(json!({"answer": null, "citations": [cite.clone()]}));
+    let turn = legacy.ask("rollout?", "Any time", None, None);
+    assert_eq!(turn.error, ERROR_GENERIC);
+    assert!(turn.citations.is_empty() && !turn.sources_only());
+    // Opted in (GPUI Ask).
+    let mut ask = HttpAskBackend::new(server.http()).with_sources_only_replies();
+    // The model was unavailable: passages only (HTTP 200).
+    *server.backend.response.lock().unwrap() =
+        Some(json!({"answer": null, "citations": [cite.clone()]}));
+    let turn = ask.ask("rollout?", "Any time", None, None);
+    assert!(turn.sources_only(), "{turn:?}");
+    assert_eq!((turn.answer.as_str(), turn.error.as_str()), ("", ""));
+    assert_eq!(turn.citations.len(), 1);
+    assert_eq!(turn.citations[0].snippet, "Kubernetes rollout Friday");
+    assert_eq!(turn.citations[0].reference, "12");
+    assert_eq!(ask.turns().last(), Some(&turn));
+    // Null with nothing matched is the no-answer reply, never sources-only.
+    *server.backend.response.lock().unwrap() = Some(json!({"answer": null, "citations": []}));
+    let turn = ask.ask("q", "Any time", None, None);
+    assert_eq!(turn.answer, NO_ANSWER);
+    assert!(!turn.sources_only());
+    // Missing or invalid answers and malformed citations stay errors.
+    for body in [
+        json!({"answer": null}),
+        json!({"answer": null, "citations": "x"}),
+        json!({"answer": null, "citations": [{}]}),
+        json!({"answer": null, "citations": [cite.clone(), {"n": "one"}]}),
+        json!({"citations": [cite.clone()]}),
+        json!({"answer": 5, "citations": [cite.clone()]}),
+        json!({"answer": ["a"], "citations": [cite.clone()]}),
+    ] {
+        *server.backend.response.lock().unwrap() = Some(body.clone());
+        let turn = ask.ask("q", "Any time", None, None);
+        assert_eq!(turn.error, ERROR_GENERIC, "{body}");
+        assert!(turn.citations.is_empty() && !turn.sources_only(), "{body}");
+    }
+    // Normal answers are unchanged.
+    *server.backend.response.lock().unwrap() =
+        Some(json!({"answer": "Friday [1].", "citations": [cite]}));
+    let turn = ask.ask("q", "Any time", None, None);
+    assert_eq!(turn.answer, "Friday [1].");
+    assert!(!turn.sources_only());
+}
+
+#[test]
 fn token_source_is_read_each_request_without_creation_or_rotation() {
     let server = Server::new();
     let dir = tempfile::tempdir().unwrap();

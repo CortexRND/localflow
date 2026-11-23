@@ -11,7 +11,7 @@ use std::time::Duration;
 use gpui::{div, prelude::*, px, Context, Entity, FontWeight, Pixels, SharedString, Window};
 use lf_ui::backends::ask::{
     citation_document, citation_label, citation_target, CitationTarget, Turn, ERROR_GENERIC,
-    EXAMPLES, INTRO, PRIVACY, SOURCES, THINKING, TIME_FILTERS,
+    EXAMPLES, INTRO, PRIVACY, SOURCES, SOURCES_ONLY, THINKING, TIME_FILTERS,
 };
 
 use crate::app::PageCx;
@@ -469,17 +469,40 @@ impl AskPage {
             Some(i) => {
                 if !turn.error.is_empty() {
                     answer = answer.child(ui::banner(&t, Tone::Error, turn.error.clone(), None));
+                } else if turn.sources_only() {
+                    // No model answer: no empty prose. The recall note says
+                    // why; without one, say it here.
+                    if turn.note.is_none() {
+                        answer = answer.child(ui::secondary(&t, SOURCES_ONLY));
+                    }
                 } else {
                     answer = answer.child(ui::reading(&t, turn.answer.clone()));
                 }
                 if let Some(note) = &turn.note {
+                    // Definite widths so the note wraps inside the column
+                    // (an intrinsic-width text runs off the window).
+                    let text_width = width - size::icon() - space::s3();
+                    let text_width = if text_width > px(0.) {
+                        text_width
+                    } else {
+                        px(0.)
+                    };
                     answer = answer.child(
                         div()
+                            .w(width)
                             .flex()
-                            .items_center()
+                            .flex_row()
+                            .items_start()
                             .gap(space::s3())
-                            .child(ui::icon("info", t.icon_secondary))
-                            .child(ui::supporting(&t, note.clone())),
+                            .child(ui::icon("info", t.icon_secondary).flex_none())
+                            .child(
+                                div()
+                                    .w(text_width)
+                                    .min_w_0()
+                                    .flex_none()
+                                    .whitespace_normal()
+                                    .child(ui::supporting(&t, note.clone())),
+                            ),
                     );
                 }
                 if !turn.citations.is_empty() {

@@ -45,7 +45,7 @@ pub struct Limits {
     pub max_steps: usize,
     /// Tool calls per question (rejected calls count).
     pub max_tool_calls: usize,
-    /// Wall-clock budget for the model steps of one question.
+    /// Wall-clock budget for one question.
     pub run_deadline: Duration,
     /// Longest single model request (the provider's HTTP timeout).
     pub model_timeout: Duration,
@@ -659,6 +659,39 @@ pub const NOTE_RECALL_MISSING: &str =
 pub const NOTE_RECALL_FAILED: &str =
     "Answered with basic recall: LocalFlow's tools didn't respond.";
 
+/// Why basic recall was used instead of the tools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecallReason {
+    /// Not installed or turned off.
+    Missing,
+    /// Found but failed to start or stopped responding.
+    Failed,
+}
+
+/// The note under a basic-recall turn. It says "Answered" only when recall
+/// produced an answer: a sources-only turn (the model couldn't answer) and
+/// an error turn are described as what they are.
+pub fn recall_note(reason: RecallReason, turn: &Turn) -> String {
+    let why = match reason {
+        RecallReason::Missing => "LocalFlow's tools aren't installed or are turned off",
+        RecallReason::Failed => "LocalFlow's tools didn't respond",
+    };
+    if !turn.error.is_empty() {
+        format!("Tried basic recall because {why}.")
+    } else if turn.sources_only() {
+        format!(
+            "Basic recall was used because {why}. The model couldn't answer, so only the \
+             matching sources are shown."
+        )
+    } else {
+        match reason {
+            RecallReason::Missing => NOTE_RECALL_MISSING,
+            RecallReason::Failed => NOTE_RECALL_FAILED,
+        }
+        .to_string()
+    }
+}
+
 fn card_args(arguments: &Value) -> String {
     let text = match arguments {
         Value::Object(map) if map.is_empty() => String::new(),
@@ -850,12 +883,12 @@ pub fn answer(
         Err(McpError::Deadline) => return finish_turn(timed_out(&turn, limits), cancel, emit),
         Err(e) => {
             emit(AgentEvent::Status(McpStatus::from_error(&e)));
-            let note = if e.is_missing() {
-                NOTE_RECALL_MISSING
+            let reason = if e.is_missing() {
+                RecallReason::Missing
             } else {
-                NOTE_RECALL_FAILED
+                RecallReason::Failed
             };
-            return fallback(backend, question, note, limits, deadline, cancel, emit);
+            return fallback(backend, question, reason, limits, deadline, cancel, emit);
         }
     };
     if stopped() {
@@ -997,7 +1030,7 @@ pub fn answer(
                         return fallback(
                             backend,
                             question,
-                            NOTE_RECALL_FAILED,
+                            RecallReason::Failed,
                             limits,
                             deadline,
                             cancel,
@@ -1081,7 +1114,7 @@ fn timed_out(turn: &Turn, limits: &Limits) -> Turn {
 fn fallback(
     backend: &dyn AgentBackend,
     question: &Question,
-    note: &str,
+    reason: RecallReason,
     limits: &Limits,
     deadline: Instant,
     cancel: &AtomicBool,
@@ -1102,9 +1135,10 @@ fn fallback(
     if Instant::now() >= deadline {
         return finish_turn(timed_out(&turn, limits), cancel, emit);
     }
+    let note = recall_note(reason, &turn);
     emit(AgentEvent::Finished(Answer {
         turn,
-        note: Some(note.to_string()),
+        note: Some(note),
         via: Via::Recall,
     }));
 }
@@ -1210,6 +1244,8 @@ pub(crate) mod tests {
         pub connect_deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
         /// Handed out by the next connect instead of [`FakeTools`].
         pub transport: Mutex<Option<Box<dyn ToolTransport>>>,
+        /// Returned by recall instead of the default answered turn.
+        pub recall_turn: Mutex<Option<Turn>>,
     }
 
     impl Harness {
@@ -1258,6 +1294,9 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push((question.into(), filter.into()));
+            if let Some(turn) = self.recall_turn.lock().unwrap().take() {
+                return turn;
+            }
             let mut turn = Turn::new(question);
             turn.answer = "recall answer".into();
             turn.citations = vec![Citation {
@@ -1455,6 +1494,64 @@ pub(crate) mod tests {
             h.recalls.lock().unwrap()[0],
             ("x".to_string(), "Any time".to_string())
         );
+    }
+
+    #[test]
+    fn recall_notes_never_claim_an_answer_that_wasnt_given() {
+        let cite = Citation {
+            n: 1,
+            source: "dictation".into(),
+            snippet: "Kubernetes rollout Friday".into(),
+            reference: "12".into(),
+            ..Citation::default()
+        };
+        // Sources only (`"answer": null`): kept as is, no prose added.
+        let mut sources = Turn::new("rollout?");
+        sources.citations = vec![cite.clone()];
+        let h = Harness {
+            connect_error: Some(McpError::Missing),
+            recall_turn: Mutex::new(Some(sources.clone())),
+            ..Harness::default()
+        };
+        let done = finished(&run(&h, &q("rollout?", "Any time"))).clone();
+        assert_eq!(done.via, Via::Recall);
+        assert_eq!(done.turn, sources, "citations and snippets preserved");
+        assert!(done.turn.sources_only() && done.turn.answer.is_empty());
+        let note = done.note.unwrap();
+        assert!(!note.contains("Answered"), "{note}");
+        assert!(note.contains("couldn't answer") && note.contains("matching sources"));
+        assert!(note.contains("aren't installed or are turned off"));
+        // A recall error isn't "Answered" either.
+        let mut failed = Turn::new("q");
+        failed.error = ERROR_UNREACHABLE.into();
+        let h = Harness {
+            connect_error: Some(McpError::Closed),
+            recall_turn: Mutex::new(Some(failed)),
+            ..Harness::default()
+        };
+        let done = finished(&run(&h, &q("q", "Any time"))).clone();
+        assert_eq!(done.turn.error, ERROR_UNREACHABLE);
+        let note = done.note.unwrap();
+        assert_eq!(
+            note,
+            "Tried basic recall because LocalFlow's tools didn't respond."
+        );
+        // The no-answer reply and real answers keep the existing notes.
+        let mut nothing = Turn::new("q");
+        nothing.answer = NO_ANSWER.into();
+        assert!(!nothing.sources_only());
+        assert_eq!(
+            recall_note(RecallReason::Missing, &nothing),
+            NOTE_RECALL_MISSING
+        );
+        let mut answered = sources.clone();
+        answered.answer = "Friday [1].".into();
+        assert_eq!(
+            recall_note(RecallReason::Failed, &answered),
+            NOTE_RECALL_FAILED
+        );
+        // No sources: never a claim that there are any.
+        assert!(!Turn::new("q").sources_only());
     }
 
     #[test]
