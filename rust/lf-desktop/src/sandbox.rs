@@ -806,35 +806,57 @@ const FRAMING: &[&str] = &[
     "written",
 ];
 
-/// The sandbox model's search terms for a question: its topic only.
-///
-/// When the question has "about", the topic is what follows the last one
-/// ("What have I dictated about the launch?" -> `launch`). Otherwise framing
-/// words are dropped. Either way, framing words are kept when they are all
-/// there is, so a search for the word "dictated" itself still works.
-fn question_topic(question: &str) -> Vec<String> {
-    let lower = question.to_lowercase();
-    let after_about = tokens(&lower)
-        .collect::<Vec<_>>()
+/// Conversational qualifiers that can trail a question ("… about again?")
+/// without naming its topic.
+const QUALIFIERS: &[&str] = &["again", "anyway", "exactly", "now", "please", "then"];
+
+/// `terms` without any of `drop`, or `None` when nothing would be left.
+fn without(terms: &[String], drop: &[&str]) -> Option<Vec<String>> {
+    let kept: Vec<String> = terms
         .iter()
-        .rposition(|t| t == "about")
-        .map(|at| tokens(&lower).skip(at + 1).collect::<Vec<_>>().join(" "))
-        .map(|rest| words(&rest))
-        .filter(|terms| !terms.is_empty());
-    if let Some(terms) = after_about {
-        return terms;
-    }
-    let all = words(&lower);
-    let topic: Vec<String> = all
-        .iter()
-        .filter(|w| !FRAMING.contains(&w.as_str()))
+        .filter(|w| !drop.contains(&w.as_str()))
         .cloned()
         .collect();
-    if topic.is_empty() {
-        all
-    } else {
-        topic
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// The sandbox model's search terms for a question: its topic only.
+///
+/// - "about" followed by a topic: what follows the last "about", minus
+///   trailing qualifiers ("What have I dictated about the launch?" ->
+///   `launch`).
+/// - "about" followed only by qualifiers: the words before it, minus framing
+///   words and qualifiers, when there are any ("What was that Kubernetes
+///   dictation about again?" -> `kubernetes`); otherwise the qualifier is
+///   itself the topic ("What did I write about again?" -> `again`).
+/// - No "about": the question minus framing words, unless that leaves
+///   nothing ("dictated" -> `dictated`). Qualifiers are dropped only in the
+///   "about …" phrase, never elsewhere.
+fn question_topic(question: &str) -> Vec<String> {
+    // One tokenization pass; `terms` is `words` over a slice of it.
+    let all: Vec<String> = tokens(question).collect();
+    let terms = |slice: &[String]| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for token in slice {
+            if !STOPWORDS.contains(&token.as_str()) && !out.contains(token) {
+                out.push(token.clone());
+            }
+        }
+        out
+    };
+    if let Some(at) = all.iter().rposition(|t| t == "about") {
+        let suffix = terms(&all[at + 1..]);
+        if !suffix.is_empty() {
+            return match without(&suffix, QUALIFIERS) {
+                Some(topic) => topic,
+                None => without(&terms(&all[..at]), FRAMING)
+                    .and_then(|prefix| without(&prefix, QUALIFIERS))
+                    .unwrap_or(suffix),
+            };
+        }
     }
+    let whole = terms(&all);
+    without(&whole, FRAMING).unwrap_or(whole)
 }
 
 /// A search query from `terms` that `ask_agent::validate_args` accepts: at
@@ -1648,6 +1670,60 @@ mod tests {
         assert!(done.turn.error.is_empty(), "{}", done.turn.error);
         assert_eq!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
         assert!(done.turn.citations.is_empty(), "{:?}", done.turn.citations);
+    }
+
+    /// A trailing qualifier after "about" is not the topic: "What was that
+    /// Kubernetes dictation about again?" searched for `again` and found
+    /// nothing. It must search the words before "about" and find the example.
+    #[test]
+    fn trailing_qualifier_after_about_keeps_the_real_topic() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        let question = "What was that Kubernetes dictation about again?";
+        assert_eq!(question_topic(question), ["kubernetes"]);
+        // Explicit topics after "about" are unchanged.
+        assert_eq!(
+            question_topic("What have I dictated about the launch?"),
+            ["launch"]
+        );
+        assert_eq!(
+            question_topic("What did I dictate about dictated notes?"),
+            ["dictated", "notes"]
+        );
+        // A qualifier is still searched when it is all there is.
+        assert_eq!(question_topic("again"), ["again"]);
+        assert_eq!(question_topic("What did I say about again?"), ["again"]);
+        // Only framing before a trailing qualifier: the qualifier is the topic.
+        assert_eq!(question_topic("What did I write about again?"), ["again"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let events = sandbox_ask(&root, question, "Any time");
+        let calls: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, args, .. } => Some((name.as_str(), args.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls[0].0, "search_dictations");
+        assert!(
+            calls[0].1.contains("query: \"kubernetes\""),
+            "{}",
+            calls[0].1
+        );
+        assert_eq!(calls[1].0, "get_dictation", "{calls:?}");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(
+            done.turn.answer.contains("Kubernetes"),
+            "{}",
+            done.turn.answer
+        );
+        let id: i64 = done.turn.citations[0].reference.parse().unwrap();
+        let entry = open_history(&root).unwrap().get(id).unwrap().unwrap();
+        assert!(entry.final_text.contains("Kubernetes"));
     }
 
     /// A detailed question has more distinct terms than one query may hold
