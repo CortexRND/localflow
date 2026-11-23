@@ -18,11 +18,18 @@ pub const WARM_KEEP_ALIVE: &str = "5m";
 
 pub type WarmFn = Arc<dyn Fn(&Config) -> Result<(), String> + Send + Sync>;
 
+#[derive(PartialEq, Eq)]
+struct WarmTarget {
+    model: String,
+    base_url: String,
+    num_ctx: Option<i64>,
+}
+
 #[derive(Default)]
 struct WarmState {
     in_flight: bool,
-    last_ok: Option<Instant>,
-    last_fast_ok: Option<Instant>,
+    last_ok: Option<(WarmTarget, Instant)>,
+    last_fast_ok: Option<(WarmTarget, Instant)>,
 }
 
 /// Single-flight, throttled warm-ups on a background thread.
@@ -84,14 +91,21 @@ impl LlmWarmer {
         if !wants_ollama_warm_up(kind, config) {
             return None;
         }
+        let target = WarmTarget {
+            model: str_field(config, "llm_model"),
+            base_url: str_field(config, "llm_base_url"),
+            num_ctx: config.field_i64("cleanup_num_ctx"),
+        };
         {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let last = if use_fast {
-                state.last_fast_ok
+                &state.last_fast_ok
             } else {
-                state.last_ok
+                &state.last_ok
             };
-            let fresh = last.is_some_and(|at| at.elapsed() < self.interval);
+            let fresh = last
+                .as_ref()
+                .is_some_and(|(previous, at)| previous == &target && at.elapsed() < self.interval);
             if state.in_flight || fresh {
                 return None;
             }
@@ -112,7 +126,7 @@ impl LlmWarmer {
                         } else {
                             &mut state.last_ok
                         };
-                        *last = Some(Instant::now());
+                        *last = Some((target, Instant::now()));
                         log::debug!("cleanup LLM warmed in {}ms", started.elapsed().as_millis());
                     }
                     Err(error) => log::debug!("cleanup LLM warm-up skipped: {error}"),
@@ -174,6 +188,24 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["fast", "gemma4"]);
+    }
+
+    #[test]
+    fn a_new_fast_model_is_not_throttled_by_the_previous_model() {
+        let (warmer, calls) = counting(Ok(()));
+        let mut config = ollama_config();
+        for model in ["fast-a", "fast-b"] {
+            config.set_field("llm_fast_model", serde_json::json!(model));
+            warmer
+                .on_recording_start(JobKind::Dictate, &config)
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(warmer
+                .on_recording_start(JobKind::Dictate, &config)
+                .is_none());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
