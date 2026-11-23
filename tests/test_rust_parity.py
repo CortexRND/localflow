@@ -2258,6 +2258,197 @@ def test_cli_recall_llm_answers(rust_build, sandbox):
         server.server_close()
 
 
+# ------------------------------------------------------------- token / hub ---
+
+
+def test_cli_token(rust_build, sandbox):
+    token_path = Path(_require_isolated(rust_build, sandbox, "token_path")["token_path"])
+    rust, python = _clis(rust_build, sandbox, "token")
+    assert _cli_output(rust) == _cli_output(python)
+    assert rust.returncode == 1 and rust.stdout.startswith("no API token yet — ")
+    assert not token_path.exists()
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    for raw, expected in ((b" \n\t \r\n", None), (b"  tok-123 \r\n", "tok-123\n")):
+        token_path.write_bytes(raw)
+        rust, python = _clis(rust_build, sandbox, "token")
+        assert _cli_output(rust) == _cli_output(python), raw
+        assert (rust.returncode, rust.stdout if expected else None) == (0 if expected else 1, expected)
+        assert token_path.read_bytes() == raw
+
+
+# The Python CLI with `cli.subprocess.Popen` recording the legacy argv instead
+# of opening a window; desktop_launch's own Popen (probe, preview) stays real.
+_HUB_PYTHON = """\
+import json, sys, types
+from localflow import cli
+record = sys.argv.pop(1)
+def popen(argv, **kwargs):
+    with open(record, "a", encoding="utf-8") as f:
+        f.write(json.dumps(argv[1:]) + "\\n")
+cli.subprocess = types.SimpleNamespace(Popen=popen)
+cli.cli()
+"""
+# `-m localflow.hub_window` for lf-rs: a stub package on PYTHONPATH.
+_HUB_STUB = """\
+import json, os, sys
+with open(os.environ["LF_TEST_LEGACY_RECORD"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.orig_argv[1:]) + "\\n")
+"""
+_FAKE_DESKTOP = """\
+#!{python}
+import json, os, sys, time
+with open(os.environ["LF_TEST_DESKTOP_RECORD"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:] == ["--help"]:
+    sys.stdout.write({help!r})
+    sys.exit(0)
+print("native-stderr", file=sys.stderr)
+time.sleep({stay!r})
+sys.exit({code!r})
+"""
+_DESKTOP_HELP = (
+    "lf-desktop — LocalFlow native desktop app (GPUI preview)\n\nOPTIONS:\n"
+    "    --page <PAGE>      Open a page\n    --setup            Open the setup wizard\n\n"
+    "EXIT STATUS (launch-status: 1):\n    0   The window closed, or the request was handed off\n"
+)
+
+
+def _records(path: Path) -> list:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.fixture
+def hub(rust_build, sandbox, tmp_path):
+    """Run `args` through lf-rs and the Python CLI; each side gives
+    (result, legacy argv tails, lf-desktop argv tails)."""
+    stub = tmp_path / "stub"
+    (stub / "localflow").mkdir(parents=True)
+    (stub / "localflow" / "__init__.py").write_bytes(b"")
+    (stub / "localflow" / "hub_window.py").write_bytes(_HUB_STUB.encode())
+    work = tmp_path / "cwd"  # never the repo root, so `-m` can't find the real package
+    work.mkdir()
+    runs = []
+
+    def run(*args, env=None):
+        sides = {}
+        for side in ("python", "rust"):
+            runs.append(side)
+            legacy = tmp_path / f"legacy-{len(runs)}.jsonl"
+            desktop = tmp_path / f"desktop-{len(runs)}.jsonl"
+            full = {**sandbox["env"], **_RICH_ENV, **(env or {}), "LF_TEST_DESKTOP_RECORD": str(desktop)}
+            if side == "rust":
+                full.update(_stt_probes_same_python(sandbox))
+                full.update(PYTHONPATH=str(stub), LF_TEST_LEGACY_RECORD=str(legacy))
+                command, cwd = [str(rust_build[0]), *args], work
+            else:
+                command, cwd = [sys.executable, "-c", _HUB_PYTHON, str(legacy), *args], ROOT
+            result = subprocess.run(
+                command, cwd=cwd, env=full, input="", check=False, capture_output=True,
+                text=True, encoding="utf-8", timeout=120,
+            )
+            sides[side] = (result, _records(legacy), _records(desktop))
+        return sides["rust"], sides["python"]
+
+    return run
+
+
+def _same_hub(pair):
+    (rust, rust_legacy, rust_desktop), (python, legacy, desktop) = pair
+    assert _cli_output(rust) == _cli_output(python)
+    assert (rust_legacy, rust_desktop) == (legacy, desktop)
+    return python, legacy, desktop
+
+
+def _legacy(page):
+    return [["-m", "localflow.hub_window", "--page", page]]
+
+
+def test_cli_hub_usage_errors_and_sandbox_refusal(hub):
+    from localflow.desktop_launch import SANDBOX_REFUSAL
+
+    for args in [("hub", "--page", "x"), ("hub", "--page", "hot  phrases"), ("hub", "--page", ""),
+                 ("hub", "--page", "x", "--gpui", "--legacy"), ("hub", "--gpui", "--legacy"),
+                 ("hub", "--legacy", "--page", "Home", "--gpui")]:
+        (rust, *rust_runs), (python, *python_runs) = hub(*args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2 and rust_runs == python_runs == [[], []], args
+    (rust, _, _), _ = hub("hub", "--page", "x")
+    assert rust.stderr.splitlines()[-1] == (
+        "Error: Invalid value for '--page': 'x' is not one of 'home', 'ask', 'hot phrases', "
+        "'dictionary', 'prompts', 'meetings', 'history', 'style', 'models', 'settings'."
+    )
+    for args, env in [(("hub", "--gpui"), {"LOCALFLOW_SANDBOX": "1"}),
+                      (("hub", "--page", "ask"), {"LOCALFLOW_UI": "gpui", "LOCALFLOW_SANDBOX": "true"})]:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
+        assert (python.returncode, python.stderr) == (1, f"Error: {SANDBOX_REFUSAL}\n")
+        assert legacy == desktop == []
+
+
+def test_cli_hub_legacy_launches(hub):
+    from localflow.desktop_launch import NOTICE_INVALID_ENV, NOTICE_PLATFORM
+
+    cases = [
+        (("hub",), {}, "Home", ""),
+        (("hub", "--page", "hot phrases"), {}, "Hot Phrases", ""),
+        (("hub", "--legacy", "--page", "SETTINGS"), {"LOCALFLOW_UI": "gpui"}, "Settings", ""),
+        (("hub",), {"LOCALFLOW_UI": " Bogus "}, "Home", NOTICE_INVALID_ENV + "\n"),
+        (("hub", "--page", "Ask"), {"LOCALFLOW_SANDBOX": "1", "LOCALFLOW_UI": "legacy"}, "Ask", ""),
+    ]
+    if os.name == "nt":  # no preview package: one notice, then the legacy window
+        cases.append((("hub", "--gpui", "--page", "models"), {}, "Models", NOTICE_PLATFORM + "\n"))
+    for args, env, page, stderr in cases:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
+        assert (python.returncode, python.stdout, python.stderr) == (0, "", stderr), args
+        assert (legacy, desktop) == (_legacy(page), []), args
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake lf-desktop needs a POSIX executable")
+def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
+    from localflow import desktop_launch as dl
+
+    def fake(name, *, help_text=_DESKTOP_HELP, code=0, stay=0.0):
+        path = tmp_path / "bin" / name / "lf-desktop"
+        path.parent.mkdir(parents=True)
+        script = _FAKE_DESKTOP.format(python=sys.executable, help=help_text, stay=stay, code=code)
+        path.write_bytes(script.encode())
+        path.chmod(0o755)
+        return {"LOCALFLOW_DESKTOP_BIN": str(path)}
+
+    good, early = fake("good"), fake("early", code=2)
+    old = fake("old", help_text=_DESKTOP_HELP.replace("    --setup ", "    --set "))
+    staying = fake("stay", code=1, stay=2.5)
+    probe, launch = ["--help"], ["--page", "Hot Phrases"]
+    cases = [
+        (("hub", "--gpui"), {}, dl.NOTICE_NOT_INSTALLED, "Home", []),
+        (("hub", "--gpui"), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop"}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
+        (("hub", "--gpui", "--page", "ask"), {"LOCALFLOW_DESKTOP_BIN": str(tmp_path / "missing")},
+         dl.NOTICE_BAD_OVERRIDE, "Ask", []),
+        (("hub", "--gpui", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
+        (("hub", "--gpui", "--page", "hot phrases"), early, "native-stderr\n" + dl.NOTICE_EARLY_EXIT.format(code=2),
+         "Hot Phrases", [probe, launch]),
+        (("hub", "--gpui"), good, "native-stderr", None, [probe, []]),
+        (("hub", "--gpui", "--page", "Home"), good, "native-stderr", None, [probe, ["--page", "Home"]]),
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": "GPUI"}, "native-stderr", None, [probe, launch]),
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": ""}, "", "Hot Phrases", []),
+        (("hub", "--gpui"), staying, "native-stderr", None, [probe, []]),
+    ]
+    for args, env, stderr, page, launches in cases:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
+        assert (python.returncode, python.stdout) == (0, ""), args
+        assert python.stderr == (stderr + "\n" if stderr else ""), args
+        assert (legacy, desktop) == ((_legacy(page) if page else []), launches), args
+
+    # Something the preview installer didn't install sits at the package root.
+    linux = sys.platform.startswith("linux")
+    root = sandbox["home"].joinpath(*(dl.LINUX_ROOT if linux else dl.MAC_APP))
+    root.mkdir(parents=True)
+    python, legacy, desktop = _same_hub(hub("hub", "--gpui", "--page", "models"))
+    assert python.stderr == dl.NOTICE_NOT_OWNED + "\n"
+    assert (legacy, desktop) == (_legacy("Models"), [])
+
+
 # ------------------------------------------------------------------ tweak ---
 
 

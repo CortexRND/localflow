@@ -25,6 +25,7 @@ mod cmd_agent;
 mod cmd_config;
 mod cmd_dict;
 mod cmd_history;
+mod cmd_hub;
 mod cmd_keys;
 mod cmd_llm;
 mod cmd_meeting;
@@ -34,7 +35,9 @@ mod cmd_serve;
 mod cmd_setup;
 mod cmd_status;
 mod cmd_stt;
+mod cmd_token;
 mod cmd_tweak;
+pub mod desktop_launch;
 mod native;
 pub mod pyfmt;
 mod pyfs;
@@ -268,6 +271,8 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Meeting(command) => cmd_meeting::run(command, io),
         Command::Prompts(command) => cmd_prompts::run(command, io),
         Command::Recall(args) => cmd_recall::run(args, io),
+        Command::Hub { page, gpui, legacy } => cmd_hub::run(page, gpui, legacy, io),
+        Command::Token => cmd_token::run(io),
         Command::Tweak(args) => cmd_tweak::run(args, io),
         Command::Agent(command) => cmd_agent::run(command, io),
         Command::Setup(command) => cmd_setup::run(command, io),
@@ -287,7 +292,8 @@ mod tests {
         assert_eq!(help.code, 0);
         assert!(help.out.contains("Usage: lf-rs"));
         for name in [
-            "config", "dict", "history", "llm", "keys", "status", "meeting", "prompts", "tweak",
+            "config", "dict", "history", "llm", "keys", "status", "meeting", "prompts", "hub",
+            "token", "tweak",
         ] {
             assert!(help.out.contains(name), "{name}");
         }
@@ -375,6 +381,15 @@ mod tests {
                 &["recall", "x", "--since", "Soon"],
                 "Invalid value for --since: invalid since value 'Soon'; \
                  use today, yesterday, 7d, 30d or YYYY-MM-DD",
+            ),
+            (
+                &["hub", "--page", "x", "--gpui", "--legacy"],
+                "Invalid value for '--page': 'x' is not one of 'home', 'ask', 'hot phrases', \
+                 'dictionary', 'prompts', 'meetings', 'history', 'style', 'models', 'settings'.",
+            ),
+            (
+                &["hub", "--page", "SETTINGS", "--gpui", "--legacy"],
+                "--gpui and --legacy can't be used together",
             ),
             (&["prompts", "show"], "Missing argument 'PROMPT_ID'."),
             (&["prompts", "approve"], "Missing argument 'IDS...'."),
