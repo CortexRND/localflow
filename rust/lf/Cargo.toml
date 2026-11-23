@@ -21,11 +21,12 @@ lf-meetings-backend = { path = "../lf-meetings-backend" }
 lf-providers = { path = "../lf-providers" }
 lf-runtime = { path = "../lf-runtime" }
 lf-server = { path = "../lf-server" }
-lf-stt = { path = "../lf-stt", features = ["runtime", "server"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+lf-stt = { path = "../lf-stt", features = ["runtime", "server", "setup"] }
+tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+unicode-width = "0.2"
 chrono = { workspace = true }
 # Facade for lf-core's warnings; `run_main` installs a small stderr logger.
 log = { workspace = true }
@@ -33,6 +34,10 @@ log = { workspace = true }
 reqwest = { workspace = true }
 # Clipboard for `history copy`/`history raw`; image support is not needed.
 arboard = { version = "3", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# `stt download` matches Rich's ASCII progress bar on legacy (non-VT) consoles.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
