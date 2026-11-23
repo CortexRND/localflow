@@ -15,13 +15,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Local, NaiveDate, TimeZone};
-use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use rusqlite::{
+    params, types::Value, Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior,
+};
 use serde::Serialize;
 
 use crate::symbols::pycompat::{casefold, repr_str, split_ws};
 
 const SCHEMA_VERSION: i64 = 1;
-const KINDS: [&str; 3] = ["dictate", "command", "transform"];
+pub const KINDS: [&str; 3] = ["dictate", "command", "transform"];
 const STATUSES: [&str; 3] = ["ok", "failed", "silent"];
 const AUDIO_RATE: u32 = 16000;
 
@@ -255,6 +257,82 @@ fn resolve_lenient(path: &Path) -> std::io::Result<PathBuf> {
         }
     }
     Ok(resolved)
+}
+
+/// Open existing history without initializing the schema, changing permissions
+/// or creating a database. An absent or uninitialized database is empty.
+pub struct HistoryReader(Connection);
+
+impl HistoryReader {
+    pub fn open(path: &Path) -> Result<Option<Self>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let connection = (|| -> rusqlite::Result<Connection> {
+            let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            connection.busy_timeout(Duration::from_secs(30))?;
+            Ok(connection)
+        })()
+        .map_err(history_read_error)?;
+        let version = connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .map_err(history_read_error)?;
+        if version > SCHEMA_VERSION {
+            bail!("history written by a newer LocalFlow; update LocalFlow to read it");
+        }
+        Ok((version != 0).then_some(Self(connection)))
+    }
+
+    pub fn recent_ok(
+        &self,
+        since: Option<f64>,
+        until: Option<f64>,
+        app: Option<&str>,
+        kind: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<HistoryEntry>> {
+        let mut sql = String::from("SELECT * FROM dictations WHERE status = 'ok'");
+        let mut values = Vec::new();
+        for (value, filter) in [(since, " AND ts >= ?"), (until, " AND ts < ?")] {
+            if let Some(value) = value {
+                sql.push_str(filter);
+                values.push(Value::Real(value));
+            }
+        }
+        if let Some(kind) = kind {
+            sql.push_str(" AND kind = ?");
+            values.push(Value::Text(kind.into()));
+        }
+        if let Some(app) = app {
+            sql.push_str(
+                " AND (instr(lower(coalesce(app_name, '')), lower(?)) > 0 OR bundle_id = ?)",
+            );
+            values.extend([Value::Text(app.into()), Value::Text(app.into())]);
+        }
+        sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
+        values.push(Value::Integer(limit));
+        let mut statement = self.0.prepare(&sql).map_err(history_read_error)?;
+        statement
+            .query_map(rusqlite::params_from_iter(values), HistoryEntry::from_row)
+            .map_err(history_read_error)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(history_read_error)
+    }
+
+    pub fn get(&self, entry_id: i64) -> Result<Option<HistoryEntry>> {
+        self.0
+            .query_row(
+                "SELECT * FROM dictations WHERE id = ?",
+                [entry_id],
+                HistoryEntry::from_row,
+            )
+            .optional()
+            .map_err(history_read_error)
+    }
+}
+
+fn history_read_error(err: rusqlite::Error) -> anyhow::Error {
+    anyhow!("cannot read dictation history: {err}")
 }
 
 /// Thread-safe local history backed by SQLite and private WAV clips.
