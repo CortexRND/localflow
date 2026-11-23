@@ -3,8 +3,7 @@
 //! The Python `lf` stays the default CLI. This crate ports the subset of its
 //! commands that work on local files (config, dictionary, history) plus the
 //! provider-key/LLM commands and a read-only `status` that asks the running
-//! Python server. All storage logic lives in `lf-core`/`lf-providers`; this
-//! crate only parses arguments and renders output like `localflow/cli.py`.
+//! server. The `serve` command hosts the Rust dictation and meeting services.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -19,6 +18,7 @@ mod cmd_dict;
 mod cmd_history;
 mod cmd_keys;
 mod cmd_llm;
+mod cmd_serve;
 mod cmd_status;
 mod cmd_stt;
 pub mod pyfmt;
@@ -187,33 +187,7 @@ where
 
 fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
     match command {
-        Command::Serve { host, port } => {
-            let config = lf_core::config::load_config()?;
-            let host = host.unwrap_or_else(|| {
-                config
-                    .field_str("server_host")
-                    .unwrap_or("127.0.0.1")
-                    .into()
-            });
-            let port = match port {
-                Some(port) => port,
-                None => u16::try_from(config.field_i64("server_port").unwrap_or(8756))
-                    .map_err(|_| anyhow::anyhow!("server_port must be between 0 and 65535"))?,
-            };
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .max_blocking_threads(16)
-                .enable_all()
-                .build()?;
-            let server = runtime.block_on(lf_server::Server::bind(&host, port))?;
-            outln!(
-                io.out,
-                "LocalFlow Rust server listening on {}",
-                lf_server::server_url::base_url(&host, server.local_addr()?.port())
-            )?;
-            io.out.flush()?;
-            runtime.block_on(server.run())
-        }
+        Command::Serve { host, port } => cmd_serve::run(host, port, io),
         Command::Config(command) => cmd_config::run(command, io),
         Command::Dict(command) => cmd_dict::run(command, io),
         Command::Dictation { action } => {

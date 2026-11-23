@@ -17,7 +17,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run the optional Rust HTTP server (runtime backends are not yet linked).
+    /// Run the Rust HTTP server for dictation and meetings.
     Serve {
         /// Bind address; defaults to the saved server.host.
         #[arg(long)]

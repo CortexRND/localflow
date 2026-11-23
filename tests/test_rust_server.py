@@ -6,11 +6,13 @@ or fails with LF_RUST_PARITY_REQUIRED=1. No models, microphone or real keychain.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import socket
 import subprocess
 import sys
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -28,6 +30,13 @@ def _free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _token_path(env):
+    return Path(subprocess.check_output(
+        [sys.executable, "-c", "from localflow.apitoken import token_path; print(token_path())"],
+        env=env, cwd=ROOT, text=True,
+    ).strip())
 
 
 @dataclass
@@ -93,7 +102,7 @@ def servers(rust_build, sandbox):
     # Both processes use the same fixture config/token locations. Python creates
     # its per-boot token first; Rust must READ it unchanged on startup.
     py_port = _free_port()
-    token_path = Path(subprocess.check_output([sys.executable, "-c", "from localflow.apitoken import token_path; print(token_path())"], env=env, cwd=ROOT, text=True).strip())
+    token_path = _token_path(env)
     command = [sys.executable, "-m", "uvicorn", "localflow.server:app", "--host", "127.0.0.1", "--port", str(py_port), "--log-level", "error", "--no-access-log"]
     with _start(command, env, token_path, sandbox["root"] / "python-server.log", py_port) as python:
         before = token_path.read_bytes()
@@ -142,7 +151,7 @@ def test_configuration_and_provider_contract(servers):
     py = servers[0].request("/api/providers/stt")[1]
     rs = servers[1].request("/api/providers/stt")[1]
     assert [{k: v for k, v in x.items() if k != "available"} for x in py] == [{k: v for k, v in x.items() if k != "available"} for x in rs]
-    assert all(not p["available"] for p in rs)
+    assert all(p["available"] for p in rs)
     py_status = servers[0].request("/api/status")[1]
     rs_status = servers[1].request("/api/status")[1]
     assert rs_status.pop("autostart") == "unavailable"
@@ -206,8 +215,92 @@ def test_upload_limit_and_error_routes(servers):
     compare(servers, "/api/config", "POST", {})
     compare(servers, "/not-a-route")
     rust = servers[1]
-    assert rust.request("/api/recall", "POST", {"question": "test"})[:2] == (503, {"detail": "recall backend unavailable"})
-    assert rust.request("/meeting/start", "POST", {})[:2] == (503, {"detail": "meeting backend unavailable"})
+    assert rust.request("/api/recall", "POST", {"question": ""})[:2] == (400, {"detail": "question is empty"})
+    assert rust.request("/meeting/start", "POST", {"template": "missing"})[:2] == (400, {"detail": "unknown template 'missing'"})
+
+
+def test_dictation_decodes_silent_wav_without_loading_a_model(servers):
+    rust = servers[1]
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(bytes(16000 * 2))
+    upload = (
+        b'--lf-test\r\nContent-Disposition: form-data; name="file"; filename="silence.wav"\r\n'
+        b"Content-Type: audio/wav\r\n\r\n" + wav.getvalue() + b"\r\n--lf-test--\r\n"
+    )
+    status, body, _ = rust.request("/transcribe", "POST", upload, headers={
+        "Content-Type": "multipart/form-data; boundary=lf-test",
+    })
+    assert status == 200
+    assert body["text"] == ""
+    assert isinstance(body["ms"], int)
+    assert rust.request("/api/status")[1]["stt"]["loaded"] is False
+
+
+def test_meetings_reads_local_templates_and_handles_session_requests(servers, sandbox):
+    rust = servers[1]
+    templates = sandbox["home"] / ".localflow" / "meeting_templates"
+    templates.mkdir(parents=True, exist_ok=True)
+    (templates / "sandbox.md").write_text(
+        "---\nname: Sandbox meeting\n---\n## Decisions\n", encoding="utf-8",
+    )
+    status, body, _ = rust.request("/meeting/templates")
+    assert status == 200
+    template = next(item for item in body["templates"] if item["id"] == "sandbox")
+    assert template["name"] == "Sandbox meeting"
+    assert template["sections"] == ["Decisions"]
+
+    assert rust.request("/api/config", "PUT", {
+        "features": {"meetings": True},
+        "dictation": {"input_device": "localflow-test-missing-microphone"},
+    })[0] == 200
+    status, body, _ = rust.request("/meeting/start", "POST", {"template": "sandbox"})
+    assert status == 500
+    assert body["detail"].startswith("mic open failed: ")
+    assert "transcriber unavailable" not in body["detail"]
+    status, body, _ = rust.request("/meeting/status")
+    assert status == 200
+    assert body["session"] is None
+    assert rust.request("/meeting/stop", "POST")[:2] == (409, {"detail": "no meeting session running"})
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Uses an ALSA virtual microphone")
+def test_meeting_lifecycle_with_virtual_microphone(rust_build, sandbox):
+    alsa = sandbox["root"] / "asound.conf"
+    alsa.write_text(
+        'pcm.!default { type file slave.pcm { type null } file "/dev/null" infile "/dev/zero" format "raw" }\n',
+        encoding="utf-8",
+    )
+    env = {**sandbox["env"], "ALSA_CONFIG_PATH": str(alsa)}
+    config = sandbox["config"]
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'config_version = 2\n[features]\nmeetings = true\n'
+        '[meetings]\nwatch = false\nwork_prompts = false\nvault_path = "~/vault"\n',
+        encoding="utf-8",
+    )
+    token_path = _token_path(env)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text("localflow-http-test-token\n", encoding="utf-8")
+    port = _free_port()
+    command = [str(LF_RS), "serve", "--host", "127.0.0.1", "--port", str(port)]
+    with _start(command, env, token_path, sandbox["root"] / "rust-server.log", port) as rust:
+        title = "Sandbox meeting"
+        status, body, _ = rust.request("/meeting/start", "POST", {"title": title})
+        assert status == 200, body
+        assert body["ok"] is True
+        assert rust.request("/meeting/status")[1]["session"]["title"] == title
+
+        notes = "Discussed next steps."
+        assert rust.request("/meeting/notes", "POST", {"notes": notes})[0] == 200
+        status, body, _ = rust.request("/meeting/stop", "POST")
+        assert status == 200, body
+        assert body["segments"] == 0
+        notes_path = Path(body["notes_path"])
+        assert notes_path.is_relative_to(sandbox["home"] / "vault")
+        assert notes in notes_path.read_text(encoding="utf-8")
+        assert rust.request("/meeting/status")[1]["session"] is None
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc RSS measurement")

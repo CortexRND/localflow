@@ -16,9 +16,12 @@ path = "src/main.rs"
 
 [dependencies]
 lf-core = { path = "../lf-core" }
+lf-meetings = { path = "../lf-meetings", features = ["capture"] }
+lf-meetings-backend = { path = "../lf-meetings-backend" }
 lf-providers = { path = "../lf-providers" }
+lf-runtime = { path = "../lf-runtime" }
 lf-server = { path = "../lf-server" }
-lf-stt = { path = "../lf-stt", default-features = false, features = ["setup"] }
+lf-stt = { path = "../lf-stt", features = ["runtime", "server", "setup"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 anyhow = { workspace = true }
 clap = { workspace = true }

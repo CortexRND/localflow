@@ -4,6 +4,7 @@
 //! the Input Monitoring (TCC) preflight and dead-tap watchdog from PR #31.
 //! Linux: listen-only XInput2 raw key events on X11 (see [`crate::linux`]);
 //! Wayland and display-less sessions get an explicit `Unsupported` error.
+//! Windows: a listen-only low-level keyboard hook on the interactive desktop.
 //! Other platforms: a clear `Unsupported` error.
 
 use std::fmt;
@@ -54,8 +55,7 @@ pub enum InputError {
     /// The OS refused to create the tap (Accessibility/Input Monitoring).
     TapCreateFailed,
     Unsupported(&'static str),
-    /// The platform event source failed or disconnected (X server gone,
-    /// XInput2 missing). The text never contains key data.
+    /// The platform event source failed or disconnected. The text never contains key data.
     Backend(String),
 }
 
@@ -76,7 +76,7 @@ impl fmt::Display for InputError {
 
 /// Told once the platform accepted the listener (macOS: tap installed with
 /// Input Monitoring granted / X11: raw key subscription confirmed by the
-/// server). Nothing calls it for a listener
+/// server / Windows: keyboard hook installed). Nothing calls it for a listener
 /// that failed to register, so "listening" is never inferred from a thread.
 pub type ReadySink = Arc<dyn Fn() + Send + Sync>;
 
@@ -88,6 +88,8 @@ pub enum Support {
     MacOs,
     /// A native X11 session: XInput2 raw key events.
     X11,
+    /// A low-level keyboard hook on the current Windows desktop.
+    Windows,
     /// Can't work here, with the reason to show.
     Unsupported(&'static str),
 }
@@ -105,15 +107,19 @@ pub fn support() -> Support {
             Err(_) => Support::Unsupported(crate::linux::NO_DISPLAY),
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        Support::Windows
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Support::Unsupported(UNSUPPORTED_PLATFORM)
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-const UNSUPPORTED_PLATFORM: &str = "global hotkeys are only implemented for macOS and Linux (X11) \
-in the Rust port; use the Python app on Windows";
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const UNSUPPORTED_PLATFORM: &str =
+    "global hotkeys are only implemented for macOS, Linux (X11), and Windows";
 
 impl std::error::Error for InputError {}
 
@@ -150,7 +156,12 @@ pub fn run_forever(hub: &KeyboardHub, warn: WarningSink) -> Result<(), InputErro
         let _ = warn;
         crate::linux::run_x11(hub, &std::sync::atomic::AtomicBool::new(false), &|| {})
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = warn;
+        crate::windows::run_hook(hub, &std::sync::atomic::AtomicBool::new(false), &|| {})
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (hub, warn);
         Err(InputError::Unsupported(UNSUPPORTED_PLATFORM))
@@ -196,7 +207,12 @@ pub fn run_cancellable_with_ready(
         let _ = (warn, request_permissions);
         crate::linux::run_x11(hub, &stop, ready.as_ref())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (warn, request_permissions);
+        crate::windows::run_hook(hub, &stop, ready.as_ref())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (stop, request_permissions, ready);
         run_forever(hub, warn)
