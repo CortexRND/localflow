@@ -155,13 +155,19 @@ dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24 -dpi 96 -extension Co
 ```
 
 Use new artifact directories each run. Gate 2 requires a persistent GNOME
-Keyring default collection in the current session. Run it with LocalFlow and other
+Keyring default collection in the current session; it fails unless the `default`
+alias resolves to a collection whose `<name>.keyring` file is in the monitored
+keyrings directory used by the running daemon, and it refuses to run while a legacy
+`~/.gnome2/keyrings` directory exists. Run it with LocalFlow and other
 writers to the monitored stores stopped. It adds a word to the **sandbox**
 Dictionary and checks that the real config (including legacy fallback),
 `~/.localflow`, and the GNOME Keyring backing files did not change. `before.json`
 and `after.json` contain only per-store HMAC-SHA256 digests with a per-run key;
 compare them only within the same run. Other keyring backends are not supported by
 this script. Gate 8 writes 44 PNGs (10 pages and Setup × two themes × two sizes).
+It launches `lf-desktop` with `GPUI_X11_SCALE_FACTOR=1` (which GPUI reads before
+`Xft.dpi` and RandR) and fails if the process did not get it, so host HiDPI
+settings cannot change the captured layout.
 Review the PNGs for legibility and layout at both sizes; capture success alone
 does not complete the review.
 
