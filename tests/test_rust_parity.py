@@ -3425,8 +3425,9 @@ def _native_app(app: Path, *, executable: bool = True, marker: bool = True) -> N
     """A LocalFlow.app as scripts/build_rust_app.sh builds it (plutil xml1 Info.plist)."""
     macos = app / "Contents" / "MacOS"
     macos.mkdir(parents=True)
-    (macos / ("lf-hub" if executable else "launcher")).write_bytes(b"\x7fELF")
-    info = {"CFBundleIdentifier": "com.cortexrnd.localflow.app", "CFBundleExecutable": "lf-hub"}
+    name = "lf-hub" if executable else "launcher"
+    (macos / name).write_bytes(b"\x7fELF")
+    info = {"CFBundleIdentifier": "com.cortexrnd.localflow.app", "CFBundleExecutable": name}
     if marker:
         info["LocalFlowRuntime"] = "rust"
     (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
