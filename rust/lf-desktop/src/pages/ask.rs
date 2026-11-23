@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{div, prelude::*, px, Context, Entity, FontWeight, Pixels, SharedString, Window};
+use gpui::{
+    div, prelude::*, px, AnyWindowHandle, BoxShadow, Context, Entity, FontWeight, Hsla, Keystroke,
+    Pixels, SharedString, Subscription, Window,
+};
 use lf_ui::backends::ask::{
     citation_document, citation_label, citation_target, CitationTarget, Turn, ERROR_GENERIC,
     EXAMPLES, INTRO, PRIVACY, SOURCES, SOURCES_ONLY, THINKING, TIME_FILTERS,
@@ -21,6 +24,7 @@ use crate::controllers::ask::{
 };
 use crate::controllers::ask_agent::{self, AgentEvent, Answer, Question, Via, LIMITS};
 use crate::controllers::mcp_client::McpStatus;
+use crate::page::Page;
 use crate::pages::{header, page, sandbox_note};
 use crate::theme::{size, space, theme, Theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
@@ -94,15 +98,52 @@ impl AskLayout {
     }
 }
 
-/// `ui::row_button` on an opaque fill, with `ui::surface_ring`: the focus
-/// ring is a shadow painted under the row, so a transparent row (or a
-/// translucent hover/pressed fill) would show the ring colour through it
-/// instead of an edge. Same tab stop and cursor; the hover and pressed
-/// tints are pre-blended onto the surface the rows sit on (the content pane
-/// and the composer). Callers round the row.
-fn surface_row(t: &Theme, id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
-    let ring = ui::surface_ring(t);
-    let (hover, pressed) = (t.bg_surface.blend(t.hover), t.bg_surface.blend(t.pressed));
+/// Blur for Ask's focus ring. GPUI 0.2.2's Linux (blade) and Windows shadow
+/// shaders sample the blur over `±3 × blur_radius`, so the zero blur of
+/// `ui::ring` / `ui::ring_over` paints nothing there (only Metal
+/// special-cases zero). A sub-pixel blur draws the same 2 px neutral edge.
+const RING_BLUR: f32 = 0.5;
+
+/// Ask's focus decoration: none after pointer input (focus, caret and
+/// selection stay); after keyboard navigation, the shared `ui::ring` for an
+/// opaque control, or `ui::ring_over(fill)` for a transparent control on
+/// `fill`, with every platform's blur.
+fn ask_ring(t: &Theme, keyboard: bool, over: Option<Hsla>) -> ui::FocusRing {
+    if !keyboard {
+        return ui::FocusRing::Hidden;
+    }
+    let shadows = match over {
+        Some(fill) => ui::ring_over(t, fill),
+        None => ui::ring(t),
+    };
+    ui::FocusRing::Shadows(
+        shadows
+            .into_iter()
+            .map(|s| BoxShadow {
+                blur_radius: if s.blur_radius > px(RING_BLUR) {
+                    s.blur_radius
+                } else {
+                    px(RING_BLUR)
+                },
+                ..s
+            })
+            .collect(),
+    )
+}
+
+/// Whether a keystroke is keyboard navigation (shows Ask's rings): Tab and
+/// Shift-Tab only, so typing, caret moves and shortcuts never do.
+fn is_keyboard_nav(keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    keystroke.key == "tab" && !(m.control || m.alt || m.platform || m.function)
+}
+
+/// `ui::row_button` for Ask: transparent on `bg_surface` (the content pane
+/// and the composer), with Ask's keyboard-only ring. Same tab stop, cursor
+/// and tints. Callers round the row.
+fn ask_row(t: &Theme, id: impl Into<gpui::ElementId>, keyboard: bool) -> gpui::Stateful<gpui::Div> {
+    let ring = ask_ring(t, keyboard, Some(t.bg_surface)).shadows(Vec::new);
+    let (hover, pressed) = (t.hover, t.pressed);
     div()
         .id(id)
         .relative()
@@ -110,10 +151,9 @@ fn surface_row(t: &Theme, id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui
         .w_full()
         .tab_index(0)
         .cursor_pointer()
-        .bg(t.bg_surface)
         .hover(move |s| s.bg(hover))
         .active(move |s| s.bg(pressed))
-        .focus(move |s| s.shadow(ring.clone()))
+        .when_some(ring, |d, ring| d.focus(move |s| s.shadow(ring.clone())))
 }
 
 /// Sources the tools search (versus `SOURCES`, which basic recall searches).
@@ -127,6 +167,13 @@ pub struct AskPage {
     /// Stop flag of the running question.
     cancel: Option<Arc<AtomicBool>>,
     probe_generation: u64,
+    /// The last input was keyboard navigation (Tab), so focus rings show;
+    /// a mouse press on the page hides them again.
+    keyboard_focus: bool,
+    /// The window this page renders in (set on render), so another window's
+    /// keystrokes don't change it.
+    window: Option<AnyWindowHandle>,
+    _keystrokes: Subscription,
 }
 
 impl Drop for AskPage {
@@ -152,6 +199,7 @@ impl AskPage {
             }
         })
         .detach();
+        let ask = cx.weak_entity();
         let time = cx.new(|cx| {
             Select::new(
                 cx,
@@ -162,7 +210,32 @@ impl AskPage {
                 Some(0),
             )
             .width(150.)
-            .surface_ring()
+            // The open menu occludes the page, so the root's mouse capture
+            // never sees a click on an option: clear the modality here too.
+            // Deferred, so updating Ask (which updates this Select) never
+            // re-enters it.
+            .on_menu_pointer(move |window, cx| {
+                let ask = ask.clone();
+                window.defer(cx, move |_, cx| {
+                    let _ = ask.update(cx, |page, cx| page.set_keyboard_focus(false, cx));
+                });
+            })
+        });
+        // Interceptors run before the keymap, so this also sees the Tab that
+        // the `FocusNext` binding consumes (keystroke observers don't). It
+        // only records the modality: nothing is stopped or handled here.
+        let page_entity = cx.weak_entity();
+        let current_page = pcx.current_page.clone();
+        let keystrokes = cx.intercept_keystrokes(move |event, window, cx| {
+            if *current_page.borrow() != Page::Ask || !is_keyboard_nav(&event.keystroke) {
+                return;
+            }
+            let handle = window.window_handle();
+            let _ = page_entity.update(cx, |page, cx| {
+                if page.window == Some(handle) {
+                    page.set_keyboard_focus(true, cx);
+                }
+            });
         });
         let mut page = AskPage {
             pcx,
@@ -171,13 +244,43 @@ impl AskPage {
             convo: Conversation::default(),
             cancel: None,
             probe_generation: 0,
+            keyboard_focus: false,
+            window: None,
+            _keystrokes: keystrokes,
         };
+        page.push_focus_rings(cx);
         page.probe(cx);
         page
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         cx.notify();
+    }
+
+    /// Record keyboard (Tab) or pointer input; repaint only on a change.
+    fn set_keyboard_focus(&mut self, keyboard: bool, cx: &mut Context<Self>) {
+        if self.keyboard_focus != keyboard {
+            self.keyboard_focus = keyboard;
+            self.push_focus_rings(cx);
+            cx.notify();
+        }
+    }
+
+    /// The composer and Time menu render themselves: hand them the ring.
+    /// The composer is opaque `bg_control` and so is the Time trigger, so
+    /// both use the plain ring.
+    fn push_focus_rings(&self, cx: &mut Context<Self>) {
+        let t = theme(cx).clone();
+        let ring = ask_ring(&t, self.keyboard_focus, None);
+        self.composer
+            .update(cx, |c, cx| c.set_focus_ring(ring.clone(), cx));
+        self.time.update(cx, |s, cx| s.set_focus_ring(ring, cx));
+    }
+
+    /// Ask's ring for a Button: `over` is the fill a transparent (ghost)
+    /// button sits on; `None` for opaque buttons.
+    fn button_ring(&self, t: &Theme, over: Option<Hsla>) -> ui::FocusRing {
+        ask_ring(t, self.keyboard_focus, over)
     }
 
     pub fn new_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -397,7 +500,7 @@ impl AskPage {
                 words.push_str(&format!(" · {failed} failed"));
             }
             list = list.child(
-                surface_row(t, ("ask-cards", key))
+                ask_row(t, ("ask-cards", key), self.keyboard_focus)
                     .items_center()
                     .gap(space::s3())
                     .px(space::s4())
@@ -433,7 +536,7 @@ impl AskPage {
                     }
                     result.push_str(&format!("{ms} ms"));
                 }
-                let row = surface_row(t, ("ask-card", key * 1000 + j as u64))
+                let row = ask_row(t, ("ask-card", key * 1000 + j as u64), self.keyboard_focus)
                     .items_center()
                     .gap(space::s3())
                     .px(space::s4())
@@ -577,7 +680,7 @@ impl AskPage {
                         let label =
                             citation_label(c).unwrap_or_else(|_| format!("[{}] {}", c.n, c.title));
                         list = list.child(
-                            surface_row(&t, ("cite", (i * 100 + j) as u64))
+                            ask_row(&t, ("cite", (i * 100 + j) as u64), self.keyboard_focus)
                                 .flex_col()
                                 .px(space::s4())
                                 .py(space::s3())
@@ -630,7 +733,7 @@ impl AskPage {
             self.convo.status,
             McpStatus::Checking | McpStatus::Simulated
         ) && !self.convo.running();
-        surface_row(t, "ask-tools")
+        ask_row(t, "ask-tools", self.keyboard_focus)
             .w_auto()
             .flex_none()
             .items_center()
@@ -648,6 +751,10 @@ impl AskPage {
 impl Render for AskPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
+        self.window = Some(window.window_handle());
+        // Notifies the composer and Time menu only when their ring changed
+        // (a theme switch); a modality change already pushed it.
+        self.push_focus_rings(cx);
         let layout = AskLayout::for_viewport(window.viewport_size().width);
         let AskLayout {
             pane,
@@ -669,6 +776,7 @@ impl Render for AskPage {
                 Some(
                     Button::new("ask-retry", "Try again")
                         .small()
+                        .focus_ring(self.button_ring(&t, None))
                         .icon("refresh-cw")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             // Recheck both paths; a running question
@@ -686,7 +794,8 @@ impl Render for AskPage {
         let clear = (!self.convo.turns.is_empty() || running).then(|| {
             Button::new("ask-clear", "New conversation")
                 .ghost()
-                .surface_ring(t.bg_surface)
+                // Transparent, on the header's `bg_surface`.
+                .focus_ring(self.button_ring(&t, Some(t.bg_surface)))
                 .icon("plus")
                 .on_click(cx.listener(|this, _, _, cx| this.clear(cx)))
                 .into_any_element()
@@ -700,7 +809,7 @@ impl Render for AskPage {
                     let text = ex.to_string();
                     Button::new(("example", i as u64), ex)
                         .small()
-                        .surface_ring(t.bg_surface)
+                        .focus_ring(self.button_ring(&t, None))
                         .icon("sparkles")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.composer
@@ -754,14 +863,14 @@ impl Render for AskPage {
             );
         let action = if running {
             Button::new("ask-stop", "Stop")
-                .surface_ring(t.bg_surface)
+                .focus_ring(self.button_ring(&t, None))
                 .icon("square")
                 .tooltip("Stop (Esc)")
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
         } else {
             Button::new("ask-send", "Send")
                 .primary()
-                .surface_ring(t.bg_surface)
+                .focus_ring(self.button_ring(&t, None))
                 .icon("send")
                 .on_click(cx.listener(|this, _, _, cx| this.send(cx)))
         };
@@ -865,6 +974,11 @@ impl Render for AskPage {
                 )
                 .child(composer),
         )
+        // Pointer input anywhere on the page hides the rings (capture phase,
+        // so it runs before the control focuses; nothing is stopped).
+        .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+            this.set_keyboard_focus(false, cx);
+        }))
     }
 }
 
@@ -914,5 +1028,67 @@ mod tests {
             (tiny.pane, tiny.column, tiny.field),
             (px(0.), px(0.), px(0.))
         );
+    }
+
+    /// Pointer focus draws nothing; keyboard focus draws the shared neutral
+    /// ring (same colour, offset and 2 px spread as `ui::ring` /
+    /// `ui::ring_over`) with a blur every platform's shader paints.
+    #[test]
+    fn ask_ring_is_keyboard_only_and_paints_everywhere() {
+        for t in [Theme::light(), Theme::dark()] {
+            assert_eq!(ask_ring(&t, false, None), ui::FocusRing::Hidden);
+            assert_eq!(
+                ask_ring(&t, false, Some(t.bg_surface)),
+                ui::FocusRing::Hidden
+            );
+            for (over, shared) in [
+                (None, ui::ring(&t)),
+                (Some(t.bg_surface), ui::ring_over(&t, t.bg_surface)),
+            ] {
+                let ui::FocusRing::Shadows(shadows) = ask_ring(&t, true, over) else {
+                    panic!("keyboard focus shows a ring");
+                };
+                assert_eq!(shadows.len(), shared.len());
+                for (s, u) in shadows.iter().zip(&shared) {
+                    assert_eq!(
+                        (s.color, s.offset, s.spread_radius),
+                        (u.color, u.offset, u.spread_radius)
+                    );
+                    // Zero blur paints nothing on Linux (blade) and Windows.
+                    assert!(s.blur_radius > px(0.) && s.blur_radius <= px(RING_BLUR));
+                }
+                assert_eq!(shadows[0].color, t.focus);
+                assert_eq!(shadows[0].spread_radius, px(2.));
+            }
+            // A transparent control restores the surface it sits on.
+            let ui::FocusRing::Shadows(over) = ask_ring(&t, true, Some(t.bg_surface)) else {
+                unreachable!()
+            };
+            assert_eq!(over.last().unwrap().color, t.bg_surface);
+        }
+    }
+
+    #[test]
+    fn only_tab_counts_as_keyboard_navigation() {
+        let nav = |s: &str| is_keyboard_nav(&Keystroke::parse(s).unwrap());
+        assert!(nav("tab") && nav("shift-tab"));
+        // Typing, caret moves, Enter/Escape and shortcuts in the composer
+        // or elsewhere never show a ring.
+        for key in [
+            "a",
+            "shift-a",
+            "space",
+            "enter",
+            "escape",
+            "left",
+            "down",
+            "backspace",
+            "ctrl-tab",
+            "alt-tab",
+            "cmd-tab",
+            "ctrl-n",
+        ] {
+            assert!(!nav(key), "{key}");
+        }
     }
 }

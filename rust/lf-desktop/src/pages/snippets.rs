@@ -281,7 +281,7 @@ impl SnippetsPage {
                     .cursor_pointer()
                     .when(row.selected, |d| d.bg(t.selected))
                     .when(!row.selected, |d| d.hover(|s| s.bg(t.hover)))
-                    .focus(|s| s.shadow(ui::ring(&t)))
+                    .focus(|s| s.shadow(ui::ring_over(&t, t.bg_surface)))
                     .when(row.selected, |d| {
                         d.child(
                             div()

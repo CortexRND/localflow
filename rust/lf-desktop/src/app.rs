@@ -1157,7 +1157,7 @@ impl Shell {
                         .max_w(px(560.))
                         .child(toast.message.clone())
                         .when_some(action, |d, (label, f)| {
-                            let ring = ui::ring(t);
+                            let ring = ui::ring_over(t, t.bg_popover);
                             d.child(
                                 div()
                                     .id("toast-action")

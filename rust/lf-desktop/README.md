@@ -698,6 +698,10 @@ the last three answered turns as context.
   server (with its process group on Unix) is killed and reaped. A model request
   already in flight can't be interrupted. Its result is dropped, and the worker
   exits within that request's timeout.
+- **Focus rings.** On Ask, the neutral 2 px ring shows after Tab or Shift-Tab
+  and hides on the next mouse press on the page. A click still focuses (the
+  composer shows its caret) but draws no ring or focus edge. Other pages show
+  the ring on any focus.
 
 `LOCALFLOW_MCP_TEST_PYTHON=/abs/python cargo test … optional_real_python_server`
 also runs the client against the real Python server (with a temporary `HOME`).

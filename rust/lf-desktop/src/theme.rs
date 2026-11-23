@@ -3,9 +3,9 @@
 //! Role names follow Astryx semantic tokens (`bg.body`, `text.secondary`,
 //! `border.control`, ...), translated to a native struct. Two palettes exist
 //! (light and dark), modelled on macOS: calm neutral surfaces, one restrained
-//! blue accent for the primary action, selection and focus, and hierarchy
-//! from weight and colour rather than borders. Which palette is shown follows
-//! the [`AppearanceMode`] (System follows the OS setting).
+//! blue accent for the primary action and selection, a neutral focus edge,
+//! and hierarchy from weight and colour rather than borders. Which palette
+//! is shown follows the [`AppearanceMode`] (System follows the OS setting).
 
 use gpui::{
     point, px, rgb, rgba, App, BoxShadow, Global, Hsla, Pixels, Rgba, SharedString,
@@ -66,7 +66,7 @@ pub struct Palette {
     pub text_on_accent: u32,
     pub text_inverted: u32,
     pub icon_secondary: u32,
-    /// Accent for non-text marks (icons, focus ring edge, progress fill):
+    /// Accent for non-text marks (icons, progress fill):
     /// >= 3:1 on every surface it sits on.
     pub icon_accent: u32,
     /// Accent fill (primary buttons, switch track, selection).
@@ -79,8 +79,9 @@ pub struct Palette {
     pub separator: u32,
     /// Boundary of interactive controls (>= 3:1 on card and surface).
     pub border_control: u32,
-    /// Accent alpha of the soft outer focus halo.
-    pub focus_alpha: f32,
+    /// Neutral keyboard-focus edge: >= 3:1 on every surface a control sits
+    /// on or is filled with.
+    pub focus: u32,
     /// `(text, background)` of neutral tokens and unselected segments.
     pub neutral: (u32, u32),
     pub success: (u32, u32),
@@ -132,7 +133,7 @@ impl Palette {
         border: 0xE3E3E8,
         separator: 0xDCDCE1,
         border_control: 0x86868B,
-        focus_alpha: 0.30,
+        focus: 0x6E6E73,
         neutral: (0x5E5E63, 0xE8E8ED),
         success: (0x1B6B2F, 0xE3F4E6),
         warning: (0x8A4600, 0xFCEFD8),
@@ -180,7 +181,7 @@ impl Palette {
         border: 0x38383A,
         separator: 0x3A3A3C,
         border_control: 0x86868B,
-        focus_alpha: 0.40,
+        focus: 0xAEAEB2,
         neutral: (0xAEAEB2, 0x3A3A3C),
         success: (0x63D987, 0x173322),
         warning: (0xFFC864, 0x3A2B12),
@@ -246,8 +247,8 @@ pub struct Theme {
     pub border: Hsla,
     pub separator: Hsla,
     pub border_control: Hsla,
-    /// Soft outer focus halo (accent at reduced alpha).
-    pub focus_ring: Hsla,
+    /// Neutral keyboard-focus edge.
+    pub focus: Hsla,
     pub recording: Hsla,
     pub sandbox_text: Hsla,
     pub sandbox_bg: Hsla,
@@ -306,7 +307,7 @@ impl Theme {
             border: hex(p.border),
             separator: hex(p.separator),
             border_control: hex(p.border_control),
-            focus_ring: hex_a(p.accent, p.focus_alpha),
+            focus: hex(p.focus),
             recording: hex(p.recording),
             sandbox_text: hex(p.sandbox.0),
             sandbox_bg: hex(p.sandbox.1),
@@ -674,9 +675,21 @@ mod tests {
             mark(p.accent, p.bg_card, "on switch / selection in a group");
             // Progress fill on its muted track (ui::progress, both variants).
             mark(p.icon_accent, p.bg_muted, "progress fill on track");
-            // The solid edge of the focus ring, wherever a control sits.
-            for bg in [p.bg_body, p.bg_surface, p.bg_card, p.bg_popover] {
-                mark(p.icon_accent, bg, "focus ring edge");
+            // The selected-option check in the select popover.
+            mark(p.icon_accent, p.bg_popover, "select check on popover");
+            // The neutral focus edge, on every surface a control sits on or
+            // is filled with (ui::ring / ui::ring_over).
+            for bg in [
+                p.bg_body,
+                p.bg_surface,
+                p.bg_card,
+                p.bg_popover,
+                p.bg_muted,
+                p.bg_control,
+                p.bg_raised,
+                p.bg_sidebar_selected,
+            ] {
+                mark(p.focus, bg, "focus edge");
             }
             // Status dots, the recording dot and secondary icons.
             for bg in [p.bg_body, p.bg_surface, p.bg_card] {

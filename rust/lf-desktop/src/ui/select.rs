@@ -32,7 +32,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-use super::{icon, ring, surface_ring};
+use super::{icon, ring, Action, FocusRing};
 use crate::theme::{elevation, size, space, text, theme};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,8 +49,11 @@ pub struct Select {
     disabled: bool,
     placeholder: SharedString,
     width: f32,
-    /// The focused trigger draws [`surface_ring`] (its fill is opaque).
-    surface_ring: bool,
+    /// Opt-in focus decoration of the trigger (see [`FocusRing`]).
+    focus_ring: FocusRing,
+    /// Opt-in: told of any mouse press inside the open menu (see
+    /// [`Select::on_menu_pointer`]).
+    on_menu_pointer: Option<Action>,
 }
 
 impl EventEmitter<SelectEvent> for Select {}
@@ -76,8 +79,18 @@ impl Select {
             disabled: false,
             placeholder: "Choose…".into(),
             width: 220.,
-            surface_ring: false,
+            focus_ring: FocusRing::Default,
+            on_menu_pointer: None,
         }
+    }
+
+    /// Call `f` on any mouse press inside the open menu (options, padding
+    /// or scrolling), before it is handled. The menu is deferred and
+    /// occludes what's under it, so the page's own mouse listeners never see
+    /// these presses. Nothing is stopped.
+    pub fn on_menu_pointer(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_menu_pointer = Some(std::rc::Rc::new(f));
+        self
     }
 
     pub fn width(mut self, w: f32) -> Self {
@@ -85,10 +98,12 @@ impl Select {
         self
     }
 
-    /// Opt into [`surface_ring`] for the focused trigger.
-    pub fn surface_ring(mut self) -> Self {
-        self.surface_ring = true;
-        self
+    /// Replace or hide the trigger's focus ring (default: its own).
+    pub fn set_focus_ring(&mut self, ring: FocusRing, cx: &mut Context<Self>) {
+        if self.focus_ring != ring {
+            self.focus_ring = ring;
+            cx.notify();
+        }
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -237,11 +252,8 @@ impl Render for Select {
         };
         let hover = t.hover;
         let trigger_hover = t.bg_muted;
-        let ring_style = if self.surface_ring {
-            surface_ring(&t)
-        } else {
-            ring(&t)
-        };
+        // A hidden ring leaves a focused trigger looking unfocused.
+        let ring_style = self.focus_ring.shadows(|| ring(&t)).filter(|_| focused);
         let control_shadow = elevation::control(&t);
         let trigger = div()
             .id("select-trigger")
@@ -267,10 +279,10 @@ impl Render for Select {
             .text_size(sz)
             .line_height(lh)
             .text_color(fg)
-            .when(!focused && !self.disabled, move |d| {
+            .when(ring_style.is_none() && !self.disabled, move |d| {
                 d.shadow(control_shadow)
             })
-            .when(focused, move |d| d.shadow(ring_style.clone()))
+            .when_some(ring_style, |d, ring| d.shadow(ring))
             .when(!self.disabled, move |d| {
                 d.cursor_pointer().hover(move |s| s.bg(trigger_hover))
             })
@@ -348,6 +360,9 @@ impl Render for Select {
                             this.open = false;
                             cx.notify();
                         }))
+                        .when_some(self.on_menu_pointer.clone(), |d, f| {
+                            d.capture_any_mouse_down(move |_, window, cx| f(window, cx))
+                        })
                         .children(items),
                 ),
             )

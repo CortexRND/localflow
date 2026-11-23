@@ -2,7 +2,7 @@
 //!
 //! The look follows macOS: inset grouped lists on a calm surface, neutral
 //! controls with a hairline and a faint shadow, one accent for the primary
-//! action, selection and focus.
+//! action and selection, and a neutral focus edge.
 
 pub mod assets;
 pub mod input;
@@ -29,37 +29,57 @@ pub fn handler(f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Hand
     Rc::new(f)
 }
 
-/// Blur of [`surface_ring`]'s shadows. Never zero: GPUI 0.2.2's Linux
-/// (blade) and Windows shadow shaders integrate the blur over
-/// `±3 × blur_radius`, so a zero radius gives a zero-width range and paints
-/// nothing (only the macOS shader special-cases zero). A sub-pixel blur
-/// still draws a crisp edge.
-const RING_BLUR: f32 = 0.5;
-
-/// The ring's two tokenized shadows: a solid 2 px accent edge inside a soft
-/// accent halo (drawn outside the box; no layout shift).
-fn ring_with_blur(t: &Theme, blur: f32) -> Vec<BoxShadow> {
-    [(t.focus_ring, 4.), (t.icon_accent, 2.)]
-        .into_iter()
-        .map(|(color, spread)| BoxShadow {
-            color,
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(blur),
-            spread_radius: px(spread),
-        })
-        .collect()
-}
-
-/// The focus ring.
+/// The focus ring: a single solid 2 px neutral edge, no halo (drawn
+/// outside the box; no layout shift). Only for controls with an opaque
+/// fill; transparent controls use [`ring_over`].
 pub fn ring(t: &Theme) -> Vec<BoxShadow> {
-    ring_with_blur(t, 0.)
+    vec![BoxShadow {
+        color: t.focus,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+    }]
 }
 
-/// The focus ring with a blur every platform paints. Shadows are filled
-/// shapes painted under the element, so use it only on an element whose
-/// fill is opaque in every state (or the ring shows through as a fill).
-pub fn surface_ring(t: &Theme) -> Vec<BoxShadow> {
-    ring_with_blur(t, RING_BLUR)
+/// [`ring`] for a control without an opaque fill of its own. GPUI paints a
+/// shadow as a filled shape that shows through a transparent background, so
+/// a second zero-spread shadow in `fill` restores the interior.
+pub fn ring_over(t: &Theme, fill: Hsla) -> Vec<BoxShadow> {
+    let mut shadows = ring(t);
+    shadows.push(BoxShadow {
+        color: fill,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(0.),
+    });
+    shadows
+}
+
+/// How a focusable control draws focus. Opt-in per control: the default
+/// keeps the control's own [`ring`] / [`ring_over`] and focus edge on any
+/// focus, exactly as before.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum FocusRing {
+    /// The control's own ring.
+    #[default]
+    Default,
+    /// No ring and no focus edge (focus came from the pointer). Focus
+    /// itself, the caret and selection are unchanged.
+    Hidden,
+    /// These shadows instead of the control's own ring.
+    Shadows(Vec<BoxShadow>),
+}
+
+impl FocusRing {
+    /// The shadows to draw while focused (`own` is the control's default
+    /// ring); `None` when hidden.
+    pub fn shadows(&self, own: impl FnOnce() -> Vec<BoxShadow>) -> Option<Vec<BoxShadow>> {
+        match self {
+            FocusRing::Default => Some(own()),
+            FocusRing::Hidden => None,
+            FocusRing::Shadows(s) => Some(s.clone()),
+        }
+    }
 }
 
 pub fn icon(name: &str, color: Hsla) -> gpui::Svg {
@@ -215,9 +235,8 @@ pub struct Button {
     /// Use this handle instead of an automatic tab stop, so the owner can
     /// move focus to the button (dialogs).
     focus: Option<FocusHandle>,
-    /// Opaque surface the button sits on, when it opts into
-    /// [`surface_ring`] (see [`Button::surface_ring`]).
-    surface: Option<Hsla>,
+    /// Opt-in focus decoration (see [`FocusRing`]).
+    focus_ring: FocusRing,
 }
 
 impl Button {
@@ -233,14 +252,12 @@ impl Button {
             tooltip: None,
             on_click: None,
             focus: None,
-            surface: None,
+            focus_ring: FocusRing::Default,
         }
     }
-    /// Draw [`surface_ring`] when focused. A ghost button fills with
-    /// `surface` (the opaque fill it sits on), its hover and pressed tints
-    /// pre-blended onto it, so the ring stays an edge.
-    pub fn surface_ring(mut self, surface: Hsla) -> Self {
-        self.surface = Some(surface);
+    /// Replace or hide the focus ring (default: the button's own).
+    pub fn focus_ring(mut self, ring: FocusRing) -> Self {
+        self.focus_ring = ring;
         self
     }
     pub fn primary(mut self) -> Self {
@@ -308,10 +325,7 @@ impl RenderOnce for Button {
                 t.accent_hover,
             ),
             Variant::Secondary => (t.bg_control, t.text, t.separator, t.bg_muted, t.bg_muted),
-            Variant::Ghost => match self.surface {
-                Some(s) => (s, t.text_accent, s, s.blend(t.hover), s.blend(t.pressed)),
-                None => (clear, t.text_accent, clear, t.hover, t.pressed),
-            },
+            Variant::Ghost => (clear, t.text_accent, clear, t.hover, t.pressed),
             Variant::Destructive => {
                 let (fg, bg) = t.tone(Tone::Error);
                 (bg, fg, bg, bg.opacity(0.8), bg.opacity(0.65))
@@ -337,11 +351,13 @@ impl RenderOnce for Button {
         } else {
             self.icon
         };
-        let ring = if self.surface.is_some() {
-            surface_ring(&t)
-        } else {
-            ring(&t)
-        };
+        let ring = self.focus_ring.shadows(|| {
+            if self.variant == Variant::Ghost {
+                ring_over(&t, t.bg_card)
+            } else {
+                ring(&t)
+            }
+        });
         let mut el = div()
             .id(self.id)
             .flex()
@@ -371,8 +387,10 @@ impl RenderOnce for Button {
             el = el
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
-                .active(move |s| s.bg(pressed))
-                .focus(move |s| s.shadow(ring.clone()));
+                .active(move |s| s.bg(pressed));
+            if let Some(ring) = ring {
+                el = el.focus(move |s| s.shadow(ring.clone()));
+            }
             if let Some(f) = self.on_click {
                 el = el.on_click(move |e, w, cx| f(e, w, cx));
             }
@@ -427,7 +445,7 @@ impl RenderOnce for IconButton {
             t.icon_secondary
         };
         let (hover, pressed) = (t.hover, t.pressed);
-        let ring = ring(&t);
+        let ring = ring_over(&t, t.bg_card);
         let label = self.label.clone();
         let mut el = div()
             .id(self.id)
@@ -626,7 +644,7 @@ fn segment(
     } else {
         t.tone(Tone::Neutral).0
     };
-    let ring = ring(t);
+    let ring = ring_over(t, t.bg_muted);
     let hover = t.hover;
     let mut seg = div()
         .id(id)
@@ -1014,7 +1032,7 @@ pub fn card(t: &Theme) -> Div {
 
 /// Clickable row with hover, focus ring and a soft selection fill.
 pub fn row_button(t: &Theme, id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
-    let ring = ring(t);
+    let ring = ring_over(t, t.bg_card);
     let (hover, pressed) = (t.hover, t.pressed);
     div()
         .id(id)
@@ -1051,7 +1069,7 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
             let selected = *value == current;
             let value = *value;
             let f = on_select.clone();
-            let ring = ring(t);
+            let ring = ring_over(t, t.bg_card);
             let hover = t.hover;
             let strong = t.text;
             div()
@@ -1081,4 +1099,26 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
                 .on_click(move |_, w, cx| f(value, w, cx))
                 .child(*name)
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Controls that don't opt in keep their own ring, so every page other
+    /// than Ask renders focus exactly as before.
+    #[test]
+    fn focus_ring_defaults_to_the_controls_own_ring() {
+        let t = Theme::light();
+        assert_eq!(FocusRing::default(), FocusRing::Default);
+        assert_eq!(FocusRing::Default.shadows(|| ring(&t)), Some(ring(&t)));
+        let over = ring_over(&t, t.bg_card);
+        assert_eq!(FocusRing::Default.shadows(|| over.clone()), Some(over));
+        assert_eq!(FocusRing::Hidden.shadows(|| ring(&t)), None);
+        let custom = ring_over(&t, t.bg_surface);
+        assert_eq!(
+            FocusRing::Shadows(custom.clone()).shadows(|| ring(&t)),
+            Some(custom)
+        );
+    }
 }
