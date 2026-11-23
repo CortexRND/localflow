@@ -351,6 +351,50 @@ fn snapshot_interrupt_during_final_commit_publishes_nothing() {
     );
 }
 
+/// Models an interrupt first observed after the ref commit (e.g. Ctrl+C that
+/// lands during the synchronous `create_ref` write). The interrupt future
+/// never wakes itself: it stays pending until `refs/main` holds the commit,
+/// so it can only fire if the transfer yields after publishing the ref. As
+/// in Python, the download reports interruption but keeps the complete cache.
+#[test]
+fn snapshot_interrupt_observed_after_ref_commit_keeps_complete_cache() {
+    let root = tempfile::tempdir().unwrap();
+    let bytes = b"committed weights";
+    let (url, server) = server(vec![
+        Reply::Body(200, metadata(bytes)),
+        Reply::Body(200, String::from_utf8_lossy(bytes).into_owned()),
+    ]);
+    let commit = "a".repeat(40);
+    let repo = root.path().join("models--test--native");
+    let main_ref = repo.join("refs").join("main");
+    let interrupt = std::future::poll_fn(|_| {
+        if std::fs::read(&main_ref).is_ok_and(|content| content == commit.as_bytes()) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    });
+    let result = download_snapshot("test/native", root.path(), &url, |_, _| {}, interrupt);
+    server.join().unwrap();
+    assert_eq!(result, Err(INTERRUPTED.to_owned()));
+    assert_eq!(std::fs::read(&main_ref).unwrap(), commit.as_bytes());
+    assert_eq!(
+        model().inspect(root.path()),
+        Inspection {
+            installed: true,
+            bytes: bytes.len() as u64
+        }
+    );
+    let blob = repo
+        .join("blobs")
+        .join(format!("{:x}", Sha256::digest(bytes)));
+    assert_eq!(std::fs::read(blob).unwrap(), bytes);
+    assert_eq!(
+        std::fs::read(repo.join("snapshots").join(&commit).join("weights.bin")).unwrap(),
+        bytes
+    );
+}
+
 #[test]
 fn native_formats_are_separate_from_python_and_require_all_onnx_files() {
     #[cfg(feature = "whisper")]
