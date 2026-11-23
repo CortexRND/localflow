@@ -706,6 +706,30 @@ impl Shell {
         .detach();
     }
 
+    /// When the focused element leaves the frame (a cached page that was
+    /// navigated away from, or a button replaced by another), GPUI dispatches
+    /// keys from the window root, above the shell's action listeners, so
+    /// shortcuts stop working until something is clicked. Move focus back to
+    /// the shell, or to Cancel while a dialog is open. GPUI calls this in the
+    /// draw that lost focus, after the new frame is in place; it never runs
+    /// while focus is on a rendered element.
+    fn install_focus_recovery(window: &mut Window, cx: &mut Context<Self>) {
+        cx.on_focus_lost(window, |shell, window, cx| {
+            let target = if shell.confirm.is_some() && shell.dialog_armed {
+                &shell.cancel_focus
+            } else {
+                &shell.focus
+            };
+            // Now, so a key handled in this same dispatch reaches the shell.
+            window.focus(target);
+            // A refresh inside the draw is ignored: repaint once it is over,
+            // so the frame shows the target as focused (Cancel's ring) and a
+            // later loss is seen as one again.
+            cx.defer_in(window, |_, window, _| window.refresh());
+        })
+        .detach();
+    }
+
     fn watch_config(&mut self, cx: &mut Context<Self>) {
         let now = mtime(&self.cx.services.root.config_path);
         if now != self.config_mtime {
@@ -1779,6 +1803,7 @@ pub fn run(launch: Launch) -> RunStatus {
                 Ok(window) => {
                     let _ = window.update(cx, |shell, window, cx| {
                         window.focus(&shell.focus_handle(cx));
+                        Shell::install_focus_recovery(window, cx);
                         cx.activate(true);
                         // Titlebar close: flush first; keep the window open
                         // (with an explanation) when something wasn't saved.
@@ -1878,5 +1903,247 @@ mod tests {
         assert_eq!(trap_step(Some(1), 2, true), 0, "wraps instead of leaving");
         assert_eq!(trap_step(Some(0), 2, false), 1);
         assert_eq!(trap_step(Some(1), 2, false), 0);
+    }
+}
+
+/// Keyboard focus in a headless GPUI window (no display, no app): the real
+/// `Shell` over a seeded temporary sandbox, so secrets stay in memory, health
+/// and runtime are simulated, and no engine, tray, hotkey, model or network
+/// is touched. Shortcuts go through the real keymap and dispatch tree.
+#[cfg(test)]
+mod focus_tests {
+    use std::rc::Rc;
+
+    use gpui::{Entity, FocusHandle, TestAppContext, VisualTestContext};
+
+    use super::*;
+
+    /// Opens the shell on `page` the way [`run`] does. Keep the returned
+    /// directory alive for the whole test.
+    fn open(
+        page: Page,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        open_with(page, |_| {}, cx)
+    }
+
+    /// [`open`], after `prepare` adjusts the seeded sandbox data.
+    fn open_with(
+        page: Page,
+        prepare: impl FnOnce(&crate::data::DataRoot),
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let launched =
+            crate::launch::sandbox(&dir.path().join("sandbox"), false, Route::Page(page)).unwrap();
+        let crate::launch::Launched::Window(root, instance) = launched else {
+            panic!("expected to own the sandbox window");
+        };
+        prepare(&root);
+        let services = Services::open(*root).unwrap();
+        assert!(services.is_sandbox());
+        cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(cx.window_appearance()));
+            bind_keys(cx);
+        });
+        let launch = Launch {
+            services,
+            page,
+            setup: false,
+            notice: None,
+            instance,
+        };
+        let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(launch, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                window.focus(&shell.focus);
+                Shell::install_focus_recovery(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        (shell, cx, dir)
+    }
+
+    fn page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Page {
+        shell.read_with(cx, |shell, _| shell.page)
+    }
+
+    /// Focus is on a rendered element inside the shell, where its shortcut
+    /// listeners are.
+    fn in_shell(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        let root = shell.read_with(cx, |shell, _| shell.focus.clone());
+        cx.update(|window, cx| root.contains_focused(window, cx))
+    }
+
+    fn focused(handle: &FocusHandle, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, _| handle.is_focused(window))
+    }
+
+    #[gpui::test]
+    fn shortcuts_keep_working_after_leaving_a_focused_history_list(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::History, cx);
+        let list = shell.read_with(cx, |shell, cx| match shell.find(Page::History) {
+            Some(View::History(view)) => view.read(cx).list_focus(),
+            _ => panic!("History isn't open"),
+        });
+        // What a row click does.
+        cx.update(|window, _| window.focus(&list));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(focused(&list, cx), "a repaint leaves valid focus alone");
+        assert!(in_shell(&shell, cx));
+
+        cx.simulate_keystrokes("secondary-1");
+        assert_eq!(page(&shell, cx), Page::Home);
+
+        // History (and its list handle) is cached but no longer on screen.
+        let third = Page::sidebar_order()[2];
+        cx.simulate_keystrokes("secondary-3");
+        assert_eq!(page(&shell, cx), third, "shortcuts still reach the shell");
+        assert!(in_shell(&shell, cx), "focus came back to the shell");
+        cx.simulate_keystrokes("secondary-3");
+        assert_eq!(page(&shell, cx), third, "the same shortcut again stays");
+        cx.simulate_keystrokes("secondary-2");
+        assert_eq!(page(&shell, cx), Page::History);
+    }
+
+    #[gpui::test]
+    fn shortcuts_keep_working_after_the_focused_element_is_removed(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Models, cx);
+        assert_eq!(page(&shell, cx), Page::Models);
+        // Tab onto a real control first, so focus is on screen.
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        let root = shell.read_with(cx, |shell, _| shell.focus.clone());
+        assert!(!focused(&root, cx), "Tab moved focus onto a control");
+        assert!(in_shell(&shell, cx));
+
+        // A focused button that is replaced: GPUI keeps its focus handle in
+        // element state and drops it with the element.
+        cx.update(|window, cx| {
+            let button = cx.focus_handle();
+            window.focus(&button);
+            drop(button);
+            assert!(window.focused(cx).is_none(), "focus is on a dropped handle");
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(Go1);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert!(in_shell(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn an_open_dialog_takes_lost_focus_on_cancel_and_keeps_its_trap(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Models, cx);
+        shell.update(cx, |shell, cx| {
+            shell.confirm = Some(Confirm {
+                title: "Delete?".into(),
+                body: "Test dialog".into(),
+                verb: "Delete".into(),
+                destructive: true,
+                on_confirm: Rc::new(|_, _| panic!("the dialog was cancelled")),
+            });
+            shell.dialog_armed = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (cancel, ok) = shell.read_with(cx, |shell, _| {
+            (shell.cancel_focus.clone(), shell.ok_focus.clone())
+        });
+        // The test window runs no next-frame callbacks, so the dialog's own
+        // move to Cancel hasn't happened; lose focus instead.
+        cx.update(|window, cx| window.focus(&cx.focus_handle()));
+        cx.run_until_parked();
+        assert!(focused(&cancel, cx), "lost focus lands on Cancel");
+
+        cx.dispatch_action(FocusNext);
+        assert!(focused(&ok, cx));
+        cx.dispatch_action(FocusNext);
+        assert!(focused(&cancel, cx), "Tab stays inside the dialog");
+        cx.dispatch_action(Go1);
+        assert_eq!(page(&shell, cx), Page::Models, "no navigation behind it");
+
+        cx.dispatch_action(Escape);
+        assert!(shell.read_with(cx, |shell, _| shell.confirm.is_none()));
+        assert!(in_shell(&shell, cx));
+        cx.dispatch_action(Go1);
+        assert_eq!(page(&shell, cx), Page::Home);
+    }
+
+    /// Focus on a handle that has just been dropped (a removed button).
+    fn lose_focus(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.focus(&cx.focus_handle()));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn focus_is_recovered_again_after_a_second_loss(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Models, cx);
+        lose_focus(cx);
+        assert!(in_shell(&shell, cx), "first loss recovered");
+        // Nothing else repaints in between (a keyboard-only user).
+        lose_focus(cx);
+        assert!(in_shell(&shell, cx), "second loss recovered");
+        cx.dispatch_action(Go1);
+        assert_eq!(page(&shell, cx), Page::Home);
+    }
+
+    fn dictionary_filter(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> FocusHandle {
+        shell.read_with(cx, |shell, cx| match shell.find(Page::Dictionary) {
+            Some(View::Dictionary(view)) => view.read(cx).filter_focus(cx),
+            _ => panic!("Dictionary isn't open"),
+        })
+    }
+
+    #[gpui::test]
+    fn find_on_a_short_dictionary_leaves_focus_where_it_is(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Dictionary, cx);
+        let (words, replacements) = shell.read_with(cx, |shell, _| {
+            let store = &shell.cx.services.dictionary;
+            (store.words().len(), store.replacements().len())
+        });
+        assert!(words + replacements <= 12, "the seeded list is short");
+        let filter = dictionary_filter(&shell, cx);
+        let root = shell.read_with(cx, |shell, _| shell.focus.clone());
+        assert!(
+            !cx.update(|window, _| root.contains(&filter, window)),
+            "a short list shows no filter"
+        );
+        // Tab onto a real control.
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        let control = cx
+            .update(|window, cx| window.focused(cx))
+            .expect("Tab focused a control");
+        assert!(control != root && in_shell(&shell, cx));
+
+        cx.simulate_keystrokes("secondary-k");
+        assert!(focused(&control, cx), "Find with no filter keeps focus");
+        cx.simulate_keystrokes("secondary-k");
+        assert!(focused(&control, cx), "and again");
+        assert!(in_shell(&shell, cx));
+        cx.simulate_keystrokes("secondary-1");
+        assert_eq!(page(&shell, cx), Page::Home);
+    }
+
+    #[gpui::test]
+    fn find_on_a_long_dictionary_focuses_its_filter(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(
+            Page::Dictionary,
+            |root| {
+                let store =
+                    lf_core::dictionary::DictionaryStore::new(Some(root.dictionary_path.clone()));
+                for word in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"] {
+                    store.add_word(word).unwrap();
+                }
+            },
+            cx,
+        );
+        let filter = dictionary_filter(&shell, cx);
+        cx.simulate_keystrokes("secondary-k");
+        assert!(focused(&filter, cx), "Find focuses the filter");
+        assert!(in_shell(&shell, cx), "which is on screen");
     }
 }
