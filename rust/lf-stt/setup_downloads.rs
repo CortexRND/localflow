@@ -158,7 +158,7 @@ impl NativeModel {
             format!("{endpoint}/api/models/{repo_id}/revision/main?blobs=true")
         } else {
             let url = format!("{endpoint}/api/models/{repo_id}?blobs=true");
-            if hf_env_flag("HF_HUB_OFFLINE") || hf_env_flag("TRANSFORMERS_OFFLINE") {
+            if hf_offline_mode() {
                 return Err(inspect_error(format!(
                     "Cannot reach {url}: offline mode is enabled. To disable it, please unset the `HF_HUB_OFFLINE` environment variable."
                 )));
@@ -403,6 +403,21 @@ fn hf_env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {
         matches!(
             value.to_ascii_uppercase().as_str(),
+            "1" | "ON" | "YES" | "TRUE"
+        )
+    })
+}
+
+/// Mirrors huggingface_hub `_is_true(HF_HUB_OFFLINE or TRANSFORMERS_OFFLINE)`:
+/// a nonempty primary value wins (even if false), an unset or empty one falls
+/// back to the legacy name, and the match uses Python's Unicode `str.upper()`.
+fn hf_offline_mode() -> bool {
+    let value = std::env::var_os("HF_HUB_OFFLINE")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("TRANSFORMERS_OFFLINE"));
+    value.is_some_and(|value| {
+        matches!(
+            value.to_string_lossy().to_uppercase().as_str(),
             "1" | "ON" | "YES" | "TRUE"
         )
     })

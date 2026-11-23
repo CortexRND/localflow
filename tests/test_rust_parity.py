@@ -1450,7 +1450,10 @@ def test_cli_stt_download_shared_snapshot(rust_build, sandbox):
             env = {
                 "HF_ENDPOINT": f"http://127.0.0.1:{server.server_port}", "HF_HOME": str(cache),
                 "HF_HUB_CACHE": str(cache / "hub"), "HF_TOKEN": "", "HF_TOKEN_PATH": str(cache / "token"),
-                "HF_HUB_OFFLINE": "0", "HF_HUB_DISABLE_XET": "1", "NO_PROXY": "127.0.0.1",
+                # A nonempty HF_HUB_OFFLINE wins over the legacy flag (huggingface_hub
+                # reads `HF_HUB_OFFLINE or TRANSFORMERS_OFFLINE`), so this stays online.
+                "HF_HUB_OFFLINE": "0", "TRANSFORMERS_OFFLINE": "1",
+                "HF_HUB_DISABLE_XET": "1", "NO_PROXY": "127.0.0.1",
                 "COLUMNS": "80", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
             }
             repo = cache / "hub" / "models--Systran--faster-whisper-tiny"
@@ -1489,6 +1492,37 @@ def test_cli_stt_download_shared_snapshot(rust_build, sandbox):
             assert sandbox["config"].read_bytes() == before
         finally:
             _SpeechHub.corrupt = False
+            server.shutdown()
+            thread.join()
+
+
+def test_cli_stt_download_offline_legacy_fallback(rust_build, sandbox):
+    # An empty HF_HUB_OFFLINE falls back to TRANSFORMERS_OFFLINE, matched with
+    # Python's Unicode str.upper() ("yeſ".upper() == "YES"), so both go offline.
+    cache = sandbox["root"] / "hf"
+    args = ("stt", "download", "fw-tiny")
+    with ThreadingHTTPServer(("127.0.0.1", 0), _SpeechHub) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            env = {
+                "HF_ENDPOINT": f"http://127.0.0.1:{server.server_port}", "HF_HOME": str(cache),
+                "HF_HUB_CACHE": str(cache / "hub"), "HF_TOKEN": "", "HF_TOKEN_PATH": str(cache / "token"),
+                "HF_HUB_OFFLINE": "", "TRANSFORMERS_OFFLINE": "yeſ",
+                "HF_HUB_DISABLE_XET": "1", "NO_PROXY": "127.0.0.1",
+                "COLUMNS": "80", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+            }
+            python = _python_cli(sandbox, *args, env=env)
+            assert python.returncode != 0
+            assert "offline mode is enabled" in python.stdout + python.stderr
+            rust = lf(rust_build, sandbox, *args, env=env)
+            # Python also logs "Model download failed" plus a traceback (an intentional
+            # fidelity limit); the user-facing Click error must match exactly.
+            assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout)
+            assert rust.stderr.startswith("Error:")
+            assert python.stderr.endswith(rust.stderr)
+            assert not (cache / "hub" / "models--Systran--faster-whisper-tiny" / "snapshots").exists()
+        finally:
             server.shutdown()
             thread.join()
 
