@@ -257,8 +257,8 @@ fn seed(root: &DataRoot) -> Result<()> {
             // Persist an absolute path: a relative `--sandbox` root would
             // otherwise store a cwd-relative path that breaks on relaunch.
             let clip = history.write_clip(&tone, 16_000)?;
-            let clip =
-                fs::canonicalize(&clip).with_context(|| format!("resolve {}", clip.display()))?;
+            let clip = persisted_clip_path(&clip)
+                .with_context(|| format!("resolve {}", clip.display()))?;
             entry.audio_path = Some(clip.to_string_lossy().into());
         }
         history.add(&entry)?;
@@ -276,6 +276,25 @@ fn seed(root: &DataRoot) -> Result<()> {
         phrases.add(trigger, text, *enabled)?;
     }
     Ok(())
+}
+
+/// The absolute form of a freshly written clip path, stable across a cwd
+/// change and in the same prefix style as the (possibly relative) clips root,
+/// so `HistoryStore`'s containment check still matches it.
+///
+/// Windows: `std::path::absolute` (GetFullPathNameW) only prepends the cwd and
+/// normalizes lexically. `fs::canonicalize` would return a `\\?\C:\...`
+/// verbatim path that never `starts_with` an ordinary `C:\...` clips root.
+#[cfg(windows)]
+fn persisted_clip_path(clip: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    std::path::absolute(clip)
+}
+
+/// Elsewhere: `fs::canonicalize`, so a relative root reached through `..`
+/// doesn't store the old working directory (which may be deleted) as a prefix.
+#[cfg(not(windows))]
+fn persisted_clip_path(clip: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    fs::canonicalize(clip)
 }
 
 /// The sandbox prompt queue: three example prompts, one failed.
@@ -955,6 +974,69 @@ mod tests {
         for path in services.root.all_paths() {
             assert!(path.starts_with(&absolute));
         }
+    }
+
+    /// An ordinary absolute root (e.g. `C:\scratch\sandbox` on Windows) saves
+    /// a clip path in the root's own prefix style, so HistoryStore's real
+    /// containment checks load, retry and then delete it. A verbatim
+    /// `\\?\C:\...` clip under a non-verbatim `C:\...` root fails all three.
+    #[test]
+    fn absolute_sandbox_root_clip_loads_retries_and_deletes() {
+        use crate::controllers::retry::{retry_entry, RetryKey};
+        use std::path::{Component, Path};
+        // The Windows prefix of a path, if any, and whether it is verbatim;
+        // no assumption about which style the test temp dir uses.
+        fn verbatim(path: &Path) -> Option<bool> {
+            match path.components().next() {
+                Some(Component::Prefix(p)) => Some(p.kind().is_verbatim()),
+                _ => None,
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::path::absolute(dir.path().join("sb")).unwrap();
+        let root = prepare(&base, false).unwrap();
+        assert!(root.clips_dir.is_absolute());
+        let history = open_history(&root).unwrap();
+        let entry = history
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "failed")
+            .unwrap();
+        let clip = std::path::PathBuf::from(entry.audio_path.clone().unwrap());
+        assert!(clip.is_absolute(), "{}", clip.display());
+        assert_eq!(
+            verbatim(&clip),
+            verbatim(&root.clips_dir),
+            "{} vs {}",
+            clip.display(),
+            root.clips_dir.display()
+        );
+        assert!(clip.is_file(), "{}", clip.display());
+
+        // The store's own loader accepts it as inside the clips directory.
+        let (samples, rate) = history.load_clip(&clip).unwrap();
+        assert_eq!(rate, 16_000);
+        assert_eq!(samples.len(), 24_000);
+
+        // Retry (which loads through the store) works as a simulation.
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        let updated = retry_entry(
+            &root,
+            &services.config(),
+            RetryKey::of(&entry),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+        assert_eq!(updated.audio_path, entry.audio_path);
+        assert!(clip.is_file(), "retry keeps the clip");
+
+        // Deleting the row removes the clip (only possible inside the root).
+        assert!(history.delete(entry.id).unwrap());
+        assert!(!clip.exists(), "{}", clip.display());
+        assert!(history.get(entry.id).unwrap().is_none());
     }
 
     #[test]
