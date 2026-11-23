@@ -13,8 +13,7 @@ pub(crate) const PYTHON: &str = if cfg!(windows) {
     "python3"
 };
 
-/// The `localflow` console script a Python LocalFlow install puts next to
-/// its interpreter.
+/// The `localflow` console script of a Python LocalFlow install.
 const SCRIPT: &str = if cfg!(windows) {
     "localflow.exe"
 } else {
@@ -62,34 +61,59 @@ fn beside_launchers(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     })
 }
 
-/// Whether the `localflow` script is installed for `python`: next to it, or
-/// in `Scripts\` below a Windows interpreter that is not in a virtualenv.
-fn has_script(python: &Path) -> bool {
-    python.with_file_name(SCRIPT).is_file()
-        || (cfg!(windows) && python.with_file_name("Scripts").join(SCRIPT).is_file())
+/// The `localflow` script installed for `python`: next to it, or in
+/// `Scripts\` below a Windows interpreter that is not in a virtualenv.
+fn script_of(python: &Path) -> Option<PathBuf> {
+    let beside = python.with_file_name(SCRIPT);
+    let scripts = python.with_file_name("Scripts").join(SCRIPT);
+    if beside.is_file() {
+        Some(beside)
+    } else {
+        (cfg!(windows) && scripts.is_file()).then_some(scripts)
+    }
 }
 
-/// The interpreter of the Python LocalFlow install for this environment.
-pub(crate) fn find_install() -> Option<PathBuf> {
-    find_install_in(
+/// Interpreters that exist, best first: the venv's, the one next to any
+/// `lf` on PATH (another program may be called `lf` too), then `python3`
+/// and `python` in each PATH directory.
+fn interpreters_in<'a>(
+    venv: Option<&OsStr>,
+    path: &'a OsStr,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    let bare = [PYTHON, "python"]
+        .into_iter()
+        .flat_map(move |name| env::split_paths(path).map(move |dir| dir.join(name)));
+    venv_python(venv)
+        .into_iter()
+        .chain(beside_launchers(path))
+        .chain(bare)
+        .filter(|python| python.is_file())
+}
+
+/// The `localflow` script of the Python LocalFlow install for this
+/// environment, which `agent install` starts at login. Nothing is run.
+pub(crate) fn find_script() -> Option<PathBuf> {
+    find_script_in(
         env::var_os("VIRTUAL_ENV").as_deref(),
         &env::var_os("PATH").unwrap_or_default(),
     )
 }
 
-/// The first interpreter that exists and has the `localflow` script: the
-/// venv's, the one next to any `lf` on PATH (another program may be called
-/// `lf` too), then `python3` and `python` in each PATH directory. Nothing is
-/// run.
-fn find_install_in(venv: Option<&OsStr>, path: &OsStr) -> Option<PathBuf> {
-    let bare = [PYTHON, "python"]
-        .into_iter()
-        .flat_map(|name| env::split_paths(path).map(move |dir| dir.join(name)));
-    venv_python(venv)
-        .into_iter()
-        .chain(beside_launchers(path))
-        .chain(bare)
-        .find(|python| python.is_file() && has_script(python))
+fn find_script_in(venv: Option<&OsStr>, path: &OsStr) -> Option<PathBuf> {
+    interpreters_in(venv, path).find_map(|python| script_of(&python))
+}
+
+/// The interpreter of the Python LocalFlow install for this environment,
+/// whose modules `setup install-app` launches. Nothing is run.
+pub(crate) fn find_interpreter() -> Option<PathBuf> {
+    find_interpreter_in(
+        env::var_os("VIRTUAL_ENV").as_deref(),
+        &env::var_os("PATH").unwrap_or_default(),
+    )
+}
+
+fn find_interpreter_in(venv: Option<&OsStr>, path: &OsStr) -> Option<PathBuf> {
+    interpreters_in(venv, path).find(|python| script_of(python).is_some())
 }
 
 #[cfg(test)]
@@ -120,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn install_needs_the_localflow_script_next_to_python() {
+    fn install_needs_the_localflow_script() {
         let root = tempfile::tempdir().unwrap();
         let (other, _) = tree(root.path(), "other", &[PYTHON]);
         let (venv, venv_bin) = tree(root.path(), "venv", &[PYTHON, SCRIPT]);
@@ -130,18 +154,32 @@ mod tests {
 
         // An unrelated venv is skipped for the install on PATH.
         assert_eq!(
-            find_install_in(Some(other.as_os_str()), &path),
-            Some(install.join("python"))
+            find_script_in(Some(other.as_os_str()), &path),
+            Some(install.join(SCRIPT))
         );
         // A venv with the script wins.
         assert_eq!(
-            find_install_in(Some(venv.as_os_str()), &path),
-            Some(venv_bin.join(PYTHON))
+            find_script_in(Some(venv.as_os_str()), &path),
+            Some(venv_bin.join(SCRIPT))
         );
         // Nothing found.
         let bare_only = env::join_paths([&bare]).unwrap();
-        assert_eq!(find_install_in(Some(other.as_os_str()), &bare_only), None);
-        assert_eq!(find_install_in(None, OsStr::new("")), None);
+        assert_eq!(find_script_in(Some(other.as_os_str()), &bare_only), None);
+        assert_eq!(find_script_in(None, OsStr::new("")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_may_live_in_scripts() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("Python312");
+        fs::create_dir_all(home.join("Scripts")).unwrap();
+        fs::write(home.join(PYTHON), "").unwrap();
+        fs::write(home.join("Scripts").join(SCRIPT), "").unwrap();
+        assert_eq!(
+            find_script_in(None, home.as_os_str()),
+            Some(home.join("Scripts").join(SCRIPT))
+        );
     }
 
     #[cfg(unix)]
@@ -155,8 +193,8 @@ mod tests {
         std::os::unix::fs::symlink(install.join("lf"), links.join("lf")).unwrap();
         let path = env::join_paths([&other, &links]).unwrap();
         assert_eq!(
-            find_install_in(None, &path),
-            Some(install.canonicalize().unwrap().join(PYTHON))
+            find_script_in(None, &path),
+            Some(install.canonicalize().unwrap().join(SCRIPT))
         );
     }
 }

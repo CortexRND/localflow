@@ -310,12 +310,14 @@ lf-rs setup install-app
   oversized logs) and the HKCU `Run` value on Windows. `setup install-app`
   writes `~/Applications/LocalFlow Setup.app` and `LocalFlow.app`. Both need
   the Python LocalFlow install, as Python uses `sys.executable`: the first
-  interpreter `stt` would probe (`VIRTUAL_ENV`, then PATH) that has the
-  `localflow` script next to it (or in `Scripts\` on Windows). Without one they exit 1 and change nothing,
-  so they never touch a native install's app bundle or login job. The
-  interpreter path written is the discovered `python3` (`python.exe` on
-  Windows), where Python writes its own `sys.executable`. Bare `setup` and
-  `setup uninstall-app` are not ported.
+  interpreter (`VIRTUAL_ENV`, next to an `lf` on PATH, then `python3` and
+  `python` on PATH) that has the `localflow` script next to it, or in
+  `Scripts\` on Windows. `agent install` starts that script at login, also
+  where Python would name a missing `localflow.exe` next to a Windows
+  interpreter outside a virtualenv. `setup install-app` writes that
+  interpreter where Python writes its own `sys.executable`. Without an install they exit 1 and change nothing, so
+  they never touch a native install's app bundle or login job. Bare `setup`
+  and `setup uninstall-app` are not ported.
 
 * `meeting` posts to the running server (API token read, never created);
   `prompts` works on the shared `~/.localflow/queue.json` and dispatches

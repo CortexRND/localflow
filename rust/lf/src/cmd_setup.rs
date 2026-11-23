@@ -45,7 +45,7 @@ pub(crate) fn run(command: SetupCommand, io: &mut Io<'_>) -> Result<()> {
             let console = Console::detect();
             // `sys.executable` of the Python LocalFlow install; without one a
             // native install's signed LocalFlow.app must stay untouched.
-            let Some(python) = python::find_install() else {
+            let Some(python) = python::find_interpreter() else {
                 return fail(python::NO_INSTALL);
             };
             // `install_app`'s default `dest_dir`.

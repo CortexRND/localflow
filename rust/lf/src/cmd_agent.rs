@@ -160,13 +160,15 @@ fn autostart_path() -> Result<PathBuf> {
     Ok(base.join("autostart").join("localflow.desktop"))
 }
 
-/// `Path(sys.executable).parent / name` for the Python LocalFlow install.
-/// Without one nothing is installed: a native install's login job must not
-/// be replaced by one for a missing script.
+/// `name` in the scripts directory of the Python LocalFlow install, which
+/// is `Path(sys.executable).parent / name` except below a Windows
+/// interpreter outside a virtualenv. Without an install nothing is
+/// installed: a native install's login job must not be replaced by one for
+/// a missing script.
 fn install_program(name: &str) -> Result<PathBuf> {
-    let python =
-        python::find_install().ok_or_else(|| RuntimeError(python::NO_INSTALL.to_string()))?;
-    Ok(python.with_file_name(name))
+    let script =
+        python::find_script().ok_or_else(|| RuntimeError(python::NO_INSTALL.to_string()))?;
+    Ok(script.with_file_name(name))
 }
 
 fn linux_install() -> Result<PathBuf> {

@@ -2674,12 +2674,21 @@ def _same_python(sandbox, bin_dir: Path = Path(sys.executable).parent):
 _NO_INSTALL = "no Python LocalFlow install found; activate its virtualenv or put its lf on PATH"
 
 
-def _install_or_skip(python: Path) -> None:
-    """lf-rs only installs launchers for an interpreter with the `localflow`
-    script next to it (or in Scripts\\ for a non-venv Windows Python)."""
+def _install_or_skip(python: Path) -> Path:
+    """The `localflow` script lf-rs finds for `python`: next to it, or in
+    Scripts\\ for a non-venv Windows Python. Without one `agent install` refuses."""
     names = [Path("localflow.exe"), Path("Scripts", "localflow.exe")] if os.name == "nt" else [Path("localflow")]
-    if not any((python.parent / name).exists() for name in names):
-        pytest.skip(f"no localflow script for {python}; lf-rs refuses to install")
+    for name in names:
+        if (python.parent / name).exists():
+            return python.parent / name
+    pytest.skip(f"no localflow script for {python}; lf-rs refuses to install")
+
+
+def _stub_python(directory: Path, body: str) -> Path:
+    directory.mkdir(parents=True)
+    (directory / "python3").write_text(f"#!/bin/sh\n{body}\n")
+    (directory / "python3").chmod(0o755)
+    return directory
 
 
 def _fake_launchctl(directory: Path) -> Path:
@@ -2909,7 +2918,13 @@ def test_cli_agent_win32_run_key(rust_build, sandbox):
                 pass
 
     python, env = _same_python(sandbox)
-    _install_or_skip(python)
+    # Python names `localflow.exe` next to `sys.executable`; lf-rs names the
+    # script that exists, which is in Scripts\\ for a non-venv Python.
+    script, beside = str(_install_or_skip(python)), str(python.parent / "localflow.exe")
+
+    def as_python(text):
+        return text if script == beside else "".join(text.split()).replace(script, beside)
+
     env["LOCALFLOW_PLATFORM"] = "win32"
     original = read()
     try:
@@ -2920,11 +2935,12 @@ def test_cli_agent_win32_run_key(rust_build, sandbox):
             py_after = read()
             write(before)
             rs = _run_cli([str(rust_build[0]), "agent", *args], env)
-            assert _cli_output(rs) == _cli_output(py), args
-            assert read() == py_after, args
-            assert rs.returncode == 0, args
+            assert tuple(map(as_python, _cli_output(rs)[1:])) == tuple(map(as_python, _cli_output(py)[1:])), args
+            rs_after = read()
+            assert (rs_after and (as_python(rs_after[0]), rs_after[1])) == py_after, args
+            assert rs.returncode == py.returncode == 0, args
         _run_cli([str(rust_build[0]), "agent", "install"], env)
-        assert read() == (f'"{python.parent / "localflow.exe"}"', winreg.REG_SZ)
+        assert read() == (f'"{script}"', winreg.REG_SZ)
     finally:
         write(original)
 
@@ -2962,14 +2978,12 @@ def test_cli_setup_install_app(rust_build, sandbox):
     assert not (apps / "LocalFlow Setup.app" / "Contents" / "Resources").exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="needs symlinked interpreters")
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
 def test_cli_install_commands_skip_an_unrelated_virtualenv(rust_build, sandbox, tmp_path):
     real, env = _same_python(sandbox)
     _install_or_skip(real)
     # VIRTUAL_ENV names a venv without LocalFlow; the real install is first on PATH.
-    other = tmp_path / "other-venv" / "bin"
-    other.mkdir(parents=True)
-    (other / "python3").symlink_to(sys.executable)
+    other = _stub_python(tmp_path / "other-venv" / "bin", "exit 1")
     env["VIRTUAL_ENV"] = str(other.parent)
     # lf-rs then takes the interpreter next to the `lf` on PATH (resolved), else
     # the bare python3 there; Python runs as that interpreter.
@@ -2987,17 +3001,15 @@ def test_cli_install_commands_skip_an_unrelated_virtualenv(rust_build, sandbox, 
     assert shlex.quote(str(python)) in launcher_text and str(other) not in launcher_text
 
 
-@pytest.mark.skipif(os.name == "nt", reason="needs symlinked interpreters")
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
 def test_cli_install_commands_refuse_without_a_python_install(rust_build, sandbox, tmp_path):
     real, env = _same_python(sandbox)
-    # PATH holds only a bare python3 (no localflow script) and the fake launchctl.
-    bare = tmp_path / "bare-bin"
-    bare.mkdir()
-    (bare / "python3").symlink_to(sys.executable)
+    # PATH holds only a python3 without LocalFlow and the fake launchctl.
+    bare = _stub_python(tmp_path / "bare-bin", "exit 1")
     fake = _fake_launchctl(tmp_path / "fake-bin")
     log = tmp_path / "launchctl.log"
     log.write_text("")
-    env.pop("VIRTUAL_ENV")
+    env.pop("VIRTUAL_ENV", None)
     env.update(PATH=os.pathsep.join((str(bare), str(fake))), FAKE_LAUNCHCTL_LOG=str(log))
     home = sandbox["home"]
     autostart = _user_config_dir(real, env) / "autostart"
