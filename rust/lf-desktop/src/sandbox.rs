@@ -752,11 +752,58 @@ fn bound(value: Option<&str>, end: bool, now: chrono::DateTime<chrono::Local>) -
     }
 }
 
-fn words(text: &str) -> Vec<String> {
+/// Question words that carry no topic. Short topic words ("git", "k8s",
+/// "CI") are kept: a length cut-off would drop them.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "all", "an", "and", "any", "are", "as", "at", "be", "by", "can", "could", "did",
+    "do", "does", "for", "from", "had", "has", "have", "how", "i", "if", "in", "is", "it", "me",
+    "my", "of", "on", "or", "our", "said", "say", "so", "tell", "that", "the", "this", "to", "us",
+    "was", "we", "were", "what", "when", "where", "which", "who", "why", "with", "you", "your",
+];
+
+/// Lowercase alphanumeric tokens of `text`, in order.
+fn tokens(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() > 3)
+        .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
-        .collect()
+}
+
+/// Distinct search terms of a query or question: every token except
+/// stopwords, whatever its length.
+fn words(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in tokens(text) {
+        if !STOPWORDS.contains(&token.as_str()) && !out.contains(&token) {
+            out.push(token);
+        }
+    }
+    out
+}
+
+/// How many `terms` occur in `text`. Terms under four characters must be a
+/// whole word (so "git" doesn't match inside "digital"); longer ones may
+/// start a word, as the old substring match allowed ("fail" -> "failed").
+fn term_score(terms: &[String], text: &str) -> usize {
+    let present: Vec<String> = tokens(text).collect();
+    terms
+        .iter()
+        .filter(|t| {
+            present.iter().any(|w| {
+                if t.chars().count() < 4 {
+                    w == *t
+                } else {
+                    w.starts_with(t.as_str())
+                }
+            })
+        })
+        .count()
+}
+
+/// The query's terms, or `None` for no query at all (list the latest). A
+/// non-empty query with no searchable term gives an empty term list, which
+/// matches nothing rather than everything.
+fn query_terms(query: Option<&str>) -> Option<Vec<String>> {
+    query.map(str::trim).filter(|q| !q.is_empty()).map(words)
 }
 
 fn tool_error(text: impl Into<String>) -> crate::controllers::mcp_client::ToolOutput {
@@ -792,7 +839,7 @@ impl SandboxTools {
         let app = s("app")
             .map(str::to_lowercase)
             .filter(|a| !a.trim().is_empty());
-        let terms = words(s("query").unwrap_or(""));
+        let terms = query_terms(s("query"));
         let mut hits: Vec<(usize, &lf_core::history::HistoryEntry)> = entries
             .iter()
             .filter(|e| e.status == "ok")
@@ -808,14 +855,14 @@ impl SandboxTools {
                         || e.bundle_id.as_deref() == s("app")
                 })
             })
-            .map(|e| {
-                let text = format!("{} {}", e.final_text, e.raw_text).to_lowercase();
-                (
-                    terms.iter().filter(|t| text.contains(t.as_str())).count(),
+            .map(|e| match &terms {
+                None => (0, e),
+                Some(terms) => (
+                    term_score(terms, &format!("{} {}", e.final_text, e.raw_text)),
                     e,
-                )
+                ),
             })
-            .filter(|(score, _)| terms.is_empty() || *score > 0)
+            .filter(|(score, _)| terms.is_none() || *score > 0)
             .collect();
         // Stable: newest first within one score.
         hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
@@ -837,7 +884,7 @@ impl SandboxTools {
             .collect();
         tool_ok(json!({
             "count": results.len(),
-            "match": if terms.is_empty() { "recent" } else { "ranked" },
+            "match": if terms.is_none() { "recent" } else { "ranked" },
             "results": results,
         }))
     }
@@ -890,7 +937,7 @@ impl SandboxTools {
             .and_then(Value::as_i64)
             .unwrap_or(10)
             .clamp(1, 50) as usize;
-        let terms = words(args.get("query").and_then(Value::as_str).unwrap_or(""));
+        let terms = query_terms(args.get("query").and_then(Value::as_str));
         let Ok(mut entries) = self.prompts.list(status) else {
             return tool_error("prompt queue unreadable");
         };
@@ -906,13 +953,15 @@ impl SandboxTools {
         let results: Vec<Value> = entries
             .iter()
             .filter(|e| {
+                let Some(terms) = &terms else {
+                    return true;
+                };
                 let text = format!(
                     "{} {}",
                     e.get("title").and_then(Value::as_str).unwrap_or(""),
                     e.get("meeting").and_then(Value::as_str).unwrap_or("")
-                )
-                .to_lowercase();
-                terms.is_empty() || terms.iter().any(|t| text.contains(t.as_str()))
+                );
+                term_score(terms, &text) > 0
             })
             .take(limit)
             .map(|e| {
@@ -923,7 +972,7 @@ impl SandboxTools {
             .collect();
         tool_ok(json!({
             "count": results.len(),
-            "match": if terms.is_empty() { "recent" } else { "ranked" },
+            "match": if terms.is_none() { "recent" } else { "ranked" },
             "results": results,
         }))
     }
@@ -1009,6 +1058,8 @@ impl lf_providers::LlmProvider for SandboxModel {
             if final_only {
                 return Ok(no_answer);
             }
+            // Short topic words ("git") stay in the query. A question with
+            // no topic word at all lists the latest dictations (no query).
             let query = words(&question).join(" ");
             let tool = if wants_prompts {
                 "search_prompts"
@@ -1017,6 +1068,8 @@ impl lf_providers::LlmProvider for SandboxModel {
             };
             let arguments = if wants_prompts {
                 json!({})
+            } else if query.is_empty() {
+                json!({"limit": 5})
             } else {
                 json!({"query": query, "limit": 5})
             };
@@ -1339,6 +1392,92 @@ mod tests {
         };
         assert_eq!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
         assert!(done.turn.citations.is_empty());
+    }
+
+    /// "git" is three characters: it must reach the search (not be dropped
+    /// so the newest dictation answers instead) and match the git dictation.
+    #[test]
+    fn short_topic_words_find_their_dictation_not_the_newest() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        use crate::controllers::mcp_client::ToolTransport;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let entries = open_history(&root).unwrap().recent(100, None, 0).unwrap();
+        let newest = entries.iter().find(|e| e.status == "ok").unwrap();
+        let git = entries
+            .iter()
+            .find(|e| e.final_text.starts_with("git commit"))
+            .unwrap();
+        assert_ne!(newest.id, git.id, "the example must not be the newest");
+        assert!(!newest.final_text.to_lowercase().contains("git"));
+
+        // Through the production Ask agent and the sandbox model.
+        let events = sandbox_ask(&root, "What did I say about git?", "Any time");
+        let queries: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, args, .. } if name == "search_dictations" => {
+                    Some(args.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queries.len(), 1);
+        assert!(queries[0].contains("query: \"git\""), "{}", queries[0]);
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert_eq!(done.turn.citations.len(), 1);
+        let cite = &done.turn.citations[0];
+        assert_eq!(cite.source, "dictation");
+        assert_eq!(cite.reference, git.id.to_string());
+        assert_eq!(cite.app, "Terminal");
+        assert!(
+            done.turn.answer.contains("git commit"),
+            "{}",
+            done.turn.answer
+        );
+        assert!(!done.turn.answer.contains(&newest.final_text));
+
+        // The tool itself: whole-word short terms, no broadening.
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: std::time::Duration::ZERO,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut search = |args: Value| {
+            tools
+                .call("search_dictations", &args, &cancel)
+                .unwrap()
+                .structured
+                .unwrap()
+        };
+        let found = search(json!({"query": "git"}));
+        assert_eq!(found["count"], 1);
+        assert_eq!(found["results"][0]["id"], git.id);
+        // A non-empty query with nothing searchable matches nothing...
+        for query in ["the", "what did I say", "!!"] {
+            let none = search(json!({"query": query}));
+            assert_eq!(
+                (none["count"].as_i64(), none["match"].as_str()),
+                (Some(0), Some("ranked")),
+                "{query}"
+            );
+        }
+        // ...while no query (or a blank one) still lists the latest.
+        for args in [json!({}), json!({"query": "  "})] {
+            let latest = search(args);
+            assert_eq!(latest["match"], "recent");
+            assert_eq!(latest["results"][0]["id"], newest.id);
+        }
+        // Longer terms still match word starts; short ones never inside words.
+        assert_eq!(search(json!({"query": "fail"}))["count"], 1);
+        assert_eq!(words("What did I say about git and CI?"), ["git", "ci"]);
+        assert_eq!(term_score(&words("ci"), "Check the readiness probe"), 0);
     }
 
     #[test]
