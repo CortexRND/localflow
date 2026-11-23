@@ -164,15 +164,15 @@ impl RetryError {
     }
 }
 
-/// Why Retry can't run with this config, checked without I/O.
-pub fn config_reason(config: &Config) -> Option<String> {
-    let rate = config
-        .fields
-        .get("sample_rate")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(i64::from(CLIP_RATE));
-    (rate != i64::from(CLIP_RATE))
-        .then(|| format!("Retry needs sample_rate = {CLIP_RATE} in your settings (it is {rate})."))
+/// The config one retry runs with: `config` with `sample_rate` set to the
+/// saved clip's own (already validated) rate. The microphone `sample_rate`
+/// setting describes live capture, not saved clips (always stored at
+/// [`CLIP_RATE`]), so it must not block or skew a retry. A local copy only:
+/// every other field is kept and nothing is written back.
+fn clip_config(config: &Config, clip_rate: u32) -> Config {
+    let mut config = config.clone();
+    config.set_field("sample_rate", serde_json::json!(clip_rate));
+    config
 }
 
 /// A row's identity for a job. Ids are reused after a clear, so the
@@ -245,7 +245,7 @@ pub fn retry_entry(
         .clone()
         .filter(|p| entry.kind == "dictate" && !p.is_empty())
         .ok_or(RetryError::NotRetryable)?;
-    if let Some(reason) = backend.unavailable().or_else(|| config_reason(config)) {
+    if let Some(reason) = backend.unavailable() {
         return Err(RetryError::Unavailable(reason));
     }
     // Validated loader: inside the clips directory, mono 16-bit WAV.
@@ -260,6 +260,7 @@ pub fn retry_entry(
     if samples.is_empty() {
         return Err(RetryError::Clip("it contains no audio".into()));
     }
+    let config = &clip_config(config, rate);
     let vocab = vocabulary(root, config);
     let app_info = (entry.app_name.is_some() || entry.bundle_id.is_some()).then(|| AppInfo {
         name: entry.app_name.clone().unwrap_or_default(),
@@ -307,15 +308,10 @@ pub struct RetryView {
 }
 
 /// Retry's state for `entry`. No I/O: safe while rendering.
-pub fn view(
-    entry: &HistoryEntry,
-    backend: &dyn RetryBackend,
-    config: &Config,
-    jobs: &RetryJobs,
-) -> RetryView {
+pub fn view(entry: &HistoryEntry, backend: &dyn RetryBackend, jobs: &RetryJobs) -> RetryView {
     let running = jobs.running();
     let mine = running.is_some_and(|key| key.matches(entry));
-    let unavailable = backend.unavailable().or_else(|| config_reason(config));
+    let unavailable = backend.unavailable();
     let blocked = unavailable
         .clone()
         .or_else(|| (running.is_some() && !mine).then(|| OTHER_RUNNING.to_string()));
@@ -538,6 +534,17 @@ mod tests {
         unloads: AtomicUsize,
         llms: AtomicUsize,
         prompts: Mutex<Vec<Option<String>>>,
+        /// `sample_rate` of every config handed to `open` and `llm`.
+        rates: Mutex<Vec<Option<i64>>>,
+    }
+
+    impl Counts {
+        fn saw(&self, config: &Config) {
+            self.rates
+                .lock()
+                .unwrap()
+                .push(config.field_i64("sample_rate"));
+        }
     }
 
     struct FakeSpeech {
@@ -649,7 +656,8 @@ mod tests {
         fn unavailable(&self) -> Option<String> {
             None
         }
-        fn open(&self, _: &Config) -> Result<Arc<dyn SpeechEngine>, String> {
+        fn open(&self, config: &Config) -> Result<Arc<dyn SpeechEngine>, String> {
+            self.counts.saw(config);
             self.counts.opens.fetch_add(1, Ordering::SeqCst);
             if let Some(error) = self.open_error {
                 return Err(error.into());
@@ -662,7 +670,8 @@ mod tests {
                 started: self.started.clone(),
             }))
         }
-        fn llm(&self, _: &Config) -> Option<Box<dyn LlmProvider>> {
+        fn llm(&self, config: &Config) -> Option<Box<dyn LlmProvider>> {
+            self.counts.saw(config);
             self.counts.llms.fetch_add(1, Ordering::SeqCst);
             self.failing_llm
                 .then(|| Box::new(FailingLlm) as Box<dyn LlmProvider>)
@@ -830,16 +839,15 @@ mod tests {
             .unwrap_err()
             .message()
             .contains("44100 Hz"));
-        // A configured rate the engines can't use is refused up front too.
-        let mut config = config();
-        config.set_field("sample_rate", serde_json::json!(48_000));
-        let good = f.retryable();
+        // The clip's own rate decides, whatever the microphone is set to.
+        let mut matching = config();
+        matching.set_field("sample_rate", serde_json::json!(44_100));
         assert!(matches!(
-            f.retry(&config, &good, &fake),
-            Err(RetryError::Unavailable(_))
+            f.retry(&matching, &rate_44k, &fake),
+            Err(RetryError::Clip(_))
         ));
-        assert!(config_reason(&config).is_some());
         assert_eq!(fake.opens(), 0);
+        assert_eq!(fake.counts.llms.load(Ordering::SeqCst), 0);
         for entry in f.rows() {
             assert_ne!(entry.status, "ok", "nothing was updated");
         }
@@ -936,6 +944,46 @@ mod tests {
         assert!(Path::new(updated.audio_path.as_deref().unwrap()).is_file());
         assert_eq!(std::fs::read(&f.root.config_path).ok(), config_bytes);
         assert!(!f.root.localflow_dir.join("last.txt").exists());
+    }
+
+    /// The microphone `sample_rate` (an old Python setting such as 8000 or
+    /// 44100) doesn't describe saved clips, which are always 16 kHz: Retry
+    /// is offered and runs with the clip's rate, and the user's config is
+    /// neither changed in memory nor on disk.
+    #[test]
+    fn a_16k_clip_retries_whatever_the_microphone_sample_rate_is() {
+        for capture_rate in [8_000, 44_100] {
+            let f = fixture();
+            let entry = f.retryable();
+            let mut config = config();
+            config.set_field("sample_rate", serde_json::json!(capture_rate));
+            config.set_field("cleanup_enabled", serde_json::json!(true));
+            config.set_field("language", serde_json::json!("de"));
+            lf_core::config::save_config(&config, Some(&f.root.config_path)).unwrap();
+            let config_bytes = std::fs::read(&f.root.config_path).unwrap();
+            let before = config.clone();
+            let fake = Fake::new(Says::Text("hello there"));
+
+            let shown = view(&entry, &fake, &RetryJobs::new());
+            assert!(shown.blocked.is_none(), "{shown:?}");
+            let updated = f.retry(&config, &entry, &fake).unwrap();
+            assert_eq!(updated.status, "ok");
+            assert_eq!(updated.raw_text, "hello there");
+            // The backend (speech and cleanup) saw the clip's actual rate.
+            assert_eq!(
+                *fake.counts.rates.lock().unwrap(),
+                vec![Some(i64::from(CLIP_RATE)); 2]
+            );
+            assert_eq!(fake.counts.transcribes.load(Ordering::SeqCst), 1);
+            // Only that one field differs in the retry's copy.
+            let mut seen = clip_config(&config, CLIP_RATE);
+            seen.set_field("sample_rate", serde_json::json!(capture_rate));
+            assert_eq!(seen.fields, before.fields);
+            // The caller's config and the file are untouched.
+            assert_eq!(config.fields, before.fields);
+            assert_eq!(config.field_i64("sample_rate"), Some(capture_rate));
+            assert_eq!(std::fs::read(&f.root.config_path).unwrap(), config_bytes);
+        }
     }
 
     #[test]
@@ -1091,10 +1139,10 @@ mod tests {
             crate::controllers::shutdown::remaining_work(&downloads, &jobs, false),
             vec![crate::controllers::shutdown::RETRY_RUNNING]
         );
-        let mine = view(&entry, fake.as_ref(), &config(), &jobs);
+        let mine = view(&entry, fake.as_ref(), &jobs);
         assert!(mine.mine && mine.blocked.is_none() && mine.error.is_none());
         assert!(mine.note.contains("can't be cancelled"));
-        let theirs = view(&other, fake.as_ref(), &config(), &jobs);
+        let theirs = view(&other, fake.as_ref(), &jobs);
         assert!(!theirs.mine);
         assert_eq!(theirs.blocked.as_deref(), Some(OTHER_RUNNING));
         // Repeat clicks and another row are refused: no second model load.
@@ -1533,25 +1581,21 @@ mod tests {
         let fake = Arc::new(Fake::new(Says::Fails));
         assert!(jobs.start(f.root.clone(), config(), key, fake.clone()));
         assert!(jobs.wait_idle(WAIT));
-        let shown = view(&entry, fake.as_ref(), &config(), &jobs);
+        let shown = view(&entry, fake.as_ref(), &jobs);
         assert!(shown.error.unwrap().contains("fake inference failed"));
         assert!(shown.blocked.is_none(), "Try again is usable");
-        assert!(view(&other, fake.as_ref(), &config(), &jobs)
-            .error
-            .is_none());
+        assert!(view(&other, fake.as_ref(), &jobs).error.is_none());
         // A reused id (same id, other timestamp) doesn't inherit the error.
         let mut reused = entry.clone();
         reused.ts += 1.0;
-        assert!(view(&reused, fake.as_ref(), &config(), &jobs)
-            .error
-            .is_none());
+        assert!(view(&reused, fake.as_ref(), &jobs).error.is_none());
     }
 
     #[test]
     fn default_builds_explain_why_and_never_open_anything() {
         let f = fixture();
         let entry = f.retryable();
-        let shown = view(&entry, &UnavailableRetry, &config(), &RetryJobs::new());
+        let shown = view(&entry, &UnavailableRetry, &RetryJobs::new());
         assert!(shown
             .blocked
             .as_deref()

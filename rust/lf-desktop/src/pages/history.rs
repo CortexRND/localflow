@@ -296,12 +296,7 @@ impl HistoryPage {
 
     fn retry_view(&self, entry: &HistoryEntry) -> retry::RetryView {
         let services = &self.pcx.services;
-        retry::view(
-            entry,
-            services.retry.as_ref(),
-            &services.config(),
-            &services.retry_jobs,
-        )
+        retry::view(entry, services.retry.as_ref(), &services.retry_jobs)
     }
 
     fn selected_entry(&self) -> Option<&HistoryEntry> {

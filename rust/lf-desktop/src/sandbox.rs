@@ -725,12 +725,8 @@ mod tests {
             .collect();
         assert_eq!(failed.len(), 1);
         let entry = failed[0].clone();
-        let shown = crate::controllers::retry::view(
-            &entry,
-            services.retry.as_ref(),
-            &services.config(),
-            &services.retry_jobs,
-        );
+        let shown =
+            crate::controllers::retry::view(&entry, services.retry.as_ref(), &services.retry_jobs);
         assert!(shown.blocked.is_none());
         assert!(shown
             .note
