@@ -398,6 +398,17 @@ mod tests {
     }
 
     #[test]
+    fn meeting_speech_ignores_dictation_sample_rate() {
+        let mut config = Config::default();
+        config.set_field("sample_rate", serde_json::json!(22050));
+        config.set_field("stt_backend", serde_json::json!("missing-provider"));
+        let dictation = LazySpeechAdapter::new(config.clone()).load().unwrap_err();
+        assert!(dictation.contains("sample_rate"), "{dictation}");
+        let meeting = LazySpeechAdapter::for_16k_pcm(config).load().unwrap_err();
+        assert!(meeting.contains("unsupported speech provider"), "{meeting}");
+    }
+
+    #[test]
     fn load_prompt_empty_error_unload_reload_and_shared_calls() {
         let root = tempfile::tempdir().unwrap();
         let (speech, counts) = adapter(root.path(), false);
