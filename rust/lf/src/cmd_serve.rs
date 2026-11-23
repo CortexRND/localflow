@@ -22,7 +22,9 @@ struct MeetingCapture;
 
 impl CaptureFactory for MeetingCapture {
     fn transcriber(&self, config: &Config) -> Result<Arc<dyn Transcriber>> {
-        Ok(Arc::new(MeetingSpeech(LazySpeechAdapter::new(
+        // Meeting capture resamples to 16 kHz itself; the dictation
+        // `sample_rate` setting only governs the dictation recorder.
+        Ok(Arc::new(MeetingSpeech(LazySpeechAdapter::for_16khz_pcm(
             config.clone(),
         ))))
     }
@@ -69,4 +71,24 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
     let served = runtime.block_on(server.run());
     let shutdown = state.shutdown();
     served.and(shutdown)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn meeting_speech_ignores_the_dictation_sample_rate() {
+        // An unknown provider fails before any model download; reaching that
+        // error proves the 22,050 Hz dictation setting was not checked.
+        let mut config = Config::default();
+        config.set_field("sample_rate", json!(22050));
+        config.set_field("stt_backend", json!("test-unknown"));
+        let speech = MeetingCapture.transcriber(&config).unwrap();
+        assert_eq!(
+            speech.transcribe(&[0.5], None).unwrap_err().to_string(),
+            "unsupported speech provider: test-unknown"
+        );
+    }
 }

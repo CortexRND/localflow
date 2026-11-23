@@ -380,8 +380,8 @@ meeting formatting/writer bytes and Python/Rust prompt-queue round trips.
 Both `lf-rs serve` and the embedded macOS `lf-hub` server wire these routes
 through `lf-meetings-backend`. The headless CLI supports explicit meeting
 start/stop with microphone capture and configured system audio, but does not
-run the desktop meeting watcher or manage platform autostart. For dictation,
-`POST /transcribe` uses ffmpeg and loads the configured native speech model on
+run the desktop meeting watcher or manage platform autostart. For HTTP-upload
+dictation, `POST /transcribe` uses ffmpeg and loads the configured native speech model on
 demand.
 They preserve Python prompts and on-disk formats (including history SQLite,
 meeting Markdown, `queue.json` and `settings-undo.json`). Providers,
@@ -426,8 +426,11 @@ offline transducer API and downloaded prebuilt libraries, not a local
 sherpa build. HF downloads use the standard shared blobs/snapshots cache and
 the same `HF_HUB_CACHE`/`HUGGINGFACE_HUB_CACHE`/`HF_HOME`/`XDG_CACHE_HOME`
 precedence as Python. The factory maps Python provider IDs to the native
-counterparts without changing model size; `lf-hub` uses them on macOS, and
-they are not wired into `lf-rs` or the Python app.
+counterparts without changing model size. `lf-hub` uses them on macOS, and
+`lf-rs serve` uses them in-process on every platform for HTTP uploads
+(`POST /transcribe`) and for meeting transcription, loading the configured
+model on first use. They are not wired into the Python app, and `lf-rs serve`
+does not start a global (hotkey) dictation runtime.
 
 Benchmark (downloads models and the fixed Parakeet `test_wavs/0.wav`):
 
@@ -476,11 +479,15 @@ Transcripts/timing need not be bit-identical across models/backends. See the
 Outside the shipped macOS `lf-hub` app this is not a full application port:
 
 * `lf-hub` ships on macOS only; on Linux and Windows there is no Hub, setup or
-  native settings window — `serve` hosts the web UI and core APIs, and
-  `lf-stt`'s optional `server` feature
-  provides an opt-in transcription backend adapter ([integration](lf-stt/README.md#http-backend-optional));
-  other runtime routes return explicit unavailable-backend errors until linked;
-  `lf-rs` has no `dictate` command (the dictation runtime runs inside `lf-hub`);
+  native settings window. `serve` hosts the web UI, core APIs, HTTP-upload
+  transcription (`POST /transcribe`, via ffmpeg and the native engines;
+  [integration](lf-stt/README.md#http-backend-optional)) and the meetings,
+  Ask and prompt routes, including explicit meeting start/stop. It does not
+  run the meeting watcher (no auto-detect or auto-start) or manage
+  autostart: `POST /api/autostart` returns an unavailable-backend error and
+  `GET` reports it as unavailable;
+* `lf-rs` has no `dictate` command, and `lf-rs serve` does not start a
+  global hotkey dictation runtime; HTTP uploads are its only dictation path;
 * hotkeys and the menu bar are implemented on macOS only: on Linux and
   Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
   tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
@@ -495,9 +502,9 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   `write_clip` (linear resample to private 16 kHz mono 16-bit PCM WAV with
   Python `wave`'s header), `load_clip` (PCM / extensible-PCM WAV inside the
   clips dir only), `prune_audio_clips` and `delete_clip` — but nothing in the
-  CLI records audio, `lf-rs` exposes no clip command, and there is no
-  retry-from-audio (`lf history retry` needs speech-to-text); no other audio
-  codecs;
+  CLI records dictation clips (`serve` captures only meeting audio), `lf-rs`
+  exposes no clip command, and there is no retry-from-audio
+  (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
   `meeting`, `models`, `stt`, `setup`, `tweak`, `recall`, `prompts`,
   `history retry`, `keys import`, `secret`, `token`, …);
