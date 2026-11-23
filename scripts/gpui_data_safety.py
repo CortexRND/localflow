@@ -75,8 +75,9 @@ def collection_file(collection, directory):
     prefix = "/org/freedesktop/secrets/collection/"
     if not collection.startswith(prefix) or "/" in collection[len(prefix):]:
         return None
-    identifier = re.sub(r"_([0-9a-f]{2})", lambda m: chr(int(m[1], 16)), collection[len(prefix):])
-    return directory / f"{identifier}.keyring"
+    escaped = collection[len(prefix):].encode("ascii")
+    identifier = re.sub(rb"_([0-9a-f]{2})", lambda m: bytes([int(m[1], 16)]), escaped)
+    return directory / (os.fsdecode(identifier) + ".keyring")
 
 
 def process_environment(pid):
