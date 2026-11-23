@@ -25,7 +25,7 @@ Each PR leaves every existing entry point working.
 | **2. Runtime and global-input parity** | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
 | **3. Packaging** (PR 65, merged) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Done. Linux package built and smoke-installed on the VM; fixture tests for builder/installer/publisher. All three `gpui-package.yml` legs (Linux x86_64, macOS arm64, macOS x86_64) build the release package, verify it, re-verify it outside the checkout and smoke-install/uninstall it in a temporary HOME, running `lf-desktop --version`; macOS relocation and signing are verified only by those CI legs. No interactive GUI, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
 | **4a. Opt-in launch** (this PR) | `localflow/desktop_launch.py`, called only by `lf hub`, bare `lf phrases` and the `lf setup` window: `--gpui` / `--legacy`, then `LOCALFLOW_UI=gpui\|legacy`, then `DEFAULT_UI = "legacy"` (no config key). Discovery only after a GPUI selection: absolute `LOCALFLOW_DESKTOP_BIN`, else only the preview installer's package (manifest name / bundle id checked). Bounded `--help` probe for the `--page`/`--setup` interface and the `EXIT STATUS (launch-status: 1):` line; `lf-desktop` now exits 1 when no window can open (it used to exit 0), so Scope 3 packages, which lack the line, must be updated before `lf` or `lf-hub` will open them. Closed argv, detached, 1.5 s startup watch; exit 0 is a hand-off. Any failure: one notice, then the legacy window once. `LOCALFLOW_SANDBOX` with a GPUI selection is refused (no fallback). `lf-hub` on Linux `exec`s the preview through the same rules (`lf_ui::desktop_launch`). Details: [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md#opening-it-from-lf-step-4a) | Implemented; unit and fake-executable subprocess tests (Python and Rust, temporary HOME, no GUI). Not exercised against a real window or on macOS hardware (GUI probing waived by the owner) |
-| 4b. Default-launch promotion | `DEFAULT_UI` becomes `gpui` (per platform), keeping the 4a fallback and `--legacy` | Not started. Needs the open gates below (1 parity, 5 packaging QA, 7 accessibility, 8 UI verification) and the owner's decision |
+| 4b. Default-launch promotion | `DEFAULT_UI` becomes `gpui` (per platform), keeping the 4a fallback and `--legacy` | Not started. Needs the open gates below (1 parity, 5 packaging QA, 8 UI verification) and the owner's decision |
 | 5. Legacy retirement | Remove the launch paths that are no longer used and the controller code duplicated from `lf_ui::mac` (done on macOS). Bundle Figtree. Screen-reader support once GPUI has an accessibility tree | Not started |
 
 ## Feature matrix (after PR 2)
@@ -91,10 +91,10 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    single-instance and page routing; they still need interactive review on Linux
    (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
    rows (tray item, History retry) need a decision.
-2. **Data safety.** A script compares the real config file, `~/.localflow` and the
-   keyring by hash before and after a scripted sandbox session, and finds them
-   unchanged. In real mode, every write goes through `config_write` or the
-   existing store APIs. The unit tests in `data.rs`, `sandbox.rs` and
+2. **Data safety.** [`gpui_data_safety.py`](../scripts/gpui_data_safety.py) compares
+   the real config file, `~/.localflow` and the keyring by hash before and after a
+   scripted sandbox session. In real mode, every write goes through `config_write`
+   or the existing store APIs. The unit tests in `data.rs`, `sandbox.rs` and
    `controllers/*` cover this already.
 3. **Platforms.** The app builds and passes tests on Linux (X11 and Wayland) and
    macOS in CI. Today `gpui.yml` runs fmt, clippy, tests and the build for both the
@@ -121,9 +121,49 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    "status limited".
 7. **Accessibility.** Either GPUI exposes an accessibility tree and it's wired up,
    or the owner accepts keyboard-only support and `lf-hub` stays the recommended
-   macOS app for screen-reader users.
+   macOS app for screen-reader users. Taj accepted keyboard-only support for
+   `lf-desktop`; the macOS screen-reader recommendation is unchanged.
 8. **UI verification.** Light and dark screenshots of every page at 1280 × 850 and
-   at 960 × 640 are captured from the sandbox and reviewed.
+   at 960 × 640 are captured from the sandbox with
+   [`gpui_screenshots.py`](../scripts/gpui_screenshots.py) and reviewed.
+
+### Run gates 2 and 8 on Linux
+
+The Linux job in [GPUI desktop CI](../.github/workflows/gpui.yml) runs both
+scripts and uploads `gpui-data-safety` and `gpui-screenshots`. CI uses an
+isolated home with populated fixture stores; the local Gate 2 command below
+uses your existing stores.
+
+Build `lf-desktop` with the [GPUI build dependencies](../.github/workflows/gpui.yml).
+The capture scripts use Xvfb, Openbox, ImageMagick, and the Linux Secret Service
+and appearance portal. On Ubuntu/Debian, install `xvfb xauth x11-utils xdotool
+openbox imagemagick dbus-x11 python3-dbus python3-gi mesa-vulkan-drivers` in addition
+to the build dependencies. Use the system Python (3.10+) for the D-Bus bindings.
+
+```bash
+cargo build --manifest-path rust/lf-desktop/Cargo.toml --locked --bin lf-desktop
+binary="$PWD/rust/lf-desktop/target/debug/lf-desktop"
+
+# Gate 2: keep the current HOME, config overrides and D-Bus session.
+xvfb-run -a -s '-screen 0 1600x1000x24 -dpi 96' /usr/bin/python3 \
+  scripts/gpui_data_safety.py "$binary" artifacts/gpui-data-safety
+
+# Gate 8: the private bus provides deterministic light/dark preferences.
+# Disable Composite so the GPUI client pixels are capturable under Xvfb.
+dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24 -dpi 96 -extension Composite' /usr/bin/python3 \
+  scripts/gpui_screenshots.py "$binary" artifacts/gpui-screenshots
+```
+
+Use new artifact directories each run. Gate 2 requires a persistent GNOME
+Keyring default collection in the current session. Run it with LocalFlow and other
+writers to the monitored stores stopped. It adds a word to the **sandbox**
+Dictionary and checks that the real config (including legacy fallback),
+`~/.localflow`, and the GNOME Keyring backing files did not change. `before.json`
+and `after.json` contain only per-store HMAC-SHA256 digests with a per-run key;
+compare them only within the same run. Other keyring backends are not supported by
+this script. Gate 8 writes 44 PNGs (10 pages and Setup × two themes × two sizes).
+Review the PNGs for legibility and layout at both sizes; capture success alone
+does not complete the review.
 
 ## Architecture notes for contributors
 
