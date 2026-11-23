@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import ast
 import hashlib
 import types
@@ -1755,12 +1756,30 @@ def _python_keyring_cli(monkeypatch, args, stdin, env, keyring, failing):
     fake = types.SimpleNamespace(
         get_password=get_password, set_password=set_password, delete_password=delete_password,
     )
-    with monkeypatch.context() as patch:
-        patch.setattr(py_secrets, "keyring", fake)
-        patch.setattr(py_secrets, "_keyring_warned", False)
-        result = CliRunner().invoke(py_cli.cli, args, input=stdin, env=env)
+    # Outside pytest these records reach stderr through logging's last-resort
+    # handler; pytest's own handlers keep them out of `result.stderr`.
+    warnings = _WarningRecords()
+    logger = logging.getLogger("localflow")
+    logger.addHandler(warnings)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(py_secrets, "keyring", fake)
+            patch.setattr(py_secrets, "_keyring_warned", False)
+            result = CliRunner().invoke(py_cli.cli, args, input=stdin, env=env)
+    finally:
+        logger.removeHandler(warnings)
     assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
-    return {"code": result.exit_code, "out": result.stdout, "err": result.stderr, "keyring": values}
+    return {"code": result.exit_code, "out": result.stdout, "err": result.stderr, "keyring": values,
+            "warnings": warnings.messages}
+
+
+class _WarningRecords(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
 
 
 def _unecho(out: str, prompt: str, stdin: str) -> str:
@@ -1779,8 +1798,9 @@ def _unecho(out: str, prompt: str, stdin: str) -> str:
 def cli_parity(rust_build, sandbox, monkeypatch, args, *, stdin="", env=None, keyring=None,
                failing=None, secrets=(), full_err=True):
     """Run `lf ARGS` in Python and Rust; compare exit code, stdout, the final
-    keyring and stderr (the whole of it, its last line for click usage
-    errors, or only the `Error: ` prefix when `full_err` is False)."""
+    keyring, logged warnings and stderr (the whole of it, its last line for
+    click usage errors, or only the `Error: ` prefix when `full_err` is
+    False, which also compares only the number of warnings)."""
     env = env or {}
     keyring = keyring or {}
     python = _python_keyring_cli(monkeypatch, args, stdin, env, keyring, failing)
@@ -1790,9 +1810,13 @@ def cli_parity(rust_build, sandbox, monkeypatch, args, *, stdin="", env=None, ke
     rust = drive1(rust_build, {"env": {**sandbox["env"], **env}}, request)
     assert "error" not in rust, rust
     for value in secrets:
-        assert value not in rust["out"] and value not in rust["err"], value
+        assert value not in rust["out"] + rust["err"] + "".join(rust["warnings"]), value
     assert rust["code"] == python["code"], (rust, python)
     assert rust["keyring"] == python["keyring"]
+    if full_err:
+        assert rust["warnings"] == python["warnings"]
+    else:
+        assert len(rust["warnings"]) == len(python["warnings"])
     if python["code"] == 2:
         last = rust["err"].splitlines()[-1]
         if last.startswith("Error: "):  # lf-rs reports this one as click does
@@ -1886,6 +1910,7 @@ def test_keys_import_keyring_failure_is_sanitized(rust_build, keys_env, monkeypa
                       secrets=KEY_VALUES)
     assert (rust["code"], rust["err"]) == (1, "Error: Unable to save keys; check Keychain access\n")
     assert failing not in rust["err"]
+    assert rust["warnings"] == [f"keyring unavailable: {failing}"]
     # Nothing confirmed: nothing is written, so the broken keyring is never hit.
     rust = cli_parity(rust_build, keys_env, monkeypatch, args, stdin="n\n" * 5, failing=failing,
                       secrets=KEY_VALUES)

@@ -10,7 +10,7 @@
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{anyhow, bail, Context, Result};
 use lf_core::config::{self, Config};
@@ -21,7 +21,35 @@ use lf_core::secrets::{self, FailingKeyring, KeyringBackend, MemoryKeyring};
 use lf_core::{apitoken, formatting, symbols};
 use serde_json::{json, Value};
 
+/// Collects WARN and ERROR log messages (what `lf-rs` prints to stderr
+/// through its own logger) so `cli` results can include them.
+struct CaptureLogger(Mutex<Vec<String>>);
+
+impl log::Log for CaptureLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            let mut records = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            records.push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: CaptureLogger = CaptureLogger(Mutex::new(Vec::new()));
+
+fn take_warnings() -> Vec<String> {
+    std::mem::take(&mut *LOGGER.0.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
 fn main() {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
     let mut input = String::new();
     if let Err(error) = io::stdin().read_to_string(&mut input) {
         eprintln!("parity: cannot read stdin: {error}");
@@ -276,7 +304,8 @@ impl KeyringBackend for StrictMemory {
 
 /// `lf::run(args)` in-process with `stdin` as input and an in-memory keyring
 /// seeded from `keyring` (`{name: value}`), or a keyring whose every call
-/// fails with `failing_keyring`. Returns `{code, out, err, keyring}`.
+/// fails with `failing_keyring`. Returns `{code, out, err, keyring, warnings}`,
+/// `warnings` being the messages `lf-rs` would log to stderr.
 fn cli(request: &Value) -> Result<Value> {
     let mut argv = vec!["lf-rs".to_string()];
     argv.extend(strings(request.get("args")));
@@ -296,6 +325,7 @@ fn cli(request: &Value) -> Result<Value> {
     };
     let previous = secrets::set_keyring_backend(Some(backend));
     secrets::reset_keyring_warning();
+    take_warnings();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let mut input = io::Cursor::new(opt_text(request, "stdin").unwrap_or("").as_bytes().to_vec());
     let mut clipboard = NoClipboard;
@@ -316,6 +346,7 @@ fn cli(request: &Value) -> Result<Value> {
         "out": String::from_utf8(out)?,
         "err": String::from_utf8(err)?,
         "keyring": memory.values(secrets::SERVICE),
+        "warnings": take_warnings(),
     }))
 }
 
