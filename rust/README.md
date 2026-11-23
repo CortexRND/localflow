@@ -302,7 +302,26 @@ lf-rs prompts list [-s STATUS] | show ID | approve ID... | reject ID...
 lf-rs prompts dispatch [ID...] [--all] [--repo R] [--agent A] [--dry-run]
 lf-rs recall QUESTION [--since today|yesterday|7d|YYYY-MM-DD] [--k 1-20] [--no-llm] [--json]
 lf-rs tweak REQUEST [--yes] | --undo
+lf-rs agent install | uninstall | status
+lf-rs setup install-app
 ```
+
+* `agent` (hidden, as in Python) manages launch at login for
+  `LOCALFLOW_PLATFORM` or the real OS: the freedesktop autostart entry on
+  Linux, the launchd LaunchAgent on macOS (via `launchctl`, trimming its
+  oversized logs) and the HKCU `Run` value on Windows. `setup install-app`
+  writes `~/Applications/LocalFlow Setup.app` and `LocalFlow.app`. Both need
+  the Python LocalFlow install, as Python uses `sys.executable`: the first
+  interpreter (`VIRTUAL_ENV`, next to an `lf` on PATH, then `python3` and
+  `python` on PATH) that has the `localflow` script next to it, or in
+  `Scripts\` on Windows. `agent install` starts that script at login, also
+  where Python would name a missing `localflow.exe` next to a Windows
+  interpreter outside a virtualenv. `setup install-app` writes that
+  interpreter where Python writes its own `sys.executable`, and also accepts
+  one that only imports `localflow` (a `pip install --user`, whose scripts
+  live elsewhere). Without an install they exit 1 and change nothing, so
+  they never touch a native install's app bundle or login job. Bare `setup`
+  and `setup uninstall-app` are not ported.
 
 * `meeting` posts to the running server (API token read, never created);
   `prompts` works on the shared `~/.localflow/queue.json` and dispatches
@@ -558,7 +577,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
-  `watch`, `notes`, `open`, `models`, `stt`, `setup`,
+  `watch`, `notes`, `open`, `models`, `stt`, bare `setup`,
   `history retry`, `token`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;
