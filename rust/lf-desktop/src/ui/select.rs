@@ -32,7 +32,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-use super::{icon, ring};
+use super::{icon, ring, surface_ring};
 use crate::theme::{elevation, size, space, text, theme};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +49,8 @@ pub struct Select {
     disabled: bool,
     placeholder: SharedString,
     width: f32,
+    /// The focused trigger draws [`surface_ring`] (its fill is opaque).
+    surface_ring: bool,
 }
 
 impl EventEmitter<SelectEvent> for Select {}
@@ -74,11 +76,18 @@ impl Select {
             disabled: false,
             placeholder: "Choose…".into(),
             width: 220.,
+            surface_ring: false,
         }
     }
 
     pub fn width(mut self, w: f32) -> Self {
         self.width = w;
+        self
+    }
+
+    /// Opt into [`surface_ring`] for the focused trigger.
+    pub fn surface_ring(mut self) -> Self {
+        self.surface_ring = true;
         self
     }
 
@@ -228,7 +237,11 @@ impl Render for Select {
         };
         let hover = t.hover;
         let trigger_hover = t.bg_muted;
-        let ring_style = ring(&t);
+        let ring_style = if self.surface_ring {
+            surface_ring(&t)
+        } else {
+            ring(&t)
+        };
         let control_shadow = elevation::control(&t);
         let trigger = div()
             .id("select-trigger")

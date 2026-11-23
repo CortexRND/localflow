@@ -29,23 +29,37 @@ pub fn handler(f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Hand
     Rc::new(f)
 }
 
-/// The focus ring: a solid 2 px accent edge inside a soft accent halo
-/// (drawn outside the box; no layout shift).
+/// Blur of [`surface_ring`]'s shadows. Never zero: GPUI 0.2.2's Linux
+/// (blade) and Windows shadow shaders integrate the blur over
+/// `±3 × blur_radius`, so a zero radius gives a zero-width range and paints
+/// nothing (only the macOS shader special-cases zero). A sub-pixel blur
+/// still draws a crisp edge.
+const RING_BLUR: f32 = 0.5;
+
+/// The ring's two tokenized shadows: a solid 2 px accent edge inside a soft
+/// accent halo (drawn outside the box; no layout shift).
+fn ring_with_blur(t: &Theme, blur: f32) -> Vec<BoxShadow> {
+    [(t.focus_ring, 4.), (t.icon_accent, 2.)]
+        .into_iter()
+        .map(|(color, spread)| BoxShadow {
+            color,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(blur),
+            spread_radius: px(spread),
+        })
+        .collect()
+}
+
+/// The focus ring.
 pub fn ring(t: &Theme) -> Vec<BoxShadow> {
-    vec![
-        BoxShadow {
-            color: t.focus_ring,
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(4.),
-        },
-        BoxShadow {
-            color: t.icon_accent,
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(2.),
-        },
-    ]
+    ring_with_blur(t, 0.)
+}
+
+/// The focus ring with a blur every platform paints. Shadows are filled
+/// shapes painted under the element, so use it only on an element whose
+/// fill is opaque in every state (or the ring shows through as a fill).
+pub fn surface_ring(t: &Theme) -> Vec<BoxShadow> {
+    ring_with_blur(t, RING_BLUR)
 }
 
 pub fn icon(name: &str, color: Hsla) -> gpui::Svg {
@@ -201,6 +215,9 @@ pub struct Button {
     /// Use this handle instead of an automatic tab stop, so the owner can
     /// move focus to the button (dialogs).
     focus: Option<FocusHandle>,
+    /// Opaque surface the button sits on, when it opts into
+    /// [`surface_ring`] (see [`Button::surface_ring`]).
+    surface: Option<Hsla>,
 }
 
 impl Button {
@@ -216,7 +233,15 @@ impl Button {
             tooltip: None,
             on_click: None,
             focus: None,
+            surface: None,
         }
+    }
+    /// Draw [`surface_ring`] when focused. A ghost button fills with
+    /// `surface` (the opaque fill it sits on), its hover and pressed tints
+    /// pre-blended onto it, so the ring stays an edge.
+    pub fn surface_ring(mut self, surface: Hsla) -> Self {
+        self.surface = Some(surface);
+        self
     }
     pub fn primary(mut self) -> Self {
         self.variant = Variant::Primary;
@@ -283,7 +308,10 @@ impl RenderOnce for Button {
                 t.accent_hover,
             ),
             Variant::Secondary => (t.bg_control, t.text, t.separator, t.bg_muted, t.bg_muted),
-            Variant::Ghost => (clear, t.text_accent, clear, t.hover, t.pressed),
+            Variant::Ghost => match self.surface {
+                Some(s) => (s, t.text_accent, s, s.blend(t.hover), s.blend(t.pressed)),
+                None => (clear, t.text_accent, clear, t.hover, t.pressed),
+            },
             Variant::Destructive => {
                 let (fg, bg) = t.tone(Tone::Error);
                 (bg, fg, bg, bg.opacity(0.8), bg.opacity(0.65))
@@ -309,7 +337,11 @@ impl RenderOnce for Button {
         } else {
             self.icon
         };
-        let ring = ring(&t);
+        let ring = if self.surface.is_some() {
+            surface_ring(&t)
+        } else {
+            ring(&t)
+        };
         let mut el = div()
             .id(self.id)
             .flex()

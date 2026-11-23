@@ -51,6 +51,28 @@ fn suggestions(tools_mode: bool) -> [&'static str; 3] {
 /// The composer's Send/Stop slot (fits either button with its icon).
 const ACTION_WIDTH: f32 = 96.;
 
+/// `ui::row_button` on an opaque fill, with `ui::surface_ring`: the focus
+/// ring is a shadow painted under the row, so a transparent row (or a
+/// translucent hover/pressed fill) would show the ring colour through it
+/// instead of an edge. Same tab stop and cursor; the hover and pressed
+/// tints are pre-blended onto the surface the rows sit on (the content pane
+/// and the composer). Callers round the row.
+fn surface_row(t: &Theme, id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    let ring = ui::surface_ring(t);
+    let (hover, pressed) = (t.bg_surface.blend(t.hover), t.bg_surface.blend(t.pressed));
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .w_full()
+        .tab_index(0)
+        .cursor_pointer()
+        .bg(t.bg_surface)
+        .hover(move |s| s.bg(hover))
+        .active(move |s| s.bg(pressed))
+        .focus(move |s| s.shadow(ring.clone()))
+}
+
 /// Sources the tools search (versus `SOURCES`, which basic recall searches).
 const TOOL_SOURCES: [&str; 2] = ["Dictation", "Work prompt"];
 
@@ -97,6 +119,7 @@ impl AskPage {
                 Some(0),
             )
             .width(150.)
+            .surface_ring()
         });
         let mut page = AskPage {
             pcx,
@@ -331,7 +354,7 @@ impl AskPage {
                 words.push_str(&format!(" · {failed} failed"));
             }
             list = list.child(
-                ui::row_button(t, ("ask-cards", key), false)
+                surface_row(t, ("ask-cards", key))
                     .items_center()
                     .gap(space::s3())
                     .px(space::s4())
@@ -367,7 +390,7 @@ impl AskPage {
                     }
                     result.push_str(&format!("{ms} ms"));
                 }
-                let row = ui::row_button(t, ("ask-card", key * 1000 + j as u64), false)
+                let row = surface_row(t, ("ask-card", key * 1000 + j as u64))
                     .items_center()
                     .gap(space::s3())
                     .px(space::s4())
@@ -511,7 +534,7 @@ impl AskPage {
                         let label =
                             citation_label(c).unwrap_or_else(|_| format!("[{}] {}", c.n, c.title));
                         list = list.child(
-                            ui::row_button(&t, ("cite", (i * 100 + j) as u64), false)
+                            surface_row(&t, ("cite", (i * 100 + j) as u64))
                                 .flex_col()
                                 .px(space::s4())
                                 .py(space::s3())
@@ -564,7 +587,7 @@ impl AskPage {
             self.convo.status,
             McpStatus::Checking | McpStatus::Simulated
         ) && !self.convo.running();
-        ui::row_button(t, "ask-tools", false)
+        surface_row(t, "ask-tools")
             .w_auto()
             .flex_none()
             .items_center()
@@ -615,6 +638,7 @@ impl Render for AskPage {
         let clear = (!self.convo.turns.is_empty() || running).then(|| {
             Button::new("ask-clear", "New conversation")
                 .ghost()
+                .surface_ring(t.bg_surface)
                 .icon("plus")
                 .on_click(cx.listener(|this, _, _, cx| this.clear(cx)))
                 .into_any_element()
@@ -628,6 +652,7 @@ impl Render for AskPage {
                     let text = ex.to_string();
                     Button::new(("example", i as u64), ex)
                         .small()
+                        .surface_ring(t.bg_surface)
                         .icon("sparkles")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.composer
@@ -681,12 +706,14 @@ impl Render for AskPage {
             );
         let action = if running {
             Button::new("ask-stop", "Stop")
+                .surface_ring(t.bg_surface)
                 .icon("square")
                 .tooltip("Stop (Esc)")
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
         } else {
             Button::new("ask-send", "Send")
                 .primary()
+                .surface_ring(t.bg_surface)
                 .icon("send")
                 .on_click(cx.listener(|this, _, _, cx| this.send(cx)))
         };
