@@ -2012,24 +2012,40 @@ mod focus_tests {
     fn shortcuts_keep_working_after_the_focused_element_is_removed(cx: &mut TestAppContext) {
         let (shell, cx, _dir) = open(Page::Models, cx);
         assert_eq!(page(&shell, cx), Page::Models);
-        // Tab onto a real control first, so focus is on screen.
-        cx.update(|window, _| window.focus_next());
-        cx.run_until_parked();
         let root = shell.read_with(cx, |shell, _| shell.focus.clone());
-        assert!(!focused(&root, cx), "Tab moved focus onto a control");
-        assert!(in_shell(&shell, cx));
-
-        // A focused button that is replaced: GPUI keeps its focus handle in
-        // element state and drops it with the element.
-        cx.update(|window, cx| {
-            let button = cx.focus_handle();
-            window.focus(&button);
-            drop(button);
-            assert!(window.focused(cx).is_none(), "focus is on a dropped handle");
+        let action: ui::Action = Rc::new(|_, _| panic!("the toast action ran"));
+        shell.update(cx, |shell, cx| {
+            shell.toast("Model removed".into(), Some(("Undo".into(), action)), cx)
         });
         cx.run_until_parked();
 
-        cx.dispatch_action(Go1);
+        // The toast is painted last, so Shift-Tab from the shell reaches its
+        // Dismiss button, then its action (both keep their focus handles in
+        // element state only).
+        let mounted = |handle: &FocusHandle, cx: &mut VisualTestContext| {
+            cx.update(|window, _| root.contains(handle, window))
+        };
+        cx.simulate_keystrokes("shift-tab");
+        let dismiss = cx.update(|window, cx| window.focused(cx)).unwrap();
+        cx.simulate_keystrokes("shift-tab");
+        let toast_action = cx.update(|window, cx| window.focused(cx)).unwrap();
+        assert!(toast_action != dismiss && toast_action != root);
+        assert!(mounted(&dismiss, cx) && mounted(&toast_action, cx));
+        assert!(in_shell(&shell, cx), "valid focus inside the shell");
+        let (dismiss, toast_action) = (dismiss.downgrade(), toast_action.downgrade());
+
+        cx.simulate_keystrokes("escape");
+        assert!(shell.read_with(cx, |shell, _| shell.toast.is_none()));
+        // Both stops belonged to the toast: they went with it, so the
+        // focused element is gone rather than merely unfocused.
+        for (name, gone) in [("action", &toast_action), ("Dismiss", &dismiss)] {
+            assert!(
+                gone.upgrade().is_none_or(|h| !mounted(&h, cx)),
+                "the toast {name} is no longer on screen"
+            );
+        }
+
+        cx.simulate_keystrokes("secondary-1");
         assert_eq!(page(&shell, cx), Page::Home);
         assert!(in_shell(&shell, cx));
     }
