@@ -289,6 +289,15 @@ pub fn row_text(entry: &HistoryEntry) -> String {
     hub_model::history_row_text(&entry.final_text, &entry.raw_text)
 }
 
+/// Single-line list preview: all whitespace runs (including newlines)
+/// collapse to one space so the row ellipsizes instead of showing a break.
+pub fn row_preview(entry: &HistoryEntry) -> String {
+    row_text(entry)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Whether "Copy original" adds anything.
 pub fn has_distinct_original(entry: &HistoryEntry) -> bool {
     !entry.raw_text.is_empty() && entry.raw_text != entry.final_text
@@ -334,6 +343,15 @@ mod tests {
             store.add(&e).unwrap();
         }
         (dir, root)
+    }
+
+    #[test]
+    fn row_preview_is_single_line() {
+        let (_d, root) = seeded(1);
+        let mut entry = load(&root, 1, "", 0, false).unwrap().entries.remove(0);
+        entry.final_text = "  first line\n\nsecond\tline  ".into();
+        assert_eq!(row_preview(&entry), "first line second line");
+        assert!(entry.final_text.contains('\n'));
     }
 
     #[test]

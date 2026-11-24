@@ -205,9 +205,18 @@ fn config_error(message: impl Into<String>) -> anyhow::Error {
 }
 
 /// The Python `Config` dataclass: every field keyed by its flat field name.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Config {
     pub fields: BTreeMap<String, Value>,
+    /// The file's `meetings_enabled` when load forced it off; saved in its
+    /// place until the field is set (Python `_file_meetings_enabled`).
+    file_meetings_enabled: Option<Value>,
+}
+
+impl PartialEq for Config {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields == other.fields
+    }
 }
 
 impl Default for Config {
@@ -302,6 +311,7 @@ impl Config {
                 .into_iter()
                 .map(|(name, value)| (name.to_string(), value))
                 .collect(),
+            file_meetings_enabled: None,
         }
     }
 
@@ -316,7 +326,17 @@ impl Config {
 
     /// Set a field by flat field name, without validation (dataclass setattr).
     pub fn set_field(&mut self, field: &str, value: Value) {
+        if field == "meetings_enabled" {
+            self.file_meetings_enabled = None;
+        }
         self.fields.insert(field.to_string(), value);
+    }
+
+    fn force_meetings_off(&mut self) {
+        self.file_meetings_enabled = self
+            .fields
+            .insert("meetings_enabled".to_string(), Value::Bool(false))
+            .filter(Value::is_boolean);
     }
 
     /// The field as a string, when it holds one.
@@ -904,7 +924,7 @@ fn config_from_v2_inner(
         }
     }
     if !darwin {
-        config.set_field("meetings_enabled", Value::Bool(false));
+        config.force_meetings_off();
     }
     Ok(config)
 }
@@ -983,7 +1003,9 @@ fn reload_config_at(
     let mut config = config_from_v2_inner(&parse_toml_file(target)?, darwin, warnings)?;
     if !darwin {
         if let Some(value) = current.field("meetings_enabled") {
-            config.set_field("meetings_enabled", value.clone());
+            config
+                .fields
+                .insert("meetings_enabled".to_string(), value.clone());
         }
     }
     Ok(config)
@@ -1229,9 +1251,11 @@ pub fn config_toml(config: &Config) -> Result<String> {
     for (section, mapping) in SECTIONS {
         lines.push(format!("[{section}]"));
         for (file_key, field) in mapping.iter() {
-            let value = config
-                .field(field)
-                .ok_or_else(|| anyhow!("'Config' object has no attribute '{field}'"))?;
+            let value = match &config.file_meetings_enabled {
+                Some(value) if *field == "meetings_enabled" => Some(value),
+                _ => config.field(field),
+            }
+            .ok_or_else(|| anyhow!("'Config' object has no attribute '{field}'"))?;
             if value.is_null() {
                 continue;
             }
@@ -2355,6 +2379,66 @@ mod tests {
         let reloaded = reload_config_at(&current, &iso.target, true, &mut warnings).unwrap();
         assert_eq!(reloaded.field_str("llm_model"), Some("edited"));
         assert_eq!(reloaded.field_bool("meetings_enabled"), Some(false));
+    }
+
+    #[test]
+    fn save_keeps_file_meetings_value_forced_off_on_load() {
+        let iso = Isolated::new();
+        save_config(
+            &with(
+                &Config::defaults_for(true),
+                &[("meetings_enabled", json!(true))],
+            ),
+            Some(&iso.target),
+        )
+        .unwrap();
+        let (loaded, _) = iso.load(false).unwrap();
+        assert_eq!(loaded.field_bool("meetings_enabled"), Some(false));
+        let updated =
+            apply_config_update(&loaded, &json!({"cleanup": {"style_work": "casual"}})).unwrap();
+        save_config(&updated, Some(&iso.target)).unwrap();
+        let written = fs::read_to_string(&iso.target).unwrap();
+        assert!(written.contains("style_work = \"casual\""));
+        assert!(written.contains("meetings = true"));
+        assert_eq!(
+            iso.load(true).unwrap().0.field_bool("meetings_enabled"),
+            Some(true)
+        );
+
+        let mut warnings = Vec::new();
+        let reloaded = reload_config_at(&loaded, &iso.target, false, &mut warnings).unwrap();
+        assert_eq!(reloaded.field_bool("meetings_enabled"), Some(false));
+        assert!(config_toml(&reloaded).unwrap().contains("meetings = true"));
+    }
+
+    #[test]
+    fn save_writes_explicit_meetings_edit_over_file_value() {
+        let iso = Isolated::new();
+        save_config(
+            &with(
+                &Config::defaults_for(true),
+                &[("meetings_enabled", json!(true))],
+            ),
+            Some(&iso.target),
+        )
+        .unwrap();
+        let (loaded, _) = iso.load(false).unwrap();
+        let off = apply_config_update(&loaded, &json!({"features": {"meetings": false}})).unwrap();
+        save_config(&off, Some(&iso.target)).unwrap();
+        assert!(fs::read_to_string(&iso.target)
+            .unwrap()
+            .contains("meetings = false"));
+        assert_eq!(
+            iso.load(true).unwrap().0.field_bool("meetings_enabled"),
+            Some(false)
+        );
+
+        let (loaded, _) = iso.load(false).unwrap();
+        let on = apply_config_update(&loaded, &json!({"features": {"meetings": true}})).unwrap();
+        save_config(&on, Some(&iso.target)).unwrap();
+        assert!(fs::read_to_string(&iso.target)
+            .unwrap()
+            .contains("meetings = true"));
     }
 
     #[test]
