@@ -57,6 +57,32 @@ impl Route {
     }
 }
 
+/// What a launch asks the window for: a route, plus the `--page` name it
+/// didn't know (so it opens Home and says why).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    pub route: Route,
+    pub unknown_page: Option<String>,
+}
+
+impl Request {
+    /// The notice for an unknown page, shown in the window and on stderr.
+    pub fn notice(&self) -> Option<String> {
+        self.unknown_page
+            .as_ref()
+            .map(|p| format!("There's no page called “{p}”, so Home is shown."))
+    }
+}
+
+impl From<Route> for Request {
+    fn from(route: Route) -> Self {
+        Request {
+            route,
+            unknown_page: None,
+        }
+    }
+}
+
 /// The instance directory for a sandbox base directory.
 pub fn sandbox_instance_dir(sandbox_dir: &Path) -> PathBuf {
     sandbox_dir.join(SANDBOX_DIR)
@@ -75,7 +101,16 @@ pub struct Instance {
     _lock: SingleInstance,
     requests: RequestFile,
     /// A request consumed while becoming the owner (see [`claim`]).
-    pending: std::cell::Cell<Option<Route>>,
+    pending: std::cell::Cell<Option<Request>>,
+}
+
+/// The pending request in `requests`, if it is fresh and routable.
+fn consume(requests: &RequestFile) -> Option<Request> {
+    let (id, unknown_page) = requests.consume_request_noting(&system_now)?;
+    Some(Request {
+        route: Route::from_id(id)?,
+        unknown_page,
+    })
 }
 
 impl Instance {
@@ -89,12 +124,8 @@ impl Instance {
 
     /// The next routed request from another launch, if any (stale, invalid
     /// and unknown requests are dropped by `RequestFile`).
-    pub fn take_request(&self) -> Option<Route> {
-        self.pending.take().or_else(|| {
-            self.requests
-                .consume_request(&system_now)
-                .and_then(Route::from_id)
-        })
+    pub fn take_request(&self) -> Option<Request> {
+        self.pending.take().or_else(|| consume(&self.requests))
     }
 
     pub fn dir(&self) -> &Path {
@@ -110,16 +141,16 @@ pub enum Claim {
     Busy,
 }
 
-/// Become the owner of `dir`, or hand `route` to the current owner.
-/// `route = None` means "don't hand anything over" (used before a sandbox
+/// Become the owner of `dir`, or hand `request` to the current owner.
+/// `request = None` means "don't hand anything over" (used before a sandbox
 /// reset, which must not run while another window uses the sandbox).
 ///
 /// Race-free: if the owner exits between our failed lock attempt and the
 /// request write, the retry takes the lock and consumes the pending request
 /// atomically (ours, or a newer launch's that replaced it) and routes it, so
 /// no launch is lost and no two windows run.
-pub fn claim(dir: &Path, route: Option<Route>) -> std::io::Result<Claim> {
-    claim_with(dir, route, || {})
+pub fn claim(dir: &Path, request: Option<Request>) -> std::io::Result<Claim> {
+    claim_with(dir, request, || {})
 }
 
 /// The instance directory must really be this root's: not a symlink (or a
@@ -159,7 +190,11 @@ pub fn check_instance_dir(dir: &Path) -> std::io::Result<()> {
 
 /// [`claim`] with a hook between the hand-off write and the retry (tests
 /// use it to make the owner exit and another launch write meanwhile).
-fn claim_with(dir: &Path, route: Option<Route>, between: impl FnOnce()) -> std::io::Result<Claim> {
+fn claim_with(
+    dir: &Path,
+    request: Option<Request>,
+    between: impl FnOnce(),
+) -> std::io::Result<Claim> {
     // Before any lock or request operation.
     check_instance_dir(dir)?;
     let path = dir.join(LOCK_NAME);
@@ -167,10 +202,14 @@ fn claim_with(dir: &Path, route: Option<Route>, between: impl FnOnce()) -> std::
     if let Some(lock) = acquire_at(&path)? {
         return Ok(Claim::Owner(Instance::new(lock, requests)));
     }
-    let Some(route) = route else {
+    let Some(request) = request else {
         return Ok(Claim::Busy);
     };
-    if !requests.write_request(route.id(), &system_now) {
+    if !requests.write_request_noting(
+        request.route.id(),
+        request.unknown_page.as_deref(),
+        &system_now,
+    ) {
         return Err(std::io::Error::other(
             "couldn't hand the page to the running LocalFlow window",
         ));
@@ -180,11 +219,7 @@ fn claim_with(dir: &Path, route: Option<Route>, between: impl FnOnce()) -> std::
         // The owner went away meanwhile: we are the window now. Take the
         // latest request (atomic claim) and route it on the first poll.
         let owner = Instance::new(lock, requests);
-        let latest = owner
-            .requests
-            .consume_request(&system_now)
-            .and_then(Route::from_id);
-        owner.pending.set(latest);
+        owner.pending.set(consume(&owner.requests));
         return Ok(Claim::Owner(owner));
     }
     Ok(Claim::HandedOff)
@@ -197,28 +232,80 @@ mod tests {
     #[test]
     fn second_launch_hands_over_its_page_and_setup() {
         let dir = tempfile::tempdir().unwrap();
-        let Claim::Owner(owner) = claim(dir.path(), Some(Route::Page(Page::Home))).unwrap() else {
+        let Claim::Owner(owner) = claim(dir.path(), Some(Route::Page(Page::Home).into())).unwrap()
+        else {
             panic!("first launch owns");
         };
         assert!(owner.take_request().is_none());
         assert!(matches!(
-            claim(dir.path(), Some(Route::Page(Page::Settings))).unwrap(),
+            claim(dir.path(), Some(Route::Page(Page::Settings).into())).unwrap(),
             Claim::HandedOff
         ));
-        assert_eq!(owner.take_request(), Some(Route::Page(Page::Settings)));
+        assert_eq!(
+            owner.take_request(),
+            Some(Route::Page(Page::Settings).into())
+        );
         assert!(owner.take_request().is_none(), "consumed once");
         assert!(matches!(
-            claim(dir.path(), Some(Route::Setup)).unwrap(),
+            claim(dir.path(), Some(Route::Setup.into())).unwrap(),
             Claim::HandedOff
         ));
-        assert_eq!(owner.take_request(), Some(Route::Setup));
+        assert_eq!(owner.take_request(), Some(Route::Setup.into()));
         assert!(matches!(claim(dir.path(), None).unwrap(), Claim::Busy));
         assert!(owner.take_request().is_none(), "Busy writes nothing");
         drop(owner);
         assert!(matches!(
-            claim(dir.path(), Some(Route::Page(Page::Home))).unwrap(),
+            claim(dir.path(), Some(Route::Page(Page::Home).into())).unwrap(),
             Claim::Owner(_)
         ));
+    }
+
+    #[test]
+    fn an_unknown_page_hands_over_with_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let Claim::Owner(owner) = claim(dir.path(), None).unwrap() else {
+            panic!()
+        };
+        let unknown = Request {
+            route: Route::Page(Page::Home),
+            unknown_page: Some("NoSuchPage".into()),
+        };
+        assert!(matches!(
+            claim(dir.path(), Some(unknown.clone())).unwrap(),
+            Claim::HandedOff
+        ));
+        let got = owner.take_request().unwrap();
+        assert_eq!(got, unknown);
+        assert_eq!(
+            got.notice().as_deref(),
+            Some("There's no page called “NoSuchPage”, so Home is shown.")
+        );
+        assert_eq!(Request::from(Route::Setup).notice(), None);
+
+        let path = dir.path().join(lf_ui::hub_route::REQUEST_NAME);
+        // Written by an older lf-desktop: no name, still routed.
+        std::fs::write(
+            &path,
+            format!(r#"{{"page":"History","ts":{}}}"#, system_now()),
+        )
+        .unwrap();
+        assert_eq!(
+            owner.take_request(),
+            Some(Route::Page(Page::History).into())
+        );
+        // Garbled: dropped, nothing routed.
+        for raw in [
+            "{\"page\":\"Home\",\"unknown_page\":\"x\"".to_string(),
+            format!(
+                r#"{{"page":"Nowhere","ts":{},"unknown_page":"x"}}"#,
+                system_now()
+            ),
+            "\u{0}\u{ff}garbage".to_string(),
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert_eq!(owner.take_request(), None);
+            assert!(!path.exists());
+        }
     }
 
     #[test]
@@ -228,7 +315,7 @@ mod tests {
             panic!()
         };
         let mut first = Some(first);
-        let claimed = claim_with(dir.path(), Some(Route::Page(Page::History)), || {
+        let claimed = claim_with(dir.path(), Some(Route::Page(Page::History).into()), || {
             // The owner exits, and a newer launch hands off before our retry.
             drop(first.take());
             assert!(RequestFile::new(dir.path()).write_request("Settings", &system_now));
@@ -239,7 +326,7 @@ mod tests {
         };
         assert_eq!(
             owner.take_request(),
-            Some(Route::Page(Page::Settings)),
+            Some(Route::Page(Page::Settings).into()),
             "newest wins, not lost"
         );
         assert_eq!(owner.take_request(), None);
@@ -254,12 +341,13 @@ mod tests {
             panic!()
         };
         let mut holder = Some(holder);
-        let Claim::Owner(owner) =
-            claim_with(dir.path(), Some(Route::Setup), || drop(holder.take())).unwrap()
-        else {
+        let Claim::Owner(owner) = claim_with(dir.path(), Some(Route::Setup.into()), || {
+            drop(holder.take())
+        })
+        .unwrap() else {
             panic!()
         };
-        assert_eq!(owner.take_request(), Some(Route::Setup));
+        assert_eq!(owner.take_request(), Some(Route::Setup.into()));
     }
 
     #[test]
@@ -337,20 +425,21 @@ mod tests {
     fn concurrent_launch_processes_produce_exactly_one_owner() {
         const CHILD: &str = "LF_DESKTOP_RACE_CHILD";
         if let Some(dir) = std::env::var_os(CHILD) {
-            let code = match claim(Path::new(&dir), Some(Route::Page(Page::History))).unwrap() {
-                Claim::Owner(owner) => {
-                    // Stay the window long enough for every racer to arrive,
-                    // then report whether a hand-off reached us.
-                    std::thread::sleep(std::time::Duration::from_millis(1500));
-                    if owner.take_request().is_some() {
-                        11
-                    } else {
-                        10
+            let code =
+                match claim(Path::new(&dir), Some(Route::Page(Page::History).into())).unwrap() {
+                    Claim::Owner(owner) => {
+                        // Stay the window long enough for every racer to arrive,
+                        // then report whether a hand-off reached us.
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        if owner.take_request().is_some() {
+                            11
+                        } else {
+                            10
+                        }
                     }
-                }
-                Claim::HandedOff => 20,
-                Claim::Busy => 30,
-            };
+                    Claim::HandedOff => 20,
+                    Claim::Busy => 30,
+                };
             std::process::exit(code);
         }
         let dir = tempfile::tempdir().unwrap();
@@ -384,11 +473,12 @@ mod tests {
     fn a_child_process_sees_the_lock_held_for_the_parent_lifetime() {
         const CHILD: &str = "LF_DESKTOP_INSTANCE_CHILD";
         if let Some(dir) = std::env::var_os(CHILD) {
-            let outcome = match claim(Path::new(&dir), Some(Route::Page(Page::Prompts))).unwrap() {
-                Claim::Owner(_) => 10,
-                Claim::HandedOff => 20,
-                Claim::Busy => 30,
-            };
+            let outcome =
+                match claim(Path::new(&dir), Some(Route::Page(Page::Prompts).into())).unwrap() {
+                    Claim::Owner(_) => 10,
+                    Claim::HandedOff => 20,
+                    Claim::Busy => 30,
+                };
             std::process::exit(outcome);
         }
         let dir = tempfile::tempdir().unwrap();
@@ -404,7 +494,10 @@ mod tests {
             .status()
             .unwrap();
         assert_eq!(status.code(), Some(20), "the child handed off");
-        assert_eq!(owner.take_request(), Some(Route::Page(Page::Prompts)));
+        assert_eq!(
+            owner.take_request(),
+            Some(Route::Page(Page::Prompts).into())
+        );
         drop(owner);
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([

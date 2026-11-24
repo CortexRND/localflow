@@ -449,17 +449,20 @@ impl Shell {
             // close fails, and no setup or page opens meanwhile.
             return;
         }
-        let Some(route) = self.instance.take_request() else {
+        let Some(request) = self.instance.take_request() else {
             return;
         };
         window.activate_window();
-        match route {
+        match request.route {
             Route::Setup if self.confirm.is_none() => self.show_setup(cx),
             route if self.setup_visible || self.confirm.is_some() => {
                 self.queued = Some(route);
             }
             Route::Page(page) => self.navigate(page, None, cx),
-            Route::Setup => self.queued = Some(route),
+            Route::Setup => self.queued = Some(request.route),
+        }
+        if let Some(notice) = request.notice() {
+            self.toast(notice.into(), None, cx);
         }
     }
 
@@ -2027,9 +2030,12 @@ mod focus_tests {
         cx: &mut TestAppContext,
     ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let launched =
-            crate::launch::sandbox(&dir.path().join("sandbox"), false, Some(Route::Page(page)))
-                .unwrap();
+        let launched = crate::launch::sandbox(
+            &dir.path().join("sandbox"),
+            false,
+            Some(Route::Page(page).into()),
+        )
+        .unwrap();
         let crate::launch::Launched::Window(root, instance) = launched else {
             panic!("expected to own the sandbox window");
         };
@@ -2255,5 +2261,48 @@ mod focus_tests {
         cx.simulate_keystrokes("secondary-k");
         assert!(focused(&filter, cx), "Find focuses the filter");
         assert!(in_shell(&shell, cx), "which is on screen");
+    }
+
+    /// A second launch hands `request` to the open window, which routes it.
+    fn hand_off(
+        shell: &Entity<Shell>,
+        dir: &tempfile::TempDir,
+        request: crate::controllers::instance::Request,
+        cx: &mut VisualTestContext,
+    ) {
+        let launched =
+            crate::launch::sandbox(&dir.path().join("sandbox"), false, Some(request)).unwrap();
+        assert!(matches!(launched, crate::launch::Launched::HandedOff));
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.poll_instance(window, cx)));
+        cx.run_until_parked();
+    }
+
+    fn toast(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+        shell.read_with(cx, |shell, _| {
+            shell.toast.as_ref().map(|t| t.message.to_string())
+        })
+    }
+
+    #[gpui::test]
+    fn an_unknown_page_handed_off_opens_home_with_its_notice(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::History, cx);
+        let request = crate::controllers::instance::Request {
+            route: Route::Page(Page::Home),
+            unknown_page: Some("NoSuchPage".into()),
+        };
+        hand_off(&shell, &dir, request, cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("There's no page called “NoSuchPage”, so Home is shown.")
+        );
+    }
+
+    #[gpui::test]
+    fn a_known_page_handed_off_opens_without_a_notice(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::Home, cx);
+        hand_off(&shell, &dir, Route::Page(Page::History).into(), cx);
+        assert_eq!(page(&shell, cx), Page::History);
+        assert_eq!(toast(&shell, cx), None);
     }
 }
