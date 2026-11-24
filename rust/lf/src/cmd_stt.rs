@@ -310,6 +310,10 @@ def crash(exc):
     text = "".join(report.format())
     return text if report.stack else "Traceback (most recent call last):\n" + text
 
+if sys.version_info < (3, 11):
+    sys.exit(1)
+sys.stdout.write("lf-stt-probe:")
+sys.stdout.flush()
 mode, selected = sys.argv[1:]
 result = {}
 if mode in ("runtime", "list"):
@@ -318,12 +322,13 @@ if mode in ("runtime", "list"):
 entries = {}
 if mode in ("list", "use"):
     builtins = ("faster-whisper", "mlx-whisper", "parakeet")
-    for entry in importlib.metadata.entry_points(group="localflow.stt_providers"):
-        if entry.name not in builtins:
-            entries.setdefault(entry.name, entry)
+    try:
+        for entry in importlib.metadata.entry_points(group="localflow.stt_providers"):
+            if entry.name not in builtins:
+                entries.setdefault(entry.name, entry)
+    except Exception as exc:
+        result["traceback"] = crash(exc)
     result["plugins"] = dict.fromkeys(entries)
-sys.stdout.write("lf-stt-probe:")
-sys.stdout.flush()
 with contextlib.redirect_stdout(sys.stderr):
     if mode == "list":
         for name in sorted(entries):
@@ -363,9 +368,9 @@ fn probe_python(mode: &str, provider: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `None` when the interpreter failed before loading plug-ins (spawn, imports,
-/// entry-point discovery). A failure after that is a plug-in's and is that
-/// interpreter's answer, like Python's crash.
+/// `None` when the interpreter could not start the probe or is older than
+/// LocalFlow supports. Any later failure is that interpreter's answer, like
+/// Python's crash.
 fn probe_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Option<Value> {
     let stdout = stdout.strip_prefix(b"lf-stt-probe:")?;
     if code == Some(0) {
