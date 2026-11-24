@@ -212,6 +212,8 @@ jobs:
       PYNPUT_BACKEND: dummy
       # The parity suite fails instead of skipping when the binary is missing.
       LF_RUST_PARITY_REQUIRED: "1"
+      # Cached whisper.cpp objects must run on any runner CPU (no -march=native).
+      GGML_NATIVE: "OFF"
     steps:
       - uses: actions/checkout@v4
 
@@ -224,6 +226,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+          env-vars: GGML_NATIVE
 
       # cpal needs ALSA headers; whisper-rs needs CMake and libclang.
       # lf-core vendors libdbus; arboard uses X11 and HTTPS uses rustls.

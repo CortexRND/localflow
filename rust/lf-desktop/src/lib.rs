@@ -7,10 +7,13 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod app;
+pub mod appearance;
 pub mod args;
+pub mod console;
 pub mod controllers;
 pub mod data;
 pub mod launch;
+mod native_appearance;
 pub mod page;
 pub mod pages;
 pub mod remote;

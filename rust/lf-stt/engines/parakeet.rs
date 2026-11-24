@@ -63,6 +63,21 @@ impl ParakeetEngine {
         Ok(engine)
     }
 
+    /// The installed model in the HF cache at `cache_root`, in the strict
+    /// explicit-file mode: construction fails if any file is missing, and a
+    /// file removed later makes `load` fail instead of downloading it.
+    pub fn cached(provider: &str, cache_root: &std::path::Path) -> Result<Self> {
+        let paths = PARAKEET_ONNX_FILES
+            .iter()
+            .map(|file| {
+                downloads::cached_model_file(cache_root, PARAKEET_ONNX_REPO, file).with_context(
+                    || format!("the Parakeet model isn't downloaded ({PARAKEET_ONNX_REPO}/{file})"),
+                )
+            })
+            .collect::<Result<_>>()?;
+        Self::with_model_files(provider, paths, super::threads())
+    }
+
     fn create(&self, provider: &str) -> Result<OfflineRecognizer> {
         let paths = self.paths.as_ref().context("Parakeet not downloaded")?;
         let path = |i: usize| {
@@ -198,6 +213,35 @@ mod tests {
             std::fs::write(path, b"fixture").unwrap();
         }
         assert_eq!(engine.download().unwrap(), 0.0);
+        assert!(!engine.loaded());
+    }
+    #[test]
+    fn cached_engine_needs_every_installed_file_and_never_downloads() {
+        let cache = tempfile::tempdir().unwrap();
+        let some: Vec<(&str, &[u8])> = PARAKEET_ONNX_FILES[..3]
+            .iter()
+            .map(|f| (*f, b"fixture" as &[u8]))
+            .collect();
+        crate::downloads::install_for_test(cache.path(), PARAKEET_ONNX_REPO, &some);
+        let error = ParakeetEngine::cached("cpu", cache.path())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("isn't downloaded"), "{error}");
+        crate::downloads::install_for_test(
+            cache.path(),
+            PARAKEET_ONNX_REPO,
+            &[(PARAKEET_ONNX_FILES[3], b"fixture")],
+        );
+        let mut engine = ParakeetEngine::cached("cpu", cache.path()).unwrap();
+        assert_eq!(engine.download().unwrap(), 0.0);
+        std::fs::remove_file(engine.paths.as_ref().unwrap()[0].clone()).unwrap();
+        for error in [
+            engine.download().unwrap_err().to_string(),
+            engine.load().err().unwrap().to_string(),
+        ] {
+            assert!(error.contains("explicit Parakeet"), "{error}");
+        }
         assert!(!engine.loaded());
     }
     #[test]

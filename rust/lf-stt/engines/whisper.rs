@@ -19,6 +19,8 @@ pub struct WhisperEngine {
     provider: String,
     path: Option<PathBuf>,
     context: Option<WhisperContext>,
+    /// Built by [`WhisperEngine::cached`]: never fall back to a download.
+    cache_only: bool,
 }
 
 impl WhisperEngine {
@@ -53,7 +55,28 @@ impl WhisperEngine {
             provider: provider.into(),
             path: None,
             context: None,
+            cache_only: false,
         })
+    }
+
+    /// An engine for an already installed model in the HF cache at
+    /// `cache_root`. Construction fails if the file isn't there; if it
+    /// disappears afterwards, `load` fails instead of downloading it.
+    pub fn cached(
+        size: &str,
+        language: Option<String>,
+        provider: &str,
+        cache_root: &std::path::Path,
+    ) -> Result<Self> {
+        let mut engine = Self::new(size, language, provider)?;
+        let file = whisper_cpp_file(size).context("unknown ggml size")?;
+        engine.path = Some(
+            downloads::cached_model_file(cache_root, WHISPER_CPP_REPO, file).with_context(
+                || format!("the Whisper {size} model isn't downloaded ({WHISPER_CPP_REPO}/{file})"),
+            )?,
+        );
+        engine.cache_only = true;
+        Ok(engine)
     }
 }
 
@@ -68,6 +91,12 @@ impl SpeechEngine for WhisperEngine {
             .is_some_and(|path| downloads::cached_file_exists(path))
         {
             return Ok(0.0);
+        }
+        if self.cache_only {
+            bail!(
+                "the Whisper {} model file was removed; it isn't downloaded again here",
+                self.size
+            );
         }
         let start = Instant::now();
         self.path = Some(downloads::model_file(
@@ -167,5 +196,35 @@ mod tests {
         let mut engine = WhisperEngine::new("base", None, "cpu").unwrap();
         assert!(!engine.loaded());
         assert!(engine.transcribe(&[], None).is_err());
+    }
+
+    #[test]
+    fn cached_engine_never_downloads_a_missing_or_removed_model() {
+        let cache = tempfile::tempdir().unwrap();
+        let error = WhisperEngine::cached("base", None, "cpu", cache.path())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("isn't downloaded"), "{error}");
+        crate::downloads::install_for_test(
+            cache.path(),
+            WHISPER_CPP_REPO,
+            &[("ggml-tiny.bin", b"weights")],
+        );
+        // Another size in the same repo folder doesn't count as installed.
+        assert!(WhisperEngine::cached("base", None, "cpu", cache.path()).is_err());
+        let mut engine = WhisperEngine::cached("tiny", None, "cpu", cache.path()).unwrap();
+        assert!(engine.path.as_ref().unwrap().starts_with(cache.path()));
+        assert_eq!(engine.download().unwrap(), 0.0);
+        std::fs::remove_file(engine.path.clone().unwrap()).unwrap();
+        // Removed after resolution: download and load refuse without reaching
+        // `downloads::model_file` (whose error would say "could not download").
+        for error in [
+            engine.download().unwrap_err().to_string(),
+            engine.load().err().unwrap().to_string(),
+        ] {
+            assert!(error.contains("isn't downloaded again"), "{error}");
+        }
+        assert!(!engine.loaded());
     }
 }

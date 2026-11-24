@@ -1,7 +1,7 @@
 //! Home: dictation status, setup guidance, stats from the history store,
 //! recent dictations and shortcuts.
 
-use gpui::{div, prelude::*, px, ClipboardItem, Context, FontWeight, Window};
+use gpui::{div, prelude::*, px, AnyElement, ClipboardItem, Context, FontWeight, Window};
 use lf_core::history::{HistoryEntry, Stats};
 use lf_ui::hub_model;
 use serde_json::json;
@@ -13,7 +13,7 @@ use crate::controllers::{history, setup};
 use crate::page::Page;
 use crate::pages::{column, header, page};
 use crate::remote::Health;
-use crate::theme::{space, text, theme, Tone};
+use crate::theme::{size, space, text, theme, Tone};
 use crate::ui::{self, Button, IconButton, Switch};
 
 pub struct HomePage {
@@ -163,6 +163,8 @@ impl HomePage {
         )
     }
 
+    /// The status hero: glyph, lead, support and the Dictation switch, then
+    /// the shortcut, microphone and local-service lines as inset rows.
     fn render_card(&self, health: &Health, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let config = self.pcx.services.config();
@@ -188,7 +190,6 @@ impl HomePage {
         let engine = self.engine_controls(cx);
         let note = (!self.pcx.services.caps.engine_allowed())
             .then(|| ui::supporting(&t, self.pcx.services.caps.engine_note()));
-        let (sz, _) = text::supporting();
         let service = (
             tone(legacy.service.0),
             format!(
@@ -205,50 +206,28 @@ impl HomePage {
             service,
         ];
         let (lead, support) = (runtime.lead.clone(), runtime.support.clone());
-        ui::card(&t)
+        let hero = div()
+            .flex()
             .items_start()
-            .gap(space::s6())
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(px(40.))
-                    .rounded_full()
-                    .bg(t.accent_muted)
-                    .child(ui::icon_lg("mic", t.icon_accent)),
-            )
+            .gap(space::s5())
+            .px(ui::row_inset())
+            .py(space::s6())
+            .child(ui::glyph_tile("mic", t.icon_accent, t.accent_muted))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::s2())
+                    .gap(space::s1())
                     .flex_1()
                     .min_w_0()
                     .child(ui::heading(&t, lead))
-                    .when(!support.is_empty(), |d| d.child(ui::secondary(&t, support)))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(space::s1())
-                            .pt(space::s2())
-                            .children(
-                                lines.into_iter().map(|(tone, line)| {
-                                    ui::status_dot(&t, tone, line).text_size(sz)
-                                }),
-                            ),
-                    )
-                    .children(note)
-                    .when_some(self.save_error.clone(), |d, e| {
-                        d.child(ui::error_line(&t, e))
-                    }),
+                    .when(!support.is_empty(), |d| d.child(ui::secondary(&t, support))),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
+                    .flex_none()
                     .items_end()
                     .gap(space::s4())
                     .child(
@@ -260,7 +239,35 @@ impl HomePage {
                             .child(toggle),
                     )
                     .children(engine),
-            )
+            );
+        let mut rows: Vec<AnyElement> = vec![hero.into_any_element()];
+        for (tone, line) in lines {
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .min_h(px(36.))
+                    .px(ui::row_inset())
+                    .py(space::s3())
+                    .child(ui::status_dot(&t, tone, line))
+                    .into_any_element(),
+            );
+        }
+        let save_error = self.save_error.clone();
+        if note.is_some() || save_error.is_some() {
+            rows.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::s2())
+                    .px(ui::row_inset())
+                    .py(space::s4())
+                    .children(note)
+                    .when_some(save_error, |d, e| d.child(ui::error_line(&t, e)))
+                    .into_any_element(),
+            );
+        }
+        ui::group_rows(&t, rows, ui::row_inset())
     }
 
     fn render_warnings(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
@@ -308,19 +315,24 @@ impl HomePage {
         .small()
         .primary()
         .on_click(move |_, _, cx| pcx.open_setup(cx));
-        let collapse = div().flex().gap(space::s3()).child(run).child(
-            Button::new("setup-hide", "Hide")
-                .ghost()
-                .small()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.setup_open = false;
-                    cx.notify();
-                })),
-        );
-        let mut list = ui::list(&t);
+        let collapse = div()
+            .flex()
+            .items_center()
+            .gap(space::s3())
+            .child(run)
+            .child(
+                Button::new("setup-hide", "Hide")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.setup_open = false;
+                        cx.notify();
+                    })),
+            );
+        let mut rows = Vec::new();
         for (i, step) in steps.into_iter().enumerate() {
             let (icon, color) = match step.state {
-                setup::State::Done => ("circle-check", t.icon_accent),
+                setup::State::Done => ("circle-check", t.dot(Tone::Success)),
                 setup::State::Todo => ("circle-alert", t.dot(Tone::Warning)),
                 setup::State::Unavailable => ("info", t.icon_secondary),
             };
@@ -330,13 +342,14 @@ impl HomePage {
                     .small()
                     .on_click(move |_, _, cx| pcx.navigate(page, target, cx))
             });
-            list = list.child(
+            rows.push(
                 div()
                     .flex()
                     .items_center()
                     .gap(space::s5())
-                    .py(space::s5())
-                    .when(i > 0, |d| d.border_t_1().border_color(t.border))
+                    .min_h(size::row())
+                    .px(ui::row_inset())
+                    .py(space::s4())
                     .child(ui::icon(icon, color))
                     .child(
                         div()
@@ -347,54 +360,55 @@ impl HomePage {
                             .child(ui::label(&t, step.title))
                             .child(ui::supporting(&t, step.detail)),
                     )
-                    .children(action),
+                    .children(action)
+                    .into_any_element(),
             );
         }
+        // Separators start at the step titles (after the 16 px glyph).
+        let inset = ui::row_inset() + size::icon() + space::s5();
         ui::section(
             &t,
             "Get set up",
             Some(format!("{done} of {total} ready. Run setup to pick and download models, test the microphone and choose a shortcut.").into()),
             Some(collapse.into_any_element()),
         )
-        .child(list)
+        .child(ui::group_rows(&t, rows, inset))
     }
 
     fn render_stats(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let Some(stats) = &self.stats else {
-            return div().child(ui::secondary(
-                &t,
-                if self.loading { "Loading stats…" } else { "" },
-            ));
+            if !self.loading {
+                return div();
+            }
+            return ui::section(&t, "Activity", None, None)
+                .child(ui::secondary(&t, "Loading stats…"));
         };
         let cards = hub_model::home_stat_cards(stats);
         let (vs, vl) = text::stat();
-        div()
-            .flex()
-            .flex_col()
-            .gap(space::s4())
+        ui::section(&t, "Activity", None, None)
             .child(
-                div()
-                    .flex()
-                    .w_full()
-                    .children(cards.into_iter().enumerate().map(|(i, (name, value))| {
+                ui::group(&t).child(div().flex().w_full().py(space::s4()).children(
+                    cards.into_iter().enumerate().map(|(i, (name, value))| {
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
-                            .gap(space::s2())
-                            .px(space::s6())
-                            .when(i > 0, |d| d.border_l_1().border_color(t.border))
-                            .when(i == 0, |d| d.pl(px(0.)))
+                            .min_w_0()
+                            .gap(space::s1())
+                            .px(ui::row_inset())
+                            .when(i > 0, |d| d.border_l_1().border_color(t.separator))
                             .child(
                                 div()
                                     .text_size(vs)
                                     .line_height(vl)
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(t.text)
                                     .child(value),
                             )
                             .child(ui::supporting(&t, name))
-                    })),
+                    }),
+                )),
             )
             .child(ui::supporting(&t, hub_model::home_stats_summary(stats)))
     }
@@ -413,36 +427,39 @@ impl HomePage {
         }
         if self.recent.is_empty() && !self.loading {
             let (h, d, _, _) = hub_model::history_empty_state(false, true);
-            return section.child(ui::empty_state(
-                &t,
-                "history",
-                h,
-                d,
-                Some(
-                    Button::new("home-empty-setup", "Show setup steps")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.setup_open = true;
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                ),
-            ));
+            return section.child(
+                ui::group(&t).child(ui::empty_state(
+                    &t,
+                    "history",
+                    h,
+                    d,
+                    Some(
+                        Button::new("home-empty-setup", "Show setup steps")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.setup_open = true;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    ),
+                )),
+            );
         }
-        let mut list = ui::list(&t);
-        for (i, entry) in self.recent.iter().enumerate() {
+        let mut rows = Vec::new();
+        for entry in self.recent.iter() {
             let id = entry.id;
             let text_value = history::row_text(entry);
             let chip = hub_model::history_status_chip(&entry.status);
             let copy_text = entry.final_text.clone();
             let open = self.pcx.clone();
             let pcx = self.pcx.clone();
-            list = list.child(
+            rows.push(
                 ui::row_button(&t, ("recent", id as u64), false)
                     .items_center()
-                    .gap(space::s6())
-                    .h(px(56.))
-                    .px(space::s4())
-                    .when(i > 0, |d| d.border_t_1().border_color(t.border))
+                    .gap(space::s5())
+                    .min_h(size::row())
+                    .pl(ui::row_inset())
+                    .pr(space::s4())
+                    .rounded(size::radius_inner())
                     .on_click(move |_, _, cx| {
                         open.open_history(id, cx);
                     })
@@ -477,10 +494,11 @@ impl HomePage {
                                     pcx.toast("Copied", cx);
                                 }),
                         )
-                    }),
+                    })
+                    .into_any_element(),
             );
         }
-        section.child(list)
+        section.child(ui::group_rows(&t, rows, ui::row_inset()))
     }
 
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -501,34 +519,38 @@ impl HomePage {
                 .into_iter()
                 .map(|r| (r.name.to_string(), r.detail.to_string(), r.hotkey)),
         );
-        let mut grid = div().flex().flex_wrap().w_full();
-        for (name, detail, hotkey) in rows {
-            grid = grid.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(space::s4())
-                    .w(relative_half())
-                    .py(space::s4())
-                    .pr(space::s8())
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .child(ui::label(&t, name))
-                            .child(
-                                ui::supporting(&t, detail)
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis(),
-                            ),
-                    )
-                    .child(ui::keys(&t, &hotkey)),
-            );
-        }
-        ui::section(&t, "Shortcuts", None, Some(change.into_any_element())).child(grid)
+        let rows = rows.into_iter().map(|(name, detail, hotkey)| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(space::s6())
+                .min_h(size::row())
+                .px(ui::row_inset())
+                .py(space::s3())
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(ui::label(&t, name))
+                        .child(
+                            ui::supporting(&t, detail)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis(),
+                        ),
+                )
+                .child(ui::keys(&t, &hotkey))
+                .into_any_element()
+        });
+        let rows: Vec<AnyElement> = rows.collect();
+        ui::section(&t, "Shortcuts", None, Some(change.into_any_element())).child(ui::group_rows(
+            &t,
+            rows,
+            ui::row_inset(),
+        ))
     }
 }
 
@@ -541,10 +563,6 @@ fn tone(level: Level) -> Tone {
     }
 }
 
-fn relative_half() -> gpui::DefiniteLength {
-    gpui::relative(0.5)
-}
-
 impl Render for HomePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
@@ -552,9 +570,6 @@ impl Render for HomePage {
         let mut body = div().child(self.render_card(&health, cx));
         if let Some(warnings) = self.render_warnings(cx) {
             body = body.child(warnings);
-        }
-        if self.setup_open {
-            body = body.child(self.render_setup(&health, cx));
         }
         if let Some(err) = self.pcx.services.config_error.borrow().clone() {
             body = body.child(ui::banner(
@@ -583,6 +598,9 @@ impl Render for HomePage {
                         .into_any_element(),
                 ),
             ));
+        }
+        if self.setup_open {
+            body = body.child(self.render_setup(&health, cx));
         }
         body = body
             .child(self.render_stats(cx))

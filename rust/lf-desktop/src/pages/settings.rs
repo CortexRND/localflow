@@ -9,6 +9,7 @@ use gpui::{div, prelude::*, ClipboardItem, Context, Entity, SharedString, Window
 use serde_json::{json, Value};
 
 use crate::app::{Confirm, PageCx};
+use crate::appearance::{self, AppearanceMode};
 use crate::controllers::assistant::{mask_secrets, Assistant};
 use crate::controllers::history;
 use crate::controllers::models::data_leaves_text;
@@ -39,6 +40,18 @@ pub struct SettingsPage {
     /// The config the assistant's preview was computed against.
     seen_config: Value,
     simulated: Entity<Select>,
+    /// The appearance choice couldn't be stored (it still applies now).
+    appearance_error: Option<String>,
+}
+
+/// Extra rows and sections of a tab, beside its `[section] key` rows.
+struct Extra {
+    /// Above the tab's group (the Shortcuts note).
+    top: Vec<gpui::AnyElement>,
+    /// Rows that join the tab's group.
+    rows: Vec<gpui::AnyElement>,
+    /// Sections after the group.
+    sections: Vec<gpui::AnyElement>,
 }
 
 fn spec_index(spec: &Spec) -> usize {
@@ -90,6 +103,8 @@ impl SettingsPage {
             request,
             seen_config,
             simulated,
+            // A failure from an earlier visit stays visible.
+            appearance_error: appearance::queue().error(),
         };
         for (i, spec) in SPECS.iter().enumerate() {
             match spec.control {
@@ -658,15 +673,73 @@ impl SettingsPage {
         )
     }
 
-    fn render_extra(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+    /// Appearance: System / Light / Dark, stored apart from the config file.
+    fn appearance_row(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let t = theme(cx).clone();
+        let this = cx.entity().downgrade();
+        let control = ui::Segmented::new(
+            "appearance-mode",
+            AppearanceMode::ALL.iter().map(|m| m.label()),
+            Some(t.mode.index()),
+        )
+        .on_select(move |i, _, cx| {
+            if let Some(mode) = AppearanceMode::ALL.get(i).copied() {
+                let _ = this.update(cx, |p, cx| p.set_appearance(mode, cx));
+            }
+        });
+        ui::setting_row(
+            &t,
+            "Appearance",
+            "System follows your computer's light or dark setting.",
+            control.into_any_element(),
+            self.appearance_error
+                .clone()
+                .map(|e| (Tone::Error, SharedString::from(e))),
+        )
+    }
+
+    /// Apply the choice to every window now, then store it on the
+    /// appearance writer (never on this thread). A failed save is shown on
+    /// the row; the choice still applies for this session.
+    fn set_appearance(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+        let queue = appearance::queue();
+        if !queue.needs_save(mode, theme(cx).mode) {
+            return;
+        }
+        crate::theme::apply_mode(mode, cx);
+        // Registered before queueing; the writer drops it once on disk.
+        let write = Box::new(lf_ui::shutdown::register_pending_write());
+        let receiver = queue.submit(&self.pcx.services.root, mode, write);
+        self.appearance_error = queue.error();
+        cx.notify();
+        let Ok(receiver) = receiver else {
+            return;
+        };
+        // Awaited here, so no background thread waits while the disk stalls.
+        cx.spawn(async move |this, cx| {
+            let _ = receiver.recv().await;
+            // The writer records only the latest choice's outcome.
+            let _ = this.update(cx, |this, cx| {
+                this.appearance_error = appearance::queue().error();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_extra(&self, cx: &mut Context<Self>) -> Extra {
         let t = theme(cx).clone();
         let services = &self.pcx.services;
         let root = &services.root;
         let config = services.config();
-        let mut out = Vec::new();
+        let mut out = Extra {
+            top: Vec::new(),
+            rows: Vec::new(),
+            sections: Vec::new(),
+        };
         match self.tab {
             Tab::General => {
-                out.push(ui::setting_row(
+                out.rows.push(ui::setting_row(
                     &t,
                     "Setup",
                     "Pick and download a speech model, test your microphone, choose cleanup and a shortcut. Nothing changes until you apply.",
@@ -679,7 +752,7 @@ impl SettingsPage {
                     },
                     None,
                 ).into_any_element());
-                out.push(ui::setting_row(
+                out.rows.push(ui::setting_row(
                     &t,
                     "Launch at login",
                     if cfg!(target_os = "macos") {
@@ -692,7 +765,7 @@ impl SettingsPage {
                 ).into_any_element());
             }
             Tab::Shortcuts => {
-                out.insert(0, ui::banner(
+                out.top.push(ui::banner(
                     &t,
                     Tone::Info,
                     format!(
@@ -705,7 +778,7 @@ impl SettingsPage {
             Tab::Privacy => {
                 let this = cx.entity().downgrade();
                 let pcx = self.pcx.clone();
-                out.push(
+                out.rows.push(
                     ui::setting_row(
                         &t,
                         "Clear history",
@@ -744,18 +817,37 @@ impl SettingsPage {
                     )
                     .into_any_element(),
                 );
-                out.push(ui::section(&t, "What leaves this device", None, None)
-                    .child(ui::secondary(&t, data_leaves_text(&config)))
-                    .child(ui::supporting(&t, "Speech is transcribed locally. API keys stay in your system keyring and are never shown here."))
+                out.sections.push(ui::section(&t, "What leaves this device", None, None)
+                    .child(
+                        ui::group(&t).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(space::s2())
+                                .px(ui::row_inset())
+                                .py(space::s5())
+                                .child(ui::secondary(&t, data_leaves_text(&config)))
+                                .child(ui::supporting(&t, "Speech is transcribed locally. API keys stay in your system keyring and are never shown here.")),
+                        ),
+                    )
                     .into_any_element());
-                let mut paths = ui::section(&t, "Where your data lives", None, None);
-                paths = paths
-                    .child(self.path_row("Config file", root.config_path.clone(), false, cx))
-                    .child(self.path_row("History", root.history_path.clone(), false, cx))
-                    .child(self.path_row("Audio clips", root.clips_dir.clone(), true, cx))
-                    .child(self.path_row("Dictionary", root.dictionary_path.clone(), false, cx))
-                    .child(self.path_row("Snippets", root.hot_phrases_path.clone(), false, cx));
-                out.push(paths.into_any_element());
+                let paths = vec![
+                    self.path_row("Config file", root.config_path.clone(), false, cx)
+                        .into_any_element(),
+                    self.path_row("History", root.history_path.clone(), false, cx)
+                        .into_any_element(),
+                    self.path_row("Audio clips", root.clips_dir.clone(), true, cx)
+                        .into_any_element(),
+                    self.path_row("Dictionary", root.dictionary_path.clone(), false, cx)
+                        .into_any_element(),
+                    self.path_row("Snippets", root.hot_phrases_path.clone(), false, cx)
+                        .into_any_element(),
+                ];
+                out.sections.push(
+                    ui::section(&t, "Where your data lives", None, None)
+                        .child(ui::group_rows(&t, paths, ui::row_inset()))
+                        .into_any_element(),
+                );
             }
             Tab::Advanced => {
                 let health = self.pcx.health(cx);
@@ -766,7 +858,7 @@ impl SettingsPage {
                     Health::Unknown => (Tone::Neutral, "Checking…"),
                 };
                 let pcx = self.pcx.clone();
-                out.push(
+                out.rows.push(
                     ui::setting_row(
                         &t,
                         "Local service",
@@ -790,12 +882,12 @@ impl SettingsPage {
                     )
                     .into_any_element(),
                 );
-                out.push(
+                out.rows.push(
                     self.path_row("Config file", root.config_path.clone(), false, cx)
                         .into_any_element(),
                 );
                 if services.is_sandbox() {
-                    out.push(
+                    out.rows.push(
                         ui::setting_row(
                             &t,
                             "Simulated runtime state",
@@ -806,12 +898,13 @@ impl SettingsPage {
                         .into_any_element(),
                     );
                 }
-                let mut keys = ui::section(
+                let keys = ui::section(
                     &t,
                     "Current settings",
                     Some("Read-only view of what LocalFlow will use.".into()),
                     None,
                 );
+                let mut lines = Vec::new();
                 let dict = lf_core::config::config_to_dict(&config);
                 if let Some(obj) = dict.as_object() {
                     for (section, values) in obj {
@@ -820,27 +913,32 @@ impl SettingsPage {
                                 if key.contains("api_key") {
                                     continue;
                                 }
-                                keys = keys.child(
+                                lines.push(
                                     div()
                                         .flex()
                                         .justify_between()
                                         .gap(space::s6())
+                                        .px(ui::row_inset())
                                         .py(space::s2())
-                                        .border_b_1()
-                                        .border_color(t.border)
                                         .child(ui::mono(&t, format!("{section}.{key}")))
                                         .child(
                                             ui::mono(&t, value.to_string())
                                                 .text_color(t.text_secondary)
                                                 .overflow_hidden()
                                                 .text_ellipsis(),
-                                        ),
+                                        )
+                                        .into_any_element(),
                                 );
                             }
                         }
                     }
                 }
-                out.push(keys.into_any_element());
+                out.sections.push(
+                    keys.when(!lines.is_empty(), |d| {
+                        d.child(ui::group_rows(&t, lines, ui::row_inset()))
+                    })
+                    .into_any_element(),
+                );
             }
             _ => {}
         }
@@ -866,38 +964,51 @@ impl Render for SettingsPage {
                 });
             }),
         );
-        let mut rows = div().flex().flex_col();
         let extra = self.render_extra(cx);
-        let (top, bottom): (Vec<_>, Vec<_>) = if self.tab == Tab::Shortcuts {
-            let mut e = extra.into_iter();
-            (e.next().into_iter().collect(), e.collect())
-        } else {
-            (Vec::new(), extra)
-        };
-        for el in top {
-            rows = rows.child(div().pb(space::s5()).child(el));
+        // One group per tab: Appearance (General), the `[section] key` rows,
+        // then the tab's extra rows; standalone sections follow it.
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        if self.tab == Tab::General {
+            rows.push(self.appearance_row(cx).into_any_element());
         }
         for spec in ctl::specs_for(self.tab) {
-            rows = rows.child(self.render_spec(spec, cx));
+            rows.push(self.render_spec(spec, cx).into_any_element());
         }
         if self.tab == Tab::Cleanup {
             let pcx = self.pcx.clone();
-            rows = rows.child(ui::setting_row(
-                &t,
-                "Tone by app",
-                "Work, email, personal and other tones are set on the Style page.",
-                Button::new("to-style", "Open Style")
-                    .small()
-                    .on_click(move |_, _, cx| pcx.navigate(Page::Style, None, cx))
-                    .into_any_element(),
-                None,
-            ));
+            rows.push(
+                ui::setting_row(
+                    &t,
+                    "Tone by app",
+                    "Work, email, personal and other tones are set on the Style page.",
+                    Button::new("to-style", "Open Style")
+                        .small()
+                        .on_click(move |_, _, cx| pcx.navigate(Page::Style, None, cx))
+                        .into_any_element(),
+                    None,
+                )
+                .into_any_element(),
+            );
+        }
+        rows.extend(extra.rows);
+        let mut tab_body = div().flex().flex_col().gap(space::s5()).children(extra.top);
+        if !rows.is_empty() {
+            tab_body = tab_body.child(ui::group_rows(&t, rows, ui::row_inset()));
         }
         let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(space::s8())
             .child(self.render_assistant(cx))
-            .child(tabs)
-            .child(rows);
-        for el in bottom {
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::s6())
+                    .child(tabs)
+                    .child(tab_body),
+            );
+        for el in extra.sections {
             body = body.child(el);
         }
         if let Some(err) = self.pcx.services.config_error.borrow().clone() {

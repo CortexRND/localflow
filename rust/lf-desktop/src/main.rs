@@ -1,5 +1,7 @@
 //! `lf-desktop`: the LocalFlow native desktop app (GPUI).
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::process::ExitCode;
 
 use lf_desktop::app::{self, Launch};
@@ -11,6 +13,7 @@ use lf_desktop::launch::{self, Launched};
 use lf_desktop::page::Page;
 
 fn main() -> ExitCode {
+    lf_desktop::console::attach_parent();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let env_sandbox = std::env::var("LOCALFLOW_SANDBOX").is_ok_and(|v| v == "1" || v == "true");
     #[cfg(feature = "runtime")]
@@ -43,7 +46,11 @@ fn main() -> ExitCode {
     };
     let launched = if args.sandbox {
         let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
-        launch::sandbox(&dir, args.sandbox_reset, route)
+        launch::sandbox(
+            &dir,
+            args.sandbox_reset,
+            (!args.sandbox_exercise).then_some(route),
+        )
     } else {
         match DataRoot::real() {
             Ok(root) => launch::real(root, route),
@@ -74,6 +81,20 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if args.sandbox_exercise {
+        return match lf_desktop::sandbox::exercise(&services) {
+            Ok(done) => {
+                for line in done {
+                    println!("{line}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("lf-desktop: sandbox exercise failed: {err:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let notice = args
         .unknown_page
         .as_ref()
@@ -128,13 +149,17 @@ fn speech_helper(env_sandbox: bool) -> Option<ExitCode> {
     }
     log::info!("starting speech helper");
     Some(
-        match lf_stt::helper::serve_stdio(|config| {
-            lf_stt::runtime::SpeechAdapter::from_config(&config)
-                .map(|engine| {
-                    std::sync::Arc::new(engine)
-                        as std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>
-                })
-                .map_err(|error| error.to_string())
+        // A cache-only request (History retry) never downloads a model.
+        match lf_stt::helper::serve_stdio_with(|config, cache_only| {
+            if cache_only {
+                lf_stt::runtime::SpeechAdapter::from_config_cached(&config)
+            } else {
+                lf_stt::runtime::SpeechAdapter::from_config(&config)
+            }
+            .map(|engine| {
+                std::sync::Arc::new(engine) as std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>
+            })
+            .map_err(|error| error.to_string())
         }) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

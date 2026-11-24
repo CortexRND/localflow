@@ -4210,6 +4210,7 @@ dependencies = [
  "lf-ui",
  "libc",
  "log",
+ "objc2",
  "objc2-app-kit",
  "regex",
  "reqwest",

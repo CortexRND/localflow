@@ -78,6 +78,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Packages must not depend on the packaging runner's CPU (no -march=native).
+  GGML_NATIVE: "OFF"
 
 jobs:
   package:
@@ -115,6 +117,7 @@ jobs:
         with:
           workspaces: rust/lf-desktop
           key: gpui-package-${{ matrix.platform }}
+          env-vars: GGML_NATIVE
       # As in rust.yml: a cached whisper-rs-sys CMake cache can name an older
       # runner image's MSVC path; rebuild only that crate on Windows.
       - name: Drop cached whisper-rs-sys CMake state (Windows)
@@ -138,6 +141,24 @@ jobs:
           test -f "$tmp/gpui-preview/$asset.sha256"
           [[ "$(ls -A "$tmp/gpui-preview" | sort)" == "$(printf '%s\n' "$asset" "$asset.sha256" | sort)" ]]
           echo "ASSET=$asset" >> "$GITHUB_ENV"
+      # The window-only launch below cannot catch a sandbox clip path whose
+      # Windows prefix style differs from the data root (verbatim \\?\C:\
+      # vs C:\), which broke History Retry/Delete; run that exact pure
+      # regression natively (cfg(windows) branch). Default features (no
+      # runtime/model loading); release profile and the builder's
+      # crt-static RUSTFLAGS so shared dependencies are reused.
+      - name: Sandbox clip retry/delete regression (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        # A filter that matches nothing would pass silently: require 1 passed.
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          cargo test --manifest-path rust/lf-desktop/Cargo.toml --locked --release --lib \
+            sandbox::tests::absolute_sandbox_root_clip_loads_retries_and_deletes -- --exact --color never | tee "$log"
+          grep -q '^test result: ok\. 1 passed' "$log"
       # Re-verify a fresh copy outside the repository (signatures after
       # extraction/relocation on macOS; no build-tree library on Linux).
       - name: Verify the archive outside the checkout

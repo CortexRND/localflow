@@ -64,6 +64,7 @@ rust/lf-desktop/target/debug/lf-desktop --engine     # then press "Start here" o
 | `--sandbox` | Uses isolated example data and in-process fake services (also `LOCALFLOW_SANDBOX=1`) |
 | `--data-dir <DIR>` | Sandbox directory, only valid with `--sandbox` |
 | `--sandbox-reset` | Re-seeds the sandbox directory (refused while that sandbox is open in another window) |
+| `--sandbox-exercise` | Writes once to each sandbox store (Settings, a provider key, Hot Phrases, History, Prompts) through the page controllers, prints one line per store and exits without a window. Only valid with `--sandbox`; refused while that sandbox is open in another window; used by Gate 2 |
 
 An unknown argument, or `--engine` where it can't run, exits with status 2. A first
 launch with no setup marker in the config (and no `--page`) opens the wizard,
@@ -124,7 +125,7 @@ reason and the removal condition are in `vendor/xattr-shim/src/lib.rs`.
 |---|---|
 | Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, Mesa llvmpipe). Native rendering was not verified interactively: first paint was transparent under X11/VNC, and under Cage/Wayland redraws appeared only after a resize |
 | macOS | Expected to build (GPUI's Metal backend; the code has no Linux-only parts). Not verified in this PR. `lf-hub` stays the macOS app |
-| Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. This packaging change adds neither Windows hotkeys nor the tray |
+| Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. It includes the native tray and, with `--engine`, the engine's Windows global hotkeys. Windows CI exercises the `lf-input` keyboard hook, type-checks the tray and launches the package in `--sandbox`; none of this is verified interactively |
 
 Linux build packages (Debian/Ubuntu names): `build-essential cmake clang pkg-config
 libasound2-dev libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev
@@ -153,7 +154,7 @@ directory you pass:
 |---|---|
 | `LocalFlow-Preview-<ver>-linux-x86_64.tar.gz` | `localflow-preview/`: `bin/lf-desktop`, `lib/` (Sherpa-ONNX C and C++ API and ONNX Runtime `.so` files), `share/applications/localflow-preview.desktop`, `share/icons/localflow-preview.png`, `README.txt`, `MANIFEST.json` (version, measured ABI requirements, SHA-256 of every file) |
 | `LocalFlow-Preview-<ver>-macos-arm64.tar.gz`, `LocalFlow-Preview-<ver>-macos-x86_64.tar.gz` | `LocalFlow Preview.app` |
-| `LocalFlow-Preview-<ver>-windows-x86_64.zip` | `LocalFlow Preview\`: `lf-desktop.exe` (static CRT, no Visual C++ Redistributable), the Sherpa-ONNX C/C++ API and ONNX Runtime DLLs next to it, `README.txt`, `MANIFEST.json`. Unzip and run; there is no installer |
+| `LocalFlow-Preview-<ver>-windows-x86_64.zip` | `LocalFlow Preview\`: `lf-desktop.exe` (static CRT, no Visual C++ Redistributable), the Sherpa-ONNX C/C++ API and ONNX Runtime DLLs next to it, `README.txt`, `MANIFEST.json`. Unzip and run; there is no installer. Release builds are GUI-subsystem programs (no console window); started from a terminal without redirection they print `--help`/`--version`/errors (including a window that can't open) to that terminal and detach from it once the window has opened. `cmd` and PowerShell don't wait for GUI programs, so their prompt can return first and `%ERRORLEVEL%`/`$LASTEXITCODE` are not set; Git Bash, `Start-Process -Wait` and redirected output do wait. Debug builds stay console programs |
 
 Each archive comes with `<asset>.sha256`. Nothing in the output directory is
 replaced until `scripts/verify_gpui_package.sh` has extracted the archive into
@@ -397,6 +398,11 @@ meantime, are kept. The running LocalFlow runtime reads the same file.
 - It's **kept between launches**, so edits can be checked after a relaunch.
 - `--sandbox-reset` re-seeds it, and refuses to delete a directory that has no
   marker. A non-empty directory that isn't a sandbox is refused too.
+- History **Retry** is a labelled simulation: the failed example has a synthetic
+  clip, and Retry runs the real text pipeline over the sandbox dictionary and
+  snippets with a fixed transcript ("Sandbox: simulated result. No speech model
+  ran."). No model, cleanup provider or key is used. Sandboxes seeded before
+  this existed have no clip on that row; run `--sandbox-reset` to re-seed.
 - Keys live in memory only. The OS keyring is never read or written.
 - Ask, Meetings and Prompts use the existing in-process fakes, and no socket is
   opened. Ask answers with a labelled keyword match over the example history.
@@ -467,6 +473,28 @@ Shortcut, Try it, Review. It is built on `lf_ui::setup_flow` (`initial_choices`,
   the trial say they need `--features runtime` (choices are still saved).
   **Runtime build:** they run for real against the Hugging Face cache.
 
+## History retry
+
+- **Retry** (secondary to Copy) appears for dictations with saved audio. It
+  transcribes the clip again through the shared `process_clip` pipeline with the
+  current settings, this window's dictionary, snippets and commands, and the
+  row's own app (for its style). A failing cleanup provider keeps the
+  uncleaned text, as in live dictation.
+- Only the installed configured model is used; Retry never downloads, never
+  picks another model and never starts dictation, the microphone or the
+  shortcut listener. On macOS it runs in the speech helper with a cache-only
+  load request (a helper without that support refuses before loading).
+- Success replaces that row's status, text and word count in place (an atomic
+  conditional update: a row deleted, cleared and reused, or edited meanwhile is
+  left alone) and shows a short toast. Nothing is pasted or copied, `last.txt`
+  is untouched and no clip is pruned.
+- One retry runs at a time per process; the button reads **Retrying…** and stays
+  focusable, and repeat presses are ignored. A failure stays as a banner on that
+  row with **Try again**. Closing waits briefly for a retry and says it can't be
+  interrupted.
+- **Default build:** Retry is disabled with the rebuild hint. **Sandbox:** a
+  labelled simulation (see Sandbox above).
+
 ## Models & keys
 
 - **Speech → Models on this computer:** each catalogue model for this machine
@@ -509,6 +537,15 @@ only). Preview runs on a worker; **Apply** and **Undo** run through
 applied; an apply the agent refuses keeps the preview and shows why; Undo skips
 (and lists) settings that changed since. Secret-looking tokens in model output
 are masked. The manual Settings rows are unchanged.
+
+## Appearance
+
+Settings → General → **Appearance** picks System, Light or Dark (default
+System, which follows the OS light/dark setting live). The choice applies to
+every open window at once and is stored on its own in `appearance.json` in the
+window's instance directory (`<localflow dir>/desktop/`, or inside the sandbox
+directory), never in `config.toml`. A missing or unreadable file means System;
+if saving fails, the row says so and the choice still applies for the session.
 
 ## Runtime connection
 
@@ -636,11 +673,11 @@ These are tracked in `docs/gpui-migration.md`:
   the development VM; behaviour is covered by controller, sandbox and CLI
   subprocess tests. macOS runtime behaviour (tap readiness, engine, Metal
   whisper) is type-checked in CI only.
-- The engine runs only on LocalFlow's own data folders, has no tray item, and
-  runs only in builds made with `--features runtime` (the preview package is one).
+- The engine runs only on LocalFlow's own data folders and only in builds made
+  with `--features runtime` (the preview package is one).
 - Wayland global shortcuts are not possible (see above). On Windows only the
-  preview package is built; the packaging change adds neither Windows global
-  hotkeys nor the tray.
+  preview package is built; its tray and global hotkeys are not interactively
+  verified.
 - The Python runtime still writes protocol-1 status, so Home shows it as
   "Running · status limited".
 - `lf-hub` / the Python Hub and this window don't route to each other until the

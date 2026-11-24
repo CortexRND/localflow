@@ -558,23 +558,31 @@ impl ModelsPage {
                 Some(format!("In use: {}", models_layout::speech_summary(&config)).into()),
                 None,
             )
-            .child(ui::setting_row(
+            .child(ui::group_rows(
                 &t,
-                "Engine",
-                "Automatic picks the best engine for this computer when LocalFlow starts.",
-                self.speech_provider.clone().into_any_element(),
-                ctl::speech_unavailable_reason(&current).map(|r| (Tone::Warning, r.into())),
-            ))
-            .child(ui::setting_row(
-                &t,
-                "Model size",
-                if self.model_ids.is_empty() {
-                    "This engine runs one fixed model."
-                } else {
-                    "Larger models are more accurate and slower."
-                },
-                self.speech_model.clone().into_any_element(),
-                None,
+                [
+                    ui::setting_row(
+                        &t,
+                        "Engine",
+                        "Automatic picks the best engine for this computer when LocalFlow starts.",
+                        self.speech_provider.clone().into_any_element(),
+                        ctl::speech_unavailable_reason(&current).map(|r| (Tone::Warning, r.into())),
+                    )
+                    .into_any_element(),
+                    ui::setting_row(
+                        &t,
+                        "Model size",
+                        if self.model_ids.is_empty() {
+                            "This engine runs one fixed model."
+                        } else {
+                            "Larger models are more accurate and slower."
+                        },
+                        self.speech_model.clone().into_any_element(),
+                        None,
+                    )
+                    .into_any_element(),
+                ],
+                ui::row_inset(),
             )),
         );
         if !ctl::speech_available("mlx-whisper") {
@@ -600,6 +608,7 @@ impl ModelsPage {
             Some(format!("In use: {current}").into()),
             None,
         );
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
         if is_ollama {
             let (_, _, note) =
                 models_layout::cleanup_picker(&config, self.ollama.1, &self.ollama.0);
@@ -613,48 +622,54 @@ impl ModelsPage {
                 ListState::Empty => format!("Ollama at {base} has no models installed."),
                 ListState::Unavailable => format!("Ollama isn't answering at {base}."),
             };
-            sec = sec.child(ui::setting_row(
+            rows.push(
+                ui::setting_row(
+                    &t,
+                    "Installed model",
+                    state_text,
+                    div()
+                        .flex()
+                        .gap(space::s4())
+                        .child(self.cleanup_select.clone())
+                        .child(
+                            Button::new("ollama-refresh", "Refresh")
+                                .small()
+                                .icon("refresh-cw")
+                                .busy(self.ollama.1 == ListState::Loading)
+                                .on_click(cx.listener(|this, _, _, cx| this.load_ollama(cx))),
+                        )
+                        .into_any_element(),
+                    (!note.is_empty()).then(|| (Tone::Warning, note.into())),
+                )
+                .into_any_element(),
+            );
+        }
+        rows.push(
+            ui::setting_row(
                 &t,
-                "Installed model",
-                state_text,
+                "Model ID",
+                if is_ollama {
+                    "Or type any model ID Ollama has, then press Enter."
+                } else {
+                    "The provider's model ID, for example gpt-5-mini."
+                },
                 div()
                     .flex()
                     .gap(space::s4())
-                    .child(self.cleanup_select.clone())
+                    .child(div().w(gpui::px(240.)).child(self.cleanup_input.clone()))
                     .child(
-                        Button::new("ollama-refresh", "Refresh")
+                        Button::new("cleanup-use", "Use")
                             .small()
-                            .icon("refresh-cw")
-                            .busy(self.ollama.1 == ListState::Loading)
-                            .on_click(cx.listener(|this, _, _, cx| this.load_ollama(cx))),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let model = this.cleanup_input.read(cx).text().to_string();
+                                this.save_cleanup(&model, cx);
+                            })),
                     )
                     .into_any_element(),
-                (!note.is_empty()).then(|| (Tone::Warning, note.into())),
-            ));
-        }
-        sec = sec.child(ui::setting_row(
-            &t,
-            "Model ID",
-            if is_ollama {
-                "Or type any model ID Ollama has, then press Enter."
-            } else {
-                "The provider's model ID, for example gpt-5-mini."
-            },
-            div()
-                .flex()
-                .gap(space::s4())
-                .child(div().w(gpui::px(240.)).child(self.cleanup_input.clone()))
-                .child(
-                    Button::new("cleanup-use", "Use")
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let model = this.cleanup_input.read(cx).text().to_string();
-                            this.save_cleanup(&model, cx);
-                        })),
-                )
-                .into_any_element(),
-            None,
-        ));
+                None,
+            )
+            .into_any_element(),
+        );
         // Test what cleanup really uses — its provider, host and model —
         // on explicit click only.
         if !config.field_str("llm_provider").unwrap_or("").is_empty() {
@@ -665,14 +680,18 @@ impl ModelsPage {
                 }
                 _ => None,
             };
-            sec = sec.child(ui::setting_row(
-                &t,
-                "Connection",
-                format!("Checks that {} answers.", target.endpoint()),
-                self.test_button(target, blocker, cx).into_any_element(),
-                None,
-            ));
+            rows.push(
+                ui::setting_row(
+                    &t,
+                    "Connection",
+                    format!("Checks that {} answers.", target.endpoint()),
+                    self.test_button(target, blocker, cx).into_any_element(),
+                    None,
+                )
+                .into_any_element(),
+            );
         }
+        sec = sec.child(ui::group_rows(&t, rows, ui::row_inset()));
         let mut body = div().flex().flex_col().gap(space::s8()).child(sec);
         body = body.child(ui::supporting(&t, ctl::data_leaves_text(&config)));
         if let Some((tone, msg)) = self.cleanup_message.clone() {
@@ -693,7 +712,8 @@ impl ModelsPage {
         if !matches!(self.providers, Loadable::Ready(_)) {
             list = list.child(
                 div()
-                    .px(space::s4())
+                    .pl(ui::row_inset())
+                    .pr(space::s4())
                     .py(space::s5())
                     .child(ui::secondary(&t, "Checking saved keys…")),
             );
@@ -788,9 +808,9 @@ impl ModelsPage {
                 .flex()
                 .flex_col()
                 .gap(space::s4())
-                .px(space::s4())
+                .pl(ui::row_inset())
+                .pr(space::s4())
                 .py(space::s5())
-                .when(i > 0, |d| d.border_t_1().border_color(t.border))
                 .child(
                     div()
                         .flex()
@@ -889,6 +909,9 @@ impl ModelsPage {
                     );
                 }
                 _ => {}
+            }
+            if i > 0 {
+                list = list.child(ui::separator(&t, ui::row_inset()));
             }
             list = list.child(item);
         }
@@ -1209,9 +1232,9 @@ impl ModelsPage {
                 .flex()
                 .flex_col()
                 .gap(space::s2())
-                .px(space::s4())
+                .pl(ui::row_inset())
+                .pr(space::s4())
                 .py(space::s4())
-                .when(i > 0, |d| d.border_t_1().border_color(t.border))
                 .child(
                     div()
                         .flex()
@@ -1256,6 +1279,9 @@ impl ModelsPage {
                         .text_color(t.tone(Tone::Warning).0),
                 );
             }
+            if i > 0 {
+                list = list.child(ui::separator(&t, ui::row_inset()));
+            }
             list = list.child(item);
         }
         let mut section = ui::section(
@@ -1275,7 +1301,8 @@ impl ModelsPage {
                 if inv.models.is_empty() {
                     stored = stored.child(
                         div()
-                            .px(space::s4())
+                            .pl(ui::row_inset())
+                            .pr(space::s4())
                             .py(space::s4())
                             .child(ui::secondary(&t, "No speech models are stored yet.")),
                     );
@@ -1287,14 +1314,17 @@ impl ModelsPage {
                         .or(downloading.then_some(DOWNLOADING));
                     let (repo, label, size) =
                         (model.repo.clone(), model.label.clone(), model.size_bytes);
+                    if i > 0 {
+                        stored = stored.child(ui::separator(&t, ui::row_inset()));
+                    }
                     stored = stored.child(
                         div()
                             .flex()
                             .items_center()
                             .gap(space::s4())
-                            .px(space::s4())
+                            .pl(ui::row_inset())
+                            .pr(space::s4())
                             .py(space::s4())
-                            .when(i > 0, |d| d.border_t_1().border_color(t.border))
                             .child(
                                 div()
                                     .flex()
@@ -1700,18 +1730,21 @@ impl ModelsPage {
         if let Some(data) = &card.data {
             body = body.child(ui::secondary(&t, data.summary()));
             let rows = data.rows(&has_key, &env_override);
-            let mut list = ui::list(&t);
+            // The card is the group: rows sit directly in it (no inner list
+            // container), separated by the shared inset hairline.
+            let mut list = div().flex().flex_col().w_full();
             for (i, row) in rows.iter().enumerate() {
                 let key = row.key.clone();
                 let this = cx.entity().downgrade();
+                if i > 0 {
+                    list = list.child(ui::separator(&t, gpui::px(0.)));
+                }
                 list = list.child(
                     div()
                         .flex()
                         .items_center()
                         .gap(space::s4())
-                        .px(space::s4())
                         .py(space::s4())
-                        .when(i > 0, |d| d.border_t_1().border_color(t.border))
                         .child(
                             ui::Switch::new(
                                 ("import-row", i as u64),

@@ -9,7 +9,7 @@ default. Build and run commands are in
 **Current state: preview, opt-in, not the default.** By default `lf hub`,
 `lf phrases`, `lf setup`, `lf-hub` on macOS (the AppKit Hub), the Python runtime and
 all existing installers are unchanged. PR 3 added a separate, opt-in preview package
-and installer (`scripts/install_gpui_preview.sh`). Scope 4a (this PR) lets the three
+and installer (`scripts/install_gpui_preview.sh`). Scope 4a (PR 66) lets the three
 `lf` window commands open it only when asked (`--gpui` or `LOCALFLOW_UI=gpui`), with
 a legacy fallback, and makes `lf-hub` on Linux (which had no UI) open it. Promoting
 it to the default (4b) is pending the gates below and the owner's decision.
@@ -24,7 +24,7 @@ Each PR leaves every existing entry point working.
 | **1. Parallel GPUI front end** | Standalone crate `rust/lf-desktop` (pinned `gpui = 0.2.2`, own `Cargo.lock`, outside the `rust/` workspace). One token and component layer. Library and config workflows connected to the real stores. Ask, Meetings and Prompts over the existing local HTTP service. Isolated persistent `--sandbox`. Controller, store and editing tests. Additive `gpui.yml` CI (Linux full, macOS type-check). `scripts/run_gpui.sh` | Done |
 | **2. Runtime and global-input parity** | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
 | **3. Packaging** (PR 65, merged) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Done. Linux package built and smoke-installed on the VM; fixture tests for builder/installer/publisher. All three `gpui-package.yml` legs (Linux x86_64, macOS arm64, macOS x86_64) build the release package, verify it, re-verify it outside the checkout and smoke-install/uninstall it in a temporary HOME, running `lf-desktop --version`; macOS relocation and signing are verified only by those CI legs. No interactive GUI, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
-| **4a. Opt-in launch** (this PR) | `localflow/desktop_launch.py`, called only by `lf hub`, bare `lf phrases` and the `lf setup` window: `--gpui` / `--legacy`, then `LOCALFLOW_UI=gpui\|legacy`, then `DEFAULT_UI = "legacy"` (no config key). Discovery only after a GPUI selection: absolute `LOCALFLOW_DESKTOP_BIN`, else only the preview installer's package (manifest name / bundle id checked). Bounded `--help` probe for the `--page`/`--setup` interface and the `EXIT STATUS (launch-status: 1):` line; `lf-desktop` now exits 1 when no window can open (it used to exit 0), so Scope 3 packages, which lack the line, must be updated before `lf` or `lf-hub` will open them. Closed argv, detached, 1.5 s startup watch; exit 0 is a hand-off. Any failure: one notice, then the legacy window once. `LOCALFLOW_SANDBOX` with a GPUI selection is refused (no fallback). `lf-hub` on Linux `exec`s the preview through the same rules (`lf_ui::desktop_launch`). Details: [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md#opening-it-from-lf-step-4a) | Implemented; unit and fake-executable subprocess tests (Python and Rust, temporary HOME, no GUI). Not exercised against a real window or on macOS hardware (GUI probing waived by the owner) |
+| **4a. Opt-in launch** (PR 66, merged) | `localflow/desktop_launch.py`, called only by `lf hub`, bare `lf phrases` and the `lf setup` window: `--gpui` / `--legacy`, then `LOCALFLOW_UI=gpui\|legacy`, then `DEFAULT_UI = "legacy"` (no config key). Discovery only after a GPUI selection: absolute `LOCALFLOW_DESKTOP_BIN`, else only the preview installer's package (manifest name / bundle id checked). Bounded `--help` probe for the `--page`/`--setup` interface and the `EXIT STATUS (launch-status: 1):` line; `lf-desktop` now exits 1 when no window can open (it used to exit 0), so Scope 3 packages, which lack the line, must be updated before `lf` or `lf-hub` will open them. Closed argv, detached, 1.5 s startup watch; exit 0 is a hand-off. Any failure: one notice, then the legacy window once. `LOCALFLOW_SANDBOX` with a GPUI selection is refused (no fallback). `lf-hub` on Linux `exec`s the preview through the same rules (`lf_ui::desktop_launch`). Details: [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md#opening-it-from-lf-step-4a) | Implemented; unit and fake-executable subprocess tests (Python and Rust, temporary HOME, no GUI). Not exercised against a real window or on macOS hardware (GUI probing waived by the owner) |
 | 4b. Default-launch promotion | `DEFAULT_UI` becomes `gpui` (per platform), keeping the 4a fallback and `--legacy` | Not started. Needs the open gates below (1 parity, 5 packaging QA, 8 UI verification) and the owner's decision |
 | 5. Legacy retirement | Remove the launch paths that are no longer used and the controller code duplicated from `lf_ui::mac` (done on macOS). Bundle Figtree. Screen-reader support once GPUI has an accessibility tree | Not started |
 
@@ -47,7 +47,7 @@ Legend:
 | History | Search (debounced, background), paging, details | Works | `HistoryStore::recent(limit, query, offset)` | `lf history`, Hub |
 | History | Copy final or original text | Works | clipboard | Hub |
 | History | Delete one, clear all (with confirmation) | Works | `HistoryStore::delete/clear` | Hub |
-| History | Retry transcription | Honest-off (`HISTORY_RETRY_UNAVAILABLE`) | — | Python Hub |
+| History | Retry transcription | Works in `--features runtime` builds for dictations with a saved 16 kHz clip: the shared `process_clip` pipeline (current config, this data root's dictionary/snippets/commands, the row's app context, fail-soft cleanup) with only the installed configured model (cache-only; never downloads; macOS keeps the speech helper via a cache-only load request old helpers reject). Updates only that row with an atomic conditional update (refuses a deleted, cleared-and-reused or edited row); no paste, clipboard, `last.txt`, pruning or config write. One job per process; a close waits briefly for it and can't interrupt it. Default build explains the rebuild; the sandbox runs a labelled simulation (no model, provider or key). Native interaction and macOS are unverified | `lf_runtime::pipeline::process_clip`, `HistoryStore::update_if_unchanged`, `lf_stt::runtime::hub_speech_cached` | Python Hub |
 | Dictionary | Add, edit, remove (with Undo) words and replacements | Works | `hub_model::submit_*` → `dictionary.json` | `lf dict`, Hub |
 | Dictionary | Import CSV/JSON | Works (file picker, or a typed path when no portal is available) | `DictionaryStore::import_file` | `lf dict import` |
 | Snippets | Create, edit, enable, delete with Undo, autosave, external-change reconcile, try-it preview | Works | `HotPhrasesEditor<PhrasesModel>` → `hot_phrases.json` | `lf phrases`, Hub |
@@ -89,11 +89,14 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    works in `lf-desktop`, or the owner explicitly waives it. PR 2 implemented the
    setup wizard, model storage, the settings assistant, key import, Test LLM, and
    single-instance and page routing; they still need interactive review on Linux
-   (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
-   row (History retry) needs a decision.
+   (X11 and Wayland) and macOS before this gate is met. No rows remain marked
+   Missing: the tray item (Linux, Windows and macOS) and History retry (runtime
+   builds) are implemented but, like the rest, still need interactive review.
 2. **Data safety.** [`gpui_data_safety.py`](../scripts/gpui_data_safety.py) compares
-   the real config file, `~/.localflow` and the keyring by hash before and after a
-   scripted sandbox session. In real mode, every write goes through `config_write`
+   the whole real config directory (including `api-token` and `launch/`),
+   `~/.localflow` and the keyring by hash before and after a scripted sandbox
+   session that writes every sandbox store, and fails if any of those writes did not
+   happen. In real mode, every write goes through `config_write`
    or the existing store APIs. The unit tests in `data.rs`, `sandbox.rs` and
    `controllers/*` cover this already.
 3. **Platforms.** The app builds and passes tests on Linux (X11 and Wayland) and
@@ -162,8 +165,16 @@ alias resolves to a collection whose `<name>.keyring` file is in the monitored
 keyrings directory used by the running daemon, and it refuses to run while a legacy
 `~/.gnome2/keyrings` directory exists. Run it with LocalFlow and other
 writers to the monitored stores stopped. It adds a word to the **sandbox**
-Dictionary and checks that the real config (including legacy fallback),
-`~/.localflow`, and the GNOME Keyring backing files did not change. `before.json`
+Dictionary with the keyboard in the window, then runs `lf-desktop --sandbox
+--sandbox-exercise`. That makes one write through the page controllers to each other
+sandbox store (a Settings change, a provider key saved to the in-memory keyring, a Hot
+Phrase, a History delete and approving a pending Prompt) and reads each one back. It is
+refused while that sandbox is open in a window. The script
+also checks the file-backed sandbox stores itself, and fails if any write is missing.
+It then checks that the whole real config directory (`config.toml`, `api-token`,
+`launch/` and any other file), `LOCALFLOW_CONFIG` and the legacy config,
+`~/.localflow`, and the GNOME Keyring backing files did not change. `lf-desktop`
+never creates or rotates the API token, so no token write is scripted. `before.json`
 and `after.json` contain only per-store HMAC-SHA256 digests with a per-run key;
 compare them only within the same run. Other keyring backends are not supported by
 this script. Gate 8 writes 44 PNGs (10 pages and Setup × two themes × two sizes).

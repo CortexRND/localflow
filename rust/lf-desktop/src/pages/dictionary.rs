@@ -10,7 +10,7 @@ use lf_ui::hub_model::{self, DictionaryRow, EntryKind};
 use crate::app::PageCx;
 use crate::controllers::dictionary as ctl;
 use crate::pages::{column, header, page};
-use crate::theme::{space, theme, Tone};
+use crate::theme::{size, space, theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::{self, Button, IconButton};
 
@@ -292,14 +292,18 @@ impl DictionaryPage {
                 EntryKind::Word => row.key.clone().into(),
                 EntryKind::Replacement => format!("{}  →  {}", row.key, row.target).into(),
             };
+            if i > 0 {
+                list = list.child(ui::separator(&t, ui::row_inset()));
+            }
             list = list.child(
                 div()
                     .flex()
                     .items_center()
                     .gap(space::s4())
-                    .px(space::s4())
+                    .pl(ui::row_inset())
+                    .pr(space::s4())
                     .py(space::s3())
-                    .when(i > 0, |d| d.border_t_1().border_color(t.border))
+                    .rounded(size::radius_inner())
                     .when(editing, |d| d.bg(t.selected))
                     .child(div().flex_1().min_w_0().child(ui::body(&t, label)))
                     .when(editing, |d| d.child(ui::token(&t, Tone::Accent, "Editing")))
