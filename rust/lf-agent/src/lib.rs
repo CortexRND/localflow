@@ -539,11 +539,17 @@ impl<C: ChatClient> SettingsAgent<C> {
             "The local model asked for more than {MAX_TOOL_CALLS} changes at once; ask for fewer."
         );
         let (changes, rejected) = self.changes_from_calls(calls, &config, request);
-        ensure!(
-            !changes.is_empty(),
-            "Nothing to change: {}",
-            rejected.join("; ")
-        );
+        if changes.is_empty() {
+            let reasons = rejected.join("; ");
+            bail!(
+                "Nothing to change: {}",
+                if reasons.is_empty() {
+                    "no usable changes"
+                } else {
+                    &reasons
+                }
+            );
+        }
         Ok(Proposal {
             request: request.into(),
             model,
@@ -632,7 +638,11 @@ impl<C: ChatClient> SettingsAgent<C> {
             let bad: HashSet<_> = clashes.iter().map(|(k, _)| k.clone()).collect();
             changes.retain(|c| !matches!(c, Change::Setting {key,..} if bad.contains(key)));
             if !bad.is_empty() {
-                rejected.extend(clashes.into_iter().map(|(_, reason)| reason));
+                rejected.extend(
+                    clashes
+                        .into_iter()
+                        .map(|(_, reason)| safe_text(&reason, 300)),
+                );
             }
         }
         (changes, rejected)

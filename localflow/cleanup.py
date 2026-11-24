@@ -44,8 +44,9 @@ def _vocabulary_line(vocabulary: Sequence[str]) -> str | None:
 
 
 class Cleaner:
-    def __init__(self, llm: LLMProvider):
+    def __init__(self, llm: LLMProvider, fast_llm: LLMProvider | None = None):
         self.llm = llm
+        self.fast_llm = fast_llm
 
     def clean(
         self,
@@ -64,7 +65,8 @@ class Cleaner:
         if vocabulary_line:
             prompt += "\n\n" + vocabulary_line
         try:
-            cleaned = self.llm.complete(prompt, f"Text:\n{text}")
+            llm = self.fast_llm if level == "light" and self.fast_llm is not None else self.llm
+            cleaned = llm.complete(prompt, f"Text:\n{text}")
             if not cleaned:
                 return text
             cleaned = re.sub(

@@ -104,6 +104,7 @@ pub fn finish(
 /// `lf_ui::shutdown::wait_for_pending_writes`).
 pub fn remaining_work(
     downloads: &crate::controllers::jobs::Downloads,
+    retry: &crate::controllers::retry::RetryJobs,
     writes_idle: bool,
 ) -> Vec<&'static str> {
     let mut out = Vec::new();
@@ -113,11 +114,20 @@ pub fn remaining_work(
     if downloads.deleting() {
         out.push("A speech model is still being deleted.");
     }
-    if !writes_idle {
+    let retrying = retry.running().is_some();
+    if retrying {
+        out.push(RETRY_RUNNING);
+    }
+    // A running retry is itself a registered write; don't also blame settings.
+    if !writes_idle && !retrying {
         out.push("A settings or key change is still being saved.");
     }
     out
 }
+
+/// A History retry is still transcribing (it can't be interrupted).
+pub const RETRY_RUNNING: &str =
+    "A dictation is still being retried; speech recognition can't be interrupted.";
 
 #[cfg(test)]
 mod tests {
@@ -126,7 +136,8 @@ mod tests {
         use super::remaining_work;
         use crate::controllers::jobs::{speech_key, Downloads};
         let downloads = Downloads::new();
-        assert!(remaining_work(&downloads, true).is_empty());
+        let retry = crate::controllers::retry::RetryJobs::new();
+        assert!(remaining_work(&downloads, &retry, true).is_empty());
         // Work that appears after the one-time drain is still reported.
         let (go, gate) = std::sync::mpsc::channel::<()>();
         downloads.start(
@@ -137,19 +148,19 @@ mod tests {
             }),
         );
         assert_eq!(
-            remaining_work(&downloads, true),
+            remaining_work(&downloads, &retry, true),
             vec!["A model download is still running."]
         );
         go.send(()).unwrap();
         assert!(downloads.wait_idle(std::time::Duration::from_secs(3)));
         let guard = downloads.begin_delete().unwrap();
         assert_eq!(
-            remaining_work(&downloads, false).len(),
+            remaining_work(&downloads, &retry, false).len(),
             2,
             "deletion + pending write"
         );
         drop(guard);
-        assert!(remaining_work(&downloads, true).is_empty());
+        assert!(remaining_work(&downloads, &retry, true).is_empty());
     }
 
     use super::*;

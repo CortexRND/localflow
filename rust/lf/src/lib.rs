@@ -4,24 +4,47 @@
 //! commands that work on local files (config, dictionary, history) plus the
 //! provider-key/LLM commands and a read-only `status` that asks the running
 //! server. The `serve` command hosts the Rust dictation and meeting services.
+//! `meeting start|stop|dismiss` POST to the running server, `prompts` reviews
+//! and dispatches the shared work-prompt queue, and `recall` searches local
+//! history, transcripts and notes; their Rich console output is reproduced by
+//! [`richfmt`]. `tweak` previews, applies and undoes plain-language settings
+//! changes through the local `lf-agent` settings agent.
+//! `agent` installs launch at login and `setup install-app` the macOS app
+//! bundles, both pointing at the Python installation.
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 use clap::Parser;
 
 pub mod args;
+mod clickfmt;
 pub mod clipboard;
+mod cmd_agent;
 mod cmd_config;
 mod cmd_dict;
 mod cmd_history;
+mod cmd_hub;
 mod cmd_keys;
 mod cmd_llm;
+mod cmd_meeting;
+mod cmd_prompts;
+mod cmd_recall;
+mod cmd_secret;
 mod cmd_serve;
+mod cmd_setup;
 mod cmd_status;
 mod cmd_stt;
+mod cmd_token;
+mod cmd_tweak;
+pub mod desktop_launch;
+mod native;
+mod prompt;
 pub mod pyfmt;
+mod pyfs;
+mod python;
+pub mod richfmt;
 
 pub use clipboard::{Clipboard, SystemClipboard};
 
@@ -36,6 +59,9 @@ pub struct Io<'a> {
     pub clipboard: &'a mut dyn Clipboard,
     /// Base URL override for `status` (tests); `None` = from config.
     pub server_url: Option<String>,
+    /// Stdin is a terminal: hidden prompts read from it without echo instead
+    /// of reading a line of `input`.
+    pub terminal: bool,
 }
 
 /// A user-facing failure. `Failed` is click's `ClickException` (prints
@@ -66,6 +92,32 @@ pub(crate) fn fail<T>(message: impl Into<String>) -> anyhow::Result<T> {
 
 pub(crate) fn usage<T>(message: impl Into<String>) -> anyhow::Result<T> {
     Err(CliError::Usage(message.into()).into())
+}
+
+/// click's `Abort`: `Aborted!` on stderr, exit 1.
+pub(crate) fn abort<T>(io: &mut Io<'_>) -> anyhow::Result<T> {
+    writeln!(io.err, "Aborted!")?;
+    Err(CliError::Exit(1).into())
+}
+
+/// `click.confirm(text, default=False)` on stdout: the answer is stripped and
+/// lowercased; y/yes or n/no, empty means no; anything else prints
+/// `Error: invalid input` (stdout too) and asks again. End of input is click's
+/// `Abort`, with nothing more on stdout.
+pub(crate) fn confirm(text: &str, io: &mut Io<'_>) -> anyhow::Result<bool> {
+    loop {
+        write!(io.out, "{text} [y/N]: ")?;
+        io.out.flush()?;
+        let mut line = String::new();
+        if io.input.read_line(&mut line)? == 0 {
+            return abort(io);
+        }
+        match pyfmt::py_strip(&line).to_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" | "" => return Ok(false),
+            _ => writeln!(io.out, "Error: invalid input")?,
+        }
+    }
 }
 
 /// Write one line to a stream; a closed pipe is not worth a panic.
@@ -129,6 +181,7 @@ where
     // Unlocked (stderr is unbuffered): holding the lock for the whole run
     // would block log records from other threads until exit.
     let mut err = io::stderr();
+    let terminal = stdin.is_terminal();
     let mut input = stdin.lock();
     let mut clipboard = SystemClipboard;
     let mut io = Io {
@@ -137,6 +190,7 @@ where
         input: &mut input,
         clipboard: &mut clipboard,
         server_url: None,
+        terminal,
     };
     run(args, &mut io)
 }
@@ -147,9 +201,15 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => {
+            if let Some(text) = clickfmt::usage_error(&args, &error) {
+                let _ = write!(io.err, "{text}");
+                let _ = io.err.flush();
+                return 2;
+            }
             let rendered = error.render().to_string();
             let stream: &mut dyn Write = if error.use_stderr() {
                 &mut *io.err
@@ -162,6 +222,11 @@ where
         }
     };
     let result = dispatch(cli.command, io);
+    report(result, io)
+}
+
+/// Print a command's error the way click does and return the exit status.
+pub(crate) fn report(result: anyhow::Result<()>, io: &mut Io<'_>) -> i32 {
     let code = match result {
         Ok(()) => 0,
         Err(error) => match error.downcast_ref::<CliError>() {
@@ -209,7 +274,16 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Llm(command) => cmd_llm::run(command, io),
         Command::Stt(command) => cmd_stt::run(command, io),
         Command::Keys(command) => cmd_keys::run(command, io),
+        Command::Secret(command) => cmd_secret::run(command, io),
         Command::Status { json } => cmd_status::run(json, io),
+        Command::Meeting(command) => cmd_meeting::run(command, io),
+        Command::Prompts(command) => cmd_prompts::run(command, io),
+        Command::Recall(args) => cmd_recall::run(args, io),
+        Command::Hub { page, gpui, legacy } => cmd_hub::run(page, gpui, legacy, io),
+        Command::Token => cmd_token::run(io),
+        Command::Tweak(args) => cmd_tweak::run(args, io),
+        Command::Agent(command) => cmd_agent::run(command, io),
+        Command::Setup(command) => cmd_setup::run(command, io),
     }
 }
 
@@ -225,14 +299,64 @@ mod tests {
         let help = run_cli(&["--help"]);
         assert_eq!(help.code, 0);
         assert!(help.out.contains("Usage: lf-rs"));
-        for name in ["config", "dict", "history", "llm", "keys", "status"] {
+        for name in [
+            "config", "dict", "history", "llm", "keys", "status", "meeting", "prompts", "hub",
+            "token", "tweak",
+        ] {
             assert!(help.out.contains(name), "{name}");
         }
+        // Hidden like their click counterparts, but still runnable.
+        assert!(!help.out.contains("recall"));
+        let prompts = run_cli(&["prompts", "--help"]);
+        assert!(prompts.out.contains("  dispatch") && !prompts.out.contains("  approve"));
+        assert_eq!(run_cli(&["recall", "--help"]).code, 0);
+        let start = run_cli(&["meeting", "start", "--help"]);
+        assert!(start.out.contains("--title") && start.out.contains("--category"));
         assert!(help.err.is_empty());
+        // `secret` is hidden like Python's `@cli.group(hidden=True)`.
+        assert!(!help
+            .out
+            .lines()
+            .any(|l| l.trim_start().starts_with("secret")));
+        let secret = run_cli(&["secret", "--help"]);
+        assert_eq!(secret.code, 0);
+        for name in ["set", "unset", "status"] {
+            assert!(secret.out.contains(name), "{name}");
+        }
         let sub = run_cli(&["history", "clear", "--help"]);
         assert_eq!(sub.code, 0);
         assert!(sub.out.contains("--yes"));
         assert_eq!(run_cli(&["--version"]).code, 0);
+        // `agent` is hidden like click's; `setup` is listed.
+        assert!(!help.out.contains("agent") && help.out.contains("setup"));
+        let agent = run_cli(&["agent", "--help"]);
+        assert!(agent.out.contains("install") && agent.out.contains("uninstall"));
+        assert!(run_cli(&["setup", "--help"]).out.contains("install-app"));
+    }
+
+    #[test]
+    fn new_groups_report_click_usage_errors() {
+        for (args, last) in [
+            (
+                &["agent"][..],
+                "  uninstall  Alias of `lf autostart uninstall`",
+            ),
+            (&["agent", "bogus"], "Error: No such command 'bogus'."),
+            (
+                &["setup", "install-app", "extra"],
+                "Error: Got unexpected extra argument (extra)",
+            ),
+            (
+                &["agent", "status", "a", "b"],
+                "Error: Got unexpected extra arguments (a b)",
+            ),
+        ] {
+            let outcome = run_cli(args);
+            assert_eq!((outcome.code, outcome.out.as_str()), (2, ""), "{args:?}");
+            let line = outcome.err.lines().last().unwrap_or_default();
+            assert!(line.starts_with(last), "{args:?}: {line}");
+        }
+        assert_eq!(run_cli(&["setup"]).code, 2);
     }
 
     #[test]
@@ -247,10 +371,63 @@ mod tests {
             &["dict", "import"],
             &["llm", "use"],
             &["keys"],
+            &["keys", "import", "--file"],
+            &["secret"],
+            &["secret", "set"],
+            &["secret", "unset"],
+            &["meeting"],
+            &["meeting", "bogus"],
+            &["prompts"],
+            &["prompts", "dispatch", "--dry-run", "--repo"],
         ] {
             let outcome = run_cli(args);
             assert_eq!(outcome.code, 2, "{args:?}");
             assert!(!outcome.err.is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn new_commands_report_click_usage_errors_before_touching_files() {
+        for (args, message) in [
+            (&["recall"][..], "Missing argument 'QUESTION'."),
+            (&["recall", " \t"], "question is empty"),
+            (
+                &["recall", "x", "--k", "0"],
+                "Invalid value for '--k': 0 is not in the range 1<=x<=20.",
+            ),
+            (
+                &["recall", "--k=x"],
+                "Invalid value for '--k': 'x' is not a valid integer range.",
+            ),
+            (
+                &["recall", "x", "--since", "Soon"],
+                "Invalid value for --since: invalid since value 'Soon'; \
+                 use today, yesterday, 7d, 30d or YYYY-MM-DD",
+            ),
+            (
+                &["hub", "--page", "x", "--gpui", "--legacy"],
+                "Invalid value for '--page': 'x' is not one of 'home', 'ask', 'hot phrases', \
+                 'dictionary', 'prompts', 'meetings', 'history', 'style', 'models', 'settings'.",
+            ),
+            (
+                &["hub", "--page", "SETTINGS", "--gpui", "--legacy"],
+                "--gpui and --legacy can't be used together",
+            ),
+            (&["prompts", "show"], "Missing argument 'PROMPT_ID'."),
+            (&["prompts", "approve"], "Missing argument 'IDS...'."),
+            (&["prompts", "reject"], "Missing argument 'IDS...'."),
+            (
+                &["prompts", "list", "-s", "done"],
+                "Invalid value for '--status' / '-s': 'done' is not one of \
+                 'pending', 'approved', 'rejected', 'dispatched', 'failed'.",
+            ),
+        ] {
+            let outcome = run_cli(args);
+            assert_eq!(
+                (outcome.code, outcome.out.as_str(), outcome.err.as_str()),
+                (2, "", format!("Error: {message}\n").as_str()),
+                "{args:?}"
+            );
         }
     }
 

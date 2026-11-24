@@ -72,7 +72,8 @@ using the Hub's `hub_route::plan_initial_route` policy.
 ### System tray
 
 On Linux and Windows, LocalFlow shows a tray item while the desktop window is
-running. Right-click it for runtime status, **Open LocalFlow**, the dictation
+running; on macOS it is a menu bar item. Right-click it (on macOS, click it or
+reach it with the keyboard) for runtime status, **Open LocalFlow**, the dictation
 switch and **Quit LocalFlow**. The switch uses the active config (the isolated
 config in sandbox mode). **Paste last transcript** is enabled only while this
 window's opt-in dictation engine is running; it never sends commands to another
@@ -80,7 +81,21 @@ runtime. Closing the last window still quits the app.
 
 On Linux the tray uses the session D-Bus and needs a StatusNotifierItem host,
 such as KDE Plasma or GNOME with an AppIndicator extension. If the host is
-unavailable, the window still runs. macOS keeps the existing AppKit menu.
+unavailable, the window still runs.
+
+On macOS the menu bar item uses a template icon (tinted for light and dark menu
+bars) and is not shown in `--sandbox`, so sandbox automation leaves the menu bar
+alone. **Paste last transcript** checks the target once, when the window
+handles the request: if the app that was frontmost when you chose it is
+LocalFlow, unknown, or no longer frontmost, nothing is pasted, no app is
+activated and the clipboard is untouched; a toast in the LocalFlow window asks
+you to switch to the target app and choose it again. Choosing it again before
+LocalFlow has handled the first request does nothing. After the check passes,
+the paste goes through the engine queue and a history lookup (which waits if
+the history database is busy) before the paste keystroke, and goes to whichever
+app is frontmost then, as with the paste shortcut. The item is not interactively
+verified on macOS yet (UI QA waived); an earlier native probe exercised the
+status item and its menu callbacks.
 
 The crate is a **standalone Cargo workspace** with its own `Cargo.lock`, so GPUI's
 dependency tree and system libraries stay out of the `rust/` workspace and its CI.
@@ -89,7 +104,8 @@ or one of its path dependencies changes:
 
 - **Linux:** fmt, then clippy, the headless tests (including the shim's) and the
   build, each for the default build and for `--features runtime`.
-- **macOS:** the shim tests and a full type-check of both builds.
+- **macOS:** the shim tests and a full type-check of both builds, including the
+  menu bar item.
 - **Windows:** a type-check of the desktop and its native tray.
 
 The runtime feature adds `lf-stt` (whisper.cpp needs CMake and libclang) and
@@ -381,6 +397,11 @@ meantime, are kept. The running LocalFlow runtime reads the same file.
 - It's **kept between launches**, so edits can be checked after a relaunch.
 - `--sandbox-reset` re-seeds it, and refuses to delete a directory that has no
   marker. A non-empty directory that isn't a sandbox is refused too.
+- History **Retry** is a labelled simulation: the failed example has a synthetic
+  clip, and Retry runs the real text pipeline over the sandbox dictionary and
+  snippets with a fixed transcript ("Sandbox: simulated result. No speech model
+  ran."). No model, cleanup provider or key is used. Sandboxes seeded before
+  this existed have no clip on that row; run `--sandbox-reset` to re-seed.
 - Keys live in memory only. The OS keyring is never read or written.
 - Ask, Meetings and Prompts use the existing in-process fakes, and no socket is
   opened. Ask answers with a labelled keyword match over the example history.
@@ -450,6 +471,28 @@ Shortcut, Try it, Review. It is built on `lf_ui::setup_flow` (`initial_choices`,
 - **Default build:** the microphone test works; speech inspection, download and
   the trial say they need `--features runtime` (choices are still saved).
   **Runtime build:** they run for real against the Hugging Face cache.
+
+## History retry
+
+- **Retry** (secondary to Copy) appears for dictations with saved audio. It
+  transcribes the clip again through the shared `process_clip` pipeline with the
+  current settings, this window's dictionary, snippets and commands, and the
+  row's own app (for its style). A failing cleanup provider keeps the
+  uncleaned text, as in live dictation.
+- Only the installed configured model is used; Retry never downloads, never
+  picks another model and never starts dictation, the microphone or the
+  shortcut listener. On macOS it runs in the speech helper with a cache-only
+  load request (a helper without that support refuses before loading).
+- Success replaces that row's status, text and word count in place (an atomic
+  conditional update: a row deleted, cleared and reused, or edited meanwhile is
+  left alone) and shows a short toast. Nothing is pasted or copied, `last.txt`
+  is untouched and no clip is pruned.
+- One retry runs at a time per process; the button reads **Retrying…** and stays
+  focusable, and repeat presses are ignored. A failure stays as a banner on that
+  row with **Try again**. Closing waits briefly for a retry and says it can't be
+  interrupted.
+- **Default build:** Retry is disabled with the rebuild hint. **Sandbox:** a
+  labelled simulation (see Sandbox above).
 
 ## Models & keys
 

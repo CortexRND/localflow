@@ -47,7 +47,7 @@ Legend:
 | History | Search (debounced, background), paging, details | Works | `HistoryStore::recent(limit, query, offset)` | `lf history`, Hub |
 | History | Copy final or original text | Works | clipboard | Hub |
 | History | Delete one, clear all (with confirmation) | Works | `HistoryStore::delete/clear` | Hub |
-| History | Retry transcription | Honest-off (`HISTORY_RETRY_UNAVAILABLE`) | — | Python Hub |
+| History | Retry transcription | Works in `--features runtime` builds for dictations with a saved 16 kHz clip: the shared `process_clip` pipeline (current config, this data root's dictionary/snippets/commands, the row's app context, fail-soft cleanup) with only the installed configured model (cache-only; never downloads; macOS keeps the speech helper via a cache-only load request old helpers reject). Updates only that row with an atomic conditional update (refuses a deleted, cleared-and-reused or edited row); no paste, clipboard, `last.txt`, pruning or config write. One job per process; a close waits briefly for it and can't interrupt it. Default build explains the rebuild; the sandbox runs a labelled simulation (no model, provider or key). Native interaction and macOS are unverified | `lf_runtime::pipeline::process_clip`, `HistoryStore::update_if_unchanged`, `lf_stt::runtime::hub_speech_cached` | Python Hub |
 | Dictionary | Add, edit, remove (with Undo) words and replacements | Works | `hub_model::submit_*` → `dictionary.json` | `lf dict`, Hub |
 | Dictionary | Import CSV/JSON | Works (file picker, or a typed path when no portal is available) | `DictionaryStore::import_file` | `lf dict import` |
 | Snippets | Create, edit, enable, delete with Undo, autosave, external-change reconcile, try-it preview | Works | `HotPhrasesEditor<PhrasesModel>` → `hot_phrases.json` | `lf phrases`, Hub |
@@ -56,29 +56,29 @@ Legend:
 | Settings | Every row in `controllers::settings::SPECS` | Works with validation | `apply_config_update`. Shortcuts are normalised and conflict-checked through `lf_core::shortcuts` | `lf config`, Hub |
 | Settings | Sounds and meeting detection on Linux | Honest-off | — | — |
 | Settings | Data locations, what leaves the device, clear history, read-only current config | Works | — | — |
-| Settings | Settings assistant (natural-language change): preview, explicit apply, undo that keeps newer edits, stale-preview and conflict handling | Works (native agent on explicit paths, loopback Ollama; writes through `settings_worker::dispatch`). Sandbox: native agent with a scripted offline chat | `hub_settings`, `settings_agent_native`, `settings_worker` | `lf tweak`, Hub |
+| Settings | Settings assistant (natural-language change): preview, explicit apply, undo that keeps newer edits, stale-preview and conflict handling | Works (native agent on explicit paths, loopback Ollama; writes through `settings_worker::dispatch`). Sandbox: native agent with a scripted offline chat | `hub_settings`, `settings_agent_native`, `settings_worker` | `lf tweak`, `lf-rs tweak` (the same `lf-agent`, default config/dictionary/undo paths), Hub |
 | Settings | Run setup again; sandbox-only simulated runtime state selector | Works | — | — |
-| Settings | Launch at login | Honest-off on Linux; macOS points to `lf agent` | — | `lf agent install` |
+| Settings | Launch at login | Honest-off on Linux; macOS points to `lf agent` | — | `lf agent install`, `lf-rs agent install/uninstall/status` (`lf-rs agent install` never replaces a native install's agent) |
 | Models | Speech engine and model size | Works (`models_layout::set_speech`; MLX refused off Apple silicon) | `[stt]` | `lf stt`, `lf-rs stt list/use`, Hub |
 | Models | Speech models on this computer: installed / downloading (progress, cancel) / failed (retry) / in use; download, use, delete with confirmation | Works in `--features runtime` builds (default build explains the rebuild). Delete is refused for the selected model and for models leased by a running LocalFlow, re-checked at delete time; only managed, non-symlinked cache folders are removed | `lf_stt::model_storage`, `stt_lease`, `FlowModelBackend` | `lf setup`, `lf-rs stt download` (Python catalog), Hub |
 | Models | Cleanup model: Ollama installed list, or a typed model ID | Works (background list, `cleanup_picker` states) | `[llm] model` | `lf llm`, Hub |
 | Models | Provider keys: add or replace (masked, cleared after save), remove (with confirmation), use or activate | Works through `ProviderKeys` and the OS keyring. Key values are never shown or kept. Key presence is read on a worker and cached (render never touches the keyring); save, use, remove and import run on workers too | keyring + `[llm]` | `lf keys`, `lf llm use`, Hub |
 | Models | Import keys from the environment or a `.env` file (selection, overwrite marker, counts) | Works. Values never shown or logged; active provider unchanged; providers overridden by `LOCALFLOW_PROVIDER_KEY_<ID>` can't be imported | `keys::detect_imports`, `ProviderKeys::save_imports` | `lf keys import`, Hub |
 | Models | Test connection | Works on click only, background, 10 s timeout, model-list probe, no prompt sent, three fixed result sentences. The provider in use is probed as configured (`factory::build_llm` + `healthcheck`, keeping its endpoint and endpoint-bound key); other rows probe their preset with the saved key (`ProviderKeys::test_llm`) | provider HTTP | Hub |
-| Ask | Question and answer, examples, time filter, citations to History or vault files, Stop | Works when the service is up. Offline banner and retry otherwise | `HttpAskBackend` → `/api/recall` | `lf recall`, Hub |
+| Ask | Question and answer, examples, time filter, citations to History or vault files, Stop | Works when the service is up. Offline banner and retry otherwise | `HttpAskBackend` → `/api/recall` | `lf recall`, `lf-rs recall` (local `lf_ask`, no service needed), Hub |
 | Ask | Source filter | Honest-off (the adapter refuses restricted sets) | — | — |
 | Meetings | Feature off: explanation and turn-on button | Works (says a restart is needed) | `[features] meetings` | `lf config` |
-| Meetings | Start, notes autosave (800 ms, ordered), stop and save, chat, open saved note, recent notes | Works when the service is up | `HttpMeetingClient` → `/meeting/*`, `hub_model::recent_notes` | `lf meeting`, Hub |
+| Meetings | Start, notes autosave (800 ms, ordered), stop and save, chat, open saved note, recent notes | Works when the service is up | `HttpMeetingClient` → `/meeting/*`, `hub_model::recent_notes` | `lf meeting`, `lf-rs meeting start/stop/dismiss`, Hub |
 | Meetings | Auto-detect on Linux | Honest-off | — | — |
-| Prompts | List, filter by status, approve or reject with conflict messages, pending badge | Works when the service is up | `HttpPromptQueue` | `lf prompts`, Hub |
-| Prompts | Dispatch to Orca | CLI only (the page says so) | — | `lf prompts dispatch` |
+| Prompts | List, filter by status, approve or reject with conflict messages, pending badge | Works when the service is up | `HttpPromptQueue` | `lf prompts`, `lf-rs prompts list/show/approve/reject`, Hub |
+| Prompts | Dispatch to Orca | CLI only (the page says so) | — | `lf prompts dispatch`, `lf-rs prompts dispatch` |
 | Shell | Sidebar with 10 destinations, light/dark from the system, keyboard map, toasts, confirmation dialogs, minimum window size 960 × 640 | Works | — | — |
 | Shell | Narrow layout (below 1100 px): History list or detail with Back | Works (History) | — | — |
 | Shell | Single instance and page routing (including Setup) | Works per mode and data folder: OS lock held for the process, `hub_route::RequestFile` hand-off, requests queued behind the overlay or a dialog; if the owner exits mid hand-off the new window consumes and routes the newest request. Own namespace (`~/.localflow/desktop/`, `<sandbox>/desktop-instance/`), so it still runs beside the legacy Hub without routing to it | `singleinstance`, `hub_route` | Hub |
 | Shell | Screen-reader tree | Not possible with GPUI 0.2.2 (no accessibility API) | — | `lf-hub` on macOS |
 | Dictation | Linux global hotkeys in the Rust engine | Works on X11 (listen-only XInput2 raw events via `x11rb`, no grab or extra permission; hold, toggle, chords, sides, repeat suppression, clean stop). Wayland: explicit "unsupported" with the reason. Listener readiness is published only after the platform accepted it. If the listener dies, held keys count as released: a hold recording ends and is transcribed; a toggle or command recording is discarded | `lf_input::linux` | Python runtime |
 | Dictation | Windows global hotkeys in the Rust engine | Listen-only Win32 keyboard hook on the current desktop; supports hold-to-talk, chords, sided modifiers, repeat suppression, and clean stop. Printable shortcuts use virtual keys with US punctuation mappings | `lf_input::listener` | Python runtime |
-| Dictation | Tray item | Missing | — | Python runtime |
+| Dictation | Tray item | Works on Linux (StatusNotifierItem), Windows and macOS (menu bar item, not shown in `--sandbox`): status, Open, dictation switch, Paste last transcript (this window's engine only; on macOS refused unless, when the window handles the request, the app frontmost when it was chosen is still frontmost and isn't LocalFlow; as with the paste shortcut, focus can change after that check and before the keystroke), Quit. macOS: type-checked in CI and an earlier native probe exercised the status item and menu callbacks; this integration is not interactively verified (UI QA waived) | `lf_runtime::menubar::MenuModel`, `tray-icon` / `ksni` | Python runtime |
 
 Wispr Flow features that LocalFlow doesn't plan (account, team sharing, sync, mobile,
 cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
@@ -89,8 +89,9 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    works in `lf-desktop`, or the owner explicitly waives it. PR 2 implemented the
    setup wizard, model storage, the settings assistant, key import, Test LLM, and
    single-instance and page routing; they still need interactive review on Linux
-   (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
-   rows (tray item, History retry) need a decision.
+   (X11 and Wayland) and macOS before this gate is met. No rows remain marked
+   Missing: the tray item (Linux, Windows and macOS) and History retry (runtime
+   builds) are implemented but, like the rest, still need interactive review.
 2. **Data safety.** [`gpui_data_safety.py`](../scripts/gpui_data_safety.py) compares
    the real config file, `~/.localflow` and the keyring by hash before and after a
    scripted sandbox session. In real mode, every write goes through `config_write`
@@ -107,7 +108,9 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    it's installed and falls back to the current UI otherwise. Two launches hand
    over the page instead of opening two windows. 4a implements this behind the
    opt-in (a hand-off exits 0 and is not treated as a failure); verified by
-   fake-executable tests only, not against a real window.
+   fake-executable tests only, not against a real window. `lf-rs hub` follows
+   the same rules with byte-identical notices (`rust/lf/src/desktop_launch.rs`,
+   compared with `lf hub` in `tests/test_rust_parity.py`).
 5. **Packaging.** The installers ship a release `lf-desktop` and its system-library
    requirements are documented per distribution. The `rust/` workspace CI matrix
    isn't weakened. PR 3 ships it as a separate preview package and installer;

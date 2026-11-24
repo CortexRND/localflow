@@ -15,7 +15,7 @@ use crate::pyfmt::{self, py_space};
 use crate::{outln, Io};
 
 /// Header the Python server checks (localflow/server.py).
-const TOKEN_HEADER: &str = "X-Localflow-Token";
+pub(crate) const TOKEN_HEADER: &str = "X-Localflow-Token";
 
 /// `server_url.client_host`: the address a local client dials for a server
 /// bound to `host` (wildcards become loopback, brackets are stripped).

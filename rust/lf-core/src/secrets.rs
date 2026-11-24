@@ -175,6 +175,18 @@ impl MemoryKeyring {
             .unwrap_or_else(|poison| poison.into_inner());
         map.get(&(service.to_string(), name.to_string())).cloned()
     }
+
+    /// Every `name -> value` stored for `service`.
+    pub fn values(&self, service: &str) -> std::collections::BTreeMap<String, String> {
+        let map = self
+            .values
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        map.iter()
+            .filter(|((stored, _), _)| stored == service)
+            .map(|((_, name), value)| (name.clone(), value.clone()))
+            .collect()
+    }
 }
 
 impl KeyringBackend for MemoryKeyring {

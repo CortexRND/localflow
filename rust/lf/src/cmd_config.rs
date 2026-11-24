@@ -247,15 +247,11 @@ fn migrate(io: &mut Io<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use lf_core::secrets::{self, FailingKeyring, KeyringBackend};
 
-    use crate::testing::run_cli;
-
-    /// The only lf unit test that touches the environment and the
-    /// process-wide keyring backend; serialize anyway in case more appear.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::testing::{run_cli, ENV_LOCK};
 
     /// Sets/removes variables and the keyring override; restores both on drop.
     struct Sandbox {

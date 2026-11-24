@@ -56,6 +56,7 @@ pub const LLM_FIELDS: &[&str] = &[
     "llm_provider",
     "llm_base_url",
     "llm_model",
+    "llm_fast_model",
     "llm_key_ref",
     "cleanup_timeout",
     "cleanup_num_ctx",

@@ -43,7 +43,7 @@ HOTKEY_FIELDS = frozenset(
 )
 DEFAULT_INTERVAL = 2.0
 LLM_FIELDS = (
-    "llm_provider", "llm_base_url", "llm_model", "llm_key_ref",
+    "llm_provider", "llm_base_url", "llm_model", "llm_fast_model", "llm_key_ref",
     "cleanup_timeout", "cleanup_num_ctx",
 )
 STT_FIELDS = ("stt_backend", "model_size", "language", "stt_device")

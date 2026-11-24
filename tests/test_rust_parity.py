@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import ast
 import hashlib
 import types
 import os
 import platform
+import plistlib
+import shlex
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -37,11 +41,14 @@ from typing import ClassVar
 from urllib.parse import urlsplit
 
 import pytest
+from click.testing import CliRunner
 
+from localflow import cli as py_cli
 from localflow import config as py_config
 from localflow import dictionary as py_dictionary
 from localflow import formatting as py_formatting
 from localflow import hotphrases as py_hotphrases
+from localflow import secrets as py_secrets
 from localflow import settings_agent as py_settings
 from localflow import symbols as py_symbols
 from localflow.config import (
@@ -379,11 +386,12 @@ def test_local_writer_bytes_collisions_and_queue_cross_read(rust_build, sandbox,
     assert_same(queue.get(added[0]["id"]), changed)
 
 
-def lf(rust_build, sandbox, *args, input_text: str | None = None, env=None):
+def lf(rust_build, sandbox, *args, input_text: str | None = None, env=None, cwd=None):
     binary, _ = rust_build
     return subprocess.run(
         [str(binary), *args],
         check=False,
+        cwd=cwd,
         input=input_text if input_text is not None else "",
         capture_output=True,
         text=True,
@@ -1222,7 +1230,7 @@ def test_token_read_never_creates(rust_build, sandbox):
 def test_cli_help_and_usage_errors(rust_build, sandbox):
     result = lf(rust_build, sandbox, "--help")
     assert result.returncode == 0
-    for name in ("config", "dict", "history", "llm", "keys", "status"):
+    for name in ("config", "dict", "history", "llm", "keys", "status", "tweak"):
         assert name in result.stdout
     assert lf(rust_build, sandbox, "history", "clear", "--help").returncode == 0
     assert lf(rust_build, sandbox, "bogus").returncode == 2
@@ -1335,6 +1343,40 @@ def test_cli_stt_python_plugin(rust_build, sandbox):
     assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == (
         _cli_output(_python_cli(sandbox, *args, env=env))
     )
+
+
+@pytest.mark.parametrize("args", [
+    ("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "not-a-provider"),
+    ("stt", "download", "mlx-tiny"),
+])
+def test_cli_stt_probes_ignore_working_directory(rust_build, sandbox, args):
+    if args[1] == "download" and sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        if importlib.util.find_spec("mlx_whisper") is not None:
+            pytest.skip("the installed Apple Silicon runtime passes the download gate")
+    planted = sandbox["root"] / "planted"
+    marker = sandbox["root"] / "imported"
+    metadata = planted / "planted-0.1.dist-info"
+    for package in (planted / "importlib", planted / "mlx_whisper", metadata):
+        package.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\nplanted = planted_plugin:Planted\n", encoding="utf-8",
+    )
+    for module in (
+        "json.py", "platform.py", "dataclasses.py", "contextlib.py", "importlib/__init__.py",
+        "planted_plugin.py", "mlx_whisper/__init__.py",
+    ):
+        (planted / module).write_text(
+            f"with open({str(marker)!r}, 'a', encoding='utf-8') as f:\n    f.write({module!r} + '\\n')\n",
+            encoding="utf-8",
+        )
+    path = sandbox["config"]
+    save_config(Config(model_size="small", stt_device="cpu", dictation_enabled=False), path)
+    before = path.read_bytes()
+    env = {**_stt_probes_same_python(sandbox), "HF_HUB_OFFLINE": "1"}
+    rust = lf(rust_build, sandbox, *args, env=env, cwd=planted)
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    assert path.read_bytes() == before
+    assert _cli_output(rust) == _cli_output(_python_cli(sandbox, *args, env=env))
 
 
 def test_cli_stt_download_rejects_unknown_model(rust_build, sandbox):
@@ -1703,6 +1745,253 @@ def test_cli_keys_list_masks_values(rust_build, sandbox):
     assert "sk-secret" not in result.stdout
 
 
+# `keys import` and the hidden `secret` group: Python's CLI runs in-process
+# (CliRunner) against a dict keyring; the Rust CLI runs in-process in the
+# parity driver against a seeded MemoryKeyring, with the same env and stdin.
+
+PROVIDER_ENV = (
+    "FIREWORKS_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY",
+    "TOGETHER_API_KEY", "OPENAI_COMPAT_API_KEY", "LLM_API_KEY",
+)
+SAVE_PROMPT = "Save this key? [y/N]: "
+
+
+class _DeleteError(Exception):
+    """Stands in for keyring's PasswordDeleteError (same text as the driver)."""
+
+
+@pytest.fixture
+def keys_env(sandbox, py_env, monkeypatch):
+    """No provider keys or LOCALFLOW_<SECRET> overrides on either side, so
+    only the test's own environment and keyring are seen."""
+    for name in PROVIDER_ENV + tuple(f"LOCALFLOW_{n.upper()}" for n in SECRET_NAMES):
+        monkeypatch.delenv(name, raising=False)
+        sandbox["env"].pop(name, None)
+    return sandbox
+
+
+def _python_keyring_cli(monkeypatch, args, stdin, env, keyring, failing):
+    values = dict(keyring)
+
+    def check():
+        if failing:
+            raise RuntimeError(failing)
+
+    def get_password(service, name):
+        check()
+        return values.get(name)
+
+    def set_password(service, name, value):
+        check()
+        values[name] = value
+
+    def delete_password(service, name):
+        check()
+        if name not in values:
+            raise _DeleteError("Password not found")
+        del values[name]
+
+    fake = types.SimpleNamespace(
+        get_password=get_password, set_password=set_password, delete_password=delete_password,
+    )
+    # Outside pytest these records reach stderr through logging's last-resort
+    # handler; pytest's own handlers keep them out of `result.stderr`.
+    warnings = _WarningRecords()
+    logger = logging.getLogger("localflow")
+    logger.addHandler(warnings)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(py_secrets, "keyring", fake)
+            patch.setattr(py_secrets, "_keyring_warned", False)
+            result = CliRunner().invoke(py_cli.cli, args, input=stdin, env=env)
+    finally:
+        logger.removeHandler(warnings)
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+    return {"code": result.exit_code, "out": result.stdout, "err": result.stderr, "keyring": values,
+            "warnings": warnings.messages}
+
+
+class _WarningRecords(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _unecho(out: str, prompt: str, stdin: str) -> str:
+    """CliRunner echoes each answer after a visible prompt; a real piped
+    stdin (and lf-rs) does not."""
+    answers = iter(stdin.splitlines())
+    parts = out.split(prompt)
+    for index in range(1, len(parts)):
+        answer = next(answers, None)
+        if answer is not None:
+            assert parts[index].startswith(answer + "\n"), (prompt, parts[index])
+            parts[index] = parts[index][len(answer) + 1:]
+    return prompt.join(parts)
+
+
+def cli_parity(rust_build, sandbox, monkeypatch, args, *, stdin="", env=None, keyring=None,
+               failing=None, secrets=(), full_err=True):
+    """Run `lf ARGS` in Python and Rust; compare exit code, stdout, the final
+    keyring, logged warnings and stderr (the whole of it, its last line for
+    click usage errors, or only the `Error: ` prefix when `full_err` is
+    False, which also compares only the number of warnings)."""
+    env = env or {}
+    keyring = keyring or {}
+    python = _python_keyring_cli(monkeypatch, args, stdin, env, keyring, failing)
+    request = {"op": "cli", "args": list(args), "stdin": stdin, "keyring": keyring}
+    if failing:
+        request["failing_keyring"] = failing
+    rust = drive1(rust_build, {"env": {**sandbox["env"], **env}}, request)
+    assert "error" not in rust, rust
+    for value in secrets:
+        assert value not in rust["out"] + rust["err"] + "".join(rust["warnings"]), value
+    assert rust["code"] == python["code"], (rust, python)
+    assert rust["keyring"] == python["keyring"]
+    if full_err:
+        assert rust["warnings"] == python["warnings"]
+    else:
+        assert len(rust["warnings"]) == len(python["warnings"])
+    if python["code"] == 2:
+        last = rust["err"].splitlines()[-1]
+        if last.startswith("Error: "):  # lf-rs reports this one as click does
+            assert last == python["err"].splitlines()[-1]
+        return rust
+    assert rust["out"] == _unecho(python["out"], SAVE_PROMPT, stdin)
+    if full_err:
+        assert rust["err"] == python["err"]
+    else:
+        assert rust["err"].startswith("Error: ") and python["err"].startswith("Error: ")
+        assert len(rust["err"].splitlines()) == len(python["err"].splitlines()) == 1
+    return rust
+
+
+def test_keys_import_nothing_found(rust_build, keys_env, monkeypatch):
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import"])
+    assert rust["out"] == "No keys found\n" and rust["keyring"] == {}
+    cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import", "--yes"],
+               env={"OPENAI_API_KEY": "  ", "GROQ_API_KEY": "$OTHER"})
+
+
+KEY_FILE = """\
+# provider keys
+export OPENAI_API_KEY="sk-open-file-1111"
+GROQ_API_KEY='gsk-file-2222'
+TOGETHER_API_KEY=$TOGETHER_FROM_ENV
+FIREWORKS_API_KEY=fw-file-3333
+LLM_API_KEY=" custom-file-6666 "
+"""
+KEY_VALUES = (
+    "sk-open-file-1111", "gsk-file-2222", "fw-file-3333", "custom-file-6666", "fw-env-5555",
+)
+
+
+@pytest.mark.parametrize("stdin", [
+    "y\nn\nmaybe\nyes\n\nY\n",
+    "n\n NO \nn\nn\nn\n",
+    "y\ny\ny\ny\ny",
+])
+def test_keys_import_file_and_environment(rust_build, keys_env, monkeypatch, tmp_path, stdin):
+    path = tmp_path / ".env"
+    path.write_text(KEY_FILE, encoding="utf-8")
+    env = {"FIREWORKS_API_KEY": "fw-env-5555"}
+    seeded = {"provider_key_groq": "old-groq-0000"}
+    args = ["keys", "import", "--file", str(path)]
+    rust = cli_parity(rust_build, keys_env, monkeypatch, args, stdin=stdin, env=env,
+                      keyring=seeded, secrets=KEY_VALUES)
+    assert rust["code"] == 0
+    assert rust["out"].count(SAVE_PROMPT) >= 5
+    if stdin.startswith("y\n"):
+        assert rust["keyring"]["fireworks_api_key"] == rust["keyring"]["provider_key_fireworks"]
+    rust = cli_parity(rust_build, keys_env, monkeypatch, [*args, "--yes"], env=env,
+                      keyring=seeded, secrets=KEY_VALUES)
+    assert SAVE_PROMPT not in rust["out"] and rust["out"].endswith("Saved 5 key(s)\n")
+    assert rust["keyring"]["fireworks_api_key"] == "fw-file-3333"
+    assert rust["keyring"]["provider_key_custom"] == "custom-file-6666"
+
+
+@pytest.mark.parametrize("stdin", ["", "y\n", "y\nmaybe\n", "y\nn\ny"])
+def test_keys_import_end_of_input_aborts_without_saving(rust_build, keys_env, monkeypatch,
+                                                         tmp_path, stdin):
+    path = tmp_path / "profile"
+    path.write_text(KEY_FILE, encoding="utf-8")
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import", "--file", str(path)],
+                      stdin=stdin, env={"FIREWORKS_API_KEY": "fw-env-5555"},
+                      keyring={"llm_api_key": "keep"}, secrets=KEY_VALUES)
+    assert (rust["code"], rust["err"]) == (1, "Aborted!\n")
+    assert rust["keyring"] == {"llm_api_key": "keep"}
+
+
+def test_keys_import_file_errors(rust_build, keys_env, monkeypatch, tmp_path):
+    missing = tmp_path / "missing.env"
+    binary = tmp_path / "binary.env"
+    binary.write_bytes(b"OPENAI_API_KEY=sk-\xff\xfe-9999\n")
+    env = {"GROQ_API_KEY": "gsk-env-8888"}
+    for target, code in ((missing, 2), (tmp_path, 2), (binary, 1)):
+        rust = cli_parity(rust_build, keys_env, monkeypatch,
+                          ["keys", "import", "--file", str(target)], env=env,
+                          secrets=("gsk-env-8888",))
+        assert rust["code"] == code and rust["keyring"] == {}
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import", "--file"])
+    assert rust["code"] == 2
+
+
+def test_keys_import_keyring_failure_is_sanitized(rust_build, keys_env, monkeypatch, tmp_path):
+    path = tmp_path / ".env"
+    path.write_text(KEY_FILE, encoding="utf-8")
+    args = ["keys", "import", "--file", str(path)]
+    failing = "backend down"
+    rust = cli_parity(rust_build, keys_env, monkeypatch, [*args, "--yes"], failing=failing,
+                      secrets=KEY_VALUES)
+    assert (rust["code"], rust["err"]) == (1, "Error: Unable to save keys; check Keychain access\n")
+    assert failing not in rust["err"]
+    assert rust["warnings"] == [f"keyring unavailable: {failing}"]
+    # Nothing confirmed: nothing is written, so the broken keyring is never hit.
+    rust = cli_parity(rust_build, keys_env, monkeypatch, args, stdin="n\n" * 5, failing=failing,
+                      secrets=KEY_VALUES)
+    assert rust["out"].endswith("Saved 0 key(s)\n")
+
+
+@pytest.mark.parametrize("stdin", ["sk-typed-7777\n", "\n\n sk-typed-7777 \n", "sk-typed-7777", "", "\n"])
+def test_secret_set(rust_build, keys_env, monkeypatch, stdin):
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["secret", "set", "llm_api_key"],
+                      stdin=stdin, keyring={"fireworks_api_key": "fw-old"},
+                      secrets=("sk-typed-7777",))
+    assert rust["code"] == (0 if "sk-typed" in stdin else 1)
+
+
+def test_secret_unset_status_and_usage(rust_build, keys_env, monkeypatch):
+    stored = {"llm_api_key": "sk-stored-1234", "fireworks_api_key": "fw-stored-5678"}
+    values = ("sk-stored-1234", "fw-stored-5678", "sk-env-1111", "fw-legacy-2222")
+    for name in ("llm_api_key", "missing_name"):
+        cli_parity(rust_build, keys_env, monkeypatch, ["secret", "unset", name], keyring=stored)
+    for keyring, env in (
+        ({}, {}),
+        ({"llm_api_key": "sk-stored-1234"}, {}),
+        (stored, {"LOCALFLOW_FIREWORKS_API_KEY": ""}),
+        ({}, {"LOCALFLOW_LLM_API_KEY": "sk-env-1111"}),
+        ({}, {"FIREWORKS_API_KEY": "fw-legacy-2222"}),
+    ):
+        cli_parity(rust_build, keys_env, monkeypatch, ["secret", "status"], env=env,
+                   keyring=keyring, secrets=values)
+    for args in (["secret"], ["secret", "set"], ["secret", "unset"], ["secret", "bogus"]):
+        assert cli_parity(rust_build, keys_env, monkeypatch, args)["code"] == 2
+
+
+def test_secret_failing_keyring(rust_build, keys_env, monkeypatch):
+    failing = "keyring backend unavailable"
+    for args, stdin in ((["secret", "set", "llm_api_key"], "sk-typed-7777\n"),
+                        (["secret", "unset", "llm_api_key"], "")):
+        rust = cli_parity(rust_build, keys_env, monkeypatch, args, stdin=stdin, failing=failing,
+                          secrets=("sk-typed-7777",), full_err=False)
+        assert rust["code"] == 1
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["secret", "status"], failing=failing)
+    assert rust["out"] == "llm_api_key: not configured\nfireworks_api_key: not configured\n"
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1782,6 +2071,1010 @@ def test_cli_status(rust_build, sandbox, py_env):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ------------------------------------------- meeting / prompts / recall ---
+
+# Both CLIs print through Rich (Python) or its emulation (Rust): a fixed
+# COLUMNS keeps the soft-wrap width independent of the terminal running
+# pytest, and UTF-8 mode stops Windows pipes from using the ANSI code page.
+_RICH_ENV = {"COLUMNS": "80", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",
+             "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
+
+
+def _clis(rust_build, sandbox, *args, env=None, reset=None, input_text=""):
+    """Run the Python CLI, then lf-rs, in the same sandbox with the same args
+    and stdin.
+
+    `reset` runs between the two, to restore state the Python run changed."""
+    env = {**_RICH_ENV, **(env or {})}
+    python = subprocess.run(
+        [sys.executable, "-m", "localflow.cli", *args], cwd=ROOT, input=input_text,
+        env={**sandbox["env"], **env}, check=False, capture_output=True, text=True,
+        encoding="utf-8", timeout=120,
+    )
+    if reset is not None:
+        reset()
+    return lf(rust_build, sandbox, *args, env=env, input_text=input_text), python
+
+
+def _usage_error(result):
+    """Exit code, stdout and click's closing `Error: ...` line (the `Usage:`
+    preamble names a different program)."""
+    return result.returncode, result.stdout, result.stderr.splitlines()[-1:]
+
+
+def _rich_reference(case: dict) -> str:
+    """What a non-terminal, colourless Rich console of `width` prints."""
+    import io
+
+    from rich.console import Console as RichConsole
+    from rich.table import Table
+    from rich.text import Text
+
+    console = RichConsole(file=io.StringIO(), width=case["width"], no_color=True, force_terminal=False,
+                          legacy_windows=False, color_system=None)
+    if case["kind"] == "table":
+        table = Table(box=None, header_style="dim")
+        for header in case["headers"]:
+            table.add_column(header)
+        for row in case["rows"]:
+            table.add_row(*row)
+        console.print(table)
+    else:
+        console.print(case["text"] if case["kind"] == "markup" else Text(case["text"]))
+    return console.file.getvalue()
+
+
+def test_rich_console_emulation(rust_build, sandbox):
+    import random
+
+    pieces = ["a", "word", "longerword", "x" * 30, " ", "  ", "\t", "\n", "-", "/", "é", "漢字", "—", "…", "●",
+              "[red]", "[/red]", "[bold]", "[/bold]", "\\[", "[WIP]", "[1]", "[link]", "]", "[", "\\", "\x07", "\r"]
+    rng = random.Random(1234)
+
+    def text(n):
+        return "".join(rng.choice(pieces) for _ in range(rng.randint(0, n)))
+
+    cases = [
+        {"kind": "markup", "width": 80, "text": "[red]server not running[/red] — open [bold]LocalFlow.app[/bold] x"},
+        {"kind": "text", "width": 10, "text": "[1] Fri Nov 13 09:00 · meeting · Launch — \"launch [bold]\""},
+        {"kind": "table", "width": 80, "headers": ["id", "title"], "rows": [["1", "x " * 60], ["2", ""]]},
+    ]
+    for _ in range(400):
+        kind = rng.choice(["markup", "text", "table", "table"])
+        width = rng.choice([5, 10, 20, 40, 79, 80])
+        if kind == "table":
+            headers = rng.sample(["id", "status", "title", "meeting", "created"], rng.randint(1, 5))
+            rows = [[text(12) for _ in headers] for _ in range(rng.randint(0, 4))]
+            cases.append({"kind": kind, "width": width, "headers": headers, "rows": rows})
+        else:
+            cases.append({"kind": kind, "width": width, "text": text(25)})
+    # Markup Rich rejects (an unmatched closing tag) is a documented gap.
+    checked = []
+    for case in cases:
+        try:
+            checked.append((case, _rich_reference(case)))
+        except Exception as exc:  # noqa: BLE001 - rich.errors.MarkupError
+            assert type(exc).__name__ == "MarkupError"
+    results = drive(rust_build, sandbox, [{"op": "rich", **case} for case, _ in checked])
+    for (case, expected), result in zip(checked, results):
+        assert result == expected, case
+    assert len(checked) > 200
+
+
+class _MeetingServer(BaseHTTPRequestHandler):
+    replies: ClassVar[dict] = {}
+    seen: ClassVar[list] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        self.seen.append({
+            "method": self.command, "path": self.path,
+            "token": self.headers.get("X-Localflow-Token"),
+            "json": json.loads(raw) if raw else None,
+        })
+        status, body = self.replies.get(self.path, (404, {"detail": "Not Found"}))
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json" if not isinstance(body, bytes) else "text/plain")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def _meeting_clis(rust_build, sandbox, *args):
+    """Both CLIs against the fake server; also what each one sent."""
+    _MeetingServer.seen.clear()
+    python_sent: list = []
+    rust, python = _clis(rust_build, sandbox, *args, reset=lambda: python_sent.extend(_MeetingServer.seen))
+    return rust, python, python_sent, _MeetingServer.seen[len(python_sent):]
+
+
+def test_cli_meeting(rust_build, sandbox):
+    paths = _require_isolated(rust_build, sandbox, "token_path")
+    port = _free_port()
+    save_config(Config(server_port=port), sandbox["config"])
+    down_rust, down_python = _clis(rust_build, sandbox, "meeting", "dismiss")
+    assert _cli_output(down_rust) == _cli_output(down_python) == (
+        1, "server not running — open LocalFlow.app (it starts the server) or run: lf serve\n", "",
+    )
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), _MeetingServer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    long_path = str(sandbox["root"] / "vault" / ("very-long-folder-name-" * 3) / "2026-11-13 0900 Sprint planning.md")
+    cases = [
+        (("meeting", "start"), {"/meeting/start": (200, {"category": "Zoom", "ok": True})}),
+        (("meeting", "start", "-t", "Meeting", "-c", "Teams"), {"/meeting/start": (200, {"category": "Teams"})}),
+        (("meeting", "start", "--title", "Sprint [wip] review", "--category", ""),
+         {"/meeting/start": (200, {"category": "[bold]auto[/bold] detected"})}),
+        (("meeting", "stop",), {"/meeting/stop": (200, {"segments": 12, "notes_path": long_path, "log_path": "log.md"})}),
+        (("meeting", "dismiss"), {"/meeting/dismiss": (200, {})}),
+        (("meeting", "stop"), {"/meeting/stop": (409, {"detail": "no meeting in progress"})}),
+        (("meeting", "stop"), {"/meeting/stop": (500, b"<html>oops</html>")}),
+        (("meeting", "start"), {"/meeting/start": (400, {"error": "no detail key"})}),
+        (("meeting", "start"), {"/meeting/start": (422, {"detail": [{"loc": ["body", "title"], "msg": "bad"}]})}),
+        (("meeting", "dismiss"), {"/meeting/dismiss": (401, ["not", "an", "object"])}),
+    ]
+    try:
+        for token in (None, "tok-meeting"):
+            if token:
+                token_path = Path(paths["token_path"])
+                token_path.parent.mkdir(parents=True, exist_ok=True)
+                token_path.write_text(token + "\n", encoding="utf-8")
+            for args, replies in cases:
+                _MeetingServer.replies = replies
+                rust, python, python_sent, rust_sent = _meeting_clis(rust_build, sandbox, *args)
+                assert _cli_output(rust) == _cli_output(python), args
+                assert rust_sent == python_sent, args
+                assert [r["token"] for r in rust_sent] == [token]
+                assert rust.stderr == ""
+                if replies is cases[0][1]:
+                    assert rust.stdout == "● transcribing — category Zoom. Stop with: lf meeting stop\n"
+        assert python_sent[0]["json"] is None  # stop/dismiss send no body
+        starts = []
+        for args, replies in cases[:3]:
+            _MeetingServer.replies = replies
+            starts.append(_meeting_clis(rust_build, sandbox, *args)[3][0]["json"])
+        assert starts == [
+            {"title": "Meeting", "category": "", "auto_title": True},
+            {"title": "Meeting", "category": "Teams", "auto_title": False},
+            {"title": "Sprint [wip] review", "category": "", "auto_title": False},
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _seed_prompt_queue(home: Path) -> Path:
+    """A queue in every status, written by the Python PromptQueue."""
+    from localflow import dispatch as py_dispatch
+
+    prompts = [py_dispatch.WorkPrompt(title, f"Do the {n} thing carefully.") for n, title in enumerate([
+        "Fix launch pricing tests",
+        "Write the end-to-end migration plan for the billing service and every reporting dashboard",
+        "Review the [docs] page and [WIP] notes",
+        "Retry the flaky sync",
+        "Drop the old exporter",
+        "Ship the dark mode toggle",
+    ])]
+    paths = py_dispatch.write_prompts(prompts, "Sprint planning", datetime(2026, 11, 13, 9, 0),
+                                      home / "projs" / "prompts" / "meetings")
+    queue = py_dispatch.PromptQueue(home / ".localflow" / "queue.json")
+    entries = queue.add(prompts, paths, "Sprint planning")
+    ids = [e["id"] for e in entries]
+    queue.set_status(ids[1], "approved")
+    queue.set_status(ids[2], "dispatched", worktree="repo::/wt/docs", handle="term-docs", repo="id:r")
+    queue.set_status(ids[3], "failed", error="orca exited 1: boom", worktree="repo::/wt/stale", handle="term-old")
+    queue.set_status(ids[4], "rejected")
+    queue.set_status(ids[5], "dispatched", worktree="", handle="", repo="id:r")
+    return queue.path
+
+
+def _prompt_clis(rust_build, sandbox, queue_path: Path, *args, env=None):
+    """Both CLIs from the same queue file; the queue each one left behind."""
+    before = queue_path.read_bytes()
+    after: list[bytes] = []
+
+    def reset():
+        after.append(queue_path.read_bytes())
+        queue_path.write_bytes(before)
+
+    rust, python = _clis(rust_build, sandbox, *args, env=env, reset=reset)
+    return rust, python, queue_path.read_bytes(), after[0]
+
+
+def test_cli_prompts_list_show_and_review(rust_build, sandbox):
+    paths = _require_isolated(rust_build, sandbox, "history_path")
+    home = Path(paths["history_path"]).parent.parent
+    assert home == sandbox["home"]
+    queue_path = home / ".localflow" / "queue.json"
+    for args in (("prompts", "list"), ("prompts", "list", "-s", "failed")):
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _cli_output(rust) == _cli_output(python)
+        assert rust.returncode == 0 and str(queue_path) in rust.stdout.replace("\n", "")
+    assert not queue_path.exists()
+
+    queue_path = _seed_prompt_queue(home)
+    from localflow import dispatch as py_dispatch
+    ids = [e["id"] for e in py_dispatch.PromptQueue(queue_path).list()]
+    pending, approved, dispatched, failed, rejected, bare = ids
+    missing_file = Path(py_dispatch.PromptQueue(queue_path).get(rejected)["path"])
+    missing_file.unlink()
+    read_only = [
+        ("prompts", "list"), ("prompts", "list", "--status", "pending"), ("prompts", "list", "-s", "dispatched"),
+        ("prompts", "list", "--status", "approved"),
+        ("prompts", "show", pending), ("prompts", "show", dispatched), ("prompts", "show", bare),
+        ("prompts", "show", rejected), ("prompts", "show", "nope"),
+    ]
+    for columns in ("80", "60", "200"):
+        for args in read_only:
+            rust, python, rust_queue, python_queue = _prompt_clis(
+                rust_build, sandbox, queue_path, *args, env={"COLUMNS": columns})
+            assert _cli_output(rust) == _cli_output(python), (columns, args)
+            assert rust_queue == python_queue
+    # Rich reads `[docs]` in a title as a style tag; `[WIP]` (uppercase) is text.
+    wide = _clis(rust_build, sandbox, "prompts", "list", env={"COLUMNS": "200"})[0].stdout
+    assert "Review the  page and [WIP] notes" in wide
+
+    mutating = [
+        ("prompts", "approve", pending), ("prompts", "reject", pending),
+        ("prompts", "approve", failed), ("prompts", "reject", failed),
+        ("prompts", "approve", approved), ("prompts", "reject", dispatched),
+        ("prompts", "approve", pending, rejected, failed), ("prompts", "approve", pending, "nope", failed),
+        ("prompts", "reject", "nope"),
+    ]
+    for args in mutating:
+        rust, python, rust_queue, python_queue = _prompt_clis(rust_build, sandbox, queue_path, *args)
+        assert _cli_output(rust) == _cli_output(python), args
+        assert rust_queue == python_queue, args
+    retried = _prompt_clis(rust_build, sandbox, queue_path, "prompts", "approve", failed)[2]
+    entry = next(e for e in json.loads(retried) if e["id"] == failed)
+    assert (entry["status"], entry["error"], entry["worktree"], entry["handle"]) == ("approved", "", "", "")
+
+    for args in (("prompts", "list", "--status", "bogus"), ("prompts", "show"), ("prompts", "approve"),
+                 ("prompts", "reject")):
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2
+
+
+_FAKE_ORCA = """\
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_ORCA_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(args) + "\\n")
+if args[:2] == ["status", "--json"]:
+    print("SecCodeCheckValidity: noise", file=sys.stderr)
+    running = os.environ.get("FAKE_ORCA_MODE") != "stopped"
+    print(json.dumps({"result": {"app": {"running": running}, "runtime": {"reachable": True}}}))
+elif args[:2] == ["worktree", "create"]:
+    name = args[args.index("--name") + 1]
+    if "retry" in name:
+        print("creating worktree\\nfatal: repo is busy  ", file=sys.stderr)
+        sys.exit(3)
+    worktree = {"worktreeId": "repo::/wt/" + name}
+    print("noise " + json.dumps({"ok": True, "result": {"worktree": worktree, "agentTerminalHandle": "term-" + name}}))
+"""
+
+
+def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+    paths = _require_isolated(rust_build, sandbox, "history_path")
+    home = Path(paths["history_path"]).parent.parent
+    queue_path = _seed_prompt_queue(home)
+    from localflow import dispatch as py_dispatch
+    ids = [e["id"] for e in py_dispatch.PromptQueue(queue_path).list()]
+    pending, approved, _dispatched, failed, _rejected, _bare = ids
+    no_orca = tmp_path / "no-orca"
+    no_orca.mkdir()
+    env = {"PATH": str(no_orca)}
+
+    def check(*args, env=env, code=None):
+        rust, python, rust_queue, python_queue = _prompt_clis(rust_build, sandbox, queue_path, *args, env=env)
+        assert _cli_output(rust) == _cli_output(python), args
+        assert rust_queue == python_queue, args
+        if code is not None:
+            assert rust.returncode == code, rust.stdout
+        return rust, rust_queue
+
+    check("prompts", "dispatch", "--all", code=1)  # no repo configured
+    check("prompts", "dispatch", "--repo", "id:r", code=1)  # nothing selected
+    check("prompts", "dispatch", approved, "--all", "--repo", "id:r", code=1)
+    check("prompts", "dispatch", approved, pending, failed, "--repo", "id:r", code=1)
+    check("prompts", "dispatch", approved, "nope", "--repo", "id:r", code=1)
+    for columns in ("80", "40"):
+        check("prompts", "dispatch", "--all", "--repo", "id:" + "r" * 30, "--agent", "codex", "--dry-run",
+              env={**env, "COLUMNS": columns}, code=0)
+    check("prompts", "dispatch", "--all", "--repo", "id:r", code=1)  # orca not on PATH
+    save_config(Config(orca_repo="id:configured", orca_agent="claude"), sandbox["config"])
+    check("prompts", "dispatch", approved, "--dry-run", code=0)
+    no_approved = py_dispatch.PromptQueue(queue_path)
+    no_approved.set_status(approved, "rejected")
+    check("prompts", "dispatch", "--all", code=0)
+    no_approved.set_status(approved, "approved", expect=("rejected",))
+    if os.name == "nt":
+        return  # subprocess needs a real orca.exe; the rest is covered on POSIX
+
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    (bin_dir / "fake_orca.py").write_text(_FAKE_ORCA, encoding="utf-8")
+    orca = bin_dir / "orca"
+    orca.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{bin_dir / "fake_orca.py"}" "$@"\n', encoding="utf-8")
+    orca.chmod(0o755)
+    log = tmp_path / "orca.log"
+    orca_env = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""), "FAKE_ORCA_LOG": str(log)}
+    check("prompts", "dispatch", "--all", env={**orca_env, "FAKE_ORCA_MODE": "stopped"}, code=1)
+    queue = py_dispatch.PromptQueue(queue_path)
+
+    def dispatched_with_orca(*args, code):
+        log.write_text("", encoding="utf-8")
+        _, rust_queue = check(*args, env=orca_env, code=code)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert lines[: len(lines) // 2] == lines[len(lines) // 2:]  # same orca calls from both
+        return [json.loads(line) for line in lines[: len(lines) // 2]], {e["id"]: e for e in json.loads(rust_queue)}
+
+    # One success and one failure ("retry" makes the fake orca exit 3).
+    queue.set_status(failed, "approved")
+    calls, entries = dispatched_with_orca("prompts", "dispatch", "--all", "--agent", "codex", code=1)
+    assert calls[0] == ["status", "--json"]
+    assert calls[1][:8] == ["worktree", "create", "--repo", "id:configured", "--name",
+                            "write-the-end-to-end-migration-plan-for", "--agent", "codex"]
+    assert calls[1][8:] == ["--prompt", "Do the 1 thing carefully.", "--no-parent", "--setup", "run", "--json"]
+    assert entries[approved]["status"] == "dispatched"
+    assert entries[approved]["worktree"] == "repo::/wt/write-the-end-to-end-migration-plan-for"
+    assert (entries[failed]["status"], entries[failed]["error"]) == ("failed", "orca exited 3: fatal: repo is busy")
+    queue.set_status(pending, "approved")
+    calls, entries = dispatched_with_orca("prompts", "dispatch", pending, code=0)
+    assert [call[:2] for call in calls] == [["status", "--json"], ["worktree", "create"]]
+    assert entries[pending]["handle"] == "term-fix-launch-pricing-tests"
+
+
+_NOTES = {
+    ("Notes", "2026-11-13 0900 Launch.md"): "---\ntags: [x]\n---\n# Launch\nPricing budget owners agreed: café budget.",
+    ("Notes", "Zoom", "2026-10-02 1400 Retro.md"): "Retro on launch pricing and the [bold] budget",
+    ("Transcripts", "2026-11-13 0900 Launch (transcript).md"):
+        "# Launch\n\n**[00:00]** launch pricing budget review\n\n**[01:05]** owners agreed on launch pricing",
+}
+
+
+def _seed_recall(sandbox, *, base_url: str, history: bool = True) -> None:
+    vault = sandbox["root"] / "vault"
+    for parts, body in _NOTES.items():
+        path = vault.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    store = HistoryStore(sandbox["home"] / ".localflow" / "history.sqlite", sandbox["home"] / ".localflow" / "clips")
+    now = datetime.now().timestamp()
+    for days, text in [(1.25, "launch pricing budget for the café"), (3.5, "launch pricing owners"),
+                       (10.5, "unrelated groceries"), (40.5, "launch pricing budget " * 40)]:
+        store.add(kind="dictate", app_name="Editor", final_text=text, ts=now - days * DAY)
+    save_config(Config(vault_path=str(vault), notes_folder="Notes", logs_folder="Transcripts",
+                       llm_provider="ollama", llm_base_url=base_url, history_enabled=history), sandbox["config"])
+
+
+class _FakeOllama(BaseHTTPRequestHandler):
+    status: ClassVar[int] = 200
+    reply: ClassVar[str] = ""
+    prompts: ClassVar[list] = []
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        self.prompts.append((self.path, body["model"], body["prompt"]))
+        data = json.dumps({"response": self.reply}).encode()
+        self.send_response(self.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_cli_recall_search_and_errors(rust_build, sandbox):
+    _require_isolated(rust_build, sandbox, "history_path")
+    _seed_recall(sandbox, base_url=f"http://127.0.0.1:{_free_port()}")
+    for args in [
+        ("recall", "launch pricing", "--no-llm"), ("recall", "launch pricing", "--no-llm", "--json"),
+        ("recall", "launch pricing", "--no-llm", "--since", "7d"), ("recall", "launch", "--no-llm", "--k", "2"),
+        ("recall", '"launch pricing" café', "--no-llm", "--json", "--since", "2026-01-01"),
+        ("recall", "budget", "--no-llm", "--since", "today"), ("recall", "nonexistent", "--no-llm"),
+        ("recall", "nonexistent", "--json"), ("recall", "nonexistent"), ("recall", "launch", "--no-llm", "--k", "20"),
+    ]:
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _cli_output(rust) == _cli_output(python), args
+        assert rust.returncode == 0
+        if args == ("recall", "launch pricing", "--no-llm"):
+            assert rust.stdout.startswith("\nSources\n[1] ")
+            assert "dictation · Editor — " in rust.stdout and "meeting · Launch — " in rust.stdout
+    for args in [("recall", ""), ("recall", "  "), ("recall", "x", "--since", "Bogus"), ("recall", "x", "--k", "0"),
+                 ("recall", "x", "--k", "21"), ("recall", "x", "--k", "abc"), ("recall",), ("recall", "--k", "0")]:
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2
+
+    # Unreachable LLM: the passages still print; the logged reason carries
+    # OS-specific connection text, so only its prefix is compared.
+    rust, python = _clis(rust_build, sandbox, "recall", "launch pricing")
+    assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout)
+    assert "LLM unavailable — showing matching passages only." in rust.stdout
+    prefix = "recall: LLM unavailable, returning passages only: Ollama completion failed: "
+    assert rust.stderr.startswith(prefix) and python.stderr.startswith(prefix)
+
+    save_config(Config(vault_path=str(sandbox["root"] / "vault"), notes_folder="Notes", logs_folder="Transcripts",
+                       history_enabled=False), sandbox["config"])
+    for args in [("recall", "launch pricing", "--no-llm"), ("recall", "groceries", "--no-llm", "--json")]:
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _cli_output(rust) == _cli_output(python), args
+    assert "dictation" not in rust.stdout
+
+
+def test_cli_recall_llm_answers(rust_build, sandbox):
+    _require_isolated(rust_build, sandbox, "history_path")
+    port = _free_port()
+    _seed_recall(sandbox, base_url=f"http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeOllama)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        for status, reply, flags in [
+            (200, "Launch pricing was agreed [1], with owners in [2; 9] .", ()),
+            (200, "Launch pricing was agreed [1], with owners in [2; 9] .", ("--json",)),
+            (200, "I couldn't find that in your history", ()),
+            (200, "", ("--json",)),
+            (500, "", ()),
+            (200, "[9]", ()),
+        ]:
+            _FakeOllama.status, _FakeOllama.reply = status, reply
+            _FakeOllama.prompts.clear()
+            rust, python = _clis(rust_build, sandbox, "recall", "launch pricing budget", "--k", "3", *flags)
+            assert _cli_output(rust) == _cli_output(python), (status, reply, flags)
+            assert rust.returncode == 0
+            if flags == () and reply.startswith("Launch"):
+                assert rust.stdout.startswith("Launch pricing was agreed [1], with owners in [2].\n\nSources\n")
+            # One identical prompt (passages, local times, question) from each.
+            assert len(_FakeOllama.prompts) == 2 and _FakeOllama.prompts[0] == _FakeOllama.prompts[1]
+            assert _FakeOllama.prompts[0][:2] == ("/api/generate", Config().llm_model)
+            assert bool(rust.stderr) == (status == 500 or not reply)  # empty replies are errors too
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# ------------------------------------------------------------- token / hub ---
+
+
+def test_cli_token(rust_build, sandbox):
+    token_path = Path(_require_isolated(rust_build, sandbox, "token_path")["token_path"])
+    rust, python = _clis(rust_build, sandbox, "token")
+    assert _cli_output(rust) == _cli_output(python)
+    assert rust.returncode == 1 and rust.stdout.startswith("no API token yet — ")
+    assert not token_path.exists()
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    for raw, expected in ((b" \n\t \r\n", None), (b"  tok-123 \r\n", "tok-123\n")):
+        token_path.write_bytes(raw)
+        rust, python = _clis(rust_build, sandbox, "token")
+        assert _cli_output(rust) == _cli_output(python), raw
+        assert (rust.returncode, rust.stdout if expected else None) == (0 if expected else 1, expected)
+        assert token_path.read_bytes() == raw
+
+
+# The Python CLI with `cli.subprocess.Popen` recording the legacy argv instead
+# of opening a window; desktop_launch's own Popen (probe, preview) stays real.
+_HUB_PYTHON = """\
+import json, sys, types
+from localflow import cli
+record = sys.argv.pop(1)
+def popen(argv, **kwargs):
+    with open(record, "a", encoding="utf-8") as f:
+        f.write(json.dumps(argv[1:]) + "\\n")
+cli.subprocess = types.SimpleNamespace(Popen=popen)
+cli.cli()
+"""
+# `-m localflow.hub_window` for lf-rs: a stub package on PYTHONPATH.
+_HUB_STUB = """\
+import json, os, sys
+with open(os.environ["LF_TEST_LEGACY_RECORD"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.orig_argv[1:]) + "\\n")
+"""
+_FAKE_DESKTOP = """\
+#!{python}
+import json, os, sys, time
+with open(os.environ["LF_TEST_DESKTOP_RECORD"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:] == ["--help"]:
+    sys.stdout.write({help!r})
+    sys.exit(0)
+print("native-stderr", file=sys.stderr)
+time.sleep({stay!r})
+sys.exit({code!r})
+"""
+_DESKTOP_HELP = (
+    "lf-desktop — LocalFlow native desktop app (GPUI preview)\n\nOPTIONS:\n"
+    "    --page <PAGE>      Open a page\n    --setup            Open the setup wizard\n\n"
+    "EXIT STATUS (launch-status: 1):\n    0   The window closed, or the request was handed off\n"
+)
+
+
+def _records(path: Path) -> list:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.fixture
+def hub(rust_build, sandbox, tmp_path):
+    """Run `args` through lf-rs and the Python CLI; each side gives
+    (result, legacy argv tails, lf-desktop argv tails)."""
+    stub = tmp_path / "stub"
+    (stub / "localflow").mkdir(parents=True)
+    (stub / "localflow" / "__init__.py").write_bytes(b"")
+    (stub / "localflow" / "hub_window.py").write_bytes(_HUB_STUB.encode())
+    work = tmp_path / "cwd"  # never the repo root, so `-m` can't find the real package
+    work.mkdir()
+    runs = []
+
+    def run(*args, env=None):
+        sides = {}
+        for side in ("python", "rust"):
+            runs.append(side)
+            legacy = tmp_path / f"legacy-{len(runs)}.jsonl"
+            desktop = tmp_path / f"desktop-{len(runs)}.jsonl"
+            full = {**sandbox["env"], **_RICH_ENV, **(env or {}), "LF_TEST_DESKTOP_RECORD": str(desktop)}
+            if side == "rust":
+                full.update(_stt_probes_same_python(sandbox))
+                full.update(PYTHONPATH=str(stub), LF_TEST_LEGACY_RECORD=str(legacy))
+                command, cwd = [str(rust_build[0]), *args], work
+            else:
+                command, cwd = [sys.executable, "-c", _HUB_PYTHON, str(legacy), *args], ROOT
+            result = subprocess.run(
+                command, cwd=cwd, env=full, input="", check=False, capture_output=True,
+                text=True, encoding="utf-8", timeout=120,
+            )
+            sides[side] = (result, _records(legacy), _records(desktop))
+        return sides["rust"], sides["python"]
+
+    return run
+
+
+def _same_hub(pair):
+    (rust, rust_legacy, rust_desktop), (python, legacy, desktop) = pair
+    assert _cli_output(rust) == _cli_output(python)
+    assert (rust_legacy, rust_desktop) == (legacy, desktop)
+    return python, legacy, desktop
+
+
+def _legacy(page):
+    return [["-m", "localflow.hub_window", "--page", page]]
+
+
+def test_cli_hub_usage_errors_and_sandbox_refusal(hub):
+    from localflow.desktop_launch import SANDBOX_REFUSAL
+
+    for args in [("hub", "--page", "x"), ("hub", "--page", "hot  phrases"), ("hub", "--page", ""),
+                 ("hub", "--page", "x", "--gpui", "--legacy"), ("hub", "--gpui", "--legacy"),
+                 ("hub", "--legacy", "--page", "Home", "--gpui")]:
+        (rust, *rust_runs), (python, *python_runs) = hub(*args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2 and rust_runs == python_runs == [[], []], args
+    (rust, _, _), _ = hub("hub", "--page", "x")
+    assert rust.stderr.splitlines()[-1] == (
+        "Error: Invalid value for '--page': 'x' is not one of 'home', 'ask', 'hot phrases', "
+        "'dictionary', 'prompts', 'meetings', 'history', 'style', 'models', 'settings'."
+    )
+    for args, env in [(("hub", "--gpui"), {"LOCALFLOW_SANDBOX": "1"}),
+                      (("hub", "--page", "ask"), {"LOCALFLOW_UI": "gpui", "LOCALFLOW_SANDBOX": "true"})]:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
+        assert (python.returncode, python.stderr) == (1, f"Error: {SANDBOX_REFUSAL}\n")
+        assert legacy == desktop == []
+
+
+def test_cli_hub_legacy_launches(hub):
+    from localflow.desktop_launch import NOTICE_INVALID_ENV, NOTICE_PLATFORM
+
+    cases = [
+        (("hub",), {}, "Home", ""),
+        (("hub", "--page", "hot phrases"), {}, "Hot Phrases", ""),
+        (("hub", "--legacy", "--page", "SETTINGS"), {"LOCALFLOW_UI": "gpui"}, "Settings", ""),
+        (("hub",), {"LOCALFLOW_UI": " Bogus "}, "Home", NOTICE_INVALID_ENV + "\n"),
+        (("hub", "--page", "Ask"), {"LOCALFLOW_SANDBOX": "1", "LOCALFLOW_UI": "legacy"}, "Ask", ""),
+    ]
+    if os.name == "nt":  # no preview package: one notice, then the legacy window
+        cases.append((("hub", "--gpui", "--page", "models"), {}, "Models", NOTICE_PLATFORM + "\n"))
+    for args, env, page, stderr in cases:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
+        assert (python.returncode, python.stdout, python.stderr) == (0, "", stderr), args
+        assert (legacy, desktop) == (_legacy(page), []), args
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake lf-desktop needs a POSIX executable")
+def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
+    from localflow import desktop_launch as dl
+
+    def fake(name, *, help_text=_DESKTOP_HELP, code=0, stay=0.0):
+        path = tmp_path / "bin" / name / "lf-desktop"
+        path.parent.mkdir(parents=True)
+        script = _FAKE_DESKTOP.format(python=sys.executable, help=help_text, stay=stay, code=code)
+        path.write_bytes(script.encode())
+        path.chmod(0o755)
+        return {"LOCALFLOW_DESKTOP_BIN": str(path)}
+
+    good, early = fake("good"), fake("early", code=2)
+    old = fake("old", help_text=_DESKTOP_HELP.replace("    --setup ", "    --set "))
+    staying = fake("stay", code=1, stay=2.5)
+    probe, launch = ["--help"], ["--page", "Hot Phrases"]
+    cases = [
+        (("hub", "--gpui"), {}, dl.NOTICE_NOT_INSTALLED, "Home", []),
+        (("hub", "--gpui"), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop"}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
+        (("hub", "--gpui", "--page", "ask"), {"LOCALFLOW_DESKTOP_BIN": str(tmp_path / "missing")},
+         dl.NOTICE_BAD_OVERRIDE, "Ask", []),
+        (("hub", "--gpui", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
+        (("hub", "--gpui", "--page", "hot phrases"), early, "native-stderr\n" + dl.NOTICE_EARLY_EXIT.format(code=2),
+         "Hot Phrases", [probe, launch]),
+        (("hub", "--gpui"), good, "native-stderr", None, [probe, []]),
+        (("hub", "--gpui", "--page", "Home"), good, "native-stderr", None, [probe, ["--page", "Home"]]),
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": "GPUI"}, "native-stderr", None, [probe, launch]),
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": ""}, "", "Hot Phrases", []),
+        (("hub", "--gpui"), staying, "native-stderr", None, [probe, []]),
+    ]
+    for args, env, stderr, page, launches in cases:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
+        assert (python.returncode, python.stdout) == (0, ""), args
+        assert python.stderr == (stderr + "\n" if stderr else ""), args
+        assert (legacy, desktop) == ((_legacy(page) if page else []), launches), args
+
+    # Something the preview installer didn't install sits at the package root.
+    linux = sys.platform.startswith("linux")
+    root = sandbox["home"].joinpath(*(dl.LINUX_ROOT if linux else dl.MAC_APP))
+    root.mkdir(parents=True)
+    python, legacy, desktop = _same_hub(hub("hub", "--gpui", "--page", "models"))
+    assert python.stderr == dl.NOTICE_NOT_OWNED + "\n"
+    assert (legacy, desktop) == (_legacy("Models"), [])
+
+
+# ------------------------------------------------------------------ tweak ---
+
+
+class _FakeTweakOllama(BaseHTTPRequestHandler):
+    """`GET /api/tags` and `POST /api/chat` for the Settings agent; a bytes
+    body is sent as is, anything else as JSON."""
+
+    tags: ClassVar[tuple] = (200, {"models": [{"name": "llama3:8b"}, {"name": "gemma4:e4b"}]})
+    chat: ClassVar[tuple] = (200, {"message": {}})
+    requests: ClassVar[list] = []
+
+    def _send(self, status, body):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/api/tags":
+            self._send(*self.tags)
+        else:
+            self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        self.requests.append((self.path, body))
+        self._send(*self.chat)
+
+    def log_message(self, *args):
+        pass
+
+
+def _tool_calls(*calls):
+    return (200, {"message": {"role": "assistant", "content": "", "tool_calls": [
+        {"function": {"name": name, "arguments": arguments}} for name, arguments in calls
+    ]}})
+
+
+def _tweak_paths(sandbox):
+    data = sandbox["home"] / ".localflow"
+    return {"config": sandbox["config"], "dictionary": data / "dictionary.json",
+            "undo": data / "settings-undo.json", "legacy": sandbox["home"] / ".localflow.toml"}
+
+
+def _tweak_state(sandbox):
+    """Config and legacy bytes, the parsed dictionary (Python writes it in text
+    mode, so with CRLF on Windows; Rust writes LF), and the parsed undo record
+    without its timestamp."""
+    state = {}
+    for name, path in _tweak_paths(sandbox).items():
+        data = path.read_bytes() if path.exists() else None
+        if name in ("dictionary", "undo") and data is not None:
+            data = json.loads(data)
+        if name == "undo" and data is not None:
+            assert isinstance(data.pop("created"), (int, float))
+        state[name] = data
+    return state
+
+
+def _tweak_restore(sandbox, saved):
+    for path, data in zip(_tweak_paths(sandbox).values(), saved, strict=True):
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+
+def _tweak_clis(rust_build, sandbox, *args, input_text=""):
+    """`_clis` for `tweak`: both CLIs start from the same files, which are put
+    back afterwards; returns the two results and the files each left behind."""
+    saved = [p.read_bytes() if p.exists() else None for p in _tweak_paths(sandbox).values()]
+    states = {}
+
+    def reset():
+        states["python"] = _tweak_state(sandbox)
+        _tweak_restore(sandbox, saved)
+
+    _FakeTweakOllama.requests.clear()
+    rust, python = _clis(rust_build, sandbox, "tweak", *args, reset=reset, input_text=input_text)
+    states["rust"] = _tweak_state(sandbox)
+    _tweak_restore(sandbox, saved)
+    return rust, python, states["python"], states["rust"]
+
+
+def _assert_tweak_same(rust_build, sandbox, *args, input_text=""):
+    rust, python, python_state, rust_state = _tweak_clis(rust_build, sandbox, *args, input_text=input_text)
+    assert _cli_output(rust) == _cli_output(python), args
+    assert rust_state == python_state, args
+    # Both CLIs sent the identical chat request (model, messages, tools, options).
+    requests = _FakeTweakOllama.requests
+    assert len(requests) in (0, 2), requests
+    if requests:
+        assert requests[0] == requests[1]
+        assert requests[0][0] == "/api/chat"
+    return rust, rust_state
+
+
+@pytest.fixture
+def tweak_ollama(rust_build, sandbox):
+    """A fake loopback Ollama the saved config points both CLIs at."""
+    # The dictionary and the undo record live in ~/.localflow.
+    _require_isolated(rust_build, sandbox, "dictionary_path")
+    port = _free_port()
+    save_config(Config(llm_provider="ollama", llm_base_url=f"http://127.0.0.1:{port}"), sandbox["config"])
+    _FakeTweakOllama.tags = (200, {"models": [{"name": "llama3:8b"}, {"name": "gemma4:e4b"}]})
+    _FakeTweakOllama.chat = (200, {"message": {}})
+    _FakeTweakOllama.requests.clear()
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeTweakOllama)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+_TWEAK_FULL = _tool_calls(
+    ("set_setting", {"key": "sounds_enabled", "value": "off"}),
+    ("add_dictionary_word", {"word": "Kubernetes"}),
+    ("add_replacement", {"spoken": "gonna", "written": "going to"}),
+)
+_TWEAK_FULL_REQUEST = "turn off sounds, learn Kubernetes and write gonna as going to"
+
+
+def test_cli_tweak_usage_errors(rust_build, sandbox, tweak_ollama):
+    before = _tweak_state(sandbox)
+    for args in [(), ("   ",), ("--yes",), ("-y",), ("--undo", "turn off sounds"), ("turn off sounds", "--undo"),
+                 ("--undo", "--yes"), ("--yes", "--undo"), ("-y", "--undo")]:
+        rust, python, python_state, rust_state = _tweak_clis(rust_build, sandbox, *args, input_text="y\n")
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2 and rust.stdout == "", args
+        assert rust_state == python_state == before
+        assert _FakeTweakOllama.requests == []
+    # Parser-level errors: clap words these itself, as for the other commands.
+    for args in [("--bogus", "x"), ("--yes=1", "a"), ("a", "b")]:
+        rust, python, python_state, rust_state = _tweak_clis(rust_build, sandbox, *args, input_text="y\n")
+        assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout) == (2, ""), args
+        assert rust_state == python_state == before
+        assert _FakeTweakOllama.requests == []
+    assert lf(rust_build, sandbox, "tweak", "--help").returncode == 0
+
+
+def test_cli_tweak_preview_and_confirm(rust_build, sandbox, tweak_ollama):
+    _FakeTweakOllama.chat = _TWEAK_FULL
+    for input_text, applied in [("n\n", False), ("\n", False), ("", False), ("maybe\ny\n", True),
+                                ("maybe\n", False), (" YES \n", True), ("y\n", True)]:
+        rust, state = _assert_tweak_same(rust_build, sandbox, _TWEAK_FULL_REQUEST, input_text=input_text)
+        assert rust.stdout.startswith("Preview (runs on your computer with gemma4:e4b):\n  Sounds: On → Off\n")
+        assert "Apply these changes? [y/N]: " in rust.stdout
+        assert ("Applied 3 changes.\nUndo with: lf tweak --undo\n" in rust.stdout) == applied
+        assert rust.returncode == (1 if input_text in ("", "maybe\n") else 0)
+        assert (state["undo"] is not None) == applied
+        if applied:
+            assert state["undo"] == {"version": 1, "settings": [
+                {"key": "sounds_enabled", "before": True, "after": False}],
+                "words": ["Kubernetes"], "replacements": [{"spoken": "gonna", "written": "going to"}]}
+    eof, _ = _assert_tweak_same(rust_build, sandbox, _TWEAK_FULL_REQUEST)
+    assert eof.stderr == "Aborted!\n" and eof.stdout.endswith("[y/N]: ")
+
+    rust, _ = _assert_tweak_same(rust_build, sandbox, _TWEAK_FULL_REQUEST, "--yes")
+    assert "Apply these changes?" not in rust.stdout
+    assert "  Dictionary: — → add “Kubernetes”\n  Replacement: “gonna” → “going to”\n" in rust.stdout
+    assert "  WARNING: Sounds: On → Off — Check: turns Sounds off.\n" in rust.stdout
+
+
+def test_cli_tweak_warnings_skips_and_escaping(rust_build, sandbox, tweak_ollama):
+    cases = [
+        # Shortcut and switch-off warnings.
+        ("set the polish shortcut to ctrl alt p and set cleanup level to none", _tool_calls(
+            ("set_setting", {"key": "polish_hotkey", "value": "<ctrl>+<alt>+p"}),
+            ("set_setting", {"key": "cleanup_level", "value": "none"}),
+        )),
+        # An invalid call, an unknown tool and an unrequested change next to a valid one.
+        ("turn off sounds", _tool_calls(
+            ("set_setting", {"key": "sounds_enabled", "value": "off"}),
+            ("set_setting", {"key": "server_port", "value": "9999"}),
+            ("delete_everything‮", {}),
+            ("add_dictionary_word", {"word": "Kubernetes"}),
+            ("set_setting", {"key": "sounds_enabled", "value": "on"}),
+        )),
+        # Model text safe_text escapes: arrows, bidi controls, astral characters.
+        ("learn Zoë and turn off sounds", _tool_calls(
+            ("add_dictionary_word", {"word": "Zoë"}),
+            ("set_setting", {"key": "sounds_enabled", "value": False}),
+            ("set_setting", {"key": "sounds→x\U0001f600", "value": "off"}),
+            ("add_replacement", {"spoken": "Zoë", "written": "a→b"}),
+        )),
+        # A shortcut clash is skipped with its reason.
+        ("set the polish shortcut to ctrl alt 2 and turn off sounds", _tool_calls(
+            ("set_setting", {"key": "polish_hotkey", "value": "<ctrl>+<alt>+2"}),
+            ("set_setting", {"key": "sounds_enabled", "value": "off"}),
+        )),
+    ]
+    for request, chat in cases:
+        _FakeTweakOllama.chat = chat
+        for flags in [("--yes",), ()]:
+            rust, _ = _assert_tweak_same(rust_build, sandbox, request, *flags, input_text="n\n")
+            assert rust.stdout.startswith("Preview (runs on your computer with gemma4:e4b):\n") or rust.returncode == 1
+    _FakeTweakOllama.chat = cases[0][1]
+    assert "  WARNING: " in _assert_tweak_same(rust_build, sandbox, cases[0][0], "--yes")[0].stdout
+    _FakeTweakOllama.chat = cases[1][1]
+    assert "  skipped: " in _assert_tweak_same(rust_build, sandbox, cases[1][0], "--yes")[0].stdout
+    _FakeTweakOllama.chat = cases[2][1]
+    assert "\\u" in _assert_tweak_same(rust_build, sandbox, cases[2][0], "--yes")[0].stdout
+    _FakeTweakOllama.chat = cases[3][1]
+    clash = _assert_tweak_same(rust_build, sandbox, cases[3][0], "--yes")[0].stdout
+    assert "  skipped: Polish shortcut: Ctrl+Option+2 is already the Prompt shortcut\n" in clash
+
+
+def test_cli_tweak_undo_interop(rust_build, sandbox, tweak_ollama):
+    paths = _tweak_paths(sandbox)
+    start = [p.read_bytes() if p.exists() else None for p in paths.values()]
+    _FakeTweakOllama.chat = _TWEAK_FULL
+
+    nothing, _ = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert (nothing.returncode, nothing.stderr) == (1, "Error: There's no change to undo.\n")
+
+    # Python applies, lf-rs undoes; then lf-rs applies, Python undoes.
+    runs = {}
+    for applier, undoer in [("python", "rust"), ("rust", "python")]:
+        _tweak_restore(sandbox, start)
+        run = {"python": lambda *a: _python_cli(sandbox, "tweak", *a, env=_RICH_ENV),
+               "rust": lambda *a: lf(rust_build, sandbox, "tweak", *a, env=_RICH_ENV)}
+        applied = run[applier](_TWEAK_FULL_REQUEST, "--yes")
+        after_apply = _tweak_state(sandbox)
+        undone = run[undoer]("--undo")
+        runs[applier] = (_cli_output(applied), after_apply, _cli_output(undone), _tweak_state(sandbox))
+    assert runs["python"] == runs["rust"]
+    _, after_apply, undone, after_undo = runs["python"]
+    assert after_apply["undo"]["words"] == ["Kubernetes"]
+    assert undone == (0, "  Sounds: On\n  Removed word “Kubernetes”\n  Removed replacement “gonna”\n"
+                         "Undid the last change.\n", "")
+    assert after_undo["undo"] is None
+    assert after_undo["config"] == start[0]
+
+    # Changed again since the apply: undo leaves it alone and says so.
+    _tweak_restore(sandbox, start)
+    assert _python_cli(sandbox, "tweak", _TWEAK_FULL_REQUEST, "--yes", env=_RICH_ENV).returncode == 0
+    save_config(Config(llm_provider="ollama", llm_base_url=tweak_ollama), paths["config"])
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert "Left alone: Sounds (changed to On since)." in rust.stdout
+    # Everything changed since: nothing to undo.
+    _tweak_restore(sandbox, start)
+    assert lf(rust_build, sandbox, "tweak", "turn off sounds", "--yes", env=_RICH_ENV).returncode == 0
+    save_config(Config(llm_provider="ollama", llm_base_url=tweak_ollama), paths["config"])
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert rust.returncode == 1 and rust.stderr.startswith("Error: Nothing to undo: everything was changed")
+
+
+def test_cli_tweak_migrates_legacy_config(rust_build, sandbox, tweak_ollama):
+    # Only a v1 ~/.localflow.toml: both CLIs migrate it (left in place) before
+    # previewing. It has no fireworks_api_key, so the keyring step (unreachable
+    # in the sandbox) never runs.
+    paths = _tweak_paths(sandbox)
+    paths["config"].unlink()
+    legacy = "".join(f"{key} = {py_config._toml_value(value)}\n" for key, value in {
+        "sounds_enabled": False, "cleanup_enabled": False, "paste_method": "clipboard",
+        "ollama_url": tweak_ollama,
+    }.items())
+    paths["legacy"].write_bytes(legacy.encode())
+    home_files = sorted(p.name for p in sandbox["home"].iterdir())
+    _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "on"}))
+
+    rust, state = _assert_tweak_same(rust_build, sandbox, "turn on sounds", "--yes")
+    assert rust.returncode == 0 and rust.stderr == ""
+    assert rust.stdout.startswith("Preview (runs on your computer with gemma4:e4b):\n  Sounds: Off → On\n")
+    assert state["legacy"] == legacy.encode()
+    migrated = tomllib.loads(state["config"].decode())
+    assert migrated["hotkey"]["sounds"] is True
+    assert migrated["llm"]["cleanup_enabled"] is False and migrated["llm"]["base_url"] == tweak_ollama
+    assert state["undo"]["settings"] == [{"key": "sounds_enabled", "before": False, "after": True}]
+    # Nothing else (no backup or renamed legacy file) is left behind.
+    assert not paths["config"].exists()
+    for run in (lambda: _python_cli(sandbox, "tweak", "turn on sounds", "--yes", env=_RICH_ENV),
+                lambda: lf(rust_build, sandbox, "tweak", "turn on sounds", "--yes", env=_RICH_ENV)):
+        assert run().returncode == 0
+        assert set(p.name for p in sandbox["home"].iterdir()) - set(home_files) <= {".localflow"}
+        assert sorted(p.name for p in paths["config"].parent.iterdir()) == ["config.toml"]
+        _tweak_restore(sandbox, [None, None, None, legacy.encode()])
+
+    # A request propose refuses still leaves the migrated config: Python's
+    # `localflow.cli` runs load_config() at import, before any argument is
+    # checked. The second survives the CLI's blank check: \x01, U+200B and \x7f
+    # are control/format characters, not whitespace.
+    for request, message in [("a" * 501, "Keep the request under 500 characters."),
+                             ("\x01​ \x7f", "Tell LocalFlow what to change.")]:
+        rust, state = _assert_tweak_same(rust_build, sandbox, request, "--yes")
+        assert (rust.returncode, rust.stdout, rust.stderr) == (1, "", f"Error: {message}\n")
+        assert state["config"] is not None and state["legacy"] == legacy.encode()
+
+    # --undo migrates first too. The record says Sounds went On → Off; only the
+    # legacy file (Off, unlike the default On) makes that undoable.
+    _tweak_restore(sandbox, [None, None, None, legacy.replace("false", "true", 1).encode()])
+    _FakeTweakOllama.chat = _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "off"}))
+    assert lf(rust_build, sandbox, "tweak", "turn off sounds", "--yes", env=_RICH_ENV).returncode == 0
+    paths["config"].unlink()
+    paths["legacy"].write_bytes(legacy.encode())
+    rust, state = _assert_tweak_same(rust_build, sandbox, "--undo")
+    assert (rust.returncode, rust.stdout, rust.stderr) == (0, "  Sounds: On\nUndid the last change.\n", "")
+    assert tomllib.loads(state["config"].decode())["hotkey"]["sounds"] is True
+    assert state["legacy"] == legacy.encode()
+
+
+def test_cli_tweak_errors(rust_build, sandbox, tweak_ollama):
+    models = (200, {"models": [{"name": "gemma4:e4b"}]})
+    for tags, chat in [
+        ((500, {"error": "boom"}), _TWEAK_FULL),
+        ((200, {"models": []}), _TWEAK_FULL),
+        ((200, {"models": [{"name": "bad name!"}]}), _TWEAK_FULL),
+        ((200, b"not json"), _TWEAK_FULL),
+        ((200, {"nope": 1}), _TWEAK_FULL),
+        (models, (404, {"error": "model \"gemma4:e4b\" not found, try pulling it first"})),
+        (models, (400, {"error": "registry.ollama.ai/library/gemma4:e4b does not support tools"})),
+        (models, (500, "<html>→</html>".encode())),
+        (models, (500, {"error": "line one\nline two ‮"})),
+        (models, (200, b"[]")),
+        (models, (200, {"message": "text"})),
+        (models, (200, {"message": {"role": "assistant", "content": "Sure! I turned off sounds."}})),
+        (models, (200, {"message": {"tool_calls": {"function": {}}}})),
+        (models, _tool_calls(*[("set_setting", {"key": "sounds_enabled", "value": "off"})] * 11)),
+        (models, _tool_calls(("set_setting", {"key": "server_port", "value": "1"}),
+                             ("add_dictionary_word", {"word": "Kubernetes"}))),
+        (models, _tool_calls(("set_setting", {"key": "sounds_enabled", "value": "on"}))),
+    ]:
+        _FakeTweakOllama.tags, _FakeTweakOllama.chat = tags, chat
+        rust, _ = _assert_tweak_same(rust_build, sandbox, "turn off sounds", "--yes")
+        assert rust.returncode == 1 and rust.stdout == "", (tags, chat)
+        assert rust.stderr.startswith("Error: ") and rust.stderr.count("\n") == 1, rust.stderr
+    assert "Nothing to change: Sounds is already On" in rust.stderr
+
+    # Nothing listening: both name the same loopback URL (no OS error text).
+    save_config(Config(llm_provider="ollama", llm_base_url=f"http://127.0.0.1:{_free_port()}/"), sandbox["config"])
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "turn off sounds", "--yes")
+    assert rust.stderr.startswith("Error: Couldn't reach Ollama at http://127.0.0.1:")
+    # Control characters only: the agent, not click, refuses it.
+    rust, _ = _assert_tweak_same(rust_build, sandbox, "\x01\x02")
+    assert rust.stderr == "Error: Tell LocalFlow what to change.\n"
 
 
 # ---------------------------------------------------- audio / STT storage ---
@@ -2178,3 +3471,550 @@ def test_runtime_single_instance_lock_interoperates(runtime_build, sandbox, monk
     again = singleinstance.acquire("localflow")
     assert again is not None
     again.release()
+
+
+# ---------------------------------------------------------------------------
+# lf agent / lf setup install-app
+# ---------------------------------------------------------------------------
+
+def _same_python(sandbox, bin_dir: Path = Path(sys.executable).parent):
+    """An interpreter in `bin_dir` that the Python CLI runs as `sys.executable`
+    and lf-rs discovers (VIRTUAL_ENV, else PATH) without running it."""
+    env = {key: value for key, value in sandbox["env"].items() if key != "VIRTUAL_ENV"}
+    env.update(_RICH_ENV)
+    name = "python.exe" if os.name == "nt" else "python3"
+    if bin_dir.name == ("Scripts" if os.name == "nt" else "bin") and (bin_dir / name).exists():
+        env["VIRTUAL_ENV"] = str(bin_dir.parent)
+        python = bin_dir / name
+    else:
+        python = bin_dir / Path(sys.executable).name
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return python, env
+
+
+_NO_INSTALL = "no Python LocalFlow install found; activate its virtualenv or put its lf on PATH"
+
+
+def _install_or_skip(python: Path) -> Path:
+    """The `localflow` script lf-rs finds for `python`: next to it, or in
+    Scripts\\ for a non-venv Windows Python. Without one `agent install` refuses."""
+    names = [Path("localflow.exe"), Path("Scripts", "localflow.exe")] if os.name == "nt" else [Path("localflow")]
+    for name in names:
+        if (python.parent / name).exists():
+            return python.parent / name
+    pytest.skip(f"no localflow script for {python}; lf-rs refuses to install")
+
+
+def _stub_python(directory: Path, body: str) -> Path:
+    directory.mkdir(parents=True)
+    (directory / "python3").write_text(f"#!/bin/sh\n{body}\n")
+    (directory / "python3").chmod(0o755)
+    return directory
+
+
+def _fake_launchctl(directory: Path) -> Path:
+    directory.mkdir()
+    (directory / "launchctl").write_text(_FAKE_LAUNCHCTL)
+    (directory / "launchctl").chmod(0o755)
+    return directory
+
+
+def _run_cli(command, env):
+    return subprocess.run(
+        command, cwd=ROOT, input="", env=env, check=False, capture_output=True, text=True,
+        encoding="utf-8", timeout=120,
+    )
+
+
+def _snapshot(*roots: Path) -> dict:
+    """Every directory, file (bytes, and mode on POSIX) and symlink under `roots`."""
+    state = {}
+
+    def mode(path):
+        return stat.S_IMODE(path.lstat().st_mode) if os.name != "nt" else None
+
+    for root in roots:
+        if root.is_symlink() or root.is_file():
+            paths = [root]
+        elif root.is_dir():
+            paths = [root, *root.rglob("*")]
+        else:
+            continue
+        for path in paths:
+            if path.is_symlink():
+                state[str(path)] = ("link", os.readlink(path))
+            elif path.is_dir():
+                state[str(path)] = ("dir", mode(path))
+            elif path.suffix == ".icns":
+                state[str(path)] = ("icns",)  # iconutil output: only its presence is compared
+            else:
+                state[str(path)] = ("file", path.read_bytes(), mode(path))
+    return state
+
+
+def _restore(roots, state: dict) -> None:
+    for root in roots:
+        if root.is_symlink() or root.is_file():
+            root.unlink()
+        elif root.is_dir():
+            shutil.rmtree(root)
+    for name, entry in sorted(state.items()):
+        path = Path(name)
+        if entry[0] == "link":
+            path.symlink_to(entry[1])
+        elif entry[0] == "dir":
+            path.mkdir(exist_ok=True)
+        elif entry[0] == "icns":
+            path.write_bytes(b"")
+        else:
+            path.write_bytes(entry[1])
+            if entry[2] is not None:
+                path.chmod(entry[2])
+    for name, entry in state.items():
+        if entry[0] == "dir" and entry[1] is not None:
+            Path(name).chmod(entry[1])
+
+
+def _both_clis(rust_build, roots, python, env, *args, rust_env=None, as_python=lambda content: content):
+    """The Python CLI, then lf-rs, from the same state of `roots`; asserts
+    equal output and equal files afterwards and returns `(rust, python)`.
+    Where Python changed files, lf-rs's contents are compared through `as_python`."""
+    before = _snapshot(*roots)
+    py = _run_cli([str(python), "-m", "localflow.cli", *args], env)
+    py_after = _snapshot(*roots)
+    _restore(roots, before)
+    rs = _run_cli([str(rust_build[0]), *args], rust_env or env)
+    assert _cli_output(rs) == _cli_output(py), args
+    rs_after = _snapshot(*roots)
+    if py_after != before:
+        rs_after = {
+            path: tuple(as_python(part) if isinstance(part, bytes) else part for part in entry)
+            for path, entry in rs_after.items()
+        }
+    assert rs_after == py_after, args
+    return rs, py
+
+
+def _user_config_dir(python, env) -> Path:
+    out = _run_cli([str(python), "-c", "import platformdirs; print(platformdirs.user_config_dir())"], env)
+    assert out.returncode == 0, out.stderr
+    return Path(out.stdout.strip())
+
+
+def test_cli_agent_linux_autostart(rust_build, sandbox):
+    python, env = _same_python(sandbox)
+    # Python names `localflow` next to `sys.executable`; lf-rs names it next to
+    # the script that exists, which is in Scripts\\ for a non-venv Windows Python.
+    ours, theirs = (
+        f'Exec="{directory / "localflow"}"'.replace("\\", "\\\\").encode()
+        for directory in (_install_or_skip(python).parent, python.parent)
+    )
+    env["LOCALFLOW_PLATFORM"] = "linux"
+    autostart = _user_config_dir(python, env) / "autostart"
+    roots = [autostart]
+    for args in (("status",), ("install",), ("status",), ("install",), ("uninstall",), ("uninstall",)):
+        rust, _ = _both_clis(
+            rust_build, roots, python, env, "agent", *args, as_python=lambda content: content.replace(ours, theirs)
+        )
+        assert rust.returncode == 0 and rust.stderr == "", args
+        if args == ("install",):
+            assert ours in (autostart / "localflow.desktop").read_bytes()
+            assert "\ninstalled" not in rust.stdout and rust.stdout.startswith("installed: ")
+    assert _both_clis(rust_build, roots, python, env, "agent", "status")[0].stdout == "not installed\n"
+
+    # OSError: the autostart folder is a file.
+    shutil.rmtree(autostart)
+    autostart.write_text("x")
+    rust, _ = _both_clis(rust_build, roots, python, env, "agent", "install")
+    assert rust.returncode == 1 and rust.stdout.startswith("error: [")
+    autostart.unlink()
+    if os.name != "nt":
+        (autostart / "localflow.desktop").mkdir(parents=True)
+        rust, _ = _both_clis(rust_build, roots, python, env, "agent", "uninstall")
+        assert rust.returncode == 1 and rust.stdout.startswith("error: [Errno ")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinked interpreter directory")
+def test_cli_agent_linux_exec_escaping(rust_build, sandbox, tmp_path):
+    # An interpreter directory whose path _desktop_exec has to escape.
+    real = Path(sys.executable).parent
+    link = tmp_path / 'py $HOME "q" `x` \\z'
+    link.symlink_to(real.parent, target_is_directory=True)
+    python, env = _same_python(sandbox, link / real.name)
+    seen = _run_cli([str(python), "-c", "import sys; print(sys.executable)"], env)
+    assert seen.returncode == 0, seen.stderr
+    if (seen := seen.stdout.strip()) != str(python):
+        pytest.skip(f"this Python resolves the symlink: sys.executable is {seen}")
+    env["LOCALFLOW_PLATFORM"] = "linux"
+    autostart = _user_config_dir(python, env) / "autostart"
+    _both_clis(rust_build, [autostart], python, env, "agent", "install")
+    text = (autostart / "localflow.desktop").read_text()
+    assert 'py \\$HOME \\"q\\" \\`x\\` \\\\z' in text, text
+
+
+_FAKE_LAUNCHCTL = """#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_LAUNCHCTL_LOG"
+case "$1" in
+  bootout) exit "${FAKE_BOOTOUT_RC:-0}" ;;
+  bootstrap) printf '%s\\n' "$FAKE_BOOTSTRAP_ERR" >&2; exit "${FAKE_BOOTSTRAP_RC:-0}" ;;
+  load) printf '%s\\n' "$FAKE_LOAD_ERR" >&2; exit "${FAKE_LOAD_RC:-0}" ;;
+  print) printf '%s\\n' "$FAKE_PRINT_OUT"; exit "${FAKE_PRINT_RC:-0}" ;;
+esac
+exit 64
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="launchd paths need os.getuid")
+def test_cli_agent_darwin_launchagent(rust_build, sandbox, tmp_path):
+    fake = _fake_launchctl(tmp_path / "fake-bin")
+    python, env = _same_python(sandbox)
+    _install_or_skip(python)
+    env["LOCALFLOW_PLATFORM"] = "darwin"
+    no_launchctl = {**env, "PATH": str(python.parent)}
+    env["PATH"] = str(fake) + os.pathsep + env["PATH"]
+    home = sandbox["home"]
+    roots = [home / "Library", home / ".localflow"]
+    logs = {"python": tmp_path / "python.log", "rust": tmp_path / "rust.log"}
+    plist = home / "Library" / "LaunchAgents" / "com.cortexrnd.localflow.plist"
+    target = f"gui/{os.getuid()}/com.cortexrnd.localflow"
+
+    def agent(*args, **fake_env):
+        """Both CLIs with the fake launchctl; returns lf-rs and its launchctl calls."""
+        for log in logs.values():
+            log.write_text("")
+        side = {**env, **fake_env}
+        rust, _ = _both_clis(
+            rust_build, roots, python, {**side, "FAKE_LAUNCHCTL_LOG": str(logs["python"])}, "agent", *args,
+            rust_env={**side, "FAKE_LAUNCHCTL_LOG": str(logs["rust"])},
+        )
+        calls = logs["rust"].read_text().splitlines()
+        assert calls == logs["python"].read_text().splitlines(), args
+        return rust, calls
+
+    rust, calls = agent("status")
+    assert (rust.stdout, calls) == ("not installed\n", [])
+    rust, calls = agent("install")
+    assert calls == [f"bootout {target}", f"bootstrap gui/{os.getuid()} {plist}"]
+    assert rust.stdout.startswith("installed ") and "KeepAlive" in rust.stdout and rust.returncode == 0
+    assert f"<string>{python.parent / 'localflow'}</string>" in plist.read_text()
+    assert agent("status", FAKE_PRINT_OUT="\tstate = running")[0].stdout == "running (com.cortexrnd.localflow)\n"
+    assert agent("status", FAKE_PRINT_OUT="\tstate = waiting")[0].stdout.startswith("loaded, not running (")
+    rust, calls = agent("status", FAKE_PRINT_RC="113")
+    assert (rust.stdout, calls) == ("not loaded (com.cortexrnd.localflow)\n", [f"print {target}"])
+
+    rust, calls = agent("install", FAKE_BOOTSTRAP_RC="5", FAKE_BOOTSTRAP_ERR="Bootstrap failed: 5: Input/output error")
+    assert rust.returncode == 0 and calls[1:] == [f"bootstrap gui/{os.getuid()} {plist}", f"load -w {plist}"]
+    rust, calls = agent(
+        "install", FAKE_BOOTSTRAP_RC="5", FAKE_BOOTSTRAP_ERR="  Bootstrap failed: 5: Input/output error\n",
+        FAKE_LOAD_RC="1", FAKE_LOAD_ERR="Load failed: [wip] service already loaded " + "x" * 50,
+    )
+    assert rust.returncode == 1 and len(calls) == 3
+    assert " ".join(rust.stdout.split()) == (
+        "error: launchctl bootstrap failed: Bootstrap failed: 5: Input/output error; launchctl load fallback "
+        "also failed: Load failed: service already loaded " + "x" * 50)  # Rich drops the [wip] tag and wraps
+
+    # Oversized launchd logs are trimmed in place; symlinks are left alone.
+    log_dir = home / ".localflow"
+    line = b"0123456789" * 10 + b"\n"
+    (log_dir / "agent.out.log").write_bytes(line * (5 * 1024 * 1024 // len(line) + 50) + b"partial")
+    (log_dir / "agent.err.log").symlink_to(log_dir / "agent.out.log")
+    agent("install")
+    trimmed = (log_dir / "agent.out.log").read_bytes()
+    assert len(trimmed) <= 5 * 1024 * 1024 // 2 and trimmed.startswith(line) and trimmed.endswith(b"partial")
+    assert (log_dir / "agent.err.log").is_symlink()
+
+    rust, calls = agent("uninstall")
+    assert (rust.stdout, calls, plist.exists()) == ("uninstalled\n", [f"bootout {target}"], False)
+    assert agent("uninstall")[1] == [f"bootout {target}"]
+
+    rust, _ = _both_clis(rust_build, roots, python, no_launchctl, "agent", "install")
+    assert (rust.returncode, rust.stdout) == (1, "error: [Errno 2] No such file or directory: 'launchctl'\n")
+
+
+@pytest.mark.skipif(os.name != "nt" or not os.environ.get("GITHUB_ACTIONS"),
+                    reason="writes the real HKCU Run value; Windows CI only")
+def test_cli_agent_win32_run_key(rust_build, sandbox):
+    import winreg
+
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    def read():
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                return winreg.QueryValueEx(key, "localflow")
+        except FileNotFoundError:
+            return None
+
+    def write(saved):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            if saved is not None:
+                winreg.SetValueEx(key, "localflow", 0, saved[1], saved[0])
+                return
+            try:
+                winreg.DeleteValue(key, "localflow")
+            except FileNotFoundError:
+                pass
+
+    python, env = _same_python(sandbox)
+    # Python names `localflow.exe` next to `sys.executable`; lf-rs names the
+    # script that exists, which is in Scripts\\ for a non-venv Python.
+    script, beside = str(_install_or_skip(python)), str(python.parent / "localflow.exe")
+
+    def squeeze(text):  # Rich folds the two paths at different columns
+        return "".join(text.split())
+
+    def as_python(text):
+        return text if script == beside else squeeze(text).replace(squeeze(script), squeeze(beside))
+
+    env["LOCALFLOW_PLATFORM"] = "win32"
+    original = read()
+    try:
+        write(None)
+        for args in (("status",), ("install",), ("status",), ("uninstall",), ("uninstall",), ("status",)):
+            before = read()
+            py = _run_cli([str(python), "-m", "localflow.cli", "agent", *args], env)
+            py_after = read()
+            write(before)
+            rs = _run_cli([str(rust_build[0]), "agent", *args], env)
+            assert tuple(map(as_python, _cli_output(rs)[1:])) == tuple(map(as_python, _cli_output(py)[1:])), args
+            rs_after = read()
+            if rs_after and py_after != before:
+                rs_after = (rs_after[0].replace(script, beside), rs_after[1])
+            assert rs_after == py_after, args
+            assert rs.returncode == py.returncode == 0, args
+        _run_cli([str(rust_build[0]), "agent", "install"], env)
+        assert read() == (f'"{script}"', winreg.REG_SZ)
+    finally:
+        write(original)
+
+
+def test_cli_agent_platform_errors(rust_build, sandbox):
+    python, env = _same_python(sandbox)
+    cases = [("bogus", "unknown platform: 'bogus'")]
+    if os.name != "nt":
+        cases.append(("win32", "No module named 'winreg'"))
+    for selected, message in cases:
+        for args in (("install",), ("status",)):
+            side = {**env, "LOCALFLOW_PLATFORM": selected}
+            py = _run_cli([str(python), "-m", "localflow.cli", "agent", *args], side)
+            rs = _run_cli([str(rust_build[0]), "agent", *args], side)
+            assert _cli_output(rs) == (1, "", f"Error: {message}\n")
+            assert (py.returncode, py.stdout) == (1, "")
+            assert py.stderr.splitlines()[-1].endswith(message)
+
+
+def test_cli_setup_install_app(rust_build, sandbox):
+    python, env = _same_python(sandbox)
+    _install_or_skip(python)
+    apps = sandbox["home"] / "Applications"
+    for _ in range(2):  # the second run rewrites the existing bundles
+        rust, _ = _both_clis(rust_build, [apps], python, env, "setup", "install-app")
+        assert rust.returncode == 0 and rust.stderr == ""
+        assert rust.stdout.replace("\n", "").startswith(f"installed {apps}")
+    main = apps / "LocalFlow.app" / "Contents"
+    launcher = main / "MacOS" / "launcher"
+    assert launcher.read_text() == f'#!/bin/bash\nexec {shlex.quote(str(python))} -m localflow.main_app "$@"\n'
+    if os.name != "nt":
+        assert stat.S_IMODE(launcher.stat().st_mode) == 0o755
+    has_icon = (main / "Resources" / "LocalFlow.icns").exists()
+    assert ("CFBundleIconFile" in (main / "Info.plist").read_text()) == has_icon
+    assert not (apps / "LocalFlow Setup.app" / "Contents" / "Resources").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
+def test_cli_install_commands_skip_an_unrelated_virtualenv(rust_build, sandbox, tmp_path):
+    real, env = _same_python(sandbox)
+    _install_or_skip(real)
+    # VIRTUAL_ENV names a venv without LocalFlow; the real install is first on PATH.
+    other = _stub_python(tmp_path / "other-venv" / "bin", "exit 1")
+    env["VIRTUAL_ENV"] = str(other.parent)
+    # lf-rs then takes the interpreter next to the `lf` on PATH (resolved), else
+    # the bare python3 there; Python runs as that interpreter.
+    launcher = real.parent / "lf"
+    beside_lf = launcher.resolve().parent / "python3"
+    python = beside_lf if launcher.exists() and beside_lf.is_file() else real.parent / "python3"
+    autostart = _user_config_dir(python, env) / "autostart"
+    rust, _ = _both_clis(rust_build, [autostart], python, {**env, "LOCALFLOW_PLATFORM": "linux"}, "agent", "install")
+    assert rust.returncode == 0
+    assert f'Exec="{python.parent / "localflow"}"' in (autostart / "localflow.desktop").read_text()
+    apps = sandbox["home"] / "Applications"
+    rust, _ = _both_clis(rust_build, [apps], python, env, "setup", "install-app")
+    assert rust.returncode == 0
+    launcher_text = (apps / "LocalFlow.app" / "Contents" / "MacOS" / "launcher").read_text()
+    assert shlex.quote(str(python)) in launcher_text and str(other) not in launcher_text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
+def test_cli_setup_install_app_for_a_python_with_scripts_elsewhere(rust_build, sandbox, tmp_path):
+    """As in a `pip install --user`: the interpreter imports localflow but the
+    `localflow` script is not next to it, so only `agent install` refuses."""
+    real, env = _same_python(sandbox)
+    user = _stub_python(tmp_path / "user-bin", f'exec {shlex.quote(str(real))} "$@"')
+    env.pop("VIRTUAL_ENV", None)
+    env["PATH"] = str(user)
+    home = sandbox["home"]
+    rust = _run_cli([str(rust_build[0]), "setup", "install-app"], env)
+    assert rust.returncode == 0 and rust.stderr == ""
+    for name, module in (("LocalFlow Setup", "setup_window"), ("LocalFlow", "main_app")):
+        launcher = home / "Applications" / f"{name}.app" / "Contents" / "MacOS" / "launcher"
+        assert launcher.read_text() == (
+            f'#!/bin/bash\nexec {shlex.quote(str(user / "python3"))} -m localflow.{module} "$@"\n')
+    autostart = _user_config_dir(real, env) / "autostart"
+    rust = _run_cli([str(rust_build[0]), "agent", "install"], {**env, "LOCALFLOW_PLATFORM": "linux"})
+    assert (rust.returncode, " ".join(rust.stdout.split())) == (1, f"error: {_NO_INSTALL}")
+    assert not autostart.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters")
+def test_cli_install_commands_refuse_without_a_python_install(rust_build, sandbox, tmp_path):
+    real, env = _same_python(sandbox)
+    # PATH holds only a python3 without LocalFlow and the fake launchctl.
+    bare = _stub_python(tmp_path / "bare-bin", "exit 1")
+    fake = _fake_launchctl(tmp_path / "fake-bin")
+    log = tmp_path / "launchctl.log"
+    log.write_text("")
+    env.pop("VIRTUAL_ENV", None)
+    env.update(PATH=os.pathsep.join((str(bare), str(fake))), FAKE_LAUNCHCTL_LOG=str(log))
+    home = sandbox["home"]
+    autostart = _user_config_dir(real, env) / "autostart"
+    for args, extra, roots in (
+        (("agent", "install"), {"LOCALFLOW_PLATFORM": "linux"}, [autostart]),
+        (("agent", "install"), {"LOCALFLOW_PLATFORM": "darwin"}, [home / "Library", home / ".localflow"]),
+        (("setup", "install-app"), {}, [home / "Applications"]),
+    ):
+        before = _snapshot(*roots)
+        rust = _run_cli([str(rust_build[0]), *args], {**env, **extra})
+        if args[0] == "agent":
+            assert (rust.returncode, " ".join(rust.stdout.split()), rust.stderr) == (
+                1, f"error: {_NO_INSTALL}", ""), extra
+        else:
+            assert _cli_output(rust) == (1, "", f"Error: {_NO_INSTALL}\n")
+        assert _snapshot(*roots) == before, args
+    assert log.read_text() == ""
+
+
+_SWITCH_BACK = "lf-rs will not replace it. To switch back to Python run: LOCALFLOW_RUNTIME=python ./install.sh"
+_NATIVE_APP = f"~/Applications/LocalFlow.app is the native LocalFlow app; {_SWITCH_BACK}"
+_NATIVE_AGENT = f"the LocalFlow login agent belongs to the native LocalFlow app; {_SWITCH_BACK}"
+
+
+def _native_app(app: Path, *, executable: bool = True, marker: bool = True) -> None:
+    """A LocalFlow.app as scripts/build_rust_app.sh builds it (plutil xml1 Info.plist)."""
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    name = "lf-hub" if executable else "launcher"
+    (macos / name).write_bytes(b"\x7fELF")
+    info = {"CFBundleIdentifier": "com.cortexrnd.localflow.app", "CFBundleExecutable": name}
+    if marker:
+        info["LocalFlowRuntime"] = "rust"
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
+
+
+def _native_agent(plist: Path, program: Path, logs: Path) -> None:
+    """The LaunchAgent scripts/macos_launchagent.sh writes for the native Hub."""
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_bytes((
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>\n'
+        '<key>Label</key><string>com.cortexrnd.localflow</string>\n'
+        f'<key>ProgramArguments</key><array><string>{program}</string></array>\n'
+        '<key>RunAtLoad</key><true/>\n'
+        '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n'
+        '<key>LimitLoadToSessionType</key><string>Aqua</string>\n'
+        f'<key>StandardOutPath</key><string>{logs / "agent.out.log"}</string>\n'
+        f'<key>StandardErrorPath</key><string>{logs / "agent.err.log"}</string>\n'
+        '</dict></plist>\n'
+    ).encode())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters and os.getuid")
+def test_cli_install_commands_leave_a_native_install_alone(rust_build, sandbox, tmp_path):
+    """With a Python install on PATH too, lf-rs never rewrites the native
+    LocalFlow.app or replaces (and reloads) the native login agent."""
+    _, env = _same_python(sandbox)
+    # A Python LocalFlow install lf-rs discovers without running it.
+    install = _stub_python(tmp_path / "install-bin", "exit 1")
+    (install / "localflow").write_text("#!/bin/sh\nexit 0\n")
+    (install / "localflow").chmod(0o755)
+    fake = _fake_launchctl(tmp_path / "fake-bin")
+    log = tmp_path / "launchctl.log"
+    log.write_text("")
+    env.pop("VIRTUAL_ENV", None)
+    env.update(PATH=os.pathsep.join((str(install), str(fake))), FAKE_LAUNCHCTL_LOG=str(log),
+               LOCALFLOW_PLATFORM="darwin")
+    home = sandbox["home"]
+    roots = [home / "Applications", home / "Library", home / ".localflow"]
+    app = home / "Applications" / "LocalFlow.app"
+    plist = home / "Library" / "LaunchAgents" / "com.cortexrnd.localflow.plist"
+    hub = app / "Contents" / "MacOS" / "lf-hub"
+
+    def reset():
+        for root in roots:
+            shutil.rmtree(root, ignore_errors=True)
+        log.write_text("")
+
+    def refused(*args):
+        before = _snapshot(*roots)
+        rust = _run_cli([str(rust_build[0]), *args], env)
+        if args[0] == "agent":
+            assert (rust.returncode, " ".join(rust.stdout.split()), rust.stderr) == (
+                1, f"error: {_NATIVE_AGENT}", ""), args
+        else:
+            assert _cli_output(rust) == (1, "", f"Error: {_NATIVE_APP}\n"), args
+        assert _snapshot(*roots) == before, args
+        assert log.read_text() == "", args
+
+    # The full native install: both commands refuse.
+    reset()
+    _native_app(app)
+    _native_agent(plist, hub, home / ".localflow")
+    (home / ".localflow").mkdir()
+    (home / ".localflow" / "agent.out.log").write_bytes(b"x" * (6 * 1024 * 1024))
+    refused("setup", "install-app")
+    refused("agent", "install")
+
+    # CFBundleExecutable = lf-hub alone, the LocalFlowRuntime marker alone, or
+    # an lf-hub file with no Info.plist makes the bundle native; the agent then
+    # refuses with no plist.
+    for marks in ({"marker": False}, {"executable": False}, {}):
+        reset()
+        _native_app(app, **marks)
+        if not marks:
+            (app / "Contents" / "Info.plist").unlink()
+        refused("setup", "install-app")
+        refused("agent", "install")
+
+    # A native agent alone (app removed) still owns the label.
+    reset()
+    _native_agent(plist, hub, home / ".localflow")
+    refused("agent", "install")
+
+    # Control: Python launcher bundles and agent are (re)written as before.
+    reset()
+    # The second round runs with an lf-hub left behind in the Python bundle
+    # (a native bundle the old lf-rs overwrote): Info.plist still says launcher.
+    for leftover in (False, True):
+        if leftover:
+            hub.write_bytes(b"\x7fELF")
+        rust = _run_cli([str(rust_build[0]), "setup", "install-app"], env)
+        assert (rust.returncode, rust.stderr) == (0, ""), rust.stdout
+        log.write_text("")
+        rust = _run_cli([str(rust_build[0]), "agent", "install"], env)
+        assert (rust.returncode, rust.stderr) == (0, ""), rust.stdout
+        assert log.read_text().splitlines()[0] == f"bootout gui/{os.getuid()}/com.cortexrnd.localflow"
+        assert hub.exists() == leftover
+    assert f"<string>{install / 'localflow'}</string>" in plist.read_text()
+    assert (app / "Contents" / "MacOS" / "launcher").read_text() == (
+        f'#!/bin/bash\nexec {shlex.quote(str(install / "python3"))} -m localflow.main_app "$@"\n')
+
+
+def test_cli_agent_setup_usage_and_help(rust_build, sandbox):
+    for args in (("agent",), ("agent", "bogus"), ("setup", "install-app", "extra"),
+                 ("agent", "status", "a", "b"), ("setup", "bogus")):
+        rust, python = _clis(rust_build, sandbox, *args)
+        assert _usage_error(rust) == _usage_error(python), args
+        assert rust.returncode == 2
+    top = lf(rust_build, sandbox, "--help").stdout
+    assert "setup" in top and "agent" not in top
+    assert "install-app" in lf(rust_build, sandbox, "setup", "--help").stdout

@@ -1151,7 +1151,7 @@ impl Render for TextInput {
         let border = if self.invalid {
             t.tone(crate::theme::Tone::Error).0
         } else if focused {
-            t.accent
+            t.focus
         } else {
             t.border_control
         };
@@ -1194,7 +1194,7 @@ impl Render for TextInput {
             root = root.h(tsize::control_md());
         }
         if focused {
-            // Accent edge plus the shared soft focus ring (no layout shift).
+            // Neutral edge plus the shared focus ring (no layout shift).
             root = root.shadow(super::ring(&t));
         }
         if !self.disabled {

@@ -1,7 +1,5 @@
 use std::env;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::Result;
 use lf_core::config;
@@ -9,9 +7,11 @@ use lf_providers::pyfmt::py_repr;
 use lf_server::api::{self, STT_IDS};
 use lf_stt::{model_storage, setup_downloads};
 use serde_json::{json, Value};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::args::{SttCommand, SttDevice};
+#[cfg(test)]
+use crate::richfmt::effective_width;
+use crate::richfmt::{console_width, legacy_windows_console, Console};
 use crate::{fail, outln, pyfmt, CliError, Io};
 
 pub fn run(command: SttCommand, io: &mut Io<'_>) -> Result<()> {
@@ -105,74 +105,15 @@ fn list(json_output: bool, io: &mut Io<'_>) -> Result<()> {
         }
     }
     if let Some(error) = selected["error"].as_str().filter(|s| !s.is_empty()) {
-        outln!(
+        // console.print(f"[red]error:[/red] {error}")
+        let console = Console::detect();
+        write!(
             io.out,
             "{}",
-            wrap_text(
-                &format!("error: {error}"),
-                console_width(legacy_windows_console())
-            )
+            console.markup(&format!("[red]error:[/red] {error}"))
         )?;
     }
     Ok(())
-}
-
-fn console_width(legacy_windows: bool) -> usize {
-    effective_width(
-        env::var("COLUMNS").ok().and_then(|s| s.parse().ok()),
-        legacy_windows,
-    )
-}
-
-/// Rich's `Console` reserves the last column on legacy Windows consoles:
-/// it subtracts `legacy_windows` from `COLUMNS` or the detected width.
-fn effective_width(columns: Option<usize>, legacy_windows: bool) -> usize {
-    columns
-        .filter(|&width| width > 0)
-        .unwrap_or(80)
-        .saturating_sub(usize::from(legacy_windows))
-}
-
-fn wrap_text(text: &str, width: usize) -> String {
-    let mut lines = Vec::new();
-    for mut rest in text.split('\n') {
-        let mut line = String::new();
-        let mut cells = 0;
-        while !rest.is_empty() {
-            let word_start = rest
-                .find(|c: char| !c.is_whitespace())
-                .unwrap_or(rest.len());
-            let word_end = word_start
-                + rest[word_start..]
-                    .find(char::is_whitespace)
-                    .unwrap_or(rest.len() - word_start);
-            let end = word_end
-                + rest[word_end..]
-                    .find(|c: char| !c.is_whitespace())
-                    .unwrap_or(rest.len() - word_end);
-            let (word, trailing) = rest[..end].split_at(word_end);
-            if cells + word.width() > width && !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
-                cells = 0;
-            }
-            for ch in word.chars() {
-                let ch_width = ch.width().unwrap_or(0);
-                if cells + ch_width > width && !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
-                    cells = 0;
-                }
-                line.push(ch);
-                cells += ch_width;
-            }
-            for ch in trailing.chars().take(width.saturating_sub(cells)) {
-                line.push(ch);
-                cells += ch.width().unwrap_or(0);
-            }
-            rest = &rest[end..];
-        }
-        lines.push(line);
-    }
-    lines.join("\n")
 }
 
 fn select(provider: &str, model: Option<String>, device: SttDevice, io: &mut Io<'_>) -> Result<()> {
@@ -308,26 +249,6 @@ async fn ctrl_c() {
     }
 }
 
-/// Rich's `legacy_windows`: on Windows, stdout is not a console with VT
-/// processing enabled (`rich._windows.get_windows_console_features`), which
-/// includes redirected or captured stdout. Rich then draws its bar in ASCII.
-#[cfg(windows)]
-fn legacy_windows_console() -> bool {
-    use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
-    };
-    let mut mode = 0;
-    // SAFETY: GetStdHandle takes no pointers; GetConsoleMode only writes the
-    // u32 out-parameter and fails cleanly for invalid or non-console handles.
-    let ok = unsafe { GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mut mode) } != 0;
-    !ok || mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0
-}
-
-#[cfg(not(windows))]
-fn legacy_windows_console() -> bool {
-    false
-}
-
 fn progress_line(
     model_id: &str,
     progress: Option<(u64, u64)>,
@@ -412,29 +333,11 @@ print(json.dumps(result))
 // Availability and entry points describe the installed Python runtime, not Rust
 // engine features. Only probe that boundary; config, catalogs and downloads are native.
 fn probe_python(mode: &str, provider: &str) -> Value {
-    let python = if cfg!(windows) {
-        "python.exe"
-    } else {
-        "python3"
-    };
-    let launcher = if cfg!(windows) { "lf.exe" } else { "lf" };
-    let venv = env::var_os("VIRTUAL_ENV").map(|root| {
-        Path::new(&root)
-            .join(if cfg!(windows) { "Scripts" } else { "bin" })
-            .join(python)
-    });
-    let path = env::var_os("PATH").unwrap_or_default();
-    let installed = env::split_paths(&path).find_map(|dir| {
-        let binary = dir.join(launcher).canonicalize().ok()?;
-        let python = binary.with_file_name(python);
-        python.is_file().then_some(python)
-    });
-    venv.into_iter()
-        .chain(installed)
-        .chain([PathBuf::from(python), PathBuf::from("python")])
+    crate::python::candidates()
+        .into_iter()
         .find_map(|interpreter| {
-            let output = Command::new(interpreter)
-                .args(["-c", PROBE, mode, provider])
+            let output = crate::python::probe(&interpreter, PROBE)
+                .args([mode, provider])
                 .output()
                 .ok()?;
             if !output.status.success() {

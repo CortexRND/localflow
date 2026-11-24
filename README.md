@@ -216,6 +216,51 @@ Transcript cleanup is optional. Select an Ollama model in setup or use
 space and memory. Choose `none` to keep the raw transcript and avoid the extra
 model.
 
+### Set up a fast local model for dictation
+
+On a machine with around 16 GB of RAM or more, start with `qwen2.5:7b` for
+general text tasks and `llama3.2:3b` for light cleanup and automatic meeting
+titles. `llama3.1:8b` is an alternative general model; try `qwen2.5:3b` as the
+fast model for multilingual dictation. These are starting points: leave memory
+for speech recognition and the OS rather than putting a 27B model on the
+dictation path.
+
+```bash
+ollama pull qwen2.5:7b
+ollama pull llama3.2:3b
+```
+
+Edit the existing sections in your [LocalFlow config file](#configuration):
+
+```toml
+[llm]
+provider = "ollama"
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b"
+fast_model = "llama3.2:3b"
+cleanup_enabled = true
+
+[cleanup]
+level = "light"
+```
+
+`fast_model` is optional and uses the same provider and URL as `model`. Leave it
+unset or empty to use `model` for everything, as before. If you use the CLI,
+you can also set it with `lf config set llm.fast_model llama3.2:3b`. Medium cleanup, voice
+commands, selection transforms, meeting notes, transcript Q&A and Recall
+answers still use `model`. Whole-utterance hot phrases expand without LLM
+generation, dictionary replacements are deterministic, and hotkey dictation skips
+cleanup for transcripts under five words (HTTP uploads can clean shorter text).
+Switching providers or endpoints through LocalFlow clears the saved `fast_model`,
+so set it again afterward if you want to use one.
+
+On an 8 GB machine, try a single model: run `ollama pull llama3.2:1b`, set
+`model = "llama3.2:1b"` and leave `fast_model` empty. Or set
+`[cleanup].level = "none"` to skip dictation cleanup altogether. A local Ollama
+configuration does not change the separate Fireworks meeting work-prompt
+feature: if you have a Fireworks key configured and want all meeting processing
+offline, set `work_prompts = false` under `[meetings]`.
+
 ## Usage
 
 ### Desktop app (local dictation)
@@ -586,6 +631,7 @@ device = "auto"
 provider = "ollama"                # ollama | openai-compatible
 base_url = "http://localhost:11434"
 model = "llama3.2:3b"
+# fast_model = "llama3.2:1b"       # only light cleanup and automatic meeting titles
 cleanup_enabled = true
 cleanup_timeout = 120
 num_ctx = 8192

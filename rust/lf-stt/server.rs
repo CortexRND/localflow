@@ -115,11 +115,17 @@ impl<B: Backend> SttBackend<B> {
             let replace = |text: &str| apply_replacements(text, &replacements);
             let symbols = |text: &str| apply_spoken_symbols(text, &commands);
             let style = |text: &str| apply_style(text, style_name.unwrap_or(""), &words);
-            let clean_step =
-                |text: &str| match build_llm(config, &BuildOptions::default(), &CoreSecrets) {
-                    Ok(llm) => Cleaner::new(llm.as_ref()).clean(text, level, style_name, &words),
-                    Err(_) => text.into(),
-                };
+            let fast = (level == "light")
+                .then(|| config.fast_model_config())
+                .flatten();
+            let clean_step = |text: &str| match build_llm(
+                fast.as_ref().unwrap_or(config),
+                &BuildOptions::default(),
+                &CoreSecrets,
+            ) {
+                Ok(llm) => Cleaner::new(llm.as_ref()).clean(text, level, style_name, &words),
+                Err(_) => text.into(),
+            };
             Ok(render_dictation(
                 &raw,
                 &phrases,
