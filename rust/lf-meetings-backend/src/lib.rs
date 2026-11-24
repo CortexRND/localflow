@@ -60,6 +60,7 @@ struct State {
     session: Option<Arc<SessionActor>>,
     meta: Metadata,
     last_saved: Option<Value>,
+    transcript_saved: bool,
 }
 
 pub struct MeetingsBackend {
@@ -127,6 +128,22 @@ impl MeetingsBackend {
     pub fn with_transcribe_lock(mut self, lock: Arc<Mutex<()>>) -> Self {
         self.transcribe_lock = lock;
         self
+    }
+    /// Whether a recorded meeting is still to be saved (running or stopping).
+    pub fn session_active(&self) -> bool {
+        matches!(self.state().phase, Phase::Running | Phase::Stopping)
+    }
+    /// Blocks until the stopping meeting's full transcript is on disk (as a
+    /// recovery note, before any LLM step) or no meeting remains to save.
+    /// Returns whether that transcript was saved.
+    pub fn wait_for_saved_transcript(&self) -> bool {
+        let state = self.state();
+        self.idle
+            .wait_while(state, |state| {
+                state.phase != Phase::Idle && !state.transcript_saved
+            })
+            .unwrap_or_else(|error| error.into_inner())
+            .transcript_saved
     }
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
@@ -293,6 +310,7 @@ impl MeetingsBackend {
             }
             let session = state.session.take().ok_or_else(internal)?;
             state.phase = Phase::Stopping;
+            state.transcript_saved = false;
             (session, state.meta.clone())
         };
         let _reset = ResetSlot {
@@ -328,6 +346,8 @@ impl MeetingsBackend {
             if let Some(previous) = recovery.replace(saved) {
                 remove_recovery(previous);
             }
+            self.state().transcript_saved = true;
+            self.idle.notify_all();
         }
         let transcript = format_transcript(&finished.segments);
         let template = templates::resolve_template(
@@ -677,6 +697,38 @@ mod shutdown_tests {
         assert_eq!(calls, 1);
         backend.state().closed = true;
         assert!(!backend.while_idle(&mut || calls += 1));
+    }
+
+    #[test]
+    fn saved_transcript_wait_ends_at_the_raw_save_or_when_idle() {
+        let backend = Arc::new(MeetingsBackend::new().unwrap());
+        assert!(!backend.session_active());
+        assert!(!backend.wait_for_saved_transcript());
+        backend.state().phase = Phase::Starting;
+        assert!(!backend.session_active());
+        for (finish, saved) in [
+            (
+                (|state: &mut State| state.transcript_saved = true) as fn(&mut State),
+                true,
+            ),
+            (|state: &mut State| state.phase = Phase::Idle, false),
+        ] {
+            backend.state().phase = Phase::Running;
+            assert!(backend.session_active());
+            backend.state().phase = Phase::Stopping;
+            backend.state().transcript_saved = false;
+            assert!(backend.session_active());
+            let (finished, done) = mpsc::channel();
+            let waiting = backend.clone();
+            let waiter = std::thread::spawn(move || {
+                finished.send(waiting.wait_for_saved_transcript()).unwrap();
+            });
+            assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
+            finish(&mut backend.state());
+            backend.idle.notify_all();
+            assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), saved);
+            waiter.join().unwrap();
+        }
     }
 
     #[test]
