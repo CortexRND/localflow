@@ -354,6 +354,54 @@ block_factor = 2.0
 on_pr = "warn"
 
 # --------------------------------------------------------------------------
+# Footprint suite (evals/perf/suites/footprint.py, evals/perf/adapters/)
+# --------------------------------------------------------------------------
+
+# Speech helper lifecycle: no helper process outside the loaded stages, and a
+# fresh helper after reload (scripts/ci_speech_helper.py asserts the same).
+[metrics.helper_pid_cleaned]
+class = "exact"
+on_pr = "block"
+
+[metrics.helper_respawned]
+class = "exact"
+on_pr = "block"
+
+[metrics.hwm_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.package_size_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.installed_size_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# Idle CPU over a 10-30 s window is a few clock ticks (10 ms each), so small
+# absolute changes are large ratios: wide tolerance, hard block only at 10x.
+[metrics.cpu_seconds]
+class = "noisy"
+better = "lower"
+rel_tol = 0.50
+mad_k = 3.0
+block_factor = 10.0
+on_pr = "warn"
+
+# --------------------------------------------------------------------------
 # Absolute caps, checked on the candidate regardless of baseline.
 # --------------------------------------------------------------------------
 
