@@ -1,0 +1,368 @@
+# Compare policy for lf-perf-result/v1 (see docs/plans/PLAN-perf-evals.md §6).
+#
+# Classes:
+#   exact   - must equal / pass in every repeat; differing repeats are "flaky". Blocks PRs.
+#   quality - candidate may not be worse than baseline by more than abs_tol. Blocks PRs.
+#   noisy   - regression only if the median worsens by more than
+#             max(rel_tol * |baseline|, mad_k * MAD(baseline samples)).
+#             Warns on PRs (blocks with --strict); always blocks at >= block_factor x.
+#
+# `better` in a rule overrides the direction declared by the metric itself.
+# Metrics without a rule fall back by unit: bytes -> noisy memory,
+# ms/s/us/ratio -> noisy latency, bool -> exact.
+#
+# Absolute budgets are not invented up front: the first nightly run on main
+# becomes the baseline and budgets are written here from it.
+
+[defaults]
+noisy_min_samples = 3        # smoke runs 3 repeats; nightly uses >= 5
+noisy_mad_multiplier = 3.0
+noisy_block_factor = 2.0
+noisy_latency_rel_tol = 0.15
+noisy_memory_rel_tol = 0.10
+
+# --------------------------------------------------------------------------
+# Exact: correctness gates
+# --------------------------------------------------------------------------
+
+[metrics.exact_match_rate]
+class = "exact"
+on_pr = "block"
+
+[metrics.citation_equal]
+class = "exact"
+on_pr = "block"
+
+[metrics.pid_cleanup_ok]
+class = "exact"
+on_pr = "block"
+
+[metrics.lifecycle_ok]
+class = "exact"
+on_pr = "block"
+
+[metrics.gate_pass]
+class = "exact"
+on_pr = "block"
+
+[metrics.M1]
+class = "exact"
+on_pr = "block"
+
+[metrics.M2]
+class = "exact"
+on_pr = "block"
+
+[metrics.M3]
+class = "exact"
+on_pr = "block"
+
+[metrics.M4]
+class = "exact"
+on_pr = "block"
+
+[metrics.M11]
+class = "exact"
+on_pr = "block"
+
+[metrics.M12]
+class = "exact"
+on_pr = "block"
+
+[metrics.M13]
+class = "exact"
+on_pr = "block"
+
+# --------------------------------------------------------------------------
+# Quality: absolute tolerance vs baseline
+# --------------------------------------------------------------------------
+
+[metrics.wer]
+class = "quality"
+better = "lower"
+abs_tol = 0.02
+on_pr = "block"
+
+[metrics.M5]
+class = "quality"
+better = "higher"
+abs_tol = 0.05
+on_pr = "block"
+
+[metrics.M6]
+class = "quality"
+better = "higher"
+abs_tol = 0.05
+on_pr = "block"
+
+[metrics.M7]
+class = "quality"
+better = "higher"
+abs_tol = 0.05
+on_pr = "block"
+
+[metrics.M8]
+class = "quality"
+better = "higher"
+abs_tol = 0.05
+on_pr = "block"
+
+[metrics.M9]
+class = "quality"
+better = "higher"
+abs_tol = 0.05
+on_pr = "block"
+
+[metrics.M10]
+class = "quality"
+better = "higher"
+abs_tol = 0.05
+on_pr = "block"
+
+[metrics.fidelity_rate]
+class = "quality"
+better = "higher"
+abs_tol = 0.02
+on_pr = "block"
+
+[metrics.number_fidelity_rate]
+class = "quality"
+better = "higher"
+abs_tol = 0.02
+on_pr = "block"
+
+[metrics.vocab_fidelity_rate]
+class = "quality"
+better = "higher"
+abs_tol = 0.02
+on_pr = "block"
+
+# --------------------------------------------------------------------------
+# Noisy: latency / time (rel_tol 15 %)
+# --------------------------------------------------------------------------
+
+[metrics.latency_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.first_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.load_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.download_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.rtf]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.startup_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.search_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.llm_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.summarize_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.chat_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.stop_to_notes_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.server_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.wall_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.render_us]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.cpu_s]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.cold_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.warm_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.reload_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# --------------------------------------------------------------------------
+# Noisy: memory / size (rel_tol 10 %)
+# --------------------------------------------------------------------------
+
+[metrics.rss_before]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.rss_loaded]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.rss_after_unload]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.rss_idle]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.rss_peak]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.footprint_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.package_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.rss_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# --------------------------------------------------------------------------
+# Absolute caps, checked on the candidate regardless of baseline.
+# --------------------------------------------------------------------------
+
+# dims_match: exact match per key; `<key>_prefix` matches dims[<key>] by prefix.
+# A cap may set max_value and/or min_value.
+
+[[caps]]
+suite = "stt"
+metric = "latency_ms"
+dims_match = { provider = "cpu", model_prefix = "tiny" }
+max_value = 3000.0
+reason = "Cross-platform target: tiny on CPU within 3 s"
