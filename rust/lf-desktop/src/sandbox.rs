@@ -826,12 +826,22 @@ pub fn setup_platform() -> lf_ui::setup_flow::FakeSetupPlatform {
 mod tests {
     use super::*;
 
+    /// The temp dir in the same style `persisted_clip_path` stores clips in.
+    fn temp_base(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        if cfg!(windows) {
+            dir.path().to_path_buf()
+        } else {
+            fs::canonicalize(dir.path()).unwrap()
+        }
+    }
+
     #[test]
     fn sandbox_retry_is_a_labelled_simulation_over_sandbox_data_only() {
         use crate::controllers::model_storage::SpeechStorage;
         use crate::controllers::retry::{retry_entry, RetryBackend, RetryKey};
         let dir = tempfile::tempdir().unwrap();
-        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let base = temp_base(&dir);
+        let root = prepare(&base.join("sb"), false).unwrap();
         let services = crate::data::Services::open(root.clone()).unwrap();
         assert!(services.retry.simulated());
         assert!(services.retry.unavailable().is_none());
@@ -878,7 +888,7 @@ mod tests {
         let error = retry.open(&services.config()).err().unwrap();
         assert!(error.contains("isn't downloaded"), "{error}");
         for path in services.root.all_paths() {
-            assert!(path.starts_with(dir.path()));
+            assert!(path.starts_with(&base));
         }
     }
 
