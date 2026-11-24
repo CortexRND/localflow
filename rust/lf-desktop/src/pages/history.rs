@@ -440,7 +440,7 @@ impl HistoryPage {
         let now = history::now();
         let searching = !self.search.read(cx).is_empty();
         let focused = self.list_focus.is_focused(window);
-        let mut rows = div().flex().flex_col();
+        let mut rows = div().flex().flex_col().w_full().min_w_0();
         if self.list.entries.is_empty() && !self.loading {
             let (h, d, button, _) = hub_model::history_empty_state(searching, false);
             let action = if searching {
@@ -481,6 +481,8 @@ impl HistoryPage {
                     .relative()
                     .flex()
                     .flex_col()
+                    .w_full()
+                    .min_w_0()
                     .gap(space::s1())
                     .px(space::s6())
                     .py(space::s4())
@@ -510,37 +512,47 @@ impl HistoryPage {
                         div()
                             .flex()
                             .items_center()
+                            .w_full()
+                            .min_w_0()
                             .gap(space::s4())
                             .child(
+                                // No `whitespace_nowrap`: GPUI then skips the
+                                // truncating re-measure and clips mid-letter.
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .whitespace_nowrap()
+                                    .line_clamp(1)
                                     .text_ellipsis()
                                     .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
-                                    .child(history::row_text(entry)),
+                                    .child(history::row_preview(entry)),
                             )
                             .when_some(chip, |d, (label, failed)| {
-                                d.child(ui::token(
+                                d.child(div().flex_none().child(ui::token(
                                     &t,
                                     if failed { Tone::Error } else { Tone::Neutral },
                                     label,
-                                ))
+                                )))
                             }),
                     )
-                    .child(ui::supporting(
-                        &t,
-                        format!(
-                            "{}  ·  {}",
-                            history::time_label(entry.ts),
-                            entry
-                                .app_name
-                                .clone()
-                                .filter(|a| !a.is_empty())
-                                .unwrap_or_else(|| "Unknown app".into())
-                        ),
-                    )),
+                    .child(
+                        ui::supporting(
+                            &t,
+                            format!(
+                                "{}  ·  {}",
+                                history::time_label(entry.ts),
+                                entry
+                                    .app_name
+                                    .clone()
+                                    .filter(|a| !a.is_empty())
+                                    .unwrap_or_else(|| "Unknown app".into())
+                            ),
+                        )
+                        .min_w_0()
+                        .overflow_hidden()
+                        .line_clamp(1)
+                        .text_ellipsis(),
+                    ),
             );
         }
         if self.list.more {
@@ -612,7 +624,11 @@ impl HistoryPage {
         let can_retry = hub_model::history_row_actions(&entry.kind, has_audio)
             .iter()
             .any(|(name, _)| *name == "Retry");
-        let mut actions = div().flex().flex_wrap().gap(space::s4());
+        let mut actions = div()
+            .debug_selector(|| "history-actions".into())
+            .flex()
+            .flex_wrap()
+            .gap(space::s4());
         actions = actions.child(
             Button::new("copy-final", "Copy")
                 .primary()
@@ -672,14 +688,19 @@ impl HistoryPage {
         };
         div()
             .id("history-detail")
+            .debug_selector(|| "history-detail".into())
             .size_full()
+            .min_w_0()
             .overflow_y_scroll()
             .child(
                 div()
+                    .debug_selector(|| "history-detail-column".into())
                     .flex()
                     .flex_col()
                     .gap(space::s6())
                     .p(space::s10())
+                    .w_full()
+                    .min_w_0()
                     .max_w(px(size::READING + 64.))
                     .when(narrow, |d| {
                         d.child(
@@ -723,24 +744,29 @@ impl HistoryPage {
                         retry_view.as_ref().and_then(|v| v.error.clone()),
                         |d, message| {
                             let key = RetryKey::of(&entry);
-                            d.child(ui::banner(
-                                &t,
-                                Tone::Error,
-                                format!("Retry failed. {message}"),
-                                Some(
-                                    Button::new("retry-again", "Try again")
-                                        .small()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.start_retry(key, cx)
-                                        }))
-                                        .into_any_element(),
-                                ),
-                            ))
+                            d.child(
+                                ui::banner(
+                                    &t,
+                                    Tone::Error,
+                                    format!("Retry failed. {message}"),
+                                    Some(
+                                        Button::new("retry-again", "Try again")
+                                            .small()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.start_retry(key, cx)
+                                            }))
+                                            .into_any_element(),
+                                    ),
+                                )
+                                .debug_selector(|| "history-retry-banner".into()),
+                            )
                         },
                     )
                     .child(actions)
                     .when_some(retry_view.map(|v| v.note), |d, note| {
-                        d.child(ui::supporting(&t, note))
+                        d.child(
+                            ui::supporting(&t, note).debug_selector(|| "history-retry-note".into()),
+                        )
                     })
                     .when(distinct, |d| {
                         let open = self.show_original;
@@ -824,6 +850,7 @@ impl Render for HistoryPage {
                 .flex()
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .child(self.render_detail(true, cx))
         } else if narrow {
             div()
