@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"localflow unavailable: {exc}", file=sys.stderr)
         return EXIT_UNAVAILABLE
     report = run_bench(args.db, args.vault, queries, iterations=args.iterations, warmup=args.warmup, now=now)
-    sys.stdout.write(json.dumps(report, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(report, ensure_ascii=True) + "\n")
     return 0
 
 
