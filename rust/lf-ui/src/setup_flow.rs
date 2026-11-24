@@ -538,16 +538,33 @@ fn windows_machine_name(native_machine: u16) -> Option<&'static str> {
 
 /// `models.detect_hardware()` on Windows from `GlobalMemoryStatusEx`'s
 /// `ullTotalPhys` and `shutil.disk_usage(home).free` (the total free bytes of
-/// `GetDiskFreeSpaceExW`), in the same decimal GB as the Unix detection.
+/// `GetDiskFreeSpaceExW`), in GB of `1024**3` bytes as Python divides.
 #[cfg(any(windows, test))]
 fn windows_hardware(machine: &str, total_phys: u64, total_free_bytes: u64) -> HardwareInfo {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     HardwareInfo::new(
         "Windows",
         machine,
-        total_phys as f64 / 1_000_000_000.0,
+        total_phys as f64 / GIB,
         false,
-        total_free_bytes as f64 / 1_000_000_000.0,
+        total_free_bytes as f64 / GIB,
     )
+}
+
+/// The NUL-terminated `lpDirectoryName` for `GetDiskFreeSpaceExW`, with the
+/// trailing backslash that a UNC share root requires.
+#[cfg(any(windows, test))]
+fn windows_directory_name(path: &[u16]) -> std::result::Result<Vec<u16>, String> {
+    if path.contains(&0) {
+        return Err("the home path contains a NUL character".into());
+    }
+    let mut wide = Vec::with_capacity(path.len() + 2);
+    wide.extend_from_slice(path);
+    if !matches!(wide.last(), Some(&0x5c) | Some(&0x2f)) {
+        wide.push(0x5c);
+    }
+    wide.push(0);
+    Ok(wide)
 }
 
 #[cfg(windows)]
@@ -566,11 +583,7 @@ fn detect_host_hardware() -> std::result::Result<HardwareInfo, String> {
     }
 
     let home = lf_core::home::python_home().map_err(|error| error.to_string())?;
-    let mut path: Vec<u16> = home.as_os_str().encode_wide().collect();
-    if path.contains(&0) {
-        return Err("the home path contains a NUL character".into());
-    }
-    path.push(0);
+    let path = windows_directory_name(&home.as_os_str().encode_wide().collect::<Vec<u16>>())?;
     let mut total_free_bytes = 0u64;
     // SAFETY: `path` is NUL terminated for the duration of the call; the out
     // pointers are either null (not requested) or point to a valid u64.
