@@ -732,7 +732,8 @@ def threshold_label(key: str) -> str:
 
 def compute(run: Path) -> dict:
     manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8")) if (run / "manifest.json").is_file() else {}
-    pinned = manifest.get("commit") or SPEC["sut"]["commit"]
+    pinned = SPEC["sut"]["commit"]
+    manifest_commit = manifest.get("commit")
     found = sorted((p.parent.name for p in run.glob("r*/results") if p.is_dir()), key=lambda n: (len(n), n))
     declared = [f"r{k}" for k in range(1, int(manifest.get("repeats", 0)) + 1)]
     repeats = declared if declared else found
@@ -772,10 +773,13 @@ def compute(run: Path) -> dict:
                      "P4 covers JSON-RPC error handling only.")
     if extras["sut_dirty"]:
         notes.append("SUT worktree had uncommitted changes to tracked files during at least one cell.")
+    manifest_ok = not manifest_commit or manifest_commit == pinned
+    if not manifest_ok:
+        notes.append(f"manifest.json commit ({manifest_commit[:12]}) != frozen scenarios.json pin ({pinned[:12]}).")
     return {
         "run": str(run), "pinned_commit": pinned,
-        "pinned_source": "manifest.json" if manifest.get("commit") else "scenarios.json",
-        "commits_seen": commits_seen, "commit_ok": commits_seen == [pinned],
+        "pinned_source": "scenarios.json",
+        "commits_seen": commits_seen, "commit_ok": commits_seen == [pinned] and manifest_ok,
         "repeats": repeats, "expected_cells_per_repeat": len(cell_index()),
         "not_exercised": not_exercised, "notes": notes,
         "extras": {"rust_parity_cells": extras["rust_cells"], "meeting_auth_probe": extras["meeting_auth_probe"],

@@ -27,6 +27,11 @@ for old in "$RUN"/r*; do
   [ "$n" -gt "$REPEATS" ] && rm -rf "$old"
 done
 COMMIT="$(git -C "$SIM_SUT" rev-parse HEAD)" || exit 2
+SPEC_COMMIT="$("$PY" -c "import json, sys; print(json.load(open(sys.argv[1]))['sut']['commit'])" "$HERE/scenarios.json")" || exit 2
+if [ "$COMMIT" != "$SPEC_COMMIT" ] && [ "${SIM_ALLOW_COMMIT_OVERRIDE:-0}" != "1" ]; then
+  echo "SIM_SUT HEAD ($COMMIT) != frozen scenarios.json pin ($SPEC_COMMIT); set SIM_ALLOW_COMMIT_OVERRIDE=1 to override" >&2
+  exit 2
+fi
 HARNESS="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 # The manifest pins the SUT commit for gates.py; it holds no secrets.
