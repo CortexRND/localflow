@@ -33,7 +33,7 @@ for old in "$RUN"/r*; do
   [ "$n" -gt "$REPEATS" ] && rm -rf "$old"
 done
 HARNESS="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
-HARNESS_DIRTY="$(git -C "$REPO" status --porcelain -- evals/localflow_sim 2>/dev/null | head -n 1)"
+HARNESS_DIRTY="$(git -C "$REPO" status --porcelain -- evals/localflow_sim evals/meeting_sim 2>/dev/null | head -n 1)"
 
 # The manifest pins the SUT commit for gates.py; it holds no secrets.
 RUN_ID="$RUN_ID" COMMIT="$COMMIT" HARNESS="$HARNESS" HARNESS_DIRTY="$HARNESS_DIRTY" REPEATS="$REPEATS" SUITES="$SUITES" \
