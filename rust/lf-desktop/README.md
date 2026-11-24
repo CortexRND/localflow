@@ -126,7 +126,7 @@ reason and the removal condition are in `vendor/xattr-shim/src/lib.rs`.
 
 | Platform | Status |
 |---|---|
-| Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, Mesa llvmpipe). Native rendering was not verified interactively: first paint was transparent under X11/VNC, and under Cage/Wayland redraws appeared only after a resize |
+| Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, Mesa llvmpipe). The `v0.2.3` package was reviewed interactively in nested X11 (Xephyr) and on Wayland under sway 1.7; see gate 1 in [`docs/gpui-migration.md`](../../docs/gpui-migration.md). Known limits: on a remote X11 desktop with software rendering (TigerVNC) the window body can stay blank, under Cage 0.1.4 redraws appeared only after a resize, and under Weston 9.0.0 it panics on start |
 | macOS | Expected to build (GPUI's Metal backend; the code has no Linux-only parts). Not verified in this PR. `lf-hub` stays the macOS app |
 | Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. It includes the native tray and, with `--engine`, the engine's Windows global hotkeys. Windows CI exercises the `lf-input` keyboard hook, type-checks the tray and launches the package in `--sandbox`; none of this is verified interactively |
 
@@ -842,10 +842,10 @@ These are tracked in `docs/gpui-migration.md`:
 
 - GPUI 0.2.2 doesn't publish an accessibility tree, so screen readers can't read
   the app. Keyboard and visual focus work.
-- None of the scope-2 UI was exercised interactively: owner-waived UI probing on
-  the development VM; behaviour is covered by controller, sandbox and CLI
-  subprocess tests. macOS runtime behaviour (tap readiness, engine, Metal
-  whisper) is type-checked in CI only.
+- The scope-2 UI was reviewed interactively on Linux and Windows for gate 1
+  (see [`docs/gpui-migration.md`](../../docs/gpui-migration.md)), not on macOS.
+  macOS runtime behaviour (tap readiness, engine, Metal whisper) is
+  type-checked in CI only.
 - The engine runs only on LocalFlow's own data folders and only in builds made
   with `--features runtime` (the preview package is one).
 - Wayland global shortcuts are not possible (see above). On Windows only the
