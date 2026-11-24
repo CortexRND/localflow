@@ -15,8 +15,8 @@
 //! (bounded) without depending on the UI executor. Speech recognition can't
 //! be interrupted, so nothing claims to cancel it.
 //!
-//! When the configured native model isn't downloaded, a real (never
-//! sandbox) window transcribes with the Python app's model instead
+//! When the configured native model isn't downloaded (or the native engine
+//! has no such size, e.g. `distil-large-v3`), a real (never sandbox) window transcribes with the Python app's model instead
 //! ([`PythonRetry`]) and commits its result the same way.
 
 use std::path::Path;
@@ -41,6 +41,11 @@ pub const CLIP_RATE: u32 = 16_000;
 /// How `lf_stt::runtime::hub_speech_cached` says the configured model isn't
 /// installed.
 pub const NOT_DOWNLOADED: &str = "isn't downloaded";
+
+/// How the native engine says it has no such model size (a size or repo
+/// only faster-whisper has). `lf_stt::engines::UNSUPPORTED_WHISPER_SIZE`,
+/// copied because default builds don't link lf-stt (a test pins it).
+pub const NO_NATIVE_SIZE: &str = "unsupported whisper.cpp model size";
 
 /// What a missing native model's error ends with.
 pub const MODELS_HINT: &str = "Download it in Models & keys, then try again.";
@@ -299,13 +304,19 @@ pub fn retry_entry(
             drop(speech);
             processed.map_err(RetryError::Failed)?
         }
-        Err(why) => match backend
-            .python()
-            .filter(|_| why.contains(NOT_DOWNLOADED) && !root.is_sandbox())
-        {
-            Some(python) => python_text(python.transcribe(root, entry.id), &entry, &why)?,
-            None => return Err(RetryError::Unavailable(why)),
-        },
+        Err(why) => {
+            let no_size = why.contains(NO_NATIVE_SIZE);
+            match backend
+                .python()
+                .filter(|_| (no_size || why.contains(NOT_DOWNLOADED)) && !root.is_sandbox())
+            {
+                Some(python) => {
+                    let python_only = no_size.then(|| config.field_str("model_size").unwrap_or(""));
+                    python_text(python.transcribe(root, entry.id), &entry, &why, python_only)?
+                }
+                None => return Err(RetryError::Unavailable(why)),
+            }
+        }
     };
     if final_text.trim().is_empty() {
         return Err(RetryError::Empty);
@@ -323,18 +334,34 @@ pub fn retry_entry(
 }
 
 /// The Python app's result for `entry`, or why there is none. `why` is the
-/// native model's "isn't downloaded" error.
+/// native error: the model "isn't downloaded", or (`python_only`: the
+/// configured size) the native engine has no such size at all.
 fn python_text(
     result: Result<Transcript, PythonError>,
     entry: &HistoryEntry,
     why: &str,
+    python_only: Option<&str>,
 ) -> Result<(String, String), RetryError> {
     let both_ways = |reason: &str| {
-        let missing = why.strip_suffix(MODELS_HINT).unwrap_or(why).trim_end();
-        let missing = missing.strip_suffix('.').unwrap_or(missing);
-        RetryError::Unavailable(format!(
-            "{missing}, and {reason}. Download it in Models & keys, or download the Python app's model with `lf models download`, then try again."
-        ))
+        RetryError::Unavailable(match python_only {
+            Some(size) => {
+                let size = if size.is_empty() {
+                    "configured".into()
+                } else {
+                    format!("`{size}`")
+                };
+                format!(
+                    "The {size} speech model only runs in the Python LocalFlow app, and {reason}. Download the Python app's model with `lf models download`, or pick another model in Models & keys, then try again."
+                )
+            }
+            None => {
+                let missing = why.strip_suffix(MODELS_HINT).unwrap_or(why).trim_end();
+                let missing = missing.strip_suffix('.').unwrap_or(missing);
+                format!(
+                    "{missing}, and {reason}. Download it in Models & keys, or download the Python app's model with `lf models download`, then try again."
+                )
+            }
+        })
     };
     match result {
         Ok(t) if (RetryKey { id: t.id, ts: t.ts }).matches(entry) => Ok((t.raw_text, t.final_text)),
@@ -345,9 +372,11 @@ fn python_text(
         Err(PythonError::Unsupported) => Err(both_ways(
             "the `lf` found isn't a Python LocalFlow app that can retry",
         )),
-        Err(PythonError::NoModel) => {
-            Err(both_ways("the Python app's model isn't downloaded either"))
-        }
+        Err(PythonError::NoModel) => Err(both_ways(if python_only.is_some() {
+            "it isn't downloaded there"
+        } else {
+            "the Python app's model isn't downloaded either"
+        })),
         Err(PythonError::Failed(why)) => Err(RetryError::Failed(why)),
     }
 }
@@ -2059,6 +2088,119 @@ mod tests {
                 );
             }
             unchanged(&f, &before);
+        }
+
+        #[cfg(feature = "runtime")]
+        #[test]
+        fn the_unsupported_size_wording_is_lf_stts() {
+            assert_eq!(NO_NATIVE_SIZE, lf_stt::engines::UNSUPPORTED_WHISPER_SIZE);
+        }
+
+        #[test]
+        fn a_size_only_python_has_retries_with_the_python_app() {
+            let _serial = serial();
+            let f = real_fixture();
+            let mut config = config();
+            config.set_field("model_size", serde_json::json!("distil-large-v3"));
+            let no_size = "unsupported whisper.cpp model size: distil-large-v3";
+            let entry = f.retryable();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            python.reply(0, &reply_for(&entry, "raw", "Distil."), "");
+            let mut fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            fake.open_error = Some(no_size);
+            let updated = f.retry(&config, &entry, &fake).unwrap();
+            assert_eq!(updated.final_text, "Distil.");
+            assert_eq!(f.store.get(entry.id).unwrap().unwrap(), updated);
+
+            // Without the Python app (or its model) the message says the
+            // size is Python-only, not "download it in Models & keys".
+            let entry = f.retryable();
+            let before = f.rows();
+            let python_only = |reason: &str| {
+                RetryError::Unavailable(format!(
+                    "The `distil-large-v3` speech model only runs in the Python LocalFlow app, \
+                     and {reason}. Download the Python app's model with `lf models download`, \
+                     or pick another model in Models & keys, then try again."
+                ))
+            };
+            let mut nowhere = missing_native(&[], WAIT);
+            nowhere.open_error = Some(no_size);
+            assert_eq!(
+                f.retry(&config, &entry, &nowhere).unwrap_err(),
+                python_only("the Python LocalFlow app wasn't found")
+            );
+            python.reply(3, "", "Error: the speech model isn't downloaded\n");
+            assert_eq!(
+                f.retry(&config, &entry, &fake).unwrap_err(),
+                python_only("it isn't downloaded there")
+            );
+            unchanged(&f, &before);
+
+            // Other native errors (provider, language, a corrupt model)
+            // never run Python.
+            std::fs::remove_file(python.dir.join("record")).unwrap();
+            for error in [
+                "unsupported whisper.cpp provider: cuda",
+                "unsupported Whisper language: xx",
+                "failed to load the Whisper model: invalid model file",
+            ] {
+                fake.open_error = Some(error);
+                assert_eq!(
+                    f.retry(&config, &entry, &fake).unwrap_err(),
+                    RetryError::Unavailable(error.into())
+                );
+            }
+            assert!(python.record().is_none());
+            unchanged(&f, &before);
+        }
+
+        #[test]
+        fn a_python_lf_in_local_bin_is_found_off_path_but_never_lf_rs() {
+            let _serial = serial();
+            let f = real_fixture();
+            let entry = f.retryable();
+            let base = f._dir.path();
+            let empty_path = base.join("empty bin");
+            std::fs::create_dir_all(&empty_path).unwrap();
+            // HOME/.local/bin/lf → lf-rs is skipped.
+            let rs_home = base.join("rs home");
+            let rs = FakeLf::new(&rs_home.join("rust"), "lf-rs");
+            std::fs::create_dir_all(rs_home.join(".local/bin")).unwrap();
+            std::os::unix::fs::symlink(&rs.exe, rs_home.join(".local/bin/lf")).unwrap();
+            let fake = missing_native(&[("PATH", &empty_path), ("HOME", &rs_home)], WAIT);
+            assert!(matches!(
+                f.retry(&config(), &entry, &fake),
+                Err(RetryError::Unavailable(m)) if m.contains("wasn't found")
+            ));
+            assert!(rs.record().is_none());
+            // The Python CLI install.sh links there is used.
+            let home = base.join("home");
+            let lf = FakeLf::new(&home.join(".local/bin"), "lf");
+            lf.reply(0, &reply_for(&entry, "raw", "From local bin."), "");
+            let fake = missing_native(&[("PATH", &empty_path), ("HOME", &home)], WAIT);
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap().final_text,
+                "From local bin."
+            );
+            assert_eq!(lf.args()[..2], ["history", "retry"]);
+        }
+
+        #[test]
+        fn a_relative_config_path_reaches_python_absolute() {
+            let _serial = serial();
+            let mut f = real_fixture();
+            f.root.config_path = PathBuf::from("relative dir/config.toml");
+            let entry = f.retryable();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            python.reply(0, &reply_for(&entry, "raw", "Text."), "");
+            let fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            f.retry(&config(), &entry, &fake).unwrap();
+            assert_eq!(
+                PathBuf::from(python.value("LOCALFLOW_CONFIG")),
+                std::env::current_dir()
+                    .unwrap()
+                    .join("relative dir/config.toml")
+            );
         }
 
         fn reaped(python: &FakeLf) {
