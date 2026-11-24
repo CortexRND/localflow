@@ -197,8 +197,8 @@ pub const SPECS: &[Spec] = &[
         Tab::Shortcuts,
         "hotkey",
         "dictation_toggle",
-        "Hands-free toggle",
-        "Press once to start dictating, again to stop.",
+        "Toggle dictation shortcut",
+        "Turn push-to-talk on or off without quitting LocalFlow.",
         Control::Shortcut { optional: true },
     ),
     row(
@@ -601,6 +601,22 @@ mod tests {
         // Optional shortcuts can be turned off.
         let saved = save(&file, polish, json!("")).unwrap();
         assert_eq!(saved.field_str("polish_hotkey"), Some(""));
+    }
+
+    #[test]
+    fn dictation_toggle_shortcut_name_is_unified() {
+        let toggle = spec("hotkey", "dictation_toggle").unwrap();
+        assert_eq!(toggle.label, "Toggle dictation shortcut");
+        assert_eq!(toggle.label, lf_agent::label("dictation_toggle_hotkey"));
+
+        let (_d, file) = file();
+        save(&file, toggle, json!("<ctrl>+<alt>+8")).unwrap();
+        let polish = spec("hotkey", "polish").unwrap();
+        let err = save(&file, polish, json!("<ctrl>+<alt>+8")).unwrap_err();
+        assert!(
+            error_text(&err).contains("Toggle dictation shortcut"),
+            "{err}"
+        );
     }
 
     #[test]

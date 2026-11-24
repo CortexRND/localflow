@@ -581,9 +581,13 @@ def _dictation_summary(dictate: dict[str, Any] | None) -> dict[str, Any]:
     stages = dictate["stages"] if dictate else {}
     total = stages.get("total_ms")
     slowest = None
+    slowest_p95 = None
     for stage in STEP_STAGES:
-        if stage in stages and (slowest is None or stages[stage]["p50"] > stages[slowest]["p50"]):
-            slowest = stage
+        if stage in stages:
+            if slowest is None or stages[stage]["p50"] > stages[slowest]["p50"]:
+                slowest = stage
+            if slowest_p95 is None or stages[stage]["p95"] > stages[slowest_p95]["p95"]:
+                slowest_p95 = stage
     p95 = total["p95"] if total else None
     over_budget = p95 is not None and p95 > BUDGET_MS
     return {
@@ -593,7 +597,7 @@ def _dictation_summary(dictate: dict[str, Any] | None) -> dict[str, Any]:
         "median_rtf": dictate["median_rtf"] if dictate else None,
         "slowest_stage": slowest,
         "budget_ms": BUDGET_MS,
-        "hint": HINTS[slowest] if over_budget and slowest is not None else None,
+        "hint": HINTS[slowest_p95] if over_budget and slowest_p95 is not None else None,
     }
 
 

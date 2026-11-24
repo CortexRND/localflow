@@ -783,7 +783,7 @@ def test_run_idle_python_real_bench_bare(tmp_path):
 # --------------------------------------------------------------------------
 
 STUB_SERVER = """\
-import http.server, json, os, sys, time, tomllib
+import http.server, json, os, socketserver, sys, time, tomllib
 mode = os.environ.get("STUB_MODE", "ok")
 if mode == "exit":
     print("stub crashed"); sys.exit(5)
@@ -799,7 +799,11 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200 if self.path == "/healthz" else 404)
         self.end_headers(); self.wfile.write(body)
     def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+class S(http.server.HTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+S(("127.0.0.1", port), H).serve_forever()
 """
 
 
