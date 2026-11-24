@@ -771,11 +771,18 @@ fn dictation_summary(dictate: Option<&Value>) -> Value {
         .and_then(|d| d["stages"].as_object())
         .unwrap_or(&empty);
     let p50 = |name: &str| stages.get(name).and_then(|s| s["p50"].as_f64());
+    let p95_stage = |name: &str| stages.get(name).and_then(|s| s["p95"].as_f64());
     let mut slowest: Option<&str> = None;
+    let mut slowest_p95: Option<&str> = None;
     for name in &STAGES[..STAGES.len() - 1] {
         if let Some(value) = p50(name) {
             if slowest.is_none_or(|best| value > p50(best).unwrap_or(f64::MIN)) {
                 slowest = Some(name);
+            }
+        }
+        if let Some(value) = p95_stage(name) {
+            if slowest_p95.is_none_or(|best| value > p95_stage(best).unwrap_or(f64::MIN)) {
+                slowest_p95 = Some(name);
             }
         }
     }
@@ -789,7 +796,7 @@ fn dictation_summary(dictate: Option<&Value>) -> Value {
         "median_rtf": dictate.and_then(|d| d["median_rtf"].as_f64()),
         "slowest_stage": slowest,
         "budget_ms": BUDGET_MS,
-        "hint": slowest.filter(|_| over_budget).map(hint),
+        "hint": slowest_p95.filter(|_| over_budget).map(hint),
     })
 }
 
