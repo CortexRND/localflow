@@ -735,7 +735,7 @@ def compute(run: Path) -> dict:
     pinned = manifest.get("commit") or SPEC["sut"]["commit"]
     found = sorted((p.parent.name for p in run.glob("r*/results") if p.is_dir()), key=lambda n: (len(n), n))
     declared = [f"r{k}" for k in range(1, int(manifest.get("repeats", 0)) + 1)]
-    repeats = declared + [name for name in found if name not in declared]
+    repeats = declared if declared else found
     extras = {"commits_seen": set(), "sut_dirty": False, "rust_cells": 0, "meeting_auth_probe": {"k": 0, "n": 0}}
     helpers = _meeting_helpers()
     per, not_exercised = {}, []

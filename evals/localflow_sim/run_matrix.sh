@@ -20,6 +20,12 @@ if [ -z "${FIREWORKS_API_KEY:-}" ]; then
   exit 2
 fi
 mkdir -p "$RUN"
+for old in "$RUN"/r*; do
+  [ -d "$old" ] || continue
+  n="${old##*/r}"
+  case "$n" in *[!0-9]*|"") continue ;; esac
+  [ "$n" -gt "$REPEATS" ] && rm -rf "$old"
+done
 COMMIT="$(git -C "$SIM_SUT" rev-parse HEAD)" || exit 2
 HARNESS="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
 
