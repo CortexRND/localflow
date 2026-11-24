@@ -270,6 +270,15 @@ pub struct SetupFlow {
     /// top of it). `opened` stays the immutable intent baseline; this is
     /// only the revision the next Apply expects to find on disk.
     pub acknowledged: Option<Config>,
+    /// The speech model is the user's intent: they picked one in the Speech
+    /// step ([`SetupFlow::select_model`]), or nothing was saved yet so the
+    /// recommendation is. Otherwise the preselected row may be a substitute
+    /// for a saved model this build can't offer (MLX, `auto`, off-catalogue
+    /// sizes), and Apply keeps the saved speech provider/model/device.
+    speech_selected: bool,
+    /// `speech_selected` as of the last save (or setup opening), for
+    /// [`SetupFlow::dirty`].
+    initial_speech_selected: bool,
     /// Generations of the read-only facts (installed models, devices,
     /// Ollama list): a result from a superseded worker is dropped.
     fact_generations: [u64; 3],
@@ -288,12 +297,19 @@ fn platform_name(darwin: bool) -> &'static str {
 impl SetupFlow {
     /// Start from the saved config (after a first run) or the hardware
     /// recommendation (`initial_choices`).
+    ///
+    /// `speech_saved`: the config file at the path Apply writes already
+    /// records a speech choice (`controllers::setup::configured`: a `[setup]`
+    /// version or an explicit raw `[stt]` provider/model — a hand-written
+    /// file may have the latter without the former). Then the preselected
+    /// model is not written unless the user selects one.
     pub fn new(
         config: &Config,
         hw: &HardwareInfo,
         platform: &dyn SetupPlatform,
         launch_agent: &dyn LaunchAgent,
         simulated: bool,
+        speech_saved: bool,
     ) -> Result<Self, String> {
         let mut choices =
             flow::initial_choices(config, hw, platform, launch_agent).map_err(|e| e.0)?;
@@ -349,6 +365,8 @@ impl SetupFlow {
             darwin: platform.is_darwin(),
             opened: config.clone(),
             acknowledged: None,
+            speech_selected: !speech_saved,
+            initial_speech_selected: !speech_saved,
             fact_generations: [0; 3],
         };
         flow.validate_hotkey();
@@ -358,9 +376,16 @@ impl SetupFlow {
         Ok(flow)
     }
 
-    /// Choices differ from what setup opened with.
+    /// Choices differ from what setup opened with (an explicit pick of the
+    /// preselected speech model counts: Apply would now write it).
     pub fn dirty(&self) -> bool {
-        self.choices != self.initial
+        self.choices != self.initial || self.speech_selected != self.initial_speech_selected
+    }
+
+    /// Apply keeps the saved speech model: nothing was selected in the
+    /// Speech step and the config already had one.
+    pub fn speech_kept(&self) -> bool {
+        !self.speech_selected
     }
 
     pub fn visited(&self, step: Step) -> bool {
@@ -635,9 +660,13 @@ impl SetupFlow {
         self.models.iter().find(|m| m.id == id)
     }
 
+    /// The user picked a speech model (the only path that marks the model as
+    /// their intent — downloads, inventory, the trial and initialisation
+    /// don't). Also when it's the preselected row, and it stays so.
     pub fn select_model(&mut self, id: &str) {
         if self.model(id).is_some() {
             self.choices.stt_id = id.to_string();
+            self.speech_selected = true;
             self.trial = Trial::Ready;
         }
     }
@@ -858,14 +887,20 @@ impl SetupFlow {
     // ----------------------------------------------------------- review ---
 
     pub fn review_rows(&self) -> Vec<ReviewRow> {
-        let model = self
-            .model(&self.choices.stt_id)
-            .map(|m| m.label.to_string())
-            .unwrap_or_else(|| self.choices.stt_id.clone());
-        let downloaded = match self.installed(&self.choices.stt_id) {
-            Some(true) => " · downloaded",
-            Some(false) => " · not downloaded yet",
-            None => "",
+        let speech = if self.speech_kept() {
+            // The preselected row isn't saved; say so rather than naming it.
+            "Keep current speech model".to_string()
+        } else {
+            let model = self
+                .model(&self.choices.stt_id)
+                .map(|m| m.label.to_string())
+                .unwrap_or_else(|| self.choices.stt_id.clone());
+            let downloaded = match self.installed(&self.choices.stt_id) {
+                Some(true) => " · downloaded",
+                Some(false) => " · not downloaded yet",
+                None => "",
+            };
+            format!("{model}{downloaded}")
         };
         let cleanup = match self.cleanup {
             CleanupMode::Local => format!(
@@ -895,7 +930,7 @@ impl SetupFlow {
             },
             ReviewRow {
                 label: "Speech model",
-                value: format!("{model}{downloaded}"),
+                value: speech,
                 step: Step::Speech,
             },
             ReviewRow {
@@ -956,6 +991,7 @@ impl SetupFlow {
             choices: self.choices.clone(),
             opened: self.opened.clone(),
             acknowledged: self.acknowledged.clone(),
+            speech_selected: self.speech_selected,
         })
     }
 
@@ -963,6 +999,7 @@ impl SetupFlow {
         self.apply = match result {
             Ok(path) => {
                 self.initial = self.choices.clone();
+                self.initial_speech_selected = self.speech_selected;
                 Applying::Done(path)
             }
             Err(ApplyFailure::Conflict { fields, latest }) => {
@@ -997,13 +1034,49 @@ pub fn provider_label(id: &str) -> String {
 /// and the paste helper (both from what this machine reports).
 pub fn checks(config: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
     let mut rows = flow::run_checks(config, platform);
-    if platform.system() == "Linux" {
+    let system = platform.system();
+    let ffmpeg_fix = match system.as_str() {
+        "Linux" => Some((
+            "Not found — install ffmpeg with your package manager",
+            "https://ffmpeg.org/download.html#build-linux",
+        )),
+        "Windows" => Some((
+            "Not found — install ffmpeg and add it to PATH",
+            "https://ffmpeg.org/download.html#build-windows",
+        )),
+        _ => None,
+    };
+    if let Some((detail, url)) = ffmpeg_fix {
         for row in rows.iter_mut().filter(|r| r.key == "ffmpeg") {
             if row.ok == Some(false) {
-                row.detail = "Not found — install ffmpeg with your package manager".into();
-                row.fix_url = String::new();
+                row.detail = detail.into();
+                row.fix_url = url.into();
             }
         }
+    }
+    // A remote Ollama server needs nothing installed or started here.
+    // Locally, starting it only makes sense once it's installed (until then
+    // the one fix offered is Get Ollama), and only with a command that
+    // really starts the configured server; the command goes in `fix_url`.
+    let ollama_missing = rows
+        .iter()
+        .any(|r| r.key == "ollama-installed" && r.ok == Some(false));
+    let base_url = config.field_str("llm_base_url").unwrap_or("").trim();
+    let remote = !base_url.is_empty() && !is_loopback(base_url);
+    let start = (!ollama_missing && !remote)
+        .then(|| start_ollama_command(base_url, &system, platform.which("ollama")))
+        .flatten();
+    for row in rows.iter_mut() {
+        match row.key.as_str() {
+            "ollama-installed" if remote => row.fix_label.clear(),
+            "ollama-running" => match &start {
+                Some(command) => row.fix_url = command.clone(),
+                None => row.fix_label.clear(),
+            },
+            _ => {}
+        }
+    }
+    if system == "Linux" {
         let session = lf_input::linux::session();
         let (ok, detail) = match session {
             lf_input::linux::Session::X11 => (
@@ -1049,6 +1122,190 @@ pub fn checks(config: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
     rows
 }
 
+// ------------------------------------------------------- checkup fixes ---
+
+/// What a checkup row's fix button does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckAction {
+    /// An `https://` page or a macOS System Settings pane.
+    OpenUrl(String),
+    GoTo(Step),
+    /// Copy a terminal command.
+    Copy(String),
+}
+
+/// A row's fix button: its label and what it does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckFix {
+    pub label: &'static str,
+    pub action: CheckAction,
+}
+
+/// What the view does for a fix. In the sandbox an external open becomes a
+/// [`Notice`](FixEffect::Notice) saying what would have opened; going to a
+/// step and copying a command work normally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixEffect {
+    Open(String),
+    GoTo(Step),
+    Copy(String),
+    Notice(String),
+}
+
+const SETTINGS_SCHEME: &str = "x-apple.systempreferences:";
+
+/// Only web pages and System Settings panes are ever opened.
+fn openable(url: &str) -> Option<CheckAction> {
+    let web = url.starts_with("https://") && !url_host(url).is_empty();
+    let settings = url
+        .strip_prefix(SETTINGS_SCHEME)
+        .is_some_and(|pane| !pane.trim().is_empty());
+    (web || settings).then(|| CheckAction::OpenUrl(url.to_string()))
+}
+
+/// Host and raw port text of `scheme://userinfo@host:port/path?query#fragment`
+/// (any part but the host optional; IPv6 hosts without their brackets).
+fn host_port(url: &str) -> (&str, Option<&str>) {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '#', '?']).next().unwrap_or(rest);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    match host.strip_prefix('[') {
+        // Anything after `]` but `:port` is kept so the port fails to parse.
+        Some(v6) => match v6.split_once(']') {
+            Some((host, "")) => (host, None),
+            Some((host, after)) => (host, Some(after.strip_prefix(':').unwrap_or(after))),
+            None => (v6, None),
+        },
+        None => match host.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host, None),
+        },
+    }
+}
+
+fn url_host(url: &str) -> &str {
+    host_port(url).0
+}
+
+/// `localhost` or any loopback address (`127.0.0.0/8`, `::1` in any
+/// spelling).
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || loopback_ip(host).is_some()
+}
+
+fn loopback_ip(host: &str) -> Option<std::net::IpAddr> {
+    host.parse::<std::net::IpAddr>()
+        .ok()
+        .filter(std::net::IpAddr::is_loopback)
+}
+
+fn is_loopback(url: &str) -> bool {
+    is_loopback_host(url_host(url))
+}
+
+const OLLAMA_PORT: u16 = 11434;
+
+/// A terminal command that starts the Ollama server `base_url` points at,
+/// or `None` when there's no safe one: not on this computer, an unreadable
+/// port, a non-default address on Windows (no `VAR=value cmd` syntax), or
+/// neither the `ollama` command nor (macOS, default address) the app. Only
+/// the validated loopback host and `u16` port reach the command.
+fn start_ollama_command(base_url: &str, system: &str, cli: bool) -> Option<String> {
+    let (host, port) = if base_url.is_empty() {
+        ("localhost", None)
+    } else {
+        host_port(base_url)
+    };
+    if !is_loopback_host(host) {
+        return None;
+    }
+    let port = match port {
+        None => OLLAMA_PORT,
+        Some(port) => port.parse::<u16>().ok()?,
+    };
+    // Plain `ollama serve` and the app listen on 127.0.0.1:11434 only; any
+    // other loopback address or port needs `OLLAMA_HOST`.
+    let default_target =
+        port == OLLAMA_PORT && (host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1");
+    match (cli, default_target) {
+        (true, true) => Some("ollama serve".into()),
+        (true, false) if system != "Windows" => {
+            // Rebuilt from the parsed address: canonical, IPv6 bracketed.
+            let authority = match loopback_ip(host) {
+                Some(ip) => std::net::SocketAddr::new(ip, port).to_string(),
+                None => format!("localhost:{port}"),
+            };
+            Some(format!("OLLAMA_HOST={authority} ollama serve"))
+        }
+        // Ollama.app without its command line tool on PATH.
+        (false, true) if system == "Darwin" => Some("open -a Ollama".into()),
+        _ => None,
+    }
+}
+
+/// The fix button for a checkup row, or `None` when it's ready or there's
+/// nothing concrete LocalFlow can take you to.
+pub fn check_fix(check: &Check) -> Option<CheckFix> {
+    if check.ok == Some(true) || check.fix_label.is_empty() {
+        return None;
+    }
+    let (label, action) = match check.key.as_str() {
+        "ffmpeg" => ("Install ffmpeg", openable(&check.fix_url)?),
+        "ollama-installed" => ("Get Ollama", openable(&check.fix_url)?),
+        // `checks()` stores the start command in `fix_url`; `run_checks`
+        // alone leaves its download link, meaning the plain default.
+        "ollama-running" => {
+            let command = match check.fix_url.as_str() {
+                "" => return None,
+                url if url.starts_with("https://") || url.starts_with("http://") => "ollama serve",
+                command => command,
+            };
+            ("Copy command", CheckAction::Copy(command.to_string()))
+        }
+        "microphone-device" => ("Check microphone", CheckAction::GoTo(Step::Microphone)),
+        "microphone" | "accessibility" | "input-monitoring" => {
+            ("Open Settings", openable(&check.fix_url)?)
+        }
+        _ => return None,
+    };
+    Some(CheckFix { label, action })
+}
+
+/// What pressing a fix does. `simulated` (the sandbox) suppresses only
+/// external URL opens, replacing them with an honest notice; in-app
+/// navigation and clipboard copy are unaffected.
+pub fn fix_effect(action: CheckAction, simulated: bool) -> FixEffect {
+    match action {
+        CheckAction::OpenUrl(url) if simulated => {
+            FixEffect::Notice(if url.starts_with(SETTINGS_SCHEME) {
+                "Sandbox — nothing was opened. This would open System Settings.".into()
+            } else {
+                format!(
+                    "Sandbox — nothing was opened. This would open {}.",
+                    url_host(&url)
+                )
+            })
+        }
+        CheckAction::OpenUrl(url) => FixEffect::Open(url),
+        CheckAction::GoTo(step) => FixEffect::GoTo(step),
+        CheckAction::Copy(cmd) => FixEffect::Copy(cmd),
+    }
+}
+
+/// The fix button's tooltip: where it goes.
+pub fn fix_tooltip(action: &CheckAction) -> String {
+    match action {
+        CheckAction::OpenUrl(url) if url.starts_with(SETTINGS_SCHEME) => {
+            "Opens System Settings".into()
+        }
+        CheckAction::OpenUrl(url) => format!("Opens {}", url_host(url)),
+        CheckAction::GoTo(step) => format!("Go to {} step", step.label()),
+        CheckAction::Copy(cmd) => format!("Copies “{cmd}”"),
+    }
+}
+
 /// Why Apply didn't save.
 #[derive(Clone, Debug)]
 pub enum ApplyFailure {
@@ -1070,6 +1327,9 @@ pub struct ApplyJob {
     pub opened: Config,
     /// The revision the user acknowledged in a conflict, if any.
     pub acknowledged: Option<Config>,
+    /// The speech model is the user's intent (see `SetupFlow::speech_kept`);
+    /// when false the speech group is never written.
+    pub speech_selected: bool,
 }
 
 /// Fields that only make sense together. When the user changes any member,
@@ -1112,12 +1372,75 @@ fn field_label(key: &str) -> &str {
     }
 }
 
+/// What the draft changes: `setup_flow::config_update` of the choices applied
+/// to `job.opened` (the immutable baseline), and the fields that differ,
+/// widened to whole [`INTENT_GROUPS`]. Without an explicit speech selection
+/// (`job.speech_selected`) the speech group is dropped first, so a
+/// substituted preselection never replaces the saved provider/model/device;
+/// language, microphone, cleanup, shortcuts and the setup marker still count.
+fn edited_fields(
+    job: &ApplyJob,
+) -> Result<(Config, std::collections::BTreeSet<String>), ApplyFailure> {
+    let opened = &job.opened;
+    let updates =
+        flow::config_update(&job.choices, opened).map_err(|e| ApplyFailure::Error(e.0))?;
+    let edited_config = lf_core::config::apply_config_update(opened, &updates)
+        .map_err(|e| ApplyFailure::Error(format!("{e:#}")))?;
+    let mut edited: std::collections::BTreeSet<String> = edited_config
+        .fields
+        .keys()
+        .filter(|k| edited_config.field(k) != opened.field(k))
+        .cloned()
+        .collect();
+    if !job.speech_selected {
+        for key in INTENT_GROUPS[0] {
+            edited.remove(*key);
+        }
+    }
+    for group in INTENT_GROUPS {
+        if group.iter().any(|k| edited.contains(*k)) {
+            edited.extend(group.iter().map(|k| k.to_string()));
+        }
+    }
+    Ok((edited_config, edited))
+}
+
+/// A legacy flat config (`~/.localflow.toml`) records a speech choice that
+/// the config load would fall back to: only when there is no active file at
+/// `active`, and `legacy` parses with a speech provider/model after
+/// `migrate_v1` (the `hub_route::configuration_marker` rule). Read-only: no
+/// migration, no secrets. Missing, unreadable or malformed legacy → false.
+///
+/// A deferred migration (the keyring couldn't take `fireworks_api_key`)
+/// still loads the legacy speech choice without writing an active file, so
+/// the active-file marker alone would treat it as a first run.
+pub fn legacy_speech_saved_at(active: &std::path::Path, legacy: &std::path::Path) -> bool {
+    if active.exists() {
+        return false;
+    }
+    lf_core::config::parse_toml_file(legacy)
+        .map(|raw| lf_ui::hub_route::configuration_marker(&lf_core::config::migrate_v1(&raw).0))
+        .unwrap_or(false)
+}
+
+/// [`legacy_speech_saved_at`] for `root`, only where `data::load_config_at`
+/// itself falls back to legacy: a real root at the default config path. A
+/// sandbox or explicit-path root never looks at the home legacy file.
+pub fn legacy_speech_saved(root: &crate::data::DataRoot) -> bool {
+    if root.mode != crate::data::Mode::Real
+        || lf_core::config::try_config_path().ok().as_ref() != Some(&root.config_path)
+    {
+        return false;
+    }
+    lf_core::config::try_legacy_config_path()
+        .is_ok_and(|legacy| legacy_speech_saved_at(&root.config_path, &legacy))
+}
+
 /// Write the draft to the explicit config file. Blocking; call off the UI
 /// thread.
 ///
-/// `setup_flow::config_update` turns the choices into the setup sections;
-/// applied to `job.opened` (the immutable baseline) that shows what the user
-/// changed, widened to whole [`INTENT_GROUPS`]. Under
+/// [`edited_fields`] decides what the user changed (the speech model only
+/// when they selected one, or on a first run). Under
 /// `config_write::with_lock` the latest file is loaded (`missing` supplies
 /// the explicit root's defaults when there is no file yet — no separate
 /// preparatory write) and only those fields are written; everything else,
@@ -1138,21 +1461,7 @@ pub fn apply(
     let opened = &job.opened;
     let expected = job.acknowledged.as_ref().unwrap_or(opened);
     lf_ui::config_write::with_lock(|| {
-        let updates =
-            flow::config_update(&job.choices, opened).map_err(|e| ApplyFailure::Error(e.0))?;
-        let edited_config =
-            lf_core::config::apply_config_update(opened, &updates).map_err(failure)?;
-        let mut edited: std::collections::BTreeSet<String> = edited_config
-            .fields
-            .keys()
-            .filter(|k| edited_config.field(k) != opened.field(k))
-            .cloned()
-            .collect();
-        for group in INTENT_GROUPS {
-            if group.iter().any(|k| edited.contains(*k)) {
-                edited.extend(group.iter().map(|k| k.to_string()));
-            }
-        }
+        let (edited_config, edited) = edited_fields(job)?;
         // Another process may create the file while we decide; never
         // replace a file we didn't read.
         for _ in 0..2 {
@@ -1646,7 +1955,7 @@ mod tests {
         let path = dir.path().join("config").join("config.toml");
         let mut defaults = Config::defaults_for(false);
         defaults.set_field("meetings_enabled", serde_json::json!(false));
-        let mut flow = new_flow(&defaults);
+        let mut flow = flow_with(&defaults, false);
         flow.set_device("USB Mic");
         let job = flow.begin_apply().unwrap();
         let fallback = defaults.clone();
@@ -1662,7 +1971,374 @@ mod tests {
         assert_eq!(saved.field_i64("setup_version"), Some(1));
     }
 
+    fn mlx_small(c: &mut Config) {
+        c.set_field("stt_backend", serde_json::json!("mlx-whisper"));
+        c.set_field("model_size", serde_json::json!("small"));
+        c.set_field("llm_provider", serde_json::json!("ollama"));
+        c.set_field("llm_model", serde_json::json!("llama3.2:1b"));
+        c.set_field("cleanup_enabled", serde_json::json!(true));
+    }
+
+    #[test]
+    fn cleanup_only_apply_keeps_a_configured_mlx_or_auto_speech_model() {
+        for (backend, size) in [("mlx-whisper", "small"), ("auto", "base")] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, opened) = configured(dir.path(), |c| {
+                mlx_small(c);
+                c.set_field("stt_backend", serde_json::json!(backend));
+                c.set_field("model_size", serde_json::json!(size));
+            });
+            let before = speech(&path);
+            let mut flow = new_flow(&opened);
+            // The Linux fake can't run MLX/auto as such: a Faster Whisper row
+            // is preselected, which isn't the saved provider.
+            let preselected = flow.model(&flow.choices.stt_id).unwrap().clone();
+            assert_eq!(preselected.backend, "faster-whisper");
+            assert!(flow.speech_kept());
+            assert!(!flow.dirty(), "nothing chosen yet");
+            flow.set_cleanup(CleanupMode::Off);
+            let job = flow.begin_apply().unwrap();
+            assert!(!job.speech_selected);
+            flow.apply_done(apply_at(&job, &path));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            assert_eq!(speech(&path), before, "{backend}/{size} kept");
+            let saved = lf_core::config::load_from(&path).unwrap();
+            assert_eq!(saved.field_bool("cleanup_enabled"), Some(false));
+            assert_eq!(saved.field_i64("setup_version"), Some(1));
+            assert!(!flow.dirty());
+        }
+    }
+
+    #[test]
+    fn an_explicit_speech_selection_is_written_even_when_it_is_the_preselection() {
+        let cases: [&[&str]; 3] = [&["fw-small"], &["fw-base", "fw-small"], &["fw-base"]];
+        for picks in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, opened) = configured(dir.path(), mlx_small);
+            let mut flow = new_flow(&opened);
+            assert_eq!(flow.choices.stt_id, "fw-small", "same-size fallback");
+            // Not a selection: an unknown id, the inventory, a trial.
+            flow.select_model("not-a-model");
+            let g = flow.begin_fact(Fact::Installed);
+            assert!(flow.installed_done(g, Ok(HashMap::from([("fw-small".into(), true)]))));
+            walk_to(&mut flow, Step::Trial);
+            let trial = flow.begin_trial(true, None).unwrap();
+            flow.trial_done(trial.generation, Ok("hello".into()));
+            assert!(flow.speech_kept(), "no click yet");
+            assert!(!flow.dirty());
+            for id in picks {
+                flow.select_model(id);
+            }
+            assert!(!flow.speech_kept(), "{picks:?}");
+            assert!(flow.dirty(), "an explicit pick is a change: {picks:?}");
+            let job = flow.begin_apply().unwrap();
+            assert!(job.speech_selected);
+            flow.apply_done(apply_at(&job, &path));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            let last = flow.model(picks.last().unwrap()).unwrap().clone();
+            let saved = lf_core::config::load_from(&path).unwrap();
+            assert_eq!(saved.field_str("stt_backend"), Some("faster-whisper"));
+            assert_eq!(saved.field_str("model_size"), Some(last.model_size));
+            assert!(!flow.dirty(), "the saved selection is the new baseline");
+        }
+    }
+
+    #[test]
+    fn a_language_only_change_is_saved_without_the_speech_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, opened) = configured(dir.path(), mlx_small);
+        let before = speech(&path);
+        let mut flow = new_flow(&opened);
+        flow.choices.language = Some("de".into());
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_str("language"), Some("de"));
+        assert_eq!(speech(&path), before);
+    }
+
+    #[test]
+    fn untouched_speech_keeps_a_concurrent_speech_change_without_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, opened) = configured(dir.path(), mlx_small);
+        let mut flow = new_flow(&opened);
+        flow.set_device("Desk Mic");
+        external(&path, |c| {
+            c.set_field("stt_backend", serde_json::json!("parakeet"));
+            c.set_field("model_size", serde_json::json!("base"));
+        });
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_str("input_device"), Some("Desk Mic"));
+        assert_eq!(saved.field_str("stt_backend"), Some("parakeet"));
+        assert_eq!(saved.field_str("model_size"), Some("base"));
+    }
+
+    #[test]
+    fn an_explicit_preselection_still_conflicts_and_retries_as_a_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, opened) = configured(dir.path(), mlx_small);
+        let mut flow = new_flow(&opened);
+        flow.select_model("fw-small");
+        external(&path, |c| {
+            c.set_field("model_size", serde_json::json!("base"))
+        });
+        let before = std::fs::read(&path).unwrap();
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(
+            matches!(&flow.apply, Applying::Failed(m) if m.contains("Speech model")),
+            "{:?}",
+            flow.apply
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "zero bytes written");
+        assert!(flow.dirty(), "draft kept");
+        // Acknowledged: the explicit selection is written as a whole.
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some("faster-whisper"));
+        assert_eq!(saved.field_str("model_size"), Some("small"));
+    }
+
+    #[test]
+    fn review_says_the_speech_model_is_kept_until_one_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, opened) = configured(dir.path(), mlx_small);
+        let mut flow = new_flow(&opened);
+        flow.installed = Loadable::Ready(HashMap::from([("fw-small".into(), false)]));
+        let row = |flow: &SetupFlow| {
+            flow.review_rows()
+                .into_iter()
+                .find(|r| r.label == "Speech model")
+                .unwrap()
+        };
+        let kept = row(&flow);
+        assert_eq!(kept.value, "Keep current speech model");
+        assert_eq!(kept.step, Step::Speech);
+        // Kept MLX small still runs as whisper.cpp small natively: the
+        // missing download is a real problem even though Apply keeps it.
+        assert!(
+            flow.warnings()[0].contains("isn't downloaded"),
+            "{:?}",
+            flow.warnings()
+        );
+        flow.select_model("fw-small");
+        let chosen = row(&flow);
+        assert!(chosen.value.contains(flow.model("fw-small").unwrap().label));
+        assert!(
+            chosen.value.contains("not downloaded yet"),
+            "{}",
+            chosen.value
+        );
+        assert!(flow.warnings()[0].contains("isn't downloaded"));
+    }
+
+    #[test]
+    fn a_first_run_writes_the_recommendation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::data::DataRoot::sandbox(dir.path());
+        let mut flow = open_root(&root);
+        assert!(
+            !flow.speech_kept(),
+            "no file: the recommendation is the intent"
+        );
+        assert!(!flow.dirty());
+        let recommended = flow.model(&flow.choices.stt_id).unwrap().clone();
+        assert!(!flow.review_rows()[1].value.contains("Keep current"));
+        flow.set_device("USB Mic");
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some(recommended.backend));
+        assert_eq!(saved.field_str("model_size"), Some(recommended.model_size));
+        assert_eq!(saved.field_str("input_device"), Some("USB Mic"));
+        assert_eq!(saved.field_i64("setup_version"), Some(1));
+    }
+
+    #[test]
+    fn a_hand_written_speech_choice_without_a_setup_marker_is_kept() {
+        let raw = [
+            (
+                "[stt]\nprovider = \"mlx-whisper\"\nmodel = \"small\"\n",
+                "mlx-whisper",
+            ),
+            ("[stt]\nprovider = \"auto\"\n", "auto"),
+        ];
+        for (toml, backend) in raw {
+            let dir = tempfile::tempdir().unwrap();
+            let root = crate::data::DataRoot::sandbox(dir.path());
+            write_raw(&root, toml);
+            // The real raw marker, not a hand-set flag: no [setup] version,
+            // yet configured by the explicit [stt] provider.
+            assert!(crate::controllers::setup::configured(&root), "{toml}");
+            let before = speech(&root.config_path);
+            let mut flow = open_root(&root);
+            assert_eq!(flow.opened.field_i64("setup_version").unwrap_or(0), 0);
+            assert_eq!(flow.opened.field_str("stt_backend"), Some(backend));
+            assert!(flow.speech_kept());
+            flow.set_cleanup(CleanupMode::Off);
+            let job = flow.begin_apply().unwrap();
+            flow.apply_done(apply_root(&job, &root));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            assert_eq!(speech(&root.config_path), before, "{backend} kept");
+            let saved = lf_core::config::load_from(&root.config_path).unwrap();
+            assert_eq!(saved.field_bool("cleanup_enabled"), Some(false));
+            assert_eq!(saved.field_i64("setup_version"), Some(1));
+        }
+        // An explicit pick on the same hand-written file is written.
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::data::DataRoot::sandbox(dir.path());
+        write_raw(&root, raw[0].0);
+        let mut flow = open_root(&root);
+        flow.select_model("fw-small");
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some("faster-whisper"));
+        assert_eq!(saved.field_str("model_size"), Some("small"));
+    }
+
+    #[test]
+    fn a_config_created_while_first_run_setup_is_open_is_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::data::DataRoot::sandbox(dir.path());
+        let mut flow = open_root(&root);
+        assert!(!flow.speech_kept());
+        let recommended = flow.model(&flow.choices.stt_id).unwrap().clone();
+        flow.set_device("USB Mic");
+        // Another process writes a hand-made MLX config meanwhile.
+        write_raw(
+            &root,
+            "[stt]\nprovider = \"mlx-whisper\"\nmodel = \"small\"\n",
+        );
+        let before = std::fs::read(&root.config_path).unwrap();
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(
+            matches!(&flow.apply, Applying::Failed(m) if m.contains("Speech model")),
+            "{:?}",
+            flow.apply
+        );
+        assert_eq!(std::fs::read(&root.config_path).unwrap(), before);
+        // Acknowledged: the first-run recommendation replaces it as a unit.
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some(recommended.backend));
+        assert_eq!(saved.field_str("model_size"), Some(recommended.model_size));
+        assert_eq!(saved.field_str("input_device"), Some("USB Mic"));
+    }
+
+    #[test]
+    fn a_legacy_speech_choice_counts_only_without_an_active_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("config").join("config.toml");
+        let legacy = dir.path().join(".localflow.toml");
+        let with_legacy = |text: Option<&str>| {
+            let _ = std::fs::remove_file(&legacy);
+            if let Some(text) = text {
+                std::fs::write(&legacy, text).unwrap();
+            }
+            legacy_speech_saved_at(&active, &legacy)
+        };
+        assert!(with_legacy(Some(
+            "stt_backend = \"mlx\"\nmodel_size = \"small\"\n"
+        )));
+        assert!(with_legacy(Some("stt_backend = \"auto\"\n")));
+        assert!(
+            !with_legacy(Some("hotkey = \"f19\"\n")),
+            "no speech keys: still a first run"
+        );
+        assert!(!with_legacy(Some("stt_backend = [\"mlx\"")), "malformed");
+        assert!(!with_legacy(None), "missing");
+        // An active file decides by itself (its own marker), even when the
+        // legacy file has a speech choice.
+        std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+        std::fs::write(&active, "[setup]\nversion = 0\n").unwrap();
+        assert!(!with_legacy(Some("stt_backend = \"mlx\"\n")));
+    }
+
+    #[test]
+    fn only_a_real_default_path_root_looks_at_the_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandbox = crate::data::DataRoot::sandbox(dir.path());
+        assert!(!legacy_speech_saved(&sandbox));
+        // A real root at an explicit (non-default) path: `load_config_at`
+        // never falls back to legacy there, so neither does this.
+        let explicit = crate::data::DataRoot {
+            mode: crate::data::Mode::Real,
+            sandbox_dir: None,
+            ..crate::data::DataRoot::sandbox(dir.path())
+        };
+        assert_ne!(
+            lf_core::config::try_config_path().ok().as_ref(),
+            Some(&explicit.config_path)
+        );
+        assert!(!legacy_speech_saved(&explicit));
+    }
+
+    #[test]
+    fn cleanup_only_apply_keeps_a_deferred_legacy_speech_choice() {
+        for (text, backend, size) in [
+            (
+                "stt_backend = \"mlx\"\nmodel_size = \"small\"\n",
+                "mlx-whisper",
+                "small",
+            ),
+            (
+                "stt_backend = \"auto\"\nmodel_size = \"base\"\n",
+                "auto",
+                "base",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let active = dir.path().join("config").join("config.toml");
+            let legacy = dir.path().join(".localflow.toml");
+            std::fs::write(&legacy, text).unwrap();
+            // What a deferred migration loads: the migrated legacy config,
+            // with no active file written.
+            let raw = lf_core::config::parse_toml_str(text).unwrap();
+            let (loaded, _) =
+                lf_core::config::config_from_v2(&lf_core::config::migrate_v1(&raw).0, false)
+                    .unwrap();
+            assert_eq!(loaded.field_str("stt_backend"), Some(backend));
+            let speech_saved = legacy_speech_saved_at(&active, &legacy);
+            assert!(speech_saved, "{text}");
+            let mut flow = flow_with(&loaded, speech_saved);
+            let preselected = flow.model(&flow.choices.stt_id).unwrap().clone();
+            assert_eq!(preselected.backend, "faster-whisper", "a substitute");
+            assert!(flow.speech_kept());
+            flow.set_cleanup(CleanupMode::Off);
+            let job = flow.begin_apply().unwrap();
+            let fallback = loaded.clone();
+            flow.apply_done(apply(&job, &active, move || Ok(fallback.clone())));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            let saved = lf_core::config::load_from(&active).unwrap();
+            assert_eq!(saved.field_str("stt_backend"), Some(backend));
+            assert_eq!(saved.field_str("model_size"), Some(size));
+            assert_eq!(
+                saved.field_str("stt_device"),
+                loaded.field_str("stt_device")
+            );
+            assert_eq!(saved.field_bool("cleanup_enabled"), Some(false));
+            assert_eq!(saved.field_i64("setup_version"), Some(1));
+        }
+    }
+
+    /// A flow over a config whose file already records a speech choice.
     fn new_flow(config: &Config) -> SetupFlow {
+        flow_with(config, true)
+    }
+
+    fn flow_with(config: &Config, speech_saved: bool) -> SetupFlow {
         let platform = FakeSetupPlatform {
             ollama_installed: true,
             ..FakeSetupPlatform::default()
@@ -1673,8 +2349,33 @@ mod tests {
             &platform,
             &FakeLaunchAgent::new("not installed"),
             true,
+            speech_saved,
         )
         .unwrap()
+    }
+
+    /// Production's inputs for a root (`pages::setup::build`): the loaded
+    /// config, and `speech_saved` from the raw file at the path Apply writes.
+    fn open_root(root: &crate::data::DataRoot) -> SetupFlow {
+        let config = crate::data::load_config_at(root).unwrap();
+        flow_with(&config, crate::controllers::setup::configured(root))
+    }
+
+    /// Production's Apply for a root (`pages::setup`).
+    fn apply_root(job: &ApplyJob, root: &crate::data::DataRoot) -> Result<String, ApplyFailure> {
+        apply(job, &root.config_path, || crate::data::load_config_at(root))
+    }
+
+    /// A hand-written config file (no `[setup]` section).
+    fn write_raw(root: &crate::data::DataRoot, toml: &str) {
+        std::fs::create_dir_all(root.config_path.parent().unwrap()).unwrap();
+        std::fs::write(&root.config_path, toml).unwrap();
+    }
+
+    fn speech(path: &std::path::Path) -> (Option<String>, Option<String>, Option<String>) {
+        let saved = lf_core::config::load_from(path).unwrap();
+        let get = |k: &str| saved.field_str(k).map(str::to_string);
+        (get("stt_backend"), get("model_size"), get("stt_device"))
     }
 
     #[derive(Clone, Default)]
@@ -2170,7 +2871,8 @@ mod tests {
 
     #[test]
     fn review_rows_and_warnings_come_from_live_state() {
-        let mut flow = new_flow(&Config::defaults_for(false));
+        // First run (no file yet): the recommendation is what Apply saves.
+        let mut flow = flow_with(&Config::defaults_for(false), false);
         let mut installed = HashMap::new();
         installed.insert(flow.choices.stt_id.clone(), false);
         flow.installed = Loadable::Ready(installed);
@@ -2192,5 +2894,552 @@ mod tests {
             .any(|r| r.key == "paste-tool" && r.ok == Some(false)));
         let ffmpeg = rows.iter().find(|r| r.key == "ffmpeg").unwrap();
         assert!(!ffmpeg.detail.contains("brew"));
+        for key in ["global-shortcuts", "paste-tool"] {
+            let row = rows.iter().find(|r| r.key == key).unwrap();
+            assert_eq!(check_fix(row), None, "{key}");
+        }
+    }
+
+    // ------------------------------------------------------ checkup fixes ---
+
+    const FIX_KEYS: [&str; 7] = [
+        "ffmpeg",
+        "ollama-installed",
+        "ollama-running",
+        "microphone-device",
+        "microphone",
+        "accessibility",
+        "input-monitoring",
+    ];
+
+    fn row(key: &str, ok: Option<bool>, url: &str) -> Check {
+        Check::new(key, key, ok, "detail", "Fix it", url)
+    }
+
+    fn platform(system: &str) -> FakeSetupPlatform {
+        FakeSetupPlatform {
+            system: system.into(),
+            ..FakeSetupPlatform::default()
+        }
+    }
+
+    /// Everything missing: every fix this system can offer.
+    fn broken(system: &str) -> Vec<Check> {
+        let platform = FakeSetupPlatform {
+            mic: Some(flow::MicAuthorization::Denied),
+            accessibility: Some(false),
+            input_monitoring: Some(false),
+            ..platform(system)
+        };
+        let mut rows = checks(&Config::defaults_for(system == "Darwin"), &platform);
+        let running = FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform
+        };
+        rows.extend(checks(&Config::defaults_for(system == "Darwin"), &running));
+        rows
+    }
+
+    #[test]
+    fn ready_checks_never_offer_a_fix() {
+        for key in FIX_KEYS.into_iter().chain(["llm-provider", "other"]) {
+            let check = row(key, Some(true), "https://example.com/fix");
+            assert_eq!(check_fix(&check), None, "{key}");
+        }
+    }
+
+    #[test]
+    fn fixes_have_exact_labels_and_targets() {
+        let settings = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
+        let cases: [(&str, &str, &str, CheckAction); 7] = [
+            (
+                "ffmpeg",
+                "https://formulae.brew.sh/formula/ffmpeg",
+                "Install ffmpeg",
+                CheckAction::OpenUrl("https://formulae.brew.sh/formula/ffmpeg".into()),
+            ),
+            (
+                "ollama-installed",
+                "https://ollama.com/download",
+                "Get Ollama",
+                CheckAction::OpenUrl("https://ollama.com/download".into()),
+            ),
+            (
+                "ollama-running",
+                "https://ollama.com/download",
+                "Copy command",
+                CheckAction::Copy("ollama serve".into()),
+            ),
+            (
+                "microphone-device",
+                "",
+                "Check microphone",
+                CheckAction::GoTo(Step::Microphone),
+            ),
+            (
+                "microphone",
+                settings,
+                "Open Settings",
+                CheckAction::OpenUrl(settings.into()),
+            ),
+            (
+                "accessibility",
+                settings,
+                "Open Settings",
+                CheckAction::OpenUrl(settings.into()),
+            ),
+            (
+                "input-monitoring",
+                settings,
+                "Open Settings",
+                CheckAction::OpenUrl(settings.into()),
+            ),
+        ];
+        for (key, url, label, action) in cases {
+            for ok in [Some(false), None] {
+                assert_eq!(
+                    check_fix(&row(key, ok, url)),
+                    Some(CheckFix {
+                        label,
+                        action: action.clone()
+                    }),
+                    "{key} {ok:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rows_without_a_target_have_no_button() {
+        for key in ["llm-provider", "global-shortcuts", "paste-tool", "unknown"] {
+            assert_eq!(
+                check_fix(&row(key, Some(false), "https://example.com")),
+                None,
+                "{key}"
+            );
+        }
+        for key in [
+            "ffmpeg",
+            "ollama-installed",
+            "microphone",
+            "accessibility",
+            "input-monitoring",
+        ] {
+            for url in ["", "file:///etc/passwd", "http://example.com", "https://"] {
+                assert_eq!(check_fix(&row(key, Some(false), url)), None, "{key} {url}");
+            }
+        }
+        // No label: nothing to offer even with a known key.
+        let mut unlabeled = row("ffmpeg", Some(false), "https://ffmpeg.org");
+        unlabeled.fix_label.clear();
+        assert_eq!(check_fix(&unlabeled), None);
+    }
+
+    #[test]
+    fn ffmpeg_fix_is_platform_correct() {
+        for (system, url) in [
+            ("Darwin", "https://formulae.brew.sh/formula/ffmpeg"),
+            ("Linux", "https://ffmpeg.org/download.html#build-linux"),
+            ("Windows", "https://ffmpeg.org/download.html#build-windows"),
+        ] {
+            let rows = checks(&Config::defaults_for(system == "Darwin"), &platform(system));
+            let ffmpeg = rows.iter().find(|r| r.key == "ffmpeg").unwrap();
+            assert_eq!(ffmpeg.ok, Some(false));
+            assert_eq!(
+                check_fix(ffmpeg).map(|f| f.action),
+                Some(CheckAction::OpenUrl(url.into())),
+                "{system}"
+            );
+            if system != "Darwin" {
+                assert!(!ffmpeg.detail.contains("brew"), "{system}");
+            }
+        }
+        // Installed: no fix on any system.
+        let found = FakeSetupPlatform {
+            commands: vec!["ffmpeg".into()],
+            ..platform("Windows")
+        };
+        let rows = checks(&Config::defaults_for(false), &found);
+        let ffmpeg = rows.iter().find(|r| r.key == "ffmpeg").unwrap();
+        assert_eq!(ffmpeg.detail, "Installed");
+        assert_eq!(check_fix(ffmpeg), None);
+    }
+
+    #[test]
+    fn start_ollama_is_offered_only_when_installed() {
+        let config = Config::defaults_for(false);
+        let fix = |rows: &[Check], key: &str| {
+            check_fix(rows.iter().find(|r| r.key == key).unwrap()).map(|f| f.action)
+        };
+        let rows = checks(&config, &platform("Linux"));
+        assert_eq!(
+            fix(&rows, "ollama-installed"),
+            Some(CheckAction::OpenUrl("https://ollama.com/download".into()))
+        );
+        assert_eq!(fix(&rows, "ollama-running"), None);
+        let stopped = with_cli(FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform("Linux")
+        });
+        let rows = checks(&config, &stopped);
+        assert_eq!(fix(&rows, "ollama-installed"), None);
+        assert_eq!(
+            fix(&rows, "ollama-running"),
+            Some(CheckAction::Copy("ollama serve".into()))
+        );
+    }
+
+    #[test]
+    fn start_ollama_is_offered_only_for_a_local_server() {
+        let stopped = with_cli(FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform("Linux")
+        });
+        for local in [
+            "",
+            "http://localhost:11434",
+            "http://LOCALHOST:11434/",
+            "http://127.0.0.1:11434",
+            "http://localhost",
+            "localhost:11434",
+        ] {
+            assert_eq!(
+                ollama_fix(&stopped, local, "ollama-running"),
+                Some(CheckAction::Copy("ollama serve".into())),
+                "{local:?}"
+            );
+        }
+        for remote in [
+            "http://192.168.1.20:11434",
+            "https://ollama.example.com",
+            "http://localhost.example.com:11434",
+            "http://localhost@evil.example:11434",
+            "http://[2001:db8::1]:11434",
+            "http://128.0.0.1:11434",
+        ] {
+            assert_eq!(
+                ollama_fix(&stopped, remote, "ollama-running"),
+                None,
+                "{remote:?}"
+            );
+        }
+    }
+
+    fn with_cli(platform: FakeSetupPlatform) -> FakeSetupPlatform {
+        FakeSetupPlatform {
+            commands: vec!["ollama".into()],
+            ..platform
+        }
+    }
+
+    /// The fix on `key` with `llm_base_url = base_url`.
+    fn ollama_fix(platform: &FakeSetupPlatform, base_url: &str, key: &str) -> Option<CheckAction> {
+        let mut config = Config::defaults_for(platform.system == "Darwin");
+        config.set_field("llm_base_url", serde_json::json!(base_url));
+        let rows = checks(&config, platform);
+        check_fix(rows.iter().find(|r| r.key == key).unwrap()).map(|f| f.action)
+    }
+
+    #[test]
+    fn a_remote_ollama_server_needs_nothing_installed_here() {
+        for system in ["Darwin", "Linux", "Windows"] {
+            let nothing_local = platform(system);
+            for url in ["http://192.168.1.20:11434", "https://ollama.example.com"] {
+                assert_eq!(
+                    ollama_fix(&nothing_local, url, "ollama-installed"),
+                    None,
+                    "{system} {url}"
+                );
+                assert_eq!(
+                    ollama_fix(&nothing_local, url, "ollama-running"),
+                    None,
+                    "{system} {url}"
+                );
+            }
+            // Locally it's still offered.
+            assert_eq!(
+                ollama_fix(&nothing_local, "http://localhost:11434", "ollama-installed"),
+                Some(CheckAction::OpenUrl("https://ollama.com/download".into())),
+                "{system}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ollama_app_without_its_command_opens_the_app_on_macos_only() {
+        let app_only = |system: &str| FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform(system)
+        };
+        assert_eq!(
+            ollama_fix(&app_only("Darwin"), "", "ollama-running"),
+            Some(CheckAction::Copy("open -a Ollama".into()))
+        );
+        assert_eq!(
+            ollama_fix(
+                &app_only("Darwin"),
+                "http://127.0.0.1:11434",
+                "ollama-running"
+            ),
+            Some(CheckAction::Copy("open -a Ollama".into()))
+        );
+        // The app always listens on the default port.
+        assert_eq!(
+            ollama_fix(
+                &app_only("Darwin"),
+                "http://localhost:11435",
+                "ollama-running"
+            ),
+            None
+        );
+        // …and only on 127.0.0.1.
+        for url in ["http://[::1]:11434", "http://127.0.0.2:11434"] {
+            assert_eq!(
+                ollama_fix(&app_only("Darwin"), url, "ollama-running"),
+                None,
+                "{url}"
+            );
+        }
+        for system in ["Linux", "Windows"] {
+            assert_eq!(
+                ollama_fix(&app_only(system), "", "ollama-running"),
+                None,
+                "{system}"
+            );
+        }
+        // With the command line tool, macOS gets `ollama serve` too.
+        assert_eq!(
+            ollama_fix(&with_cli(app_only("Darwin")), "", "ollama-running"),
+            Some(CheckAction::Copy("ollama serve".into()))
+        );
+    }
+
+    #[test]
+    fn a_custom_local_port_is_started_on_that_port() {
+        let stopped = |system: &str| {
+            with_cli(FakeSetupPlatform {
+                ollama_installed: true,
+                ..platform(system)
+            })
+        };
+        for system in ["Darwin", "Linux"] {
+            for (url, command) in [
+                (
+                    "http://localhost:11435",
+                    "OLLAMA_HOST=localhost:11435 ollama serve",
+                ),
+                (
+                    "http://LocalHost:11435/api",
+                    "OLLAMA_HOST=localhost:11435 ollama serve",
+                ),
+                (
+                    "http://127.0.0.1:8080",
+                    "OLLAMA_HOST=127.0.0.1:8080 ollama serve",
+                ),
+                ("http://[::1]:11435", "OLLAMA_HOST=[::1]:11435 ollama serve"),
+                // Loopback aliases are written canonically.
+                (
+                    "http://[0:0:0:0:0:0:0:1]:11435",
+                    "OLLAMA_HOST=[::1]:11435 ollama serve",
+                ),
+                (
+                    "http://127.0.0.2:11435",
+                    "OLLAMA_HOST=127.0.0.2:11435 ollama serve",
+                ),
+                // Plain `ollama serve` binds 127.0.0.1 only: other loopback
+                // addresses need OLLAMA_HOST even on the default port.
+                ("http://[::1]:11434", "OLLAMA_HOST=[::1]:11434 ollama serve"),
+                (
+                    "http://[0:0:0:0:0:0:0:1]:11434",
+                    "OLLAMA_HOST=[::1]:11434 ollama serve",
+                ),
+                (
+                    "http://127.0.0.2:11434",
+                    "OLLAMA_HOST=127.0.0.2:11434 ollama serve",
+                ),
+                ("http://localhost:11434", "ollama serve"),
+                ("http://127.0.0.1:11434", "ollama serve"),
+            ] {
+                assert_eq!(
+                    ollama_fix(&stopped(system), url, "ollama-running"),
+                    Some(CheckAction::Copy(command.into())),
+                    "{system} {url}"
+                );
+            }
+            // Never a command built from an unreadable port.
+            for url in [
+                "http://localhost:99999",
+                "http://localhost:11435;rm -rf ~",
+                "http://localhost:",
+                "http://[::1]x:11435",
+            ] {
+                assert_eq!(
+                    ollama_fix(&stopped(system), url, "ollama-running"),
+                    None,
+                    "{system} {url}"
+                );
+            }
+        }
+        // Windows shells don't take `VAR=value command`.
+        for url in [
+            "http://localhost:11435",
+            "http://[::1]:11434",
+            "http://127.0.0.2:11434",
+        ] {
+            assert_eq!(
+                ollama_fix(&stopped("Windows"), url, "ollama-running"),
+                None,
+                "{url}"
+            );
+        }
+        assert_eq!(
+            ollama_fix(
+                &stopped("Windows"),
+                "http://localhost:11434",
+                "ollama-running"
+            ),
+            Some(CheckAction::Copy("ollama serve".into()))
+        );
+    }
+
+    #[test]
+    fn the_start_command_comes_from_fix_url() {
+        let running = |url: &str| row("ollama-running", Some(false), url);
+        for raw in ["https://ollama.com/download", "http://localhost:11434"] {
+            assert_eq!(
+                check_fix(&running(raw)).map(|f| f.action),
+                Some(CheckAction::Copy("ollama serve".into())),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            check_fix(&running("open -a Ollama")).map(|f| f.action),
+            Some(CheckAction::Copy("open -a Ollama".into()))
+        );
+        assert_eq!(check_fix(&running("")), None);
+    }
+
+    #[test]
+    fn url_hosts_drop_userinfo_and_port() {
+        for (url, host) in [
+            ("https://ollama.com/download", "ollama.com"),
+            ("https://user:pw@ollama.com:8443/x?y#z", "ollama.com"),
+            ("https://ffmpeg.org#build-linux", "ffmpeg.org"),
+            ("http://[::1]:11434", "::1"),
+            ("localhost:11434", "localhost"),
+        ] {
+            assert_eq!(url_host(url), host, "{url}");
+        }
+        assert_eq!(
+            fix_tooltip(&CheckAction::OpenUrl("https://me@ollama.com:443/".into())),
+            "Opens ollama.com"
+        );
+        for bad in [
+            "x-apple.systempreferences:",
+            "x-apple.systempreferences:  ",
+            "https://user@",
+            "https://:443/path",
+        ] {
+            assert_eq!(openable(bad), None, "{bad:?}");
+        }
+        assert!(openable("x-apple.systempreferences:com.apple.preference.security").is_some());
+    }
+
+    #[test]
+    fn microphone_fix_step_is_reachable_from_checkup() {
+        let mut flow = new_flow(&Config::defaults_for(false));
+        assert_eq!(flow.step, Step::Checkup);
+        assert!(flow.go_to(Step::Microphone));
+        assert_eq!(flow.step, Step::Microphone);
+    }
+
+    #[test]
+    fn sandbox_never_opens_anything() {
+        // Every system offers some links (ffmpeg on both runs, Get Ollama on
+        // the first); only macOS adds its three Settings panes per run.
+        for (system, expected) in [("Darwin", 9), ("Linux", 3), ("Windows", 3)] {
+            let mut opened = 0;
+            for check in broken(system) {
+                let Some(fix) = check_fix(&check) else {
+                    continue;
+                };
+                let simulated = fix_effect(fix.action.clone(), true);
+                assert!(
+                    !matches!(simulated, FixEffect::Open(_)),
+                    "{system} {}",
+                    check.key
+                );
+                if let FixEffect::Notice(notice) = &simulated {
+                    assert!(notice.starts_with("Sandbox — nothing was opened."));
+                }
+                if let CheckAction::OpenUrl(url) = &fix.action {
+                    opened += 1;
+                    assert!(matches!(simulated, FixEffect::Notice(_)));
+                    assert_eq!(
+                        fix_effect(fix.action.clone(), false),
+                        FixEffect::Open(url.clone())
+                    );
+                }
+            }
+            assert_eq!(opened, expected, "openable fixes on {system}");
+        }
+        assert_eq!(
+            fix_effect(
+                CheckAction::OpenUrl("https://ollama.com/download".into()),
+                true
+            ),
+            FixEffect::Notice("Sandbox — nothing was opened. This would open ollama.com.".into())
+        );
+        assert_eq!(
+            fix_effect(
+                CheckAction::OpenUrl("https://ffmpeg.org/download.html#build-linux".into()),
+                true
+            ),
+            FixEffect::Notice("Sandbox — nothing was opened. This would open ffmpeg.org.".into())
+        );
+        assert_eq!(
+            fix_effect(
+                CheckAction::OpenUrl(
+                    "x-apple.systempreferences:com.apple.preference.security".into()
+                ),
+                true
+            ),
+            FixEffect::Notice(
+                "Sandbox — nothing was opened. This would open System Settings.".into()
+            )
+        );
+        // Non-URL actions behave the same in the sandbox.
+        for simulated in [true, false] {
+            assert_eq!(
+                fix_effect(CheckAction::GoTo(Step::Microphone), simulated),
+                FixEffect::GoTo(Step::Microphone)
+            );
+            assert_eq!(
+                fix_effect(CheckAction::Copy("ollama serve".into()), simulated),
+                FixEffect::Copy("ollama serve".into())
+            );
+        }
+    }
+
+    #[test]
+    fn fix_tooltips_say_where_they_go() {
+        assert_eq!(
+            fix_tooltip(&CheckAction::OpenUrl("https://ollama.com/download".into())),
+            "Opens ollama.com"
+        );
+        assert_eq!(
+            fix_tooltip(&CheckAction::OpenUrl(
+                "x-apple.systempreferences:com.apple.preference.security".into()
+            )),
+            "Opens System Settings"
+        );
+        assert_eq!(
+            fix_tooltip(&CheckAction::GoTo(Step::Microphone)),
+            "Go to Microphone step"
+        );
+        assert_eq!(
+            fix_tooltip(&CheckAction::Copy("ollama serve".into())),
+            "Copies “ollama serve”"
+        );
     }
 }

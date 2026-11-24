@@ -29,7 +29,9 @@ use unicode_normalization::UnicodeNormalization;
 // ------------------------------------------------------------- constants ---
 
 /// The exact config fields the agent may change.
-pub const ALLOWLIST: [&str; 22] = [
+pub const ALLOWLIST: [&str; 24] = [
+    "dictation_enabled",
+    "dictation_toggle_hotkey",
     "sounds_enabled",
     "cleanup_enabled",
     "cleanup_level",
@@ -62,6 +64,8 @@ pub const MAX_DISPLAY_CHARS: usize = 300;
 /// `LABELS[key]` from Python; `None` outside the allowlist.
 pub fn label(key: &str) -> Option<&'static str> {
     Some(match key {
+        "dictation_enabled" => "Dictation",
+        "dictation_toggle_hotkey" => "Toggle dictation shortcut",
         "sounds_enabled" => "Sounds",
         "cleanup_enabled" => "Cleanup",
         "cleanup_level" => "Cleanup level",
@@ -117,6 +121,7 @@ pub const MANUAL_GROUPS: [(&str, &[&str]); 4] = [
     (
         "Dictation",
         &[
+            "dictation_enabled",
             "sounds_enabled",
             "paste_method",
             "spoken_symbols",
@@ -139,6 +144,7 @@ pub const MANUAL_GROUPS: [(&str, &[&str]); 4] = [
     (
         "Shortcuts",
         &[
+            "dictation_toggle_hotkey",
             "hotkey",
             "command_hotkey",
             "polish_hotkey",
@@ -159,7 +165,8 @@ pub const MANUAL_GROUPS: [(&str, &[&str]); 4] = [
 ];
 
 /// Keys shown as an On/Off switch.
-pub const BOOL_KEYS: [&str; 10] = [
+pub const BOOL_KEYS: [&str; 11] = [
+    "dictation_enabled",
     "sounds_enabled",
     "cleanup_enabled",
     "styles_enabled",
@@ -174,7 +181,8 @@ pub const BOOL_KEYS: [&str; 10] = [
 /// The writing styles a style popup offers.
 pub const STYLES: [&str; 4] = ["formal", "casual", "very_casual", "excited"];
 /// Keys edited as a shortcut text field.
-pub const SHORTCUT_KEYS: [&str; 5] = [
+pub const SHORTCUT_KEYS: [&str; 6] = [
+    "dictation_toggle_hotkey",
     "hotkey",
     "command_hotkey",
     "polish_hotkey",
@@ -542,8 +550,6 @@ fn shortcut_name(name: &str) -> Option<&'static str> {
         "tab" => "Tab",
         "backspace" => "Backspace",
         "delete" => "Delete",
-        "page_up" => "Page Up",
-        "page_down" => "Page Down",
         _ => return None,
     })
 }
@@ -697,6 +703,8 @@ pub fn change_line(change: &Change) -> String {
 /// Words a request can use to mean a setting (besides its own label/key).
 fn intent_words(key: &str) -> &'static [&'static str] {
     match key {
+        "dictation_enabled" => &["dictation", "dictating", "push to talk", "push-to-talk"],
+        "dictation_toggle_hotkey" => &["toggle dictation", "dictation toggle"],
         "sounds_enabled" => &["sound", "beep", "chime", "audio cue"],
         "cleanup_enabled" | "cleanup_level" => &["cleanup", "clean up", "clean-up"],
         "styles_enabled" => &["writing style", "styles"],
@@ -1342,7 +1350,7 @@ mod tests {
             .flat_map(|(_, k)| k.iter().copied())
             .collect();
         let unique: BTreeSet<&str> = keys.iter().copied().collect();
-        assert_eq!(keys.len(), 22);
+        assert_eq!(keys.len(), 24);
         assert_eq!(unique, ALLOWLIST.iter().copied().collect());
         assert_eq!(
             MANUAL_GROUPS.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
@@ -1408,6 +1416,47 @@ mod tests {
         odd.kind = "mystery".into();
         assert_eq!(odd.line(), INVALID_LINE);
         assert_eq!(change_warning(&odd, "x"), "Not valid: preview again.");
+    }
+
+    #[test]
+    fn dictation_switch_and_toggle_shortcut_have_lines_and_warnings() {
+        let off = Change::setting("dictation_enabled", json!(true), json!(false));
+        assert_eq!(off.line(), "Dictation: On → Off");
+        assert_eq!(control_kind("dictation_enabled"), "switch");
+        assert_eq!(
+            off.warning("Turn off dictation."),
+            "Check: turns Dictation off."
+        );
+        assert_eq!(
+            off.warning("Make it quieter"),
+            "Check: turns Dictation off; your request doesn't seem to mention this."
+        );
+        let on = Change::setting("dictation_enabled", json!(false), json!(true));
+        assert_eq!(on.line(), "Dictation: Off → On");
+        assert_eq!(on.warning("Turn dictation back on"), "");
+
+        let toggle = Change::setting(
+            "dictation_toggle_hotkey",
+            json!(""),
+            json!("<ctrl>+<alt>+d"),
+        );
+        assert_eq!(control_kind("dictation_toggle_hotkey"), "shortcut");
+        assert_eq!(
+            toggle.line(),
+            format!(
+                "Toggle dictation shortcut: Off → {}",
+                display_value("hotkey", &json!("<ctrl>+<alt>+d"))
+            )
+        );
+        assert_ne!(toggle.line(), INVALID_LINE);
+        assert_eq!(
+            toggle.warning("Set the toggle dictation shortcut to ctrl+alt+d"),
+            "Check: changes a keyboard shortcut."
+        );
+        assert_eq!(
+            toggle.warning("Change all my shortcuts"),
+            "Check: changes a keyboard shortcut."
+        );
     }
 
     #[test]
@@ -1495,11 +1544,22 @@ mod tests {
     #[test]
     fn sample_rows_follow_the_page_order_and_the_config() {
         let rows = FakeSettingsAgent::new().manual_settings(None).unwrap();
-        assert_eq!(rows.len(), 22);
-        assert_eq!(rows[0].key, "sounds_enabled");
+        assert_eq!(rows.len(), 24);
+        assert_eq!(rows[0].key, "dictation_enabled");
         assert_eq!(rows[0].group, "Dictation");
+        assert_eq!(rows[0].label, "Dictation");
         assert_eq!(rows[0].kind, "switch");
         assert_eq!(rows[0].display, "On");
+        assert_eq!(rows[1].key, "sounds_enabled");
+        let toggle = rows
+            .iter()
+            .find(|r| r.key == "dictation_toggle_hotkey")
+            .unwrap();
+        assert_eq!(toggle.group, "Shortcuts");
+        assert_eq!(toggle.label, "Toggle dictation shortcut");
+        assert_eq!(toggle.kind, "shortcut");
+        let first_shortcut = rows.iter().position(|r| r.group == "Shortcuts").unwrap();
+        assert_eq!(rows[first_shortcut].key, "dictation_toggle_hotkey");
         let level = rows.iter().find(|r| r.key == "cleanup_level").unwrap();
         assert_eq!(level.kind, "choice");
         assert_eq!(
