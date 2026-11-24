@@ -236,8 +236,9 @@ Audio and speech-to-text come in through the `AudioSource` and
 feature supplies real lf-audio capture and SttSlot adapters, a worker factory
 and `run_options` ([integration and HTTP stacking](lf-stt/README.md#dictation-runtime-optional));
 `lf_runtime::run::run` wires everything, and
-`lf-hub` runs it on macOS. The `lf-desktop` preview runs it with `--engine` in a
-`--features runtime` build on Linux, Windows and macOS.
+`lf-hub` runs it on macOS. The `lf-desktop` preview can run it on Linux,
+Windows and macOS: in a `--features runtime` build started with `--engine`,
+once **Start here** is pressed on Home.
 
 Everything is event-driven. The controller blocks on its channel and only
 sets a deadline for the double-tap window and the max-duration timer. The
@@ -576,12 +577,12 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   `GET` reports it as unavailable;
 * `lf-rs` has no `dictate` command, and `lf-rs serve` does not start a
   global hotkey dictation runtime; HTTP uploads are its only dictation path;
-* global hotkeys work on macOS, X11 and Windows; on Wayland and other
-  platforms `lf_input::listener::run_forever` returns `Unsupported`. The menu
-  bar item is `lf-hub`'s on macOS; on Linux and Windows the only tray is the
-  `lf-desktop` preview's, and `lf-rs` draws none. Paste works everywhere
-  (CGEvent Cmd+V or `osascript`
-  on macOS, `wtype`/`xdotool` on Linux, `SendInput` on Windows; Linux
+* global hotkeys work on macOS, X11 (XInput 2.1 or newer) and Windows; on
+  Wayland, in a session with no display and on other platforms
+  `lf_input::listener::run_forever` returns `Unsupported`. `lf-hub` draws the
+  macOS menu bar item and the `lf-desktop` preview draws its own menu bar or
+  tray item on macOS, Linux and Windows; `lf-rs` draws none. Paste works
+  everywhere (CGEvent Cmd+V or `osascript` on macOS, `wtype`/`xdotool` on Linux, `SendInput` on Windows; Linux
   `pynput` paste is not ported). Keys are mapped by US-layout keycode, plus
   the character Shift types (as pynput reports it), so `<ctrl>++` works;
   Option never changes the key;
