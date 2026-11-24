@@ -128,6 +128,7 @@ jobs:
           export XDG_RUNTIME_DIR="$HOME" LOCALFLOW_CONFIG=""
           mkdir -p "$XDG_CONFIG_HOME/localflow" "$HOME/.localflow"
           printf '# Gate 2 fixture\n' > "$XDG_CONFIG_HOME/localflow/config.toml"
+          printf 'gate2-fixture-token\n' > "$XDG_CONFIG_HOME/localflow/api-token"
           printf '{"words": [], "replacements": {}}\n' > "$HOME/.localflow/dictionary.json"
           dbus-run-session -- bash -e -o pipefail -c '
             printf %s cutover-fixture | gnome-keyring-daemon --unlock --components=secrets

@@ -43,7 +43,11 @@ fn main() -> ExitCode {
     };
     let launched = if args.sandbox {
         let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
-        launch::sandbox(&dir, args.sandbox_reset, route)
+        launch::sandbox(
+            &dir,
+            args.sandbox_reset,
+            (!args.sandbox_exercise).then_some(route),
+        )
     } else {
         match DataRoot::real() {
             Ok(root) => launch::real(root, route),
@@ -74,6 +78,20 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if args.sandbox_exercise {
+        return match lf_desktop::sandbox::exercise(&services) {
+            Ok(done) => {
+                for line in done {
+                    println!("{line}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("lf-desktop: sandbox exercise failed: {err:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let notice = args
         .unknown_page
         .as_ref()

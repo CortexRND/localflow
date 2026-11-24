@@ -64,6 +64,7 @@ rust/lf-desktop/target/debug/lf-desktop --engine     # then press "Start here" o
 | `--sandbox` | Uses isolated example data and in-process fake services (also `LOCALFLOW_SANDBOX=1`) |
 | `--data-dir <DIR>` | Sandbox directory, only valid with `--sandbox` |
 | `--sandbox-reset` | Re-seeds the sandbox directory (refused while that sandbox is open in another window) |
+| `--sandbox-exercise` | Writes once to each sandbox store (Settings, a provider key, Hot Phrases, History, Prompts) through the page controllers, prints one line per store and exits without a window. Only valid with `--sandbox`; refused while that sandbox is open in another window; used by Gate 2 |
 
 An unknown argument, or `--engine` where it can't run, exits with status 2. A first
 launch with no setup marker in the config (and no `--page`) opens the wizard,
