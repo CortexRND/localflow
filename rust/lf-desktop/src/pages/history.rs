@@ -566,6 +566,7 @@ impl HistoryPage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .bg(t.bg_surface)
                     .when(focused, move |d| d.shadow(ring.clone()))
                     .child(rows),
             )

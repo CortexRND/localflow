@@ -17,7 +17,7 @@ use crate::data::Services;
 use crate::page::{Page, NAV_FOOTER, NAV_GROUPS};
 use crate::pages;
 use crate::remote::Health;
-use crate::theme::{size as tsize, space, text, theme, Theme, Tone};
+use crate::theme::{elevation, size as tsize, space, text, theme, Theme, Tone};
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use crate::tray;
 use crate::ui::{self, assets::Assets, Button};
@@ -1055,29 +1055,21 @@ impl Shell {
             let (sz, lh) = text::body();
             let badge = (page == Page::Prompts && self.pending_prompts > 0)
                 .then(|| ui::badge(t, self.pending_prompts));
+            // Selected: a soft rounded fill, heavier label, accent icon.
             ui::row_button(t, ("nav", page as u64), selected)
-                .h(tsize::control_md())
+                .h(tsize::nav_row())
                 .items_center()
-                .gap(space::s5())
-                .px(space::s5())
-                .rounded(tsize::radius_element())
+                .gap(space::s4())
+                .px(space::s4())
+                .rounded(tsize::radius_inner())
                 .text_size(sz)
                 .line_height(lh)
-                .text_color(if selected { t.text } else { t.text_secondary })
-                .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
-                .on_click(cx.listener(move |this, _, _, cx| this.navigate(page, None, cx)))
+                .text_color(t.text)
                 .when(selected, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .top(px(8.))
-                            .w(px(2.))
-                            .h(px(16.))
-                            .rounded_full()
-                            .bg(t.accent),
-                    )
+                    d.bg(t.bg_sidebar_selected)
+                        .font_weight(FontWeight::SEMIBOLD)
                 })
+                .on_click(cx.listener(move |this, _, _, cx| this.navigate(page, None, cx)))
                 .child(ui::icon(
                     page.icon(),
                     if selected {
@@ -1086,16 +1078,29 @@ impl Shell {
                         t.icon_secondary
                     },
                 ))
-                .child(div().flex_1().child(page.label()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(page.label()),
+                )
                 .children(badge)
         };
-        let mut groups = div().flex().flex_col().gap(space::s1()).px(space::s4());
+        let mut groups = div()
+            .flex()
+            .flex_col()
+            .gap(space::s1())
+            .px(space::s4())
+            .pb(space::s4());
         for (label, pages) in NAV_GROUPS {
             if let Some(label) = label {
                 groups = groups.child(
                     ui::supporting(t, label)
-                        .font_weight(FontWeight::MEDIUM)
-                        .px(space::s5())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .px(space::s4())
                         .pt(space::s6())
                         .pb(space::s2()),
                 );
@@ -1109,24 +1114,34 @@ impl Shell {
             .flex_col()
             .gap(space::s1())
             .px(space::s4())
-            .pb(space::s4());
+            .py(space::s4());
         for page in NAV_FOOTER {
             footer = footer.child(nav_item(page, cx));
         }
         // Status row: what a runtime itself reports (status file, lock,
-        // this window's engine). HTTP reachability never changes it.
+        // this window's engine). HTTP reachability never changes it. A
+        // quiet footer: dot, line 1, line 2; clicking opens Home.
         let (signal, line1, line2) = self.runtime.sidebar.clone();
         let tone = signal_tone(signal);
-        let status = ui::row_button(t, "status-row", false)
-            .flex_col()
-            .gap(space::s1())
-            .px(space::s6())
-            .py(space::s5())
-            .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Home, None, cx)))
-            .child(ui::status_dot(t, tone, line1).font_weight(FontWeight::MEDIUM))
-            .when(!line2.is_empty(), |d| {
-                d.child(ui::supporting(t, line2).pl(px(20.)))
-            });
+        let (sz, lh) = text::supporting();
+        let status = div().px(space::s4()).py(space::s4()).child(
+            ui::row_button(t, "status-row", false)
+                .flex_col()
+                .gap(space::s1())
+                .px(space::s4())
+                .py(space::s3())
+                .rounded(tsize::radius_element())
+                .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Home, None, cx)))
+                .child(
+                    ui::status_dot(t, tone, line1)
+                        .text_size(sz)
+                        .line_height(lh)
+                        .font_weight(FontWeight::MEDIUM),
+                )
+                .when(!line2.is_empty(), |d| {
+                    d.child(ui::supporting(t, line2).pl(px(14.)))
+                }),
+        );
 
         div()
             .id("sidebar")
@@ -1143,8 +1158,9 @@ impl Shell {
                 div()
                     .flex()
                     .items_center()
-                    .gap(space::s5())
-                    .h(px(56.))
+                    .flex_none()
+                    .gap(space::s4())
+                    .h(px(52.))
                     .px(space::s6())
                     .child(ui::brand(t))
                     .child(ui::label(t, "LocalFlow").font_weight(FontWeight::SEMIBOLD)),
@@ -1157,6 +1173,7 @@ impl Shell {
                     .overflow_y_scroll()
                     .child(groups),
             )
+            .child(ui::divider(t))
             .child(footer)
             .child(ui::divider(t))
             .child(status)
@@ -1180,26 +1197,32 @@ impl Shell {
                         .occlude()
                         .flex()
                         .items_center()
-                        .gap(space::s6())
-                        .px(space::s6())
-                        .py(space::s4())
-                        .rounded(tsize::radius_element())
-                        .bg(t.bg_inverted)
-                        .text_color(t.text_inverted)
+                        .gap(space::s5())
+                        .pl(space::s6())
+                        .pr(space::s2())
+                        .py(space::s2())
+                        .min_h(px(40.))
+                        .rounded(tsize::radius_group())
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(t.bg_popover)
+                        .text_color(t.text)
                         .text_size(sz)
                         .line_height(lh)
-                        .shadow_lg()
+                        .shadow(elevation::popover(t))
                         .max_w(px(560.))
                         .child(toast.message.clone())
                         .when_some(action, |d, (label, f)| {
-                            let ring = ui::ring(t);
+                            let ring = ui::ring_over(t, t.bg_popover);
                             d.child(
                                 div()
                                     .id("toast-action")
                                     .tab_index(0)
                                     .cursor_pointer()
+                                    .px(space::s2())
+                                    .rounded(tsize::radius_inner())
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(t.accent_muted)
+                                    .text_color(t.text_accent)
                                     .focus(move |s| s.shadow(ring.clone()))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.toast = None;
@@ -1544,12 +1567,14 @@ impl Shell {
                         .occlude()
                         .flex()
                         .flex_col()
-                        .gap(space::s5())
-                        .w(px(440.))
-                        .p(space::s8())
+                        .gap(space::s3())
+                        .w(px(420.))
+                        .p(space::s7())
                         .rounded(tsize::radius_container())
+                        .border_1()
+                        .border_color(t.border)
                         .bg(t.bg_popover)
-                        .shadow_lg()
+                        .shadow(elevation::popover(t))
                         .child(ui::heading(t, confirm.title.clone()))
                         .child(ui::secondary(t, confirm.body.clone()))
                         .child(
@@ -1557,7 +1582,7 @@ impl Shell {
                                 .flex()
                                 .justify_end()
                                 .gap(space::s4())
-                                .pt(space::s4())
+                                .pt(space::s6())
                                 .child(
                                     Button::new("confirm-cancel", "Cancel")
                                         .track_focus(&self.cancel_focus)
@@ -1675,8 +1700,11 @@ impl Render for Shell {
                         .h(px(28.))
                         .px(space::s6())
                         .bg(t.sandbox_bg)
+                        .border_b_1()
+                        .border_color(t.border)
                         .text_color(t.sandbox_text)
                         .text_size(text::supporting().0)
+                        .line_height(text::supporting().1)
                         .child(ui::icon("triangle-alert", t.sandbox_text).size(px(14.)))
                         .child(
                             div()
@@ -1705,10 +1733,17 @@ impl Render for Shell {
                         .bg(t.scrim)
                         .child(
                             div()
-                                .px(space::s8())
-                                .py(space::s6())
+                                .flex()
+                                .items_center()
+                                .gap(space::s4())
+                                .px(space::s7())
+                                .py(space::s5())
                                 .rounded(tsize::radius_container())
+                                .border_1()
+                                .border_color(t.border)
                                 .bg(t.bg_popover)
+                                .shadow(elevation::popover(&t))
+                                .child(ui::icon("loader-circle", t.icon_secondary))
                                 .child(ui::label(&t, "Stopping LocalFlow…")),
                         ),
                 )
@@ -1808,7 +1843,13 @@ pub fn run(launch: Launch) -> RunStatus {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            let mut base = Theme::for_appearance(cx.window_appearance());
+            // The stored appearance choice decides the very first frame:
+            // native chrome first (no window exists yet, so no appearance
+            // handler can re-enter), then the palette, so System resolves
+            // against what the chrome will show.
+            let mode = crate::appearance::load(&launch.services.root);
+            crate::native_appearance::set(mode);
+            let mut base = Theme::for_mode(mode, cx.window_appearance());
             base.font_family = pick_font(cx);
             cx.set_global(base);
             bind_keys(cx);
@@ -1881,15 +1922,12 @@ pub fn run(launch: Launch) -> RunStatus {
                             }
                         })
                         .detach();
-                        // Follow the system light/dark setting live.
+                        // Follow the system light/dark setting live, in
+                        // System mode only (Light/Dark ignore the OS).
                         cx.observe_window_appearance(window, |_, window, cx| {
-                            let want = Theme::for_appearance(window.appearance());
-                            if want.dark != theme(cx).dark {
-                                let font_family = theme(cx).font_family.clone();
-                                cx.set_global(Theme {
-                                    font_family,
-                                    ..want
-                                });
+                            if let Some(next) = theme(cx).after_system_change(window.appearance()) {
+                                cx.set_global(next);
+                                cx.refresh_windows();
                                 cx.notify();
                             }
                         })

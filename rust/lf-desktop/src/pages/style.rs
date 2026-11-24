@@ -217,6 +217,7 @@ impl Render for StylePage {
             .iter()
             .map(|o| hub_model::style_option_title(o))
             .collect();
+        let mut tone_rows: Vec<gpui::AnyElement> = Vec::new();
         for (category, example) in STYLE_CATEGORIES {
             let value = config
                 .field_str(&format!("style_{category}"))
@@ -226,29 +227,32 @@ impl Render for StylePage {
             let this = cx.entity().downgrade();
             let describe = lf_providers::cleanup::style_line(&value).unwrap_or("");
             let enabled = cleanup_on && styles_on;
-            tones = tones.child(ui::setting_row(
-                &t,
-                hub_model::style_category_label(category),
-                format!("For example: “{example}” {describe}"),
-                Segmented::new(
-                    (
-                        "tone",
-                        category.len() as u64 * 7 + category.as_bytes()[0] as u64,
-                    ),
-                    titles.clone(),
-                    index,
+            tone_rows.push(
+                ui::setting_row(
+                    &t,
+                    hub_model::style_category_label(category),
+                    format!("For example: “{example}” {describe}"),
+                    Segmented::new(
+                        (
+                            "tone",
+                            category.len() as u64 * 7 + category.as_bytes()[0] as u64,
+                        ),
+                        titles.clone(),
+                        index,
+                    )
+                    .disabled(!enabled)
+                    .on_select(move |i, _, cx| {
+                        let _ = this.update(cx, |p, cx| {
+                            p.save_styles(None, Some((category, STYLE_OPTIONS[i])), cx)
+                        });
+                    })
+                    .into_any_element(),
+                    None,
                 )
-                .disabled(!enabled)
-                .on_select(move |i, _, cx| {
-                    let _ = this.update(cx, |p, cx| {
-                        p.save_styles(None, Some((category, STYLE_OPTIONS[i])), cx)
-                    });
-                })
                 .into_any_element(),
-                None,
-            ));
+            );
         }
-        body = body.child(tones);
+        body = body.child(tones.child(ui::group_rows(&t, tone_rows, ui::row_inset())));
         page(
             header(
                 &t,

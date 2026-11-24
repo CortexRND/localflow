@@ -636,14 +636,20 @@ impl SetupView {
                         Some(false) => ("circle-alert", t.dot(Tone::Warning)),
                         None => ("info", t.icon_secondary),
                     };
+                    if i > 0 {
+                        list = list.child(ui::separator(
+                            t,
+                            ui::row_inset() + size::icon() + space::s5(),
+                        ));
+                    }
                     list = list.child(
                         div()
                             .flex()
                             .items_center()
                             .gap(space::s5())
-                            .px(space::s4())
+                            .pl(ui::row_inset())
+                            .pr(space::s4())
                             .py(space::s4())
-                            .when(i > 0, |d| d.border_t_1().border_color(t.border))
                             .child(ui::icon(icon, color))
                             .child(
                                 div()
@@ -689,26 +695,28 @@ impl SetupView {
                 }
             }
             Step::Microphone => {
-                body = body.child(ui::setting_row(
-                    t,
-                    "Microphone",
-                    "LocalFlow records from this input when you dictate.",
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(space::s3())
-                        .child(self.devices.clone())
-                        .child(
-                            Button::new("mic-list-refresh", "Refresh")
-                                .small()
-                                .icon("refresh-cw")
-                                .busy(flow.devices == Loadable::Loading)
-                                .tooltip("Look for newly connected microphones")
-                                .on_click(cx.listener(|this, _, _, cx| this.load_devices(cx))),
-                        )
-                        .into_any_element(),
-                    None,
-                ));
+                body = body.child(
+                    ui::group(t).child(ui::setting_row(
+                        t,
+                        "Microphone",
+                        "LocalFlow records from this input when you dictate.",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::s3())
+                            .child(self.devices.clone())
+                            .child(
+                                Button::new("mic-list-refresh", "Refresh")
+                                    .small()
+                                    .icon("refresh-cw")
+                                    .busy(flow.devices == Loadable::Loading)
+                                    .tooltip("Look for newly connected microphones")
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_devices(cx))),
+                            )
+                            .into_any_element(),
+                        None,
+                    )),
+                );
                 if let Loadable::Failed(error) = &flow.devices {
                     body = body.child(ui::banner(
                         t,
@@ -795,9 +803,10 @@ impl SetupView {
                     let mut item = ui::row_button(t, ("setup-model", i as u64), row.selected)
                         .flex_col()
                         .gap(space::s2())
-                        .px(space::s4())
+                        .pl(ui::row_inset())
+                        .pr(space::s4())
                         .py(space::s4())
-                        .when(i > 0, |d| d.border_t_1().border_color(t.border))
+                        .rounded(size::radius_inner())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(flow) = this.flow.as_mut() {
                                 flow.select_model(&id);
@@ -869,6 +878,12 @@ impl SetupView {
                     if let crate::controllers::model_storage::RowState::Failed(error) = &row.state {
                         item = item.child(ui::error_line(t, error.clone()).pl(px(28.)));
                     }
+                    if i > 0 {
+                        list = list.child(ui::separator(
+                            t,
+                            ui::row_inset() + size::icon() + space::s4(),
+                        ));
+                    }
                     list = list.child(item);
                 }
                 body = body.child(list);
@@ -917,13 +932,20 @@ impl SetupView {
                         for (i, model) in lf_ui::setup_flow::LLM_MODELS.iter().enumerate() {
                             let chosen = flow.choices.llm_id.as_deref() == Some(model.id);
                             let id = model.id;
+                            if i > 0 {
+                                list = list.child(ui::separator(
+                                    t,
+                                    ui::row_inset() + size::icon() + space::s4(),
+                                ));
+                            }
                             list = list.child(
                                 ui::row_button(t, ("setup-llm", i as u64), chosen)
                                     .items_center()
                                     .gap(space::s4())
-                                    .px(space::s4())
+                                    .pl(ui::row_inset())
+                                    .pr(space::s4())
                                     .py(space::s4())
-                                    .when(i > 0, |d| d.border_t_1().border_color(t.border))
+                                    .rounded(size::radius_inner())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if let Some(flow) = this.flow.as_mut() {
                                             flow.choose_llm(id);
@@ -994,13 +1016,20 @@ impl SetupView {
                 let mut list = ui::list(t);
                 for (i, (key, label)) in flow.hotkey_options().into_iter().enumerate() {
                     let chosen = flow.choices.hotkey == key;
+                    if i > 0 {
+                        list = list.child(ui::separator(
+                            t,
+                            ui::row_inset() + size::icon() + space::s4(),
+                        ));
+                    }
                     list = list.child(
                         ui::row_button(t, ("setup-hotkey", i as u64), chosen)
                             .items_center()
                             .gap(space::s4())
-                            .px(space::s4())
+                            .pl(ui::row_inset())
+                            .pr(space::s4())
                             .py(space::s4())
-                            .when(i > 0, |d| d.border_t_1().border_color(t.border))
+                            .rounded(size::radius_inner())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(flow) = this.flow.as_mut() {
                                     flow.set_hotkey(key);
@@ -1124,7 +1153,7 @@ impl SetupView {
                 for warning in flow.warnings() {
                     body = body.child(ui::banner(t, Tone::Warning, warning, None));
                 }
-                let mut rows = div().flex().flex_col();
+                let mut rows = Vec::new();
                 for (i, row) in flow.review_rows().into_iter().enumerate() {
                     let step = row.step;
                     let change = (step != Step::Review).then(|| {
@@ -1134,18 +1163,23 @@ impl SetupView {
                             .on_click(cx.listener(move |this, _, _, cx| this.go(step, cx)))
                             .into_any_element()
                     });
-                    rows = rows.child(ui::setting_row(
-                        t,
-                        row.label,
-                        row.value,
-                        change.unwrap_or_else(|| div().into_any_element()),
-                        None,
-                    ));
+                    rows.push(
+                        ui::setting_row(
+                            t,
+                            row.label,
+                            row.value,
+                            change.unwrap_or_else(|| div().into_any_element()),
+                            None,
+                        )
+                        .into_any_element(),
+                    );
                 }
-                body = body.child(rows).child(ui::supporting(
-                    t,
-                    format!("Saves to {}.", services.root.config_path.display()),
-                ));
+                body = body
+                    .child(ui::group_rows(t, rows, ui::row_inset()))
+                    .child(ui::supporting(
+                        t,
+                        format!("Saves to {}.", services.root.config_path.display()),
+                    ));
                 if let Applying::Failed(error) = &flow.apply {
                     body = body.child(ui::banner(
                         t,

@@ -47,9 +47,10 @@ log = "0.4"
 # Assistant output redaction (already in the lockfile through lf-ui).
 regex = "1"
 env_logger = "0.11"
+# Appearance save completions (awaited on the UI thread, no blocking wait).
+async-channel = "2"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
-async-channel = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -58,10 +59,12 @@ ksni = { version = "0.3.2", default-features = false, features = ["async-io", "b
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon = { version = "0.21.2", default-features = false }
 
-# Frontmost-app pid for the menu bar item's paste-target check (already locked
-# through lf-runtime).
+# Native titlebar follows the chosen appearance (src/native_appearance.rs) and
+# frontmost-app pid for the menu bar item's paste-target check. Versions
+# already in the lockfile (GPUI / lf-runtime).
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSAppearance", "NSApplication", "NSResponder", "NSRunningApplication", "NSWorkspace"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
