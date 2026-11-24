@@ -280,12 +280,15 @@ def run_live(ctx: RunContext) -> list[dict]:
     # Clear stale outputs if reusing an existing output directory so gates.py / adapt_run_dir
     # never score leftover rK/results/*.json or an old gates.json.
     for stale in (run_dir / "gates.json", run_dir / "matrix.log"):
-        if stale.is_file():
+        if stale.is_file() and not stale.is_symlink():
             stale.unlink()
     for stale_repeat in run_dir.glob("r*"):
-        if stale_repeat.is_dir() and stale_repeat.name[1:].isdigit():
-            for old_json in (stale_repeat / "results").glob("*.json"):
-                old_json.unlink()
+        if stale_repeat.is_dir() and not stale_repeat.is_symlink() and stale_repeat.name[1:].isdigit():
+            results_dir = stale_repeat / "results"
+            if results_dir.is_dir() and not results_dir.is_symlink():
+                for old_json in results_dir.glob("*.json"):
+                    if not old_json.is_symlink():
+                        old_json.unlink()
     # gates.py counts every scenario in the file, so a subset run gets its own file.
     scenarios_file = run_dir / "scenarios.json"
     scenarios_file.write_text(json.dumps({"scenarios": scenarios}, indent=1), encoding="utf-8")
