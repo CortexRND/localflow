@@ -95,9 +95,9 @@ better = "higher"
 abs_tol = 0.05
 on_pr = "block"
 
-[metrics.M7]
+[metrics.M7]  # unsupported-number rate: lower is better
 class = "quality"
-better = "higher"
+better = "lower"
 abs_tol = 0.05
 on_pr = "block"
 
@@ -366,3 +366,43 @@ metric = "latency_ms"
 dims_match = { provider = "cpu", model_prefix = "tiny" }
 max_value = 3000.0
 reason = "Cross-platform target: tiny on CPU within 3 s"
+
+# Meeting-sim quality floors, mirroring THRESH in evals/meeting_sim/gates.py
+# (M8 requires every template section, i.e. 100 %). These hold on every run,
+# not just relative to baseline.
+
+[[caps]]
+suite = "meetings"
+metric = "M5"
+min_value = 0.9
+reason = "meeting_sim gate M5 >= 0.90"
+
+[[caps]]
+suite = "meetings"
+metric = "M6"
+min_value = 0.7
+reason = "meeting_sim gate M6 >= 0.70"
+
+[[caps]]
+suite = "meetings"
+metric = "M7"
+max_value = 0.05
+reason = "meeting_sim gate M7 <= 0.05"
+
+[[caps]]
+suite = "meetings"
+metric = "M8"
+min_value = 1.0
+reason = "meeting_sim gate M8 >= 1.00"
+
+[[caps]]
+suite = "meetings"
+metric = "M9"
+min_value = 0.8
+reason = "meeting_sim gate M9 >= 0.80"
+
+[[caps]]
+suite = "meetings"
+metric = "M10"
+min_value = 0.8
+reason = "meeting_sim gate M10 >= 0.80"

@@ -32,7 +32,12 @@ from evals.perf import (
     write_result,
 )
 from evals.perf import __main__ as cli
-from evals.perf.compare import DEFAULT_POLICY_PATH, format_value, resolve_rule
+from evals.perf.compare import (
+    DEFAULT_POLICY_PATH,
+    format_value,
+    resolve_rule,
+    validate_policy,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PERF_DIR = REPO_ROOT / "evals" / "perf"
@@ -353,7 +358,8 @@ def test_policy_metric_classes(policy):
     assert m["wer"] == {"class": "quality", "better": "lower", "abs_tol": 0.02, "on_pr": "block"}
     for name in ("M5", "M6", "M7", "M8", "M9", "M10"):
         assert m[name]["class"] == "quality" and m[name]["abs_tol"] == 0.05
-        assert m[name]["better"] == "higher" and m[name]["on_pr"] == "block"
+        expected = "lower" if name == "M7" else "higher"  # M7 = unsupported-number rate
+        assert m[name]["better"] == expected and m[name]["on_pr"] == "block"
     for name in ("fidelity_rate", "number_fidelity_rate", "vocab_fidelity_rate"):
         assert m[name]["abs_tol"] == 0.02 and m[name]["better"] == "higher"
     for names, tol in ((LATENCY, 0.15), (MEMORY, 0.10)):
@@ -365,7 +371,8 @@ def test_policy_metric_classes(policy):
 
 
 def test_policy_caps(policy):
-    (cap,) = policy["caps"]
+    stt = [c for c in policy["caps"] if c["suite"] == "stt"]
+    (cap,) = stt
     assert cap["suite"] == "stt" and cap["metric"] == "latency_ms"
     assert cap["dims_match"] == {"provider": "cpu", "model_prefix": "tiny"}
     assert cap["max_value"] == 3000.0
@@ -460,20 +467,35 @@ def test_wer_improvement(policy):
 
 @pytest.mark.parametrize(
     ("base", "cand", "verdict"),
-    [(0.90, 0.86, "pass"), (0.90, 0.84, "regressed"), (0.80, 0.90, "improved")],
+    [(0.95, 0.91, "pass"), (0.95, 0.89, "regressed"), (0.85, 0.95, "improved")],
 )
 def test_sim_gates_higher_is_better(policy, base, cand, verdict):
-    for gate in ("M5", "M6", "M7", "M8", "M9", "M10"):
-        b = _case({gate: make_metric(unit="ratio", better="higher", value=base)}, suite="meetings")
-        c = _case({gate: make_metric(unit="ratio", better="higher", value=cand)}, suite="meetings")
+    # Suite without caps, so only the relative abs_tol rule applies.
+    for gate in ("M5", "M6", "M8", "M9", "M10"):
+        b = _case({gate: make_metric(unit="ratio", better="higher", value=base)}, suite="sim-rel")
+        c = _case({gate: make_metric(unit="ratio", better="higher", value=cand)}, suite="sim-rel")
         row = _only_row(_cmp(b, c, policy))
         assert row.verdict == verdict, gate
         assert row.blocking == (verdict == "regressed")
 
 
+@pytest.mark.parametrize(
+    ("base", "cand", "verdict"),
+    [(0.02, 0.05, "pass"), (0.02, 0.08, "regressed"), (0.10, 0.02, "improved")],
+)
+def test_sim_m7_lower_is_better(policy, base, cand, verdict):
+    assert policy["metrics"]["M7"]["better"] == "lower"
+    # Declared "higher" by the producer: the policy direction must win.
+    b = _case({"M7": make_metric(unit="ratio", better="higher", value=base)}, suite="sim-rel")
+    c = _case({"M7": make_metric(unit="ratio", better="higher", value=cand)}, suite="sim-rel")
+    row = _only_row(_cmp(b, c, policy))
+    assert row.verdict == verdict
+    assert row.blocking == (verdict == "regressed")
+
+
 def test_quality_binary_flaky(policy):
-    b = _case({"M5": make_metric(unit="ratio", better="higher", samples=[1, 1, 1])})
-    c = _case({"M5": make_metric(unit="ratio", better="higher", samples=[1, 0, 1])})
+    b = _case({"M5": make_metric(unit="ratio", better="higher", samples=[True, True, True])})
+    c = _case({"M5": make_metric(unit="ratio", better="higher", samples=[True, False, True])})
     row = _only_row(_cmp(b, c, policy))
     assert row.verdict == "flaky" and row.blocking
 
@@ -891,3 +913,300 @@ def test_run_suites_with_registered_suite(monkeypatch, tmp_path):
     assert cases[("recall", "*")]["status"] == "failed"
     assert "db missing" in cases[("recall", "*")]["error"]
     assert cases[("meetings", "*")]["error"] == "suite not implemented yet"
+
+
+# --------------------------------------------------------------------------
+# Review fixes
+# --------------------------------------------------------------------------
+
+# 1. Exact gates are absolute: a failing gate never passes, a fixed one improves.
+
+
+def _gate(value=None, samples=None, name="citation_equal", unit="bool", better="exact", **kw):
+    return _case({name: make_metric(unit=unit, better=better, value=value, samples=samples)}, **kw)
+
+
+@pytest.mark.parametrize(
+    ("name", "unit", "better", "base", "cand"),
+    [
+        ("citation_equal", "bool", "exact", False, False),
+        ("lifecycle_ok", "bool", "exact", 0.0, 0.0),
+        ("pid_cleanup_ok", "bool", "higher", False, False),
+        ("gate_pass", "ratio", "higher", 0.0, 0.0),
+        ("exact_match_rate", "ratio", "higher", 0.9, 0.9),
+        ("M1", "ratio", "higher", 0.5, 0.5),
+        ("M13", "ratio", "exact", 0.95, 0.95),
+        ("unruled_flag", "bool", "exact", False, False),  # unit fallback -> exact
+    ],
+)
+def test_exact_gate_failing_on_both_sides_blocks(policy, name, unit, better, base, cand):
+    report = _cmp(
+        _gate(base, name=name, unit=unit, better=better),
+        _gate(cand, name=name, unit=unit, better=better),
+        policy,
+    )
+    row = _only_row(report)
+    assert row.verdict == "regressed" and row.blocking, row
+    assert "baseline also failing" in row.note
+    assert report.exit_code == 1
+
+
+def test_exact_gate_all_failing_samples_block(policy):
+    base = _gate(samples=[False] * 3)
+    row = _only_row(_cmp(base, _gate(samples=[False] * 3), policy))
+    assert row.verdict == "regressed" and row.blocking
+
+
+@pytest.mark.parametrize(
+    ("unit", "better", "base", "cand"),
+    [("bool", "exact", False, True), ("ratio", "exact", 0.8, 1.0), ("ratio", "higher", 0.0, 1.0)],
+)
+def test_exact_gate_fixed_is_improved(policy, unit, better, base, cand):
+    row = _only_row(
+        _cmp(_gate(base, unit=unit, better=better), _gate(cand, unit=unit, better=better), policy)
+    )
+    assert row.verdict == "improved" and not row.blocking
+
+
+def test_exact_gate_lower_is_better_targets_zero(policy):
+    def mm(v):
+        return _gate(v, name="M2", unit="ratio", better="lower")
+
+    policy = copy.deepcopy(policy)
+    policy["metrics"]["M2"]["better"] = "lower"
+    assert _only_row(_cmp(mm(0.0), mm(0.0), policy)).verdict == "pass"
+    assert _only_row(_cmp(mm(0.1), mm(0.1), policy)).blocking
+    assert _only_row(_cmp(mm(0.1), mm(0.0), policy)).verdict == "improved"
+
+
+def test_exact_non_gate_numbers_compare_by_equality(policy):
+    def count(v):
+        return _gate(v, name="M3", unit="count", better="exact")
+
+    assert _only_row(_cmp(count(7), count(7), policy)).verdict == "pass"
+    assert _only_row(_cmp(count(7), count(8), policy)).blocking
+
+
+def test_exact_gate_checked_on_new_case(policy):
+    other = _wer(0.1)
+    for cand, verdict in ((_gate(False, case="new"), "regressed"), (_gate(True, case="new"), "pass")):
+        report = compare_results(_result(other), _result(other, cand), policy)
+        row = next(r for r in report.rows if r.case == "new")
+        assert row.verdict == verdict
+        assert row.blocking == (verdict == "regressed")
+        assert row.note.startswith("new case")
+    flaky = _gate(samples=[True, False, True], case="new")
+    report = compare_results(_result(other), _result(other, flaky), policy)
+    row = next(r for r in report.rows if r.case == "new")
+    assert row.verdict == "flaky" and row.blocking
+
+
+def test_exact_gate_checked_when_baseline_not_ok(policy):
+    base = make_case(suite="stt", case="c1", dims={}, status="failed", error="crash")
+    row = _only_row(_cmp(base, _gate(False), policy))
+    assert row.verdict == "regressed" and row.blocking
+
+
+def test_exact_gate_checked_on_new_metric(policy):
+    base = _lat([100] * 3)
+    cand = _case({
+        "latency_ms": make_metric(unit="ms", better="lower", samples=[100] * 3),
+        "citation_equal": make_metric(unit="bool", better="exact", value=False),
+    })
+    report = _cmp(base, cand, policy)
+    row = next(r for r in report.rows if r.metric == "citation_equal")
+    assert row.verdict == "regressed" and row.blocking and "new metric" in row.note
+
+
+def test_new_case_cap_still_checked_with_passing_gate(policy):
+    cand = _case(
+        {
+            "latency_ms": make_metric(unit="ms", better="lower", samples=[3500] * 5),
+            "lifecycle_ok": make_metric(unit="bool", better="exact", value=True),
+        },
+        case="new",
+        dims=TINY_CPU,
+    )
+    rows = {r.metric: r for r in compare_results(_result(), _result(cand), policy).rows}
+    assert rows["lifecycle_ok"].verdict == "pass"
+    assert rows["latency_ms"].verdict == "regressed" and rows["latency_ms"].blocking
+
+
+# 2. Meeting-sim floors from evals/meeting_sim/gates.py are absolute caps.
+
+MEETING_FLOORS = {"M5": 0.90, "M6": 0.70, "M8": 1.0, "M9": 0.80, "M10": 0.80}
+
+
+def test_policy_has_meeting_floors(policy):
+    caps = {c["metric"]: c for c in policy["caps"] if c["suite"] == "meetings"}
+    assert set(caps) == {*MEETING_FLOORS, "M7"}
+    for gate, floor in MEETING_FLOORS.items():
+        assert caps[gate]["min_value"] == floor and "max_value" not in caps[gate]
+    assert caps["M7"]["max_value"] == 0.05 and "min_value" not in caps["M7"]
+
+
+def _meet(gate, v, case="m1", suite="meetings"):
+    better = "lower" if gate == "M7" else "higher"
+    return _case({gate: make_metric(unit="ratio", better=better, value=v)}, suite=suite, case=case)
+
+
+@pytest.mark.parametrize("gate", sorted(MEETING_FLOORS))
+def test_meeting_floor_blocks_even_if_unchanged(policy, gate):
+    floor = MEETING_FLOORS[gate]
+    below = round(floor - 0.01, 2)
+    row = _only_row(_cmp(_meet(gate, below), _meet(gate, below), policy))
+    assert row.verdict == "regressed" and row.blocking and "cap" in row.note
+    assert _only_row(_cmp(_meet(gate, floor), _meet(gate, floor), policy)).verdict == "pass"
+
+
+def test_meeting_m7_ceiling(policy):
+    row = _only_row(_cmp(_meet("M7", 0.06), _meet("M7", 0.06), policy))
+    assert row.verdict == "regressed" and row.blocking
+    assert _only_row(_cmp(_meet("M7", 0.05), _meet("M7", 0.04), policy)).verdict == "pass"
+    report = compare_results(_result(), _result(_meet("M7", 0.2, case="new")), policy)
+    assert _only_row(report).blocking
+
+
+# 3. Mismatched units are never compared numerically.
+
+
+def test_unit_mismatch_blocks(policy):
+    # 0.1 s vs 100 ms is the same latency; raw numbers would read as "improved".
+    report = _cmp(_lat([100] * 5, unit="ms"), _lat([0.1] * 5, unit="s"), policy)
+    row = _only_row(report)
+    assert row.verdict == "regressed" and row.blocking
+    assert "unit mismatch: baseline 'ms' vs candidate 's'" in row.note
+    assert row.delta is None and row.unit is None
+    assert report.exit_code == 1
+    assert "unit mismatch" in render_markdown(report)
+
+
+# 4. Numeric policy values are validated.
+
+
+def _policy_with(section: str, key: str, value) -> dict:
+    p = {"defaults": {}, "metrics": {"x": {"class": "noisy"}}, "caps": []}
+    if section == "defaults":
+        p["defaults"][key] = value
+    elif section == "metrics":
+        p["metrics"]["x"][key] = value
+    else:
+        p["caps"].append({"suite": "s", "metric": "m", key: value})
+    return p
+
+
+NAN, INF = float("nan"), float("inf")
+
+BAD_NUMBERS = [
+    ("defaults", "noisy_min_samples", [0, -1, True, 2.5, "3"]),
+    ("defaults", "noisy_mad_multiplier", [-0.1, NAN, INF, True]),
+    ("defaults", "noisy_block_factor", [1.0, 0.5, INF, NAN, True]),
+    ("defaults", "noisy_latency_rel_tol", [-0.15, NAN, INF, False]),
+    ("defaults", "noisy_memory_rel_tol", [-0.1, NAN, -INF, True]),
+    ("metrics", "abs_tol", [-0.02, NAN, INF, True, "0.02"]),
+    ("metrics", "rel_tol", [-0.1, NAN, INF, True]),
+    ("metrics", "mad_k", [-3.0, NAN, INF, False]),
+    ("metrics", "block_factor", [1.0, 0.9, NAN, INF, True]),
+    ("metrics", "min_samples", [0, True, 3.0, NAN]),
+    ("caps", "max_value", [NAN, INF, True, "3000"]),
+    ("caps", "min_value", [NAN, -INF, False, None]),
+]
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [(s, k, v) for s, k, vals in BAD_NUMBERS for v in vals],
+    ids=repr,
+)
+def test_validate_policy_rejects_bad_numbers(section, key, value):
+    errors = validate_policy(_policy_with(section, key, value))
+    assert any(key in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("defaults", "noisy_min_samples", 1),
+        ("defaults", "noisy_mad_multiplier", 0),
+        ("defaults", "noisy_block_factor", 1.01),
+        ("metrics", "rel_tol", 0.0),
+        ("metrics", "block_factor", 3),
+        ("metrics", "min_samples", 5),
+        ("caps", "max_value", 0),
+        ("caps", "min_value", -5.5),
+    ],
+)
+def test_validate_policy_accepts_good_numbers(section, key, value):
+    assert validate_policy(_policy_with(section, key, value)) == []
+
+
+def test_validate_policy_quality_needs_abs_tol():
+    assert any("abs_tol" in e for e in validate_policy({"metrics": {"q": {"class": "quality"}}}))
+
+
+def test_validate_policy_cap_bounds_order():
+    p = {"caps": [{"suite": "s", "metric": "m", "min_value": 5.0, "max_value": 1.0}]}
+    assert any("min_value" in e and "max_value" in e for e in validate_policy(p))
+    p["caps"][0]["min_value"] = 1.0
+    assert validate_policy(p) == []
+
+
+def test_load_policy_rejects_toml_nan_and_bool(tmp_path):
+    path = tmp_path / "p.toml"
+    path.write_text('[metrics.x]\nclass = "noisy"\nrel_tol = nan\n')
+    with pytest.raises(ValueError, match="rel_tol"):
+        load_policy(path)
+    path.write_text("[defaults]\nnoisy_min_samples = true\n")
+    with pytest.raises(ValueError, match="noisy_min_samples"):
+        load_policy(path)
+
+
+def test_shipped_policy_is_valid(policy):
+    assert validate_policy(policy) == []
+
+
+# 5. An undersampled baseline is low_power too (the hard block still wins).
+
+
+def test_low_power_on_undersampled_baseline(policy):
+    row = _only_row(_cmp(_lat([100, 100]), _lat([130] * 5), policy))
+    assert row.verdict == "low_power" and not row.blocking
+    assert "n(baseline)=2" in row.note
+    assert _only_row(_cmp(_lat([100]), _lat([100] * 5), policy)).verdict == "low_power"
+    row = _only_row(_cmp(_lat([100, 100]), _lat([250] * 5), policy))
+    assert row.verdict == "regressed" and row.blocking
+
+
+def test_value_only_baseline_is_not_low_power(policy):
+    base = _case({"latency_ms": make_metric(unit="ms", better="lower", value=100)})
+    assert _only_row(_cmp(base, _lat([105] * 5), policy)).verdict == "pass"
+
+
+# 6. Float ratio samples at 0.0/1.0 are not binary flakiness.
+
+
+def test_wer_endpoint_samples_are_not_flaky(policy):
+    def wer(samples):
+        return _case({"wer": make_metric(unit="ratio", better="lower", samples=samples)})
+
+    assert _only_row(_cmp(wer([0.0, 0.0, 0.0]), wer([0.0, 0.0, 1.0]), policy)).verdict == "pass"
+    row = _only_row(_cmp(wer([0.0, 0.0, 0.0]), wer([0.0, 1.0, 1.0]), policy))
+    assert row.verdict == "regressed" and row.blocking and "abs_tol" in row.note
+
+    def m5(samples):
+        return _case(
+            {"M5": make_metric(unit="ratio", better="higher", samples=samples)}, suite="sim-rel"
+        )
+
+    # Integer ratio samples are not bools either: compared by median (1.0).
+    assert _only_row(_cmp(m5([1, 1, 1]), m5([1, 0, 1]), policy)).verdict == "pass"
+
+
+def test_quality_bool_unit_samples_are_flaky(policy):
+    def m6(samples):
+        return _case(
+            {"M6": make_metric(unit="bool", better="higher", samples=samples)}, suite="sim-rel"
+        )
+
+    row = _only_row(_cmp(m6([1, 1, 1]), m6([1, 0, 1]), policy))
+    assert row.verdict == "flaky" and row.blocking

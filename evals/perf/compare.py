@@ -50,11 +50,58 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> dict:
     return policy
 
 
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _check_number(errors: list[str], where: str, value: Any, kind: str) -> None:
+    """Append an error unless ``value`` satisfies ``kind``.
+
+    Kinds: ``count`` (int >= 1), ``nonneg`` (finite >= 0), ``factor``
+    (finite > 1.0), ``finite`` (any finite number). Bools never pass.
+    """
+    if kind == "count":
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            errors.append(f"{where}: must be an integer >= 1, got {value!r}")
+        return
+    if not _is_finite_number(value):
+        errors.append(f"{where}: must be a finite number, got {value!r}")
+    elif kind == "nonneg" and value < 0:
+        errors.append(f"{where}: must be >= 0, got {value!r}")
+    elif kind == "factor" and value <= 1.0:
+        errors.append(f"{where}: must be > 1.0, got {value!r}")
+
+
+_DEFAULT_KINDS = {
+    "noisy_min_samples": "count",
+    "noisy_mad_multiplier": "nonneg",
+    "noisy_block_factor": "factor",
+    "noisy_latency_rel_tol": "nonneg",
+    "noisy_memory_rel_tol": "nonneg",
+}
+
+_RULE_KINDS = {
+    "abs_tol": "nonneg",
+    "rel_tol": "nonneg",
+    "mad_k": "nonneg",
+    "block_factor": "factor",
+    "min_samples": "count",
+}
+
+
 def validate_policy(policy: dict) -> list[str]:
     errors: list[str] = []
     defaults = policy.get("defaults", {})
     if not isinstance(defaults, dict):
         errors.append("defaults: must be a table")
+    else:
+        for key, kind in _DEFAULT_KINDS.items():
+            if key in defaults:
+                _check_number(errors, f"defaults.{key}", defaults[key], kind)
     metrics = policy.get("metrics", {})
     if not isinstance(metrics, dict):
         errors.append("metrics: must be a table")
@@ -69,8 +116,11 @@ def validate_policy(policy: dict) -> list[str]:
             errors.append(f"metrics.{name}.on_pr: {rule['on_pr']!r} not in {VALID_ON_PR}")
         if "better" in rule and rule["better"] not in ("lower", "higher", "exact"):
             errors.append(f"metrics.{name}.better: {rule['better']!r} invalid")
-        if rule.get("class") == "quality" and not isinstance(rule.get("abs_tol"), (int, float)):
-            errors.append(f"metrics.{name}.abs_tol: required number for quality class")
+        if rule.get("class") == "quality" and "abs_tol" not in rule:
+            errors.append(f"metrics.{name}.abs_tol: required for quality class")
+        for key, kind in _RULE_KINDS.items():
+            if key in rule:
+                _check_number(errors, f"metrics.{name}.{key}", rule[key], kind)
     caps = policy.get("caps", [])
     if not isinstance(caps, list):
         errors.append("caps: must be an array of tables")
@@ -84,6 +134,12 @@ def validate_policy(policy: dict) -> list[str]:
                 errors.append(f"caps[{idx}].{key}: required string")
         if "max_value" not in cap and "min_value" not in cap:
             errors.append(f"caps[{idx}]: needs max_value and/or min_value")
+        for key in ("min_value", "max_value"):
+            if key in cap:
+                _check_number(errors, f"caps[{idx}].{key}", cap[key], "finite")
+        lo, hi = cap.get("min_value"), cap.get("max_value")
+        if _is_finite_number(lo) and _is_finite_number(hi) and lo > hi:
+            errors.append(f"caps[{idx}]: min_value {lo!r} > max_value {hi!r}")
         if not isinstance(cap.get("dims_match", {}), dict):
             errors.append(f"caps[{idx}].dims_match: must be a table")
     return errors
@@ -255,8 +311,15 @@ def _cap_violation(policy: dict, case: dict, name: str, value: float | None) -> 
     return None
 
 
-def _is_binary(samples: list[float]) -> bool:
-    return bool(samples) and all(x in (0.0, 1.0) for x in samples)
+def _is_binary_metric(metric: dict) -> bool:
+    """True only for real pass/fail samples: ``unit == "bool"`` or Python bools.
+
+    Float ratios that happen to hit 0.0/1.0 (e.g. per-clip WER) are not binary.
+    """
+    raw = metric.get("samples") or []
+    if not raw:
+        return False
+    return metric.get("unit") == "bool" or all(isinstance(x, bool) for x in raw)
 
 
 def _delta(base: float | None, cand: float | None) -> tuple[float | None, float | None]:
@@ -267,13 +330,45 @@ def _delta(base: float | None, cand: float | None) -> tuple[float | None, float 
     return delta, pct
 
 
-def _compare_exact(row: CompareRow, rule: dict, cand_m: dict, base: float, cand: float) -> None:
+def _gate_target(rule: dict, metric: dict, values: list[float]) -> float | None:
+    """Pass value of an exact gate, or ``None`` if the metric is not a gate.
+
+    A gate is a bool or a pass rate in [0, 1]: it passes only at 1.0
+    (or 0.0 when lower is better, e.g. a mismatch rate). Other exact metrics
+    (arbitrary counts) are compared for equality/direction against baseline.
+    """
+    is_gate = metric.get("unit") == "bool" or (bool(values) and all(0.0 <= v <= 1.0 for v in values))
+    if not is_gate:
+        return None
+    return 0.0 if rule["better"] == "lower" else 1.0
+
+
+def _compare_exact(
+    row: CompareRow, rule: dict, cand_m: dict, base: float | None, cand: float
+) -> None:
+    """Exact class. ``base`` is ``None`` for new cases/metrics."""
     soft_block = rule["on_pr"] == "block"
     cand_samples = _samples(cand_m)
     better = rule["better"]
     if len(set(cand_samples)) > 1:
         row.verdict, row.blocking = "flaky", soft_block
         row.note = f"repeats differ: {sorted(set(cand_samples))}"
+        return
+    values = [cand, *cand_samples] + ([base] if base is not None else [])
+    target = _gate_target(rule, cand_m, values)
+    if target is not None:
+        base_failing = base is not None and base != target
+        if cand != target:
+            row.verdict, row.blocking = "regressed", soft_block
+            row.note = "gate failing" + (" (baseline also failing)" if base_failing else "")
+        elif base_failing:
+            row.verdict = "improved"
+            row.note = "gate now passing"
+        else:
+            row.verdict = "pass"
+        return
+    if base is None:
+        row.verdict = "pass"
     elif (
         (better == "exact" and cand != base)
         or (better == "higher" and cand < base)
@@ -290,7 +385,7 @@ def _compare_quality(row: CompareRow, rule: dict, cand_m: dict, base: float, can
     soft_block = rule["on_pr"] == "block"
     cand_samples = _samples(cand_m)
     tol = float(rule.get("abs_tol", 0.0))
-    if _is_binary(cand_samples) and len(set(cand_samples)) > 1:
+    if _is_binary_metric(cand_m) and len(set(cand_samples)) > 1:
         row.verdict, row.blocking = "flaky", soft_block
         row.note = f"repeats differ: {sorted(set(cand_samples))}"
         return
@@ -343,9 +438,14 @@ def _compare_noisy(
     if ratio >= block_factor and worse > 0:
         row.verdict, row.blocking = "regressed", True
         row.note = f"{ratio_txt} worse >= hard block {block_factor:g}x"
-    elif cand_samples and len(cand_samples) < int(rule["min_samples"]):
+    elif (cand_samples and len(cand_samples) < int(rule["min_samples"])) or (
+        base_samples and len(base_samples) < int(rule["min_samples"])
+    ):
         row.verdict = "low_power"
-        row.note = f"n={len(cand_samples)} < min_samples {int(rule['min_samples'])}"
+        row.note = (
+            f"n(baseline)={len(base_samples)}, n(candidate)={len(cand_samples)}"
+            f" < min_samples {int(rule['min_samples'])}"
+        )
     elif worse > threshold:
         row.verdict = "regressed"
         row.blocking = bool(strict) or rule["on_pr"] == "block"
@@ -390,8 +490,17 @@ def _metric_rows(
         if cand_m is None:
             row.verdict, row.blocking = "regressed", True
             row.note = "metric missing in candidate"
+        elif base_m is not None and base_m.get("unit") != cand_m.get("unit"):
+            row.verdict, row.blocking = "regressed", True
+            row.unit, row.delta, row.delta_pct = None, None, None  # raw numbers, no unit
+            row.note = (
+                f"unit mismatch: baseline {base_m.get('unit')!r} vs candidate "
+                f"{cand_m.get('unit')!r}; not compared"
+            )
         elif base_m is None or base is None:
-            row.note = "new metric"
+            if rule["class"] == "exact" and cand is not None:
+                _compare_exact(row, rule, cand_m, None, cand)
+            row.note = "new metric" + (f"; {row.note}" if row.note else "")
         elif cand is None:
             row.verdict = "not_exercised"
             row.warning = True
@@ -421,6 +530,7 @@ def _new_case_rows(policy: dict, cand_case: dict, note: str) -> list[CompareRow]
     rows: list[CompareRow] = []
     for name, metric in (cand_case.get("metrics") or {}).items():
         value = primary_value(metric)
+        rule = resolve_rule(policy, name, metric)
         row = CompareRow(
             suite=cand_case["suite"],
             case=cand_case["case"],
@@ -428,9 +538,12 @@ def _new_case_rows(policy: dict, cand_case: dict, note: str) -> list[CompareRow]
             verdict="pass",
             unit=metric.get("unit"),
             candidate=value,
-            metric_class=resolve_rule(policy, name, metric)["class"],
-            note=note,
+            metric_class=rule["class"],
         )
+        # Correctness gates have an absolute pass value, so they gate new cases too.
+        if rule["class"] == "exact" and value is not None:
+            _compare_exact(row, rule, metric, None, value)
+        row.note = note + (f"; {row.note}" if row.note else "")
         _apply_cap(policy, cand_case, name, value, row)
         rows.append(row)
     if not rows:
