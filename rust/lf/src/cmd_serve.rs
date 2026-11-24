@@ -24,9 +24,9 @@ impl CaptureFactory for MeetingCapture {
     fn transcriber(&self, config: &Config) -> Result<Arc<dyn Transcriber>> {
         // Meeting capture resamples to 16 kHz itself; the dictation
         // `sample_rate` setting only governs the dictation recorder.
-        Ok(Arc::new(MeetingSpeech(LazySpeechAdapter::for_16khz_pcm(
-            config.clone(),
-        ))))
+        let speech = LazySpeechAdapter::for_16khz_pcm(config.clone());
+        speech.load().map_err(anyhow::Error::msg)?;
+        Ok(Arc::new(MeetingSpeech(speech)))
     }
 
     fn microphone(&self, config: &Config) -> Result<Box<dyn AudioSource>> {
@@ -79,15 +79,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn meeting_speech_ignores_the_dictation_sample_rate() {
+    fn meeting_transcriber_loads_up_front_ignoring_the_dictation_sample_rate() {
         // An unknown provider fails before any model download; reaching that
-        // error proves the 22,050 Hz dictation setting was not checked.
+        // error from the factory proves the model is loaded before capture
+        // and that the 22,050 Hz dictation setting was not checked.
         let mut config = Config::default();
         config.set_field("sample_rate", json!(22050));
         config.set_field("stt_backend", json!("test-unknown"));
-        let speech = MeetingCapture.transcriber(&config).unwrap();
+        let error = MeetingCapture.transcriber(&config).err().unwrap();
         assert_eq!(
-            speech.transcribe(&[0.5], None).unwrap_err().to_string(),
+            error.to_string(),
             "unsupported speech provider: test-unknown"
         );
     }

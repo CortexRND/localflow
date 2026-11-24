@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -265,19 +266,43 @@ def test_meetings_reads_local_templates_and_handles_session_requests(servers, sa
     assert rust.request("/meeting/stop", "POST")[:2] == (409, {"detail": "no meeting session running"})
 
 
+def _seed_empty_whisper_model(hub):
+    """Cache a header-only `ggml-tiny.bin`: whisper.cpp loads a model file with
+    no tensors as an empty test model, so nothing is downloaded."""
+    repo, revision = hub / "models--ggerganov--whisper.cpp", "0" * 40
+    snapshot = repo / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text(revision, encoding="ascii")
+    n_mel, n_fft = 80, 201
+    # magic; n_vocab, audio ctx/state/head/layer, text ctx/state/head/layer, n_mels, ftype (f16)
+    header = struct.pack("<I11i", 0x67676D6C, 51864, 1500, 64, 1, 4, 448, 64, 1, 4, n_mel, 1)
+    # mel filters, then an empty vocabulary (whisper.cpp fills in the tokens)
+    filters = struct.pack("<2i", n_mel, n_fft) + bytes(4 * n_mel * n_fft)
+    (snapshot / "ggml-tiny.bin").write_bytes(header + filters + struct.pack("<i", 0))
+
+
 @contextlib.contextmanager
-def _virtual_mic_meeting(sandbox, title, notes):
-    """`lf-rs serve` with an ALSA /dev/zero mic and a started meeting holding notes."""
+def _virtual_mic_server(sandbox, *, model):
+    """`lf-rs serve` with an ALSA /dev/zero mic, offline, with or without a cached speech model."""
     alsa = sandbox["root"] / "asound.conf"
     alsa.write_text(
         'pcm.!default { type file slave.pcm { type null } file "/dev/null" infile "/dev/zero" format "raw" }\n',
         encoding="utf-8",
     )
-    env = {**sandbox["env"], "ALSA_CONFIG_PATH": str(alsa)}
+    hub = sandbox["root"] / "hf-hub"
+    hub.mkdir()
+    if model:
+        _seed_empty_whisper_model(hub)
+    env = {
+        **sandbox["env"], "ALSA_CONFIG_PATH": str(alsa), "HF_HUB_CACHE": str(hub),
+        # A closed loopback port: any download attempt fails at once.
+        "HF_ENDPOINT": f"http://127.0.0.1:{_free_port()}",
+    }
     config = sandbox["config"]
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(
-        'config_version = 2\n[features]\nmeetings = true\n'
+        'config_version = 2\n[features]\nmeetings = true\n[stt]\nmodel = "tiny"\n'
         '[meetings]\nwatch = false\nwork_prompts = false\nvault_path = "~/vault"\n',
         encoding="utf-8",
     )
@@ -287,6 +312,13 @@ def _virtual_mic_meeting(sandbox, title, notes):
     port = _free_port()
     command = [str(LF_RS), "serve", "--host", "127.0.0.1", "--port", str(port)]
     with _start(command, env, token_path, sandbox["root"] / "rust-server.log", port) as rust:
+        yield rust
+
+
+@contextlib.contextmanager
+def _virtual_mic_meeting(sandbox, title, notes):
+    """A started meeting holding notes on `_virtual_mic_server` with the empty model."""
+    with _virtual_mic_server(sandbox, model=True) as rust:
         status, body, _ = rust.request("/meeting/start", "POST", {"title": title})
         assert status == 200, body
         assert body["ok"] is True
@@ -330,6 +362,17 @@ def test_sigterm_during_meeting_persists_notes(rust_build, sandbox):
     assert log_path.stem == f"{notes_path.stem} (transcript)"
     text = notes_path.read_text(encoding="utf-8")
     assert title in text and notes in text
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Uses an ALSA virtual microphone")
+def test_meeting_start_fails_when_the_speech_model_cannot_load(rust_build, sandbox):
+    with _virtual_mic_server(sandbox, model=False) as rust:
+        status, body, _ = rust.request("/meeting/start", "POST", {"title": "No model"})
+        assert status == 500, body
+        assert body["detail"].startswith("mic open failed: could not download ")
+        assert rust.request("/meeting/status")[1]["session"] is None
+        assert rust.request("/meeting/stop", "POST")[:2] == (409, {"detail": "no meeting session running"})
+    assert not list((sandbox["home"] / "vault").rglob("*"))
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc RSS measurement")
