@@ -243,6 +243,33 @@ fn prompts_use_server_side_transitions_and_empty_lists() {
 }
 
 #[test]
+fn recall_timeout_is_300s_by_default_and_can_only_be_shortened() {
+    let server = Server::new();
+    assert_eq!(HttpAskBackend::new(server.http()).recall_timeout, 300);
+    assert_eq!(
+        HttpAskBackend::new(server.http())
+            .with_recall_timeout(0)
+            .recall_timeout,
+        1
+    );
+    assert_eq!(
+        HttpAskBackend::new(server.http())
+            .with_recall_timeout(10_000)
+            .recall_timeout,
+        RECALL_TIMEOUT_SECS
+    );
+    // A shortened timeout really bounds the request.
+    server.backend.delay_ms.store(2500, Ordering::SeqCst);
+    let mut ask = HttpAskBackend::new(server.http()).with_recall_timeout(1);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        ask.ask("q", "Any time", None, None).error,
+        ERROR_UNREACHABLE
+    );
+    assert!(started.elapsed() < Duration::from_millis(2400));
+}
+
+#[test]
 fn recall_maps_answer_citations_validation_and_conversation() {
     let server = Server::new();
     let mut ask = HttpAskBackend::new(server.http());
@@ -317,6 +344,58 @@ fn recall_empty_results_and_malformed_response_shapes() {
     *server.backend.response.lock().unwrap() = Some(json!({}));
     assert_eq!(ask.ask("q", "Any time", None, None).error, ERROR_GENERIC);
     assert!(HttpPromptQueue(server.http()).list(None).is_err());
+}
+
+#[test]
+fn recall_null_answer_with_citations_is_sources_only() {
+    let server = Server::new();
+    let cite = json!({"n":1,"source":"dictation","title":"Slack","app":"Slack",
+        "when":"2026-11-20T10:15","snippet":"Kubernetes rollout Friday","ref":"12"});
+    // Default (the AppKit page): unchanged, `null` is still a generic error.
+    let mut legacy = HttpAskBackend::new(server.http());
+    *server.backend.response.lock().unwrap() =
+        Some(json!({"answer": null, "citations": [cite.clone()]}));
+    let turn = legacy.ask("rollout?", "Any time", None, None);
+    assert_eq!(turn.error, ERROR_GENERIC);
+    assert!(turn.citations.is_empty() && !turn.sources_only());
+    // Opted in (GPUI Ask).
+    let mut ask = HttpAskBackend::new(server.http()).with_sources_only_replies();
+    // The model was unavailable: passages only (HTTP 200).
+    *server.backend.response.lock().unwrap() =
+        Some(json!({"answer": null, "citations": [cite.clone()]}));
+    let turn = ask.ask("rollout?", "Any time", None, None);
+    assert!(turn.sources_only(), "{turn:?}");
+    assert_eq!((turn.answer.as_str(), turn.error.as_str()), ("", ""));
+    assert_eq!(turn.citations.len(), 1);
+    assert_eq!(turn.citations[0].snippet, "Kubernetes rollout Friday");
+    assert_eq!(turn.citations[0].reference, "12");
+    assert_eq!(ask.turns().last(), Some(&turn));
+    // Null with nothing matched is the no-answer reply, never sources-only.
+    *server.backend.response.lock().unwrap() = Some(json!({"answer": null, "citations": []}));
+    let turn = ask.ask("q", "Any time", None, None);
+    assert_eq!(turn.answer, NO_ANSWER);
+    assert!(!turn.sources_only());
+    // Missing or invalid answers and malformed citations stay errors.
+    for body in [
+        json!({"answer": null}),
+        json!({"answer": null, "citations": "x"}),
+        json!({"answer": null, "citations": [{}]}),
+        json!({"answer": null, "citations": [cite.clone(), {"n": "one"}]}),
+        json!({"citations": [cite.clone()]}),
+        json!({"answer": 5, "citations": [cite.clone()]}),
+        json!({"answer": ["a"], "citations": [cite.clone()]}),
+    ] {
+        *server.backend.response.lock().unwrap() = Some(body.clone());
+        let turn = ask.ask("q", "Any time", None, None);
+        assert_eq!(turn.error, ERROR_GENERIC, "{body}");
+        assert!(turn.citations.is_empty() && !turn.sources_only(), "{body}");
+    }
+    // Normal answers are unchanged.
+    *server.backend.response.lock().unwrap() =
+        Some(json!({"answer": "Friday [1].", "citations": [cite]}));
+    let turn = ask.ask("q", "Any time", None, None);
+    assert_eq!(turn.answer, "Friday [1].");
+    assert!(!turn.sources_only());
 }
 
 #[test]

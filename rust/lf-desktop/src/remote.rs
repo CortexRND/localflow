@@ -7,10 +7,13 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lf_core::config::Config;
+use lf_providers::factory::BuildOptions;
+use lf_providers::{LlmProvider, SecretStore};
 use lf_ui::backends::ask::{AskBackend, Citation, Turn, NO_ANSWER};
 use lf_ui::backends::http::{
     configured_base_url, HttpAskBackend, HttpMeetingClient, HttpPromptQueue, HttpTransport,
@@ -19,6 +22,8 @@ use lf_ui::backends::meeting::{FakeMeetingClient, MeetingClient, MeetingClientEr
 use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, QueueError, UnavailablePromptQueue};
 use serde_json::Value;
 
+use crate::controllers::ask_agent::{AgentBackend, RECALL_NUM_CTX};
+use crate::controllers::mcp_client::{self, McpError, ToolTransport};
 use crate::data::{open_history, DataRoot};
 
 /// Whether the local service answers.
@@ -124,13 +129,52 @@ impl Remote {
         }
     }
 
+    /// Ask's tool-using backend. Real mode: LocalFlow's MCP server, the
+    /// configured model and `ask` as the fallback. Sandbox: in-process fakes
+    /// (`latency` paces the fake tools for the UI; tests pass zero).
+    pub fn agent(
+        &self,
+        config: Config,
+        secrets: Arc<dyn SecretStore + Send + Sync>,
+        latency: Duration,
+    ) -> Box<dyn AgentBackend> {
+        match self {
+            Remote::Sandbox { root, prompts, .. } => Box::new(crate::sandbox::SandboxAgent::new(
+                root.clone(),
+                prompts.clone(),
+                latency,
+            )),
+            Remote::Http { .. } => Box::new(LocalAgent {
+                remote: self.clone(),
+                config,
+                secrets,
+            }),
+        }
+    }
+
     /// Ask one question (stateless: the page keeps the conversation).
     pub fn ask(&self, config: &Config, question: &str, time_filter: &str) -> Turn {
+        self.ask_within(config, question, time_filter, None)
+    }
+
+    /// [`Remote::ask`] whose `/api/recall` request is bounded by `budget`
+    /// (whole seconds, rounded down; `None` keeps the default timeout).
+    pub fn ask_within(
+        &self,
+        config: &Config,
+        question: &str,
+        time_filter: &str,
+        budget: Option<Duration>,
+    ) -> Turn {
         match self {
             Remote::Sandbox { root, .. } => sandbox_answer(root, question),
             Remote::Http { .. } => match self.transport(config) {
                 Ok(transport) => {
-                    let mut backend = HttpAskBackend::new(transport);
+                    // GPUI Ask renders sources-only turns (model unavailable).
+                    let mut backend = HttpAskBackend::new(transport).with_sources_only_replies();
+                    if let Some(budget) = budget {
+                        backend = backend.with_recall_timeout(budget.as_secs());
+                    }
                     backend.ask(question, time_filter, None::<&BTreeSet<String>>, None)
                 }
                 Err(_) => {
@@ -140,6 +184,51 @@ impl Remote {
                 }
             },
         }
+    }
+}
+
+/// Real-mode Ask backend.
+///
+/// The model is built exactly like the service's recall model
+/// (`build_llm(config, timeout=…, num_ctx=8192)` in `localflow/server.py`):
+/// the same configured provider, endpoint and endpoint-bound key, never a
+/// different one. Only the timeout differs: it is set per request (seconds,
+/// the provider's connect and overall HTTP timeout) from what is left of the
+/// run's deadline.
+pub struct LocalAgent {
+    remote: Remote,
+    config: Config,
+    secrets: Arc<dyn SecretStore + Send + Sync>,
+}
+
+impl AgentBackend for LocalAgent {
+    fn simulated(&self) -> bool {
+        false
+    }
+
+    fn connect(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Result<Box<dyn ToolTransport>, McpError> {
+        mcp_client::connect_until(&mcp_client::discover(), cancel, deadline)
+            .map(|session| Box::new(session) as Box<dyn ToolTransport>)
+    }
+
+    fn model(&self, timeout_secs: i64) -> Result<Box<dyn LlmProvider>, String> {
+        let options = BuildOptions {
+            timeout: Some(timeout_secs.max(1)),
+            num_ctx: Some(RECALL_NUM_CTX),
+            temperature: None,
+            with_api_key: true,
+        };
+        lf_providers::factory::build_llm(&self.config, &options, self.secrets.as_ref())
+            .map_err(|e| e.message())
+    }
+
+    fn recall(&self, question: &str, filter: &str, budget: Duration) -> Turn {
+        self.remote
+            .ask_within(&self.config, question, filter, Some(budget))
     }
 }
 

@@ -671,6 +671,37 @@ def retry_history_entry(
     dictionary_store: DictionaryStore | None = None,
     hot_phrases: HotPhraseStore | None = None,
 ) -> str:
+    config = config or load_config()
+    _entry, raw_text, text = transcribe_history_entry(
+        entry_id, history_store, config, transcriber, cleaner, dictionary_store, hot_phrases,
+    )
+    if not text:
+        log.warning("retry produced no text for history entry %s", entry_id)
+        raise RuntimeError("retry produced no text")
+    history_store.update(
+        entry_id,
+        status="ok",
+        raw_text=raw_text,
+        final_text=text,
+    )
+    try:
+        write_last_text(text)
+    except Exception:
+        log.exception("could not write retried text to last.txt")
+    history_store.prune_audio_clips(getattr(config, "keep_audio_clips", 5))
+    return text
+
+
+def transcribe_history_entry(
+    entry_id: int,
+    history_store: HistoryStore,
+    config=None,
+    transcriber: Transcriber | None = None,
+    cleaner: Cleaner | None = None,
+    dictionary_store: DictionaryStore | None = None,
+    hot_phrases: HotPhraseStore | None = None,
+) -> tuple[dict, str, str]:
+    """(entry, raw text, final text) for a saved clip; changes no store."""
     entry = history_store.get(entry_id)
     if entry is None or entry["kind"] != "dictate" or not entry["audio_path"]:
         raise ValueError("history entry has no retryable audio clip")
@@ -717,21 +748,7 @@ def retry_history_entry(
     finally:
         if lease is not None:
             stt_lease.release(lease)
-    if not text:
-        log.warning("retry produced no text for history entry %s", entry_id)
-        raise RuntimeError("retry produced no text")
-    history_store.update(
-        entry_id,
-        status="ok",
-        raw_text=captured[0] if captured else "",
-        final_text=text,
-    )
-    try:
-        write_last_text(text)
-    except Exception:
-        log.exception("could not write retried text to last.txt")
-    history_store.prune_audio_clips(getattr(config, "keep_audio_clips", 5))
-    return text
+    return entry, captured[0] if captured else "", text
 
 
 if __name__ == "__main__":

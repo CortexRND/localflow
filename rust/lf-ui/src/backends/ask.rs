@@ -89,7 +89,18 @@ impl Turn {
             ..Turn::default()
         }
     }
+
+    /// Recall matched passages but the model gave no answer (`/api/recall`
+    /// `"answer": null`). Invariant: no answer text, no error, at least one
+    /// citation. Show the sources with [`SOURCES_ONLY`], never as prose.
+    pub fn sources_only(&self) -> bool {
+        self.answer.is_empty() && self.error.is_empty() && !self.citations.is_empty()
+    }
 }
+
+/// Shown instead of an answer for a [`Turn::sources_only`] turn.
+pub const SOURCES_ONLY: &str =
+    "The model couldn't answer, so here are the passages that matched your question.";
 
 /// Where a citation leads.
 #[derive(Clone, Debug, PartialEq, Eq)]

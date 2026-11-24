@@ -19,8 +19,8 @@ use objc2_foundation::{NSSize, NSString};
 use serde_json::{json, Value};
 
 use crate::backends::settings_agent::{
-    editable_shortcut, safe_text, ApplyResult, Change, ManualSetting, Proposal, SettingsAgent,
-    SettingsAgentError, ALLOWLIST, KIND_SETTING,
+    editable_shortcut, ApplyResult, Change, ManualSetting, Proposal, SettingsAgent,
+    SettingsAgentError,
 };
 use crate::backends::settings_worker::{self, Completion, Outcome, Request};
 use crate::hub_settings::{
@@ -338,11 +338,7 @@ fn finish_io(state: &Shared, completion: Completion) {
     state.io_loaded = true;
     match completion.outcome {
         Outcome::Refreshed => {}
-        Outcome::Applied(Ok(result)) => {
-            let lines = result.applied.iter().map(shown_change_line).collect();
-            state.controller.state.applied(&result);
-            state.controller.state.lines = lines;
-        }
+        Outcome::Applied(Ok(result)) => state.controller.state.applied(&result),
         Outcome::Undone(Ok(result)) => state.controller.state.undone(&result),
         Outcome::Applied(Err(error)) | Outcome::Undone(Err(error)) => {
             state.controller.state.failed(&error.0)
@@ -353,7 +349,7 @@ fn finish_io(state: &Shared, completion: Completion) {
                 .state
                 .manual_failed(&key, typed.as_deref(), &error.0),
             Ok(result) if !result.applied.is_empty() => {
-                let lines: Vec<String> = result.applied.iter().map(shown_change_line).collect();
+                let lines: Vec<String> = result.applied.iter().map(Change::line).collect();
                 state
                     .controller
                     .state
@@ -421,82 +417,6 @@ fn fixture_io(agent: &SharedAgent, request: Request) -> anyhow::Result<Completio
     Ok(receiver.recv_timeout(std::time::Duration::from_secs(5))?)
 }
 
-/// Older UI display helpers predate two native allowlist entries. Preserve the
-/// native agent's already validated display values for just those keys. Every
-/// other change still goes through Change::line and its anti-forgery checks.
-fn shown_change_line(change: &Change) -> String {
-    let extended = change.kind == KIND_SETTING
-        && matches!(
-            change.key.as_str(),
-            "dictation_enabled" | "dictation_toggle_hotkey"
-        );
-    if !extended || ALLOWLIST.contains(&change.key.as_str()) {
-        return change.line();
-    }
-    let mut text = format!(
-        "{}: {} → {}",
-        safe_text(&change.label, 64),
-        safe_text(&change.old, 80),
-        safe_text(&change.new, 80)
-    );
-    if !change.note.is_empty() {
-        text.push_str(&format!(" ({})", safe_text(&change.note, 80)));
-    }
-    text
-}
-
-fn shown_warning(change: &Change, request: &str) -> Option<String> {
-    if ALLOWLIST.contains(&change.key.as_str()) || change.kind != KIND_SETTING {
-        let warning = change.warning(request);
-        return (!warning.is_empty()).then(|| format!("{} — {warning}", change.line()));
-    }
-    let mut reasons = Vec::new();
-    match change.key.as_str() {
-        "dictation_toggle_hotkey" => reasons.push("changes a keyboard shortcut"),
-        "dictation_enabled" if change.value == Value::Bool(false) => {
-            reasons.push("turns Dictation off")
-        }
-        "dictation_enabled" => {}
-        _ => return Some(format!("{} — Not valid: preview again.", change.line())),
-    }
-    // lf-agent has already rejected unrequested changes before this display.
-    (!reasons.is_empty()).then(|| {
-        format!(
-            "{} — Check: {}.",
-            shown_change_line(change),
-            reasons.join("; ")
-        )
-    })
-}
-
-/// Rebuild extended-key lines/warnings after the UI-free controller's normal
-/// stale-token transition. Supported keys keep its exact Python presentation.
-fn refresh_extended_presentation(state: &mut SettingsPageState) {
-    if state.status != Status::Preview {
-        return;
-    }
-    let Some(proposal) = state.proposal.as_ref() else {
-        return;
-    };
-    if !proposal.changes.iter().any(|change| {
-        change.kind == KIND_SETTING
-            && matches!(
-                change.key.as_str(),
-                "dictation_enabled" | "dictation_toggle_hotkey"
-            )
-    }) {
-        return;
-    }
-    state.lines = proposal.changes.iter().map(shown_change_line).collect();
-    // lf-agent proposals always retain their cleaned, non-empty request, so
-    // this is the same warning basis used by SettingsPageState::finish_preview.
-    state.warnings = proposal
-        .changes
-        .iter()
-        .filter_map(|change| shown_warning(change, &proposal.request))
-        .collect();
-}
-
 fn start_preview(state: &Shared, rebuild: Rc<dyn Fn()>) {
     if state.borrow().io_busy {
         return;
@@ -518,9 +438,6 @@ fn start_preview(state: &Shared, rebuild: Rc<dyn Fn()>) {
         let (changed, busy, visible) = {
             let mut native = state.borrow_mut();
             let changed = native.controller.preview_done();
-            if changed {
-                refresh_extended_presentation(&mut native.controller.state);
-            }
             let visible = native.visible && native.controller.should_repaint(PAGE);
             (changed, native.controller.state.busy(), visible)
         };
@@ -967,11 +884,7 @@ impl HubPage for SettingsPage {
 
     fn drain_requests(&mut self) -> usize {
         drain_io(&self.state);
-        let mut state = self.state.borrow_mut();
-        if state.controller.preview_done() {
-            refresh_extended_presentation(&mut state.controller.state);
-        }
-        drop(state);
+        self.state.borrow_mut().controller.preview_done();
         self.pending_requests()
     }
 
@@ -1050,9 +963,7 @@ impl HubPage for SettingsPage {
         {
             let mut state = self.state.borrow_mut();
             state.visible = true;
-            if state.controller.preview_done() {
-                refresh_extended_presentation(&mut state.controller.state);
-            }
+            state.controller.preview_done();
         }
         ctx.services.clear_page_error(PAGE);
 
@@ -1424,42 +1335,67 @@ mod tests {
         assert!(!page.state.borrow().io_busy);
     }
 
-    #[test]
-    fn extended_changes_keep_native_labels_and_safety_warnings() {
-        let dictation = Change::setting("dictation_enabled", json!(true), json!(false));
-        // Simulate the extended display fields supplied by the real adapter.
-        let mut dictation = dictation;
-        dictation.label = "Dictation".into();
-        dictation.old = "On".into();
-        dictation.new = "Off".into();
-        assert_eq!(shown_change_line(&dictation), "Dictation: On → Off");
-        assert_eq!(
-            shown_warning(&dictation, "turn off dictation").as_deref(),
-            Some("Dictation: On → Off — Check: turns Dictation off.")
-        );
-        let mut toggle = Change::setting("dictation_toggle_hotkey", json!(""), json!("alt_r"));
-        toggle.label = "Toggle dictation shortcut".into();
-        toggle.old = "Off".into();
-        toggle.new = "Hold Right Option".into();
-        assert_eq!(
-            shown_change_line(&toggle),
-            "Toggle dictation shortcut: Off → Hold Right Option"
-        );
-        assert!(shown_warning(&toggle, "").is_some_and(|w| w.contains("keyboard shortcut")));
-        let sounds = Change::setting("sounds_enabled", json!(true), json!(false));
-        assert_eq!(shown_change_line(&sounds), sounds.line());
+    /// Preview `changes` through the page's own controller and delivery path.
+    fn previewed(request: &str, changes: Vec<Change>) -> SettingsPageState {
+        let mut page = SettingsPage::new();
+        let fake = Arc::new(crate::backends::settings_agent::FakeSettingsAgent::new());
+        fake.script_proposal(Proposal::new(request, "m", changes, vec![]));
+        *page.state.borrow().agent_slot.lock().unwrap() = Some(fake as SharedAgent);
+        let job = page
+            .state
+            .borrow_mut()
+            .controller
+            .start_preview(request)
+            .unwrap();
+        std::thread::spawn(move || job.run()).join().unwrap();
+        page.drain_requests();
+        page.snapshot_state()
     }
 
     #[test]
-    fn extended_display_text_is_still_escaped_and_bounded() {
+    fn dictation_changes_show_shared_lines_and_safety_warnings() {
+        let toggle = Change::setting("dictation_toggle_hotkey", json!(""), json!("alt_r"));
+        let request = "Turn off dictation and set the toggle dictation shortcut";
+        let state = previewed(
+            request,
+            vec![
+                Change::setting("dictation_enabled", json!(true), json!(false)),
+                toggle.clone(),
+                Change::setting("sounds_enabled", json!(true), json!(false)),
+            ],
+        );
+        assert_eq!(state.status, Status::Preview);
+        assert!(toggle
+            .line()
+            .starts_with("Toggle dictation shortcut: Off → "));
+        assert_eq!(
+            state.lines,
+            vec![
+                "Dictation: On → Off".to_string(),
+                toggle.line(),
+                "Sounds: On → Off".to_string(),
+            ]
+        );
+        assert_eq!(
+            state.warnings,
+            vec![
+                "Dictation: On → Off — Check: turns Dictation off.".to_string(),
+                format!("{} — Check: changes a keyboard shortcut.", toggle.line()),
+                "Sounds: On → Off — Check: turns Sounds off; \
+                 your request doesn't seem to mention this."
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dictation_display_fields_are_rebuilt_not_shown() {
         let mut change = Change::setting("dictation_enabled", json!(true), json!(false));
         change.label = "Bad\nlabel".into();
         change.old = "old →".into();
         change.new = "new\u{202e}".into();
-        assert_eq!(
-            shown_change_line(&change),
-            "Bad\\u000alabel: old \\u2192 → new\\u202e"
-        );
+        let state = previewed("turn off dictation", vec![change]);
+        assert_eq!(state.lines, vec!["Dictation: On → Off"]);
     }
 
     #[test]

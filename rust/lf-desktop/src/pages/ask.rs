@@ -1,33 +1,193 @@
-//! Ask: questions about your own dictations and notes through the local
-//! service's `/api/recall` (HTTP adapter from `lf_ui::backends::http`).
+//! Ask: questions about your own dictations and work prompts, answered by
+//! the configured model through LocalFlow's read-only MCP tools
+//! (`controllers::ask_agent`), or by the service's `/api/recall` when the
+//! tools are missing or fail. The conversation and tool cards live in
+//! `controllers::ask::Conversation`; a worker thread streams events into it.
 
-use gpui::{div, prelude::*, px, Context, Entity, FontWeight, SharedString, Window};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui::{
+    div, prelude::*, px, AnyWindowHandle, BoxShadow, Context, Entity, FontWeight, Hsla, Keystroke,
+    Pixels, SharedString, Subscription, Window,
+};
 use lf_ui::backends::ask::{
-    citation_document, citation_label, citation_target, CitationTarget, Turn, EXAMPLES, INTRO,
-    PRIVACY, SOURCES, TIME_FILTERS,
+    citation_document, citation_label, citation_target, CitationTarget, Turn, ERROR_GENERIC,
+    EXAMPLES, INTRO, PRIVACY, SOURCES, SOURCES_ONLY, THINKING, TIME_FILTERS,
 };
 
 use crate::app::PageCx;
-use crate::pages::{header, page, sandbox_note, service_banner};
-use crate::remote::Health;
-use crate::theme::{size, space, theme, Tone};
+use crate::controllers::ask::{
+    restored_text, unreachable_message, Activity, AgentTurn, CardStatus, Conversation, Notice,
+    StatusTone,
+};
+use crate::controllers::ask_agent::{self, AgentEvent, Answer, Question, Via, LIMITS};
+use crate::controllers::mcp_client::McpStatus;
+use crate::page::Page;
+use crate::pages::{header, page, sandbox_note};
+use crate::theme::{size, space, theme, Theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::select::Select;
 use crate::ui::{self, Button};
+
+/// Sandbox only: how long each fake tool call and model step takes, so the
+/// thinking and running states can be seen. Real mode ignores it.
+const SANDBOX_LATENCY: Duration = Duration::from_millis(450);
+
+/// With tools, Ask searches only dictations and work prompts (no meeting
+/// transcripts), so this replaces the shared meeting example.
+const TOOL_MEETING_SUGGESTION: &str = "Which work prompts came out of my meetings?";
+
+/// Empty-state suggestions: the shared `EXAMPLES` for basic recall; with
+/// tools, any example that needs meeting transcripts is swapped for one the
+/// tools can answer.
+fn suggestions(tools_mode: bool) -> [&'static str; 3] {
+    EXAMPLES.map(|ex| {
+        if tools_mode && ex.to_lowercase().contains("meeting") {
+            TOOL_MEETING_SUGGESTION
+        } else {
+            ex
+        }
+    })
+}
+
+/// The composer's Send/Stop slot (fits either button with its icon).
+const ACTION_WIDTH: f32 = 96.;
+
+/// Definite pixel widths (auto widths are measured intrinsically, which
+/// shrinks the multiline input to its placeholder). The banner, transcript
+/// and composer share one centred `column`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AskLayout {
+    /// The window minus the shell's sidebar.
+    pane: Pixels,
+    /// The column every block shares, centred in `pane` with at least `s10`
+    /// on each side.
+    column: Pixels,
+    /// The question input: the column minus the Send/Stop slot and its gap.
+    field: Pixels,
+}
+
+impl AskLayout {
+    fn for_viewport(width: Pixels) -> Self {
+        let at_least_zero = |w: Pixels| if w > px(0.) { w } else { px(0.) };
+        let pane = at_least_zero(width - px(size::SIDEBAR));
+        let inner = at_least_zero(pane - space::s10() * 2.);
+        let column = if inner < px(size::COLUMN) {
+            inner
+        } else {
+            px(size::COLUMN)
+        };
+        let field = at_least_zero(column - px(ACTION_WIDTH) - space::s4());
+        AskLayout {
+            pane,
+            column,
+            field,
+        }
+    }
+
+    /// A pane-wide line, inset by `s10`, that centres a `column`-wide block.
+    fn line(&self) -> gpui::Div {
+        div()
+            .w(self.pane)
+            .flex()
+            .flex_row()
+            .justify_center()
+            .px(space::s10())
+    }
+}
+
+/// Blur for Ask's focus ring. GPUI 0.2.2's Linux (blade) and Windows shadow
+/// shaders sample the blur over `±3 × blur_radius`, so the zero blur of
+/// `ui::ring` / `ui::ring_over` paints nothing there (only Metal
+/// special-cases zero). A sub-pixel blur draws the same 2 px neutral edge.
+const RING_BLUR: f32 = 0.5;
+
+/// Ask's focus decoration: none after pointer input (focus, caret and
+/// selection stay); after keyboard navigation, the shared `ui::ring` for an
+/// opaque control, or `ui::ring_over(fill)` for a transparent control on
+/// `fill`, with every platform's blur.
+fn ask_ring(t: &Theme, keyboard: bool, over: Option<Hsla>) -> ui::FocusRing {
+    if !keyboard {
+        return ui::FocusRing::Hidden;
+    }
+    let shadows = match over {
+        Some(fill) => ui::ring_over(t, fill),
+        None => ui::ring(t),
+    };
+    ui::FocusRing::Shadows(
+        shadows
+            .into_iter()
+            .map(|s| BoxShadow {
+                blur_radius: if s.blur_radius > px(RING_BLUR) {
+                    s.blur_radius
+                } else {
+                    px(RING_BLUR)
+                },
+                ..s
+            })
+            .collect(),
+    )
+}
+
+/// Whether a keystroke is keyboard navigation (shows Ask's rings): Tab and
+/// Shift-Tab only, so typing, caret moves and shortcuts never do.
+fn is_keyboard_nav(keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    keystroke.key == "tab" && !(m.control || m.alt || m.platform || m.function)
+}
+
+/// `ui::row_button` for Ask: transparent on `bg_surface` (the content pane
+/// and the composer), with Ask's keyboard-only ring. Same tab stop, cursor
+/// and tints. Callers round the row.
+fn ask_row(t: &Theme, id: impl Into<gpui::ElementId>, keyboard: bool) -> gpui::Stateful<gpui::Div> {
+    let ring = ask_ring(t, keyboard, Some(t.bg_surface)).shadows(Vec::new);
+    let (hover, pressed) = (t.hover, t.pressed);
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .w_full()
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .active(move |s| s.bg(pressed))
+        .when_some(ring, |d, ring| d.focus(move |s| s.shadow(ring.clone())))
+}
+
+/// Sources the tools search (versus `SOURCES`, which basic recall searches).
+const TOOL_SOURCES: [&str; 2] = ["Dictation", "Work prompt"];
 
 pub struct AskPage {
     pcx: PageCx,
     composer: Entity<TextInput>,
     time: Entity<Select>,
-    turns: Vec<Turn>,
-    waiting: Option<String>,
-    generation: u64,
+    convo: Conversation,
+    /// Stop flag of the running question.
+    cancel: Option<Arc<AtomicBool>>,
+    probe_generation: u64,
+    /// The last input was keyboard navigation (Tab), so focus rings show;
+    /// a mouse press on the page hides them again.
+    keyboard_focus: bool,
+    /// The window this page renders in (set on render), so another window's
+    /// keystrokes don't change it.
+    window: Option<AnyWindowHandle>,
+    _keystrokes: Subscription,
+}
+
+impl Drop for AskPage {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl AskPage {
     pub fn new(pcx: PageCx, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
-            TextInput::new(cx, "Ask about your dictations and notes")
+            TextInput::new(cx, "Ask about your dictations and work prompts")
                 .multiline(2, 8)
                 .submit_on_enter()
                 .max_chars(2000)
@@ -39,6 +199,7 @@ impl AskPage {
             }
         })
         .detach();
+        let ask = cx.weak_entity();
         let time = cx.new(|cx| {
             Select::new(
                 cx,
@@ -49,19 +210,77 @@ impl AskPage {
                 Some(0),
             )
             .width(150.)
+            // The open menu occludes the page, so the root's mouse capture
+            // never sees a click on an option: clear the modality here too.
+            // Deferred, so updating Ask (which updates this Select) never
+            // re-enters it.
+            .on_menu_pointer(move |window, cx| {
+                let ask = ask.clone();
+                window.defer(cx, move |_, cx| {
+                    let _ = ask.update(cx, |page, cx| page.set_keyboard_focus(false, cx));
+                });
+            })
         });
-        AskPage {
+        // Interceptors run before the keymap, so this also sees the Tab that
+        // the `FocusNext` binding consumes (keystroke observers don't). It
+        // only records the modality: nothing is stopped or handled here.
+        let page_entity = cx.weak_entity();
+        let current_page = pcx.current_page.clone();
+        let keystrokes = cx.intercept_keystrokes(move |event, window, cx| {
+            if *current_page.borrow() != Page::Ask || !is_keyboard_nav(&event.keystroke) {
+                return;
+            }
+            let handle = window.window_handle();
+            let _ = page_entity.update(cx, |page, cx| {
+                if page.window == Some(handle) {
+                    page.set_keyboard_focus(true, cx);
+                }
+            });
+        });
+        let mut page = AskPage {
             pcx,
             composer,
             time,
-            turns: Vec::new(),
-            waiting: None,
-            generation: 0,
-        }
+            convo: Conversation::default(),
+            cancel: None,
+            probe_generation: 0,
+            keyboard_focus: false,
+            window: None,
+            _keystrokes: keystrokes,
+        };
+        page.push_focus_rings(cx);
+        page.probe(cx);
+        page
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         cx.notify();
+    }
+
+    /// Record keyboard (Tab) or pointer input; repaint only on a change.
+    fn set_keyboard_focus(&mut self, keyboard: bool, cx: &mut Context<Self>) {
+        if self.keyboard_focus != keyboard {
+            self.keyboard_focus = keyboard;
+            self.push_focus_rings(cx);
+            cx.notify();
+        }
+    }
+
+    /// The composer and Time menu render themselves: hand them the ring.
+    /// The composer is opaque `bg_control` and so is the Time trigger, so
+    /// both use the plain ring.
+    fn push_focus_rings(&self, cx: &mut Context<Self>) {
+        let t = theme(cx).clone();
+        let ring = ask_ring(&t, self.keyboard_focus, None);
+        self.composer
+            .update(cx, |c, cx| c.set_focus_ring(ring.clone(), cx));
+        self.time.update(cx, |s, cx| s.set_focus_ring(ring, cx));
+    }
+
+    /// Ask's ring for a Button: `over` is the fill a transparent (ghost)
+    /// button sits on; `None` for opaque buttons.
+    fn button_ring(&self, t: &Theme, over: Option<Hsla>) -> ui::FocusRing {
+        ask_ring(t, self.keyboard_focus, over)
     }
 
     pub fn new_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -70,35 +289,113 @@ impl AskPage {
         cx.notify();
     }
 
+    /// Escape: stop a running question. `false` when there was none.
+    pub fn escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.convo.running() {
+            self.stop(cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn agent(&self) -> Box<dyn ask_agent::AgentBackend> {
+        let services = &self.pcx.services;
+        services
+            .remote
+            .agent(services.config(), services.secrets.clone(), SANDBOX_LATENCY)
+    }
+
+    /// Check once whether the tools start (connect, list, stop).
+    fn probe(&mut self, cx: &mut Context<Self>) {
+        self.probe_generation += 1;
+        let generation = self.probe_generation;
+        self.convo.status = McpStatus::Checking;
+        let backend = self.agent();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { ask_agent::probe(backend.as_ref(), &AtomicBool::new(false)) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // A question's own status is newer than a probe started before it.
+                if this.probe_generation == generation && !this.convo.running() {
+                    this.convo.status = status;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn send(&mut self, cx: &mut Context<Self>) {
-        let question = self.composer.read(cx).text().trim().to_string();
-        if question.is_empty() || self.waiting.is_some() {
+        let text = self.composer.read(cx).text().trim().to_string();
+        if text.is_empty() || self.convo.running() {
             return;
         }
         if !self.pcx.health(cx).usable() {
             self.pcx.recheck_health(cx);
         }
-        let filter = TIME_FILTERS[self.time.read(cx).selected().unwrap_or(0)]
-            .0
-            .to_string();
-        self.generation += 1;
-        let generation = self.generation;
-        self.waiting = Some(question.clone());
+        let question = Question {
+            text: text.clone(),
+            filter: TIME_FILTERS[self.time.read(cx).selected().unwrap_or(0)]
+                .0
+                .to_string(),
+            context: self.convo.context(),
+        };
+        // A running probe must not overwrite this question's status.
+        self.probe_generation += 1;
+        let generation = self.convo.begin(&text);
         self.composer.update(cx, |c, cx| c.clear(cx));
-        let remote = self.pcx.services.remote.clone();
-        let config = self.pcx.services.config();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = Some(cancel.clone());
+        let backend = self.agent();
+        let (tx, rx) = async_channel::unbounded::<AgentEvent>();
+        let worker = std::thread::Builder::new()
+            .name("ask-agent".into())
+            .spawn(move || {
+                ask_agent::answer(backend.as_ref(), &question, &LIMITS, &cancel, &mut |e| {
+                    let _ = tx.send_blocking(e);
+                });
+            });
+        if worker.is_err() {
+            let mut turn = Turn::new(text);
+            turn.error = ERROR_GENERIC.into();
+            self.convo.apply(
+                generation,
+                AgentEvent::Finished(Answer {
+                    turn,
+                    note: None,
+                    via: Via::Tools,
+                }),
+            );
+            self.cancel = None;
+            cx.notify();
+            return;
+        }
         cx.spawn(async move |this, cx| {
-            let turn = cx
-                .background_executor()
-                .spawn(async move { remote.ask(&config, &question, &filter) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return; // stopped
+            while let Ok(event) = rx.recv().await {
+                let alive = this.update(cx, |this, cx| {
+                    if this.convo.apply(generation, event) {
+                        if !this.convo.running() {
+                            this.cancel = None;
+                        }
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
                 }
-                this.waiting = None;
-                this.turns.push(turn);
-                cx.notify();
+            }
+            // Closed without `Finished` (worker gone): don't stay pending.
+            // A stopped or newer run has another generation and is untouched.
+            let _ = this.update(cx, |this, cx| {
+                if this.convo.abandon(generation) {
+                    this.cancel = None;
+                    this.recheck_if_stale(cx);
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -106,15 +403,38 @@ impl AskPage {
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
-        self.generation += 1;
-        if let Some(q) = self.waiting.take() {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let stopped = self.convo.stop();
+        // Never overwrite a new question typed while this one ran.
+        if let Some(q) = restored_text(self.composer.read(cx).text(), stopped) {
             self.composer.update(cx, |c, cx| c.set_text(q, cx));
         }
+        self.recheck_if_stale(cx);
         cx.notify();
+    }
+
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.convo.clear();
+        self.recheck_if_stale(cx);
+        cx.notify();
+    }
+
+    /// A question stopped before it reported the tools' status invalidated
+    /// the page's probe: check again rather than show "Checking" forever.
+    fn recheck_if_stale(&mut self, cx: &mut Context<Self>) {
+        if self.convo.needs_probe() {
+            self.probe(cx);
+        }
     }
 
     fn open_citation(&mut self, turn: usize, index: usize, cx: &mut Context<Self>) {
         let Some(c) = self
+            .convo
             .turns
             .get(turn)
             .and_then(|t| t.citations.get(index))
@@ -145,96 +465,369 @@ impl AskPage {
         }
     }
 
-    fn render_turn(&self, i: usize, turn: &Turn, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx).clone();
-        let mut answer = div().flex().flex_col().gap(space::s4());
-        if !turn.error.is_empty() {
-            answer = answer.child(ui::banner(&t, Tone::Error, turn.error.clone(), None));
-        } else {
-            answer = answer.child(ui::reading(&t, turn.answer.clone()));
+    /// The tools are answering (versus basic recall).
+    fn tools_mode(&self) -> bool {
+        matches!(
+            self.convo.status,
+            McpStatus::Connected { .. } | McpStatus::Simulated
+        )
+    }
+
+    /// Tool cards of one turn (`index` `None` = the running turn).
+    fn render_cards(
+        &self,
+        t: &Theme,
+        index: Option<usize>,
+        turn: &AgentTurn,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if turn.cards.is_empty() {
+            return None;
         }
-        if !turn.citations.is_empty() {
-            let mut list = div().flex().flex_col().gap(space::s1());
-            for (j, c) in turn.citations.iter().enumerate() {
-                let label = citation_label(c).unwrap_or_else(|_| format!("[{}] {}", c.n, c.title));
-                list = list.child(
-                    ui::row_button(&t, ("cite", (i * 100 + j) as u64), false)
+        let key = index.unwrap_or(self.convo.turns.len()) as u64;
+        let mut list = div().flex().flex_col().gap(space::s2());
+        if turn.grouped() {
+            let running = turn.cards.iter().any(|c| c.status == CardStatus::Running);
+            let failed = turn
+                .cards
+                .iter()
+                .filter(|c| c.status == CardStatus::Error)
+                .count();
+            let mut words = format!("{} tool calls", turn.cards.len());
+            if running {
+                words.push_str(" · running");
+            } else if failed > 0 {
+                words.push_str(&format!(" · {failed} failed"));
+            }
+            list = list.child(
+                ask_row(t, ("ask-cards", key), self.keyboard_focus)
+                    .items_center()
+                    .gap(space::s3())
+                    .px(space::s4())
+                    .py(space::s2())
+                    .rounded(size::radius_element())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.convo.toggle_group(index);
+                        cx.notify();
+                    }))
+                    .child(ui::icon("list-checks", t.icon_secondary))
+                    .child(ui::secondary(t, words))
+                    .child(ui::icon(
+                        if turn.cards_open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        t.icon_secondary,
+                    )),
+            );
+        }
+        if turn.cards_visible() {
+            for (j, card) in turn.cards.iter().enumerate() {
+                let (icon_color, word_color) = match card.status {
+                    CardStatus::Running => (t.icon_accent, t.text_secondary),
+                    CardStatus::Ok => (t.tone(Tone::Success).0, t.text_secondary),
+                    CardStatus::Error => (t.tone(Tone::Error).0, t.tone(Tone::Error).0),
+                };
+                let mut result = card.summary.clone();
+                if let Some(ms) = card.millis.filter(|_| card.status != CardStatus::Running) {
+                    if !result.is_empty() {
+                        result.push_str(" · ");
+                    }
+                    result.push_str(&format!("{ms} ms"));
+                }
+                let row = ask_row(t, ("ask-card", key * 1000 + j as u64), self.keyboard_focus)
+                    .items_center()
+                    .gap(space::s3())
+                    .px(space::s4())
+                    .py(space::s2())
+                    .rounded(size::radius_element())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.convo.toggle_card(index, j);
+                        cx.notify();
+                    }))
+                    .child(ui::icon(card.status.icon(), icon_color))
+                    .child(ui::mono(t, card.name.clone()).flex_none())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(ui::supporting(t, card.args.clone())),
+                    )
+                    .when(!result.is_empty(), |d| {
+                        d.child(ui::supporting(t, result).flex_none())
+                    })
+                    .child(
+                        ui::supporting(t, card.status.word())
+                            .flex_none()
+                            .text_color(word_color)
+                            .font_weight(FontWeight::MEDIUM),
+                    )
+                    .child(ui::icon(
+                        if card.expanded {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        t.icon_secondary,
+                    ));
+                let detail = card.expanded.then(|| {
+                    let body = match (card.status, card.preview.is_empty()) {
+                        (CardStatus::Running, _) => "Waiting for the result…".to_string(),
+                        (_, true) => card.summary.clone(),
+                        (_, false) => card.preview.clone(),
+                    };
+                    div()
+                        .flex()
                         .flex_col()
+                        .gap(space::s2())
+                        .ml(space::s10())
                         .px(space::s4())
                         .py(space::s3())
                         .rounded(size::radius_element())
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_citation(i, j, cx)))
-                        .child(ui::label(&t, label).text_color(t.text_accent))
-                        .when(!c.snippet.is_empty(), |d| {
-                            d.child(ui::supporting(&t, c.snippet.clone()))
-                        }),
+                        .bg(t.bg_muted)
+                        .when(!card.args.is_empty(), |d| {
+                            d.child(ui::supporting(t, format!("Arguments: {}", card.args)))
+                        })
+                        .child(ui::mono(t, body))
+                });
+                list = list.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::s2())
+                        .child(row)
+                        .children(detail),
                 );
             }
-            answer = answer
-                .child(ui::supporting(&t, "Sources").font_weight(FontWeight::MEDIUM))
-                .child(list);
         }
+        Some(list.into_any_element())
+    }
+
+    fn render_turn(
+        &self,
+        index: Option<usize>,
+        turn: &AgentTurn,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx).clone();
+        let mut answer = div().flex().flex_col().gap(space::s4());
+        if let Some(cards) = self.render_cards(&t, index, turn, cx) {
+            answer = answer.child(cards);
+        }
+        match index {
+            None => {
+                let activity = match self.convo.activity() {
+                    Activity::Tool(name) => format!("Running {name}…"),
+                    _ => THINKING.trim_end_matches('.').to_string() + "…",
+                };
+                answer = answer.child(
+                    div()
+                        .id("ask-activity")
+                        .flex()
+                        .items_center()
+                        .gap(space::s4())
+                        .child(ui::icon("loader-circle", t.icon_accent))
+                        .child(ui::secondary(&t, activity)),
+                );
+            }
+            Some(i) => {
+                if !turn.error.is_empty() {
+                    answer = answer.child(ui::banner(&t, Tone::Error, turn.error.clone(), None));
+                } else if turn.sources_only() {
+                    // No model answer: no empty prose. The recall note says
+                    // why; without one, say it here.
+                    if turn.note.is_none() {
+                        answer = answer.child(ui::secondary(&t, SOURCES_ONLY));
+                    }
+                } else {
+                    answer = answer.child(ui::reading(&t, turn.answer.clone()));
+                }
+                if let Some(note) = &turn.note {
+                    // Definite widths so the note wraps inside the column
+                    // (an intrinsic-width text runs off the window).
+                    let text_width = width - size::icon() - space::s3();
+                    let text_width = if text_width > px(0.) {
+                        text_width
+                    } else {
+                        px(0.)
+                    };
+                    answer = answer.child(
+                        div()
+                            .w(width)
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(space::s3())
+                            .child(ui::icon("info", t.icon_secondary).flex_none())
+                            .child(
+                                div()
+                                    .w(text_width)
+                                    .min_w_0()
+                                    .flex_none()
+                                    .whitespace_normal()
+                                    .child(ui::supporting(&t, note.clone())),
+                            ),
+                    );
+                }
+                if !turn.citations.is_empty() {
+                    let mut list = div().flex().flex_col().gap(space::s1());
+                    for (j, c) in turn.citations.iter().enumerate() {
+                        let label =
+                            citation_label(c).unwrap_or_else(|_| format!("[{}] {}", c.n, c.title));
+                        list = list.child(
+                            ask_row(&t, ("cite", (i * 100 + j) as u64), self.keyboard_focus)
+                                .flex_col()
+                                .px(space::s4())
+                                .py(space::s3())
+                                .rounded(size::radius_element())
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.open_citation(i, j, cx)),
+                                )
+                                .child(ui::label(&t, label).text_color(t.text_accent))
+                                .when(!c.snippet.is_empty(), |d| {
+                                    d.child(ui::supporting(&t, c.snippet.clone()))
+                                }),
+                        );
+                    }
+                    answer = answer
+                        .child(ui::supporting(&t, "Sources").font_weight(FontWeight::MEDIUM))
+                        .child(list);
+                }
+            }
+        }
+        // Full width so the question bubble right-aligns in every state.
         div()
+            .w(width)
             .flex()
             .flex_col()
             .gap(space::s5())
-            .pb(space::s8())
-            .border_b_1()
-            .border_color(t.border)
             .child(
-                div().flex().justify_end().child(
+                div().w(width).flex().flex_row().justify_end().child(
                     div()
                         .max_w(px(520.))
-                        .px(space::s6())
-                        .py(space::s4())
+                        .px(space::s5())
+                        .py(space::s3())
                         .rounded(size::radius_container())
                         .bg(t.accent_muted)
                         .child(ui::body(&t, turn.question.clone())),
                 ),
             )
-            .child(answer)
+            .child(answer.w(width))
+    }
+
+    fn render_status(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let (word, tone) = self.convo.status_label();
+        let tone = match tone {
+            StatusTone::Neutral => Tone::Neutral,
+            StatusTone::Good => Tone::Success,
+            StatusTone::Warn => Tone::Warning,
+            StatusTone::Bad => Tone::Error,
+        };
+        let detail = SharedString::from(self.convo.status_detail());
+        let checkable = !matches!(
+            self.convo.status,
+            McpStatus::Checking | McpStatus::Simulated
+        ) && !self.convo.running();
+        ask_row(t, "ask-tools", self.keyboard_focus)
+            .w_auto()
+            .flex_none()
+            .items_center()
+            .px(space::s3())
+            .py(space::s1())
+            .rounded(size::radius_element())
+            .child(ui::status_dot(t, tone, word))
+            .tooltip(move |_, cx| ui::Tooltip::view(detail.clone(), cx))
+            .when(checkable, |d| {
+                d.on_click(cx.listener(|this, _, _, cx| this.probe(cx)))
+            })
     }
 }
 
 impl Render for AskPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
+        self.window = Some(window.window_handle());
+        // Notifies the composer and Time menu only when their ring changed
+        // (a theme switch); a modality change already pushed it.
+        self.push_focus_rings(cx);
+        let layout = AskLayout::for_viewport(window.viewport_size().width);
+        let AskLayout {
+            pane,
+            column,
+            field,
+        } = layout;
         let health = self.pcx.health(cx);
-        let config = self.pcx.services.config();
-        let address = self.pcx.services.remote.base_url(&config);
         let pcx = self.pcx.clone();
-        let banner = if health == Health::Simulated {
-            Some(sandbox_note(&t))
-        } else {
-            service_banner(&t, &health, &address, move |_, _, cx| {
-                pcx.recheck_health(cx)
-            })
+        let tools_mode = self.tools_mode();
+        // Send stays enabled whatever this says: the check can be stale, and
+        // a question reports what actually answered.
+        let banner = match self.convo.notice(&health) {
+            Notice::None => None,
+            Notice::Sandbox => Some(sandbox_note(&t)),
+            Notice::Unreachable { tools } => Some(ui::banner(
+                &t,
+                Tone::Warning,
+                unreachable_message(tools),
+                Some(
+                    Button::new("ask-retry", "Try again")
+                        .small()
+                        .focus_ring(self.button_ring(&t, None))
+                        .icon("refresh-cw")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // Recheck both paths; a running question
+                            // reports the tools' status itself. No warning
+                            // until this health check has stored its result
+                            // (the tools may settle first).
+                            let retry = this.convo.begin_health_retry();
+                            let ask = cx.weak_entity();
+                            pcx.recheck_health_then(cx, move |cx| {
+                                let _ = ask.update(cx, |this, cx| {
+                                    if this.convo.finish_health_retry(retry) {
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                            cx.notify();
+                            if !this.convo.running() {
+                                this.probe(cx);
+                            }
+                        }))
+                        .into_any_element(),
+                ),
+            )),
         };
-        let clear = (!self.turns.is_empty()).then(|| {
+        let running = self.convo.running();
+        let clear = (!self.convo.turns.is_empty() || running).then(|| {
             Button::new("ask-clear", "New conversation")
                 .ghost()
+                // Transparent, on the header's `bg_surface`.
+                .focus_ring(self.button_ring(&t, Some(t.bg_surface)))
                 .icon("plus")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.turns.clear();
-                    this.generation += 1;
-                    this.waiting = None;
-                    cx.notify();
-                }))
+                .on_click(cx.listener(|this, _, _, cx| this.clear(cx)))
                 .into_any_element()
         });
-        let mut convo = div().flex().flex_col().gap(space::s8());
-        if self.turns.is_empty() && self.waiting.is_none() {
-            let examples = EXAMPLES.iter().enumerate().map(|(i, ex)| {
-                let text = ex.to_string();
-                Button::new(("example", i as u64), *ex)
-                    .small()
-                    .icon("sparkles")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.composer
-                            .update(cx, |c, cx| c.set_text(text.clone(), cx));
-                        this.composer.read(cx).focus(window);
-                    }))
-            });
+        let mut convo = div().flex().flex_col().gap(space::s10());
+        if self.convo.turns.is_empty() && !running {
+            let examples = suggestions(tools_mode)
+                .into_iter()
+                .enumerate()
+                .map(|(i, ex)| {
+                    let text = ex.to_string();
+                    Button::new(("example", i as u64), ex)
+                        .small()
+                        .focus_ring(self.button_ring(&t, None))
+                        .icon("sparkles")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.composer
+                                .update(cx, |c, cx| c.set_text(text.clone(), cx));
+                            this.composer.read(cx).focus(window);
+                        }))
+                });
             convo = convo.child(ui::empty_state(
                 &t,
                 "message-circle-question",
@@ -251,68 +844,92 @@ impl Render for AskPage {
                 ),
             ));
         }
-        for (i, turn) in self.turns.iter().enumerate() {
-            convo = convo.child(self.render_turn(i, turn, cx));
+        for (i, turn) in self.convo.turns.iter().enumerate() {
+            convo = convo.child(self.render_turn(Some(i), turn, column, cx));
         }
-        if let Some(q) = &self.waiting {
-            convo = convo.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::s4())
-                    .child(div().flex().justify_end().child(ui::body(&t, q.clone())))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(space::s4())
-                            .child(ui::icon("loader-circle", t.icon_accent))
-                            .child(ui::secondary(&t, "Searching your dictations and notes…"))
-                            .child(
-                                Button::new("ask-stop", "Stop")
-                                    .small()
-                                    .icon("square")
-                                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-                            ),
-                    ),
-            );
+        if let Some(turn) = &self.convo.pending {
+            convo = convo.child(self.render_turn(None, turn, column, cx));
         }
+        let (source_names, source_tip): (Vec<&'static str>, &'static str) = if tools_mode {
+            (
+                TOOL_SOURCES.to_vec(),
+                "With tools, Ask searches your dictations and meeting work prompts. \
+                 Meetings and notes are searched only by basic recall.",
+            )
+        } else {
+            (
+                SOURCES.iter().map(|(_, name)| *name).collect(),
+                "All sources are searched. Filtering by source isn't available yet.",
+            )
+        };
         let sources = div()
             .flex()
             .items_center()
             .gap(space::s3())
             .child(ui::supporting(&t, "Sources:"))
             .children(
-                SOURCES
-                    .iter()
-                    .map(|(_, name)| ui::token(&t, Tone::Neutral, *name)),
+                source_names
+                    .into_iter()
+                    .map(|name| ui::token(&t, Tone::Neutral, name)),
             );
-        let composer = div()
+        let action = if running {
+            Button::new("ask-stop", "Stop")
+                .focus_ring(self.button_ring(&t, None))
+                .icon("square")
+                .tooltip("Stop (Esc)")
+                .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+        } else {
+            Button::new("ask-send", "Send")
+                .primary()
+                .focus_ring(self.button_ring(&t, None))
+                .icon("send")
+                .on_click(cx.listener(|this, _, _, cx| this.send(cx)))
+        };
+        // Always shown, before the first question too: tools can run while
+        // their status is still being checked.
+        let privacy = format!(
+            "{PRIVACY} When LocalFlow's tools are available, it also receives each tool's \
+             result (dictations and work prompts, up to {} characters per call), not only \
+             the short preview in the card. Questions are kept until you close this window.",
+            ask_agent::MODEL_RESULT_CHARS
+        );
+        // The background and top border span the pane; the rows sit in the
+        // transcript's column.
+        let composer_rows = div()
+            .w(column)
             .flex()
             .flex_col()
             .gap(space::s4())
-            .px(space::s10())
-            .py(space::s6())
-            .border_t_1()
-            .border_color(t.border)
-            .bg(t.bg_surface)
             .child(
+                // The input gets every pixel the button slot leaves (its
+                // intrinsic width would be only the placeholder's), so Send
+                // stays beside it at the column's right edge.
                 div()
+                    .w(column)
                     .flex()
+                    .flex_row()
                     .items_end()
                     .gap(space::s4())
-                    .child(div().flex_1().child(self.composer.clone()))
                     .child(
-                        Button::new("ask-send", "Send")
-                            .primary()
-                            .icon("send")
-                            .busy(self.waiting.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
+                        div()
+                            .w(field)
+                            .flex_none()
+                            .min_w_0()
+                            .child(self.composer.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(ACTION_WIDTH))
+                            .flex_none()
+                            .flex()
+                            .justify_end()
+                            .child(action),
                     ),
             )
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap(space::s6())
@@ -322,48 +939,167 @@ impl Render for AskPage {
                             .items_center()
                             .gap(space::s4())
                             .child(ui::supporting(&t, "Time"))
-                            .child(self.time.clone()),
+                            .child(self.time.clone())
+                            .child(self.render_status(&t, cx)),
                     )
-                    .child(div().id("ask-sources").child(sources).tooltip(|_, cx| {
-                        ui::Tooltip::view(
-                            "All sources are searched. Filtering by source isn't available yet."
-                                .into(),
-                            cx,
-                        )
-                    })),
+                    .child(
+                        div()
+                            .id("ask-sources")
+                            .child(sources)
+                            .tooltip(move |_, cx| ui::Tooltip::view(source_tip.into(), cx)),
+                    ),
             )
-            .child(ui::supporting(
-                &t,
-                format!("{PRIVACY} Questions are kept until you close this window."),
-            ));
+            .child(ui::supporting(&t, privacy));
+        let composer = layout
+            .line()
+            .py(space::s6())
+            .border_t_1()
+            .border_color(t.border)
+            .bg(t.bg_surface)
+            .child(composer_rows);
         page(
             header(
                 &t,
                 "Ask",
-                Some("Answers from your own dictations, meetings and notes.".into()),
+                Some("Answers from your own dictations, work prompts, meetings and notes.".into()),
                 clear.into_iter().collect(),
             ),
             div()
                 .flex()
                 .flex_col()
                 .size_full()
-                .children(banner.map(|b| div().px(space::s10()).pt(space::s5()).child(b)))
+                .children(banner.map(|b| {
+                    layout
+                        .line()
+                        .pt(space::s5())
+                        .child(div().w(column).child(b))
+                }))
                 .child(
                     div()
                         .id("ask-scroll")
+                        .w(pane)
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .child(
-                            div()
-                                .flex()
-                                .justify_center()
-                                .px(space::s10())
-                                .py(space::s8())
-                                .child(convo.w_full().max_w(px(size::COLUMN))),
-                        ),
+                        .child(layout.line().py(space::s8()).child(convo.w(column))),
                 )
                 .child(composer),
         )
+        // Pointer input anywhere on the page hides the rings (capture phase,
+        // so it runs before the control focuses; nothing is stopped).
+        .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+            this.set_keyboard_focus(false, cx);
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_suggestions_avoid_meeting_transcripts() {
+        assert_eq!(suggestions(false), EXAMPLES);
+        let tools = suggestions(true);
+        assert!(tools.contains(&TOOL_MEETING_SUGGESTION));
+        // Only the meeting example is replaced; the others keep their order.
+        for (shared, shown) in EXAMPLES.iter().zip(tools) {
+            if !shared.to_lowercase().contains("meeting") {
+                assert_eq!(*shared, shown);
+            }
+        }
+        assert!(!tools.contains(&EXAMPLES[0]), "the transcript question");
+    }
+
+    #[test]
+    fn layout_shares_one_column() {
+        // Wide window: the column caps at 760 and is centred, so the
+        // banner, transcript and composer share both outer edges (the
+        // composer row was 1166 wide here, 203 px past each transcript edge).
+        let wide = AskLayout::for_viewport(px(1470.));
+        assert_eq!(wide.pane, px(1230.));
+        assert_eq!(wide.column, px(size::COLUMN));
+        assert_eq!(wide.field, px(656.));
+        // 235 px each side once centred.
+        assert_eq!(wide.pane - wide.column, px(470.));
+        // Small window (960x640): the column is the inset pane and the input
+        // keeps a usable width beside Send.
+        let small = AskLayout::for_viewport(px(960.));
+        assert_eq!(small.pane, px(720.));
+        assert_eq!(small.column, px(656.));
+        assert_eq!(small.field, px(552.));
+        assert_eq!(small.pane - small.column, space::s10() * 2.);
+        // Send/Stop sits right beside the input, ending on the column edge.
+        for l in [wide, small] {
+            assert_eq!(l.field + space::s4() + px(ACTION_WIDTH), l.column);
+        }
+        // Narrower than the sidebar: nothing negative.
+        let tiny = AskLayout::for_viewport(px(200.));
+        assert_eq!(
+            (tiny.pane, tiny.column, tiny.field),
+            (px(0.), px(0.), px(0.))
+        );
+    }
+
+    /// Pointer focus draws nothing; keyboard focus draws the shared neutral
+    /// ring (same colour, offset and 2 px spread as `ui::ring` /
+    /// `ui::ring_over`) with a blur every platform's shader paints.
+    #[test]
+    fn ask_ring_is_keyboard_only_and_paints_everywhere() {
+        for t in [Theme::light(), Theme::dark()] {
+            assert_eq!(ask_ring(&t, false, None), ui::FocusRing::Hidden);
+            assert_eq!(
+                ask_ring(&t, false, Some(t.bg_surface)),
+                ui::FocusRing::Hidden
+            );
+            for (over, shared) in [
+                (None, ui::ring(&t)),
+                (Some(t.bg_surface), ui::ring_over(&t, t.bg_surface)),
+            ] {
+                let ui::FocusRing::Shadows(shadows) = ask_ring(&t, true, over) else {
+                    panic!("keyboard focus shows a ring");
+                };
+                assert_eq!(shadows.len(), shared.len());
+                for (s, u) in shadows.iter().zip(&shared) {
+                    assert_eq!(
+                        (s.color, s.offset, s.spread_radius),
+                        (u.color, u.offset, u.spread_radius)
+                    );
+                    // Zero blur paints nothing on Linux (blade) and Windows.
+                    assert!(s.blur_radius > px(0.) && s.blur_radius <= px(RING_BLUR));
+                }
+                assert_eq!(shadows[0].color, t.focus);
+                assert_eq!(shadows[0].spread_radius, px(2.));
+            }
+            // A transparent control restores the surface it sits on.
+            let ui::FocusRing::Shadows(over) = ask_ring(&t, true, Some(t.bg_surface)) else {
+                unreachable!()
+            };
+            assert_eq!(over.last().unwrap().color, t.bg_surface);
+        }
+    }
+
+    #[test]
+    fn only_tab_counts_as_keyboard_navigation() {
+        let nav = |s: &str| is_keyboard_nav(&Keystroke::parse(s).unwrap());
+        assert!(nav("tab") && nav("shift-tab"));
+        // Typing, caret moves, Enter/Escape and shortcuts in the composer
+        // or elsewhere never show a ring.
+        for key in [
+            "a",
+            "shift-a",
+            "space",
+            "enter",
+            "escape",
+            "left",
+            "down",
+            "backspace",
+            "ctrl-tab",
+            "alt-tab",
+            "cmd-tab",
+            "ctrl-n",
+        ] {
+            assert!(!nav(key), "{key}");
+        }
     }
 }

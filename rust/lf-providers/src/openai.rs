@@ -28,6 +28,51 @@ impl std::fmt::Debug for OpenAiCompatLlm {
 
 pub const DEFAULT_TIMEOUT: i64 = 120;
 
+/// OpenAI's o-series reasoning models (`o1`, `o3`, `o4-mini`, dated or
+/// variant IDs such as `o1-2024-12-17` or `o3-mini`) reject `max_tokens` on
+/// `/chat/completions` and take the same bound as `max_completion_tokens`.
+/// Matched on the model id: `o`, one or more digits, then the end or `-`.
+/// The bare GPT-5 family (`gpt-5`, `gpt-5-mini`, `gpt-5.1`) does too.
+/// Every other model (GPT-4o, Llama, provider-prefixed ids such as
+/// OpenRouter's `openai/o4-mini`, which translates the field itself) keeps
+/// `max_tokens`.
+pub fn uses_max_completion_tokens(model: &str) -> bool {
+    let id = model.trim().to_ascii_lowercase();
+    let Some(rest) = id.strip_prefix('o') else {
+        return is_gpt5(&id);
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(&b'-'))
+}
+
+/// `gpt-5`, then the end, `-…` or `.<digit>…`; not `gpt-50` or `gpt-5o`.
+fn is_gpt5(model: &str) -> bool {
+    let id = model.trim().to_ascii_lowercase();
+    match id.strip_prefix("gpt-5").map(str::as_bytes) {
+        Some([] | [b'-', ..]) => true,
+        Some([b'.', next, ..]) => next.is_ascii_digit(),
+        _ => false,
+    }
+}
+
+/// Total `max_completion_tokens` a reasoning model gets when a caller asks
+/// for a reply budget ([`LlmProvider::reply_budget`]): the bound also covers
+/// invisible reasoning tokens, so a visible-sized cap can be used up before
+/// any reply text is written.
+pub const REASONING_REPLY_BUDGET: i64 = 4096;
+
+/// Whether `model` gets the o-series or GPT-5 reasoning budget:
+/// the same id rule as [`uses_max_completion_tokens`], after one `vendor/`
+/// prefix (OpenRouter's `openai/o4-mini`). Only the budget uses this; the
+/// wire field for a prefixed id stays `max_tokens`, which such routers map
+/// themselves, and the bound still covers the model's hidden reasoning.
+/// (Exception: a prefixed GPT-5 id at `api.openai.com`, see `chat_body`.)
+pub fn is_reasoning_model(model: &str) -> bool {
+    let id = model.trim();
+    let id = id.split_once('/').map_or(id, |(_, rest)| rest);
+    uses_max_completion_tokens(id)
+}
+
 impl OpenAiCompatLlm {
     pub fn new(
         base_url: &str,
@@ -58,13 +103,32 @@ impl OpenAiCompatLlm {
                 {"role": "user", "content": user},
             ],
         });
+        // No bound sends neither field (basic recall's uncapped call).
         if let Some(max_tokens) = max_tokens {
-            body["max_tokens"] = json!(max_tokens);
+            let field = if uses_max_completion_tokens(&self.model) || self.openai_prefixed_gpt5() {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            body[field] = json!(max_tokens);
         }
         if let Some(temperature) = self.temperature {
             body["temperature"] = json!(temperature);
         }
         body
+    }
+
+    /// A prefixed GPT-5 id (`openai/gpt-5-mini`) sent to `api.openai.com`
+    /// still needs `max_completion_tokens`; routers keep `max_tokens`.
+    fn openai_prefixed_gpt5(&self) -> bool {
+        let direct = reqwest::Url::parse(&self.base_url)
+            .is_ok_and(|url| url.host_str() == Some("api.openai.com"));
+        direct
+            && self
+                .model
+                .trim()
+                .split_once('/')
+                .is_some_and(|(_, id)| is_gpt5(id))
     }
 
     fn authorize(
@@ -174,6 +238,14 @@ impl LlmProvider for OpenAiCompatLlm {
             Err(exc) => Health::failed(exc.to_string()),
         }
     }
+
+    fn reply_budget(&self, visible: i64) -> i64 {
+        if is_reasoning_model(&self.model) {
+            visible.max(REASONING_REPLY_BUDGET)
+        } else {
+            visible
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,7 +308,187 @@ mod tests {
         );
         let body = request.json();
         assert_eq!(body["max_tokens"], 7);
+        assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(body["temperature"], 0.3);
+    }
+
+    #[test]
+    fn o_series_bound_is_sent_as_max_completion_tokens() {
+        let server = MockServer::start(vec![MockResponse::json(200, OK_BODY)]);
+        OpenAiCompatLlm::new(&format!("{}/v1", server.url()), "o4-mini", "k", 5, None)
+            .complete("sys", "usr", Some(800))
+            .unwrap();
+        let body = server.request(0).json();
+        assert_eq!(body["max_completion_tokens"], 800);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["model"], "o4-mini");
+        assert_eq!(body["messages"][0]["role"], "system");
+        // No bound: neither field (basic recall stays uncapped).
+        let llm = OpenAiCompatLlm::new("https://x/v1", "o4-mini", "", 5, None);
+        let body = llm.chat_body("s", "u", None);
+        assert!(body.get("max_tokens").is_none() && body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn reply_budget_is_opt_in_and_reasoning_aware() {
+        let reasoning = OpenAiCompatLlm::new("https://x/v1", "o4-mini", "", 5, None);
+        let plain = OpenAiCompatLlm::new("https://x/v1", "gpt-4o-mini", "", 5, None);
+        assert_eq!(reasoning.reply_budget(800), REASONING_REPLY_BUDGET);
+        assert_eq!(reasoning.reply_budget(10_000), 10_000, "never lowered");
+        assert_eq!(plain.reply_budget(800), 800);
+        // Opted in: the larger allowance reaches the wire.
+        let server = MockServer::start(vec![
+            MockResponse::json(200, OK_BODY),
+            MockResponse::json(200, OK_BODY),
+            MockResponse::json(200, OK_BODY),
+        ]);
+        let url = format!("{}/v1", server.url());
+        let o4 = OpenAiCompatLlm::new(&url, "o4-mini", "k", 5, None);
+        o4.complete("s", "u", Some(o4.reply_budget(800))).unwrap();
+        assert_eq!(
+            server.request(0).json()["max_completion_tokens"],
+            REASONING_REPLY_BUDGET
+        );
+        // A direct explicit bound is sent unchanged.
+        o4.complete("s", "u", Some(800)).unwrap();
+        assert_eq!(server.request(1).json()["max_completion_tokens"], 800);
+        let gpt = OpenAiCompatLlm::new(&url, "gpt-4o-mini", "k", 5, None);
+        gpt.complete("s", "u", Some(gpt.reply_budget(800))).unwrap();
+        assert_eq!(server.request(2).json()["max_tokens"], 800);
+    }
+
+    #[test]
+    fn prefixed_reasoning_ids_get_the_budget_but_keep_max_tokens() {
+        let reasoning = [
+            "openai/o4-mini",
+            "openai/o1",
+            "openai/o1-mini",
+            "openai/o3-mini",
+            "openai/o3-mini-2025-01-31",
+            "o1-preview",
+            "o3",
+        ];
+        let plain = [
+            "openai/gpt-4o-mini",
+            "openai/gpt-4.1",
+            "meta-llama/llama-3.3-70b-instruct",
+            "openai/omni-moderation-latest",
+            "openai/o",
+            "gpt-4o-mini",
+        ];
+        let server = MockServer::start(
+            (0..reasoning.len() + plain.len() + 1)
+                .map(|_| MockResponse::json(200, OK_BODY))
+                .collect(),
+        );
+        let url = format!("{}/v1", server.url());
+        let mut n = 0;
+        for model in reasoning {
+            let llm = OpenAiCompatLlm::new(&url, model, "k", 5, None);
+            assert_eq!(llm.reply_budget(800), REASONING_REPLY_BUDGET, "{model}");
+            llm.complete("s", "u", Some(llm.reply_budget(800))).unwrap();
+            let body = server.request(n).json();
+            n += 1;
+            // Prefixed ids keep the router's `max_tokens`; bare ids use the
+            // OpenAI field. Either way the reasoning allowance is sent.
+            let (field, other) = if model.contains('/') {
+                ("max_tokens", "max_completion_tokens")
+            } else {
+                ("max_completion_tokens", "max_tokens")
+            };
+            assert_eq!(body[field], REASONING_REPLY_BUDGET, "{model}");
+            assert!(body.get(other).is_none(), "{model}");
+        }
+        for model in plain {
+            let llm = OpenAiCompatLlm::new(&url, model, "k", 5, None);
+            assert_eq!(llm.reply_budget(800), 800, "{model}");
+            llm.complete("s", "u", Some(llm.reply_budget(800))).unwrap();
+            let body = server.request(n).json();
+            n += 1;
+            assert_eq!(body["max_tokens"], 800, "{model}");
+            assert!(body.get("max_completion_tokens").is_none(), "{model}");
+        }
+        // A direct explicit bound on a prefixed reasoning id is unchanged.
+        let prefixed = OpenAiCompatLlm::new(&url, "openai/o4-mini", "k", 5, None);
+        prefixed.complete("s", "u", Some(800)).unwrap();
+        let body = server.request(n).json();
+        assert_eq!(body["max_tokens"], 800);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn gpt5_family_gets_reasoning_budget_and_native_field() {
+        for model in ["gpt-5", "gpt-5-mini", "GPT-5.1", "openai/gpt-5-mini"] {
+            let llm = OpenAiCompatLlm::new("https://x/v1", model, "", 5, None);
+            assert_eq!(llm.reply_budget(800), REASONING_REPLY_BUDGET, "{model}");
+            assert_eq!(llm.reply_budget(10_000), 10_000, "{model}");
+        }
+        for model in ["gpt-50", "gpt-5o", "gpt-5.", "openai/gpt-50"] {
+            let llm = OpenAiCompatLlm::new("https://x/v1", model, "", 5, None);
+            assert_eq!(llm.reply_budget(800), 800, "{model}");
+            let body = llm.chat_body("s", "u", Some(800));
+            assert_eq!(body["max_tokens"], 800, "{model}");
+            assert!(body.get("max_completion_tokens").is_none(), "{model}");
+        }
+        // Prefixed GPT-5: native field at OpenAI, `max_tokens` at a router.
+        let direct = "https://api.openai.com/v1";
+        let router = "https://openrouter.ai/api/v1";
+        for (url, field, other) in [
+            (direct, "max_completion_tokens", "max_tokens"),
+            (router, "max_tokens", "max_completion_tokens"),
+        ] {
+            let llm = OpenAiCompatLlm::new(url, "openai/gpt-5-mini", "", 5, None);
+            let body = llm.chat_body("s", "u", Some(llm.reply_budget(800)));
+            assert_eq!(body[field], REASONING_REPLY_BUDGET, "{url}");
+            assert!(body.get(other).is_none(), "{url}");
+            assert_eq!(body["model"], "openai/gpt-5-mini");
+        }
+        // Prefixed o-series keeps `max_tokens`, even at OpenAI.
+        let o4 = OpenAiCompatLlm::new(direct, "openai/o4-mini", "", 5, None);
+        assert_eq!(o4.chat_body("s", "u", Some(800))["max_tokens"], 800);
+        // Bare GPT-5 on the wire. The mock replies by script and cannot
+        // reject a field, so this checks the recorded request instead.
+        let server = MockServer::start(vec![MockResponse::json(200, OK_BODY)]);
+        let url = format!("{}/v1", server.url());
+        let llm = OpenAiCompatLlm::new(&url, "gpt-5-mini", "k", 5, None);
+        llm.complete("s", "u", Some(llm.reply_budget(800))).unwrap();
+        let body = server.request(0).json();
+        assert_eq!(body["max_completion_tokens"], REASONING_REPLY_BUDGET);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn compatible_models_keep_max_tokens() {
+        for model in [
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "llama-3.3-70b-versatile",
+            "openai/o4-mini",
+            "omni-moderation-latest",
+            "o",
+            "o-mini",
+            "o4mini",
+            "",
+        ] {
+            let llm = OpenAiCompatLlm::new("https://x/v1", model, "", 5, None);
+            let body = llm.chat_body("s", "u", Some(7));
+            assert_eq!(body["max_tokens"], 7, "{model}");
+            assert!(body.get("max_completion_tokens").is_none(), "{model}");
+        }
+        for model in [
+            "o1",
+            "o1-mini",
+            "o1-preview",
+            "o1-2024-12-17",
+            "o3",
+            "o3-mini",
+            "o3-mini-2025-01-31",
+            "o4-mini",
+            "O4-Mini-2025-04-16",
+            " o4-mini ",
+        ] {
+            assert!(uses_max_completion_tokens(model), "{model}");
+        }
     }
 
     #[test]

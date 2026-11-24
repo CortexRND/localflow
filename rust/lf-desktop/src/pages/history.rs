@@ -84,7 +84,7 @@ impl HistoryPage {
     }
 
     /// Retry `key` (no-op while any retry runs, including this one).
-    fn start_retry(&mut self, key: RetryKey, cx: &mut Context<Self>) {
+    pub(crate) fn start_retry(&mut self, key: RetryKey, cx: &mut Context<Self>) {
         let services = &self.pcx.services;
         if services.retry_jobs.start(
             services.root.clone(),
@@ -150,6 +150,7 @@ impl HistoryPage {
             );
         }
         if self.retry_seen != before {
+            self.recount();
             cx.notify();
         }
         // From the same snapshot as the results: a job that finishes right
@@ -159,6 +160,16 @@ impl HistoryPage {
             self.retry_watch = false;
         }
         running
+    }
+
+    /// Read the count again after this window changed the store.
+    fn recount(&mut self) {
+        self.total = history::total(&self.pcx.services.root).ok();
+    }
+
+    /// The line under the heading (none until the first load).
+    pub(crate) fn count_line(&self) -> Option<String> {
+        self.total.map(history::count_line)
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -289,6 +300,12 @@ impl HistoryPage {
         self.list_focus.clone()
     }
 
+    /// The listed rows, for shell tests.
+    #[cfg(test)]
+    pub(crate) fn rows(&self) -> Vec<HistoryEntry> {
+        self.list.entries.clone()
+    }
+
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.read(cx).focus(window);
     }
@@ -330,7 +347,7 @@ impl HistoryPage {
         );
     }
 
-    fn delete(&mut self, id: i64, cx: &mut Context<Self>) {
+    pub(crate) fn delete(&mut self, id: i64, cx: &mut Context<Self>) {
         match history::delete(&self.pcx.services.root, id) {
             Ok(_) => {
                 let index = self.list.remove(id);
@@ -341,7 +358,7 @@ impl HistoryPage {
                             .get(i.min(self.list.entries.len().saturating_sub(1)))
                     })
                     .map(|e| e.id);
-                self.total = self.total.map(|n| (n - 1).max(0));
+                self.recount();
                 self.pcx.toast("Dictation deleted", cx);
             }
             Err(err) => self.pcx.toast(format!("Couldn't delete: {err:#}"), cx),
@@ -795,9 +812,7 @@ impl Render for HistoryPage {
             .disabled(self.list.entries.is_empty() && self.search.read(cx).is_empty())
             .on_click(cx.listener(|this, _, _, cx| this.ask_clear(cx)))
             .into_any_element();
-        let support = self
-            .total
-            .map(|n| format!("{n} dictations on this device").into());
+        let support = self.count_line().map(Into::into);
         let history_off = !self
             .pcx
             .services
