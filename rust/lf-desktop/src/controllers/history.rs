@@ -294,6 +294,17 @@ pub fn has_distinct_original(entry: &HistoryEntry) -> bool {
     !entry.raw_text.is_empty() && entry.raw_text != entry.final_text
 }
 
+/// The dictation count a fresh load reads ([`Loaded::stats`]).
+pub fn total(root: &DataRoot) -> Result<i64> {
+    Ok(open_history(root)?.stats(None)?.total_dictations)
+}
+
+/// The line under the History heading.
+pub fn count_line(total: i64) -> String {
+    let plural = if total == 1 { "" } else { "s" };
+    format!("{total} dictation{plural} on this device")
+}
+
 pub fn delete(root: &DataRoot, id: i64) -> Result<bool> {
     open_history(root)?.delete(id)
 }
@@ -442,6 +453,13 @@ mod tests {
         assert!(!list.replace(reused));
         assert!(!list.replace(all[110].clone()));
         assert_eq!(list, before);
+    }
+
+    #[test]
+    fn count_line_is_singular_only_for_one() {
+        assert_eq!(count_line(0), "0 dictations on this device");
+        assert_eq!(count_line(1), "1 dictation on this device");
+        assert_eq!(count_line(2), "2 dictations on this device");
     }
 
     #[test]

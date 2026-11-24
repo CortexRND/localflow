@@ -43,6 +43,10 @@ unicode-general-category = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Host hardware detection for the setup wizard.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
 # The AppKit layer (`lf_ui::mac`). macOS only: nothing here is built or linked
 # on other platforms.
 [target.'cfg(target_os = "macos")'.dependencies]

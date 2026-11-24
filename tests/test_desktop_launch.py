@@ -129,7 +129,8 @@ class FakeDesktop:
             record = {str(record)!r}
             entry = {{"argv": sys.argv[1:], "pid": os.getpid(),
                       "env": {{k: os.environ.get(k) for k in
-                              ("HOME", "LOCALFLOW_CONFIG", "LOCALFLOW_SANDBOX", "LOCALFLOW_UI")}}}}
+                              ("HOME", "LOCALFLOW_CONFIG", "LOCALFLOW_SANDBOX", "LOCALFLOW_UI",
+                               "LOCALFLOW_PYTHON")}}}}
             with open(record, "a") as f:
                 f.write(json.dumps(entry) + "\\n")
             if sys.argv[1:] == ["--help"]:
@@ -457,6 +458,8 @@ def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, 
     launched = desktop.runs()[1]["env"]
     assert launched["HOME"] == str(home) and launched["LOCALFLOW_CONFIG"] == str(config)
     assert launched["LOCALFLOW_SANDBOX"] is None
+    # History Retry can use this install's speech model through it.
+    assert launched["LOCALFLOW_PYTHON"] == sys.executable
     assert result.output == ""  # nothing from the native child is relayed
     assert not (home / ".localflow").exists() and config.read_text() == SET_UP  # no launcher writes
 

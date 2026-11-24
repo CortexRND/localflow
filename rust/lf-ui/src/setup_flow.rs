@@ -523,7 +523,114 @@ fn detect_host_hardware() -> std::result::Result<HardwareInfo, String> {
     ))
 }
 
-#[cfg(not(unix))]
+/// Python `platform.machine()` on Windows for a native `IMAGE_FILE_MACHINE_*`
+/// value (the names of its `Win32_Processor.Architecture` table).
+#[cfg(any(windows, test))]
+fn windows_machine_name(native_machine: u16) -> Option<&'static str> {
+    match native_machine {
+        0x014c => Some("x86"),
+        0x01c4 => Some("ARM"),
+        0x8664 => Some("AMD64"),
+        0xaa64 => Some("ARM64"),
+        _ => None,
+    }
+}
+
+/// `models.detect_hardware()` on Windows from `GlobalMemoryStatusEx`'s
+/// `ullTotalPhys` and `shutil.disk_usage(home).free` (the total free bytes of
+/// `GetDiskFreeSpaceExW`), in GB of `1024**3` bytes as Python divides.
+#[cfg(any(windows, test))]
+fn windows_hardware(machine: &str, total_phys: u64, total_free_bytes: u64) -> HardwareInfo {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    HardwareInfo::new(
+        "Windows",
+        machine,
+        total_phys as f64 / GIB,
+        false,
+        total_free_bytes as f64 / GIB,
+    )
+}
+
+/// The NUL-terminated `lpDirectoryName` for `GetDiskFreeSpaceExW`, with the
+/// trailing backslash that a UNC share root requires.
+#[cfg(any(windows, test))]
+fn windows_directory_name(path: &[u16]) -> std::result::Result<Vec<u16>, String> {
+    if path.contains(&0) {
+        return Err("the home path contains a NUL character".into());
+    }
+    let mut wide = Vec::with_capacity(path.len() + 2);
+    wide.extend_from_slice(path);
+    if !matches!(wide.last(), Some(&0x5c) | Some(&0x2f)) {
+        wide.push(0x5c);
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(windows)]
+fn detect_host_hardware() -> std::result::Result<HardwareInfo, String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+
+    // SAFETY: MEMORYSTATUSEX is plain data; all-zero is a valid value.
+    let mut memory: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    memory.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: `memory` is a valid, uniquely-owned MEMORYSTATUSEX with dwLength set.
+    if unsafe { GlobalMemoryStatusEx(&mut memory) } == 0 || memory.ullTotalPhys == 0 {
+        return Err("could not detect physical memory".into());
+    }
+
+    let home = lf_core::home::python_home().map_err(|error| error.to_string())?;
+    let path = windows_directory_name(&home.as_os_str().encode_wide().collect::<Vec<u16>>())?;
+    let mut total_free_bytes = 0u64;
+    // SAFETY: `path` is NUL terminated for the duration of the call; the out
+    // pointers are either null (not requested) or point to a valid u64.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut total_free_bytes,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    let mut process_machine = 0u16;
+    let mut native_machine = 0u16;
+    // SAFETY: the current-process pseudo handle needs no closing and both out
+    // pointers point to valid u16 values.
+    let ok = unsafe {
+        IsWow64Process2(
+            GetCurrentProcess(),
+            &mut process_machine,
+            &mut native_machine,
+        )
+    };
+    let native = if ok != 0 {
+        windows_machine_name(native_machine)
+    } else {
+        None
+    };
+    let machine = match native {
+        Some(name) => name.to_string(),
+        None => ["PROCESSOR_ARCHITEW6432", "PROCESSOR_ARCHITECTURE"]
+            .iter()
+            .filter_map(|name| std::env::var(name).ok())
+            .find(|value| !value.is_empty())
+            .unwrap_or_default(),
+    };
+    Ok(windows_hardware(
+        &machine,
+        memory.ullTotalPhys,
+        total_free_bytes,
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn detect_host_hardware() -> std::result::Result<HardwareInfo, String> {
     Err("hardware detection is not implemented on this host".into())
 }
