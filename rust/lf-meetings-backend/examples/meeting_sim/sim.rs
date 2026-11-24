@@ -25,10 +25,11 @@ use lf_core::config::Config;
 use lf_meetings::{
     dispatch::PromptQueue, AudioCallback, AudioSource, SystemAudioUnavailable, Transcriber,
 };
-use lf_meetings_backend::{
-    CaptureFactory, ConfiguredProviders, MeetingsBackend, ProviderFactory, TitleLlm,
+use lf_meetings_backend::{CaptureFactory, MeetingsBackend, ProviderFactory, TitleLlm};
+use lf_providers::{
+    factory::{self, BuildOptions},
+    Health, LlmProvider, ModelInfo, ProviderError, SecretStore,
 };
-use lf_providers::{Health, LlmProvider, ModelInfo, ProviderError};
 use lf_server::{router, ServerState};
 use serde_json::{json, Value};
 use std::{
@@ -295,23 +296,44 @@ impl LlmProvider for RecordingLlm {
     }
 }
 
-/// The production providers, with the meeting LLM (summary + chat) recorded.
-/// Title and work-prompt models are passed through unrecorded, as in driver.py.
+/// Empty secret store so the simulator never loads or forwards stored user API
+/// keys to a simulation endpoint.
+struct NoSecrets;
+impl SecretStore for NoSecrets {
+    fn get(&self, _name: &str) -> String {
+        String::new()
+    }
+    fn set(&self, _name: &str, _value: &str) -> Result<()> {
+        Ok(())
+    }
+    fn delete(&self, _name: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+const SIM_LLM_OPTIONS: BuildOptions = BuildOptions {
+    timeout: Some(300),
+    num_ctx: Some(8192),
+    temperature: None,
+    with_api_key: false,
+};
+
+/// Meeting LLM provider wired without stored credentials, with calls recorded.
 struct RecordingProviders {
     calls: Calls,
 }
 impl ProviderFactory for RecordingProviders {
     fn llm(&self, config: &Config) -> Result<Box<dyn LlmProvider>> {
         Ok(Box::new(RecordingLlm {
-            inner: ConfiguredProviders.llm(config)?,
+            inner: factory::build_llm(config, &SIM_LLM_OPTIONS, &NoSecrets)?,
             calls: self.calls.clone(),
         }))
     }
-    fn title(&self, config: &Config) -> Option<TitleLlm> {
-        ConfiguredProviders.title(config)
+    fn title(&self, _config: &Config) -> Option<TitleLlm> {
+        None
     }
-    fn work_prompts(&self, config: &Config) -> Option<Box<dyn LlmProvider>> {
-        ConfiguredProviders.work_prompts(config)
+    fn work_prompts(&self, _config: &Config) -> Option<Box<dyn LlmProvider>> {
+        None
     }
 }
 
