@@ -343,9 +343,12 @@ lf-rs setup install-app
 * `token` prints the API token and never creates it (exit 1 with a hint when
   there is none). `hub` follows `localflow/desktop_launch.py`
   (`lf/src/desktop_launch.rs`): on Linux and macOS it opens an installed
-  LocalFlow Preview by default (or with `--gpui`/`LOCALFLOW_UI=gpui`) under the
-  same discovery, probe and notice rules, and quietly opens the legacy window
-  when the preview isn't installed; `--legacy`/`LOCALFLOW_UI=legacy` always
+  LocalFlow Preview by default once LocalFlow is set up (the Python
+  `main_app.is_configured` marker in the active config file, without its
+  legacy flat fallback), or with `--gpui`/`LOCALFLOW_UI=gpui`,
+  under the same discovery, probe and notice rules; it quietly opens the
+  legacy window when the preview isn't installed, on first run and for the
+  Setup page; `--legacy`/`LOCALFLOW_UI=legacy` always
   opens the legacy window (builds after v0.2.2; the released v0.2.2 CLIs
   don't have this selector). The legacy window is
   `python -m localflow.hub_window --page PAGE` from the Python install

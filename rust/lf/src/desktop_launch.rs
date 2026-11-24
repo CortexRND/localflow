@@ -4,8 +4,11 @@
 //! `LOCALFLOW_DESKTOP_BIN` or the package `scripts/install_gpui_preview.sh`
 //! owns, after a bounded `--help` probe; anything wrong prints one notice and
 //! opens the legacy window once. When GPUI comes only from the default, an
-//! unsupported platform or no candidate at all (no override, nothing at the
-//! package root) opens the legacy window quietly, as Python does.
+//! unsupported platform, no candidate at all (no override, nothing at the
+//! package root), the Setup page or no active config with the setup marker
+//! (no legacy flat fallback) opens
+//! the legacy window quietly, as Python does: the default covers configured
+//! Hub windows only, so first run stays on the legacy wizard.
 //! Notices are byte-identical to Python's. `lf-hub` keeps its own
 //! copy of the probe in `lf_ui::desktop_launch` (different messages, no
 //! fallback), so the shared constants are checked against it in the tests.
@@ -100,10 +103,61 @@ pub struct Launcher<'a> {
     pub home: Option<PathBuf>,
     pub probe_timeout: Duration,
     pub startup_wait: Duration,
+    /// [`is_configured`] in production; read only for an implicit default.
+    pub configured: &'a dyn Fn() -> bool,
 }
 
 fn process_env(name: &str) -> Option<OsString> {
     std::env::var_os(name)
+}
+
+/// Python `desktop_launch.setup_route` for `lf-rs hub` (which has no
+/// `--setup`): the Setup page.
+pub fn setup_page(page: Option<&str>) -> bool {
+    page.is_some_and(|page| crate::pyfmt::py_strip(page) == "Setup")
+}
+
+/// Python `desktop_launch.configured`, read-only: the active config file must
+/// exist, load, pass `config_from_v2` and carry [`configuration_marker`].
+/// There is deliberately no legacy flat fallback (native checks only the
+/// active file, and a legacy migration can be deferred or fail), so a
+/// legacy-flat-only config stays on the legacy window, which handles its
+/// migration as before; nothing is migrated or written here. Missing,
+/// unreadable or malformed configs, and an unresolvable home, are not
+/// configured. Warnings are discarded.
+pub fn is_configured() -> bool {
+    use lf_core::config::{config_from_v2, parse_toml_file, try_config_path};
+
+    let Ok(path) = try_config_path() else {
+        return false;
+    };
+    path.exists()
+        && parse_toml_file(&path).is_ok_and(|data| {
+            config_from_v2(&data, cfg!(target_os = "macos")).is_ok() && configuration_marker(&data)
+        })
+}
+
+/// `lf_ui::hub_route::configuration_marker`: `[setup] version > 0`, or an
+/// explicit non-blank `stt.provider` / `stt.model` in the raw file.
+pub fn configuration_marker(data: &serde_json::Map<String, serde_json::Value>) -> bool {
+    use serde_json::Value;
+    let setup_done = data
+        .get("setup")
+        .and_then(Value::as_object)
+        .and_then(|setup| setup.get("version"))
+        .and_then(Value::as_i64)
+        .is_some_and(|version| version > 0);
+    setup_done
+        || data
+            .get("stt")
+            .and_then(Value::as_object)
+            .is_some_and(|stt| {
+                ["provider", "model"].into_iter().any(|key| {
+                    stt.get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !crate::pyfmt::py_strip(value).is_empty())
+                })
+            })
 }
 
 impl Launcher<'static> {
@@ -114,6 +168,7 @@ impl Launcher<'static> {
             home: lf_core::home::python_home().ok(),
             probe_timeout: PROBE_TIMEOUT,
             startup_wait: STARTUP_WAIT,
+            configured: &is_configured,
         }
     }
 }
@@ -208,8 +263,13 @@ impl Launcher<'_> {
         if choice != Ui::Gpui {
             return legacy(io);
         }
-        if self.implicit_choice(flag) && self.candidate_absent() {
-            return legacy(io); // the conditional default: nothing installed
+        // The conditional default covers configured Hub windows only: the
+        // Setup page and first run stay on the legacy wizard, and nothing
+        // installed stays legacy. Cheapest first, as in Python.
+        if self.implicit_choice(flag)
+            && (setup_page(page) || self.candidate_absent() || !(self.configured)())
+        {
+            return legacy(io);
         }
         if self.sandbox_requested() {
             return fail(SANDBOX_REFUSAL);
@@ -479,6 +539,31 @@ mod tests {
             home: home.map(Path::to_path_buf),
             probe_timeout: PROBE_TIMEOUT,
             startup_wait: STARTUP_WAIT,
+            configured: &configured_yes,
+        }
+    }
+
+    // Most launch tests are about discovery on an already set-up machine.
+    fn configured_yes() -> bool {
+        true
+    }
+
+    fn configured_no() -> bool {
+        false
+    }
+
+    fn must_not_read_config() -> bool {
+        panic!("the configuration marker was read")
+    }
+
+    fn unconfigured<'a>(
+        env: &'a Env,
+        platform: Option<Platform>,
+        home: Option<&Path>,
+    ) -> Launcher<'a> {
+        Launcher {
+            configured: &configured_no,
+            ..launcher(env, platform, home)
         }
     }
 
@@ -893,6 +978,136 @@ mod tests {
         }
     }
 
+    #[test]
+    fn configuration_marker_matches_python_is_configured() {
+        let marker =
+            |text: &str| configuration_marker(&lf_core::config::parse_toml_str(text).unwrap());
+        for configured in [
+            "[setup]\nversion = 1\n",
+            "[setup]\nversion = 3\n",
+            "[stt]\nprovider = \"faster-whisper\"\n",
+            "[stt]\nmodel = \" base \"\n",
+        ] {
+            assert!(marker(configured), "{configured:?}");
+        }
+        for not_configured in [
+            "",
+            "config_version = 2\n",
+            "[setup]\nversion = 0\n",
+            "[setup]\nversion = true\n",
+            "[setup]\nversion = 1.0\n",
+            "[setup]\nversion = \"1\"\n",
+            "setup = 1\n",
+            "[stt]\nprovider = \" \\t\"\nmodel = \"\"\n",
+            "[stt]\nmodel = 1\n",
+            "stt = \"faster-whisper\"\n",
+        ] {
+            assert!(!marker(not_configured), "{not_configured:?}");
+        }
+        // The copy must keep lf-ui's rule (lf-rs doesn't depend on lf-ui).
+        let ui = include_str!("../../lf-ui/src/hub_route.rs").replace("\r\n", "\n");
+        for needle in [
+            "pub fn configuration_marker(data: &Map<String, Value>) -> bool {",
+            ".and_then(|setup| setup.get(\"version\"))\n        .and_then(Value::as_i64)\n        \
+             .is_some_and(|version| version > 0);",
+            "[\"provider\", \"model\"].into_iter().any(|key| {",
+            ".is_some_and(|value| !value.py_strip().is_empty())",
+        ] {
+            assert!(ui.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn implicit_setup_page_and_first_run_stay_quietly_legacy() {
+        let linux = Some(Platform::Linux);
+        let bare = tempfile::tempdir().unwrap();
+        linux_install(bare.path(), None); // a candidate that would be noticed
+        let bad: Env = Box::new(|name: &str| (name == BIN_ENV).then(|| "lf-desktop".into()));
+        let sandboxed: Env = Box::new(|name: &str| match name {
+            BIN_ENV => Some("lf-desktop".into()),
+            SANDBOX_ENV => Some("1".into()),
+            _ => None,
+        });
+        let none = env_of(&[]);
+        // The Setup page never reads the marker or looks for a binary, even
+        // with a candidate and a sandbox request.
+        for (env, home) in [(&bad, None), (&sandboxed, None), (&none, Some(bare.path()))] {
+            for page in ["Setup", " Setup "] {
+                let selected = Launcher {
+                    configured: &must_not_read_config,
+                    ..launcher(env, linux, home)
+                };
+                quiet_legacy(run_launch(&selected, None, Some(page)));
+            }
+        }
+        // Nothing installed: quiet before the marker is read.
+        let selected = Launcher {
+            configured: &must_not_read_config,
+            ..launcher(&none, linux, None)
+        };
+        quiet_legacy(run_launch(&selected, None, Some("Hot Phrases")));
+        // First run (no setup marker): every page, even with a candidate.
+        for (env, home) in [(&bad, None), (&sandboxed, None), (&none, Some(bare.path()))] {
+            for page in [None, Some("Home"), Some("Hot Phrases"), Some("Settings")] {
+                quiet_legacy(run_launch(&unconfigured(env, linux, home), None, page));
+            }
+        }
+        // The same candidates once configured: the original notices and refusal.
+        let run = run_launch(&launcher(&bad, linux, None), None, Some("Home"));
+        assert_eq!(
+            (run.err, run.legacy),
+            (format!("{NOTICE_BAD_OVERRIDE}\n"), 1)
+        );
+        let run = run_launch(&launcher(&none, linux, Some(bare.path())), None, None);
+        assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_OWNED}\n"), 1));
+        let run = run_launch(&launcher(&sandboxed, linux, None), None, None);
+        assert!(run.result.is_err() && run.legacy == 0);
+    }
+
+    #[test]
+    fn explicit_choices_never_read_the_setup_marker() {
+        let linux = Some(Platform::Linux);
+        let bad: Env = Box::new(|name: &str| (name == BIN_ENV).then(|| "lf-desktop".into()));
+        let explicit = |env: &Env, flag, page| {
+            let selected = Launcher {
+                configured: &must_not_read_config,
+                ..launcher(env, linux, None)
+            };
+            run_launch(&selected, flag, page)
+        };
+        // Explicit GPUI keeps the 4a path, Setup page and first run included.
+        for page in [None, Some("Setup"), Some("Home")] {
+            let run = explicit(&bad, Some(Ui::Gpui), page);
+            assert_eq!(
+                (run.err, run.legacy),
+                (format!("{NOTICE_BAD_OVERRIDE}\n"), 1),
+                "{page:?}"
+            );
+        }
+        let gpui_env: Env = Box::new(|name: &str| match name {
+            BIN_ENV => Some("lf-desktop".into()),
+            UI_ENV => Some(" gpui ".into()),
+            _ => None,
+        });
+        let run = explicit(&gpui_env, None, Some("Setup"));
+        assert_eq!(
+            (run.err, run.legacy),
+            (format!("{NOTICE_BAD_OVERRIDE}\n"), 1)
+        );
+        let sandbox = env_of(&[(SANDBOX_ENV, "1")]);
+        let run = explicit(&sandbox, Some(Ui::Gpui), Some("Setup"));
+        assert!(run.result.is_err() && run.legacy == 0);
+        // Explicit legacy reads nothing at all.
+        quiet_legacy(explicit(&bad, Some(Ui::Legacy), Some("Setup")));
+        let ui_legacy: Env = Box::new(|name: &str| match name {
+            BIN_ENV => Some("lf-desktop".into()),
+            UI_ENV => Some("legacy".into()),
+            SANDBOX_ENV => Some("1".into()),
+            _ => None,
+        });
+        quiet_legacy(explicit(&ui_legacy, None, None));
+    }
+
     #[cfg(unix)]
     mod unix {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1028,6 +1243,28 @@ mod tests {
             let run = run_launch(&launcher(&none, linux, Some(link.path())), None, None);
             assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_OWNED}\n"), 1));
             assert!(wait_lines(&record, 0).is_empty());
+
+            // A good owned package on first run, or for the Setup page, is
+            // never probed or launched by the default; explicit GPUI opens it.
+            let (home, record) = install(GOOD_HELP, 0);
+            for (selected, page) in [
+                (unconfigured(&none, linux, Some(home.path())), None),
+                (
+                    unconfigured(&none, linux, Some(home.path())),
+                    Some("Models"),
+                ),
+                (launcher(&none, linux, Some(home.path())), Some("Setup")),
+            ] {
+                quiet_legacy(run_launch(&selected, None, page));
+            }
+            assert!(wait_lines(&record, 0).is_empty());
+            let run = run_launch(
+                &unconfigured(&none, linux, Some(home.path())),
+                Some(Ui::Gpui),
+                None,
+            );
+            assert!(run.result.is_ok() && run.err.is_empty() && run.legacy == 0);
+            assert_eq!(wait_lines(&record, 2), ["--help", ""]);
         }
 
         #[test]

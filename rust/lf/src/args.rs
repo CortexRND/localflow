@@ -77,8 +77,10 @@ pub enum Command {
         #[arg(long, value_name = "PAGE", allow_hyphen_values = true)]
         page: Option<String>,
         /// Open LocalFlow Preview (native GPUI app) instead of the legacy
-        /// window. The default on Linux and macOS when it is installed. No
-        /// screen-reader support yet: use --legacy (or lf-hub on macOS).
+        /// window. Without this flag, only lf hub and lf phrases use it, on
+        /// Linux and macOS, once LocalFlow is set up and the preview is
+        /// installed; setup and first run stay legacy. No screen-reader
+        /// support yet: use --legacy (or lf-hub on macOS).
         #[arg(long)]
         gpui: bool,
         /// Open the legacy window (also used when LocalFlow Preview isn't

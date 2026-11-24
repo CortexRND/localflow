@@ -1,5 +1,6 @@
-"""LocalFlow Preview launch from `lf hub`, `lf phrases` and `lf setup`: GPUI
-by default when a package is installed, else the legacy window.
+"""LocalFlow Preview launch from `lf hub`, `lf phrases` and `lf setup`. By
+default, a set-up Hub / phrases window uses an installed package; setup, first
+run and everything else open the legacy window.
 
 Process-boundary tests use real fake `lf-desktop` executables in a temporary
 HOME; nothing opens a GUI. Policy tests run on every platform; tests that need
@@ -9,7 +10,6 @@ a POSIX executable fixture are skipped elsewhere.
 import json
 import os
 import plistlib
-import re
 import signal
 import sys
 import textwrap
@@ -463,39 +463,76 @@ ROUTES = [
 @posix_only
 @pytest.mark.parametrize(("args", "child_args"), ROUTES)
 @pytest.mark.parametrize("opt_in", ["flag", "env", "default"])
-def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, home, tmp_path):
+def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, home, tmp_path,
+                                        monkeypatch):
     if opt_in == "default" and desktop_launch.platform_key() is None:
         pytest.skip("the default never looks for a preview package here")
     desktop = fake()
     config = tmp_path / "my config.toml"
-    # Under the GPUI default, the override alone is used.
+    # Under the GPUI default, the override alone is used, but only for a
+    # set-up Hub / phrases window; an explicit choice opens it on first run
+    # (no config at all) and never reads the setup marker.
     env = _gpui_env(desktop, LOCALFLOW_CONFIG=str(config))
     if opt_in == "flag":
         args = [args[0], "--gpui", *args[1:]]
     elif opt_in == "env":
         env["LOCALFLOW_UI"] = "gpui"
+    if opt_in == "default":
+        config.write_text(SET_UP)
+    else:
+        monkeypatch.setattr(desktop_launch, "configured", _boom)
     result = _invoke(args, env=env)
 
     assert result.exit_code == 0, result.output
+    assert result.output == ""  # nothing from the native child is relayed
+    if opt_in == "default" and args[0] == "setup":
+        assert legacy.calls == [("setup", None)]  # setup stays on the legacy wizard
+        assert desktop.runs() == []
+        assert config.read_text() == SET_UP
+        return
     assert legacy.calls == []
     assert desktop.argvs() == [["--help"], child_args]
     launched = desktop.runs()[1]["env"]
     assert launched["HOME"] == str(home) and launched["LOCALFLOW_CONFIG"] == str(config)
     assert launched["LOCALFLOW_SANDBOX"] is None
-    assert result.output == ""  # nothing from the native child is relayed
-    assert not (home / ".localflow").exists() and not config.exists()  # no launcher writes
+    assert not (home / ".localflow").exists()  # no launcher writes
+    assert (config.read_text() == SET_UP) if opt_in == "default" else not config.exists()
 
 
 CHILD_ARGS_FOR = {"hub": [], "phrases": ["--page", "Hot Phrases"], "setup": ["--setup"]}
 
 
-def _never_discovered(monkeypatch):
-    """Fail the test if the launcher looks for, probes or starts lf-desktop."""
-    def boom(*args, **kwargs):
-        raise AssertionError("looked for LocalFlow Preview")
+# The wizard's own marker: LocalFlow was set up, so the default may use GPUI.
+SET_UP = "config_version = 2\n\n[setup]\nversion = 1\n"
 
-    for name in ("find_desktop", "owned_install", "probe", "spawn"):
-        monkeypatch.setattr(desktop_launch, name, boom)
+
+def _boom(*args, **kwargs):
+    raise AssertionError("looked for LocalFlow Preview or read the setup marker")
+
+
+def _never_discovered(monkeypatch):
+    """Fail the test if the launcher reads the setup marker, or looks for,
+    probes or starts lf-desktop."""
+    for name in ("find_desktop", "owned_install", "probe", "spawn", "configured"):
+        monkeypatch.setattr(desktop_launch, name, _boom)
+
+
+def _use_config(monkeypatch, tmp_path, text=None):
+    """Point LOCALFLOW_CONFIG at a temporary file holding `text` (absent when None)."""
+    config = tmp_path / "config" / "config.toml"
+    config.parent.mkdir(exist_ok=True)
+    if text is None:
+        config.unlink(missing_ok=True)
+    else:
+        config.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(config))
+    return config
+
+
+@pytest.fixture
+def set_up(monkeypatch, tmp_path):
+    """A set-up LocalFlow: the implicit default may open LocalFlow Preview."""
+    return _use_config(monkeypatch, tmp_path, SET_UP)
 
 
 def _owned_package(home, fake, **kwargs):
@@ -565,8 +602,8 @@ def test_default_with_an_unresolvable_home_is_quiet(command, legacy, monkeypatch
 
 
 @posix_only
-@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-def test_default_opens_the_owned_package_with_a_closed_argv(command, home, fake, legacy):
+@pytest.mark.parametrize("command", ["hub", "phrases"])
+def test_default_opens_the_owned_package_with_a_closed_argv(command, home, fake, legacy, set_up):
     if desktop_launch.platform_key() is None:
         pytest.skip("no preview package for this platform")
     desktop = _owned_package(home, fake)
@@ -575,6 +612,164 @@ def test_default_opens_the_owned_package_with_a_closed_argv(command, home, fake,
     assert result.output == "" and legacy.calls == []  # a hand-off, no legacy window
     assert desktop.argvs() == [["--help"], CHILD_ARGS_FOR[command]]
     assert desktop.runs()[1]["env"]["LOCALFLOW_SANDBOX"] is None
+    assert set_up.read_text() == SET_UP
+
+
+@posix_only
+@pytest.mark.parametrize("env", [{}, {"LOCALFLOW_SANDBOX": "1"}, {"LOCALFLOW_UI": " "}])
+def test_default_setup_stays_on_the_legacy_wizard_and_inspects_nothing(
+        env, home, fake, legacy, set_up, monkeypatch):
+    # Native setup writes native model choices the Python runtime may not run,
+    # so the default never sends setup there, even with a good package.
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    desktop = _owned_package(home, fake)
+    override = fake(name="override")
+    _never_discovered(monkeypatch)
+    monkeypatch.setattr(desktop_launch, "candidate_absent", _boom)
+    for extra in ({}, _gpui_env(override)):
+        legacy.calls.clear()
+        result = _invoke(["setup"], env={**env, **extra})
+        assert result.exit_code == 0 and result.output == ""
+        assert legacy.calls == [("setup", None)]
+    assert desktop.runs() == [] and override.runs() == []
+    # The Setup page is the same request.
+    assert desktop_launch.setup_route("Setup", False) and desktop_launch.setup_route(" Setup ", False)
+    assert desktop_launch.setup_route(None, True)
+    assert not desktop_launch.setup_route("Home", False) and not desktop_launch.setup_route(None, False)
+    calls = []
+    desktop_launch.launch(None, lambda: calls.append("legacy"), page="Setup", env={})
+    assert calls == ["legacy"]
+
+
+FIRST_RUN_CONFIGS = {
+    "no config": None,
+    "malformed": "[setup\nversion = 1\n",
+    "unsupported version": "config_version = 99\n\n[setup]\nversion = 1\n",
+    "marker zero": "config_version = 2\n\n[setup]\nversion = 0\n",
+    "marker not an int": "config_version = 2\n\n[setup]\nversion = true\n",
+    "blank speech choice": 'config_version = 2\n\n[stt]\nprovider = " "\nmodel = ""\n',
+    # Missing config_version warns in load_config; the launcher stays quiet.
+    "only other settings": '[llm]\nmodel = "llama3"\n',
+}
+
+
+@posix_only
+@pytest.mark.parametrize("config", FIRST_RUN_CONFIGS.values(), ids=FIRST_RUN_CONFIGS.keys())
+@pytest.mark.parametrize(("args", "expected"), [
+    (["hub"], _hub_legacy()),
+    (["hub", "--page", "history"], _hub_legacy("History")),
+    (["phrases"], ("phrases", None)),
+])
+def test_default_first_run_stays_on_the_legacy_window(
+        config, args, expected, home, fake, legacy, monkeypatch, tmp_path):
+    # Without the setup marker LocalFlow Preview would open its own wizard,
+    # even for a page, so the default opens the legacy window quietly.
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    path = _use_config(monkeypatch, tmp_path, config)
+    desktop = _owned_package(home, fake)
+    before = sorted(p.relative_to(home) for p in home.rglob("*"))
+    for env in ({}, {"LOCALFLOW_SANDBOX": "1"}, _gpui_env(fake(name="override"))):
+        legacy.calls.clear()
+        result = _invoke(args, env=env)
+        assert result.exit_code == 0 and result.output == ""
+        assert legacy.calls == [expected]
+    assert desktop.runs() == []
+    assert (path.read_text() if path.exists() else None) == config  # nothing written
+    assert sorted(p.relative_to(home) for p in home.rglob("*")) == before
+
+
+@posix_only
+def test_default_first_run_ignores_an_unreadable_legacy_file(home, fake, legacy, monkeypatch, tmp_path):
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    _use_config(monkeypatch, tmp_path)
+    (home / ".localflow.toml").write_bytes(b"\xff\xfe not toml")
+    desktop = _owned_package(home, fake)
+    result = _invoke(["hub"])
+    assert result.exit_code == 0 and result.output == ""
+    assert legacy.calls == [_hub_legacy()] and desktop.runs() == []
+
+
+@posix_only
+@pytest.mark.parametrize("flat", [
+    'model_size = "base"\n',
+    # Its migration fails (non-string key), so the active file stays absent.
+    'model_size = "base"\nfireworks_api_key = 123\n',
+])
+def test_default_legacy_flat_only_stays_on_the_legacy_window(
+        flat, home, fake, legacy, monkeypatch, tmp_path):
+    # Native checks only the active file, and a legacy migration can be
+    # deferred or fail, so a legacy-flat-only config is a first run here even
+    # though main_app.is_configured accepts it. The launcher never migrates.
+    from localflow import main_app
+
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    for name in ("FIREWORKS_API_KEY", "LOCALFLOW_FIREWORKS_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    path = _use_config(monkeypatch, tmp_path)
+    (home / ".localflow.toml").write_text(flat)
+    assert main_app.is_configured() and not desktop_launch.configured()
+    desktop = _owned_package(home, fake)
+    before = sorted(p.relative_to(home) for p in home.rglob("*"))
+    for args, expected in ((["hub"], _hub_legacy()), (["phrases"], ("phrases", None))):
+        legacy.calls.clear()
+        result = _invoke(args)
+        assert result.exit_code == 0 and result.output == ""
+        assert legacy.calls == [expected]
+    assert desktop.runs() == []
+    assert not path.exists()  # nothing migrated or written
+    assert (home / ".localflow.toml").read_text() == flat
+    assert sorted(p.relative_to(home) for p in home.rglob("*")) == before
+    for name in ("FIREWORKS_API_KEY", "LOCALFLOW_FIREWORKS_API_KEY"):
+        assert name not in os.environ
+
+
+@posix_only
+@pytest.mark.parametrize("config", [
+    "config_version = 2\n\n[setup]\nversion = 2\n",
+    'config_version = 2\n\n[stt]\nprovider = "faster-whisper"\n',
+    'config_version = 2\n\n[stt]\nmodel = "base"\n',
+])
+def test_default_uses_the_same_configured_marker_as_the_app(
+        config, home, fake, legacy, monkeypatch, tmp_path):
+    from localflow import main_app
+
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    _use_config(monkeypatch, tmp_path, config)
+    assert main_app.is_configured() and desktop_launch.configured()
+    desktop = _owned_package(home, fake)
+    result = _invoke(["phrases"])
+    assert result.exit_code == 0 and result.output == ""
+    assert legacy.calls == [] and desktop.argvs() == [["--help"], ["--page", "Hot Phrases"]]
+
+
+def test_configured_is_main_app_is_configured_quietly(monkeypatch, tmp_path, caplog):
+    import logging
+
+    from localflow import main_app
+
+    for text in [*FIRST_RUN_CONFIGS.values(), SET_UP]:
+        _use_config(monkeypatch, tmp_path, text)
+        assert desktop_launch.configured() is main_app.is_configured(), text
+    logger = logging.getLogger("localflow.config")
+    assert logger.disabled is False  # restored afterwards
+    _use_config(monkeypatch, tmp_path, '[llm]\nmodel = "llama3"\n')  # warns when loaded
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="localflow.config"):
+        assert not desktop_launch.configured()
+    assert caplog.records == []
+
+    def no_home(cls):
+        raise RuntimeError("Could not determine home directory.")
+
+    _use_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(main_app.Path, "home", classmethod(no_home))
+    assert desktop_launch.configured() is False
+    assert logger.disabled is False
 
 
 def _bare_root(home):
@@ -610,23 +805,25 @@ def _owned_without_executable(home):
 ])
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
 def test_default_with_a_malformed_install_notices_once_then_legacy_once(
-        command, arrange, notice, home, legacy):
+        command, arrange, notice, home, legacy, set_up):
     if desktop_launch.platform_key() is None:
         pytest.skip("no preview package for this platform")
     arrange(home)
     result = _invoke([command])
     assert result.exit_code == 0
     assert legacy.calls == [LEGACY_FOR[command]]
-    assert result.output == notice + "\n"
+    # Setup never goes to the preview by default, so it has nothing to report.
+    assert result.output == ("" if command == "setup" else notice + "\n")
 
 
 @pytest.mark.parametrize("override", ["lf-desktop", "relative/lf-desktop", "/nonexistent/lf-desktop"])
-def test_default_with_a_bad_override_notices_once(override, legacy):
+@pytest.mark.parametrize("command", ["hub", "phrases"])
+def test_default_with_a_bad_override_notices_once(override, command, legacy, set_up):
     if desktop_launch.platform_key() is None:
         pytest.skip("no preview package for this platform")
-    result = _invoke(["phrases"], env={"LOCALFLOW_DESKTOP_BIN": override})
+    result = _invoke([command], env={"LOCALFLOW_DESKTOP_BIN": override})
     assert result.exit_code == 0
-    assert legacy.calls == [("phrases", None)]
+    assert legacy.calls == [LEGACY_FOR[command]]
     assert result.output == desktop_launch.NOTICE_BAD_OVERRIDE + "\n"
 
 
@@ -636,12 +833,15 @@ def test_default_with_a_bad_override_notices_once(override, legacy):
     ({"help_text": SCOPE3_HELP}, desktop_launch.NOTICE_PROBE, [["--help"]]),
     ({"help_hang": True}, desktop_launch.NOTICE_PROBE, [["--help"]]),
     ({"vanish": True}, desktop_launch.NOTICE_SPAWN, [["--help"]]),
-    ({"launch": "exit1"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=1), [["--help"], ["--setup"]]),
-    ({"launch": "exit2"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=2), [["--help"], ["--setup"]]),
+    ({"launch": "exit1"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=1),
+     [["--help"], ["--page", "Hot Phrases"]]),
+    ({"launch": "exit2"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=2),
+     [["--help"], ["--page", "Hot Phrases"]]),
 ])
 @pytest.mark.parametrize("where", ["package", "override"])
 def test_default_candidate_failures_notice_once_then_legacy_once(
-        kwargs, notice, argvs, where, home, fake, legacy, monkeypatch):
+        kwargs, notice, argvs, where, home, fake, legacy, monkeypatch, set_up):
+    # On a set-up machine (setup itself never goes to the preview by default).
     if desktop_launch.platform_key() is None:
         pytest.skip("no preview package for this platform")
     monkeypatch.setattr(desktop_launch, "PROBE_TIMEOUT", 1.0)
@@ -650,9 +850,9 @@ def test_default_candidate_failures_notice_once_then_legacy_once(
     else:
         desktop = fake(**kwargs)
         env = _gpui_env(desktop)
-    result = _invoke(["setup"], env=env)
+    result = _invoke(["phrases"], env=env)
     assert result.exit_code == 0
-    assert legacy.calls == [("setup", None)]
+    assert legacy.calls == [("phrases", None)]
     assert result.output.strip() == notice
     assert "SECRET" not in result.output
     assert desktop.argvs() == argvs
@@ -739,9 +939,12 @@ def test_owned_install_is_used_without_an_override(home, fake, legacy):
 
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
 @pytest.mark.parametrize("opt_in", [["--gpui"], "env", "default"])
-def test_sandbox_request_is_refused_not_downgraded(command, opt_in, legacy, home, tmp_path):
+def test_sandbox_request_is_refused_not_downgraded(command, opt_in, legacy, home, tmp_path,
+                                                   monkeypatch):
     if opt_in == "default" and desktop_launch.platform_key() is None:
         pytest.skip("the default never looks for a preview package here")
+    if opt_in == "default":
+        _use_config(monkeypatch, tmp_path, SET_UP)  # outside HOME
     desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
     for value in ("1", "true"):
         # Under the default, the override alone makes this a candidate.
@@ -749,8 +952,15 @@ def test_sandbox_request_is_refused_not_downgraded(command, opt_in, legacy, home
         if opt_in == "env":
             env["LOCALFLOW_UI"] = "gpui"
         result = _invoke([command, *(opt_in if isinstance(opt_in, list) else [])], env=env)
+        if opt_in == "default" and command == "setup":
+            # Setup isn't a GPUI route by default: the legacy wizard, as before.
+            assert result.exit_code == 0 and result.output == ""
+            continue
         assert result.exit_code == 1
         assert "lf-desktop --sandbox" in result.output and "LOCALFLOW_SANDBOX" in result.output
+    if opt_in == "default" and command == "setup":
+        assert legacy.calls == [("setup", None)] * 2
+        legacy.calls.clear()
     assert legacy.calls == []  # no un-sandboxed fallback
     assert desktop.runs() == []  # nothing probed or launched
     assert list(home.iterdir()) == []  # no launcher logs or data
@@ -759,11 +969,15 @@ def test_sandbox_request_is_refused_not_downgraded(command, opt_in, legacy, home
 @posix_only
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
 def test_sandbox_request_with_an_installed_package_is_refused_under_the_default(
-        command, home, fake, legacy):
+        command, home, fake, legacy, set_up):
     if desktop_launch.platform_key() is None:
         pytest.skip("no preview package for this platform")
     desktop = _owned_package(home, fake)
     result = _invoke([command], env={"LOCALFLOW_SANDBOX": "1"})
+    if command == "setup":  # not a GPUI route by default: the legacy wizard
+        assert result.exit_code == 0 and result.output == ""
+        assert legacy.calls == [("setup", None)] and desktop.runs() == []
+        return
     assert result.exit_code == 1
     assert "lf-desktop --sandbox" in result.output
     assert legacy.calls == [] and desktop.runs() == []
@@ -955,20 +1169,8 @@ def test_help_documents_the_conditional_default(command):
     result = _invoke([command, "--help"])
     assert "--gpui" in result.output and "--legacy" in result.output
     text = " ".join(result.output.split())
-    assert "default on Linux and macOS when it is installed" in text
+    assert "only lf hub and lf phrases use it" in text
+    assert "once LocalFlow is set up and the preview is installed" in text
+    assert "setup and first run stay legacy" in text
     assert "No screen-reader support yet" in text
     assert "(the default)" not in text
-
-
-def test_linux_installer_setup_stays_legacy_once_a_release_ships_the_default():
-    # install.sh still installs the v0.2.2 release archive, whose `lf setup`
-    # defaults to legacy; its bytes are pinned by the README checksum. The
-    # first release that ships the GPUI default must pin the installer's own
-    # setup window to --legacy so installer behaviour doesn't change.
-    script = (ROOT / "install.sh").read_text(encoding="utf-8")
-    release = re.search(r'^LOCALFLOW_RELEASE="([^"]+)"$', script, re.MULTILINE).group(1)
-    setups = re.findall(r"^exec \.venv/bin/lf setup.*$", script, re.MULTILINE)
-    if release == "v0.2.2":
-        assert setups == ["exec .venv/bin/lf setup"]
-    else:
-        assert setups == ["exec .venv/bin/lf setup --legacy"]

@@ -872,6 +872,95 @@ mod hub_unix {
         Some(root)
     }
 
+    /// The sandbox's `LOCALFLOW_CONFIG` file.
+    fn write_config(sandbox: &Sandbox, text: &str) {
+        std::fs::create_dir_all(sandbox.config().parent().unwrap()).unwrap();
+        std::fs::write(sandbox.config(), text).unwrap();
+    }
+
+    #[test]
+    fn first_run_keeps_the_legacy_window_and_explicit_gpui_still_opens_the_preview() {
+        let sandbox = Sandbox::new();
+        let venv = sandbox.root().join("venv");
+        let other = sandbox.root().join("other");
+        fake_python(&venv, false);
+        let record = fake_python(&other, true);
+        let path = other.join("bin");
+        let env = [
+            ("VIRTUAL_ENV", venv.to_str().unwrap()),
+            ("PATH", path.to_str().unwrap()),
+        ];
+        let launched = sandbox.root().join("desktop.txt");
+        if install_preview(&sandbox.home(), GOOD_HELP, &launched).is_none() {
+            return; // no preview package on this platform (covered above)
+        }
+        let quiet = |run: &Output| {
+            assert_eq!(
+                (code(run), stdout(run), stderr(run)),
+                (0, String::new(), String::new())
+            );
+        };
+        // No config, a malformed one, an unreadable legacy file, a config
+        // without the setup marker and a legacy flat file alone (native checks
+        // only the active file; its migration may be deferred or fail, as with
+        // a non-string Fireworks key) are all a first run: the legacy window
+        // opens quietly, the installed preview is never probed and nothing is
+        // migrated or written.
+        let legacy_file = sandbox.home().join(".localflow.toml");
+        let mut runs = 0;
+        for (config, legacy) in [
+            (None, None),
+            (Some("[setup\nversion = 1\n"), None),
+            (None, Some(&b"\xff\xfe not toml"[..])),
+            (None, Some(&b"model_size = \"base\"\n"[..])),
+            (
+                None,
+                Some(&b"model_size = \"base\"\nfireworks_api_key = 123\n"[..]),
+            ),
+            (Some("config_version = 2\n\n[setup]\nversion = 0\n"), None),
+            (
+                Some("config_version = 2\n\n[stt]\nprovider = \" \"\nmodel = \"\"\n"),
+                None,
+            ),
+        ] {
+            let _ = std::fs::remove_file(sandbox.config());
+            let _ = std::fs::remove_file(&legacy_file);
+            if let Some(text) = config {
+                write_config(&sandbox, text);
+            }
+            if let Some(bytes) = legacy {
+                std::fs::write(&legacy_file, bytes).unwrap();
+            }
+            let before = std::fs::read(sandbox.config()).ok();
+            for args in [&["hub"][..], &["hub", "--page", "hot phrases"]] {
+                quiet(&sandbox.run_with(args, &env, ""));
+                runs += 1;
+            }
+            assert_eq!(
+                std::fs::read(sandbox.config()).ok(),
+                before,
+                "no config writes"
+            );
+            assert_eq!(
+                std::fs::read(&legacy_file).ok().as_deref(),
+                legacy,
+                "legacy file untouched"
+            );
+        }
+        assert_eq!(lines(&record, runs).len(), runs);
+        assert!(lines(&launched, 0).is_empty());
+
+        // An explicit choice of the preview still opens it on first run.
+        let _ = std::fs::remove_file(&legacy_file);
+        let _ = std::fs::remove_file(sandbox.config());
+        let mut gpui = env.to_vec();
+        gpui.push(("LOCALFLOW_UI", "gpui"));
+        quiet(&sandbox.run_with(&["hub"], &gpui, ""));
+        quiet(&sandbox.run_with(&["hub", "--gpui", "--page", "home"], &env, ""));
+        assert_eq!(lines(&launched, 4), ["--help", "", "--help", "--page Home"]);
+        assert_eq!(lines(&record, runs).len(), runs);
+    }
+
     #[test]
     fn bare_hub_prefers_an_installed_preview_and_explicit_legacy_bypasses_it() {
         let sandbox = Sandbox::new();
@@ -921,6 +1010,8 @@ mod hub_unix {
             assert_eq!(lines(&record, 1), ["-m localflow.hub_window --page Home"]);
             return;
         };
+        // The default covers a set-up LocalFlow only (first run: see below).
+        write_config(&sandbox, "config_version = 2\n\n[setup]\nversion = 1\n");
         // The installed package opens by default, with the closed argv.
         quiet(&sandbox.run_with(&["hub"], &env, ""));
         quiet(&sandbox.run_with(

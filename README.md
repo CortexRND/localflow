@@ -531,11 +531,15 @@ search it read-only through the [MCP server](#mcp-server-for-agents).
 Open the native hub with `lf hub` to browse history, edit the dictionary and
 cleanup styles, or review the selected models. If you installed the separate
 LocalFlow Preview (native GPUI app, [`rust/lf-desktop`](rust/lf-desktop/README.md)),
-`lf hub`, `lf phrases` and `lf setup` open it instead on Linux and macOS; if
-something is wrong with it, they say so once and open the usual window. Without
-the preview (it isn't part of the standard install) and on Windows, nothing
-changes. `--legacy` or `LOCALFLOW_UI=legacy` always opens the usual window, and
-`--gpui` asks for the preview explicitly. This needs an `lf` built after v0.2.2
+`lf hub` and `lf phrases` open it instead on Linux and macOS once LocalFlow is
+set up; if something is wrong with it, they say so once and open the usual
+window. `lf setup`, and any window on a machine that hasn't been set up yet,
+keep the usual setup wizard and windows even with the preview installed.
+Without the preview (it isn't part of the standard install) and on Windows,
+nothing changes. `--legacy` or `LOCALFLOW_UI=legacy` always opens the usual
+window. `--gpui` asks for the preview explicitly, including its own setup
+wizard; that wizard offers the native app's speech models, which the Python
+runtime that handles dictation may not be able to run. This needs an `lf` built after v0.2.2
 (for example a source install); the released v0.2.2 CLI doesn't have this
 selector yet and always opens the usual window. The CLI can search and manage
 history without opening the hub:

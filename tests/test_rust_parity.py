@@ -2651,7 +2651,28 @@ def _legacy(page):
     return [["-m", "localflow.hub_window", "--page", page]]
 
 
-def test_cli_hub_usage_errors_and_sandbox_refusal(hub):
+# Configs without the setup marker: the GPUI default treats each as a first run.
+_FIRST_RUN_CONFIGS = (
+    None,  # nothing at LOCALFLOW_CONFIG (and no legacy file)
+    "[setup\nversion = 1\n",  # malformed
+    "config_version = 99\n\n[setup]\nversion = 1\n",  # unsupported
+    "config_version = 2\n\n[setup]\nversion = 0\n",
+    "config_version = 2\n\n[setup]\nversion = true\n",
+    'config_version = 2\n\n[stt]\nprovider = " "\nmodel = ""\n',
+    '[llm]\nmodel = "llama3"\n',  # warns when loaded; the launchers stay quiet
+)
+
+
+def _hub_config(tmp_path, name, text):
+    """`LOCALFLOW_CONFIG` for one `hub` case, holding `text` (absent when None)."""
+    path = tmp_path / "configs" / name
+    path.parent.mkdir(exist_ok=True)
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+    return {"LOCALFLOW_CONFIG": str(path)}
+
+
+def test_cli_hub_usage_errors_and_sandbox_refusal(hub, tmp_path):
     from localflow.desktop_launch import SANDBOX_REFUSAL, platform_key
 
     for args in [("hub", "--page", "x"), ("hub", "--page", "hot  phrases"), ("hub", "--page", ""),
@@ -2667,8 +2688,9 @@ def test_cli_hub_usage_errors_and_sandbox_refusal(hub):
     )
     refusals = [(("hub", "--gpui"), {"LOCALFLOW_SANDBOX": "1"}),
                 (("hub", "--page", "ask"), {"LOCALFLOW_UI": "gpui", "LOCALFLOW_SANDBOX": "true"})]
-    if platform_key() is not None:  # the default with a candidate: refused before any probe
-        refusals.append((("hub",), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop", "LOCALFLOW_SANDBOX": "1"}))
+    if platform_key() is not None:  # the default with a candidate, once set up: refused before any probe
+        set_up = _hub_config(tmp_path, "set-up.toml", "[stt]\nprovider = \"faster-whisper\"\n")
+        refusals.append((("hub",), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop", "LOCALFLOW_SANDBOX": "1", **set_up}))
     for args, env in refusals:
         python, legacy, desktop = _same_hub(hub(*args, env=env))
         assert (python.returncode, python.stderr) == (1, f"Error: {SANDBOX_REFUSAL}\n"), args
@@ -2725,6 +2747,9 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
     old = fake("old", help_text=_DESKTOP_HELP.replace("    --setup ", "    --set "))
     staying = fake("stay", code=1, stay=2.5)
     probe, launch = ["--help"], ["--page", "Hot Phrases"]
+    # The default covers a set-up LocalFlow only; explicit rows run on a first
+    # run (no config at all), which never changes an explicit choice.
+    set_up = _hub_config(tmp_path, "set-up.toml", "config_version = 2\n\n[setup]\nversion = 1\n")
     cases = [
         (("hub", "--gpui"), {}, dl.NOTICE_NOT_INSTALLED, "Home", []),
         (("hub", "--gpui"), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop"}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
@@ -2740,14 +2765,24 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
         # The GPUI default: no candidate is quiet; an override alone is used,
         # and every candidate problem is noticed once, then legacy once.
         (("hub",), {}, "", "Home", []),
-        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": ""}, "native-stderr", None, [probe, launch]),
-        (("hub", "--page", "ask"), good, "native-stderr", None, [probe, ["--page", "Ask"]]),
-        (("hub",), {**good, "LOCALFLOW_UI": " \t"}, "native-stderr", None, [probe, []]),
-        (("hub",), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop"}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
-        (("hub", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
-        (("hub", "--page", "hot phrases"), early, "native-stderr\n" + dl.NOTICE_EARLY_EXIT.format(code=2),
-         "Hot Phrases", [probe, launch]),
-        (("hub",), staying, "native-stderr", None, [probe, []]),
+        (("hub",), set_up, "", "Home", []),
+        (("hub", "--page", "hot phrases"), {**good, **set_up, "LOCALFLOW_UI": ""}, "native-stderr", None,
+         [probe, launch]),
+        (("hub", "--page", "ask"), {**good, **set_up}, "native-stderr", None, [probe, ["--page", "Ask"]]),
+        (("hub",), {**good, **set_up, "LOCALFLOW_UI": " \t"}, "native-stderr", None, [probe, []]),
+        (("hub",), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop", **set_up}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
+        (("hub", "--page", "History"), {**old, **set_up}, dl.NOTICE_PROBE, "History", [probe]),
+        (("hub", "--page", "hot phrases"), {**early, **set_up},
+         "native-stderr\n" + dl.NOTICE_EARLY_EXIT.format(code=2), "Hot Phrases", [probe, launch]),
+        (("hub",), {**staying, **set_up}, "native-stderr", None, [probe, []]),
+        # First run under the default: quietly legacy, nothing probed, for any
+        # page and even with a candidate or a sandbox request.
+        (("hub",), good, "", "Home", []),
+        (("hub", "--page", "history"), {**good, "LOCALFLOW_SANDBOX": "1"}, "", "History", []),
+        (("hub",), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop"}, "", "Home", []),
+        *((("hub", "--page", "ask"), {**good, **_hub_config(tmp_path, f"first-run-{index}.toml", text)},
+           "", "Ask", [])
+          for index, text in enumerate(_FIRST_RUN_CONFIGS)),
     ]
     for args, env, stderr, page, launches in cases:
         python, legacy, desktop = _same_hub(hub(*args, env=env))
@@ -2755,18 +2790,40 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
         assert python.stderr == (stderr + "\n" if stderr else ""), args
         assert (legacy, desktop) == ((_legacy(page) if page else []), launches), args
 
+    # A legacy flat file alone is a first run for the default on both sides:
+    # native checks only the active file, and its migration may be deferred or
+    # fail (a non-string Fireworks key, no Fireworks env vars). Neither
+    # launcher probes, migrates or writes anything.
+    flat_file = sandbox["home"] / ".localflow.toml"
+    active = _hub_config(tmp_path, "legacy-only.toml", None)
+    for flat in ('model_size = "base"\n', 'model_size = "base"\nfireworks_api_key = 123\n'):
+        flat_file.write_text(flat, encoding="utf-8")
+        for args, page in ((("hub",), "Home"), (("hub", "--page", "hot phrases"), "Hot Phrases")):
+            python, legacy, desktop = _same_hub(hub(*args, env={**good, **active}))
+            assert (python.returncode, python.stdout, python.stderr) == (0, "", ""), args
+            assert (legacy, desktop) == (_legacy(page), []), args
+        assert not Path(active["LOCALFLOW_CONFIG"]).exists()
+        assert flat_file.read_text(encoding="utf-8") == flat
+    flat_file.unlink()
+
     # Something the preview installer didn't install sits at the package root.
     linux = sys.platform.startswith("linux")
     root = sandbox["home"].joinpath(*(dl.LINUX_ROOT if linux else dl.MAC_APP))
     root.mkdir(parents=True)
-    for args in [("hub", "--gpui", "--page", "models"), ("hub", "--page", "models")]:
-        python, legacy, desktop = _same_hub(hub(*args))
+    for args, env in [(("hub", "--gpui", "--page", "models"), {}), (("hub", "--page", "models"), set_up)]:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
         assert (python.returncode, python.stderr) == (0, dl.NOTICE_NOT_OWNED + "\n"), args
         assert (legacy, desktop) == (_legacy("Models"), []), args
-    # With a candidate, a sandbox request under the default is refused before any probe.
-    python, legacy, desktop = _same_hub(hub("hub", env={"LOCALFLOW_SANDBOX": "true"}))
+    # On first run the default doesn't look at it at all.
+    python, legacy, desktop = _same_hub(hub("hub", "--page", "models"))
+    assert (python.returncode, python.stderr, legacy, desktop) == (0, "", _legacy("Models"), [])
+    # With a candidate, a sandbox request under the default is refused before
+    # any probe once set up; on first run it keeps its legacy behaviour.
+    python, legacy, desktop = _same_hub(hub("hub", env={"LOCALFLOW_SANDBOX": "true", **set_up}))
     assert (python.returncode, python.stderr) == (1, f"Error: {dl.SANDBOX_REFUSAL}\n")
     assert legacy == desktop == []
+    python, legacy, desktop = _same_hub(hub("hub", env={"LOCALFLOW_SANDBOX": "true"}))
+    assert (python.returncode, python.stderr, legacy, desktop) == (0, "", _legacy("Home"), [])
 
     # The package the preview installer owns opens by default with the closed argv.
     if linux:
@@ -2782,15 +2839,21 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
                                          code=0).encode())
     exe.chmod(0o755)
     for args, launches in [(("hub",), [probe, []]), (("hub", "--page", "settings"), [probe, ["--page", "Settings"]])]:
-        python, legacy, desktop = _same_hub(hub(*args))
+        python, legacy, desktop = _same_hub(hub(*args, env=set_up))
         assert (python.returncode, python.stdout, python.stderr) == (0, "", "native-stderr\n"), args
         assert (legacy, desktop) == ([], launches), args
+    # The same package on first run: the legacy window, unprobed; an explicit
+    # choice still opens it there.
+    python, legacy, desktop = _same_hub(hub("hub", "--page", "settings"))
+    assert (python.stderr, legacy, desktop) == ("", _legacy("Settings"), [])
+    python, legacy, desktop = _same_hub(hub("hub", env={"LOCALFLOW_UI": "gpui"}))
+    assert (python.stderr, legacy, desktop) == ("native-stderr\n", [], [probe, []])
     # An explicit rollback bypasses it, and an old package is noticed once.
-    python, legacy, desktop = _same_hub(hub("hub", "--legacy", env={"LOCALFLOW_SANDBOX": "1"}))
+    python, legacy, desktop = _same_hub(hub("hub", "--legacy", env={"LOCALFLOW_SANDBOX": "1", **set_up}))
     assert (python.stderr, legacy, desktop) == ("", _legacy("Home"), [])
     exe.write_bytes(_FAKE_DESKTOP.format(python=sys.executable, help="lf-desktop\n", stay=0.0,
                                          code=0).encode())
-    python, legacy, desktop = _same_hub(hub("hub"))
+    python, legacy, desktop = _same_hub(hub("hub", env=set_up))
     assert (python.stderr, legacy, desktop) == (dl.NOTICE_PROBE + "\n", _legacy("Home"), [probe])
 
 

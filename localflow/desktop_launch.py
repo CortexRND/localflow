@@ -13,15 +13,23 @@ searched. Anything wrong prints one short notice and opens exactly today's
 legacy window once. A sandbox request (`LOCALFLOW_SANDBOX`) is refused rather
 than turned into a real-data launch.
 
-The default is conditional. When GPUI comes only from `DEFAULT_UI` (no flag,
-blank or absent `LOCALFLOW_UI`), an unsupported platform, or no override and
-nothing at the package root, opens the legacy window quietly, as before.
-Anything at the package root, or a non-empty override, is a candidate and
-goes through the same checks and notices as `--gpui`.
+The default is conditional and covers only configured Hub / phrases windows.
+When GPUI comes only from `DEFAULT_UI` (no flag, blank or absent
+`LOCALFLOW_UI`), these open the legacy window quietly, as before: a setup
+request (`lf setup`, or the Setup page); an unsupported platform, or no
+override and nothing at the package root; and a config without the setup
+marker in the active config file (`main_app.is_configured`, without its
+legacy flat fallback; the launcher never migrates or writes), because LocalFlow Preview would open its
+own first-run wizard, whose native model choices the Python runtime that owns
+dictation may not be able to run. Otherwise anything at the package root, or
+a non-empty override, is a candidate and goes through the same checks and
+notices as `--gpui`. An explicit `--gpui` / `LOCALFLOW_UI=gpui` is unchanged,
+native setup and first run included.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import plistlib
 import re
@@ -87,8 +95,9 @@ SANDBOX_REFUSAL = (
 
 GPUI_HELP = (
     "Open LocalFlow Preview (native GPUI app) instead of the legacy window. "
-    "The default on Linux and macOS when it is installed. No screen-reader "
-    "support yet: use --legacy (or lf-hub on macOS)."
+    "Without this flag, only lf hub and lf phrases use it, on Linux and macOS, "
+    "once LocalFlow is set up and the preview is installed; setup and first run "
+    "stay legacy. No screen-reader support yet: use --legacy (or lf-hub on macOS)."
 )
 LEGACY_HELP = (
     "Open the legacy window (also used when LocalFlow Preview isn't installed)."
@@ -250,6 +259,39 @@ def candidate_absent(
     return not os.path.lexists(home.joinpath(*(LINUX_ROOT if key == "linux" else MAC_APP)))
 
 
+def setup_route(page: str | None, setup: bool) -> bool:
+    """A setup request: `lf setup`'s window, or the Setup page."""
+    return setup or (page is not None and page.strip() == "Setup")
+
+
+def configured() -> bool:
+    """An active config that passes `main_app.is_configured()`, read-only and quiet.
+
+    The same marker LocalFlow Preview and the legacy app use to skip the
+    first-run wizard: `[setup] version > 0` or an explicit STT provider/model,
+    but only in the active config file. Deliberately stricter than
+    `main_app.is_configured`, which falls back to the legacy flat file: native
+    checks only the active file, and a legacy migration can be deferred or
+    fail, so a legacy-flat-only config stays on the legacy window, which
+    handles its migration as before. It never writes or migrates anything on
+    disk. Config warnings are silenced here so that the implicit default stays
+    quiet, as in lf-rs; a home that can't be resolved counts as not configured.
+    """
+    from localflow import main_app  # config readers only; no GUI, audio or runtime
+    from localflow.config import config_path
+
+    logger = logging.getLogger("localflow.config")
+    disabled, logger.disabled = logger.disabled, True
+    try:
+        return config_path().exists() and main_app.is_configured()
+    except RuntimeError:  # no HOME and no passwd entry (Path.home)
+        return False
+    except OSError:  # an unreadable config dir, as main_app.is_configured
+        return False
+    finally:
+        logger.disabled = disabled
+
+
 # Exact tokens, as in lf_ui::desktop_launch::help_has_interface: the identity
 # can't continue with a word character or `-`, and each flag line is the exact
 # token followed by whitespace or the end of the line.
@@ -355,8 +397,13 @@ def launch(
     if choice != "gpui":
         legacy()
         return
-    if implicit_choice(flag, env) and candidate_absent(env):
-        legacy()  # the conditional default: nothing installed, as before
+    # The conditional default covers configured Hub / phrases only: setup and
+    # first run stay on the legacy wizard, and nothing installed stays legacy.
+    # Cheapest first, so a setup request inspects nothing.
+    if implicit_choice(flag, env) and (
+        setup_route(page, setup) or candidate_absent(env) or not configured()
+    ):
+        legacy()
         return
     if sandbox_requested(env):
         raise click.ClickException(SANDBOX_REFUSAL)

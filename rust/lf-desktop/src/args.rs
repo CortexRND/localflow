@@ -38,9 +38,10 @@ EXIT STATUS (launch-status: 1):
 
 One window runs per data folder: a second launch sends its page to it.
 This app runs beside the existing LocalFlow windows. On Linux and macOS,
-`lf hub`, `lf phrases` and `lf setup` open it by default once it is installed
-(`--legacy` or LOCALFLOW_UI=legacy opens the legacy window); on Linux,
-`lf-hub` opens it. It does not replace the Python runtime.";
+`lf hub` and `lf phrases` open it by default once it is installed and
+LocalFlow is set up; `lf setup` and first run open it only with `--gpui` or
+LOCALFLOW_UI=gpui (`--legacy` or LOCALFLOW_UI=legacy opens the legacy window).
+On Linux, `lf-hub` opens it. It does not replace the Python runtime.";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Args {
