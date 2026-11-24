@@ -1,19 +1,31 @@
-"""Deterministic gates M1-M13 over ~/sim-runs/<run>/rK/results/*.json (thresholds frozen in PLAN.md)."""
-import json, math, os, re, sys
-from pathlib import Path
-sys.path.insert(0, os.environ.get("SIM_SUT", str(Path.home() / "work/sim-sut")))
-from localflow.meetings import _safe_title  # noqa: E402
-from localflow.meeting_templates import resolve_template  # noqa: E402
+"""Deterministic gates M1-M13 over <run>/rK/results/*.json (thresholds frozen in PROTOCOL.md).
 
-RUN = Path(sys.argv[1])
-SC = {s["id"]: s for s in json.load(open(Path(__file__).with_name("scenarios.json")))["scenarios"]}
-ABSTAIN = re.compile(r"(doesn'?t|does not|did not|didn'?t|isn'?t|wasn'?t|is not|was not|not)\s+(mention|mentioned|contain|say|said|discuss|discussed|specif|state|include|provide|cover)|no (mention|information|record|details?)|not (in|part of) the transcript|transcript (doesn'?t|does not)", re.I)
-WORDS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+Usage: gates.py RUN_DIR [--sut PATH] [--scenarios FILE] [--output|--json FILE]
+
+``--sut`` (env ``SIM_SUT``, default: this repo) is the checkout whose
+``localflow`` helpers (title sanitizer, templates) are imported. Output goes to
+``RUN_DIR/gates.json`` unless ``--output``/``--json`` names another file. Besides
+``per_repeat`` and ``summary`` the output carries ``timings``: millisecond
+samples pooled over every result file that has the driver's ``timings`` dict.
+"""
+import argparse
+import json
+import math
+import os
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SC = {}
+_safe_title = resolve_template = None  # bound by load_sut() from the checkout under test
+ABSTAIN = re.compile(r"(doesn'?t|does not|did not|didn'?t|isn'?t|wasn'?t|is not|was not|not)\s+(mention|mentioned|contain|say|said|discuss|discussed|specif|state|include|provide|cover)|no (mention|information|record|details?)|not (in|part of) the transcript|transcript (doesn'?t|does not)", re.IGNORECASE)
+WORDS = {w: i for i, w in enumerate(["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"])}
 WORDS.update({"thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000})
 THRESH = {"M5": 0.90, "M6": 0.70, "M7": 0.05, "M9": 0.80, "M10": 0.80}
 
 def norm_head(h): return re.sub(r"[^a-z0-9 ]", "", h.replace("**", "").lower()).strip()
-def headings(md): return [norm_head(m) for m in re.findall(r"^#{1,6}\s+(.+?)\s*$", md, re.M)]
+def headings(md): return [norm_head(m) for m in re.findall(r"^#{1,6}\s+(.+?)\s*$", md, re.MULTILINE)]
 def notes_md(text, title):
     body = text.split("\n---\n", 1)[1] if text.startswith("---\n") else text
     body = body.split("\nRaw transcript: [[", 1)[0]
@@ -57,7 +69,7 @@ def repeat_gates(files):
         tally("M1", all(200 <= h["status"] < 300 for h in r["http"]) and r["notes_text"] and r["log_text"]
               and stop.get("template") == s["template"] and stop.get("enhanced") == bool(nf), sid)
         body = r["log_text"].split("\n## My raw notes\n", 1)[0]
-        got = re.findall(r"^\*\*\d\d:\d\d\*\* \*\*(Me|Others):\*\* (.*)$", body, re.M)
+        got = re.findall(r"^\*\*\d\d:\d\d\*\* \*\*(Me|Others):\*\* (.*)$", body, re.MULTILINE)
         if s["system_audio"] == "ok":
             exp = [("Me" if a == "me" else "Others", t) for a, t in s["lines"]]
             for i, e in enumerate(exp):
@@ -116,17 +128,75 @@ def repeat_gates(files):
         out[key] = {"value": None if rate is None else round(rate, 3), "k": v["k"], "n": v["n"], "pass": passed if v["n"] else None, "fail": v["fail"]}
     return out
 
-repeats = sorted(p for p in RUN.glob("r*/results") if p.is_dir())
-per = {p.parent.name: repeat_gates(sorted(p.glob("*.json"))) for p in repeats}
-summary = {}
-for key in [f"M{i}" for i in range(1, 14)]:
-    vals = [per[r][key] for r in per]
-    passes = [v["pass"] for v in vals if v["pass"] is not None]
-    k = sum(v["k"] for v in vals); n = sum(v["n"] for v in vals)
-    status = "not exercised" if not passes else "pass" if all(passes) and len(passes) == len(vals) else "fail" if not any(passes) else "flaky"
-    xs = [v["value"] for v in vals if v["value"] is not None]
-    summary[key] = {"status": status, "pass_count": f"{sum(passes)}/{len(vals)}", "min": min(xs) if xs else None, "max": max(xs) if xs else None,
-                    "spread": round(max(xs) - min(xs), 3) if xs else None, "pooled_k": k, "pooled_n": n, "wilson95_pooled": wilson(k, n), "low_power": n < 10}
-(RUN / "gates.json").write_text(json.dumps({"per_repeat": per, "summary": summary}, indent=1))
-for k, v in summary.items():
-    print(k, v["status"], v["pass_count"], v["min"], v["max"], f"n={v['pooled_n']}")
+def load_sut(sut):
+    global _safe_title, resolve_template
+    sys.path.insert(0, str(Path(sut).expanduser()))
+    from localflow.meeting_templates import resolve_template
+    from localflow.meetings import _safe_title
+
+
+def load_scenarios(path):
+    with open(path, encoding="utf-8") as fh:
+        return {s["id"]: s for s in json.load(fh)["scenarios"]}
+
+
+TIMING_KEYS = ("stop_to_notes_ms", "summarize_ms", "chat_ms", "restart_chat_ms", "llm_call_ms")
+
+
+def pooled_timings(files):
+    """Pool the driver's ``timings`` (ms) over result files; older files without them are counted, not used."""
+    out = {k: [] for k in TIMING_KEYS}
+    out["llm_calls_per_meeting"] = []
+    used = skipped = 0
+    for f in files:
+        t = json.loads(f.read_text()).get("timings")
+        if not isinstance(t, dict):
+            skipped += 1
+            continue
+        used += 1
+        for k in TIMING_KEYS:
+            v = t.get(k)
+            out[k].extend(x for x in (v if isinstance(v, list) else [v]) if isinstance(x, (int, float)))
+        if isinstance(t.get("llm_calls_count"), int):
+            out["llm_calls_per_meeting"].append(t["llm_calls_count"])
+    out["meetings"], out["meetings_without_timings"] = used, skipped
+    return out
+
+
+def evaluate(run):
+    repeats = sorted(p for p in run.glob("r*/results") if p.is_dir())
+    per = {p.parent.name: repeat_gates(sorted(p.glob("*.json"))) for p in repeats}
+    summary = {}
+    for key in [f"M{i}" for i in range(1, 14)]:
+        vals = [per[r][key] for r in per]
+        passes = [v["pass"] for v in vals if v["pass"] is not None]
+        k = sum(v["k"] for v in vals); n = sum(v["n"] for v in vals)
+        status = "not exercised" if not passes else "pass" if all(passes) and len(passes) == len(vals) else "fail" if not any(passes) else "flaky"
+        xs = [v["value"] for v in vals if v["value"] is not None]
+        summary[key] = {"status": status, "pass_count": f"{sum(passes)}/{len(vals)}", "min": min(xs) if xs else None, "max": max(xs) if xs else None,
+                        "spread": round(max(xs) - min(xs), 3) if xs else None, "pooled_k": k, "pooled_n": n, "wilson95_pooled": wilson(k, n), "low_power": n < 10}
+    timings = pooled_timings(sorted(f for p in repeats for f in p.glob("*.json")))
+    return {"per_repeat": per, "summary": summary, "timings": timings}
+
+
+def main(argv=None):
+    global SC
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("run", type=Path, help="run dir holding rK/results/*.json")
+    ap.add_argument("--sut", default=os.environ.get("SIM_SUT") or str(REPO_ROOT), help="LocalFlow checkout to import helpers from (env SIM_SUT)")
+    ap.add_argument("--scenarios", default=str(Path(__file__).with_name("scenarios.json")), help="scenarios JSON file")
+    ap.add_argument("--output", "--json", dest="output", type=Path, help="gates JSON path (default RUN/gates.json)")
+    args = ap.parse_args(argv)
+    load_sut(args.sut)
+    SC = load_scenarios(args.scenarios)
+    result = evaluate(args.run)
+    out = args.output or args.run / "gates.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, indent=1))
+    for k, v in result["summary"].items():
+        print(k, v["status"], v["pass_count"], v["min"], v["max"], f"n={v['pooled_n']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

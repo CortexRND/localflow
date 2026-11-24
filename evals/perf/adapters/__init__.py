@@ -1,4 +1,7 @@
-"""Adapters: existing CI helper outputs → ``lf-perf-result/v1`` footprint cases.
+"""Adapters: existing CI helper outputs → ``lf-perf-result/v1`` cases.
+
+Footprint adapters (``SUITE``) plus ``meeting_gates`` (``meetings`` suite,
+over ``evals/meeting_sim`` output).
 
 The CI helpers (``scripts/ci_*.py`` / ``scripts/ci_*.sh``) stay unchanged;
 these modules only read the files they already write
@@ -15,6 +18,7 @@ from __future__ import annotations
 from ._common import SUITE
 from .hub_pages import convert_hub_pages, load_hub_pages
 from .hub_rss import convert_hub_rss, load_hub_rss, parse_hub_rss
+from .meeting_gates import convert_gates, convert_timings, load_run_dir
 from .package_size import measure_package, measure_packages
 from .parakeet_memory import convert_parakeet_memory, load_parakeet_memory
 from .speech_helper import (
@@ -25,14 +29,17 @@ from .speech_helper import (
 
 __all__ = [
     "SUITE",
+    "convert_gates",
     "convert_hub_pages",
     "convert_hub_rss",
     "convert_parakeet_memory",
     "convert_speech_helper",
+    "convert_timings",
     "helper_pids_cleaned",
     "load_hub_pages",
     "load_hub_rss",
     "load_parakeet_memory",
+    "load_run_dir",
     "load_speech_helper",
     "measure_package",
     "measure_packages",

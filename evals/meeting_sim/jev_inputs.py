@@ -1,7 +1,11 @@
-import json, os, sys, tempfile
+import json
+import os
+import sys
+import tempfile
 from pathlib import Path
-sys.path.insert(0, os.environ.get("SIM_SUT", str(Path.home() / "work/sim-sut")))
-from localflow.meetings import read_transcript_log  # noqa
+
+sys.path.insert(0, os.environ.get("SIM_SUT") or str(Path(__file__).resolve().parents[2]))
+from localflow.meetings import read_transcript_log
 
 
 def transcript(r):
