@@ -270,6 +270,15 @@ pub struct SetupFlow {
     /// top of it). `opened` stays the immutable intent baseline; this is
     /// only the revision the next Apply expects to find on disk.
     pub acknowledged: Option<Config>,
+    /// The speech model is the user's intent: they picked one in the Speech
+    /// step ([`SetupFlow::select_model`]), or nothing was saved yet so the
+    /// recommendation is. Otherwise the preselected row may be a substitute
+    /// for a saved model this build can't offer (MLX, `auto`, off-catalogue
+    /// sizes), and Apply keeps the saved speech provider/model/device.
+    speech_selected: bool,
+    /// `speech_selected` as of the last save (or setup opening), for
+    /// [`SetupFlow::dirty`].
+    initial_speech_selected: bool,
     /// Generations of the read-only facts (installed models, devices,
     /// Ollama list): a result from a superseded worker is dropped.
     fact_generations: [u64; 3],
@@ -288,12 +297,19 @@ fn platform_name(darwin: bool) -> &'static str {
 impl SetupFlow {
     /// Start from the saved config (after a first run) or the hardware
     /// recommendation (`initial_choices`).
+    ///
+    /// `speech_saved`: the config file at the path Apply writes already
+    /// records a speech choice (`controllers::setup::configured`: a `[setup]`
+    /// version or an explicit raw `[stt]` provider/model — a hand-written
+    /// file may have the latter without the former). Then the preselected
+    /// model is not written unless the user selects one.
     pub fn new(
         config: &Config,
         hw: &HardwareInfo,
         platform: &dyn SetupPlatform,
         launch_agent: &dyn LaunchAgent,
         simulated: bool,
+        speech_saved: bool,
     ) -> Result<Self, String> {
         let mut choices =
             flow::initial_choices(config, hw, platform, launch_agent).map_err(|e| e.0)?;
@@ -349,6 +365,8 @@ impl SetupFlow {
             darwin: platform.is_darwin(),
             opened: config.clone(),
             acknowledged: None,
+            speech_selected: !speech_saved,
+            initial_speech_selected: !speech_saved,
             fact_generations: [0; 3],
         };
         flow.validate_hotkey();
@@ -358,9 +376,16 @@ impl SetupFlow {
         Ok(flow)
     }
 
-    /// Choices differ from what setup opened with.
+    /// Choices differ from what setup opened with (an explicit pick of the
+    /// preselected speech model counts: Apply would now write it).
     pub fn dirty(&self) -> bool {
-        self.choices != self.initial
+        self.choices != self.initial || self.speech_selected != self.initial_speech_selected
+    }
+
+    /// Apply keeps the saved speech model: nothing was selected in the
+    /// Speech step and the config already had one.
+    pub fn speech_kept(&self) -> bool {
+        !self.speech_selected
     }
 
     pub fn visited(&self, step: Step) -> bool {
@@ -635,9 +660,13 @@ impl SetupFlow {
         self.models.iter().find(|m| m.id == id)
     }
 
+    /// The user picked a speech model (the only path that marks the model as
+    /// their intent — downloads, inventory, the trial and initialisation
+    /// don't). Also when it's the preselected row, and it stays so.
     pub fn select_model(&mut self, id: &str) {
         if self.model(id).is_some() {
             self.choices.stt_id = id.to_string();
+            self.speech_selected = true;
             self.trial = Trial::Ready;
         }
     }
@@ -858,14 +887,20 @@ impl SetupFlow {
     // ----------------------------------------------------------- review ---
 
     pub fn review_rows(&self) -> Vec<ReviewRow> {
-        let model = self
-            .model(&self.choices.stt_id)
-            .map(|m| m.label.to_string())
-            .unwrap_or_else(|| self.choices.stt_id.clone());
-        let downloaded = match self.installed(&self.choices.stt_id) {
-            Some(true) => " · downloaded",
-            Some(false) => " · not downloaded yet",
-            None => "",
+        let speech = if self.speech_kept() {
+            // The preselected row isn't saved; say so rather than naming it.
+            "Keep current speech model".to_string()
+        } else {
+            let model = self
+                .model(&self.choices.stt_id)
+                .map(|m| m.label.to_string())
+                .unwrap_or_else(|| self.choices.stt_id.clone());
+            let downloaded = match self.installed(&self.choices.stt_id) {
+                Some(true) => " · downloaded",
+                Some(false) => " · not downloaded yet",
+                None => "",
+            };
+            format!("{model}{downloaded}")
         };
         let cleanup = match self.cleanup {
             CleanupMode::Local => format!(
@@ -895,7 +930,7 @@ impl SetupFlow {
             },
             ReviewRow {
                 label: "Speech model",
-                value: format!("{model}{downloaded}"),
+                value: speech,
                 step: Step::Speech,
             },
             ReviewRow {
@@ -956,6 +991,7 @@ impl SetupFlow {
             choices: self.choices.clone(),
             opened: self.opened.clone(),
             acknowledged: self.acknowledged.clone(),
+            speech_selected: self.speech_selected,
         })
     }
 
@@ -963,6 +999,7 @@ impl SetupFlow {
         self.apply = match result {
             Ok(path) => {
                 self.initial = self.choices.clone();
+                self.initial_speech_selected = self.speech_selected;
                 Applying::Done(path)
             }
             Err(ApplyFailure::Conflict { fields, latest }) => {
@@ -1070,6 +1107,9 @@ pub struct ApplyJob {
     pub opened: Config,
     /// The revision the user acknowledged in a conflict, if any.
     pub acknowledged: Option<Config>,
+    /// The speech model is the user's intent (see `SetupFlow::speech_kept`);
+    /// when false the speech group is never written.
+    pub speech_selected: bool,
 }
 
 /// Fields that only make sense together. When the user changes any member,
@@ -1112,12 +1152,44 @@ fn field_label(key: &str) -> &str {
     }
 }
 
+/// What the draft changes: `setup_flow::config_update` of the choices applied
+/// to `job.opened` (the immutable baseline), and the fields that differ,
+/// widened to whole [`INTENT_GROUPS`]. Without an explicit speech selection
+/// (`job.speech_selected`) the speech group is dropped first, so a
+/// substituted preselection never replaces the saved provider/model/device;
+/// language, microphone, cleanup, shortcuts and the setup marker still count.
+fn edited_fields(
+    job: &ApplyJob,
+) -> Result<(Config, std::collections::BTreeSet<String>), ApplyFailure> {
+    let opened = &job.opened;
+    let updates =
+        flow::config_update(&job.choices, opened).map_err(|e| ApplyFailure::Error(e.0))?;
+    let edited_config = lf_core::config::apply_config_update(opened, &updates)
+        .map_err(|e| ApplyFailure::Error(format!("{e:#}")))?;
+    let mut edited: std::collections::BTreeSet<String> = edited_config
+        .fields
+        .keys()
+        .filter(|k| edited_config.field(k) != opened.field(k))
+        .cloned()
+        .collect();
+    if !job.speech_selected {
+        for key in INTENT_GROUPS[0] {
+            edited.remove(*key);
+        }
+    }
+    for group in INTENT_GROUPS {
+        if group.iter().any(|k| edited.contains(*k)) {
+            edited.extend(group.iter().map(|k| k.to_string()));
+        }
+    }
+    Ok((edited_config, edited))
+}
+
 /// Write the draft to the explicit config file. Blocking; call off the UI
 /// thread.
 ///
-/// `setup_flow::config_update` turns the choices into the setup sections;
-/// applied to `job.opened` (the immutable baseline) that shows what the user
-/// changed, widened to whole [`INTENT_GROUPS`]. Under
+/// [`edited_fields`] decides what the user changed (the speech model only
+/// when they selected one, or on a first run). Under
 /// `config_write::with_lock` the latest file is loaded (`missing` supplies
 /// the explicit root's defaults when there is no file yet — no separate
 /// preparatory write) and only those fields are written; everything else,
@@ -1138,21 +1210,7 @@ pub fn apply(
     let opened = &job.opened;
     let expected = job.acknowledged.as_ref().unwrap_or(opened);
     lf_ui::config_write::with_lock(|| {
-        let updates =
-            flow::config_update(&job.choices, opened).map_err(|e| ApplyFailure::Error(e.0))?;
-        let edited_config =
-            lf_core::config::apply_config_update(opened, &updates).map_err(failure)?;
-        let mut edited: std::collections::BTreeSet<String> = edited_config
-            .fields
-            .keys()
-            .filter(|k| edited_config.field(k) != opened.field(k))
-            .cloned()
-            .collect();
-        for group in INTENT_GROUPS {
-            if group.iter().any(|k| edited.contains(*k)) {
-                edited.extend(group.iter().map(|k| k.to_string()));
-            }
-        }
+        let (edited_config, edited) = edited_fields(job)?;
         // Another process may create the file while we decide; never
         // replace a file we didn't read.
         for _ in 0..2 {
@@ -1646,7 +1704,7 @@ mod tests {
         let path = dir.path().join("config").join("config.toml");
         let mut defaults = Config::defaults_for(false);
         defaults.set_field("meetings_enabled", serde_json::json!(false));
-        let mut flow = new_flow(&defaults);
+        let mut flow = flow_with(&defaults, false);
         flow.set_device("USB Mic");
         let job = flow.begin_apply().unwrap();
         let fallback = defaults.clone();
@@ -1662,7 +1720,278 @@ mod tests {
         assert_eq!(saved.field_i64("setup_version"), Some(1));
     }
 
+    fn mlx_small(c: &mut Config) {
+        c.set_field("stt_backend", serde_json::json!("mlx-whisper"));
+        c.set_field("model_size", serde_json::json!("small"));
+        c.set_field("llm_provider", serde_json::json!("ollama"));
+        c.set_field("llm_model", serde_json::json!("llama3.2:1b"));
+        c.set_field("cleanup_enabled", serde_json::json!(true));
+    }
+
+    #[test]
+    fn cleanup_only_apply_keeps_a_configured_mlx_or_auto_speech_model() {
+        for (backend, size) in [("mlx-whisper", "small"), ("auto", "base")] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, opened) = configured(dir.path(), |c| {
+                mlx_small(c);
+                c.set_field("stt_backend", serde_json::json!(backend));
+                c.set_field("model_size", serde_json::json!(size));
+            });
+            let before = speech(&path);
+            let mut flow = new_flow(&opened);
+            // The Linux fake can't run MLX/auto as such: a Faster Whisper row
+            // is preselected, which isn't the saved provider.
+            let preselected = flow.model(&flow.choices.stt_id).unwrap().clone();
+            assert_eq!(preselected.backend, "faster-whisper");
+            assert!(flow.speech_kept());
+            assert!(!flow.dirty(), "nothing chosen yet");
+            flow.set_cleanup(CleanupMode::Off);
+            let job = flow.begin_apply().unwrap();
+            assert!(!job.speech_selected);
+            flow.apply_done(apply_at(&job, &path));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            assert_eq!(speech(&path), before, "{backend}/{size} kept");
+            let saved = lf_core::config::load_from(&path).unwrap();
+            assert_eq!(saved.field_bool("cleanup_enabled"), Some(false));
+            assert_eq!(saved.field_i64("setup_version"), Some(1));
+            assert!(!flow.dirty());
+        }
+    }
+
+    #[test]
+    fn an_explicit_speech_selection_is_written_even_when_it_is_the_preselection() {
+        let cases: [&[&str]; 3] = [&["fw-small"], &["fw-base", "fw-small"], &["fw-base"]];
+        for picks in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, opened) = configured(dir.path(), mlx_small);
+            let mut flow = new_flow(&opened);
+            assert_eq!(flow.choices.stt_id, "fw-small", "same-size fallback");
+            // Not a selection: an unknown id, the inventory, a trial.
+            flow.select_model("not-a-model");
+            let g = flow.begin_fact(Fact::Installed);
+            assert!(flow.installed_done(g, Ok(HashMap::from([("fw-small".into(), true)]))));
+            walk_to(&mut flow, Step::Trial);
+            let trial = flow.begin_trial(true, None).unwrap();
+            flow.trial_done(trial.generation, Ok("hello".into()));
+            assert!(flow.speech_kept(), "no click yet");
+            assert!(!flow.dirty());
+            for id in picks {
+                flow.select_model(id);
+            }
+            assert!(!flow.speech_kept(), "{picks:?}");
+            assert!(flow.dirty(), "an explicit pick is a change: {picks:?}");
+            let job = flow.begin_apply().unwrap();
+            assert!(job.speech_selected);
+            flow.apply_done(apply_at(&job, &path));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            let last = flow.model(picks.last().unwrap()).unwrap().clone();
+            let saved = lf_core::config::load_from(&path).unwrap();
+            assert_eq!(saved.field_str("stt_backend"), Some("faster-whisper"));
+            assert_eq!(saved.field_str("model_size"), Some(last.model_size));
+            assert!(!flow.dirty(), "the saved selection is the new baseline");
+        }
+    }
+
+    #[test]
+    fn a_language_only_change_is_saved_without_the_speech_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, opened) = configured(dir.path(), mlx_small);
+        let before = speech(&path);
+        let mut flow = new_flow(&opened);
+        flow.choices.language = Some("de".into());
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_str("language"), Some("de"));
+        assert_eq!(speech(&path), before);
+    }
+
+    #[test]
+    fn untouched_speech_keeps_a_concurrent_speech_change_without_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, opened) = configured(dir.path(), mlx_small);
+        let mut flow = new_flow(&opened);
+        flow.set_device("Desk Mic");
+        external(&path, |c| {
+            c.set_field("stt_backend", serde_json::json!("parakeet"));
+            c.set_field("model_size", serde_json::json!("base"));
+        });
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_str("input_device"), Some("Desk Mic"));
+        assert_eq!(saved.field_str("stt_backend"), Some("parakeet"));
+        assert_eq!(saved.field_str("model_size"), Some("base"));
+    }
+
+    #[test]
+    fn an_explicit_preselection_still_conflicts_and_retries_as_a_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, opened) = configured(dir.path(), mlx_small);
+        let mut flow = new_flow(&opened);
+        flow.select_model("fw-small");
+        external(&path, |c| {
+            c.set_field("model_size", serde_json::json!("base"))
+        });
+        let before = std::fs::read(&path).unwrap();
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(
+            matches!(&flow.apply, Applying::Failed(m) if m.contains("Speech model")),
+            "{:?}",
+            flow.apply
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "zero bytes written");
+        assert!(flow.dirty(), "draft kept");
+        // Acknowledged: the explicit selection is written as a whole.
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_at(&job, &path));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some("faster-whisper"));
+        assert_eq!(saved.field_str("model_size"), Some("small"));
+    }
+
+    #[test]
+    fn review_says_the_speech_model_is_kept_until_one_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, opened) = configured(dir.path(), mlx_small);
+        let mut flow = new_flow(&opened);
+        flow.installed = Loadable::Ready(HashMap::from([("fw-small".into(), false)]));
+        let row = |flow: &SetupFlow| {
+            flow.review_rows()
+                .into_iter()
+                .find(|r| r.label == "Speech model")
+                .unwrap()
+        };
+        let kept = row(&flow);
+        assert_eq!(kept.value, "Keep current speech model");
+        assert_eq!(kept.step, Step::Speech);
+        // Kept MLX small still runs as whisper.cpp small natively: the
+        // missing download is a real problem even though Apply keeps it.
+        assert!(
+            flow.warnings()[0].contains("isn't downloaded"),
+            "{:?}",
+            flow.warnings()
+        );
+        flow.select_model("fw-small");
+        let chosen = row(&flow);
+        assert!(chosen.value.contains(flow.model("fw-small").unwrap().label));
+        assert!(
+            chosen.value.contains("not downloaded yet"),
+            "{}",
+            chosen.value
+        );
+        assert!(flow.warnings()[0].contains("isn't downloaded"));
+    }
+
+    #[test]
+    fn a_first_run_writes_the_recommendation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::data::DataRoot::sandbox(dir.path());
+        let mut flow = open_root(&root);
+        assert!(
+            !flow.speech_kept(),
+            "no file: the recommendation is the intent"
+        );
+        assert!(!flow.dirty());
+        let recommended = flow.model(&flow.choices.stt_id).unwrap().clone();
+        assert!(!flow.review_rows()[1].value.contains("Keep current"));
+        flow.set_device("USB Mic");
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some(recommended.backend));
+        assert_eq!(saved.field_str("model_size"), Some(recommended.model_size));
+        assert_eq!(saved.field_str("input_device"), Some("USB Mic"));
+        assert_eq!(saved.field_i64("setup_version"), Some(1));
+    }
+
+    #[test]
+    fn a_hand_written_speech_choice_without_a_setup_marker_is_kept() {
+        let raw = [
+            (
+                "[stt]\nprovider = \"mlx-whisper\"\nmodel = \"small\"\n",
+                "mlx-whisper",
+            ),
+            ("[stt]\nprovider = \"auto\"\n", "auto"),
+        ];
+        for (toml, backend) in raw {
+            let dir = tempfile::tempdir().unwrap();
+            let root = crate::data::DataRoot::sandbox(dir.path());
+            write_raw(&root, toml);
+            // The real raw marker, not a hand-set flag: no [setup] version,
+            // yet configured by the explicit [stt] provider.
+            assert!(crate::controllers::setup::configured(&root), "{toml}");
+            let before = speech(&root.config_path);
+            let mut flow = open_root(&root);
+            assert_eq!(flow.opened.field_i64("setup_version").unwrap_or(0), 0);
+            assert_eq!(flow.opened.field_str("stt_backend"), Some(backend));
+            assert!(flow.speech_kept());
+            flow.set_cleanup(CleanupMode::Off);
+            let job = flow.begin_apply().unwrap();
+            flow.apply_done(apply_root(&job, &root));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            assert_eq!(speech(&root.config_path), before, "{backend} kept");
+            let saved = lf_core::config::load_from(&root.config_path).unwrap();
+            assert_eq!(saved.field_bool("cleanup_enabled"), Some(false));
+            assert_eq!(saved.field_i64("setup_version"), Some(1));
+        }
+        // An explicit pick on the same hand-written file is written.
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::data::DataRoot::sandbox(dir.path());
+        write_raw(&root, raw[0].0);
+        let mut flow = open_root(&root);
+        flow.select_model("fw-small");
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some("faster-whisper"));
+        assert_eq!(saved.field_str("model_size"), Some("small"));
+    }
+
+    #[test]
+    fn a_config_created_while_first_run_setup_is_open_is_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::data::DataRoot::sandbox(dir.path());
+        let mut flow = open_root(&root);
+        assert!(!flow.speech_kept());
+        let recommended = flow.model(&flow.choices.stt_id).unwrap().clone();
+        flow.set_device("USB Mic");
+        // Another process writes a hand-made MLX config meanwhile.
+        write_raw(
+            &root,
+            "[stt]\nprovider = \"mlx-whisper\"\nmodel = \"small\"\n",
+        );
+        let before = std::fs::read(&root.config_path).unwrap();
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(
+            matches!(&flow.apply, Applying::Failed(m) if m.contains("Speech model")),
+            "{:?}",
+            flow.apply
+        );
+        assert_eq!(std::fs::read(&root.config_path).unwrap(), before);
+        // Acknowledged: the first-run recommendation replaces it as a unit.
+        let job = flow.begin_apply().unwrap();
+        flow.apply_done(apply_root(&job, &root));
+        assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+        let saved = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(saved.field_str("stt_backend"), Some(recommended.backend));
+        assert_eq!(saved.field_str("model_size"), Some(recommended.model_size));
+        assert_eq!(saved.field_str("input_device"), Some("USB Mic"));
+    }
+
+    /// A flow over a config whose file already records a speech choice.
     fn new_flow(config: &Config) -> SetupFlow {
+        flow_with(config, true)
+    }
+
+    fn flow_with(config: &Config, speech_saved: bool) -> SetupFlow {
         let platform = FakeSetupPlatform {
             ollama_installed: true,
             ..FakeSetupPlatform::default()
@@ -1673,8 +2002,33 @@ mod tests {
             &platform,
             &FakeLaunchAgent::new("not installed"),
             true,
+            speech_saved,
         )
         .unwrap()
+    }
+
+    /// Production's inputs for a root (`pages::setup::build`): the loaded
+    /// config, and `speech_saved` from the raw file at the path Apply writes.
+    fn open_root(root: &crate::data::DataRoot) -> SetupFlow {
+        let config = crate::data::load_config_at(root).unwrap();
+        flow_with(&config, crate::controllers::setup::configured(root))
+    }
+
+    /// Production's Apply for a root (`pages::setup`).
+    fn apply_root(job: &ApplyJob, root: &crate::data::DataRoot) -> Result<String, ApplyFailure> {
+        apply(job, &root.config_path, || crate::data::load_config_at(root))
+    }
+
+    /// A hand-written config file (no `[setup]` section).
+    fn write_raw(root: &crate::data::DataRoot, toml: &str) {
+        std::fs::create_dir_all(root.config_path.parent().unwrap()).unwrap();
+        std::fs::write(&root.config_path, toml).unwrap();
+    }
+
+    fn speech(path: &std::path::Path) -> (Option<String>, Option<String>, Option<String>) {
+        let saved = lf_core::config::load_from(path).unwrap();
+        let get = |k: &str| saved.field_str(k).map(str::to_string);
+        (get("stt_backend"), get("model_size"), get("stt_device"))
     }
 
     #[derive(Clone, Default)]
@@ -2170,7 +2524,8 @@ mod tests {
 
     #[test]
     fn review_rows_and_warnings_come_from_live_state() {
-        let mut flow = new_flow(&Config::defaults_for(false));
+        // First run (no file yet): the recommendation is what Apply saves.
+        let mut flow = flow_with(&Config::defaults_for(false), false);
         let mut installed = HashMap::new();
         installed.insert(flow.choices.stt_id.clone(), false);
         flow.installed = Loadable::Ready(installed);
