@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1120,6 +1121,9 @@ def _apply_live_config(fresh: Config) -> None:
     started; merge_live logs those as restart-only."""
     global _config, _ollama, _cleaner, _summarizer, _stt_reload_pending
     with _config_lock:
+        # Saves write the file's own features.meetings back (config_toml);
+        # track the file's current value even when nothing live changed.
+        _config = replace(_config, _file_meetings_enabled=fresh._file_meetings_enabled)
         merged, changed = merge_live(_config, fresh, reloaded=RUNTIME_FIELDS)
         groups = runtime_changes(merged, fresh)
         if not changed and not groups:
