@@ -1,5 +1,7 @@
 //! `lf-desktop`: the LocalFlow native desktop app (GPUI).
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::process::ExitCode;
 
 use lf_desktop::app::{self, Launch};
@@ -11,6 +13,7 @@ use lf_desktop::launch::{self, Launched};
 use lf_desktop::page::Page;
 
 fn main() -> ExitCode {
+    lf_desktop::console::attach_parent();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let env_sandbox = std::env::var("LOCALFLOW_SANDBOX").is_ok_and(|v| v == "1" || v == "true");
     #[cfg(feature = "runtime")]
