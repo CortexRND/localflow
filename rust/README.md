@@ -64,7 +64,7 @@ real load/transcription/reload, nonempty stable text, and PID-gone assertions
 after unload and dictation-off. Its transcript is recorded independently rather
 than required to match Parakeet's punctuation and spelling.
 
-# Default macOS app packaging (v0.2.2)
+# Default macOS app packaging (v0.2.3)
 
 Rust is the macOS installer default; Linux and Windows retain Python. From a source checkout on macOS:
 
@@ -349,7 +349,7 @@ lf-rs setup install-app
   under the same discovery, probe and notice rules; it quietly opens the
   legacy window when the preview isn't installed, on first run and for the
   Setup page; `--legacy`/`LOCALFLOW_UI=legacy` always
-  opens the legacy window (builds after v0.2.2; the released v0.2.2 CLIs
+  opens the legacy window (v0.2.3 and later; v0.2.2 and earlier CLIs
   don't have this selector). The legacy window is
   `python -m localflow.hub_window --page PAGE` from the Python install
   (the one `setup install-app` uses).

@@ -85,7 +85,7 @@ fn install_app(dest: &Path, python: &str, bundle: &Bundle<'_>) -> Result<PathBuf
         ("CFBundleIdentifier".to_string(), string(bundle.bundle_id)),
         ("CFBundleExecutable".to_string(), string("launcher")),
         ("CFBundlePackageType".to_string(), string("APPL")),
-        ("CFBundleShortVersionString".to_string(), string("0.2.2")),
+        ("CFBundleShortVersionString".to_string(), string("0.2.3")),
         ("NSHighResolutionCapable".to_string(), Plist::Bool(true)),
     ]);
     if bundle.full {
