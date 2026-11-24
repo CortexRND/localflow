@@ -1391,6 +1391,7 @@ impl Shell {
             let _ = handle.update(cx, |_, window, _| window.focus(&focus));
         });
         let downloads = self.cx.services.downloads.clone();
+        let retry = self.cx.services.retry.clone();
         let engine = self.engine.take();
         cx.spawn(async move |this, cx| {
             let (jobs_stopped, engine_outcome, engine) = cx
@@ -1399,6 +1400,9 @@ impl Shell {
                     // Downloads are cancelled; deletions and persistent writes
                     // (keys, provider, setup, settings) are waited for.
                     downloads.cancel_all();
+                    if let Some(python) = retry.python() {
+                        python.stop();
+                    }
                     let jobs_stopped = downloads.wait_idle(Duration::from_secs(3))
                         && lf_ui::shutdown::wait_for_pending_writes(Duration::from_secs(3));
                     let (outcome, engine) = match engine {

@@ -33,6 +33,9 @@ UI_CHOICES = ("gpui", "legacy")
 UI_ENV = "LOCALFLOW_UI"
 BIN_ENV = "LOCALFLOW_DESKTOP_BIN"
 SANDBOX_ENV = "LOCALFLOW_SANDBOX"
+# The interpreter running this `lf`, for History Retry's fallback to this
+# install's speech model (`python -m localflow.cli history retry --json`).
+PYTHON_ENV = "LOCALFLOW_PYTHON"
 
 # Ownership metadata written by scripts/install_gpui_preview.sh.
 LINUX_ROOT = (".local", "share", "localflow-preview")
@@ -278,12 +281,16 @@ def spawn(argv: list[str], wait: float | None = None) -> tuple[bool, str | None]
     `wait` isn't seen here. stderr is inherited (nothing captured or logged).
     """
     popen_kwargs = {"start_new_session": True} if os.name == "posix" else {}
+    env = dict(os.environ)
+    if sys.executable:
+        env[PYTHON_ENV] = sys.executable
     try:
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             close_fds=True,
+            env=env,
             **popen_kwargs,
         )
     except OSError:
