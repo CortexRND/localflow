@@ -321,8 +321,10 @@ impl RenderOnce for Button {
         } else {
             ring(&t)
         };
+        let selector = self.label.clone();
         let mut el = div()
             .id(self.id)
+            .debug_selector(move || format!("button:{selector}"))
             .flex()
             .flex_none()
             .items_center()
@@ -820,6 +822,7 @@ pub fn banner(
         .items_center()
         .gap(space::s5())
         .w_full()
+        .min_w_0()
         .min_h(size::row())
         .px(space::s6())
         .py(space::s4())
@@ -828,9 +831,32 @@ pub fn banner(
         .text_color(t.text)
         .text_size(sz)
         .line_height(lh)
-        .child(icon(name, fg))
-        .child(div().flex_1().min_w_0().child(message.into()))
-        .when_some(action, |d, a| d.child(a))
+        // A wrapped message keeps its icon on the first line; the action
+        // stays centred and full size.
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(space::s5())
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .h(lh)
+                        .child(icon(name, fg).debug_selector(|| "banner-icon".into())),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "banner-message".into())
+                        .flex_1()
+                        .min_w_0()
+                        .child(message.into()),
+                ),
+        )
+        .when_some(action, |d, a| d.child(div().flex_none().child(a)))
 }
 
 pub fn empty_state(
