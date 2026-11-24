@@ -53,6 +53,16 @@ const REPLACE_BUDGET: std::time::Duration = std::time::Duration::from_millis(250
 /// it open briefly). The staged file never outlives a failed replace.
 #[cfg(windows)]
 fn replace_with(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    replace_with_pauses(tmp, path, std::thread::sleep)
+}
+
+/// [`replace_with`] with the pause between blocked renames injected (tests).
+#[cfg(windows)]
+fn replace_with_pauses(
+    tmp: tempfile::NamedTempFile,
+    path: &Path,
+    mut pause_for: impl FnMut(std::time::Duration),
+) -> std::io::Result<()> {
     let (file, staged) = tmp.keep().map_err(|e| e.error)?;
     drop(file);
     let deadline = std::time::Instant::now() + REPLACE_BUDGET;
@@ -64,7 +74,7 @@ fn replace_with(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()
                 if now >= deadline {
                     break Err(error);
                 }
-                std::thread::sleep(pause.min(deadline - now));
+                pause_for(pause.min(deadline - now));
                 pause *= 2;
             }
             other => break other,
@@ -653,22 +663,14 @@ mod tests {
             .unwrap();
         tmp.write_all(b"new").unwrap();
         tmp.as_file().sync_all().unwrap();
-        let holder = open_without_delete_sharing(&path);
-        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let release = std::thread::spawn({
-            let released = released.clone();
-            move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                released.store(true, std::sync::atomic::Ordering::SeqCst);
-                drop(holder);
-            }
-        });
-        replace_with(tmp, &path).unwrap();
-        assert!(
-            released.load(std::sync::atomic::Ordering::SeqCst),
-            "the replace finished only after the holder was released"
-        );
-        release.join().unwrap();
+        let mut holder = Some(open_without_delete_sharing(&path));
+        let mut pauses = 0;
+        replace_with_pauses(tmp, &path, |_| {
+            pauses += 1;
+            holder.take();
+        })
+        .unwrap();
+        assert_eq!(pauses, 1, "blocked once, then replaced after the release");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         assert_eq!(dir_names(dir.path()), vec!["status.json".to_string()]);
     }
