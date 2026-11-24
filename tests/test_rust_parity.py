@@ -1358,10 +1358,23 @@ def test_cli_stt_broken_python_plugin(rust_build, sandbox):
         "class Demo:\n    offline = False\n    def list_models(self):\n        return []\n", encoding="utf-8",
     )
     env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    rust_env = env
+    if os.name == "posix":
+        # A later candidate that sees no plug-ins must not replace the broken interpreter's answer.
+        shim = sandbox["root"] / "healthy-python"
+        shim.mkdir()
+        (shim / "python3").write_text(
+            f"#!/bin/sh\nunset PYTHONPATH\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8",
+        )
+        (shim / "python3").chmod(0o755)
+        rust_env = {**env, "PATH": str(shim)}
+        healthy = lf(rust_build, sandbox, "stt", "list", env={**rust_env, "VIRTUAL_ENV": str(shim)})
+        assert healthy.returncode == 0, healthy.stderr
+        assert "faster-whisper: " in healthy.stdout and "broken" not in healthy.stdout
     header = "Traceback (most recent call last):\n"
     for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "broken")):
         python = _python_cli(sandbox, *args, env=env)
-        rust = lf(rust_build, sandbox, *args, env=env)
+        rust = lf(rust_build, sandbox, *args, env=rust_env)
         assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout) == (1, "")
         assert python.stderr.startswith(header) and rust.stderr.startswith(header)
         assert python.stderr.endswith(rust.stderr[len(header):])
