@@ -57,6 +57,7 @@ fn list(json_output: bool, io: &mut Io<'_>) -> Result<()> {
     let config = config::load_config()?;
     let provider = api::resolve_stt_provider(config.field_str("stt_backend").unwrap_or("auto"));
     let probe = probe_python("list", provider);
+    crashed(&probe, io)?;
     let ids = provider_ids(&probe);
     let providers = ids
         .iter()
@@ -120,6 +121,7 @@ fn select(provider: &str, model: Option<String>, device: SttDevice, io: &mut Io<
     let selected = api::resolve_stt_provider(provider);
     if !STT_IDS.contains(&selected) {
         let probe = probe_python("use", selected);
+        crashed(&probe, io)?;
         let ids = provider_ids(&probe);
         if !ids.contains(&selected) {
             return fail(unknown_provider(selected, &ids));
@@ -161,6 +163,7 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
     };
     if let Some((extra, provider)) = apple_runtime {
         let probe = probe_python("runtime", provider);
+        crashed(&probe, io)?;
         if probe["modules"][runtime_module(provider)] != true {
             return fail(format!("install the runtime: pip install -e '.[{extra}]'"));
         }
@@ -293,6 +296,7 @@ import importlib.util
 import json
 import platform
 import sys
+import traceback
 
 def available(module):
     try:
@@ -300,57 +304,178 @@ def available(module):
     except (ImportError, ValueError):
         return False
 
+def crash(exc):
+    report = traceback.TracebackException.from_exception(exc)
+    del report.stack[0]
+    text = "".join(report.format())
+    return text if report.stack else "Traceback (most recent call last):\n" + text
+
+sys.stdout.write("lf-stt-probe:%d:" % available("localflow"))
+sys.stdout.flush()
 mode, selected = sys.argv[1:]
 result = {}
 if mode in ("runtime", "list"):
     result["modules"] = {m: available(m) for m in ("faster_whisper", "mlx_whisper", "parakeet_mlx")}
     result["apple_silicon"] = sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64")
+entries = {}
 if mode in ("list", "use"):
     builtins = ("faster-whisper", "mlx-whisper", "parakeet")
-    entries = {}
-    for entry in importlib.metadata.entry_points(group="localflow.stt_providers"):
-        if entry.name not in builtins:
-            entries.setdefault(entry.name, entry)
+    try:
+        group = importlib.metadata.entry_points()
+        if hasattr(group, "select"):
+            group = group.select(group="localflow.stt_providers")
+        else:
+            group = group.get("localflow.stt_providers", ())
+        for entry in group:
+            if entry.name not in builtins:
+                entries.setdefault(entry.name, entry)
+    except Exception as exc:
+        result["traceback"] = crash(exc)
     result["plugins"] = dict.fromkeys(entries)
-    with contextlib.redirect_stdout(sys.stderr):
-        if mode == "list":
-            for name, entry in entries.items():
-                result["plugins"][name] = entry.load().offline
-            if selected in entries:
-                try:
-                    models = [dataclasses.asdict(m) for m in entries[selected].load()().list_models()]
-                    result["selected"] = {"models": models, "error": None}
-                except Exception as exc:
-                    result["selected"] = {"models": [], "error": str(exc)}
-        elif selected in entries:
+with contextlib.redirect_stdout(sys.stderr):
+    if mode == "list":
+        for name in sorted(entries):
             try:
-                entries[selected].load()
+                result["plugins"][name] = entries[name].load().offline
             except Exception as exc:
-                result["error"] = str(exc)
+                result["traceback"] = crash(exc)
+                break
+        if selected in entries and "traceback" not in result:
+            try:
+                models = [dataclasses.asdict(m) for m in entries[selected].load()().list_models()]
+                result["selected"] = {"models": models, "error": None}
+            except Exception as exc:
+                result["selected"] = {"models": [], "error": str(exc)}
+    elif mode == "use" and selected in entries:
+        try:
+            entries[selected].load()
+        except KeyError as exc:
+            result["error"] = str(exc)
+        except Exception as exc:
+            result["traceback"] = crash(exc)
 print(json.dumps(result))
 "#;
 
 // Availability and entry points describe the installed Python runtime, not Rust
 // engine features. Only probe that boundary; config, catalogs and downloads are native.
+// The interpreter LocalFlow is installed in answers, like the Python CLI; with no
+// such candidate, the first one that ran the probe does (crashes included).
 fn probe_python(mode: &str, provider: &str) -> Value {
-    crate::python::candidates()
-        .into_iter()
-        .find_map(|interpreter| {
-            let output = crate::python::probe(&interpreter, PROBE)
-                .args([mode, provider])
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            serde_json::from_slice(&output.stdout).ok()
-        })
-        .unwrap_or(Value::Null)
+    let results = crate::python::candidates().into_iter().map(|interpreter| {
+        let output = crate::python::probe(&interpreter, PROBE)
+            .args([mode, provider])
+            .output()
+            .ok()?;
+        probe_result(output.status.code(), &output.stdout, &output.stderr)
+    });
+    choose(results)
+}
+
+/// The first answer from an interpreter with LocalFlow installed, else the
+/// first answer at all. Stops probing at the first LocalFlow answer.
+fn choose(results: impl IntoIterator<Item = Option<(bool, Value)>>) -> Value {
+    let mut first = None;
+    for (localflow, result) in results.into_iter().flatten() {
+        if localflow {
+            return result;
+        }
+        first.get_or_insert(result);
+    }
+    first.unwrap_or(Value::Null)
+}
+
+/// `None` when the interpreter could not start the probe (spawn or imports);
+/// otherwise whether it has LocalFlow installed and its answer. Any failure
+/// after the start is that answer, like Python's crash.
+fn probe_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Option<(bool, Value)> {
+    let stdout = stdout.strip_prefix(b"lf-stt-probe:")?;
+    let (localflow, stdout) = match stdout {
+        [b'1', b':', rest @ ..] => (true, rest),
+        [b'0', b':', rest @ ..] => (false, rest),
+        _ => return None,
+    };
+    if code == Some(0) {
+        if let Ok(result) = serde_json::from_slice(stdout) {
+            return Some((localflow, result));
+        }
+    }
+    Some((
+        localflow,
+        json!({
+            "traceback": String::from_utf8_lossy(stderr),
+            "exit": code.filter(|&code| code != 0).unwrap_or(1),
+        }),
+    ))
+}
+
+/// Python lets a plug-in's exception escape click: traceback, exit 1.
+fn crashed(probe: &Value, io: &mut Io<'_>) -> Result<()> {
+    let Some(traceback) = probe["traceback"].as_str() else {
+        return Ok(());
+    };
+    write!(io.err, "{traceback}")?;
+    let code = probe["exit"]
+        .as_i64()
+        .and_then(|code| i32::try_from(code).ok());
+    Err(CliError::Exit(code.unwrap_or(1)).into())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_width, progress_line};
+    use serde_json::json;
+
+    use super::{choose, effective_width, probe_result, progress_line};
+
+    #[test]
+    fn only_interpreters_that_cannot_run_the_probe_are_skipped() {
+        assert_eq!(probe_result(Some(1), b"", b"SyntaxError"), None);
+        assert_eq!(probe_result(Some(0), b"{}", b""), None);
+        assert_eq!(probe_result(Some(0), b"lf-stt-probe:{}", b""), None);
+        assert_eq!(
+            probe_result(Some(0), b"lf-stt-probe:1:{\"plugins\": {}}\r\n", b""),
+            Some((true, json!({"plugins": {}})))
+        );
+        assert_eq!(
+            probe_result(Some(3), b"lf-stt-probe:0:", b"bye\n"),
+            Some((false, json!({"traceback": "bye\n", "exit": 3})))
+        );
+        assert_eq!(
+            probe_result(None, b"lf-stt-probe:1:", b""),
+            Some((true, json!({"traceback": "", "exit": 1})))
+        );
+        assert_eq!(
+            probe_result(Some(0), b"lf-stt-probe:0:", b"oops"),
+            Some((false, json!({"traceback": "oops", "exit": 1})))
+        );
+    }
+
+    #[test]
+    fn the_localflow_interpreter_answers() {
+        let other = json!({"plugins": {}});
+        let install = json!({"plugins": {"demo": false}});
+        let crash = json!({"traceback": "boom", "exit": 1});
+        let first = json!({"plugins": {"first": null}});
+        let answer = |localflow, value: &serde_json::Value| Some((localflow, value.clone()));
+        assert_eq!(
+            choose([None, answer(false, &other), answer(true, &install)]),
+            install
+        );
+        assert_eq!(
+            choose([answer(false, &other), answer(true, &crash), None]),
+            crash
+        );
+        assert_eq!(
+            choose([None, answer(false, &first), answer(false, &other)]),
+            first
+        );
+        assert_eq!(choose([None, None]), serde_json::Value::Null);
+        let mut probed = 0;
+        let results = [Some((true, json!(1))), Some((true, json!(2)))]
+            .into_iter()
+            .inspect(|_| probed += 1);
+        assert_eq!(choose(results), json!(1));
+        assert_eq!(probed, 1);
+    }
 
     #[test]
     fn legacy_windows_reserves_last_column_like_rich() {
