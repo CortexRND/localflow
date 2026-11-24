@@ -459,6 +459,7 @@ mod tests {
         true
     }
 
+    #[cfg(unix)]
     fn set_up_no() -> bool {
         false
     }
