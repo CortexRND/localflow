@@ -156,7 +156,11 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
      and launches `lf-desktop.exe --sandbox` on `windows-latest`, but nobody has
      unzipped and run it by hand. macOS: CI smoke-install only, with no
      Gatekeeper or permission check.
-   - The default installers (`install.sh`, `install.ps1`) still don't ship it.
+
+   Waived by the owner for the launcher switch (Taj, 2026-11-24, "Waive for
+   launcher"): the default installers (`install.sh`, `install.ps1`) still don't
+   ship the preview and need not for this gate, because the launcher falls back
+   to the legacy window when no preview is installed.
 6. **Honest runtime status.** Home and the sidebar report listening, input device
    and warnings from a runtime signal (PR 2: status-file protocol 2 from the Rust
    runtime). HTTP reachability alone is never shown as dictation readiness. Before
