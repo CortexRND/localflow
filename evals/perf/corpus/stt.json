@@ -1,0 +1,117 @@
+{
+  "schema": "lf-perf-stt-corpus/v1",
+  "description": "Pinned STT corpus: 10 LibriSpeech test-clean clips (3-15 s) plus the Parakeet test_wavs/0.wav fixed clip. Audio is downloaded, SHA-256 verified and cached by download.py, never committed. sha256 is of the downloaded file (the raw .flac archive member, or the .wav).",
+  "license": "LibriSpeech: CC BY 4.0 (Panayotov et al., 2015, https://www.openslr.org/12)",
+  "sample_rate": 16000,
+  "clips": [
+    {
+      "id": "parakeet-0",
+      "duration_s": 7.435,
+      "sha256": "5fceacff0315d49cb59fcc505bcecf1ed5f2f35c2897b1e65a59f30e5d922150",
+      "smoke": false,
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/test_wavs/0.wav",
+      "reference": "AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS",
+      "source": "sherpa-onnx Parakeet TDT 0.6B v2 test_wavs/0.wav (the stt_bench fixed clip)"
+    },
+    {
+      "id": "6930-75918-0000",
+      "duration_s": 3.505,
+      "sha256": "9ce35224156f071ab58eb7feb8a5ceae600f6f9f353da2a6cbf797b6b1ac8a23",
+      "smoke": true,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0000.flac",
+      "reference": "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0007",
+      "duration_s": 3.315,
+      "sha256": "059969de8f6b780e1a4982805e977c3e73e40d3759c8fa8cb0cb8fabd9eb5b27",
+      "smoke": true,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0007.flac",
+      "reference": "YOU WILL BE FRANK WITH ME I ALWAYS AM",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0010",
+      "duration_s": 3.035,
+      "sha256": "fa67866b5efc5df7fe35e2f27ad8f9d1f344f7848ce30d8b131f77a372f96add",
+      "smoke": true,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0010.flac",
+      "reference": "I CAN PERCEIVE LOVE CLEARLY ENOUGH",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0011",
+      "duration_s": 3.195,
+      "sha256": "20e49ab7c5b418f379e775f2966616d1bd60fa6ef5d1ffc6d99de5b075e75284",
+      "smoke": false,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0011.flac",
+      "reference": "I AM CONVINCED OF WHAT I SAY SAID THE COUNT",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0002",
+      "duration_s": 5.025,
+      "sha256": "74ecfd628f49dca71995972c075fcc9904df804d49a4eb5b11fb712b3584f789",
+      "smoke": false,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0002.flac",
+      "reference": "CONGRATULATIONS WERE POURED IN UPON THE PRINCESS EVERYWHERE DURING HER JOURNEY",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0006",
+      "duration_s": 5.85,
+      "sha256": "4bed112ebfdba58ec061abd3fe013f89946863e9c51e8a83b50a5eb7afb9ce65",
+      "smoke": false,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0006.flac",
+      "reference": "THIS HAS INDEED BEEN A HARASSING DAY CONTINUED THE YOUNG MAN HIS EYES FIXED UPON HIS FRIEND",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0015",
+      "duration_s": 6.38,
+      "sha256": "93618408931cd8bcc83f064b61bf2413a0fbbed356f006ccfe80131d9966cf6d",
+      "smoke": false,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0015.flac",
+      "reference": "THUS IT IS THAT THE HONOR OF THREE IS SAVED OUR COUNTRY'S OUR MASTER'S AND OUR OWN",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0004",
+      "duration_s": 11.065,
+      "sha256": "e1c4755c2febfc6b77fde418821c57e2e980d84d4c79a73ff60c6e6dfc794eac",
+      "smoke": false,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0004.flac",
+      "reference": "SHE TAUGHT HER DAUGHTER THEN BY HER OWN AFFECTION FOR IT THAT LOVE FOR A COUNTRY WHERE THEY HAD BOTH BEEN HOSPITABLY RECEIVED AND WHERE A BRILLIANT FUTURE OPENED BEFORE THEM",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0005",
+      "duration_s": 13.16,
+      "sha256": "ccc0da025ef4f4596a4e70fbde291527d140364166d19d9bb516a48407b3491e",
+      "smoke": false,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0005.flac",
+      "reference": "THE COUNT HAD THROWN HIMSELF BACK ON HIS SEAT LEANING HIS SHOULDERS AGAINST THE PARTITION OF THE TENT AND REMAINED THUS HIS FACE BURIED IN HIS HANDS WITH HEAVING CHEST AND RESTLESS LIMBS",
+      "source": "LibriSpeech test-clean"
+    },
+    {
+      "id": "6930-75918-0001",
+      "duration_s": 14.225,
+      "sha256": "3dfad7eb0793eddd5040d04f1f2f3046ceeee39e0ec461794856a350e1bd728e",
+      "smoke": false,
+      "archive_url": "https://huggingface.co/datasets/k2-fsa/LibriSpeech/resolve/main/test-clean.tar.gz",
+      "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0001.flac",
+      "reference": "THE ENGLISH FORWARDED TO THE FRENCH BASKETS OF FLOWERS OF WHICH THEY HAD MADE A PLENTIFUL PROVISION TO GREET THE ARRIVAL OF THE YOUNG PRINCESS THE FRENCH IN RETURN INVITED THE ENGLISH TO A SUPPER WHICH WAS TO BE GIVEN THE NEXT DAY",
+      "source": "LibriSpeech test-clean"
+    }
+  ]
+}
