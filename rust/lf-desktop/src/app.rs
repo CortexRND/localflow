@@ -18,7 +18,7 @@ use crate::page::{Page, NAV_FOOTER, NAV_GROUPS};
 use crate::pages;
 use crate::remote::Health;
 use crate::theme::{size as tsize, space, text, theme, Theme, Tone};
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use crate::tray;
 use crate::ui::{self, assets::Assets, Button};
 
@@ -255,9 +255,9 @@ pub struct Shell {
     pub engine: Option<Engine>,
     /// A background stop (close/quit) is running.
     stopping: bool,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     tray: Option<(tray::Tray, tray::View)>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     tray_task: Option<gpui::Task<()>>,
 }
 
@@ -388,9 +388,9 @@ impl Shell {
             probing: false,
             engine,
             stopping: false,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             tray: None,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             tray_task: None,
         };
         if let Some(notice) = launch.notice {
@@ -531,11 +531,11 @@ impl Shell {
             }
             cx.notify();
         }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         self.update_tray();
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn tray_view(&self) -> tray::View {
         tray::View::new(
             &self.runtime,
@@ -544,7 +544,7 @@ impl Shell {
         )
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn update_tray(&mut self) {
         if self.tray.is_none() {
             return;
@@ -558,8 +558,13 @@ impl Shell {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn start_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Sandbox automation starts nothing in the macOS menu bar.
+        #[cfg(target_os = "macos")]
+        if self.cx.services.is_sandbox() {
+            return;
+        }
         let view = self.tray_view();
         let initial = view.clone();
         let (actions, events) = async_channel::unbounded();
@@ -569,7 +574,8 @@ impl Shell {
                 .background_executor()
                 .spawn(async move { tray::Tray::new(initial, actions) })
                 .await;
-            #[cfg(target_os = "windows")]
+            // AppKit and Win32 objects live on GPUI's main thread.
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             let result = tray::Tray::new(initial, actions);
             let icon = match result {
                 Ok(icon) => icon,
@@ -600,16 +606,33 @@ impl Shell {
         }));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn tray_action(&mut self, action: tray::Action, window: &mut Window, cx: &mut Context<Self>) {
         use crate::controllers::engine::MenuCommand;
 
+        // Every receipt consumes the pending macOS paste request, including
+        // ones refused below, so the menu can always take a new one.
+        #[cfg(target_os = "macos")]
+        let paste_target_ok = action == tray::Action::PasteLast
+            && self
+                .tray
+                .as_ref()
+                .is_some_and(|(icon, _)| icon.restore_paste_target());
         if self.stopping {
             return;
         }
+        // On macOS a menu bar item doesn't activate LocalFlow, and GPUI's
+        // `activate_window` only orders the window front within the app, so
+        // anything that should surface the window activates the app too.
         match action {
-            tray::Action::Open => window.activate_window(),
+            tray::Action::Open => {
+                #[cfg(target_os = "macos")]
+                cx.activate(true);
+                window.activate_window();
+            }
             tray::Action::Quit => {
+                #[cfg(target_os = "macos")]
+                cx.activate(true);
                 window.activate_window();
                 self.request_close(true, window, cx);
             }
@@ -627,6 +650,8 @@ impl Shell {
                         updated.set_field("dictation_enabled", serde_json::json!(!enabled));
                         Ok(updated)
                     }) {
+                        #[cfg(target_os = "macos")]
+                        cx.activate(true);
                         window.activate_window();
                         self.toast(
                             format!("Couldn't switch dictation: {error}").into(),
@@ -653,6 +678,19 @@ impl Shell {
                     {
                         self.toast(
                             "Couldn't restore the window to paste into.".into(),
+                            None,
+                            cx,
+                        );
+                        return;
+                    }
+                    // Never activates anything: on refusal the user re-picks
+                    // their app, and the clipboard is untouched.
+                    #[cfg(target_os = "macos")]
+                    if !paste_target_ok {
+                        self.toast(
+                            "Switch to the app you want to paste into, then choose \
+                             Paste last transcript again."
+                                .into(),
                             None,
                             cx,
                         );
@@ -1788,7 +1826,11 @@ pub fn run(launch: Launch) -> RunStatus {
                                 .unwrap_or(true)
                         });
                         Shell::start_instance_poll(window, cx);
-                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        #[cfg(any(
+                            target_os = "linux",
+                            target_os = "windows",
+                            target_os = "macos"
+                        ))]
                         shell.start_tray(window, cx);
                         // Losing the window releases a setup microphone test
                         // (also one still opening) and cancels a trial;

@@ -8,7 +8,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
-use super::{icon_pixels, Action, View, ICON_SIZE};
+use super::{icon_pixels, status_text, Action, View, ICON_SIZE};
 
 pub(crate) struct Tray {
     icon: TrayIcon,
@@ -104,13 +104,4 @@ impl Tray {
             GetForegroundWindow() == target
         }
     }
-}
-
-fn status_text(view: &View) -> String {
-    let mut text = view.model.status_line.clone();
-    if let Some(warning) = &view.model.input_warning {
-        text.push_str(" — ");
-        text.push_str(warning);
-    }
-    text.replace('&', "&&")
 }

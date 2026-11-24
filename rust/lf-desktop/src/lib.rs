@@ -16,6 +16,6 @@ pub mod pages;
 pub mod remote;
 pub mod sandbox;
 pub mod theme;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 mod tray;
 pub mod ui;

@@ -78,7 +78,7 @@ Legend:
 | Shell | Screen-reader tree | Not possible with GPUI 0.2.2 (no accessibility API) | — | `lf-hub` on macOS |
 | Dictation | Linux global hotkeys in the Rust engine | Works on X11 (listen-only XInput2 raw events via `x11rb`, no grab or extra permission; hold, toggle, chords, sides, repeat suppression, clean stop). Wayland: explicit "unsupported" with the reason. Listener readiness is published only after the platform accepted it. If the listener dies, held keys count as released: a hold recording ends and is transcribed; a toggle or command recording is discarded | `lf_input::linux` | Python runtime |
 | Dictation | Windows global hotkeys in the Rust engine | Listen-only Win32 keyboard hook on the current desktop; supports hold-to-talk, chords, sided modifiers, repeat suppression, and clean stop. Printable shortcuts use virtual keys with US punctuation mappings | `lf_input::listener` | Python runtime |
-| Dictation | Tray item | Missing | — | Python runtime |
+| Dictation | Tray item | Works on Linux (StatusNotifierItem), Windows and macOS (menu bar item, not shown in `--sandbox`): status, Open, dictation switch, Paste last transcript (this window's engine only; on macOS refused unless, when the window handles the request, the app frontmost when it was chosen is still frontmost and isn't LocalFlow; as with the paste shortcut, focus can change after that check and before the keystroke), Quit. macOS: type-checked in CI and an earlier native probe exercised the status item and menu callbacks; this integration is not interactively verified (UI QA waived) | `lf_runtime::menubar::MenuModel`, `tray-icon` / `ksni` | Python runtime |
 
 Wispr Flow features that LocalFlow doesn't plan (account, team sharing, sync, mobile,
 cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
@@ -90,7 +90,7 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    setup wizard, model storage, the settings assistant, key import, Test LLM, and
    single-instance and page routing; they still need interactive review on Linux
    (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
-   rows (tray item, History retry) need a decision.
+   row (History retry) needs a decision.
 2. **Data safety.** [`gpui_data_safety.py`](../scripts/gpui_data_safety.py) compares
    the real config file, `~/.localflow` and the keyring by hash before and after a
    scripted sandbox session. In real mode, every write goes through `config_write`
