@@ -70,7 +70,11 @@ NEAR_FLAGS_HELPS = (
 OLD_HELP = GOOD_HELP.replace(
     "    --setup            Open the setup wizard (or hand it to the open window)\n", ""
 )
-UI_ENVS = ("LOCALFLOW_UI", "LOCALFLOW_DESKTOP_BIN", "LOCALFLOW_SANDBOX", "LOCALFLOW_CONFIG")
+UI_ENVS = ("LOCALFLOW_UI", "LOCALFLOW_DESKTOP_BIN", "LOCALFLOW_SANDBOX", "LOCALFLOW_CONFIG",
+           "LOCALFLOW_RUNTIME")
+COMMANDS = ("hub", "phrases", "setup")
+# The real discovery: tests/conftest.py stubs it out for every other test file.
+REAL_FIND_DESKTOP = desktop_launch.find_desktop
 
 
 @pytest.fixture(autouse=True)
@@ -79,9 +83,36 @@ def home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    # Windows discovery reads LOCALAPPDATA: never the developer's real one.
+    monkeypatch.setenv("LOCALAPPDATA", str(home.joinpath("AppData", "Local")))
     for name in UI_ENVS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(desktop_launch, "find_desktop", REAL_FIND_DESKTOP)
     return home
+
+
+class NoProcess:
+    """Stands in for probe/spawn when nothing may be probed or launched."""
+
+    def __init__(self, monkeypatch, probe_ok=True):
+        self.probed = []
+        self.spawned = []
+        monkeypatch.setattr(desktop_launch, "probe", lambda exe: self.probed.append(exe) or probe_ok)
+        monkeypatch.setattr(desktop_launch, "spawn",
+                            lambda argv: self.spawned.append(argv) or (True, None))
+
+
+@pytest.fixture
+def no_process(monkeypatch):
+    return NoProcess(monkeypatch)
+
+
+@pytest.fixture
+def set_platform(monkeypatch):
+    def set_to(name):
+        monkeypatch.setattr(desktop_launch.sys, "platform", name)
+
+    return set_to
 
 
 class Legacy:
@@ -202,19 +233,61 @@ def configured(tmp_path, monkeypatch):
 # --------------------------------------------------------------- selection ---
 
 
-def test_selection_precedence_is_flag_then_env_then_legacy_default():
-    assert desktop_launch.DEFAULT_UI == "legacy"
-    assert desktop_launch.choose_ui(None, {}) == ("legacy", None)
-    assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": "gpui"}) == ("gpui", None)
-    assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": " GPUI "}) == ("gpui", None)
-    assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": "legacy"}) == ("legacy", None)
-    assert desktop_launch.choose_ui("legacy", {"LOCALFLOW_UI": "gpui"}) == ("legacy", None)
-    assert desktop_launch.choose_ui("gpui", {"LOCALFLOW_UI": "legacy"}) == ("gpui", None)
-    assert desktop_launch.choose_ui("gpui", {"LOCALFLOW_UI": "bogus"}) == ("gpui", None)
-    assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": "bogus"}) == (
-        "legacy", desktop_launch.NOTICE_INVALID_ENV)
-    # A binary override alone is not an opt-in.
-    assert desktop_launch.choose_ui(None, {"LOCALFLOW_DESKTOP_BIN": "/x/lf-desktop"})[0] == "legacy"
+def test_platform_default_is_gpui_on_linux_and_windows_only():
+    for name in ("linux", "linux2", "win32"):
+        assert desktop_launch.default_ui(name) == "gpui", name
+    for name in ("darwin", "cygwin", "freebsd14", "aix", ""):
+        assert desktop_launch.default_ui(name) == "legacy", name
+    assert not hasattr(desktop_launch, "DEFAULT_UI")
+    assert desktop_launch.RUNTIME_ENV == "LOCALFLOW_RUNTIME"
+
+
+@pytest.mark.parametrize(("name", "default"), [("linux", "gpui"), ("win32", "gpui"),
+                                               ("darwin", "legacy"), ("freebsd14", "legacy")])
+def test_selection_precedence_is_flag_then_runtime_then_env_then_platform_default(name, default):
+    def choose(flag, env):
+        return desktop_launch.choose_ui(flag, env, name)
+
+    assert choose(None, {}) == (default, False, None)
+    assert choose(None, {"LOCALFLOW_UI": ""}) == (default, False, None)
+    assert choose(None, {"LOCALFLOW_UI": "gpui"}) == ("gpui", True, None)
+    assert choose(None, {"LOCALFLOW_UI": " GPUI "}) == ("gpui", True, None)
+    assert choose(None, {"LOCALFLOW_UI": "legacy"}) == ("legacy", True, None)
+    assert choose("legacy", {"LOCALFLOW_UI": "gpui"}) == ("legacy", True, None)
+    assert choose("gpui", {"LOCALFLOW_UI": "legacy"}) == ("gpui", True, None)
+    assert choose("gpui", {"LOCALFLOW_UI": "bogus"}) == ("gpui", True, None)
+    assert choose(None, {"LOCALFLOW_UI": "bogus"}) == ("legacy", True, desktop_launch.NOTICE_INVALID_ENV)
+    # A binary override alone is not an opt-in: it never changes the default.
+    assert choose(None, {"LOCALFLOW_DESKTOP_BIN": "/x/lf-desktop"}) == (default, False, None)
+    # LOCALFLOW_RUNTIME=python beats LOCALFLOW_UI but not a flag.
+    for value in ("python", " Python ", "PYTHON"):
+        assert choose(None, {"LOCALFLOW_RUNTIME": value}) == ("legacy", True, None)
+        assert choose(None, {"LOCALFLOW_RUNTIME": value, "LOCALFLOW_UI": "gpui"}) == ("legacy", True, None)
+        assert choose(None, {"LOCALFLOW_RUNTIME": value, "LOCALFLOW_UI": "bogus"}) == ("legacy", True, None)
+        assert choose("gpui", {"LOCALFLOW_RUNTIME": value}) == ("gpui", True, None)
+    # Any other runtime value is ignored, silently.
+    for value in ("", "rust", " Rust ", "pythonx", "secret-garbage"):
+        assert choose(None, {"LOCALFLOW_RUNTIME": value}) == choose(None, {}), value
+        assert choose(None, {"LOCALFLOW_RUNTIME": value, "LOCALFLOW_UI": "gpui"}) == ("gpui", True, None)
+
+
+@pytest.mark.parametrize("name", ["linux", "win32", "darwin", "freebsd14"])
+def test_setup_window_defaults_to_legacy_but_explicit_choices_are_unchanged(name):
+    assert desktop_launch.default_ui(name, setup=True) == "legacy"
+
+    def choose(flag, env):
+        return desktop_launch.choose_ui(flag, env, name, setup=True)
+
+    for env in ({}, {"LOCALFLOW_UI": ""}, {"LOCALFLOW_RUNTIME": "rust"},
+                {"LOCALFLOW_DESKTOP_BIN": "/x/lf-desktop"}):
+        assert choose(None, env) == ("legacy", False, None), env
+    assert choose("gpui", {}) == ("gpui", True, None)
+    assert choose(None, {"LOCALFLOW_UI": "gpui"}) == ("gpui", True, None)
+    assert choose("gpui", {"LOCALFLOW_RUNTIME": "python"}) == ("gpui", True, None)
+    assert choose("legacy", {"LOCALFLOW_UI": "gpui"}) == ("legacy", True, None)
+    assert choose(None, {"LOCALFLOW_UI": "legacy"}) == ("legacy", True, None)
+    assert choose(None, {"LOCALFLOW_RUNTIME": "python", "LOCALFLOW_UI": "gpui"}) == ("legacy", True, None)
+    assert choose(None, {"LOCALFLOW_UI": "bogus"}) == ("legacy", True, desktop_launch.NOTICE_INVALID_ENV)
 
 
 def test_flags_are_mutually_exclusive():
@@ -254,12 +327,19 @@ def test_argv_is_closed_and_canonical():
 # --------------------------------------------------------------- discovery ---
 
 
-@pytest.mark.parametrize("platform", ["win32", "cygwin", "freebsd14", "aix"])
-def test_unsupported_platforms_never_discover(platform, home):
+@pytest.mark.parametrize("name", ["cygwin", "freebsd14", "aix", "win64"])
+def test_unsupported_platforms_never_discover(name, home):
     exe = home / "lf-desktop"
     exe.write_text("x")
     env = {"LOCALFLOW_DESKTOP_BIN": str(exe)}
-    assert desktop_launch.find_desktop(env, platform, home) == (None, desktop_launch.NOTICE_PLATFORM)
+    assert desktop_launch.find_desktop(env, name, home) == (None, desktop_launch.NOTICE_PLATFORM)
+
+
+def test_platform_keys():
+    assert desktop_launch.platform_key("linux") == "linux"
+    assert desktop_launch.platform_key("darwin") == "macos"
+    assert desktop_launch.platform_key("win32") == "windows"
+    assert desktop_launch.platform_key("cygwin") is None
 
 
 def _linux_install(home, manifest=b'{\n  "name": "localflow-preview",\n  "version": "0.2.2"\n}\n',
@@ -299,6 +379,23 @@ def test_missing_install_says_not_installed(home):
     for platform in ("linux", "darwin"):
         assert desktop_launch.find_desktop({}, platform, home) == (
             None, desktop_launch.NOTICE_NOT_INSTALLED)
+    assert desktop_launch.find_desktop({}, "win32", home) == (
+        None, desktop_launch.NOTICE_NOT_INSTALLED_WINDOWS)
+
+
+def test_not_installed_notices():
+    linux, windows = desktop_launch.NOTICE_NOT_INSTALLED, desktop_launch.NOTICE_NOT_INSTALLED_WINDOWS
+    assert "scripts/install_gpui_preview.sh" in linux  # Linux/macOS text unchanged
+    assert "install_gpui_preview" not in windows
+    assert windows == ("lf: LocalFlow Preview isn't installed (unzip the LocalFlow Preview folder "
+                       "into %LOCALAPPDATA%\\Programs); opening the legacy window.")
+    for key in ("linux", "macos", None):
+        assert desktop_launch.not_installed_notice(key) == linux
+    assert desktop_launch.not_installed_notice("windows") == windows
+    assert desktop_launch.is_not_installed(linux) and desktop_launch.is_not_installed(windows)
+    for other in (None, "", desktop_launch.NOTICE_NOT_OWNED, desktop_launch.NOTICE_BAD_OVERRIDE,
+                  desktop_launch.NOTICE_PLATFORM, desktop_launch.NOTICE_PROBE):
+        assert not desktop_launch.is_not_installed(other)
 
 
 def test_relative_home_is_never_searched_but_an_absolute_override_still_works(
@@ -393,6 +490,76 @@ def test_non_executable_override_is_refused(tmp_path, home):
     assert desktop_launch.find_desktop(env, "linux", home) == (None, desktop_launch.NOTICE_BAD_OVERRIDE)
 
 
+_WIN_MANIFEST = b'{\n  "name": "localflow-preview",\n  "os": "windows",\n  "version": "0.2.2"\n}\n'
+
+
+def _windows_install(local_appdata, manifest=_WIN_MANIFEST, exe=True):
+    """The Windows zip's `LocalFlow Preview` folder unzipped into Programs."""
+    root = local_appdata.joinpath("Programs", "LocalFlow Preview")
+    root.mkdir(parents=True)
+    if manifest is not None:
+        root.joinpath("MANIFEST.json").write_bytes(manifest)
+    exe_path = root.joinpath("lf-desktop.exe")
+    if exe:
+        exe_path.write_text("x")
+        exe_path.chmod(0o755)
+    return root, exe_path
+
+
+def test_owned_windows_folder_is_found_under_localappdata(tmp_path, home):
+    local = tmp_path.joinpath("Local AppData")
+    _, exe = _windows_install(local)
+    env = {"LOCALAPPDATA": str(local)}
+    assert desktop_launch.find_desktop(env, "win32", home) == (exe, None)
+    assert exe.parent.name == "LocalFlow Preview" and exe.name == "lf-desktop.exe"
+    # LOCALAPPDATA is honoured: the same folder isn't found from another one.
+    assert desktop_launch.find_desktop({"LOCALAPPDATA": str(home)}, "win32", home) == (
+        None, desktop_launch.NOTICE_NOT_INSTALLED_WINDOWS)
+
+
+@pytest.mark.parametrize("env", [{}, {"LOCALAPPDATA": ""}, {"LOCALAPPDATA": "relative/AppData"}])
+def test_windows_falls_back_to_home_appdata_local(env, home):
+    _, exe = _windows_install(home.joinpath("AppData", "Local"))
+    assert desktop_launch.find_desktop(env, "win32", home) == (exe, None)
+
+
+def test_missing_windows_folder_says_not_installed(tmp_path, home):
+    notice = desktop_launch.NOTICE_NOT_INSTALLED_WINDOWS
+    env = {"LOCALAPPDATA": str(tmp_path.joinpath("empty"))}
+    assert desktop_launch.find_desktop(env, "win32", home) == (None, notice)
+    _windows_install(tmp_path.joinpath("noexe"), exe=False)
+    env = {"LOCALAPPDATA": str(tmp_path.joinpath("noexe"))}
+    assert desktop_launch.find_desktop(env, "win32", home) == (None, notice)
+    # A relative HOME is never searched, and still gets the Windows wording.
+    assert desktop_launch.find_desktop({}, "win32", Path("relhome")) == (None, notice)
+
+
+@pytest.mark.parametrize("manifest", [
+    None,
+    b'{"name": "localflow"}',
+    b'{"name": "localflow-preview"',
+    b'["localflow-preview"]',
+    b"\xff\xfe not utf-8",
+])
+def test_windows_folder_without_our_manifest_is_refused(tmp_path, home, manifest):
+    _windows_install(tmp_path.joinpath("lad"), manifest=manifest)
+    env = {"LOCALAPPDATA": str(tmp_path.joinpath("lad"))}
+    assert desktop_launch.find_desktop(env, "win32", home) == (None, desktop_launch.NOTICE_NOT_OWNED)
+
+
+def test_windows_override_still_works_and_never_falls_through(tmp_path, home):
+    _windows_install(home.joinpath("AppData", "Local"))
+    exe = tmp_path.joinpath("elsewhere", "lf-desktop.exe")
+    exe.parent.mkdir()
+    exe.write_text("x")
+    exe.chmod(0o755)
+    assert desktop_launch.find_desktop({"LOCALFLOW_DESKTOP_BIN": str(exe)}, "win32", home) == (exe, None)
+    for override in ("lf-desktop.exe", str(tmp_path.joinpath("missing.exe"))):
+        env = {"LOCALFLOW_DESKTOP_BIN": override}
+        assert desktop_launch.find_desktop(env, "win32", home) == (
+            None, desktop_launch.NOTICE_BAD_OVERRIDE), override
+
+
 # ------------------------------------------------------------------- probe ---
 
 
@@ -464,16 +631,195 @@ def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, 
     assert not (home / ".localflow").exists() and config.read_text() == SET_UP  # no launcher writes
 
 
-@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-def test_default_is_unchanged_and_override_alone_does_not_opt_in(command, legacy, tmp_path):
+DEFAULT_HUB_ROUTES = [route for route in ROUTES if route[0][0] != "setup"]
+
+
+@posix_only
+@pytest.mark.parametrize(("args", "child_args"), DEFAULT_HUB_ROUTES)
+def test_linux_default_prefers_the_owned_install(args, child_args, fake, legacy, home, set_platform,
+                                                 configured):
+    set_platform("linux")
+    root, _ = _linux_install(home)
+    desktop = fake(directory=root / "bin")
+    result = _invoke(args)
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"], child_args]
+    assert legacy.calls == []
+    assert result.output == ""
+
+
+@posix_only
+@pytest.mark.parametrize(("args", "child_args"), DEFAULT_HUB_ROUTES)
+def test_linux_default_before_setup_gives_the_not_set_up_notice(
+        args, child_args, fake, legacy, home, set_platform, active_config):
+    # PR 103's rule applies to the default too: probed, never started.
+    set_platform("linux")
+    root, _ = _linux_install(home)
+    desktop = fake(directory=root / "bin")
+    result = _invoke(args)
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"]]
+    assert result.output == desktop_launch.NOTICE_NOT_SET_UP + "\n"
+    page = child_args[-1] if child_args else "Home"
+    expected = ("phrases", None) if args[0] == "phrases" else _hub_legacy(page)
+    assert legacy.calls == [expected]
+    assert not active_config.exists()
+
+
+@posix_only
+@pytest.mark.parametrize("kwargs", [{}, {"help_text": OLD_HELP}, {"launch": "exit1"}])
+def test_linux_setup_window_stays_legacy_by_default_even_with_an_owned_install(
+        kwargs, fake, legacy, home, set_platform):
+    # Preview's wizard would fetch native weights the Python runtime can't use.
+    set_platform("linux")
+    root, _ = _linux_install(home)
+    desktop = fake(directory=root / "bin", **kwargs)
+    for env in ({}, {"LOCALFLOW_UI": ""}, {"LOCALFLOW_RUNTIME": "rust"}):
+        legacy.calls.clear()
+        result = _invoke(["setup"], env=env)
+        assert result.exit_code == 0, result.output
+        assert legacy.calls == [("setup", None)]
+        assert result.output == ""
+    assert desktop.argvs() == []  # nothing discovered or probed
+
+
+@posix_only
+@pytest.mark.parametrize("opt_in", ["flag", "env"])
+def test_linux_explicit_setup_still_opens_the_preview_wizard(opt_in, fake, legacy, home, set_platform):
+    set_platform("linux")
+    root, _ = _linux_install(home)
+    desktop = fake(directory=root / "bin")
+    args, env = (["setup", "--gpui"], {}) if opt_in == "flag" else (["setup"], {"LOCALFLOW_UI": "gpui"})
+    result = _invoke(args, env=env)
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"], ["--setup"]]
+    assert legacy.calls == [] and result.output == ""
+
+
+@pytest.mark.parametrize("name", ["linux", "win32"])
+@pytest.mark.parametrize("command", COMMANDS)
+def test_default_without_an_install_opens_legacy_silently(command, name, legacy, no_process,
+                                                          set_platform):
+    set_platform(name)
+    for env in ({}, {"LOCALFLOW_UI": ""}, {"LOCALFLOW_RUNTIME": "rust"},
+                {"LOCALFLOW_RUNTIME": ""}, {"LOCALFLOW_RUNTIME": "secret-garbage"}):
+        legacy.calls.clear()
+        result = _invoke([command], env=env)
+        assert result.exit_code == 0, result.output
+        assert legacy.calls == [LEGACY_FOR[command]]
+        assert result.output == "", env
+    assert no_process.probed == [] and no_process.spawned == []
+
+
+@pytest.mark.parametrize("name", ["darwin", "freebsd14"])
+@pytest.mark.parametrize("command", COMMANDS)
+def test_mac_and_unknown_default_stay_legacy_and_override_alone_does_not_opt_in(
+        command, name, legacy, no_process, home, tmp_path, set_platform):
+    set_platform(name)
+    _mac_install(home)
     desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
-    for env in ({}, {"LOCALFLOW_DESKTOP_BIN": str(desktop.path)}, {"LOCALFLOW_UI": ""}):
+    for env in ({}, {"LOCALFLOW_DESKTOP_BIN": str(desktop.path)}, {"LOCALFLOW_UI": ""},
+                {"LOCALFLOW_RUNTIME": "rust"}):
         legacy.calls.clear()
         result = _invoke([command], env=env)
         assert result.exit_code == 0, result.output
         assert legacy.calls == [LEGACY_FOR[command]]
         assert result.output == ""
     assert desktop.runs() == []  # never probed
+    assert no_process.probed == [] and no_process.spawned == []
+
+
+@pytest.mark.parametrize("name", ["linux", "win32", "darwin"])
+@pytest.mark.parametrize("value", ["python", " Python ", "PYTHON"])
+@pytest.mark.parametrize("command", COMMANDS)
+def test_runtime_python_opens_legacy_without_probing(command, value, name, legacy, no_process,
+                                                     home, tmp_path, set_platform):
+    set_platform(name)
+    _linux_install(home)
+    _windows_install(home.joinpath("AppData", "Local"))
+    desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
+    for extra in ({}, {"LOCALFLOW_UI": "gpui"}, {"LOCALFLOW_UI": "bogus"},
+                  {"LOCALFLOW_DESKTOP_BIN": str(desktop.path)}, {"LOCALFLOW_SANDBOX": "1"}):
+        legacy.calls.clear()
+        result = _invoke([command], env={"LOCALFLOW_RUNTIME": value, **extra})
+        assert result.exit_code == 0, result.output
+        assert legacy.calls == [LEGACY_FOR[command]]
+        assert result.output == ""
+    assert desktop.runs() == []
+    assert no_process.probed == [] and no_process.spawned == []
+
+
+@posix_only
+@pytest.mark.parametrize("command", COMMANDS)
+def test_gpui_flag_beats_runtime_python(command, fake, legacy, configured):
+    desktop = fake()
+    result = _invoke([command, "--gpui"], env=_gpui_env(desktop, LOCALFLOW_RUNTIME="python"))
+    assert result.exit_code == 0, result.output
+    assert legacy.calls == [] and len(desktop.argvs()) == 2
+
+
+@posix_only
+@pytest.mark.parametrize("value", ["", "rust", "secret-garbage"])
+def test_other_runtime_values_keep_the_linux_default(value, fake, legacy, home, set_platform,
+                                                     configured):
+    set_platform("linux")
+    root, _ = _linux_install(home)
+    desktop = fake(directory=root / "bin")
+    result = _invoke(["hub"], env={"LOCALFLOW_RUNTIME": value})
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"], []]
+    assert legacy.calls == [] and result.output == ""
+
+
+def test_windows_default_launches_the_owned_folder(legacy, no_process, home, tmp_path, set_platform,
+                                                   configured):
+    set_platform("win32")
+    local = tmp_path.joinpath("Local AppData")
+    _, exe = _windows_install(local)
+    assert exe.parts[-3:] == ("Programs", "LocalFlow Preview", "lf-desktop.exe")
+    result = _invoke(["hub"], env={"LOCALAPPDATA": str(local)})
+    assert result.exit_code == 0, result.output
+    assert no_process.probed == [exe]
+    assert no_process.spawned == [[str(exe)]]
+    assert legacy.calls == [] and result.output == ""
+    result = _invoke(["phrases"], env={"LOCALAPPDATA": str(local)})
+    assert result.exit_code == 0 and no_process.spawned[-1] == [str(exe), "--page", "Hot Phrases"]
+    assert legacy.calls == []
+
+    # The setup window stays on the Python wizard by default: nothing is probed.
+    no_process.probed.clear()
+    no_process.spawned.clear()
+    result = _invoke(["setup"], env={"LOCALAPPDATA": str(local)})
+    assert result.exit_code == 0 and result.output == ""
+    assert legacy.calls == [("setup", None)]
+    assert no_process.probed == [] and no_process.spawned == []
+    # ...but an explicit choice still opens Preview's --setup.
+    legacy.calls.clear()
+    for args, env in ((["setup", "--gpui"], {}), (["setup"], {"LOCALFLOW_UI": "gpui"})):
+        result = _invoke(args, env={"LOCALAPPDATA": str(local), **env})
+        assert result.exit_code == 0 and result.output == ""
+        assert no_process.spawned[-1] == [str(exe), "--setup"]
+    assert no_process.probed == [exe, exe] and legacy.calls == []
+
+    no_process.probed.clear()
+    no_process.spawned.clear()
+    result = _invoke(["hub"], env={"LOCALAPPDATA": str(local), "LOCALFLOW_RUNTIME": "python"})
+    assert result.exit_code == 0 and result.output == ""
+    assert legacy.calls == [_hub_legacy()]
+    assert no_process.probed == [] and no_process.spawned == []
+
+
+@pytest.mark.parametrize(("command", "expected"), [("hub", _hub_legacy()), ("phrases", ("phrases", None))])
+def test_windows_default_before_setup_gives_the_not_set_up_notice(
+        command, expected, legacy, no_process, tmp_path, set_platform, active_config):
+    set_platform("win32")
+    local = tmp_path.joinpath("Local AppData")
+    _, exe = _windows_install(local)
+    result = _invoke([command], env={"LOCALAPPDATA": str(local)})
+    assert result.exit_code == 0, result.output
+    assert no_process.probed == [exe] and no_process.spawned == []  # probed, never started
+    assert result.output == desktop_launch.NOTICE_NOT_SET_UP + "\n"
+    assert legacy.calls == [expected]
 
 
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
@@ -505,7 +851,7 @@ def test_invalid_env_value_uses_legacy_with_a_static_notice(legacy):
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
 def test_unsupported_platform_falls_back_once(command, legacy, monkeypatch, tmp_path):
     desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
-    monkeypatch.setattr(desktop_launch.sys, "platform", "win32")
+    monkeypatch.setattr(desktop_launch.sys, "platform", "freebsd14")
     result = _invoke([command, "--gpui"], env=_gpui_env(desktop))
     assert result.exit_code == 0
     assert legacy.calls == [LEGACY_FOR[command]]
@@ -519,7 +865,21 @@ def test_not_installed_falls_back_once(legacy):
     result = _invoke(["phrases", "--gpui"])
     assert result.exit_code == 0
     assert legacy.calls == [("phrases", None)]
-    assert result.output.strip() == desktop_launch.NOTICE_NOT_INSTALLED
+    expected = desktop_launch.not_installed_notice(desktop_launch.platform_key())
+    assert result.output.strip() == expected
+
+
+@pytest.mark.parametrize("opt_in", [["--gpui"], []])
+@pytest.mark.parametrize("command", COMMANDS)
+def test_explicit_gpui_on_windows_without_an_install_gives_the_windows_notice(
+        command, opt_in, legacy, no_process, set_platform):
+    set_platform("win32")
+    env = {} if opt_in else {"LOCALFLOW_UI": "gpui"}
+    result = _invoke([command, *opt_in], env=env)
+    assert result.exit_code == 0
+    assert legacy.calls == [LEGACY_FOR[command]]
+    assert result.output == desktop_launch.NOTICE_NOT_INSTALLED_WINDOWS + "\n"
+    assert no_process.probed == [] and no_process.spawned == []
 
 
 @posix_only
@@ -624,7 +984,8 @@ def test_missing_preview_before_setup_keeps_the_not_installed_notice(
         pytest.skip("no preview package for this platform")
     result = _invoke(args, env=extra)
     assert result.exit_code == 0
-    assert result.output == desktop_launch.NOTICE_NOT_INSTALLED + "\n"
+    expected_notice = desktop_launch.not_installed_notice(desktop_launch.platform_key())
+    assert result.output == expected_notice + "\n"
     assert legacy.calls == [expected]
 
 
@@ -647,11 +1008,31 @@ def test_sandbox_request_is_refused_not_downgraded(command, opt_in, legacy, home
     assert list(home.iterdir()) == []  # no launcher logs or data
 
 
-def test_sandbox_env_keeps_its_legacy_semantics(legacy):
-    result = _invoke(["hub"], env={"LOCALFLOW_SANDBOX": "1"})
-    assert result.exit_code == 0 and legacy.calls == [_hub_legacy()]
-    result = _invoke(["setup", "--legacy"], env={"LOCALFLOW_SANDBOX": "1"})
-    assert result.exit_code == 0 and legacy.calls[-1] == ("setup", None)
+@pytest.mark.parametrize("name", ["linux", "win32", "darwin"])
+@pytest.mark.parametrize("command", COMMANDS)
+def test_sandbox_env_keeps_its_legacy_semantics(command, name, legacy, no_process, home, tmp_path,
+                                                set_platform):
+    # The platform default never refuses and never probes: even with an owned
+    # install or an override present, the sandbox gets today's legacy window.
+    set_platform(name)
+    _linux_install(home)
+    _windows_install(home.joinpath("AppData", "Local"))
+    desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
+    for env in ({"LOCALFLOW_SANDBOX": "1"}, {"LOCALFLOW_SANDBOX": "true"},
+                {"LOCALFLOW_SANDBOX": "1", "LOCALFLOW_DESKTOP_BIN": str(desktop.path)}):
+        legacy.calls.clear()
+        result = _invoke([command], env=env)
+        assert result.exit_code == 0, result.output
+        assert legacy.calls == [LEGACY_FOR[command]] and result.output == ""
+        result = _invoke([command, "--legacy"], env=env)
+        assert result.exit_code == 0 and legacy.calls[-1] == LEGACY_FOR[command]
+    assert desktop.runs() == []
+    assert no_process.probed == [] and no_process.spawned == []
+    # An explicit GPUI choice with the same sandbox request is still refused.
+    legacy.calls.clear()
+    result = _invoke([command, "--gpui"], env={"LOCALFLOW_SANDBOX": "1"})
+    assert result.exit_code == 1 and "lf-desktop --sandbox" in result.output
+    assert legacy.calls == [] and no_process.probed == []
 
 
 @posix_only
@@ -695,6 +1076,74 @@ def test_subcommands_never_reach_the_selector(args, monkeypatch, legacy, tmp_pat
 
 
 # ------------------------------------------------------- process fallback ---
+
+
+@pytest.mark.parametrize("name", ["linux", "win32"])
+def test_default_with_a_foreign_install_location_notices_and_falls_back_once(
+        name, legacy, no_process, home, set_platform):
+    set_platform(name)
+    _linux_install(home, manifest=b'{"name": "localflow"}')
+    _windows_install(home.joinpath("AppData", "Local"), manifest=b'{"name": "localflow"}')
+    result = _invoke(["hub"])
+    assert result.exit_code == 0
+    assert legacy.calls == [_hub_legacy()]
+    assert result.output.strip() == desktop_launch.NOTICE_NOT_OWNED
+    assert no_process.probed == []
+
+
+@pytest.mark.parametrize("name", ["linux", "win32"])
+def test_default_with_a_bad_override_notices_and_falls_back_once(name, legacy, no_process, tmp_path,
+                                                                 set_platform):
+    set_platform(name)
+    for override in ("secret-relative/lf-desktop", str(tmp_path / "secret-missing")):
+        legacy.calls.clear()
+        result = _invoke(["phrases"], env={"LOCALFLOW_DESKTOP_BIN": override})
+        assert result.exit_code == 0
+        assert legacy.calls == [("phrases", None)]
+        assert result.output.strip() == desktop_launch.NOTICE_BAD_OVERRIDE
+        assert "secret" not in result.output
+    assert no_process.probed == []
+
+
+@pytest.mark.parametrize("manifest", [b'{"name": "localflow"}', _WIN_MANIFEST])
+@pytest.mark.parametrize("name", ["linux", "win32"])
+def test_default_setup_window_ignores_a_broken_or_valid_install_silently(
+        name, manifest, legacy, no_process, home, tmp_path, set_platform):
+    # The setup window's default is legacy, so nothing is discovered: no notice
+    # for a foreign install or a bad override, and a valid one isn't probed.
+    set_platform(name)
+    _linux_install(home, manifest=manifest)
+    _windows_install(home.joinpath("AppData", "Local"), manifest=manifest)
+    for env in ({}, {"LOCALFLOW_DESKTOP_BIN": "secret-relative/lf-desktop"},
+                {"LOCALFLOW_DESKTOP_BIN": str(tmp_path / "secret-missing")}):
+        legacy.calls.clear()
+        result = _invoke(["setup"], env=env)
+        assert result.exit_code == 0
+        assert legacy.calls == [("setup", None)] and result.output == ""
+    assert no_process.probed == [] and no_process.spawned == []
+
+
+@posix_only
+@pytest.mark.parametrize(("kwargs", "notice"), [
+    ({"help_text": OLD_HELP}, desktop_launch.NOTICE_PROBE),
+    ({"help_text": SCOPE3_HELP}, desktop_launch.NOTICE_PROBE),
+    ({"help_text": OTHER_IDENTITY_HELP}, desktop_launch.NOTICE_PROBE),
+    ({"help_code": 3}, desktop_launch.NOTICE_PROBE),
+    ({"vanish": True}, desktop_launch.NOTICE_SPAWN),
+    ({"launch": "exit1"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=1)),
+    ({"launch": "exit2"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=2)),
+])
+@pytest.mark.parametrize("command", ["hub", "phrases"])
+def test_default_with_a_stale_or_failing_install_notices_and_falls_back_once(
+        command, kwargs, notice, fake, legacy, home, set_platform, configured):
+    set_platform("linux")
+    root, _ = _linux_install(home)
+    fake(directory=root / "bin", **kwargs)
+    result = _invoke([command])
+    assert result.exit_code == 0
+    assert legacy.calls == [LEGACY_FOR[command]]
+    assert result.output.strip() == notice
+    assert "SECRET" not in result.output
 
 
 @posix_only
@@ -818,6 +1267,15 @@ def test_override_path_with_spaces_and_metacharacters_is_not_shell_interpreted(
 # ---------------------------------------------------------------- wiring ---
 
 
+def test_suite_guard_matches_the_launcher():
+    import conftest
+
+    assert conftest._LAUNCHER_ENVS == (desktop_launch.UI_ENV, desktop_launch.BIN_ENV)
+    # Captured at collection, before any fixture stubs it: the real discovery.
+    assert REAL_FIND_DESKTOP.__module__ == "localflow.desktop_launch"
+    assert desktop_launch.find_desktop is REAL_FIND_DESKTOP
+
+
 def test_only_the_cli_uses_the_launcher_and_dispatchers_stay_legacy():
     users = sorted(
         path.name for path in (ROOT / "localflow").rglob("*.py")
@@ -827,6 +1285,33 @@ def test_only_the_cli_uses_the_launcher_and_dispatchers_stay_legacy():
 
 
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-def test_help_documents_the_opt_in(command):
+def test_help_documents_the_platform_default(command):
     result = _invoke([command, "--help"])
     assert "--gpui" in result.output and "--legacy" in result.output
+    text = " ".join(result.output.split())
+    # One shared text, true for all three commands.
+    assert "the default for lf hub and lf phrases on Linux and Windows" in text
+    assert "the default for lf setup, on macOS" in text and "LOCALFLOW_RUNTIME=python" in text
+    assert "(the default)" not in text and "the default on Linux and Windows" not in text
+
+
+def test_spawn_uses_its_own_session_on_posix_and_process_group_on_windows(monkeypatch):
+    # posix: a hang-up of lf's terminal doesn't reach the window. Windows: a
+    # Ctrl+C in lf's console doesn't (it stays on that console).
+    seen = []
+
+    class Proc:
+        def wait(self, timeout):
+            raise fake_subprocess.TimeoutExpired("lf-desktop", timeout)
+
+    real = desktop_launch.subprocess
+    fake_subprocess = types.SimpleNamespace(
+        Popen=lambda argv, **kw: seen.append(kw) or Proc(), DEVNULL=real.DEVNULL,
+        TimeoutExpired=real.TimeoutExpired, CREATE_NEW_PROCESS_GROUP=0x200)
+    monkeypatch.setattr(desktop_launch, "subprocess", fake_subprocess)
+    environ = desktop_launch.os.environ
+    for name in ("posix", "nt"):
+        monkeypatch.setattr(desktop_launch, "os", types.SimpleNamespace(name=name, environ=environ))
+        assert desktop_launch.spawn(["lf-desktop"], wait=0) == (True, None)
+    assert seen[0]["start_new_session"] is True and "creationflags" not in seen[0]
+    assert seen[1]["creationflags"] == 0x200 and "start_new_session" not in seen[1]

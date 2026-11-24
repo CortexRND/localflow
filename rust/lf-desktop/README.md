@@ -14,9 +14,9 @@ opt-in in-window engine). It isn't the default launcher and it doesn't replace
 Step 3 adds a separate, opt-in **LocalFlow Preview** package and installer
 ([Preview package](#preview-package-step-3)); `install.sh`, the existing
 installers and every launcher default are unchanged. Step 4a lets
-`lf hub` / `lf phrases` / `lf setup` open it when asked
-([Opening it from `lf`](#opening-it-from-lf-step-4a)); the default stays the
-legacy window. By default this window
+`lf hub` / `lf phrases` / `lf setup` open it when asked, and step 4b makes
+`lf hub` and `lf phrases` prefer it on Linux and Windows when installed
+([Opening it from `lf`](#opening-it-from-lf-step-4a)). By default this window
 does not run dictation; a `--features runtime` build can, after `--engine` and an
 explicit **Start here**.
 
@@ -31,8 +31,8 @@ gate holds. The full feature matrix is in
 | **1. Parallel front end** (done) | Native app beside the existing ones. Home, History, Dictionary, Snippets, Style, Settings and Models & keys are connected to the real stores and config. Ask, Meetings and Prompts use the existing local HTTP service. Isolated `--sandbox`. Dedicated `gpui.yml` CI | Linux and macOS CI green (`gpui.yml`). Legacy runtime, launchers and installers unchanged. Existing CI changed only by the Windows `whisper-rs-sys` CMake-cache cleanup in `rust.yml`. UI testing for this PR was waived by the owner; native rendering on screen is unverified (later steps keep their validation gates) |
 | **2. Runtime and global-input parity** (done) | Setup wizard (checks, mic level, model choice/download, cleanup, shortcut, trial, apply). Model storage. Settings assistant. Key import and Test connection. Runtime status from the runtime's own status file (protocol 2) instead of HTTP reachability. Linux X11 global hotkeys in the Rust engine. Single instance and page routing. Opt-in engine behind `--features runtime` + `--engine` | Every capability the Python Hub and `lf-hub` offer works here, or the owner waives it in writing. Dictation readiness is shown only from a runtime signal. Interactive and macOS runtime QA are still open (UI probing on the development VM was waived by the owner) |
 | **3. Packaging** (done) | A dedicated preview package and installer ship a release `lf-desktop` (runtime feature) for Linux x86_64 and macOS arm64/x86_64, built natively in `gpui-package.yml`. System-library requirements documented per distribution. Separate ad-hoc signed `LocalFlow Preview.app`. Published from release tags with `SHA256SUMS-gpui-preview` | Clean install, upgrade and uninstall on each supported platform. Existing installs keep working. Interactive (GUI, permissions, Gatekeeper) QA is still open |
-| **4a. Opt-in launch** (this PR) | `--gpui` / `--legacy` on `lf hub`, `lf phrases` and the `lf setup` window, or `LOCALFLOW_UI=gpui\|legacy` (no config key). Finds only the preview package or an absolute `LOCALFLOW_DESKTOP_BIN`, probes its `--help`, and falls back to the legacy window. `lf-hub` on Linux opens it. Default unchanged (legacy) | Owner decision to promote the default (4b) |
-| 4b. Default-launch promotion | `lf hub`, `lf phrases` and `lf setup` prefer `lf-desktop` by default, with the 4a fallback | Not started. The data-safety hash check passes. Accessibility is accepted (GPUI has no accessibility tree today). Light and dark screenshots of every page are reviewed. The owner agrees |
+| **4a. Opt-in launch** (done) | `--gpui` / `--legacy` on `lf hub`, `lf phrases` and the `lf setup` window, or `LOCALFLOW_UI=gpui\|legacy` (no config key). Finds only the preview package or an absolute `LOCALFLOW_DESKTOP_BIN`, probes its `--help`, and falls back to the legacy window. `lf-hub` on Linux opens it | Owner decision to promote the default (4b) |
+| **4b. Default-launch promotion** (this PR, `lf` launcher on Linux and Windows) | `lf hub` and `lf phrases` prefer `lf-desktop` by default on Linux and Windows, with the 4a fallback (silent when it isn't installed). `lf setup` opens it only when asked (`--gpui` / `LOCALFLOW_UI=gpui`): its wizard downloads native speech models the Python runtime can't use; `LOCALFLOW_RUNTIME=python` or `--legacy` selects the Python windows. macOS unchanged. Installers don't ship `lf-desktop` yet | Verified by unit and fake-executable tests only. Before the installers ship it: the data-safety hash check passes. Accessibility is accepted (GPUI has no accessibility tree today). Light and dark screenshots of every page are reviewed. The owner agrees |
 | 5. Legacy retirement | Remove the Tk Hub and the AppKit Hub paths that are no longer launched, and controller code duplicated from `lf_ui::mac` | One release cycle on the new default without a rollback |
 
 ## Build and run
@@ -247,8 +247,12 @@ artifact with `--archive` and `--sha256` (a `.sha256` file, a
 
 ### Opening it from `lf` (step 4a)
 
-The default is unchanged: `lf hub`, `lf phrases` and `lf setup` open the legacy
-windows. To use the preview instead:
+On Linux and Windows (step 4b) `lf hub` and `lf phrases` open the preview when it
+is installed, and otherwise the legacy Python windows without any notice. On macOS
+they open the legacy windows unless asked. `lf setup` opens the legacy Python
+wizard unless asked on every platform: the preview's wizard downloads native
+(whisper.cpp) speech models that the Python runtime `lf setup` configures can't
+use.
 
 ```bash
 lf hub --gpui                 # sends no page; only once LocalFlow is set up (below)
@@ -257,26 +261,37 @@ lf phrases --gpui             # sends --page "Hot Phrases"
 lf setup --gpui               # sends --setup
 export LOCALFLOW_UI=gpui      # the same for every one of these commands
 lf hub --legacy               # always the legacy window; nothing is probed
+export LOCALFLOW_RUNTIME=python  # always the legacy windows (unless --gpui)
 ```
 
-- **Selection:** `--gpui` / `--legacy` (not both), then `LOCALFLOW_UI=gpui|legacy`,
-  then legacy. Any other `LOCALFLOW_UI` value prints a notice and uses legacy.
-  There is no config key. The flags apply only to the window path: `lf setup
+- **Selection:** `--gpui` / `--legacy` (not both), then `LOCALFLOW_RUNTIME=python`
+  (legacy; `lf` ignores any other value, which the installers validate), then
+  `LOCALFLOW_UI=gpui|legacy`, then the default: GPUI for `lf hub` and `lf phrases`
+  on Linux and Windows, legacy for the `lf setup` window, on macOS and anything
+  else. Any other `LOCALFLOW_UI` value prints a
+  notice and uses legacy. There is no config key. When only the platform default
+  chose GPUI, a preview that isn't installed, or `LOCALFLOW_SANDBOX`, opens the
+  legacy window silently; every other failure below prints its notice as for
+  `--gpui`. The flags apply only to the window path: `lf setup
   --cli`, `--yes`, and the `install-app` / `uninstall-app` subcommands ignore
   them and behave as before. The direct dispatchers (`python -m
   localflow.hub_window`, `phrases_window`, `setup_window`), `LocalFlow.app`, the
   menu bar, the login agent and the `install-app` aliases always stay legacy.
-- **Discovery** (only after a GPUI selection, Linux and macOS only):
+- **Discovery** (only after a GPUI selection; Linux, macOS and Windows):
   `LOCALFLOW_DESKTOP_BIN` if set (an absolute path to an executable; an invalid
   one falls back to legacy and never to another install), otherwise only the
   preview installer's own package: `~/.local/share/localflow-preview/bin/lf-desktop`
   with `MANIFEST.json` `name` = `localflow-preview` (Linux), or
   `~/Applications/LocalFlow Preview.app/Contents/MacOS/lf-desktop` with bundle id
-  `com.cortexrnd.localflow.desktop-preview` (macOS). `PATH`, build trees and the
+  `com.cortexrnd.localflow.desktop-preview` (macOS), or
+  `%LOCALAPPDATA%\Programs\LocalFlow Preview\lf-desktop.exe` with `MANIFEST.json`
+  `name` = `localflow-preview` (Windows; there is no Windows installer, so unzip
+  the `LocalFlow Preview` folder from the `windows-x86_64` zip into
+  `%LOCALAPPDATA%\Programs\`). `PATH`, build trees and the
   `~/.local/bin/localflow-preview` link are never searched, and nothing is
-  downloaded or built. Setting `LOCALFLOW_DESKTOP_BIN` alone doesn't opt in.
-  Prebuilt packages exist for Linux x86_64 and macOS arm64/x86_64 only (no ARM
-  Linux); Windows and other platforms always use legacy.
+  downloaded or built. Setting `LOCALFLOW_DESKTOP_BIN` alone doesn't opt in on
+  macOS. Prebuilt packages exist for Linux x86_64, macOS arm64/x86_64 and Windows
+  x86_64 (no ARM Linux); other platforms always use legacy.
 - **Probe:** the candidate must answer `--help` within 5 s as `lf-desktop` with
   `--page <PAGE>`, `--setup` and the line `EXIT STATUS (launch-status: 1):`.
   That line promises the exit status the launchers rely on: 0 only when a window
@@ -290,7 +305,9 @@ lf hub --legacy               # always the legacy window; nothing is probed
   falls back to the legacy window and `lf-hub` prints its install hint. They can
   still be started directly. A probe that hangs is killed; nothing else ever is.
 - **Launch:** a fixed argv (no shell; never `--engine`, `--sandbox` or a speech
-  helper), stdin closed, stdout discarded, stderr inherited, in its own session.
+  helper), stdin closed, stdout discarded, stderr inherited, in its own session
+  (on Windows its own process group, so a Ctrl+C in the console that ran `lf`
+  doesn't reach it).
   Environment (`HOME`, `LOCALFLOW_CONFIG`, …) is inherited, so it opens the same
   data as the legacy window. `lf` watches the first 1.5 s: exit 0 is a hand-off to
   an already open preview window (no second window); a non-zero exit, a failed
@@ -307,8 +324,9 @@ lf hub --legacy               # always the legacy window; nothing is probed
   that opens that wizard.
   With the preview, `lf phrases` and `lf setup` return once the window has
   started instead of when it closes.
-- **Sandbox:** with `LOCALFLOW_SANDBOX=1` (or `true`) a GPUI selection is refused
-  with an error and no fallback, so a sandbox request never opens real data. Run
+- **Sandbox:** with `LOCALFLOW_SANDBOX=1` (or `true`) an explicit GPUI selection
+  is refused with an error and no fallback, so a sandbox request never opens real
+  data; the platform default opens the legacy window instead, as before. Run
   `lf-desktop --sandbox` (`localflow-preview --sandbox`, or
   `open -a "LocalFlow Preview" --args --sandbox`) directly. `--legacy` keeps its
   previous behaviour.
@@ -785,8 +803,9 @@ These are tracked in `docs/gpui-migration.md`:
   "Running · status limited".
 - `lf-hub` / the Python Hub and this window don't route to each other until the
   cutover (separate lock namespaces on purpose).
-- The preview package is opt-in and separate; `lf … --gpui` (step 4a) is opt-in
-  too. Default-launch promotion (4b) and legacy retirement are later steps.
+- The preview package is opt-in and separate. Once installed, `lf hub` and `lf
+  phrases` prefer it on Linux and Windows (step 4b); no installer ships it yet, and legacy retirement
+  is a later step.
   The macOS bundle is ad-hoc signed only (no Developer ID, notarisation or
   Gatekeeper approval) and its permissions,
   speech helper and rendering were not exercised interactively.

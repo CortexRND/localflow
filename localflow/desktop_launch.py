@@ -1,20 +1,27 @@
-"""Opt-in launch of LocalFlow Preview (`lf-desktop`) from the `lf` CLI.
+"""Launch of LocalFlow Preview (`lf-desktop`) from the `lf` CLI.
 
 Only `lf hub`, bare `lf phrases` and the `lf setup` window call `launch`, after
 their own validation. The direct window dispatchers (`python -m
 localflow.hub_window`, `phrases_window`, `setup_window`) never come here, so
 they stay the stable legacy escape paths and can't recurse.
 
-Selection, highest first: `--gpui` / `--legacy`, then `LOCALFLOW_UI`, then
-`DEFAULT_UI` (legacy). There is no config key. Only a GPUI selection looks for
-a native binary: an absolute `LOCALFLOW_DESKTOP_BIN`, else the package that
-`scripts/install_gpui_preview.sh` owns. PATH and build trees are never
+Selection, highest first: `--gpui` / `--legacy`, then `LOCALFLOW_RUNTIME=python`
+(legacy), then `LOCALFLOW_UI`, then `default_ui()`: gpui for the Hub routes
+(`lf hub`, `lf phrases`) on Linux and Windows, legacy for the `lf setup` window
+and on every other platform (macOS keeps the AppKit `lf-hub`). There is no config key.
+Only a GPUI selection looks for a native binary: an absolute
+`LOCALFLOW_DESKTOP_BIN`, else the owned package (Linux and macOS:
+`scripts/install_gpui_preview.sh`; Windows: the `LocalFlow Preview` zip folder
+unzipped into `%LOCALAPPDATA%\\Programs\\`). PATH and build trees are never
 searched. Anything wrong prints one short notice and opens exactly today's
-legacy window once. A sandbox request (`LOCALFLOW_SANDBOX`) is refused rather
-than turned into a real-data launch. The Hub routes (`lf hub`, `lf phrases`)
-open the preview only once LocalFlow is set up (the active config has the
-setup marker), so they never land in the preview's own first-run wizard; only
-`lf setup --gpui` opens that.
+legacy window once, except that a default (not explicit) GPUI choice opens it
+silently when the preview isn't installed. A sandbox request
+(`LOCALFLOW_SANDBOX`) is refused for an explicit GPUI choice rather than turned
+into a real-data launch; the default just opens the legacy window. The Hub
+routes (`lf hub`, `lf phrases`) open the preview only once LocalFlow is set up
+(the active config has the setup marker), for an explicit or a default choice,
+so they never land in the preview's own first-run wizard; only `lf setup --gpui`
+opens that.
 """
 
 from __future__ import annotations
@@ -31,18 +38,20 @@ from pathlib import Path
 
 import click
 
-DEFAULT_UI = "legacy"  # Scope 4b (global default promotion) would change this.
 UI_CHOICES = ("gpui", "legacy")
 UI_ENV = "LOCALFLOW_UI"
+RUNTIME_ENV = "LOCALFLOW_RUNTIME"  # the installers validate it; lf only honours `python`
 BIN_ENV = "LOCALFLOW_DESKTOP_BIN"
 SANDBOX_ENV = "LOCALFLOW_SANDBOX"
 # The interpreter running this `lf`, for History Retry's fallback to this
 # install's speech model (`python -m localflow.cli history retry --json`).
 PYTHON_ENV = "LOCALFLOW_PYTHON"
 
-# Ownership metadata written by scripts/install_gpui_preview.sh.
+# Ownership metadata written by scripts/install_gpui_preview.sh (Linux, macOS)
+# and by scripts/build_gpui_package.sh into the Windows zip's folder.
 LINUX_ROOT = (".local", "share", "localflow-preview")
-LINUX_MANIFEST_NAME = "localflow-preview"
+LINUX_MANIFEST_NAME = "localflow-preview"  # also the Windows MANIFEST.json name
+WINDOWS_ROOT = ("Programs", "LocalFlow Preview")  # under %LOCALAPPDATA%
 MAC_APP = ("Applications", "LocalFlow Preview.app")
 MAC_BUNDLE_ID = "com.cortexrnd.localflow.desktop-preview"
 
@@ -61,9 +70,13 @@ _MAX_HELP_BYTES = 64 * 1024
 _PREFIX = "lf: "
 _LEGACY = "; opening the legacy window."
 NOTICE_INVALID_ENV = f"{_PREFIX}{UI_ENV} must be gpui or legacy{_LEGACY}"
-NOTICE_PLATFORM = f"{_PREFIX}LocalFlow Preview has no package for this platform{_LEGACY}"
+NOTICE_PLATFORM = f"{_PREFIX}lf can't open LocalFlow Preview on this platform{_LEGACY}"
 NOTICE_NOT_INSTALLED = (
     f"{_PREFIX}LocalFlow Preview isn't installed (see scripts/install_gpui_preview.sh){_LEGACY}"
+)
+NOTICE_NOT_INSTALLED_WINDOWS = (
+    f"{_PREFIX}LocalFlow Preview isn't installed (unzip the LocalFlow Preview folder "
+    f"into %LOCALAPPDATA%\\Programs){_LEGACY}"
 )
 NOTICE_NOT_OWNED = (
     f"{_PREFIX}the LocalFlow Preview install location holds something the preview "
@@ -87,10 +100,14 @@ SANDBOX_REFUSAL = (
 )
 
 GPUI_HELP = (
-    "Open LocalFlow Preview (native GPUI app, if installed) instead of the "
-    "legacy window. No screen-reader support yet: use --legacy (or lf-hub on macOS)."
+    "Open LocalFlow Preview (native GPUI app, if installed; the default for lf hub "
+    "and lf phrases on Linux and Windows) instead of the legacy window. No "
+    "screen-reader support yet: use --legacy (or lf-hub on macOS)."
 )
-LEGACY_HELP = "Open the legacy window (the default)."
+LEGACY_HELP = (
+    "Open the legacy Python window (the default for lf setup, on macOS, when "
+    "LocalFlow Preview isn't installed, or with LOCALFLOW_RUNTIME=python)."
+)
 
 
 def ui_options(func):
@@ -105,16 +122,36 @@ def flag_choice(gpui: bool, legacy: bool) -> str | None:
     return "gpui" if gpui else "legacy" if legacy else None
 
 
-def choose_ui(flag: str | None, env: Mapping[str, str]) -> tuple[str, str | None]:
-    """(choice, notice): flag, then `LOCALFLOW_UI`, then `DEFAULT_UI`."""
+def default_ui(platform: str | None = None, *, setup: bool = False) -> str:
+    """gpui for the Hub routes on Linux and Windows; legacy for the setup window,
+    on macOS and on anything unknown."""
+    # Preview's wizard fetches native (whisper.cpp) weights the Python runtime can't use.
+    if setup:
+        return "legacy"
+    platform = sys.platform if platform is None else platform
+    return "gpui" if platform.startswith("linux") or platform == "win32" else "legacy"
+
+
+def choose_ui(
+    flag: str | None,
+    env: Mapping[str, str],
+    platform: str | None = None,
+    *,
+    setup: bool = False,
+) -> tuple[str, bool, str | None]:
+    """(choice, explicit, notice): flag, `LOCALFLOW_RUNTIME=python`, `LOCALFLOW_UI`,
+    then `default_ui()`. Only the platform default is not explicit."""
     if flag is not None:
-        return flag, None
+        return flag, True, None
+    # Any other runtime value is ignored here: the installers validate it.
+    if env.get(RUNTIME_ENV, "").strip().lower() == "python":
+        return "legacy", True, None
     value = env.get(UI_ENV, "").strip().lower()
     if not value:
-        return DEFAULT_UI, None
+        return default_ui(platform, setup=setup), False, None
     if value in UI_CHOICES:
-        return value, None
-    return "legacy", NOTICE_INVALID_ENV
+        return value, True, None
+    return "legacy", True, NOTICE_INVALID_ENV
 
 
 def sandbox_requested(env: Mapping[str, str]) -> bool:
@@ -128,6 +165,8 @@ def platform_key(platform: str | None = None) -> str | None:
         return "linux"
     if platform == "darwin":
         return "macos"
+    if platform == "win32":
+        return "windows"
     return None
 
 
@@ -157,7 +196,7 @@ def _executable_file(path: Path, *, follow_symlinks: bool) -> bool:
     return stat.S_ISREG(info.st_mode) and os.access(path, os.X_OK)
 
 
-def _linux_owned(root: Path) -> bool:
+def _manifest_owned(root: Path) -> bool:
     import json
 
     raw = _small_regular_file(root / "MANIFEST.json")
@@ -181,23 +220,47 @@ def _mac_owned(app: Path) -> bool:
     return isinstance(info, dict) and info.get("CFBundleIdentifier") == MAC_BUNDLE_ID
 
 
-def owned_install(key: str, home: Path) -> tuple[Path | None, str | None]:
-    """The preview installer's `lf-desktop`, only if its metadata says it's ours."""
+def local_appdata(env: Mapping[str, str], home: Path) -> Path:
+    """`LOCALAPPDATA` when it's an absolute path, else `<home>/AppData/Local`."""
+    value = env.get("LOCALAPPDATA", "")
+    if value and Path(value).is_absolute():
+        return Path(value)
+    return home.joinpath("AppData", "Local")
+
+
+def owned_install(
+    key: str, home: Path, env: Mapping[str, str] | None = None
+) -> tuple[Path | None, str | None]:
+    """The preview package's `lf-desktop`, only if its metadata says it's ours."""
     if key == "linux":
         root = home.joinpath(*LINUX_ROOT)
         exe = root / "bin" / "lf-desktop"
-        owned = _linux_owned
+        owned = _manifest_owned
+    elif key == "windows":
+        root = local_appdata({} if env is None else env, home).joinpath(*WINDOWS_ROOT)
+        exe = root / "lf-desktop.exe"
+        owned = _manifest_owned
     else:
         root = home.joinpath(*MAC_APP)
         exe = root / "Contents" / "MacOS" / "lf-desktop"
         owned = _mac_owned
     if not os.path.lexists(root):
-        return None, NOTICE_NOT_INSTALLED
+        return None, not_installed_notice(key)
     if not _real_dir(root) or not owned(root):
         return None, NOTICE_NOT_OWNED
     if not _executable_file(exe, follow_symlinks=False):
-        return None, NOTICE_NOT_INSTALLED
+        return None, not_installed_notice(key)
     return exe, None
+
+
+def not_installed_notice(key: str | None) -> str:
+    """Where to get the preview: Windows has no installer script, only the zip."""
+    return NOTICE_NOT_INSTALLED_WINDOWS if key == "windows" else NOTICE_NOT_INSTALLED
+
+
+def is_not_installed(notice: str | None) -> bool:
+    """True for either "isn't installed" notice (the silent default fallback)."""
+    return notice in (NOTICE_NOT_INSTALLED, NOTICE_NOT_INSTALLED_WINDOWS)
 
 
 def find_desktop(
@@ -215,8 +278,8 @@ def find_desktop(
         return path, None
     home = home if home is not None else Path.home()
     if not home.is_absolute():  # same as the Rust helper: absolute paths only
-        return None, NOTICE_NOT_INSTALLED
-    return owned_install(key, home)
+        return None, not_installed_notice(key)
+    return owned_install(key, home, env)
 
 
 # Exact tokens, as in lf_ui::desktop_launch::help_has_interface: the identity
@@ -299,7 +362,14 @@ def spawn(argv: list[str], wait: float | None = None) -> tuple[bool, str | None]
     Exit 0 within `wait` is a hand-off to an already open window. A crash after
     `wait` isn't seen here. stderr is inherited (nothing captured or logged).
     """
-    popen_kwargs = {"start_new_session": True} if os.name == "posix" else {}
+    # posix: its own session, so a hang-up of the terminal that ran `lf` doesn't
+    # reach the window. Windows: its own process group, so a Ctrl+C typed in
+    # that console doesn't reach it (Ctrl+Break and closing the console still do:
+    # it isn't detached from the console).
+    if os.name == "posix":
+        popen_kwargs = {"start_new_session": True}
+    else:
+        popen_kwargs = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
     env = dict(os.environ)
     if sys.executable:
         env[PYTHON_ENV] = sys.executable
@@ -337,15 +407,21 @@ def launch(
 ) -> None:
     """Open the selected window: LocalFlow Preview, or `legacy()` exactly once."""
     env = os.environ if env is None else env
-    choice, notice = choose_ui(flag, env)
+    choice, explicit, notice = choose_ui(flag, env, setup=setup)
     if notice:
         _notice(notice)
     if choice != "gpui":
         legacy()
         return
     if sandbox_requested(env):
-        raise click.ClickException(SANDBOX_REFUSAL)
+        if explicit:
+            raise click.ClickException(SANDBOX_REFUSAL)
+        legacy()  # the default keeps the legacy sandbox semantics
+        return
     exe, notice = find_desktop(env)
+    if exe is None and is_not_installed(notice) and not explicit:
+        legacy()  # the installers don't ship the preview yet: no notice by default
+        return
     if exe is not None and not probe(exe):
         exe, notice = None, NOTICE_PROBE
     if exe is not None and not setup and not set_up():

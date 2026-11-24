@@ -1,13 +1,19 @@
-//! Port of `localflow/desktop_launch.py` (the `lf --gpui` launcher) for
-//! `lf-rs hub`. Selection: `--gpui`/`--legacy`, then `LOCALFLOW_UI`, then
-//! legacy. A GPUI selection opens only an absolute `LOCALFLOW_DESKTOP_BIN` or
-//! the package `scripts/install_gpui_preview.sh` owns, after a bounded
-//! `--help` probe, and only once LocalFlow is set up (the active config has
-//! `lf_core::config::configuration_marker`), so the preview never opens its
-//! own first-run wizard from `hub`; anything wrong prints one notice and opens
-//! the legacy window once. Notices are byte-identical to Python's. `lf-hub` keeps its own
-//! copy of the probe in `lf_ui::desktop_launch` (different messages, no
-//! fallback), so the shared constants are checked against it in the tests.
+//! Port of `localflow/desktop_launch.py` (the `lf hub` launcher) for
+//! `lf-rs hub`. Selection: `--gpui`/`--legacy`, then `LOCALFLOW_RUNTIME=python`
+//! (legacy), then `LOCALFLOW_UI`, then the platform default: gpui on Linux and
+//! Windows, legacy on macOS and anything else. A GPUI selection opens only an
+//! absolute `LOCALFLOW_DESKTOP_BIN` or the owned package (Linux and macOS:
+//! `scripts/install_gpui_preview.sh`; Windows: the `LocalFlow Preview` zip
+//! folder in `%LOCALAPPDATA%\Programs`), after a bounded `--help` probe, and
+//! only once LocalFlow is set up (the active config has
+//! `lf_core::config::configuration_marker`) for an explicit or a default
+//! choice, so the preview never opens its own first-run wizard from `hub`;
+//! anything wrong prints one notice and opens the legacy window once. A
+//! default (not explicit) GPUI choice opens the legacy window silently when
+//! the preview isn't installed or `LOCALFLOW_SANDBOX` is set; an explicit one
+//! refuses the sandbox. Notices are byte-identical to Python's. `lf-hub` keeps
+//! its own copy of the probe in `lf_ui::desktop_launch` (different messages,
+//! no fallback), so the shared constants are checked against it in the tests.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
@@ -21,11 +27,16 @@ use anyhow::Result;
 use crate::{fail, outln, usage, Io};
 
 pub const UI_ENV: &str = "LOCALFLOW_UI";
+/// The installers validate it; the launcher only honours `python`.
+pub const RUNTIME_ENV: &str = "LOCALFLOW_RUNTIME";
 pub const BIN_ENV: &str = "LOCALFLOW_DESKTOP_BIN";
 pub const SANDBOX_ENV: &str = "LOCALFLOW_SANDBOX";
 
 pub const LINUX_ROOT: [&str; 3] = [".local", "share", "localflow-preview"];
+/// Also the `MANIFEST.json` name in the Windows zip's folder.
 pub const LINUX_MANIFEST_NAME: &str = "localflow-preview";
+/// Under `%LOCALAPPDATA%`.
+pub const WINDOWS_ROOT: [&str; 2] = ["Programs", "LocalFlow Preview"];
 pub const MAC_APP: [&str; 2] = ["Applications", "LocalFlow Preview.app"];
 pub const MAC_BUNDLE_ID: &str = "com.cortexrnd.localflow.desktop-preview";
 pub const LAUNCH_STATUS_MARKER: &str = "EXIT STATUS (launch-status: 1):";
@@ -38,9 +49,12 @@ const MAX_HELP_BYTES: u64 = 64 * 1024;
 pub const NOTICE_INVALID_ENV: &str =
     "lf: LOCALFLOW_UI must be gpui or legacy; opening the legacy window.";
 pub const NOTICE_PLATFORM: &str =
-    "lf: LocalFlow Preview has no package for this platform; opening the legacy window.";
+    "lf: lf can't open LocalFlow Preview on this platform; opening the legacy window.";
 pub const NOTICE_NOT_INSTALLED: &str = "lf: LocalFlow Preview isn't installed \
      (see scripts/install_gpui_preview.sh); opening the legacy window.";
+pub const NOTICE_NOT_INSTALLED_WINDOWS: &str = "lf: LocalFlow Preview isn't installed \
+     (unzip the LocalFlow Preview folder into %LOCALAPPDATA%\\Programs); \
+     opening the legacy window.";
 pub const NOTICE_NOT_OWNED: &str = "lf: the LocalFlow Preview install location holds \
      something the preview installer didn't install; opening the legacy window.";
 pub const NOTICE_BAD_OVERRIDE: &str = "lf: LOCALFLOW_DESKTOP_BIN must be an absolute path \
@@ -69,17 +83,43 @@ pub enum Ui {
 pub enum Platform {
     Linux,
     Macos,
+    Windows,
 }
 
-/// Python `platform_key()`: no preview package outside Linux and macOS.
+/// Python `platform_key()`: no preview package outside Linux, macOS and Windows.
 pub fn platform_key() -> Option<Platform> {
     if cfg!(target_os = "linux") {
         Some(Platform::Linux)
     } else if cfg!(target_os = "macos") {
         Some(Platform::Macos)
+    } else if cfg!(windows) {
+        Some(Platform::Windows)
     } else {
         None
     }
+}
+
+/// Python `default_ui()`: gpui on Linux and Windows; legacy on macOS and
+/// anything unknown.
+pub fn default_ui(platform: Option<Platform>) -> Ui {
+    match platform {
+        Some(Platform::Linux | Platform::Windows) => Ui::Gpui,
+        Some(Platform::Macos) | None => Ui::Legacy,
+    }
+}
+
+/// Python `not_installed_notice()`: Windows has no installer script, only the zip.
+pub fn not_installed_notice(key: Option<Platform>) -> &'static str {
+    if key == Some(Platform::Windows) {
+        NOTICE_NOT_INSTALLED_WINDOWS
+    } else {
+        NOTICE_NOT_INSTALLED
+    }
+}
+
+/// Either "isn't installed" notice (the silent default fallback).
+pub fn is_not_installed(notice: &str) -> bool {
+    notice == NOTICE_NOT_INSTALLED || notice == NOTICE_NOT_INSTALLED_WINDOWS
 }
 
 pub fn flag_choice(gpui: bool, legacy: bool) -> Result<Option<Ui>> {
@@ -126,18 +166,35 @@ impl Launcher<'_> {
             .unwrap_or_default()
     }
 
-    /// (choice, notice): flag, then `LOCALFLOW_UI`, then legacy.
-    pub fn choose_ui(&self, flag: Option<Ui>) -> (Ui, Option<&'static str>) {
+    /// Python `.strip().lower()` of an environment value.
+    fn normalized(&self, name: &str) -> String {
+        crate::pyfmt::py_strip(&self.var(name)).to_lowercase()
+    }
+
+    /// (choice, explicit, notice): flag, `LOCALFLOW_RUNTIME=python`,
+    /// `LOCALFLOW_UI`, then [`default_ui`]. Only the platform default is not
+    /// explicit.
+    pub fn choose_ui(&self, flag: Option<Ui>) -> (Ui, bool, Option<&'static str>) {
         if let Some(flag) = flag {
-            return (flag, None);
+            return (flag, true, None);
         }
-        match crate::pyfmt::py_strip(&self.var(UI_ENV))
-            .to_lowercase()
-            .as_str()
-        {
-            "" | "legacy" => (Ui::Legacy, None),
-            "gpui" => (Ui::Gpui, None),
-            _ => (Ui::Legacy, Some(NOTICE_INVALID_ENV)),
+        // Any other runtime value is ignored here: the installers validate it.
+        if self.normalized(RUNTIME_ENV) == "python" {
+            return (Ui::Legacy, true, None);
+        }
+        match self.normalized(UI_ENV).as_str() {
+            "" => (default_ui(self.platform), false, None),
+            "legacy" => (Ui::Legacy, true, None),
+            "gpui" => (Ui::Gpui, true, None),
+            _ => (Ui::Legacy, true, Some(NOTICE_INVALID_ENV)),
+        }
+    }
+
+    /// `LOCALAPPDATA` when it's an absolute path, else `<home>/AppData/Local`.
+    pub fn local_appdata(&self, home: &Path) -> PathBuf {
+        match (self.env)("LOCALAPPDATA").map(PathBuf::from) {
+            Some(path) if !path.as_os_str().is_empty() && path.is_absolute() => path,
+            _ => home.join("AppData").join("Local"),
         }
     }
 
@@ -160,8 +217,8 @@ impl Launcher<'_> {
             };
         }
         match self.home.as_deref().filter(|home| home.is_absolute()) {
-            Some(home) => owned_install(key, home),
-            None => Err(NOTICE_NOT_INSTALLED),
+            Some(home) => owned_install(key, home, &self.local_appdata(home)),
+            None => Err(not_installed_notice(Some(key))),
         }
     }
 
@@ -174,7 +231,7 @@ impl Launcher<'_> {
         legacy: &mut dyn FnMut(&mut Io<'_>) -> Result<()>,
         io: &mut Io<'_>,
     ) -> Result<()> {
-        let (choice, notice) = self.choose_ui(flag);
+        let (choice, explicit, notice) = self.choose_ui(flag);
         if let Some(notice) = notice {
             outln!(io.err, "{notice}")?;
         }
@@ -182,9 +239,16 @@ impl Launcher<'_> {
             return legacy(io);
         }
         if self.sandbox_requested() {
-            return fail(SANDBOX_REFUSAL);
+            if explicit {
+                return fail(SANDBOX_REFUSAL);
+            }
+            return legacy(io); // the default keeps the legacy sandbox semantics
         }
-        let found = self.find_desktop().and_then(|exe| {
+        let found = self.find_desktop();
+        if matches!(found, Err(notice) if is_not_installed(notice)) && !explicit {
+            return legacy(io); // the installers don't ship the preview yet: no notice
+        }
+        let found = found.and_then(|exe| {
             if probe(&exe, self.probe_timeout) {
                 Ok(exe)
             } else {
@@ -241,7 +305,7 @@ fn small_regular_file(path: &Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn linux_owned(root: &Path) -> bool {
+fn manifest_owned(root: &Path) -> bool {
     small_regular_file(&root.join("MANIFEST.json"))
         .and_then(|raw| String::from_utf8(raw).ok())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
@@ -272,8 +336,13 @@ fn mac_owned(app: &Path) -> bool {
         })
 }
 
-/// The preview installer's `lf-desktop`, only if its metadata says it's ours.
-pub fn owned_install(key: Platform, home: &Path) -> Result<PathBuf, &'static str> {
+/// The preview package's `lf-desktop`, only if its metadata says it's ours.
+/// `local_appdata` is used on Windows only.
+pub fn owned_install(
+    key: Platform,
+    home: &Path,
+    local_appdata: &Path,
+) -> Result<PathBuf, &'static str> {
     let join =
         |base: &Path, parts: &[&str]| parts.iter().fold(base.to_path_buf(), |p, s| p.join(s));
     let (root, exe, owned): (PathBuf, PathBuf, fn(&Path) -> bool) = match key {
@@ -282,7 +351,7 @@ pub fn owned_install(key: Platform, home: &Path) -> Result<PathBuf, &'static str
             (
                 root.clone(),
                 join(&root, &["bin", "lf-desktop"]),
-                linux_owned,
+                manifest_owned,
             )
         }
         Platform::Macos => {
@@ -290,15 +359,20 @@ pub fn owned_install(key: Platform, home: &Path) -> Result<PathBuf, &'static str
             let exe = join(&root, &["Contents", "MacOS", "lf-desktop"]);
             (root, exe, mac_owned)
         }
+        Platform::Windows => {
+            let root = join(local_appdata, &WINDOWS_ROOT);
+            (root.clone(), root.join("lf-desktop.exe"), manifest_owned)
+        }
     };
+    let not_installed = not_installed_notice(Some(key));
     let Ok(meta) = std::fs::symlink_metadata(&root) else {
-        return Err(NOTICE_NOT_INSTALLED);
+        return Err(not_installed);
     };
     if !meta.is_dir() || !owned(&root) {
         return Err(NOTICE_NOT_OWNED);
     }
     if !executable_file(&exe, false) {
-        return Err(NOTICE_NOT_INSTALLED);
+        return Err(not_installed);
     }
     Ok(exe)
 }
@@ -420,6 +494,14 @@ pub fn spawn(argv: &[OsString], wait: Duration) -> Result<(), String> {
             });
         }
     }
+    // Windows: its own process group, so a Ctrl+C in the console that ran
+    // `lf` doesn't reach the window (it isn't detached from that console).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
     let Ok(mut child) = command.spawn() else {
         return Err(NOTICE_SPAWN.into());
     };
@@ -491,25 +573,122 @@ mod tests {
     }
 
     #[test]
-    fn selection_is_flag_then_env_then_legacy() {
+    fn platform_default_is_gpui_on_linux_and_windows_only() {
+        assert_eq!(default_ui(Some(Platform::Linux)), Ui::Gpui);
+        assert_eq!(default_ui(Some(Platform::Windows)), Ui::Gpui);
+        assert_eq!(default_ui(Some(Platform::Macos)), Ui::Legacy);
+        assert_eq!(default_ui(None), Ui::Legacy);
+        let expected = if cfg!(target_os = "linux") {
+            Some(Platform::Linux)
+        } else if cfg!(target_os = "macos") {
+            Some(Platform::Macos)
+        } else if cfg!(windows) {
+            Some(Platform::Windows)
+        } else {
+            None
+        };
+        assert_eq!(platform_key(), expected);
+    }
+
+    #[test]
+    fn selection_is_flag_then_runtime_then_env_then_platform_default() {
         assert!(flag_choice(true, true).is_err());
         assert_eq!(flag_choice(true, false).unwrap(), Some(Ui::Gpui));
         assert_eq!(flag_choice(false, true).unwrap(), Some(Ui::Legacy));
         assert_eq!(flag_choice(false, false).unwrap(), None);
-        let choose = |flag, value: Option<&str>| {
-            let pairs: Vec<(&str, &str)> = value.map(|v| (UI_ENV, v)).into_iter().collect();
-            launcher(&env_of(&pairs), None, None).choose_ui(flag)
-        };
-        assert_eq!(choose(None, None), (Ui::Legacy, None));
-        assert_eq!(choose(None, Some(" GPUI\n")), (Ui::Gpui, None));
-        assert_eq!(choose(None, Some("legacy")), (Ui::Legacy, None));
-        assert_eq!(choose(None, Some("  ")), (Ui::Legacy, None));
+        let platforms = [
+            (Some(Platform::Linux), Ui::Gpui),
+            (Some(Platform::Windows), Ui::Gpui),
+            (Some(Platform::Macos), Ui::Legacy),
+            (None, Ui::Legacy),
+        ];
+        for (platform, default) in platforms {
+            let choose = |flag, pairs: &[(&str, &str)]| {
+                launcher(&env_of(pairs), platform, None).choose_ui(flag)
+            };
+            assert_eq!(choose(None, &[]), (default, false, None));
+            assert_eq!(choose(None, &[(UI_ENV, "  ")]), (default, false, None));
+            assert_eq!(
+                choose(None, &[(BIN_ENV, "/x/lf-desktop")]),
+                (default, false, None),
+                "a binary override alone is not an opt-in"
+            );
+            assert_eq!(choose(None, &[(UI_ENV, " GPUI\n")]), (Ui::Gpui, true, None));
+            assert_eq!(
+                choose(None, &[(UI_ENV, "legacy")]),
+                (Ui::Legacy, true, None)
+            );
+            assert_eq!(
+                choose(None, &[(UI_ENV, "bogus")]),
+                (Ui::Legacy, true, Some(NOTICE_INVALID_ENV))
+            );
+            assert_eq!(
+                choose(Some(Ui::Gpui), &[(UI_ENV, "bogus")]),
+                (Ui::Gpui, true, None)
+            );
+            assert_eq!(
+                choose(Some(Ui::Legacy), &[(UI_ENV, "gpui")]),
+                (Ui::Legacy, true, None)
+            );
+            // LOCALFLOW_RUNTIME=python beats LOCALFLOW_UI but not a flag.
+            for value in ["python", " Python ", "PYTHON\n", "\x1cpython"] {
+                for ui in ["", "gpui", "bogus"] {
+                    assert_eq!(
+                        choose(None, &[(RUNTIME_ENV, value), (UI_ENV, ui)]),
+                        (Ui::Legacy, true, None),
+                        "{value:?} {ui:?}"
+                    );
+                }
+                assert_eq!(
+                    choose(Some(Ui::Gpui), &[(RUNTIME_ENV, value)]),
+                    (Ui::Gpui, true, None)
+                );
+            }
+            // Any other runtime value is ignored, silently.
+            for value in ["", "rust", " Rust ", "pythonx", "py thon"] {
+                assert_eq!(
+                    choose(None, &[(RUNTIME_ENV, value)]),
+                    (default, false, None),
+                    "{value:?}"
+                );
+                assert_eq!(
+                    choose(None, &[(RUNTIME_ENV, value), (UI_ENV, "gpui")]),
+                    (Ui::Gpui, true, None)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn not_installed_notices() {
+        assert!(NOTICE_NOT_INSTALLED.contains("scripts/install_gpui_preview.sh"));
         assert_eq!(
-            choose(None, Some("bogus")),
-            (Ui::Legacy, Some(NOTICE_INVALID_ENV))
+            NOTICE_NOT_INSTALLED_WINDOWS,
+            "lf: LocalFlow Preview isn't installed (unzip the LocalFlow Preview folder into \
+             %LOCALAPPDATA%\\Programs); opening the legacy window."
         );
-        assert_eq!(choose(Some(Ui::Gpui), Some("bogus")), (Ui::Gpui, None));
-        assert_eq!(choose(Some(Ui::Legacy), Some("gpui")), (Ui::Legacy, None));
+        assert_eq!(
+            NOTICE_PLATFORM,
+            "lf: lf can't open LocalFlow Preview on this platform; opening the legacy window."
+        );
+        for key in [Some(Platform::Linux), Some(Platform::Macos), None] {
+            assert_eq!(not_installed_notice(key), NOTICE_NOT_INSTALLED);
+        }
+        assert_eq!(
+            not_installed_notice(Some(Platform::Windows)),
+            NOTICE_NOT_INSTALLED_WINDOWS
+        );
+        assert!(is_not_installed(NOTICE_NOT_INSTALLED));
+        assert!(is_not_installed(NOTICE_NOT_INSTALLED_WINDOWS));
+        for other in [
+            "",
+            NOTICE_NOT_OWNED,
+            NOTICE_BAD_OVERRIDE,
+            NOTICE_PLATFORM,
+            NOTICE_PROBE,
+        ] {
+            assert!(!is_not_installed(other), "{other:?}");
+        }
     }
 
     #[test]
@@ -641,6 +820,110 @@ mod tests {
         assert_eq!(find(&none, linux, Some(bare.path())), Err(NOTICE_NOT_OWNED));
     }
 
+    /// The Windows zip's `LocalFlow Preview` folder unzipped into `Programs`.
+    fn windows_install(local_appdata: &Path, manifest: Option<&[u8]>, exe: bool) -> PathBuf {
+        let root = WINDOWS_ROOT
+            .iter()
+            .fold(local_appdata.to_path_buf(), |p, s| p.join(s));
+        std::fs::create_dir_all(&root).unwrap();
+        if let Some(manifest) = manifest {
+            std::fs::write(root.join("MANIFEST.json"), manifest).unwrap();
+        }
+        let path = root.join("lf-desktop.exe");
+        if exe {
+            std::fs::write(&path, "x").unwrap();
+            make_executable(&path);
+        }
+        path
+    }
+
+    const WIN_MANIFEST: &[u8] = b"{\"name\": \"localflow-preview\", \"os\": \"windows\"}";
+
+    #[test]
+    fn windows_discovery_uses_localappdata_programs() {
+        let windows = Some(Platform::Windows);
+        let find = |env: &Env, home: &Path| launcher(env, windows, Some(home)).find_desktop();
+        let none = env_of(&[]);
+
+        // LOCALAPPDATA from the launcher's env, when absolute.
+        let home = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let exe = windows_install(local.path(), Some(WIN_MANIFEST), true);
+        let tail: Vec<_> = exe.iter().rev().take(3).collect();
+        assert_eq!(tail, ["lf-desktop.exe", "LocalFlow Preview", "Programs"]);
+        assert_eq!(
+            find(&env_path("LOCALAPPDATA", local.path()), home.path()),
+            Ok(exe)
+        );
+        assert_eq!(
+            find(&env_path("LOCALAPPDATA", home.path()), home.path()),
+            Err(NOTICE_NOT_INSTALLED_WINDOWS)
+        );
+
+        // Unset, empty or relative: `<home>/AppData/Local`.
+        let exe = windows_install(
+            &home.path().join("AppData").join("Local"),
+            Some(WIN_MANIFEST),
+            true,
+        );
+        for env in [
+            env_of(&[]),
+            env_of(&[("LOCALAPPDATA", "")]),
+            env_of(&[("LOCALAPPDATA", "relative/AppData")]),
+        ] {
+            assert_eq!(find(&env, home.path()), Ok(exe.clone()));
+        }
+
+        // A relative home is never searched, and gets the Windows wording.
+        assert_eq!(
+            launcher(&none, windows, Some(Path::new("relhome"))).find_desktop(),
+            Err(NOTICE_NOT_INSTALLED_WINDOWS)
+        );
+        assert_eq!(
+            launcher(&none, windows, None).find_desktop(),
+            Err(NOTICE_NOT_INSTALLED_WINDOWS)
+        );
+
+        // Missing executable, foreign or missing manifest.
+        let noexe = tempfile::tempdir().unwrap();
+        windows_install(noexe.path(), Some(WIN_MANIFEST), false);
+        assert_eq!(
+            find(&env_path("LOCALAPPDATA", noexe.path()), home.path()),
+            Err(NOTICE_NOT_INSTALLED_WINDOWS)
+        );
+        for manifest in [
+            Some(&b"{\"name\": \"localflow\"}"[..]),
+            Some(b"[\"localflow-preview\"]"),
+            Some(b"\xff\xfe not utf-8"),
+            None,
+        ] {
+            let other = tempfile::tempdir().unwrap();
+            windows_install(other.path(), manifest, true);
+            assert_eq!(
+                find(&env_path("LOCALAPPDATA", other.path()), home.path()),
+                Err(NOTICE_NOT_OWNED),
+                "{manifest:?}"
+            );
+        }
+
+        // LOCALFLOW_DESKTOP_BIN still works, and never falls through.
+        let bin = tempfile::tempdir().unwrap();
+        let override_exe = bin.path().join("lf-desktop.exe");
+        std::fs::write(&override_exe, "x").unwrap();
+        make_executable(&override_exe);
+        assert_eq!(
+            find(&env_path(BIN_ENV, &override_exe), home.path()),
+            Ok(override_exe)
+        );
+        let missing = bin.path().join("missing.exe");
+        for value in [Path::new("lf-desktop.exe"), &missing] {
+            assert_eq!(
+                find(&env_path(BIN_ENV, value), home.path()),
+                Err(NOTICE_BAD_OVERRIDE)
+            );
+        }
+    }
+
     #[test]
     fn mac_bundle_needs_our_identifier_in_a_python_readable_plist() {
         let none = env_of(&[]);
@@ -718,6 +1001,13 @@ mod tests {
         }
     }
 
+    fn refused(run: &Run) -> bool {
+        matches!(
+            run.result.as_ref().err().and_then(|e| e.downcast_ref()),
+            Some(crate::CliError::Failed(m)) if m == SANDBOX_REFUSAL
+        )
+    }
+
     #[test]
     fn legacy_and_refusals_never_look_for_a_binary() {
         let none = env_of(&[]);
@@ -731,30 +1021,122 @@ mod tests {
             (format!("{NOTICE_INVALID_ENV}\n"), 1)
         );
 
-        let sandbox = env_of(&[(SANDBOX_ENV, "1")]);
-        let run = run_launch(&launcher(&sandbox, None, None), Some(Ui::Gpui), None);
-        let err = run.result.unwrap_err();
-        assert!(
-            matches!(err.downcast_ref(), Some(crate::CliError::Failed(m)) if m == SANDBOX_REFUSAL)
-        );
-        assert_eq!(run.legacy, 0);
+        // An explicit GPUI choice with a sandbox request is refused everywhere.
+        for platform in [None, Some(Platform::Linux), Some(Platform::Windows)] {
+            for pairs in [
+                &[(SANDBOX_ENV, "1")][..],
+                &[(SANDBOX_ENV, "true"), (UI_ENV, "gpui")],
+            ] {
+                let env = env_of(pairs);
+                let flag = (pairs.len() == 1).then_some(Ui::Gpui);
+                let run = run_launch(&launcher(&env, platform, None), flag, None);
+                assert!(refused(&run), "{platform:?} {pairs:?}");
+                assert_eq!(run.legacy, 0);
+            }
+        }
 
         let run = run_launch(&launcher(&none, None, None), Some(Ui::Gpui), None);
         assert_eq!((run.err, run.legacy), (format!("{NOTICE_PLATFORM}\n"), 1));
 
-        // The set-up check comes after the refusals and a missing preview.
+        // The set-up check comes after the refusals and a missing preview, for
+        // an explicit choice and the platform default alike.
         fn set_up_unused() -> bool {
             panic!("asked whether LocalFlow is set up without a preview to open")
         }
-        for (env, flag) in [(&none, None), (&bogus, None), (&sandbox, Some(Ui::Gpui))] {
-            let mut l = launcher(env, Some(Platform::Linux), None);
-            l.set_up = &set_up_unused;
-            run_launch(&l, flag, None);
+        let sandbox = env_of(&[(SANDBOX_ENV, "1")]);
+        for platform in [Some(Platform::Linux), Some(Platform::Windows)] {
+            for (env, flag) in [
+                (&none, None),
+                (&none, Some(Ui::Gpui)),
+                (&bogus, None),
+                (&sandbox, Some(Ui::Gpui)),
+                (&sandbox, None),
+            ] {
+                let mut l = launcher(env, platform, None);
+                l.set_up = &set_up_unused;
+                run_launch(&l, flag, None);
+            }
         }
         let mut l = launcher(&none, None, None);
         l.set_up = &set_up_unused;
         let run = run_launch(&l, Some(Ui::Gpui), None);
         assert_eq!((run.err, run.legacy), (format!("{NOTICE_PLATFORM}\n"), 1));
+
+        // LOCALFLOW_RUNTIME=python: legacy, silently, even with LOCALFLOW_UI=gpui
+        // and an override that would fail loudly if it were looked at.
+        let python = env_of(&[
+            (RUNTIME_ENV, " Python "),
+            (UI_ENV, "gpui"),
+            (BIN_ENV, "relative/lf-desktop"),
+            (SANDBOX_ENV, "1"),
+        ]);
+        for platform in [Some(Platform::Linux), Some(Platform::Windows), None] {
+            let run = run_launch(&launcher(&python, platform, None), None, None);
+            assert!(run.result.is_ok() && run.err.is_empty() && run.legacy == 1);
+        }
+    }
+
+    #[test]
+    fn default_gpui_falls_back_silently_only_when_not_installed_or_sandboxed() {
+        let home = tempfile::tempdir().unwrap();
+        for platform in [Some(Platform::Linux), Some(Platform::Windows)] {
+            // Nothing installed: legacy once, no notice.
+            for pairs in [
+                &[][..],
+                &[(UI_ENV, "")],
+                &[(RUNTIME_ENV, "rust")],
+                &[(RUNTIME_ENV, "secret-garbage")],
+            ] {
+                let env = env_of(pairs);
+                let run = run_launch(&launcher(&env, platform, Some(home.path())), None, None);
+                assert!(run.result.is_ok(), "{platform:?} {pairs:?}");
+                assert_eq!((run.err.as_str(), run.legacy), ("", 1), "{pairs:?}");
+            }
+            // Sandbox: legacy once, no refusal, nothing looked at.
+            for value in ["1", "true"] {
+                let env = env_of(&[(SANDBOX_ENV, value), (BIN_ENV, "relative/lf-desktop")]);
+                let run = run_launch(&launcher(&env, platform, Some(home.path())), None, None);
+                assert!(run.result.is_ok() && !refused(&run));
+                assert_eq!((run.err.as_str(), run.legacy), ("", 1));
+            }
+            // Every other failure keeps its notice.
+            let env = env_of(&[(BIN_ENV, "secret-relative/lf-desktop")]);
+            let run = run_launch(&launcher(&env, platform, Some(home.path())), None, None);
+            assert_eq!(
+                (run.err, run.legacy),
+                (format!("{NOTICE_BAD_OVERRIDE}\n"), 1)
+            );
+            // An explicit choice with nothing installed still says so.
+            let none = env_of(&[]);
+            let run = run_launch(
+                &launcher(&none, platform, Some(home.path())),
+                Some(Ui::Gpui),
+                None,
+            );
+            assert_eq!(
+                (run.err, run.legacy),
+                (format!("{}\n", not_installed_notice(platform)), 1)
+            );
+        }
+        // A foreign install location keeps its notice under the default too.
+        let foreign = tempfile::tempdir().unwrap();
+        linux_install(foreign.path(), Some(b"{\"name\": \"localflow\"}"));
+        windows_install(
+            &foreign.path().join("AppData").join("Local"),
+            Some(b"{\"name\": \"localflow\"}"),
+            true,
+        );
+        let none = env_of(&[]);
+        for platform in [Some(Platform::Linux), Some(Platform::Windows)] {
+            let run = run_launch(&launcher(&none, platform, Some(foreign.path())), None, None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_OWNED}\n"), 1));
+        }
+        // macOS and unknown platforms default to legacy without looking.
+        for platform in [Some(Platform::Macos), None] {
+            let env = env_of(&[(BIN_ENV, "relative/lf-desktop"), (SANDBOX_ENV, "1")]);
+            let run = run_launch(&launcher(&env, platform, None), None, None);
+            assert!(run.result.is_ok() && run.err.is_empty() && run.legacy == 1);
+        }
     }
 
     #[cfg(unix)]
@@ -807,14 +1189,76 @@ mod tests {
             let run = run_launch(&launcher(&env, linux, None), Some(Ui::Gpui), None);
             assert!(run.result.is_ok(), "{:?}", run.result);
             assert_eq!((run.err.as_str(), run.legacy), ("", 0));
-            let run = run_launch(&launcher(&env, linux, None), None, Some("Hot Phrases"));
+            let mac = Some(Platform::Macos);
+            let run = run_launch(&launcher(&env, mac, None), None, Some("Hot Phrases"));
             assert_eq!(run.legacy, 1, "a binary override alone is not an opt-in");
             let run = run_launch(&launcher(&env, linux, None), Some(Ui::Gpui), Some("Home"));
             assert!(run.result.is_ok() && run.legacy == 0);
+            // The Linux default opens it too, silently.
+            let run = run_launch(&launcher(&env, linux, None), None, Some("Hot Phrases"));
+            assert!(run.result.is_ok());
+            assert_eq!((run.err.as_str(), run.legacy), ("", 0));
+            // LOCALFLOW_RUNTIME=python never looks at it; --gpui still wins.
+            let python = env_of(&[
+                (BIN_ENV, exe.to_str().unwrap()),
+                (RUNTIME_ENV, "python"),
+                (UI_ENV, "gpui"),
+            ]);
+            let run = run_launch(&launcher(&python, linux, None), None, None);
+            assert_eq!((run.err.as_str(), run.legacy), ("", 1));
+            let run = run_launch(&launcher(&python, linux, None), Some(Ui::Gpui), None);
+            assert!(run.result.is_ok() && run.legacy == 0);
             assert_eq!(
-                wait_lines(&record, 4),
-                ["--help", "", "--help", "--page Home"]
+                wait_lines(&record, 8),
+                [
+                    "--help",
+                    "",
+                    "--help",
+                    "--page Home",
+                    "--help",
+                    "--page Hot Phrases",
+                    "--help",
+                    "",
+                ]
             );
+        }
+
+        #[test]
+        fn default_with_an_owned_linux_install_launches_it() {
+            let _serial = serial();
+            let home = tempfile::tempdir().unwrap();
+            let exe = linux_install(home.path(), Some(b"{\"name\": \"localflow-preview\"}"));
+            let (fake_exe, record) = fake(home.path(), GOOD_HELP, 0);
+            std::fs::rename(&fake_exe, &exe).unwrap();
+            let none = env_of(&[]);
+            let linux = Some(Platform::Linux);
+            let run = run_launch(&launcher(&none, linux, Some(home.path())), None, None);
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!((run.err.as_str(), run.legacy), ("", 0));
+            assert_eq!(wait_lines(&record, 2), ["--help", ""]);
+
+            // Not set up yet: the default gets the same notice as an explicit
+            // choice, after the probe, and the preview never starts.
+            let mut not_set_up = launcher(&none, linux, Some(home.path()));
+            not_set_up.set_up = &set_up_no;
+            let run = run_launch(&not_set_up, None, Some("Hot Phrases"));
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_SET_UP}\n"), 1));
+            assert_eq!(wait_lines(&record, 3), ["--help", "", "--help"]);
+        }
+
+        #[test]
+        fn default_on_windows_with_a_preview_but_no_setup_falls_back_with_the_notice() {
+            let _serial = serial();
+            let dir = tempfile::tempdir().unwrap();
+            let (exe, record) = fake(dir.path(), GOOD_HELP, 0);
+            let env = env_path(BIN_ENV, &exe);
+            let mut not_set_up = launcher(&env, Some(Platform::Windows), None);
+            not_set_up.set_up = &set_up_no;
+            let run = run_launch(&not_set_up, None, None);
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_SET_UP}\n"), 1));
+            assert_eq!(wait_lines(&record, 1), ["--help"]);
         }
 
         #[test]
