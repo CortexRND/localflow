@@ -111,7 +111,12 @@ llm_calls = []
 _orig_complete = server._summarizer.llm.complete
 def recording_complete(system, prompt, *a, **k):
     t = time.perf_counter()
-    out = _orig_complete(system, prompt, *a, **k)
+    try:
+        out = _orig_complete(system, prompt, *a, **k)
+    except Exception as exc:
+        ms = ms_since(t)
+        llm_calls.append({"prompt": prompt, "output": "", "secs": round(ms / 1000, 2), "ms": ms, "error": str(exc)})
+        raise
     ms = ms_since(t)
     llm_calls.append({"prompt": prompt, "output": out, "secs": round(ms / 1000, 2), "ms": ms})
     return out
