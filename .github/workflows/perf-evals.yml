@@ -47,8 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0 # merge-base + baseline worktree for the same-runner A/B
+          fetch-depth: 0 # test-merge commit + baseline worktree for the same-runner A/B
 
       # ffmpeg decodes the FLAC corpus; the rest is what rust.yml installs to
       # build lf-stt (cpal: ALSA, whisper-rs: CMake + libclang) and import localflow.
@@ -143,12 +142,16 @@ jobs:
           set -uo pipefail
           results="$GITHUB_WORKSPACE/perf-results"
           baseline="$(cd "$GITHUB_WORKSPACE/.." && pwd)/perf-baseline"
-          base_sha="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)" || {
-            for rt in $PERF_RUNTIMES; do
-              echo "Could not compute merge-base with origin/${GITHUB_BASE_REF}; candidate-only." > "$results/note-$rt.txt"
-            done
-            exit 0
-          }
+          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+            base_sha="$(git rev-parse HEAD^1)"
+          else
+            base_sha="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)" || {
+              for rt in $PERF_RUNTIMES; do
+                echo "Could not compute merge-base with origin/${GITHUB_BASE_REF}; candidate-only." > "$results/note-$rt.txt"
+              done
+              exit 0
+            }
+          fi
           echo "BASE_SHA=$base_sha" >> "$GITHUB_ENV"
           echo "Baseline: $base_sha"
           git worktree remove --force ../perf-baseline 2>/dev/null || true
