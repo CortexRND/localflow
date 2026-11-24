@@ -110,7 +110,32 @@ def test_run_checks_reports_all_cross_platform_requirements(monkeypatch):
         "ffmpeg", "ollama-installed", "ollama-running", "microphone-device",
     ]
     assert [check.ok for check in checks] == [True, True, False, True]
-    assert checks[0].fix_url == "https://formulae.brew.sh/formula/ffmpeg"
+    assert checks[0].fix_url == "https://ffmpeg.org/download.html"
+
+
+def test_run_checks_gives_a_platform_specific_ffmpeg_install_hint(monkeypatch):
+    monkeypatch.setattr(setup_flow.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(setup_flow, "ollama_installed", lambda: False)
+    monkeypatch.setattr(setup_flow.OllamaClient, "is_running", lambda _self: False)
+    monkeypatch.setattr(setup_flow, "list_input_devices", list)
+    monkeypatch.setattr(setup_flow, "_mac_permission_checks", list)
+    cases = [
+        ("darwin", "Not found — run: brew install ffmpeg",
+         "https://formulae.brew.sh/formula/ffmpeg"),
+        ("win32", "Not found — run: winget install Gyan.FFmpeg",
+         "https://ffmpeg.org/download.html"),
+        ("linux",
+         "Not found — install it with your package manager (e.g. sudo apt install ffmpeg)",
+         "https://ffmpeg.org/download.html"),
+    ]
+    for platform_name, detail, url in cases:
+        monkeypatch.setattr(setup_flow, "sys", SimpleNamespace(platform=platform_name))
+
+        ffmpeg = setup_flow.run_checks(Config())[0]
+
+        assert ffmpeg == setup_flow.Check(
+            "ffmpeg", "ffmpeg", False, detail, "Install ffmpeg", url,
+        )
 
 
 def test_run_checks_uses_provider_info_without_ollama_checks(monkeypatch):
