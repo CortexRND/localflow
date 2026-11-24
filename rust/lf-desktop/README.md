@@ -397,6 +397,11 @@ meantime, are kept. The running LocalFlow runtime reads the same file.
 - It's **kept between launches**, so edits can be checked after a relaunch.
 - `--sandbox-reset` re-seeds it, and refuses to delete a directory that has no
   marker. A non-empty directory that isn't a sandbox is refused too.
+- History **Retry** is a labelled simulation: the failed example has a synthetic
+  clip, and Retry runs the real text pipeline over the sandbox dictionary and
+  snippets with a fixed transcript ("Sandbox: simulated result. No speech model
+  ran."). No model, cleanup provider or key is used. Sandboxes seeded before
+  this existed have no clip on that row; run `--sandbox-reset` to re-seed.
 - Keys live in memory only. The OS keyring is never read or written.
 - Ask, Meetings and Prompts use the existing in-process fakes, and no socket is
   opened. Ask answers with a labelled keyword match over the example history.
@@ -466,6 +471,28 @@ Shortcut, Try it, Review. It is built on `lf_ui::setup_flow` (`initial_choices`,
 - **Default build:** the microphone test works; speech inspection, download and
   the trial say they need `--features runtime` (choices are still saved).
   **Runtime build:** they run for real against the Hugging Face cache.
+
+## History retry
+
+- **Retry** (secondary to Copy) appears for dictations with saved audio. It
+  transcribes the clip again through the shared `process_clip` pipeline with the
+  current settings, this window's dictionary, snippets and commands, and the
+  row's own app (for its style). A failing cleanup provider keeps the
+  uncleaned text, as in live dictation.
+- Only the installed configured model is used; Retry never downloads, never
+  picks another model and never starts dictation, the microphone or the
+  shortcut listener. On macOS it runs in the speech helper with a cache-only
+  load request (a helper without that support refuses before loading).
+- Success replaces that row's status, text and word count in place (an atomic
+  conditional update: a row deleted, cleared and reused, or edited meanwhile is
+  left alone) and shows a short toast. Nothing is pasted or copied, `last.txt`
+  is untouched and no clip is pruned.
+- One retry runs at a time per process; the button reads **Retrying…** and stays
+  focusable, and repeat presses are ignored. A failure stays as a banner on that
+  row with **Try again**. Closing waits briefly for a retry and says it can't be
+  interrupted.
+- **Default build:** Retry is disabled with the rebuild hint. **Sandbox:** a
+  labelled simulation (see Sandbox above).
 
 ## Models & keys
 

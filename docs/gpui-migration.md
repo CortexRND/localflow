@@ -47,7 +47,7 @@ Legend:
 | History | Search (debounced, background), paging, details | Works | `HistoryStore::recent(limit, query, offset)` | `lf history`, Hub |
 | History | Copy final or original text | Works | clipboard | Hub |
 | History | Delete one, clear all (with confirmation) | Works | `HistoryStore::delete/clear` | Hub |
-| History | Retry transcription | Honest-off (`HISTORY_RETRY_UNAVAILABLE`) | — | Python Hub |
+| History | Retry transcription | Works in `--features runtime` builds for dictations with a saved 16 kHz clip: the shared `process_clip` pipeline (current config, this data root's dictionary/snippets/commands, the row's app context, fail-soft cleanup) with only the installed configured model (cache-only; never downloads; macOS keeps the speech helper via a cache-only load request old helpers reject). Updates only that row with an atomic conditional update (refuses a deleted, cleared-and-reused or edited row); no paste, clipboard, `last.txt`, pruning or config write. One job per process; a close waits briefly for it and can't interrupt it. Default build explains the rebuild; the sandbox runs a labelled simulation (no model, provider or key). Native interaction and macOS are unverified | `lf_runtime::pipeline::process_clip`, `HistoryStore::update_if_unchanged`, `lf_stt::runtime::hub_speech_cached` | Python Hub |
 | Dictionary | Add, edit, remove (with Undo) words and replacements | Works | `hub_model::submit_*` → `dictionary.json` | `lf dict`, Hub |
 | Dictionary | Import CSV/JSON | Works (file picker, or a typed path when no portal is available) | `DictionaryStore::import_file` | `lf dict import` |
 | Snippets | Create, edit, enable, delete with Undo, autosave, external-change reconcile, try-it preview | Works | `HotPhrasesEditor<PhrasesModel>` → `hot_phrases.json` | `lf phrases`, Hub |
@@ -89,8 +89,9 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    works in `lf-desktop`, or the owner explicitly waives it. PR 2 implemented the
    setup wizard, model storage, the settings assistant, key import, Test LLM, and
    single-instance and page routing; they still need interactive review on Linux
-   (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
-   row (History retry) needs a decision.
+   (X11 and Wayland) and macOS before this gate is met. No rows remain marked
+   Missing: the tray item (Linux, Windows and macOS) and History retry (runtime
+   builds) are implemented but, like the rest, still need interactive review.
 2. **Data safety.** [`gpui_data_safety.py`](../scripts/gpui_data_safety.py) compares
    the real config file, `~/.localflow` and the keyring by hash before and after a
    scripted sandbox session. In real mode, every write goes through `config_write`
