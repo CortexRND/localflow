@@ -38,6 +38,7 @@ mod cmd_stt;
 mod cmd_token;
 mod cmd_tweak;
 pub mod desktop_launch;
+mod native;
 pub mod pyfmt;
 mod pyfs;
 mod python;
