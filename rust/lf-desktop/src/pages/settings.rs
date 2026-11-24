@@ -57,8 +57,8 @@ struct Extra {
 fn spec_index(spec: &Spec) -> usize {
     SPECS
         .iter()
-        .position(|s| std::ptr::eq(s, spec))
-        .unwrap_or(0)
+        .position(|s| s.section == spec.section && s.key == spec.key)
+        .expect("spec must exist in SPECS")
 }
 
 impl SettingsPage {
@@ -1030,5 +1030,67 @@ impl Render for SettingsPage {
             ),
             column("settings-scroll", body),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn spec_keys_are_unique() {
+        let mut seen = HashSet::new();
+        for s in SPECS {
+            assert!(
+                seen.insert((s.section, s.key)),
+                "duplicate {}.{}",
+                s.section,
+                s.key
+            );
+        }
+    }
+
+    #[test]
+    fn spec_index_resolves_by_value_not_address() {
+        for tab in Tab::ALL {
+            for spec in ctl::specs_for(tab) {
+                let i = spec_index(spec);
+                assert_eq!(SPECS[i].section, spec.section);
+                assert_eq!(SPECS[i].key, spec.key);
+                // A copy lives at a different address but must resolve the same.
+                let copy = Spec { ..*spec };
+                assert!(!std::ptr::eq(&copy, spec));
+                assert_eq!(spec_index(&copy), i);
+            }
+        }
+    }
+
+    /// `SettingsPage::new` creates `inputs` for Shortcut/Text specs and
+    /// `selects` for Choice/Microphone specs, keyed by SPECS index. The index
+    /// `spec_index` returns must land on a spec of the same kind (never a
+    /// fallback `0`), so the lookups in `render_spec` find the entity.
+    #[test]
+    fn spec_index_lands_on_the_matching_control_kind() {
+        for tab in Tab::ALL {
+            for spec in ctl::specs_for(tab) {
+                let i = spec_index(spec);
+                let (name, ok) = match spec.control {
+                    Control::Shortcut { .. } | Control::Text { .. } => (
+                        "input",
+                        matches!(
+                            SPECS[i].control,
+                            Control::Shortcut { .. } | Control::Text { .. }
+                        ),
+                    ),
+                    Control::Choice(_) | Control::Microphone => (
+                        "select",
+                        matches!(SPECS[i].control, Control::Choice(_) | Control::Microphone),
+                    ),
+                    Control::Switch => ("switch", SPECS[i].control == Control::Switch),
+                };
+                assert!(ok, "{}.{} has no {name} entry", spec.section, spec.key);
+            }
+        }
     }
 }
