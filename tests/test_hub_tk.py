@@ -1,7 +1,10 @@
+import tomllib
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
 
+from localflow import config as config_module
 from localflow.config import Config
 from localflow.dictionary import DictionaryStore
 from localflow.history import HistoryStore
@@ -16,7 +19,7 @@ class FakeMeetingClient:
         return {"session": None, "last_saved": None, "chat_available": False}
 
 
-def _window(tmp_path, theme="light"):
+def _window(tmp_path, theme="light", config=None):
     try:
         root = tk.Tk()
     except tk.TclError as exc:
@@ -24,7 +27,7 @@ def _window(tmp_path, theme="light"):
     history = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
     dictionary = DictionaryStore(tmp_path / "dictionary.json")
     window = HubWindow(
-        root, history, dictionary, Config(), theme=theme,
+        root, history, dictionary, config or Config(), theme=theme,
         meeting_client=FakeMeetingClient(),
     )
     return root, window, history, dictionary
@@ -69,6 +72,7 @@ def test_hub_dictionary_edit_and_style_save_use_local_stores(tmp_path, monkeypat
     root, window, _history, dictionary = _window(tmp_path)
     saved = []
     monkeypatch.setattr("localflow.hub_tk.save_config", saved.append)
+    monkeypatch.setattr("localflow.hub_tk.load_config", Config)
     try:
         window.show_page("Dictionary")
         window.word_var.set("LocalFlow")
@@ -102,6 +106,31 @@ def test_hub_dictionary_edit_and_style_save_use_local_stores(tmp_path, monkeypat
         window._save_style()
         assert saved[0].cleanup_level == "medium"
         assert saved[0].style_work == "casual"
+    finally:
+        root.destroy()
+
+
+def test_style_save_keeps_meetings_changed_by_another_process(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(path))
+    monkeypatch.setattr(
+        config_module, "legacy_config_path", lambda: tmp_path / "legacy.toml"
+    )
+    monkeypatch.setattr(config_module.sys, "platform", "linux")
+    path.write_text("[features]\nmeetings = true\n")
+    root, window, _history, _dictionary = _window(
+        tmp_path, config=config_module.load_config()
+    )
+    try:
+        path.write_text("[features]\nmeetings = false\n")
+        window.show_page("Style")
+        window.cleanup_var.set("medium")
+        window.style_vars["work"].set("casual")
+        window._save_style()
+        saved = tomllib.loads(path.read_text())
+        assert saved["features"]["meetings"] is False
+        assert saved["cleanup"]["level"] == "medium"
+        assert saved["cleanup"]["style_work"] == "casual"
     finally:
         root.destroy()
 
