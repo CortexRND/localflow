@@ -163,10 +163,7 @@ def peak_rss_bytes() -> int | None:
 # --------------------------------------------------------------------------
 
 
-def run_bench(
-    db: Path, vault: Path, queries: list[tuple[str, str | None]], *,
-    iterations: int, warmup: int, now: datetime,
-) -> dict:
+def _ensure_headless_sounddevice() -> None:
     if "sounddevice" not in sys.modules:
         try:
             import sounddevice  # noqa: F401
@@ -174,6 +171,13 @@ def run_bench(
             # Headless Linux runners without PulseAudio fail PortAudio init on
             # `import sounddevice` via localflow.meetings, though recall never uses audio.
             sys.modules["sounddevice"] = types.ModuleType("sounddevice")
+
+
+def run_bench(
+    db: Path, vault: Path, queries: list[tuple[str, str | None]], *,
+    iterations: int, warmup: int, now: datetime,
+) -> dict:
+    _ensure_headless_sounddevice()
     from localflow.history import HistoryStore
     from localflow.recall import search
 
@@ -239,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.db.is_file():
         print(f"error: database not found: {args.db}", file=sys.stderr)
         return EXIT_BAD_INPUT
+    _ensure_headless_sounddevice()
     try:
         import localflow.recall  # noqa: F401
     except ImportError as exc:
