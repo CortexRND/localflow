@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import copy
 import json
+import os
 import random
 import subprocess
 import sys
@@ -792,10 +793,11 @@ def _write(path: Path, data: dict) -> Path:
     return path
 
 
-def _cli(*args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess:
+def _cli(*args: str, cwd: Path = REPO_ROOT, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "evals.perf", *args],
         cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+        env={**os.environ, **env} if env else None,
     )
 
 
@@ -860,8 +862,12 @@ def test_cli_validate(tmp_path):
 
 def test_cli_run_emits_valid_result(tmp_path):
     out = tmp_path / "r" / "result.json"
+    # Hide locally built Rust bench binaries so every suite reports not_exercised.
+    missing = str(tmp_path / "missing-bin")
     proc = _cli("run", "--tier", "smoke", "--runtime", "rust", "--output", str(out),
-                "--runner-label", "ci-test")
+                "--runner-label", "ci-test",
+                env={var: missing for var in ("LF_PERF_RECALL_BIN", "LF_PERF_STT_BENCH_BIN",
+                                              "LF_PERF_PARITY_BIN", "LF_PERF_LF_RS_BIN")})
     assert proc.returncode == 0, proc.stderr
     data = load_result(out)
     assert validate_result(data) == []
