@@ -67,6 +67,7 @@ rust/lf-desktop/target/debug/lf-desktop --engine     # then press "Start here" o
 | `--sandbox` | Uses isolated example data and in-process fake services (also `LOCALFLOW_SANDBOX=1`) |
 | `--data-dir <DIR>` | Sandbox directory, only valid with `--sandbox` |
 | `--sandbox-reset` | Re-seeds the sandbox directory (refused while that sandbox is open in another window) |
+| `--sandbox-exercise` | Writes once to each sandbox store (Settings, a provider key, Hot Phrases, History, Prompts) through the page controllers, prints one line per store and exits without a window. Only valid with `--sandbox`; refused while that sandbox is open in another window; used by Gate 2 |
 
 An unknown argument, or `--engine` where it can't run, exits with status 2. A first
 launch with no setup marker in the config (and no `--page`) opens the wizard,
@@ -156,7 +157,7 @@ directory you pass:
 |---|---|
 | `LocalFlow-Preview-<ver>-linux-x86_64.tar.gz` | `localflow-preview/`: `bin/lf-desktop`, `lib/` (Sherpa-ONNX C and C++ API and ONNX Runtime `.so` files), `share/applications/localflow-preview.desktop`, `share/icons/localflow-preview.png`, `README.txt`, `MANIFEST.json` (version, measured ABI requirements, SHA-256 of every file) |
 | `LocalFlow-Preview-<ver>-macos-arm64.tar.gz`, `LocalFlow-Preview-<ver>-macos-x86_64.tar.gz` | `LocalFlow Preview.app` |
-| `LocalFlow-Preview-<ver>-windows-x86_64.zip` | `LocalFlow Preview\`: `lf-desktop.exe` (static CRT, no Visual C++ Redistributable), the Sherpa-ONNX C/C++ API and ONNX Runtime DLLs next to it, `README.txt`, `MANIFEST.json`. Unzip and run; there is no installer |
+| `LocalFlow-Preview-<ver>-windows-x86_64.zip` | `LocalFlow Preview\`: `lf-desktop.exe` (static CRT, no Visual C++ Redistributable), the Sherpa-ONNX C/C++ API and ONNX Runtime DLLs next to it, `README.txt`, `MANIFEST.json`. Unzip and run; there is no installer. Release builds are GUI-subsystem programs (no console window); started from a terminal without redirection they print `--help`/`--version`/errors (including a window that can't open) to that terminal and detach from it once the window has opened. `cmd` and PowerShell don't wait for GUI programs, so their prompt can return first and `%ERRORLEVEL%`/`$LASTEXITCODE` are not set; Git Bash, `Start-Process -Wait` and redirected output do wait. Debug builds stay console programs |
 
 Each archive comes with `<asset>.sha256`. Nothing in the output directory is
 replaced until `scripts/verify_gpui_package.sh` has extracted the archive into
