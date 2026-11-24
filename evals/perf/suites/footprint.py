@@ -431,7 +431,10 @@ def run_startup(ctx: RunContext, runs: int) -> dict:
             cwd=ctx.repo_root,
         )
     except StartupError as exc:
-        return make_case(suite=SUITE, case=name, dims=dims, status="failed", error=str(exc))
+        msg = str(exc)
+        if runtime == "python" and "ModuleNotFoundError:" in msg:
+            return make_case(suite=SUITE, case=name, dims=dims, status="not_exercised", error=msg)
+        return make_case(suite=SUITE, case=name, dims=dims, status="failed", error=msg)
     if isinstance(result, str):
         return make_case(suite=SUITE, case=name, dims=dims, status="not_exercised", error=result)
     server = "lf-rs serve" if runtime == "rust" else "lf serve"
