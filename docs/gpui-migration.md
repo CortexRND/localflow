@@ -119,7 +119,8 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    isn't weakened. PR 3 ships it as a separate preview package and installer.
 
    Checked by hand on Linux x86_64 on 2026-11-24: Ubuntu, X11 under Xvfb, the
-   `gpui-preview-linux-x86_64` CI artifact, installed with
+   `gpui-preview-linux-x86_64` CI artifact built from `main` at `c74fc9d` (which
+   includes #108's generic-CPU whisper.cpp build), installed with
    `scripts/install_gpui_preview.sh --archive … --sha256 …` into a fresh HOME
    that already had `~/.localflow` and `config.toml`.
    - Install creates only the three documented paths:
