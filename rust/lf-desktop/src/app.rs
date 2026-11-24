@@ -2075,7 +2075,7 @@ mod focus_tests {
 
     #[gpui::test]
     fn ask_page_fills_the_main_pane(cx: &mut TestAppContext) {
-        let (_shell, cx, _dir) = open(Page::Ask, cx);
+        let (shell, cx, _dir) = open(Page::Ask, cx);
         for (w, h) in [(1280., 850.), (960., 640.), (1280., 850.)] {
             cx.simulate_resize(gpui::size(gpui::px(w), gpui::px(h)));
             cx.run_until_parked();
@@ -2105,6 +2105,46 @@ mod focus_tests {
                 "question box is {input:?} wide at {w}x{h}"
             );
         }
+
+        // Long conversations must overflow the scroll viewport vertically so
+        // GPUI computes a positive scroll range instead of shrinking the list.
+        let ask = shell.read_with(cx, |shell, _| match shell.find(Page::Ask) {
+            Some(View::Ask(view)) => view.clone(),
+            _ => panic!("Ask isn't open"),
+        });
+        cx.update(|_, cx| {
+            ask.update(cx, |page, cx| {
+                for i in 0..12 {
+                    page.push_turn(
+                        lf_ui::backends::ask::Turn {
+                            question: format!("Question {i}"),
+                            answer: format!("Answer {i} with enough text to take up vertical space in the conversation."),
+                            citations: Vec::new(),
+                            error: String::new(),
+                        },
+                        cx,
+                    );
+                }
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let scroll = cx
+            .debug_bounds("ask-scroll")
+            .expect("ask-scroll")
+            .size
+            .height;
+        let content = cx
+            .debug_bounds("ask-scroll-content")
+            .expect("ask-scroll-content")
+            .size
+            .height;
+        let convo = cx.debug_bounds("ask-convo").expect("ask-convo").size.height;
+        assert!(
+            content >= convo && content > scroll,
+            "direct scroll child ({content:?}) must wrap convo ({convo:?}) and exceed scroll viewport ({scroll:?})"
+        );
     }
 
     #[gpui::test]

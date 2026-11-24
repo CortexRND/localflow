@@ -70,6 +70,12 @@ impl AskPage {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn push_turn(&mut self, turn: Turn, cx: &mut Context<Self>) {
+        self.turns.push(turn);
+        cx.notify();
+    }
+
     fn send(&mut self, cx: &mut Context<Self>) {
         let question = self.composer.read(cx).text().trim().to_string();
         if question.is_empty() || self.waiting.is_some() {
@@ -367,6 +373,7 @@ impl Render for AskPage {
                 .child(
                     div()
                         .id("ask-scroll")
+                        .debug_selector(|| "ask-scroll".into())
                         .flex()
                         .flex_col()
                         .flex_1()
@@ -374,6 +381,7 @@ impl Render for AskPage {
                         .overflow_y_scroll()
                         .child(
                             div()
+                                .debug_selector(|| "ask-scroll-content".into())
                                 .flex()
                                 .justify_center()
                                 .px(space::s10())
