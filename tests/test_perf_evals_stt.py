@@ -766,8 +766,9 @@ def test_py_stt_unavailable_and_bad_args(tmp_path):
 
 
 def test_py_stt_parse_manifest_forms(tmp_path):
-    arr = py_stt.parse_manifest(json.dumps([{"id": "a", "path": "/x/a.wav"}]), tmp_path)
-    assert arr == [{"id": "a", "path": Path("/x/a.wav")}]
+    abs_clip = (tmp_path / "abs" / "a.wav").resolve()
+    arr = py_stt.parse_manifest(json.dumps([{"id": "a", "path": str(abs_clip)}]), tmp_path)
+    assert arr == [{"id": "a", "path": abs_clip}]
     obj = py_stt.parse_manifest(json.dumps({"clips": [{"id": "b", "path": "b.wav"}]}), tmp_path)
     assert obj == [{"id": "b", "path": tmp_path / "b.wav"}]
     for bad in ("[]", '{"clips": []}', '[{"id": "a"}]', '[{"id": "", "path": "a"}]',

@@ -141,9 +141,49 @@ def _rss_windows() -> int:  # pragma: no cover - Windows only
 
     counters = _Counters()
     counters.cb = ctypes.sizeof(_Counters)
-    handle = ctypes.windll.kernel32.GetCurrentProcess()  # type: ignore[attr-defined]
-    if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):  # type: ignore[attr-defined]
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Counters), wintypes.DWORD]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    handle = kernel32.GetCurrentProcess()
+    if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
         return int(counters.WorkingSetSize)
+    return 0
+
+
+def _rss_macos() -> int:  # pragma: no cover - macOS only
+    import ctypes
+
+    class _TimeValue(ctypes.Structure):
+        _fields_ = [("seconds", ctypes.c_int32), ("microseconds", ctypes.c_int32)]
+
+    class _MachTaskBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("virtual_size", ctypes.c_uint64),
+            ("resident_size", ctypes.c_uint64),
+            ("resident_size_max", ctypes.c_uint64),
+            ("user_time", _TimeValue),
+            ("system_time", _TimeValue),
+            ("policy", ctypes.c_int32),
+            ("suspend_count", ctypes.c_int32),
+        ]
+
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    libc.mach_task_self.restype = ctypes.c_uint32
+    libc.task_info.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    libc.task_info.restype = ctypes.c_int32
+    mach_task_basic_info = 20
+    info = _MachTaskBasicInfo()
+    count = ctypes.c_uint32(ctypes.sizeof(info) // ctypes.sizeof(ctypes.c_uint32))
+    if libc.task_info(libc.mach_task_self(), mach_task_basic_info, ctypes.byref(info), ctypes.byref(count)) == 0:
+        return int(info.resident_size)
     return 0
 
 
@@ -158,6 +198,10 @@ def rss_bytes() -> int:
         pass
     if sys.platform == "win32":  # pragma: no cover
         return _rss_windows()
+    if sys.platform == "darwin":  # pragma: no cover
+        current = _rss_macos()
+        if current > 0:
+            return current
     try:
         import resource
     except ImportError:  # pragma: no cover

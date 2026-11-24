@@ -134,7 +134,7 @@ def find_rust_bench(repo_root: Path, override: str | None = None) -> Path | None
     explicit = override or os.environ.get("LF_PERF_STT_BENCH_BIN")
     if explicit:
         path = Path(explicit)
-        return path if path.is_file() else None
+        return path.resolve() if path.is_file() else None
     exe = "stt_bench.exe" if sys.platform == "win32" else "stt_bench"
     for profile in ("release", "debug"):
         path = repo_root / "rust" / "target" / profile / "examples" / exe
@@ -222,6 +222,15 @@ def cases_from_report(entry: dict, report: dict, clips: list[dict]) -> list[dict
     if not isinstance(results, list) or len(results) != 1:
         return _non_ok(entry, [c["id"] for c in clips], "failed", "bench report must hold exactly one engine result")
     engine_result = results[0]
+    requested = str(entry.get("provider") or "").lower()
+    effective = str(engine_result.get("effective_provider") or "").lower()
+    if requested and requested != "auto" and effective and effective != requested:
+        return _non_ok(
+            entry,
+            [c["id"] for c in clips],
+            "not_exercised",
+            f"requested provider {entry['provider']!r} fell back to {engine_result.get('effective_provider')!r}",
+        )
     by_id = {c.get("id"): c for c in engine_result.get("clips") or [] if isinstance(c, dict)}
     cases = []
     for clip in clips:
@@ -241,7 +250,10 @@ def run_entry(ctx: RunContext, entry: dict, clips: list[dict], work: Path) -> li
     slug = case_name(entry, "x").replace("/", "_")
     manifest = work / f"{slug}.manifest.json"
     out = work / f"{slug}.out.json"
-    manifest.write_text(json.dumps({"clips": [{"id": c["id"], "path": c["path"]} for c in clips]}), encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"clips": [{"id": c["id"], "path": str(Path(c["path"]).resolve())} for c in clips]}),
+        encoding="utf-8",
+    )
     cmd = bench_command(ctx, entry, manifest, out)
     if isinstance(cmd, str):
         return _non_ok(entry, clip_ids, "not_exercised", cmd)
@@ -249,7 +261,7 @@ def run_entry(ctx: RunContext, entry: dict, clips: list[dict], work: Path) -> li
     try:
         proc = subprocess.run(
             cmd, cwd=str(ctx.repo_root), env=_bench_env(ctx), capture_output=True, text=True,
-            timeout=timeout, check=False,
+            encoding="utf-8", errors="replace", timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired as exc:
         return _non_ok(entry, clip_ids, "failed", f"bench timed out after {timeout:g} s: {_tail(exc.stderr)}".strip())
