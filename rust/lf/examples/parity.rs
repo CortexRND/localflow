@@ -3,22 +3,53 @@
 //! Reads a JSON array of requests from stdin and writes a JSON array of
 //! results to stdout, one per request: `{"ok": value}` or `{"error": text}`.
 //! Each request is `{"op": name, ...arguments}` and calls the `lf-core`
-//! function of the same purpose; the Python side computes its own result
-//! in-process and compares. Nothing here evaluates Python.
+//! function of the same purpose (`cli` runs `lf::run` in-process against an
+//! in-memory keyring); the Python side computes its own result in-process
+//! and compares. Nothing here evaluates Python.
 
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{anyhow, bail, Context, Result};
 use lf_core::config::{self, Config};
 use lf_core::dictionary::{self, DictionaryStore};
 use lf_core::history::{EntryUpdate, HistoryStore, NewEntry};
 use lf_core::hotphrases::{self, HotPhraseStore, RenderSteps};
+use lf_core::secrets::{self, FailingKeyring, KeyringBackend, MemoryKeyring};
 use lf_core::{apitoken, formatting, symbols};
 use serde_json::{json, Value};
 
+/// Collects WARN and ERROR log messages (what `lf-rs` prints to stderr
+/// through its own logger) so `cli` results can include them.
+struct CaptureLogger(Mutex<Vec<String>>);
+
+impl log::Log for CaptureLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            let mut records = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            records.push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: CaptureLogger = CaptureLogger(Mutex::new(Vec::new()));
+
+fn take_warnings() -> Vec<String> {
+    std::mem::take(&mut *LOGGER.0.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
 fn main() {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
     let mut input = String::new();
     if let Err(error) = io::stdin().read_to_string(&mut input) {
         eprintln!("parity: cannot read stdin: {error}");
@@ -133,9 +164,33 @@ fn updated_config(request: &Value) -> Result<Config> {
     config::apply_config_update(&base, request.get("update").unwrap_or(&json!({})))
 }
 
+/// `lf::richfmt` output for one Rich `console.print` call: `kind` is
+/// `markup` (a str), `text` (`Text(str)`) or `table` (`Table(box=None)`).
+fn rich(request: &Value) -> Result<Value> {
+    let width = arg(request, "width")?.as_u64().context("width")? as usize;
+    let console = lf::richfmt::Console { width };
+    Ok(Value::String(match text(request, "kind")? {
+        "markup" => console.markup(text(request, "text")?),
+        "text" => console.text(text(request, "text")?),
+        "table" => {
+            let headers = strings(request.get("headers"));
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            let rows: Vec<Vec<String>> = arg(request, "rows")?
+                .as_array()
+                .context("rows")?
+                .iter()
+                .map(|row| strings(Some(row)))
+                .collect();
+            console.table(&headers, &rows)
+        }
+        other => bail!("unknown rich kind {other:?}"),
+    }))
+}
+
 fn handle(request: &Value) -> Result<Value> {
     let op = text(request, "op")?;
     match op {
+        "rich" => rich(request),
         "config_defaults" => Ok(config::config_to_dict(&Config::default())),
         "config_update" => Ok(config::config_to_dict(&updated_config(request)?)),
         "shortcut_normalize" => Ok(json!(lf_core::shortcuts::normalize_optional_combo(
@@ -221,7 +276,85 @@ fn handle(request: &Value) -> Result<Value> {
         ))?),
         "render" => render(request),
         "hot_store" => hot_store(request),
+        "cli" => cli(request),
         other => bail!("unknown op {other:?}"),
+    }
+}
+
+/// Deleting a missing entry fails, as with a real keyring (Python keyring's
+/// `PasswordDeleteError`); `MemoryKeyring` itself treats it as a no-op.
+struct StrictMemory(Arc<MemoryKeyring>);
+
+impl KeyringBackend for StrictMemory {
+    fn get_password(&self, service: &str, name: &str) -> Result<Option<String>> {
+        self.0.get_password(service, name)
+    }
+
+    fn set_password(&self, service: &str, name: &str, value: &str) -> Result<()> {
+        self.0.set_password(service, name, value)
+    }
+
+    fn delete_password(&self, service: &str, name: &str) -> Result<()> {
+        if self.0.value(service, name).is_none() {
+            bail!("Password not found");
+        }
+        self.0.delete_password(service, name)
+    }
+}
+
+/// `lf::run(args)` in-process with `stdin` as input and an in-memory keyring
+/// seeded from `keyring` (`{name: value}`), or a keyring whose every call
+/// fails with `failing_keyring`. Returns `{code, out, err, keyring, warnings}`,
+/// `warnings` being the messages `lf-rs` would log to stderr.
+fn cli(request: &Value) -> Result<Value> {
+    let mut argv = vec!["lf-rs".to_string()];
+    argv.extend(strings(request.get("args")));
+    let memory = Arc::new(MemoryKeyring::new());
+    for (name, value) in request
+        .get("keyring")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let value = value.as_str().context("keyring values must be strings")?;
+        memory.set_password(secrets::SERVICE, name, value)?;
+    }
+    let backend: Arc<dyn KeyringBackend> = match opt_text(request, "failing_keyring") {
+        Some(message) => Arc::new(FailingKeyring(message.to_string())),
+        None => Arc::new(StrictMemory(Arc::clone(&memory))),
+    };
+    let previous = secrets::set_keyring_backend(Some(backend));
+    secrets::reset_keyring_warning();
+    take_warnings();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut input = io::Cursor::new(opt_text(request, "stdin").unwrap_or("").as_bytes().to_vec());
+    let mut clipboard = NoClipboard;
+    let code = lf::run(
+        argv,
+        &mut lf::Io {
+            out: &mut out,
+            err: &mut err,
+            input: &mut input,
+            clipboard: &mut clipboard,
+            server_url: None,
+            terminal: false,
+        },
+    );
+    secrets::set_keyring_backend(previous);
+    Ok(json!({
+        "code": code,
+        "out": String::from_utf8(out)?,
+        "err": String::from_utf8(err)?,
+        "keyring": memory.values(secrets::SERVICE),
+        "warnings": take_warnings(),
+    }))
+}
+
+struct NoClipboard;
+
+impl lf::Clipboard for NoClipboard {
+    fn set_text(&mut self, _text: &str) -> Result<()> {
+        bail!("no clipboard in the parity driver")
     }
 }
 

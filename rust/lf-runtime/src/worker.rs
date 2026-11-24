@@ -11,7 +11,7 @@ use lf_core::config::Config;
 use lf_core::history::HistoryStore;
 use lf_providers::LlmProvider;
 
-use crate::controller::Job;
+use crate::controller::{Job, JobKind};
 use crate::engine::SpeechEngine;
 use crate::pipeline::{process_job_guarded, Models, Vocabulary};
 use crate::status::write_last_text;
@@ -57,14 +57,19 @@ impl Worker {
         if stop.load(Ordering::Acquire) {
             return;
         }
-        let mut llm = (self.build_llm)(&(self.config)());
+        let config = (self.config)();
+        let mut llm = (self.build_llm)(&config);
+        let mut fast_llm = self.build_fast_llm(&config);
         while let Ok(item) = rx.recv() {
             if stop.load(Ordering::Acquire) {
                 return;
             }
             match item {
                 WorkItem::Shutdown => return,
-                WorkItem::ReloadLlm(config) => llm = (self.build_llm)(&config),
+                WorkItem::ReloadLlm(config) => {
+                    llm = (self.build_llm)(&config);
+                    fast_llm = self.build_fast_llm(&config);
+                }
                 WorkItem::ReloadStt(config) => match (self.build_stt)(&config) {
                     Ok(engine) => match engine.load() {
                         Ok(()) => {
@@ -87,17 +92,34 @@ impl Worker {
                         }
                     }
                 }
-                WorkItem::Job(job) => self.process(job, llm.as_deref(), &stop),
+                WorkItem::Job(job) => self.process(job, llm.as_deref(), fast_llm.as_deref(), &stop),
             }
         }
     }
 
-    fn process(&self, job: Job, llm: Option<&dyn LlmProvider>, stop: &AtomicBool) {
+    fn build_fast_llm(&self, config: &Config) -> Option<Box<dyn LlmProvider>> {
+        config
+            .fast_model_config()
+            .and_then(|fast| (self.build_llm)(&fast))
+    }
+
+    fn process(
+        &self,
+        job: Job,
+        llm: Option<&dyn LlmProvider>,
+        fast_llm: Option<&dyn LlmProvider>,
+        stop: &AtomicBool,
+    ) {
         if stop.load(Ordering::Acquire) {
             return;
         }
         let config = (self.config)();
         let vocab = (self.vocabulary)(&config);
+        let llm = if job.kind == JobKind::Dictate && config.uses_light_cleanup() {
+            fast_llm.or(llm)
+        } else {
+            llm
+        };
         let models = Models {
             speech: self.speech.as_ref(),
             llm,
@@ -140,7 +162,8 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controller::JobKind;
+    use lf_providers::{Health, ModelInfo, ProviderError};
+    use serde_json::json;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -163,6 +186,92 @@ mod tests {
                     .unwrap();
             }
             Ok(self.text.into())
+        }
+    }
+
+    struct RecordingLlm(String, Arc<Mutex<Vec<String>>>);
+
+    impl LlmProvider for RecordingLlm {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        fn offline(&self) -> bool {
+            true
+        }
+        fn complete(&self, _: &str, _: &str, _: Option<i64>) -> Result<String, ProviderError> {
+            self.1.lock().unwrap().push(self.0.clone());
+            Ok("Cleaned text.".into())
+        }
+        fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            unreachable!()
+        }
+        fn healthcheck(&self) -> Health {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn only_light_dictation_uses_fast_model() {
+        for (level, expected) in [
+            ("light", vec!["main", "fast", "main", "main"]),
+            ("medium", vec!["main", "main", "main", "main"]),
+        ] {
+            let mut config = Config::default();
+            config.set_field("llm_model", json!("main"));
+            config.set_field("cleanup_level", json!(level));
+            let config = Arc::new(config);
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let capture = calls.clone();
+            let initial = config.clone();
+            let worker = Worker {
+                config: Arc::new(move || initial.clone()),
+                vocabulary: Arc::new(|_| Vocabulary::default()),
+                history: None,
+                speech: Arc::new(Speech {
+                    text: "this transcript has enough words",
+                    gate: None,
+                }),
+                build_llm: Arc::new(move |config| {
+                    Some(Box::new(RecordingLlm(
+                        config.field_str("llm_model").unwrap().into(),
+                        capture.clone(),
+                    )))
+                }),
+                build_stt: Arc::new(|_| unreachable!()),
+                deliver: Arc::new(|_, _, error| assert!(!error)),
+                last_text_path: None,
+            };
+            let job = Job {
+                kind: JobKind::Dictate,
+                audio: Some(vec![0.2; 16000]),
+                app_info: None,
+                selection: String::new(),
+                preset: None,
+                clipboard_before: None,
+            };
+            let mut updated = (*config).clone();
+            updated.set_field("llm_fast_model", json!("fast"));
+            let (tx, rx) = mpsc::channel();
+            for item in [
+                WorkItem::Job(job.clone()),
+                WorkItem::ReloadLlm(Arc::new(updated)),
+                WorkItem::Job(job.clone()),
+                WorkItem::Job(Job {
+                    kind: JobKind::Command,
+                    ..job.clone()
+                }),
+                WorkItem::Job(Job {
+                    kind: JobKind::Transform,
+                    preset: Some("polish".into()),
+                    selection: "rough text".into(),
+                    ..job
+                }),
+                WorkItem::Shutdown,
+            ] {
+                tx.send(item).unwrap();
+            }
+            worker.run(rx);
+            assert_eq!(*calls.lock().unwrap(), expected);
         }
     }
 
@@ -211,14 +320,14 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let old_job = job.clone();
-        let old = std::thread::spawn(move || old.process(old_job, None, &stopped));
+        let old = std::thread::spawn(move || old.process(old_job, None, None, &stopped));
         blocked.recv_timeout(Duration::from_secs(5)).unwrap();
         stop.store(true, Ordering::Release);
         worker(Arc::new(Speech {
             text: "new result",
             gate: None,
         }))
-        .process(job, None, &AtomicBool::new(false));
+        .process(job, None, None, &AtomicBool::new(false));
         release.send(()).unwrap();
         old.join().unwrap();
         let history = HistoryStore::open(Some(database), Some(clips.clone()), true).unwrap();

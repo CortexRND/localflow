@@ -39,6 +39,8 @@ struct Capture {
     fail: AtomicBool,
     system: AtomicBool,
     opened: AtomicUsize,
+    stt_fail: AtomicBool,
+    started: Arc<AtomicUsize>,
     stopped: Arc<AtomicUsize>,
     gate: Mutex<Option<Gate>>,
     transcription_gate: Arc<Mutex<Option<Gate>>>,
@@ -47,6 +49,7 @@ struct Device {
     _local: Rc<()>,
     owner: std::thread::ThreadId,
     sample: f32,
+    started: Arc<AtomicUsize>,
     stopped: Arc<AtomicUsize>,
 }
 impl AudioSource for Device {
@@ -55,6 +58,7 @@ impl AudioSource for Device {
         callback: AudioCallback,
     ) -> std::result::Result<(), SystemAudioUnavailable> {
         assert_eq!(self.owner, std::thread::current().id());
+        self.started.fetch_add(1, Ordering::SeqCst);
         callback(vec![self.sample; 16000]);
         Ok(())
     }
@@ -90,6 +94,7 @@ impl Capture {
             _local: Rc::new(()),
             owner: std::thread::current().id(),
             sample,
+            started: self.started.clone(),
             stopped: self.stopped.clone(),
         })
     }
@@ -100,6 +105,10 @@ impl CaptureFactory for Capture {
             entered.send(()).unwrap();
             release.recv_timeout(Duration::from_secs(10)).unwrap();
         }
+        anyhow::ensure!(
+            !self.stt_fail.load(Ordering::SeqCst),
+            "model not downloaded"
+        );
         Ok(Arc::new(Stt {
             gate: self.transcription_gate.clone(),
         }))
@@ -690,9 +699,37 @@ async fn unavailable_capture_and_system_fallback_release_the_slot() {
         .await,
         (
             500,
-            json!({"detail":"mic open failed: transcriber unavailable"})
+            json!({"detail":"mic open failed: microphone unavailable"})
         )
     );
+}
+
+#[tokio::test]
+async fn failed_transcriber_aborts_start_before_any_capture_and_releases_the_slot() {
+    let mut f = Fixture::new();
+    f.config.set_field("capture_system_audio", json!(true));
+    f.capture.system.store(true, Ordering::SeqCst);
+    f.capture.stt_fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        request(f.app(), "POST", "/meeting/start", Some(json!({}))).await,
+        (
+            500,
+            json!({"detail":"mic open failed: model not downloaded"})
+        )
+    );
+    assert_eq!(f.capture.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(f.capture.started.load(Ordering::SeqCst), 0);
+    assert!(request(f.app(), "GET", "/meeting/status", None).await.1["session"].is_null());
+    assert_eq!(request(f.app(), "POST", "/meeting/stop", None).await.0, 409);
+    f.capture.stt_fail.store(false, Ordering::SeqCst);
+    assert_eq!(
+        request(f.app(), "POST", "/meeting/start", Some(json!({})))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(f.capture.started.load(Ordering::SeqCst), 2);
+    assert_eq!(request(f.app(), "POST", "/meeting/stop", None).await.0, 200);
 }
 
 #[tokio::test]

@@ -899,6 +899,8 @@ fn finish_services(server: Option<ServerShutdown>, after: impl FnOnce() + Send +
 
 /// Meeting capture; refuses to open audio until dictation activation (setup
 /// finished), so a server-only setup run can never initialize the recorder.
+/// The speech model is loaded before a meeting may start capturing, so a
+/// model that cannot load refuses the start instead of dropping its audio.
 struct Capture {
     speech: SharedSpeech,
     allowed: Arc<AtomicBool>,
@@ -1287,7 +1289,9 @@ impl lf_meetings::Transcriber for MeetingSpeech {
 impl lf_meetings_backend::CaptureFactory for Capture {
     fn transcriber(&self, _: &Config) -> Result<Arc<dyn lf_meetings::Transcriber>> {
         self.ensure_allowed()?;
-        Ok(Arc::new(MeetingSpeech(self.speech.current())))
+        let speech = self.speech.current();
+        speech.load().map_err(anyhow::Error::msg)?;
+        Ok(Arc::new(MeetingSpeech(speech)))
     }
     fn microphone(&self, config: &Config) -> Result<Box<dyn lf_meetings::AudioSource>> {
         self.ensure_allowed()?;
@@ -1341,25 +1345,29 @@ mod tests {
 
     #[test]
     fn server_only_speech_tracks_settings_lazily_after_meeting_borrow_ends() {
-        struct Engine(String);
+        // Records loaded models: only the meeting's own engine may load.
+        struct Engine(String, Arc<Mutex<Vec<String>>>);
         impl SpeechEngine for Engine {
             fn loaded(&self) -> bool {
-                false
+                self.1.lock().unwrap().contains(&self.0)
             }
             fn load(&self) -> Result<(), String> {
-                panic!("must remain lazy")
+                self.1.lock().unwrap().push(self.0.clone());
+                Ok(())
             }
             fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
                 Ok(self.0.clone())
             }
             fn unload(&self) {}
         }
-        let factory: lf_runtime::worker::SttFactory = Arc::new(|config| {
+        let loads = Arc::new(Mutex::new(Vec::new()));
+        let record = loads.clone();
+        let factory: lf_runtime::worker::SttFactory = Arc::new(move |config| {
             let model = config.field_str("model_size").unwrap_or_default();
             if model == "invalid" {
                 return Err("selection failed".into());
             }
-            Ok(Arc::new(Engine(model.into())))
+            Ok(Arc::new(Engine(model.into(), record.clone())))
         });
         let original = Config::default();
         let shared = SharedSpeech::new(factory(&original).unwrap());
@@ -1371,6 +1379,7 @@ mod tests {
         let original_model = original.field_str("model_size").unwrap().to_owned();
         let meeting =
             lf_meetings_backend::CaptureFactory::transcriber(&capture, &original).unwrap();
+        assert_eq!(*loads.lock().unwrap(), [original_model.as_str()]);
         let mut fresh = original.clone();
         fresh.set_field("model_size", serde_json::json!("new-model"));
         refresh_server_speech(&previous, &shared, fresh.clone(), &factory).unwrap();
@@ -1393,6 +1402,75 @@ mod tests {
             previous.lock().unwrap().field_str("model_size"),
             Some("new-model")
         );
+        // The replacement stayed lazy; only the meeting's model ever loaded.
+        assert_eq!(*loads.lock().unwrap(), [original_model]);
+    }
+
+    #[test]
+    fn meeting_transcriber_loads_the_model_or_refuses_before_capture() {
+        use lf_meetings_backend::CaptureFactory;
+        use std::sync::atomic::AtomicUsize;
+        #[derive(Default)]
+        struct Engine {
+            fail: AtomicBool,
+            loads: AtomicUsize,
+            loaded: AtomicBool,
+        }
+        impl SpeechEngine for Engine {
+            fn loaded(&self) -> bool {
+                self.loaded.load(Ordering::SeqCst)
+            }
+            fn load(&self) -> Result<(), String> {
+                self.loads.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err("model not downloaded".into());
+                }
+                self.loaded.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
+                if !self.loaded() {
+                    return Err("transcribed before load".into());
+                }
+                Ok("heard".into())
+            }
+            fn unload(&self) {}
+        }
+        let capture = |engine: &Arc<Engine>, allowed: bool| Capture {
+            speech: SharedSpeech::new(engine.clone()),
+            allowed: Arc::new(AtomicBool::new(allowed)),
+        };
+        let config = Config::default();
+
+        // Setup unfinished: refused without loading.
+        let engine = Arc::new(Engine::default());
+        assert!(capture(&engine, false).transcriber(&config).is_err());
+        assert_eq!(engine.loads.load(Ordering::SeqCst), 0);
+
+        // A model that cannot load refuses the start with its error.
+        let engine = Arc::new(Engine::default());
+        engine.fail.store(true, Ordering::SeqCst);
+        let failing = capture(&engine, true);
+        let error = failing.transcriber(&config).err().expect("load failed");
+        assert_eq!(error.to_string(), "model not downloaded");
+        assert_eq!(engine.loads.load(Ordering::SeqCst), 1);
+        // The failed borrow went back: only this test and the slot hold it.
+        assert_eq!(Arc::strong_count(&engine), 2);
+        // The shared slot stays usable once the model can load.
+        engine.fail.store(false, Ordering::SeqCst);
+        let meeting = failing.transcriber(&config).expect("model loads");
+        assert_eq!(engine.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(meeting.transcribe(&[], None).unwrap(), "heard");
+
+        // A loadable model is loaded exactly once, before any transcription.
+        let engine = Arc::new(Engine::default());
+        let meeting = capture(&engine, true)
+            .transcriber(&config)
+            .expect("model loads");
+        assert_eq!(engine.loads.load(Ordering::SeqCst), 1);
+        assert!(engine.loaded());
+        assert_eq!(meeting.transcribe(&[0.1], None).unwrap(), "heard");
+        assert_eq!(engine.loads.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1587,13 +1665,17 @@ mod tests {
         thread.join().unwrap();
     }
 
-    struct ModelEngine(String);
+    /// Panics on load unless it counts loads (for a test that starts a meeting,
+    /// which legitimately loads); either way activation can be checked lazy.
+    struct ModelEngine(String, Option<Arc<std::sync::atomic::AtomicUsize>>);
     impl SpeechEngine for ModelEngine {
         fn loaded(&self) -> bool {
             false
         }
         fn load(&self) -> Result<(), String> {
-            panic!("activation must keep speech lazy")
+            let loads = self.1.as_ref().expect("activation must keep speech lazy");
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
         fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String, String> {
             Ok(self.0.clone())
@@ -1619,14 +1701,18 @@ mod tests {
     type ServerOnly = (EmbeddedRuntime, String, Capture, Arc<Mutex<Vec<Config>>>);
 
     fn server_only(startup: Config) -> ServerOnly {
-        server_only_with(
-            startup,
-            Arc::new(|config| {
-                Ok(Arc::new(ModelEngine(
-                    config.field_str("model_size").unwrap_or_default().into(),
-                )))
-            }),
-        )
+        server_only_with(startup, by_model(None))
+    }
+
+    fn by_model(
+        loads: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    ) -> lf_runtime::worker::SttFactory {
+        Arc::new(move |config| {
+            Ok(Arc::new(ModelEngine(
+                config.field_str("model_size").unwrap_or_default().into(),
+                loads.clone(),
+            )))
+        })
     }
 
     fn server_only_with(startup: Config, factory: lf_runtime::worker::SttFactory) -> ServerOnly {
@@ -1675,7 +1761,9 @@ mod tests {
         let _writes = crate::shutdown::TestWrites::new();
         let mut startup = Config::default();
         startup.set_field("model_size", serde_json::json!("setup-default"));
-        let (mut runtime, base, capture, watched) = server_only(startup.clone());
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut runtime, base, capture, watched) =
+            server_only_with(startup.clone(), by_model(Some(loads.clone())));
         // Setup phase: HTTP is up, nothing that records or listens is.
         assert!(healthy(&base));
         assert!(!runtime.activated());
@@ -1724,7 +1812,10 @@ mod tests {
             runtime.speech.transcribe(&[], None).unwrap(),
             "chosen-model"
         );
+        // Activation kept speech lazy; starting a meeting is what loads it.
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
         assert!(capture.transcriber(&fresh).is_ok());
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert_eq!(watched.lock().unwrap().len(), 1);
         assert_eq!(
             watched.lock().unwrap()[0].field_str("input_device"),
@@ -1803,7 +1894,7 @@ mod tests {
                 return Err("selection failed".into());
             }
             let n = built.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(Arc::new(ModelEngine(format!("{model}#{n}"))))
+            Ok(Arc::new(ModelEngine(format!("{model}#{n}"), None)))
         })
     }
 

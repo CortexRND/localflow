@@ -20,9 +20,11 @@ let app = router(Arc::new(ServerState::load_with_backend(Arc::new(backend))?));
 
 Inject `CaptureFactory` with `with_capture` to supply a transcriber, microphone
 and optional system audio. Without one, start returns HTTP 500 with
-`{"detail":"mic open failed: transcriber unavailable"}` (Python's mic-open
-failure boundary). Device factories and their session run on one dedicated
-thread: CPAL/native devices need not be `Send`. HTTP threads communicate through
+`{"detail":"mic open failed: microphone unavailable"}` (Python's mic-open
+failure boundary). The transcriber must be ready to transcribe (model loaded):
+its error fails the start the same way, before any audio is captured. Device
+factories and their session run on one dedicated thread: CPAL/native devices
+need not be `Send`. HTTP threads communicate through
 channels. A shared transcription mutex can be injected with
 `with_transcribe_lock` for coordination with dictation. Only one session may be
 starting, recording or saving at once; slow work never holds the lifecycle lock.

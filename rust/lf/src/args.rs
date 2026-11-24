@@ -1,4 +1,5 @@
-//! Command-line grammar. Names, flags and defaults follow `localflow/cli.py`.
+//! Command-line grammar. Names, flags, defaults and hidden commands follow
+//! `localflow/cli.py`.
 
 use std::path::PathBuf;
 
@@ -48,15 +49,176 @@ pub enum Command {
     /// Inspect and select speech-to-text providers.
     #[command(subcommand)]
     Stt(SttCommand),
-    /// Inspect inference provider keys in the system keychain.
+    /// Import and inspect inference provider keys in the system keychain.
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Manage provider API-key secrets.
+    #[command(subcommand, hide = true)]
+    Secret(SecretCommand),
     /// Show localflow status (asks the running server when it is up).
     Status {
         /// Print JSON.
         #[arg(long = "json")]
         json: bool,
     },
+    /// Control meeting transcription sessions.
+    #[command(subcommand)]
+    Meeting(MeetingCommand),
+    /// Review work prompts from meetings and dispatch them to Orca.
+    #[command(subcommand)]
+    Prompts(PromptsCommand),
+    /// Ask a question across your dictations, meeting transcripts and notes.
+    #[command(hide = true)]
+    Recall(RecallArgs),
+    /// Open the native history and settings hub.
+    #[command(args_override_self = true)]
+    Hub {
+        /// Hub page to open.  [default: Home]
+        #[arg(long, value_name = "PAGE", allow_hyphen_values = true)]
+        page: Option<String>,
+        /// Open LocalFlow Preview (native GPUI app, if installed) instead of
+        /// the legacy window. No screen-reader support yet: use --legacy (or
+        /// lf-hub on macOS).
+        #[arg(long)]
+        gpui: bool,
+        /// Open the legacy window (the default).
+        #[arg(long)]
+        legacy: bool,
+    },
+    /// Print the API token (for a phone bookmark or an iOS Shortcut).
+    Token,
+    /// Change settings in plain words with a local model, e.g. lf tweak "turn off sounds".
+    ///
+    /// Shows a preview first; nothing changes until you confirm (or pass --yes).
+    /// Runs on this computer through Ollama, whatever cloud provider is active.
+    Tweak(TweakArgs),
+    // `agent` and `setup` docs are verbatim click docstrings (periods kept):
+    // `clickfmt` renders click's usage errors from them.
+    /// Alias of `lf autostart` (launchd LaunchAgent on macOS).
+    #[command(subcommand, hide = true, verbatim_doc_comment)]
+    Agent(AgentCommand),
+    /// Open the setup window or configure LocalFlow in the terminal.
+    #[command(subcommand, verbatim_doc_comment)]
+    Setup(SetupCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Alias of `lf autostart install` (launchd LaunchAgent on macOS).
+    #[command(verbatim_doc_comment)]
+    Install,
+    /// Alias of `lf autostart uninstall` (launchd LaunchAgent on macOS).
+    #[command(verbatim_doc_comment)]
+    Uninstall,
+    /// Alias of `lf autostart status` (launchd LaunchAgent on macOS).
+    #[command(verbatim_doc_comment)]
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SetupCommand {
+    /// Install the setup window as a LocalFlow Setup.app bundle.
+    #[command(verbatim_doc_comment)]
+    InstallApp,
+}
+
+// Required arguments, `--k` and `--status` are optional/plain strings here and
+// validated by the commands, so their errors end with click's `Error: …` line.
+
+#[derive(Debug, Subcommand)]
+pub enum MeetingCommand {
+    /// Start transcribing a meeting. Without --title the notes are named from
+    /// the meeting when it stops; a given --title (even "Meeting") is kept.
+    Start {
+        /// Note title.
+        #[arg(long, short = 't', allow_hyphen_values = true)]
+        title: Option<String>,
+        /// Zoom/Teams/... (default: auto-detected).
+        #[arg(long, short = 'c', default_value = "", allow_hyphen_values = true)]
+        category: String,
+    },
+    /// Stop, summarize, and write notes to the vault.
+    Stop,
+    /// Dismiss the current meeting-detected banner.
+    Dismiss,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PromptsCommand {
+    /// List queued work prompts.
+    #[command(hide = true)]
+    List {
+        /// Only show prompts with this status.
+        #[arg(long, short = 's', allow_hyphen_values = true)]
+        status: Option<String>,
+    },
+    /// Print the full text of prompt PROMPT_ID.
+    #[command(hide = true)]
+    Show {
+        #[arg(value_name = "PROMPT_ID")]
+        prompt_id: Option<String>,
+    },
+    /// Approve prompts IDS for dispatch (retries a failed one, clearing its error).
+    #[command(hide = true)]
+    Approve {
+        #[arg(value_name = "IDS")]
+        ids: Vec<String>,
+    },
+    /// Reject prompts IDS (pending or failed) so they are never dispatched.
+    #[command(hide = true)]
+    Reject {
+        #[arg(value_name = "IDS")]
+        ids: Vec<String>,
+    },
+    /// Dispatch approved prompts IDS (or --all) to Orca worktrees.
+    Dispatch {
+        #[arg(value_name = "IDS")]
+        ids: Vec<String>,
+        /// Dispatch every approved prompt.
+        #[arg(long)]
+        all: bool,
+        /// Orca repo selector (default: config.orca_repo).
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        repo: String,
+        /// Agent to run (default: config.orca_agent).
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        agent: String,
+        /// Show what would be dispatched; change nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct RecallArgs {
+    #[arg(value_name = "QUESTION")]
+    pub question: Option<String>,
+    /// today, yesterday, 7d, 30d or YYYY-MM-DD.
+    #[arg(long, allow_hyphen_values = true)]
+    pub since: Option<String>,
+    /// Passages to retrieve (1-20).
+    #[arg(long, default_value = "8", allow_hyphen_values = true)]
+    pub k: String,
+    /// Only show the ranked matching passages.
+    #[arg(long = "no-llm")]
+    pub no_llm: bool,
+    /// Machine-readable output.
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+/// The missing or blank REQUEST and the `--undo` combinations are checked by
+/// the command, like click's in-body `UsageError`s.
+#[derive(Debug, Args)]
+pub struct TweakArgs {
+    #[arg(value_name = "REQUEST")]
+    pub request: Option<String>,
+    /// Apply without asking for confirmation.
+    #[arg(long, short = 'y', overrides_with = "yes")]
+    pub yes: bool,
+    /// Undo the last applied tweak.
+    #[arg(long, overrides_with = "undo")]
+    pub undo: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -232,4 +394,29 @@ pub enum LlmCommand {
 pub enum KeysCommand {
     /// Show masked provider key status.
     List,
+    /// Scan environment and an optional .env or shell profile; confirm before saving.
+    Import {
+        /// A .env file or shell profile to scan as well.
+        #[arg(long = "file", value_name = "FILE_PATH")]
+        file: Option<PathBuf>,
+        /// Save all discovered keys without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretCommand {
+    /// Prompt for and store NAME in the keyring.
+    Set {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Delete NAME from the keyring.
+    Unset {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Show whether each supported secret is configured.
+    Status,
 }

@@ -153,6 +153,23 @@ def test_activation_never_writes_keys_to_config(vault, tmp_path):
     assert local.llm_base_url == "http://localhost:11434"
 
 
+def test_activation_clears_fast_model_only_when_endpoint_changes(vault):
+    keys.save_key("openai", "openai-key")
+    keys.save_key("groq", "groq-key")
+    current = Config(
+        llm_provider="openai-compatible",
+        llm_base_url=keys.get_preset("openai").base_url + "/",
+        llm_model="current",
+        llm_fast_model="fast",
+    )
+    same = keys.activate("openai", model="renamed", config=current)
+    assert same.llm_fast_model == "fast"
+    moved = keys.activate("groq", model="other", config=same)
+    assert moved.llm_fast_model == load_config().llm_fast_model == ""
+    local = keys.activate("ollama", model="local", config=current)
+    assert local.llm_fast_model == load_config().llm_fast_model == ""
+
+
 def test_custom_activation_and_validation(vault):
     with pytest.raises(ValueError):
         keys.activate("openai", config=Config())

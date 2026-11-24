@@ -308,6 +308,26 @@ def test_config_to_dict_and_partial_update():
     assert original.server_port == 8756
 
 
+def test_fast_model_config_is_optional_and_round_trips(isolated_config):
+    original = Config()
+    assert config.config_to_dict(original)["llm"]["fast_model"] == ""
+    updated = config.apply_config_update(original, {"llm": {"fast_model": "fast-model"}})
+    config.save_config(updated)
+    assert config.load_config().llm_fast_model == "fast-model"
+    assert config.load_config().llm_model == original.llm_model
+
+
+def test_config_update_drops_old_fast_model_on_endpoint_change():
+    original = Config(llm_fast_model="old-fast")
+    for llm, expected in (
+        ({"model": "new-primary", "base_url": "http://localhost:11434/"}, "old-fast"),
+        ({"provider": "openai-compatible"}, ""),
+        ({"base_url": "http://localhost:11435"}, ""),
+        ({"base_url": "http://localhost:11435", "fast_model": "new-fast"}, "new-fast"),
+    ):
+        assert config.apply_config_update(original, {"llm": llm}).llm_fast_model == expected
+
+
 @pytest.mark.parametrize(
     "update, message",
     [

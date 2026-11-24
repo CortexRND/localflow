@@ -127,6 +127,7 @@ mod tests {
             input: &mut input,
             clipboard: &mut clipboard,
             server_url: None,
+            terminal: false,
         };
         let code = match run_with(store, command, &mut io) {
             Ok(()) => 0,
