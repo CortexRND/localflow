@@ -20,8 +20,10 @@ import json
 import logging
 import ast
 import hashlib
+import itertools
 import types
 import os
+import random
 import platform
 import plistlib
 import shlex
@@ -33,12 +35,13 @@ import subprocess
 import sys
 import threading
 import tomllib
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 from typing import ClassVar
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 import pytest
 from click.testing import CliRunner
@@ -537,6 +540,185 @@ def test_perf_default_ledger_path_matches(rust_build, sandbox, monkeypatch):
     env = {**sandbox["env"], "LOCALFLOW_PERF_LEDGER": override}
     assert drive1(rust_build, {**sandbox, "env": env},
                   {"op": "perf", "action": "default_path"}) == override
+
+
+# --- perf summary: /api/perf, lf perf (summarize_events in both runtimes) ---
+
+_PERF_NOW = datetime(2026, 11, 24, 12, 0, 0, 250000, tzinfo=UTC)
+
+
+def _perf_ts(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
+
+def _perf_fixture(now: datetime, count: int = 240, seed: int = 7) -> list[dict]:
+    """Deterministic events over ~40 days: every kind, both statuses, both
+    runtimes, nulls, awkward floats (ties, tiny and large values), labels
+    that collapse to "other", and timestamps with 0-9 fraction digits."""
+    rng = random.Random(seed)
+    backends = ["faster-whisper", "mlx-whisper", "parakeet", "my secret app"]
+    models = ["base", "tiny", "small", "llama3.2:3b", "https://x.example/m"]
+    events = []
+    for i in range(count):
+        moment = now - timedelta(seconds=rng.randrange(0, 40 * 86_400), microseconds=rng.randrange(1_000_000))
+        base = moment.strftime("%Y-%m-%dT%H:%M:%S")
+        digits = rng.choice([0, 1, 3, 6, 9])
+        fraction = "".join(rng.choice("0123456789") for _ in range(digits))
+        ts = f"{base}.{fraction}Z" if digits else f"{base}Z"
+
+        def number(scale):
+            roll = rng.random()
+            if roll < 0.15:
+                return None
+            if roll < 0.25:
+                return rng.choice([0, 0.0005, 1.0005, 2.5, 1499.9995, 1e-4, 12345678.9])
+            return round(rng.uniform(0, scale), rng.choice([0, 1, 3, 6]))
+
+        event = {
+            "ts": ts,
+            "runtime": rng.choice(["python", "rust"]),
+            "version": "0.2.2",
+            "kind": rng.choice(py_perf.KINDS),
+            "status": "error" if rng.random() < 0.15 else "ok",
+            "audio_s": number(20),
+            **{stage: number(scale) for stage, scale in [
+                ("queue_ms", 50), ("stt_ms", 3000), ("llm_ms", 4000),
+                ("render_ms", 5), ("paste_ms", 300), ("total_ms", 8000),
+            ]},
+            "stt": {"backend": rng.choice(backends), "model": rng.choice(models),
+                    "provider": "cpu"} if rng.random() < 0.8 else None,
+            "llm": {"provider": rng.choice(["ollama", "openai"]),
+                    "model": rng.choice(models)} if rng.random() < 0.7 else None,
+            "chars": rng.randrange(0, 500),
+        }
+        if i % 50 == 0:  # unreal calendar times are skipped by both
+            event["ts"] = rng.choice(["2026-02-30T10:00:00Z", "2026-11-23T10:00:60Z"])
+        events.append(event)
+    return events
+
+
+def _py_summary(events: list[dict], window: str, now: datetime) -> dict:
+    parsed = [py_perf.PerfEvent.from_dict(event) for event in events]
+    summary = py_perf.summarize_events(parsed, window=window, now=now)
+    return {
+        "json": py_perf.summary_json(summary),
+        "pretty": json.dumps(summary, indent=2),
+        "table": py_perf.render_summary(summary),
+    }
+
+
+@pytest.mark.parametrize("window", ["24h", "7d", "30d"])
+def test_perf_summary_is_byte_identical(rust_build, sandbox, window):
+    now_text = _PERF_NOW.isoformat().replace("+00:00", "Z")
+    cases = [[], _PERF_EVENTS, _perf_fixture(_PERF_NOW), _perf_fixture(_PERF_NOW, 30, seed=11)]
+    rust = drive(rust_build, sandbox, [
+        {"op": "perf", "action": "summary", "events": events, "window": window, "now": now_text}
+        for events in cases
+    ])
+    for events, result in zip(cases, rust, strict=True):
+        assert result == _py_summary(events, window, _PERF_NOW)
+        assert "secret" not in result["json"] and "example" not in result["json"]
+    big = json.loads(rust[2]["json"])
+    assert big["total_events"] > 0
+    if window == "30d":  # the fixture must exercise every section
+        assert big["model_loads"] and big["dictation"]["median_total_ms"] is not None
+        assert len(big["by_kind"]) == len(py_perf.KINDS)
+    assert drive1(rust_build, sandbox, {
+        "op": "perf", "action": "summary", "events": [], "window": "1y", "now": now_text,
+    }) == {"error": py_perf.WINDOW_ERROR}
+
+
+def _perf_ledger_fixture(path: Path) -> list[dict]:
+    """Recent events (well away from window edges) in both ledger files."""
+    now = datetime.now(UTC)
+    events = []
+    for event, hours in zip(_perf_fixture(_PERF_NOW, 60, seed=3), itertools.cycle(
+        [1, 5, 30, 72, 240, 480, 1080],
+    ), strict=False):
+        events.append({**event, "ts": _perf_ts(now - timedelta(hours=hours))})
+    first, rest = events[:20], events[20:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.with_name(path.name + ".1").write_text("".join(json.dumps(e) + "\n" for e in first))
+    path.write_text("".join(json.dumps(e) + "\n" for e in rest) + "not json\n")
+    return events
+
+
+def test_perf_cli_output_is_identical(rust_build, sandbox):
+    path = sandbox["root"] / "perf" / "events.jsonl"
+    env = {"LOCALFLOW_PERF_LEDGER": str(path)}
+
+    def both(*args):
+        return (
+            _cli_output(_python_cli(sandbox, "perf", *args, env=env)),
+            _cli_output(lf(rust_build, sandbox, "perf", *args, env=env)),
+        )
+
+    python, rust = both()
+    assert python == rust == (0, "No perf events in the last 7d.\n", "")
+    _perf_ledger_fixture(path)
+    for args in [(), ("--json",), ("--json", "--window", "7d"), ("--window", "24h"),
+                 ("--window", "30d", "--json"), ("--window", "30d")]:
+        python, rust = both(*args)
+        assert python == rust, args
+        assert python[0] == 0 and "secret" not in python[1]
+    # 60 events; the 8 at 1080 h (45 days) are outside every window.
+    assert json.loads(both("--json", "--window", "30d")[0][1])["total_events"] == 52
+    for args in [("--window", "1y"), ("--window", "7D", "--clear")]:
+        python, rust = both(*args)
+        assert python[0] == rust[0] == 2
+        assert python[2].splitlines()[-1] == rust[2].splitlines()[-1] == (
+            f"Error: Invalid value for '--window': '{args[1]}' is not one of '24h', '7d', '30d'."
+        )
+    assert path.exists()
+    python = _python_cli(sandbox, "perf", "--clear", env=env)
+    assert not path.exists() and not path.with_name("events.jsonl.1").exists()
+    _perf_ledger_fixture(path)
+    rust = lf(rust_build, sandbox, "perf", "--clear", env=env)
+    assert not path.exists() and not path.with_name("events.jsonl.1").exists()
+    assert _cli_output(python) == _cli_output(rust) == (0, "Cleared the perf ledger.\n", "")
+
+
+def test_perf_api_is_identical(rust_build, sandbox):
+    import test_rust_server as http
+
+    path = sandbox["root"] / "perf" / "events.jsonl"
+    _perf_ledger_fixture(path)
+    env = {**sandbox["env"], "PYNPUT_BACKEND": "dummy", "LOCALFLOW_PERF_LEDGER": str(path)}
+    sandbox["config"].parent.mkdir(parents=True, exist_ok=True)
+    # perf_metrics off: neither server's startup event may change the fixture.
+    sandbox["config"].write_text(
+        "config_version = 2\n[features]\nmeetings = false\nperf_metrics = false\n"
+        "[meetings]\nwatch = false\n", encoding="utf-8",
+    )
+    before = path.read_bytes()
+    token_path = http._token_path(env)
+    py_port, rs_port = http._free_port(), http._free_port()
+    py_cmd = [sys.executable, "-m", "uvicorn", "localflow.server:app", "--host", "127.0.0.1",
+              "--port", str(py_port), "--log-level", "error", "--no-access-log"]
+    rs_cmd = [str(LF_RS), "serve", "--host", "127.0.0.1", "--port", str(rs_port)]
+    root = sandbox["root"]
+    with http._start(py_cmd, env, token_path, root / "py.log", py_port) as python, \
+            http._start(rs_cmd, env, token_path, root / "rs.log", rs_port) as rust:
+        for query in ["", "?window=24h", "?window=7d", "?window=30d"]:
+            raw = []
+            for server in (python, rust):
+                request = Request(f"http://127.0.0.1:{server.port}/api/perf{query}", headers={
+                    "X-Localflow-Token": token_path.read_text().strip(),
+                })
+                with urlopen(request, timeout=10) as response:
+                    raw.append((response.status, response.headers["Content-Type"], response.read()))
+            assert raw[0] == raw[1], query
+            assert raw[0][0] == 200 and b"secret" not in raw[0][2]
+            assert json.loads(raw[0][2])["window"] == (query.partition("=")[2] or "7d")
+        for path_query, kwargs in [
+            ("/api/perf?window=1y", {}), ("/api/perf?window=", {}),
+            ("/api/perf", {"auth": False}), ("/api/perf", {"headers": {"X-Localflow-Token": "x"}}),
+            ("/api/perf", {"auth": False, "headers": {"Host": "remote.example"}}),
+        ]:
+            responses = [server.request(path_query, **kwargs) for server in (python, rust)]
+            assert responses[0][:2] == responses[1][:2], path_query
+            assert responses[0][0] in (400, 401, 403)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("enabled", [True, False])

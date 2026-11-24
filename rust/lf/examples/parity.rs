@@ -190,10 +190,12 @@ fn rich(request: &Value) -> Result<Value> {
 /// `lf_core::perf_ledger`: `write` appends the given event objects (parsed
 /// as a reader would), `record` appends a fresh Rust event of `kind`, `read`
 /// returns every event read back as its canonical line, `line` the canonical
-/// line of one event object, `default_path` the resolved ledger path.
+/// line of one event object, `default_path` the resolved ledger path,
+/// `summary` the compact JSON, `indent=2` JSON and table of
+/// `summarize_events(events, window, now)`.
 fn perf(request: &Value) -> Result<Value> {
     use lf_core::perf_ledger::{
-        default_ledger_path, Kind, PerfEvent, PerfLedger, Status, SttLabels,
+        self, default_ledger_path, Kind, PerfEvent, PerfLedger, Status, SttLabels,
     };
     let parse = |value: &Value| {
         PerfEvent::parse_line(&value.to_string()).ok_or_else(|| anyhow!("invalid event {value}"))
@@ -231,6 +233,21 @@ fn perf(request: &Value) -> Result<Value> {
             .collect::<Vec<_>>())),
         "line" => Ok(Value::String(parse(arg(request, "event")?)?.to_line())),
         "default_path" => Ok(json!(default_ledger_path())),
+        "summary" => {
+            let events = arg(request, "events")?
+                .as_array()
+                .context("events")?
+                .iter()
+                .map(parse)
+                .collect::<Result<Vec<_>>>()?;
+            let now: chrono::DateTime<chrono::Utc> = text(request, "now")?.parse()?;
+            let summary = perf_ledger::summarize_events(&events, text(request, "window")?, now)?;
+            Ok(json!({
+                "json": perf_ledger::summary_json(&summary),
+                "pretty": lf_core::symbols::pycompat::json_dumps(&summary, Some(2), true),
+                "table": perf_ledger::render_summary(&summary),
+            }))
+        }
         other => bail!("unknown perf action {other:?}"),
     }
 }

@@ -8,7 +8,8 @@
 //! and dispatches the shared work-prompt queue, and `recall` searches local
 //! history, transcripts and notes; their Rich console output is reproduced by
 //! [`richfmt`]. `tweak` previews, applies and undoes plain-language settings
-//! changes through the local `lf-agent` settings agent.
+//! changes through the local `lf-agent` settings agent. `perf` summarizes the
+//! local perf ledger (no server needed).
 //! `agent` installs launch at login and `setup install-app` the macOS app
 //! bundles, both pointing at the Python installation.
 
@@ -29,6 +30,7 @@ mod cmd_hub;
 mod cmd_keys;
 mod cmd_llm;
 mod cmd_meeting;
+mod cmd_perf;
 mod cmd_prompts;
 mod cmd_recall;
 mod cmd_secret;
@@ -271,6 +273,7 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         }
         Command::History(args) => cmd_history::run(args, io),
         Command::Stats => cmd_history::stats(io),
+        Command::Perf(args) => cmd_perf::run(args, io),
         Command::Llm(command) => cmd_llm::run(command, io),
         Command::Stt(command) => cmd_stt::run(command, io),
         Command::Keys(command) => cmd_keys::run(command, io),

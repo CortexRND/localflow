@@ -549,6 +549,19 @@ lf history clear --yes
 lf stats
 ```
 
+`lf perf` summarizes the local speed ledger (`~/.localflow/perf/events.jsonl`,
+numbers and labels only, never your text): per kind count, failure rate, p50/p95
+of each stage, median real-time factor and model load times, with a hint when
+dictation p95 exceeds 1.5 s. The server serves the same JSON at
+`GET /api/perf?window=24h|7d|30d` (token required).
+
+```bash
+lf perf                  # last 7 days, as a table
+lf perf --window 24h     # or 30d
+lf perf --json           # raw summary JSON
+lf perf --clear          # delete the ledger
+```
+
 ### Spoken formatting
 When `[dictation].spoken_punctuation` is enabled, say “new line” or “new
 paragraph” to add line breaks, or dictate punctuation such as “comma,”

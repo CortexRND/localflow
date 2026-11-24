@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -600,6 +600,19 @@ def api_secret_update(name: str, body: dict) -> dict[str, bool]:
         except SecretsUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
     return api_logic.secrets_status(_config)
+
+
+@app.get("/api/perf")
+def api_perf(window: str = perf_ledger.DEFAULT_WINDOW) -> Response:
+    """Local speed summary from the perf ledger: numbers and labels only.
+
+    The body is `perf_ledger.summary_json`, byte-identical to `lf-rs serve`.
+    """
+    try:
+        summary = perf_ledger.summarize(window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(perf_ledger.summary_json(summary), media_type="application/json")
 
 
 @app.get("/api/autostart")
