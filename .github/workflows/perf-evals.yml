@@ -419,7 +419,13 @@ jobs:
           mkdir -p perf-results
 
       - name: Install Python dependencies
-        run: pip install -e .
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            pip install -e ".[mlx]"
+          else
+            pip install -e .
+          fi
 
       - name: Restore native runtimes pruned by Rust cache
         shell: bash
@@ -445,9 +451,11 @@ jobs:
           if has stt; then build -p lf-stt --example stt_bench; fi
           if has dictation; then build -p lf --example parity; fi
           if has recall; then build -p lf-ask --example bench_search; fi
-          if has footprint; then
+          if has footprint && [ "$RUNNER_OS" = "Linux" ]; then
             # idle.rs reads /proc: Linux only.
-            if [ "$RUNNER_OS" = "Linux" ]; then build -p lf-runtime --example idle; fi
+            build -p lf-runtime --example idle
+          fi
+          if has dictation || has footprint; then
             build -p lf --bin lf-rs
           fi
           exit 0
@@ -653,7 +661,13 @@ jobs:
           mkdir -p perf-results
 
       - name: Install Python dependencies
-        run: pip install -e .
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            pip install -e ".[mlx]"
+          else
+            pip install -e .
+          fi
 
       - name: Restore native runtimes pruned by Rust cache
         shell: bash
