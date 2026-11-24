@@ -2362,7 +2362,9 @@ elif args[:2] == ["worktree", "create"]:
 """
 
 
-def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+def _dispatch_without_orca(rust_build, sandbox, tmp_path):
+    """Dispatch refusals and dry runs, which need no orca; returns what the
+    orca checks continue from, with orca configured and `approved` approved."""
     paths = _require_isolated(rust_build, sandbox, "history_path")
     home = Path(paths["history_path"]).parent.parent
     queue_path = _seed_prompt_queue(home)
@@ -2396,9 +2398,18 @@ def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
     no_approved.set_status(approved, "rejected")
     check("prompts", "dispatch", "--all", code=0)
     no_approved.set_status(approved, "approved", expect=("rejected",))
-    if os.name == "nt":
-        pytest.skip("dispatching through orca needs the POSIX fake-orca shell script; covered on POSIX")
+    return queue_path, check, (pending, approved, failed)
 
+
+def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+    _dispatch_without_orca(rust_build, sandbox, tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake orca is a POSIX shell script")
+def test_cli_prompts_dispatch_through_orca(rust_build, sandbox, tmp_path):
+    from localflow import dispatch as py_dispatch
+
+    queue_path, check, (pending, approved, failed) = _dispatch_without_orca(rust_build, sandbox, tmp_path)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     (bin_dir / "fake_orca.py").write_text(_FAKE_ORCA, encoding="utf-8")
