@@ -3517,7 +3517,7 @@ def _install_or_skip(python: Path) -> Path:
 
 def _script_of(python: Path) -> Path | None:
     names = [Path("localflow.exe"), Path("Scripts", "localflow.exe")] if os.name == "nt" else [Path("localflow")]
-    return next((python.parent / name for name in names if (python.parent / name).exists()), None)
+    return next((python.parent / name for name in names if (python.parent / name).is_file()), None)
 
 
 def _missing_install(reason: str) -> None:
