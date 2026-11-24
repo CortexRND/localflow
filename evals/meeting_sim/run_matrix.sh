@@ -31,8 +31,8 @@ fi
 if [ -z "$OUT" ]; then
   echo "run_matrix.sh: set OUT or pass --out DIR" >&2; exit 2
 fi
-OUT="${OUT/#\~/$HOME}"
-SIM_SUT="${SIM_SUT/#\~/$HOME}"
+case "$OUT" in "~") OUT="${HOME:?}" ;; "~/"*) OUT="${HOME:?}/${OUT#~/}" ;; esac
+case "$SIM_SUT" in "~") SIM_SUT="${HOME:?}" ;; "~/"*) SIM_SUT="${HOME:?}/${SIM_SUT#~/}" ;; esac
 mkdir -p "$OUT" || exit 2
 OUT="$(cd "$OUT" && pwd)" || exit 2
 SIM_SUT="$(cd "$SIM_SUT" && pwd)" || exit 2
