@@ -402,6 +402,49 @@ block_factor = 10.0
 on_pr = "warn"
 
 # --------------------------------------------------------------------------
+# Dictation suite (evals/perf/suites/dictation.py)
+# --------------------------------------------------------------------------
+
+# Any non-200 or malformed /transcribe response fails the gate (must be 0.0).
+[metrics.error_rate]
+class = "exact"
+better = "lower"
+on_pr = "block"
+
+# Text pipeline: mean us per corpus case and ms per corpus iteration.
+[metrics.case_us]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.corpus_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.cold_first_request_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+[metrics.client_wall_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# --------------------------------------------------------------------------
 # Absolute caps, checked on the candidate regardless of baseline.
 # --------------------------------------------------------------------------
 
