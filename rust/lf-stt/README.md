@@ -219,8 +219,10 @@ faster-whisper fallback models. Always pass a freshly read Config to deletion.
 All whisper.cpp ggml sizes share `ggerganov/whisper.cpp`; a selected/active
 size protects the **whole repository**, not just one file. The mapping covers
 tiny/base/small/medium, their `.en` variants, large-v3 and large-v3-turbo.
-There are no large-v3 `.en` models upstream. Catalog has one repository row
-("Whisper Base (whisper.cpp)") because inventory/deletion are repository-level.
+There are no large-v3 `.en` models upstream. Catalog has one size-neutral
+repository row ("Whisper (whisper.cpp)") because inventory/deletion are
+repository-level; inventory labels it from the ggml files in its snapshots
+(e.g. "Whisper Tiny, Base (English) (whisper.cpp)").
 
 Parakeet ONNX is the **int8** repo
 `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`, verified with the HF
