@@ -62,6 +62,9 @@ pub const REQUEST_NAME: &str = "page-request.json";
 pub const STALE_SECONDS: f64 = 20.0;
 const FUTURE_SKEW: f64 = 5.0;
 const MAX_BYTES: u64 = 4096;
+/// Longest unknown page name a request carries; even fully JSON-escaped it
+/// keeps the request under `MAX_BYTES`.
+const MAX_UNKNOWN_CHARS: usize = 500;
 
 /// Directory holding lock files and the page request: `~/.localflow`
 /// (`singleinstance.lock_dir`). Computed at call time, like Python.
@@ -455,6 +458,18 @@ impl RequestFile {
     /// (unknown page, unwritable directory, failed rename); no temp file is
     /// left behind. `now` is the clock (`time.time`).
     pub fn write_request(&self, page: &str, now: &dyn Fn() -> f64) -> bool {
+        self.write_request_noting(page, None, now)
+    }
+
+    /// [`write_request`](Self::write_request), also carrying `unknown`: the
+    /// page name the launch couldn't open (shortened to `MAX_UNKNOWN_CHARS`
+    /// characters), for the app to mention.
+    pub fn write_request_noting(
+        &self,
+        page: &str,
+        unknown: Option<&str>,
+        now: &dyn Fn() -> f64,
+    ) -> bool {
         let Some(page) = validate_page(page) else {
             return false;
         };
@@ -462,8 +477,15 @@ impl RequestFile {
         let tmp = self.sibling("tmp");
         let result = (|| -> std::io::Result<()> {
             fs::create_dir_all(&self.dir)?;
-            let payload = serde_json::to_vec(&json!({"page": page, "ts": now()}))
-                .map_err(std::io::Error::other)?;
+            let mut request = json!({"page": page, "ts": now()});
+            if let Some(name) = unknown {
+                let mut short: String = name.chars().take(MAX_UNKNOWN_CHARS).collect();
+                if short.len() < name.len() {
+                    short.push('…');
+                }
+                request["unknown_page"] = Value::String(short);
+            }
+            let payload = serde_json::to_vec(&request).map_err(std::io::Error::other)?;
             let mut options = fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
             #[cfg(unix)]
@@ -489,6 +511,16 @@ impl RequestFile {
     /// The file is first renamed to a per-process claim name, so when several
     /// consumers race exactly one of them gets the request.
     pub fn consume_request(&self, now: &dyn Fn() -> f64) -> Option<&'static str> {
+        self.consume_request_noting(now).map(|(page, _)| page)
+    }
+
+    /// [`consume_request`](Self::consume_request) with the unknown page name
+    /// the launch carried ([`write_request_noting`](Self::write_request_noting));
+    /// the name is `None` when absent or not a non-empty string.
+    pub fn consume_request_noting(
+        &self,
+        now: &dyn Fn() -> f64,
+    ) -> Option<(&'static str, Option<String>)> {
         // Windows renames can race through handles opened on the same source.
         // Keep the lock file (not the lock) between calls: unlinking it would
         // let concurrent consumers lock different file objects.
@@ -524,7 +556,13 @@ impl RequestFile {
         if age > STALE_SECONDS || age < -FUTURE_SKEW {
             return None;
         }
-        validate_page_value(data.get("page")?)
+        let page = validate_page_value(data.get("page")?)?;
+        let unknown = data
+            .get("unknown_page")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        Some((page, unknown))
     }
 
     /// Remove any pending request; idempotent.
@@ -1143,6 +1181,47 @@ lock.release()
             assert!(requests.write_request(page, &now));
             assert_eq!(requests.consume_request(&now), Some(page));
         }
+    }
+
+    #[test]
+    fn unknown_page_name_round_trips_and_older_requests_still_route() {
+        let (_tmp, requests) = file();
+        assert!(requests.write_request_noting("Home", Some("Nowhere \"x\"\n"), &now));
+        assert_eq!(
+            requests.consume_request_noting(&now),
+            Some(("Home", Some("Nowhere \"x\"\n".to_string())))
+        );
+        assert!(requests.write_request("History", &now));
+        assert_eq!(
+            requests.consume_request_noting(&now),
+            Some(("History", None))
+        );
+        // A request without the field (older writers), or with a bad one.
+        for raw in [
+            format!(r#"{{"page":"Home","ts":{}}}"#, now()),
+            format!(r#"{{"page":"Home","ts":{},"unknown_page":7}}"#, now()),
+            format!(r#"{{"page":"Home","ts":{},"unknown_page":""}}"#, now()),
+        ] {
+            fs::write(requests.path(), raw).unwrap();
+            assert_eq!(requests.consume_request_noting(&now), Some(("Home", None)));
+        }
+        // Garbled or unknown-page requests are still dropped.
+        for raw in [
+            r#"{"page":"Nowhere","ts":"#.to_string(),
+            format!(r#"{{"page":"Nowhere","ts":{},"unknown_page":"x"}}"#, now()),
+        ] {
+            fs::write(requests.path(), raw).unwrap();
+            assert_eq!(requests.consume_request_noting(&now), None);
+        }
+        // A huge name is shortened, never pushing the request past the cap.
+        let huge = "\u{1}".repeat(5000);
+        assert!(requests.write_request_noting("Home", Some(&huge), &now));
+        assert!(fs::metadata(requests.path()).unwrap().len() <= MAX_BYTES);
+        let (page, name) = requests.consume_request_noting(&now).unwrap();
+        assert_eq!(page, "Home");
+        let name = name.unwrap();
+        assert_eq!(name.chars().count(), MAX_UNKNOWN_CHARS + 1);
+        assert!(name.ends_with('…'));
     }
 
     #[test]
