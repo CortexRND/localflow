@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 
 import numpy as np
 
-from localflow import sounds, stt_lease
+from localflow import perf_ledger, sounds, stt_lease
 from localflow.audio import Recorder, rms_dbfs
 from localflow.cleanup import Cleaner
 from localflow.commands import discover_commands
@@ -35,7 +35,12 @@ from localflow.live_config import (
 )
 from localflow.log import setup_logging
 from localflow.logfiles import prepare_process_logs
-from localflow.providers.factory import build_fast_llm, build_llm, build_stt
+from localflow.providers.factory import (
+    build_fast_llm,
+    build_llm,
+    build_stt,
+    fast_model_config,
+)
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
 from localflow.speech_retry import RetryRequests
@@ -488,16 +493,26 @@ def _process_clip(
     dictionary_store: DictionaryStore | None = None,
     paste: bool = True,
     raw_text_callback: Callable[[str], None] | None = None,
+    timings: dict | None = None,
 ) -> str:
+    """`timings`, when given, receives stt_ms, llm_ms, render_ms (render
+    excluding the LLM) and llm_used for the perf ledger."""
     start = time.monotonic()
     if rms_dbfs(audio) < config.silence_threshold_dbfs:
         log.info("silence gate: audio below %.1f dBFS", config.silence_threshold_dbfs)
         return ""
     words = dictionary_store.words() if dictionary_store is not None else []
     pairs = dictionary_store.replacements() if dictionary_store is not None else []
-    text = transcriber.transcribe(audio, prompt=stt_prompt(words))
+    stt_started = time.monotonic()
+    try:
+        text = transcriber.transcribe(audio, prompt=stt_prompt(words))
+    finally:
+        if timings is not None:
+            timings["stt_ms"] = (time.monotonic() - stt_started) * 1000
     if raw_text_callback is not None:
         raw_text_callback(text)
+    render_started = time.monotonic()
+    llm_seconds: list[float] = []
     if text:
         phrases = (
             hot_phrases.enabled()
@@ -512,12 +527,19 @@ def _process_clip(
         level = config.cleanup_level if config.cleanup_enabled else "none"
         clean = None
         if level != "none" and len(text.split()) >= 5:
-            clean = lambda value: cleaner.clean(
-                value,
-                level=level,
-                style=style_name,
-                vocabulary=words,
-            )
+            def timed_clean(value):
+                llm_started = time.monotonic()
+                try:
+                    return cleaner.clean(
+                        value,
+                        level=level,
+                        style=style_name,
+                        vocabulary=words,
+                    )
+                finally:
+                    llm_seconds.append(time.monotonic() - llm_started)
+
+            clean = timed_clean
         symbols = (
             (lambda t: apply_spoken_symbols(t, commands))
             if config.spoken_symbols
@@ -537,6 +559,13 @@ def _process_clip(
             symbols=symbols,
             style=style,
         )
+    if timings is not None:
+        llm_ms = sum(llm_seconds) * 1000
+        timings["llm_used"] = bool(llm_seconds)
+        timings["llm_ms"] = llm_ms
+        timings["render_ms"] = max(
+            (time.monotonic() - render_started) * 1000 - llm_ms, 0.0
+        )
     elapsed_ms = int((time.monotonic() - start) * 1000)
     log.info("transcribed %d chars in %dms", len(text or ""), elapsed_ms)
     if text:
@@ -544,6 +573,43 @@ def _process_clip(
             paste_text(text, config.paste_method)
         print(f"{text}  ({elapsed_ms}ms)")
     return text
+
+
+def _record_job_perf(
+    item: Job, config, *, ok: bool, audio_s, queue_ms, timings: dict, total_ms: float,
+    chars: int,
+) -> None:
+    """One job's perf ledger event: numbers and model labels only, never text.
+    Never raises; a no-op when `perf_metrics` is off."""
+    try:
+        if not perf_ledger.enabled(config):
+            return
+        llm = None
+        if timings.get("llm_used"):
+            model = config.llm_model
+            fast = fast_model_config(config)
+            if (
+                item.kind == "dictate" and fast is not None
+                and config.cleanup_enabled and config.cleanup_level == "light"
+            ):
+                model = fast.llm_model
+            llm = perf_ledger.llm_labels(config, model=model)
+        perf_ledger.record_for(
+            config,
+            item.kind,
+            status="ok" if ok else "error",
+            audio_s=audio_s,
+            queue_ms=queue_ms,
+            stt_ms=timings.get("stt_ms"),
+            llm_ms=timings.get("llm_ms"),
+            render_ms=timings.get("render_ms"),
+            total_ms=total_ms,
+            stt=perf_ledger.stt_labels(config) if item.audio is not None else None,
+            llm=llm,
+            chars=chars,
+        )
+    except Exception:
+        log.debug("could not record job timings", exc_info=True)
 
 
 def _process_job(
@@ -557,6 +623,10 @@ def _process_job(
     dictionary_store: DictionaryStore,
     history_store: HistoryStore,
 ) -> tuple[str | None, bool]:
+    started = time.monotonic()
+    queued_at = getattr(item, "queued_at", None)
+    queue_ms = (started - queued_at) * 1000 if queued_at is not None else None
+    timings: dict = {}
     raw_text = ""
     text = None
     status = "failed"
@@ -591,6 +661,7 @@ def _process_job(
                 dictionary_store=dictionary_store,
                 paste=False,
                 raw_text_callback=captured.append,
+                timings=timings,
             )
             raw_text = captured[0] if captured else ""
             status = "ok" if text else "silent"
@@ -604,17 +675,29 @@ def _process_job(
             print(message)
             error = True
         else:
+            def timed_transform(prompt):
+                llm_started = time.monotonic()
+                try:
+                    return transformer.run(prompt)
+                finally:
+                    timings["llm_ms"] = (time.monotonic() - llm_started) * 1000
+                    timings["llm_used"] = True
+
             if item.kind == "command":
-                raw_text = transcriber.transcribe(item.audio, prompt=None)
+                stt_started = time.monotonic()
+                try:
+                    raw_text = transcriber.transcribe(item.audio, prompt=None)
+                finally:
+                    timings["stt_ms"] = (time.monotonic() - stt_started) * 1000
                 if not raw_text.strip():
                     log.error("command mode received an empty instruction")
                     error = True
                     status = "silent"
                 else:
-                    text = transformer.run(command_prompt(raw_text, item.selection))
+                    text = timed_transform(command_prompt(raw_text, item.selection))
             else:
                 raw_text = item.selection
-                text = transformer.run(transform_prompt(item.preset, item.selection))
+                text = timed_transform(transform_prompt(item.preset, item.selection))
             if text:
                 status = "ok"
             elif status != "silent":
@@ -624,6 +707,13 @@ def _process_job(
         log.exception("transcription pipeline failed")
         status = "failed"
         error = True
+
+    # Timed before history and paste: the pipeline itself, not bookkeeping.
+    _record_job_perf(
+        item, config, ok=not error, audio_s=duration_s if item.audio is not None else None,
+        queue_ms=queue_ms, timings=timings,
+        total_ms=(time.monotonic() - started) * 1000, chars=len(text or ""),
+    )
 
     if history_store.enabled:
         if status == "silent":

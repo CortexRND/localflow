@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use lf_core::config::{load_config, Config};
+use lf_core::perf_ledger::{self, Kind, PerfEvent, PerfLedger, Status};
 use lf_meetings::{system_audio, AudioSource, Transcriber};
 use lf_meetings_backend::{CaptureFactory, MeetingsBackend};
 use lf_runtime::engine::SpeechEngine;
@@ -44,6 +45,7 @@ impl CaptureFactory for MeetingCapture {
 }
 
 pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> Result<()> {
+    let started = std::time::Instant::now();
     let config = load_config()?;
     let host = host
         .as_deref()
@@ -58,10 +60,22 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
         .max_blocking_threads(16)
         .enable_all()
         .build()?;
-    let meetings = MeetingsBackend::new()?.with_capture(Arc::new(MeetingCapture));
+    let ledger = PerfLedger::default();
+    let meetings = MeetingsBackend::new()?
+        .with_capture(Arc::new(MeetingCapture))
+        .with_perf_ledger(ledger.clone());
     let backend = SttBackend::new(meetings);
     let state = Arc::new(ServerState::load_with_backend(Arc::new(backend))?);
     let server = runtime.block_on(Server::bind_with_state(host, port, state.clone()))?;
+    // Ready to accept requests: config, backends and the bound socket.
+    let elapsed = perf_ledger::ms(started.elapsed());
+    ledger.record_if(
+        &config,
+        &PerfEvent {
+            total_ms: Some(elapsed),
+            ..PerfEvent::new(Kind::Startup, Status::Ok)
+        },
+    );
     outln!(
         io.out,
         "LocalFlow Rust server listening on {}",

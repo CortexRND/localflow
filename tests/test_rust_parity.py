@@ -48,6 +48,7 @@ from localflow import config as py_config
 from localflow import dictionary as py_dictionary
 from localflow import formatting as py_formatting
 from localflow import hotphrases as py_hotphrases
+from localflow import perf_ledger as py_perf
 from localflow import secrets as py_secrets
 from localflow import settings_agent as py_settings
 from localflow import symbols as py_symbols
@@ -450,6 +451,92 @@ def _all_fields_update() -> dict:
 
 def test_config_defaults_match(rust_build, sandbox):
     assert_same(drive1(rust_build, sandbox, {"op": "config_defaults"}), config_to_dict(Config()))
+
+
+# --- perf ledger (localflow/perf_ledger.py <-> lf_core::perf_ledger) --------
+
+_PERF_EVENTS = [
+    {"ts": "2026-11-24T10:00:00.000Z", "runtime": "python", "version": "0.2.2",
+     "kind": "dictate", "status": "ok", "audio_s": 3.42, "queue_ms": 1.2,
+     "stt_ms": 145.0, "llm_ms": 0.0, "render_ms": 0.4, "paste_ms": None,
+     "total_ms": 154.7,
+     "stt": {"backend": "faster-whisper", "model": "base", "provider": "cpu"},
+     "llm": {"provider": "ollama", "model": "llama3.2:3b"}, "chars": 42},
+    # Omitted keys are read as null; unknown keys and non-identifier labels
+    # are dropped the same way by both readers.
+    {"ts": "2026-11-24T10:00:01Z", "runtime": "rust", "version": "0.2.2",
+     "kind": "meeting_chat", "status": "error", "total_ms": 1234.5678,
+     "text": "secret words", "llm": {"provider": "openai-compatible",
+                                     "model": "my secret model"}},
+    *({"ts": "2026-11-24T10:00:02.5Z", "runtime": "rust", "version": "0.2.2",
+       "kind": kind, "status": "ok", "stt_ms": 1.0005, "chars": 0}
+      for kind in py_perf.KINDS),
+]
+
+
+def _py_perf_line(event: dict) -> str:
+    parsed = py_perf.parse_line(json.dumps(event))
+    assert parsed is not None, event
+    return parsed.to_line()
+
+
+def test_perf_canonical_lines_are_byte_identical(rust_build, sandbox):
+    rust = drive(rust_build, sandbox, [
+        {"op": "perf", "action": "line", "event": event} for event in _PERF_EVENTS
+    ])
+    assert rust == [_py_perf_line(event) for event in _PERF_EVENTS]
+    assert "secret" not in "".join(rust)
+
+
+def test_perf_python_written_ledger_reads_in_rust(rust_build, sandbox, tmp_path):
+    path = tmp_path / "perf" / "events.jsonl"
+    line_len = len(_py_perf_line(_PERF_EVENTS[0])) + 1
+    ledger = py_perf.PerfLedger(path, max_bytes=line_len * 4)
+    for event in _PERF_EVENTS:
+        assert ledger.record(py_perf.PerfEvent.from_dict(event))
+    with path.open("a") as handle:
+        handle.write('not json\n{"ts": "2026-11-24T10:00:00Z", "kind": "dict')
+    assert ledger.previous_path.exists()  # rotated: Rust must read both files
+    rust = drive1(rust_build, sandbox, {"op": "perf", "action": "read", "path": str(path)})
+    assert rust == [event.to_line() for event in ledger.read_events()]
+    assert rust[-1] == _py_perf_line(_PERF_EVENTS[-1])
+    assert "secret" not in path.read_text() + ledger.previous_path.read_text()
+
+
+def test_perf_rust_written_ledger_reads_in_python(rust_build, sandbox, tmp_path):
+    path = tmp_path / "perf" / "events.jsonl"
+    written = drive(rust_build, sandbox, [
+        {"op": "perf", "action": "write", "path": str(path), "events": _PERF_EVENTS},
+        {"op": "perf", "action": "record", "path": str(path), "kind": "recall"},
+    ])
+    assert written[0] is None
+    fresh = written[1]
+    events = py_perf.PerfLedger(path).read_events()
+    assert [event.to_line() for event in events] == (
+        [_py_perf_line(event) for event in _PERF_EVENTS] + [fresh]
+    )
+    assert events[-1].runtime == "rust" and events[-1].kind == "recall"
+    assert events[-1].version == py_perf.runtime_version()
+    # Rotation by Rust with a tiny limit; Python reads .1 then the new file.
+    small = tmp_path / "small.jsonl"
+    drive1(rust_build, sandbox, {"op": "perf", "action": "write", "path": str(small),
+                                 "max_bytes": 1, "events": _PERF_EVENTS[:3]})
+    assert [e.to_line() for e in py_perf.PerfLedger(small).read_events()] == [
+        _py_perf_line(event) for event in _PERF_EVENTS[1:3]
+    ]
+
+
+def test_perf_default_ledger_path_matches(rust_build, sandbox, monkeypatch):
+    monkeypatch.delenv("LOCALFLOW_PERF_LEDGER", raising=False)
+    monkeypatch.setenv("HOME", str(sandbox["home"]))
+    monkeypatch.setenv("USERPROFILE", str(sandbox["home"]))
+    rust = drive1(rust_build, sandbox, {"op": "perf", "action": "default_path"})
+    assert Path(rust) == py_perf.default_ledger_path()
+    assert Path(rust) == sandbox["home"] / ".localflow" / "perf" / "events.jsonl"
+    override = str(sandbox["root"] / "custom.jsonl")
+    env = {**sandbox["env"], "LOCALFLOW_PERF_LEDGER": override}
+    assert drive1(rust_build, {**sandbox, "env": env},
+                  {"op": "perf", "action": "default_path"}) == override
 
 
 @pytest.mark.parametrize("enabled", [True, False])
