@@ -10,7 +10,7 @@
 //!
 //! The Python `lf` is the interpreter the `lf` launcher exports in
 //! [`PYTHON_ENV`] (it is the install that opened this window), else an
-//! absolute `lf` on `PATH`. The child is killed and reaped on timeout, on
+//! absolute `lf` on `PATH`, else (Unix) `~/.local/bin/lf`. The child is killed and reaped on timeout, on
 //! [`PythonRetry::stop`] (window close) and if the worker unwinds.
 
 use std::ffi::OsString;
@@ -106,10 +106,18 @@ impl PythonRetry {
         {
             return Some(vec![python.into(), "-m".into(), "localflow.cli".into()]);
         }
-        let path = env("PATH")?;
-        std::env::split_paths(&path)
-            .filter(|dir| dir.is_absolute())
-            .map(|dir| dir.join(LF_NAME))
+        let path = env("PATH").unwrap_or_default();
+        let on_path = std::env::split_paths(&path).map(|dir| dir.join(LF_NAME));
+        // install.sh links the Python CLI here; a desktop-entry launch's
+        // session PATH often lacks it.
+        #[cfg(unix)]
+        let on_path = on_path.chain(
+            env("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local/bin").join(LF_NAME)),
+        );
+        on_path
+            .filter(|lf| lf.is_absolute())
             .find(|lf| executable(lf) && !is_lf_rs(lf))
             .map(|lf| vec![lf.into()])
     }
