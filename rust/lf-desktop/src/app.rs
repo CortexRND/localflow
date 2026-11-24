@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::controllers::engine::Engine;
-use crate::controllers::instance::{Instance, Route};
+use crate::controllers::instance::{Instance, Request, Route};
 use crate::controllers::runtime_state::{self, OwnEngine, RuntimeView, Signal};
 use crate::data::Services;
 use crate::page::{Page, NAV_FOOTER, NAV_GROUPS};
@@ -249,7 +249,7 @@ pub struct Shell {
     pub setup_view: Option<Entity<pages::setup::SetupView>>,
     setup_visible: bool,
     /// A routed page that arrived behind the overlay or a dialog.
-    queued: Option<Route>,
+    queued: Option<Request>,
     pub runtime: RuntimeView,
     probing: bool,
     pub engine: Option<Engine>,
@@ -442,7 +442,8 @@ impl Shell {
     // ---------------------------------------------------------- routing ---
 
     /// Requests from a second launch: raise, then go there (queued while the
-    /// overlay or a dialog is open).
+    /// overlay or a dialog is open). A routed Setup shows no unknown-page
+    /// notice: it opens no page, so Home isn't shown.
     fn poll_instance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.stopping {
             // Leave the request in place (TTL-bounded): it is routed if the
@@ -455,14 +456,11 @@ impl Shell {
         window.activate_window();
         match request.route {
             Route::Setup if self.confirm.is_none() => self.show_setup(cx),
-            route if self.setup_visible || self.confirm.is_some() => {
-                self.queued = Some(route);
+            _ if self.setup_visible || self.confirm.is_some() => {
+                self.queued = Some(request);
             }
-            Route::Page(page) => self.navigate(page, None, cx),
-            Route::Setup => self.queued = Some(request.route),
-        }
-        if let Some(notice) = request.notice() {
-            self.toast(notice.into(), None, cx);
+            Route::Page(page) => self.open_routed(page, request.notice(), cx),
+            Route::Setup => self.queued = Some(request),
         }
     }
 
@@ -470,13 +468,26 @@ impl Shell {
         if self.setup_visible || self.confirm.is_some() {
             return;
         }
-        match self.queued.take() {
-            Some(Route::Page(page)) => {
-                self.navigate(page, None, cx);
-                self.toast(format!("Opened {}", page.label()).into(), None, cx);
+        let Some(request) = self.queued.take() else {
+            return;
+        };
+        match request.route {
+            Route::Page(page) => {
+                let message = request
+                    .notice()
+                    .unwrap_or_else(|| format!("Opened {}", page.label()));
+                self.open_routed(page, Some(message), cx);
             }
-            Some(Route::Setup) => self.show_setup(cx),
-            None => {}
+            Route::Setup => self.show_setup(cx),
+        }
+    }
+
+    /// Go to a routed page, then toast `message` only if it really opened
+    /// (a page with an unsaved edit can refuse to be left, and says why).
+    fn open_routed(&mut self, page: Page, message: Option<String>, cx: &mut Context<Self>) {
+        self.navigate(page, None, cx);
+        if let Some(message) = message.filter(|_| self.page == page) {
+            self.toast(message.into(), None, cx);
         }
     }
 
@@ -827,7 +838,7 @@ impl Shell {
             // A dialog or the setup overlay is open: no navigation behind it
             // (routed requests are queued and applied when it closes).
             if self.setup_visible && self.confirm.is_none() {
-                self.queued = Some(Route::Page(page));
+                self.queued = Some(Route::Page(page).into());
             }
             return;
         }
@@ -2304,5 +2315,77 @@ mod focus_tests {
         hand_off(&shell, &dir, Route::Page(Page::History).into(), cx);
         assert_eq!(page(&shell, cx), Page::History);
         assert_eq!(toast(&shell, cx), None);
+    }
+
+    const NOTICE: &str = "There's no page called “NoSuchPage”, so Home is shown.";
+    const SNIPPET_WARNING: &str = "Fix the snippet before leaving; it couldn't be saved.";
+
+    fn unknown(route: Route) -> crate::controllers::instance::Request {
+        crate::controllers::instance::Request {
+            route,
+            unknown_page: Some("NoSuchPage".into()),
+        }
+    }
+
+    fn set_setup(shell: &Entity<Shell>, visible: bool, cx: &mut VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            if visible {
+                shell.show_setup(cx)
+            } else {
+                shell.hide_setup(cx)
+            }
+        });
+        cx.run_until_parked();
+    }
+
+    /// Snippets with a new snippet that has a trigger but no text: it
+    /// can't be saved, so leaving the page is refused.
+    fn open_unsaveable_snippet(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        let (shell, cx, dir) = open(Page::Snippets, cx);
+        cx.simulate_keystrokes("secondary-n");
+        cx.simulate_input("my address");
+        cx.run_until_parked();
+        (shell, cx, dir)
+    }
+
+    #[gpui::test]
+    fn a_queued_unknown_page_is_noticed_only_once_home_opens(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::History, cx);
+        set_setup(&shell, true, cx);
+        hand_off(&shell, &dir, unknown(Route::Page(Page::Home)), cx);
+        assert_eq!(page(&shell, cx), Page::History);
+        assert_eq!(toast(&shell, cx), None, "Home isn't shown yet");
+        set_setup(&shell, false, cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert_eq!(toast(&shell, cx).as_deref(), Some(NOTICE));
+    }
+
+    #[gpui::test]
+    fn setup_with_an_unknown_page_opens_setup_without_the_notice(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::History, cx);
+        hand_off(&shell, &dir, unknown(Route::Setup), cx);
+        assert!(shell.read_with(cx, |shell, _| shell.setup_visible));
+        assert_eq!(page(&shell, cx), Page::History);
+        assert_eq!(toast(&shell, cx), None);
+    }
+
+    #[gpui::test]
+    fn a_refused_unknown_page_hand_off_keeps_the_snippet_warning(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open_unsaveable_snippet(cx);
+        hand_off(&shell, &dir, unknown(Route::Page(Page::Home)), cx);
+        assert_eq!(page(&shell, cx), Page::Snippets);
+        assert_eq!(toast(&shell, cx).as_deref(), Some(SNIPPET_WARNING));
+    }
+
+    #[gpui::test]
+    fn a_refused_queued_page_is_not_reported_as_opened(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open_unsaveable_snippet(cx);
+        set_setup(&shell, true, cx);
+        hand_off(&shell, &dir, Route::Page(Page::History).into(), cx);
+        set_setup(&shell, false, cx);
+        assert_eq!(page(&shell, cx), Page::Snippets);
+        assert_eq!(toast(&shell, cx).as_deref(), Some(SNIPPET_WARNING));
     }
 }
