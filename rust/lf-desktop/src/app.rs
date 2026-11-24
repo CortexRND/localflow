@@ -1940,10 +1940,13 @@ pub fn run(launch: Launch) -> RunStatus {
                     cx.quit();
                 }
             }
+            // A window-manager close reaches this from inside the platform's
+            // event handler (X11 still holds its client state), so the quit
+            // runs on the next turn of the event loop.
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     lf_ui::shutdown::wait_for_pending_writes(Duration::from_secs(5));
-                    cx.quit();
+                    cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
                 }
             })
             .detach();
