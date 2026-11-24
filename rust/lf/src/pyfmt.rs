@@ -217,10 +217,139 @@ pub fn json_dumps(value: &Value) -> String {
     out
 }
 
+/// Python `shlex.quote`.
+pub fn shlex_quote(text: &str) -> String {
+    if text.is_empty() {
+        return "''".to_string();
+    }
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
+    if text.chars().all(safe) {
+        return text.to_string();
+    }
+    format!("'{}'", text.replace('\'', "'\"'\"'"))
+}
+
+/// A property-list value as `plistlib` writes it.
+#[derive(Clone, Debug)]
+pub enum Plist {
+    String(String),
+    Bool(bool),
+    Array(Vec<Plist>),
+    /// `plistlib` sorts keys by default, as a `BTreeMap` iterates.
+    Dict(std::collections::BTreeMap<String, Plist>),
+}
+
+/// The `ValueError` text `plistlib` raises for a control character.
+pub const PLIST_CONTROL_CHARS: &str = "strings can't contain control characters; use bytes instead";
+
+/// `plistlib.dumps(value)` (XML, sorted keys, tab indent), or
+/// [`PLIST_CONTROL_CHARS`] when a string or key contains a control character.
+pub fn plist_xml(value: &Plist) -> Result<String, &'static str> {
+    fn line(out: &mut String, depth: usize, text: &str) {
+        out.extend(std::iter::repeat_n('\t', depth));
+        out.push_str(text);
+        out.push('\n');
+    }
+    fn escape(text: &str) -> Result<String, &'static str> {
+        let control = |c: char| (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r');
+        if text.chars().any(control) {
+            return Err(PLIST_CONTROL_CHARS);
+        }
+        Ok(text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;"))
+    }
+    fn write(out: &mut String, depth: usize, value: &Plist) -> Result<(), &'static str> {
+        match value {
+            Plist::String(text) => line(out, depth, &format!("<string>{}</string>", escape(text)?)),
+            Plist::Bool(true) => line(out, depth, "<true/>"),
+            Plist::Bool(false) => line(out, depth, "<false/>"),
+            Plist::Array(items) if items.is_empty() => line(out, depth, "<array/>"),
+            Plist::Array(items) => {
+                line(out, depth, "<array>");
+                for item in items {
+                    write(out, depth + 1, item)?;
+                }
+                line(out, depth, "</array>");
+            }
+            Plist::Dict(map) if map.is_empty() => line(out, depth, "<dict/>"),
+            Plist::Dict(map) => {
+                line(out, depth, "<dict>");
+                for (key, item) in map {
+                    line(out, depth + 1, &format!("<key>{}</key>", escape(key)?));
+                    write(out, depth + 1, item)?;
+                }
+                line(out, depth, "</dict>");
+            }
+        }
+        Ok(())
+    }
+    let mut out = String::from(concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+        "<plist version=\"1.0\">\n",
+    ));
+    write(&mut out, 0, value)?;
+    out.push_str("</plist>\n");
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shlex_quote_matches_python() {
+        for (text, quoted) in [
+            ("", "''"),
+            ("/usr/bin/python3", "/usr/bin/python3"),
+            ("a-b_c@d%e+f=g:h,i.j/k", "a-b_c@d%e+f=g:h,i.j/k"),
+            ("/Users/me/My Apps/python", "'/Users/me/My Apps/python'"),
+            ("it's", "'it'\"'\"'s'"),
+            ("é", "'é'"),
+            ("$x", "'$x'"),
+        ] {
+            assert_eq!(shlex_quote(text), quoted, "{text}");
+        }
+    }
+
+    #[test]
+    fn plist_xml_matches_plistlib() {
+        // plistlib.dumps({"b": [], "a": {"k": True}, "c": ["x<&>\r\ny"], "d": {}, "e": False})
+        let value = Plist::Dict(
+            [
+                ("b".to_string(), Plist::Array(vec![])),
+                (
+                    "a".to_string(),
+                    Plist::Dict([("k".to_string(), Plist::Bool(true))].into()),
+                ),
+                (
+                    "c".to_string(),
+                    Plist::Array(vec![Plist::String("x<&>\r\ny".into())]),
+                ),
+                ("d".to_string(), Plist::Dict(Default::default())),
+                ("e".to_string(), Plist::Bool(false)),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            plist_xml(&value).unwrap(),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n<dict>\n\t<key>a</key>\n\t<dict>\n\t\t<key>k</key>\n\
+             \t\t<true/>\n\t</dict>\n\t<key>b</key>\n\t<array/>\n\t<key>c</key>\n\t<array>\n\
+             \t\t<string>x&lt;&amp;&gt;\ny</string>\n\t</array>\n\t<key>d</key>\n\t<dict/>\n\
+             \t<key>e</key>\n\t<false/>\n</dict>\n</plist>\n"
+        );
+        let bad = Plist::Array(vec![Plist::String("a\u{1}".into())]);
+        assert_eq!(plist_xml(&bad), Err(PLIST_CONTROL_CHARS));
+    }
 
     #[test]
     fn float_repr_matches_python() {

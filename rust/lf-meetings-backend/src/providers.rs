@@ -49,6 +49,8 @@ impl ProviderFactory for ConfiguredProviders {
         Ok(factory::build_llm(config, &MEETING_OPTIONS, &CoreSecrets)?)
     }
     fn title(&self, config: &Config) -> Option<TitleLlm> {
+        let fast = config.fast_model_config();
+        let config = fast.as_ref().unwrap_or(config);
         let base = config.field_str("llm_base_url").unwrap_or("");
         let model = config.field_str("llm_model").unwrap_or("");
         let timeout = MEETING_OPTIONS.timeout.unwrap();
@@ -96,6 +98,12 @@ mod tests {
 
     #[test]
     fn meeting_limits_override_dictation_limits_for_summary_and_title() {
+        for fast_model in ["", "  fast-model  "] {
+            check_meeting_models(fast_model);
+        }
+    }
+
+    fn check_meeting_models(fast_model: &str) {
         assert_eq!(MEETING_OPTIONS.timeout, Some(300));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -140,6 +148,8 @@ mod tests {
         let mut config = Config::default();
         config.set_field("llm_provider", json!("ollama"));
         config.set_field("llm_base_url", json!(format!("http://{address}")));
+        config.set_field("llm_model", json!("main-model"));
+        config.set_field("llm_fast_model", json!(fast_model));
         config.set_field("cleanup_num_ctx", json!(2048));
         config.set_field("cleanup_timeout", json!(5));
         ConfiguredProviders
@@ -152,8 +162,16 @@ mod tests {
             .unwrap()
             .complete("", "title", Some(24))
             .unwrap();
-        for body in server.join().unwrap() {
+        let bodies = server.join().unwrap();
+        for body in &bodies {
             assert_eq!(body["options"]["num_ctx"], 8192);
         }
+        assert_eq!(bodies[0]["model"], "main-model");
+        let title_model = if fast_model.is_empty() {
+            "main-model"
+        } else {
+            fast_model.trim()
+        };
+        assert_eq!(bodies[1]["model"], title_model);
     }
 }

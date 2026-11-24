@@ -48,15 +48,22 @@ log = "0.4"
 regex = "1"
 env_logger = "0.11"
 
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
 async-channel = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.2", default-features = false, features = ["async-io", "blocking"] }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon = { version = "0.21.2", default-features = false }
+
+# Frontmost-app pid for the menu bar item's paste-target check (already locked
+# through lf-runtime).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 # Runtime-status probe: signal-0 liveness check of the PID a status file names.
@@ -65,6 +72,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Headless GPUI windows (`TestAppContext`) for shell keyboard tests. Dev-only:
+# the binary's gpui features are unchanged.
+gpui = { version = "=0.2.2", features = ["test-support"] }
 
 # GPUI 0.2.2 -> zed-async-tar -> xattr 0.2.3 does not build against the libc
 # that lf-core's keyring backend requires. See vendor/xattr-shim/src/lib.rs.

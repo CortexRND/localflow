@@ -35,7 +35,7 @@ from localflow.live_config import (
 )
 from localflow.log import setup_logging
 from localflow.logfiles import prepare_process_logs
-from localflow.providers.factory import build_llm, build_stt
+from localflow.providers.factory import build_fast_llm, build_llm, build_stt
 from localflow.pushtotalk import PushToTalkController
 from localflow.singleinstance import acquire, read_holder
 from localflow.speech_retry import RetryRequests
@@ -137,7 +137,8 @@ class RuntimeModels:
 
     def reload_llm(self, config) -> None:
         llm = self._build_llm(config)
-        cleaner, transformer = Cleaner(llm), Transformer(llm)
+        cleaner = Cleaner(llm, build_fast_llm(config, builder=self._build_llm))
+        transformer = Transformer(llm)
         with self._lock:
             self.cleaner, self.transformer = cleaner, transformer
         log.info("cleanup and command model now %s / %s", config.llm_provider, config.llm_model)
@@ -386,7 +387,7 @@ def main() -> None:
         device=config.input_device or None,
     )
     llm = build_llm(config)
-    cleaner = Cleaner(llm)
+    cleaner = Cleaner(llm, build_fast_llm(config, builder=build_llm))
     transformer = Transformer(llm)
 
     work_queue: queue.Queue[Job | None] = queue.Queue()
@@ -688,7 +689,9 @@ def retry_history_entry(
                 config.model_size,
                 scoped=True,
             )
-        cleaner = cleaner or Cleaner(build_llm(config))
+        cleaner = cleaner or Cleaner(
+            build_llm(config), build_fast_llm(config, builder=build_llm),
+        )
         dictionary_store = dictionary_store or DictionaryStore()
         hot_phrases = hot_phrases or HotPhraseStore()
         app_info = (

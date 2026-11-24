@@ -283,6 +283,12 @@ impl HistoryPage {
         }
     }
 
+    /// The list's focus handle (what a row click focuses), for shell tests.
+    #[cfg(test)]
+    pub(crate) fn list_focus(&self) -> FocusHandle {
+        self.list_focus.clone()
+    }
+
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.read(cx).focus(window);
     }

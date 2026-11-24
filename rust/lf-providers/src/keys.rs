@@ -460,6 +460,11 @@ impl<'a, C: LlmConfig> ProviderKeys<'a, C> {
         updated.set_str("llm_base_url", &url);
         updated.set_str("llm_key_ref", "");
         updated.set_str("llm_model", &chosen);
+        if preset.llm_provider != base.get_str("llm_provider")
+            || activation::endpoint(&url) != activation::endpoint(&base.get_str("llm_base_url"))
+        {
+            updated.set_str("llm_fast_model", "");
+        }
         if !preset.needs_key {
             self.configs.save(&updated)?; // keyless (Ollama): nothing to pair
             return Ok(updated);

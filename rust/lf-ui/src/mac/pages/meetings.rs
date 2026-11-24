@@ -183,7 +183,10 @@ enum Request {
 enum EventKind {
     Templates(MeetingResult<Value>),
     Status(MeetingResult<Value>),
-    Start(MeetingResult<Value>),
+    Start {
+        notes: String,
+        result: MeetingResult<Value>,
+    },
     Notes {
         kind: SaveKind,
         text: String,
@@ -486,7 +489,8 @@ impl State {
                     notes,
                     auto_title,
                 } => {
-                    EventKind::Start(client.start(&title, "", &template, &notes, Some(auto_title)))
+                    let result = client.start(&title, "", &template, &notes, Some(auto_title));
+                    EventKind::Start { notes, result }
                 }
                 Request::Notes { kind, ticket, text } => {
                     let result = writer.save(&*client, ticket, &text);
@@ -882,7 +886,7 @@ impl State {
                 self.next_poll.set(Some(Instant::now() + POLL_INTERVAL));
                 self.request_rebuild();
             }
-            EventKind::Start(result) => {
+            EventKind::Start { notes, result } => {
                 self.busy.set(false);
                 match result {
                     Err(error) => {
@@ -890,14 +894,23 @@ impl State {
                         self.request_rebuild();
                     }
                     Ok(_) => {
-                        self.notes_dirty.set(false);
                         *self.last_saved.borrow_mut() = None;
                         self.answers.borrow_mut().clear();
-                        self.set_notes_notice(if self.current_notes().is_empty() {
-                            String::new()
+                        let current = self.current_notes();
+                        if current == notes {
+                            self.notes_dirty.set(false);
+                            self.set_notes_notice(if current.is_empty() {
+                                String::new()
+                            } else {
+                                "Saved".into()
+                            });
                         } else {
-                            "Saved".into()
-                        });
+                            // Typed while the start was loading: save it, and never adopt
+                            // the notes a status read before that save reports.
+                            self.notes_dirty.set(true);
+                            self.session_active.set(true);
+                            self.request_notes_save(false);
+                        }
                         self.poll();
                     }
                 }
@@ -2369,7 +2382,7 @@ mod tests {
         let page = page(client.clone(), fixture);
         page.state.primary_action();
         let event = receive(&page);
-        assert!(matches!(event.kind, EventKind::Start(Ok(_))));
+        assert!(matches!(event.kind, EventKind::Start { result: Ok(_), .. }));
         let calls = client.calls();
         assert!(
             matches!(calls.as_slice(), [MeetingCall::Start { title, template, user_notes, auto_title: Some(false), .. }] if title == "Planning" && template == "general" && user_notes == "agenda"),
@@ -2383,6 +2396,50 @@ mod tests {
         assert!(!page.state.busy.get());
         assert_eq!(page.snapshot().title, "  Planning  ");
         assert_eq!(page.snapshot().notes, "agenda");
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn notes_typed_while_start_is_in_flight_are_saved_not_overwritten() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let mut fixture = idle();
+        fixture.notes = "agenda".into();
+        let page = page(client.clone(), fixture);
+        page.state.primary_action();
+        let start = receive(&page);
+        assert!(
+            matches!(&start.kind, EventKind::Start { notes, result: Ok(_) } if notes == "agenda")
+        );
+
+        // A status read from before the notes save, delivered after it below.
+        let stale = client.status().unwrap();
+        assert_eq!(stale["session"]["user_notes"], "agenda");
+
+        let typed = "agenda\n- typed while starting";
+        page.state.notes_edited_at(typed.into(), Instant::now());
+        page.state.apply_event(start);
+        assert!(page.state.notes_dirty.get());
+
+        let (first, second) = (receive(&page), receive(&page));
+        let (saved, status) = if matches!(first.kind, EventKind::Notes { .. }) {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert!(matches!(saved.kind, EventKind::Notes { result: Ok(_), .. }));
+        page.state.apply_event(saved);
+        assert!(!page.state.notes_dirty.get());
+        page.state.apply_event(Event {
+            generation: page.state.generation.get(),
+            kind: EventKind::Status(Ok(stale)),
+        });
+        assert_eq!(page.snapshot().notes, typed);
+        page.state.apply_event(status);
+
+        assert_eq!(client.status().unwrap()["session"]["user_notes"], typed);
+        assert_eq!(page.snapshot().notes, typed);
+        assert!(!page.state.notes_dirty.get());
+        assert!(page.state.session().is_some());
         page.state.shutdown();
     }
 
