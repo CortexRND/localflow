@@ -23,6 +23,7 @@ import hashlib
 import types
 import os
 import platform
+import plistlib
 import shlex
 import shutil
 import socket
@@ -385,11 +386,12 @@ def test_local_writer_bytes_collisions_and_queue_cross_read(rust_build, sandbox,
     assert_same(queue.get(added[0]["id"]), changed)
 
 
-def lf(rust_build, sandbox, *args, input_text: str | None = None, env=None):
+def lf(rust_build, sandbox, *args, input_text: str | None = None, env=None, cwd=None):
     binary, _ = rust_build
     return subprocess.run(
         [str(binary), *args],
         check=False,
+        cwd=cwd,
         input=input_text if input_text is not None else "",
         capture_output=True,
         text=True,
@@ -1341,6 +1343,40 @@ def test_cli_stt_python_plugin(rust_build, sandbox):
     assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == (
         _cli_output(_python_cli(sandbox, *args, env=env))
     )
+
+
+@pytest.mark.parametrize("args", [
+    ("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "not-a-provider"),
+    ("stt", "download", "mlx-tiny"),
+])
+def test_cli_stt_probes_ignore_working_directory(rust_build, sandbox, args):
+    if args[1] == "download" and sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        if importlib.util.find_spec("mlx_whisper") is not None:
+            pytest.skip("the installed Apple Silicon runtime passes the download gate")
+    planted = sandbox["root"] / "planted"
+    marker = sandbox["root"] / "imported"
+    metadata = planted / "planted-0.1.dist-info"
+    for package in (planted / "importlib", planted / "mlx_whisper", metadata):
+        package.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\nplanted = planted_plugin:Planted\n", encoding="utf-8",
+    )
+    for module in (
+        "json.py", "platform.py", "dataclasses.py", "contextlib.py", "importlib/__init__.py",
+        "planted_plugin.py", "mlx_whisper/__init__.py",
+    ):
+        (planted / module).write_text(
+            f"with open({str(marker)!r}, 'a', encoding='utf-8') as f:\n    f.write({module!r} + '\\n')\n",
+            encoding="utf-8",
+        )
+    path = sandbox["config"]
+    save_config(Config(model_size="small", stt_device="cpu", dictation_enabled=False), path)
+    before = path.read_bytes()
+    env = {**_stt_probes_same_python(sandbox), "HF_HUB_OFFLINE": "1"}
+    rust = lf(rust_build, sandbox, *args, env=env, cwd=planted)
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    assert path.read_bytes() == before
+    assert _cli_output(rust) == _cli_output(_python_cli(sandbox, *args, env=env))
 
 
 def test_cli_stt_download_rejects_unknown_model(rust_build, sandbox):
@@ -3855,6 +3891,122 @@ def test_cli_install_commands_refuse_without_a_python_install(rust_build, sandbo
             assert _cli_output(rust) == (1, "", f"Error: {_NO_INSTALL}\n")
         assert _snapshot(*roots) == before, args
     assert log.read_text() == ""
+
+
+_SWITCH_BACK = "lf-rs will not replace it. To switch back to Python run: LOCALFLOW_RUNTIME=python ./install.sh"
+_NATIVE_APP = f"~/Applications/LocalFlow.app is the native LocalFlow app; {_SWITCH_BACK}"
+_NATIVE_AGENT = f"the LocalFlow login agent belongs to the native LocalFlow app; {_SWITCH_BACK}"
+
+
+def _native_app(app: Path, *, executable: bool = True, marker: bool = True) -> None:
+    """A LocalFlow.app as scripts/build_rust_app.sh builds it (plutil xml1 Info.plist)."""
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    name = "lf-hub" if executable else "launcher"
+    (macos / name).write_bytes(b"\x7fELF")
+    info = {"CFBundleIdentifier": "com.cortexrnd.localflow.app", "CFBundleExecutable": name}
+    if marker:
+        info["LocalFlowRuntime"] = "rust"
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
+
+
+def _native_agent(plist: Path, program: Path, logs: Path) -> None:
+    """The LaunchAgent scripts/macos_launchagent.sh writes for the native Hub."""
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_bytes((
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>\n'
+        '<key>Label</key><string>com.cortexrnd.localflow</string>\n'
+        f'<key>ProgramArguments</key><array><string>{program}</string></array>\n'
+        '<key>RunAtLoad</key><true/>\n'
+        '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n'
+        '<key>LimitLoadToSessionType</key><string>Aqua</string>\n'
+        f'<key>StandardOutPath</key><string>{logs / "agent.out.log"}</string>\n'
+        f'<key>StandardErrorPath</key><string>{logs / "agent.err.log"}</string>\n'
+        '</dict></plist>\n'
+    ).encode())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs shell-script interpreters and os.getuid")
+def test_cli_install_commands_leave_a_native_install_alone(rust_build, sandbox, tmp_path):
+    """With a Python install on PATH too, lf-rs never rewrites the native
+    LocalFlow.app or replaces (and reloads) the native login agent."""
+    _, env = _same_python(sandbox)
+    # A Python LocalFlow install lf-rs discovers without running it.
+    install = _stub_python(tmp_path / "install-bin", "exit 1")
+    (install / "localflow").write_text("#!/bin/sh\nexit 0\n")
+    (install / "localflow").chmod(0o755)
+    fake = _fake_launchctl(tmp_path / "fake-bin")
+    log = tmp_path / "launchctl.log"
+    log.write_text("")
+    env.pop("VIRTUAL_ENV", None)
+    env.update(PATH=os.pathsep.join((str(install), str(fake))), FAKE_LAUNCHCTL_LOG=str(log),
+               LOCALFLOW_PLATFORM="darwin")
+    home = sandbox["home"]
+    roots = [home / "Applications", home / "Library", home / ".localflow"]
+    app = home / "Applications" / "LocalFlow.app"
+    plist = home / "Library" / "LaunchAgents" / "com.cortexrnd.localflow.plist"
+    hub = app / "Contents" / "MacOS" / "lf-hub"
+
+    def reset():
+        for root in roots:
+            shutil.rmtree(root, ignore_errors=True)
+        log.write_text("")
+
+    def refused(*args):
+        before = _snapshot(*roots)
+        rust = _run_cli([str(rust_build[0]), *args], env)
+        if args[0] == "agent":
+            assert (rust.returncode, " ".join(rust.stdout.split()), rust.stderr) == (
+                1, f"error: {_NATIVE_AGENT}", ""), args
+        else:
+            assert _cli_output(rust) == (1, "", f"Error: {_NATIVE_APP}\n"), args
+        assert _snapshot(*roots) == before, args
+        assert log.read_text() == "", args
+
+    # The full native install: both commands refuse.
+    reset()
+    _native_app(app)
+    _native_agent(plist, hub, home / ".localflow")
+    (home / ".localflow").mkdir()
+    (home / ".localflow" / "agent.out.log").write_bytes(b"x" * (6 * 1024 * 1024))
+    refused("setup", "install-app")
+    refused("agent", "install")
+
+    # CFBundleExecutable = lf-hub alone, the LocalFlowRuntime marker alone, or
+    # an lf-hub file with no Info.plist makes the bundle native; the agent then
+    # refuses with no plist.
+    for marks in ({"marker": False}, {"executable": False}, {}):
+        reset()
+        _native_app(app, **marks)
+        if not marks:
+            (app / "Contents" / "Info.plist").unlink()
+        refused("setup", "install-app")
+        refused("agent", "install")
+
+    # A native agent alone (app removed) still owns the label.
+    reset()
+    _native_agent(plist, hub, home / ".localflow")
+    refused("agent", "install")
+
+    # Control: Python launcher bundles and agent are (re)written as before.
+    reset()
+    # The second round runs with an lf-hub left behind in the Python bundle
+    # (a native bundle the old lf-rs overwrote): Info.plist still says launcher.
+    for leftover in (False, True):
+        if leftover:
+            hub.write_bytes(b"\x7fELF")
+        rust = _run_cli([str(rust_build[0]), "setup", "install-app"], env)
+        assert (rust.returncode, rust.stderr) == (0, ""), rust.stdout
+        log.write_text("")
+        rust = _run_cli([str(rust_build[0]), "agent", "install"], env)
+        assert (rust.returncode, rust.stderr) == (0, ""), rust.stdout
+        assert log.read_text().splitlines()[0] == f"bootout gui/{os.getuid()}/com.cortexrnd.localflow"
+        assert hub.exists() == leftover
+    assert f"<string>{install / 'localflow'}</string>" in plist.read_text()
+    assert (app / "Contents" / "MacOS" / "launcher").read_text() == (
+        f'#!/bin/bash\nexec {shlex.quote(str(install / "python3"))} -m localflow.main_app "$@"\n')
 
 
 def test_cli_agent_setup_usage_and_help(rust_build, sandbox):

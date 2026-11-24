@@ -1,6 +1,5 @@
 use std::env;
 use std::io::IsTerminal;
-use std::process::Command;
 
 use anyhow::Result;
 use lf_core::config;
@@ -337,8 +336,8 @@ fn probe_python(mode: &str, provider: &str) -> Value {
     crate::python::candidates()
         .into_iter()
         .find_map(|interpreter| {
-            let output = Command::new(interpreter)
-                .args(["-c", PROBE, mode, provider])
+            let output = crate::python::probe(&interpreter, PROBE)
+                .args([mode, provider])
                 .output()
                 .ok()?;
             if !output.status.success() {

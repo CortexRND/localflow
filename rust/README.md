@@ -321,8 +321,15 @@ lf-rs setup install-app
   interpreter outside a virtualenv. `setup install-app` writes that
   interpreter where Python writes its own `sys.executable`, and also accepts
   one that only imports `localflow` (a `pip install --user`, whose scripts
-  live elsewhere). Without an install they exit 1 and change nothing, so
-  they never touch a native install's app bundle or login job. Bare `setup`
+  live elsewhere). Without an install they exit 1 and change nothing. They
+  also exit 1 and change nothing, even with a Python install, when
+  `~/Applications/LocalFlow.app` is the native app (`Info.plist` has
+  `LocalFlowRuntime` = `rust` or `CFBundleExecutable` = `lf-hub`, or, with no
+  `CFBundleExecutable`, `Contents/MacOS/lf-hub` exists) or, for the macOS
+  `agent install`, the login agent starts `…/Contents/MacOS/lf-hub`: they
+  never touch a native
+  install's app bundle or login job (switch back on purpose with
+  `LOCALFLOW_RUNTIME=python ./install.sh`). Bare `setup`
   and `setup uninstall-app` are not ported.
 
 * `meeting` posts to the running server (API token read, never created);
