@@ -74,7 +74,7 @@ Every failing/flaky gate item and every consistent gate-vs-Jev disagreement was 
 4. **W1 `wp-action-incident` & `wp-action-pricing` — judge error (uncalibrated advisory question):** Jev's uncalibrated `inventedWork` flagged `0.77–0.96` while `groundedInNotes` scored `0.94`. Hand inspection confirms every emitted work prompt maps 1-to-1 to a decision/action item in the notes with the exact owners and deadlines; Jev penalized the `"Done means ..."` completion criteria explicitly requested by `localflow/workprompts.py`.
 5. **Recall `recall-ans-dictation-coldstart` — judge error (borderline phrasing):** Jev rated `sourcesSuffice = 0.27–0.30` on `"Idea for the blog: write about how we cut cold start time from nine seconds to two seconds using lazy imports."` while rating the answer `verdict = correct` in all 6/6 rows (`AskModel` + `/api/recall`). Product behavior is correct.
 
-**Product bugs found:** 0 across all 36 deterministic gates and 195 Jev-graded rows (including 243/243 Python-vs-Rust `localflow-mcp` parity & lifecycle checks and 15/15 prompt-injection defense checks).
+**Product bugs found:** 0 across all 36 deterministic gates and 195 Jev-graded rows (including 243/243 P4 checks: 195 Python-vs-Rust `localflow-mcp` parity comparisons, 15 Rust lifecycle checks, and 33 JSON-RPC error checks; plus 15/15 prompt-injection defense checks).
 
 **Proposed `[metric-definition]` follow-up (not applied in this run):** update `ABSTAIN` in `evals/meeting_sim/gates.py` and `evals/localflow_sim/gates.py` to accept curly apostrophes (`['’]?`) and `"No <topic> was agreed/decided/discussed"` phrasings.
 
