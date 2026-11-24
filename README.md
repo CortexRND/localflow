@@ -531,7 +531,8 @@ search it read-only through the [MCP server](#mcp-server-for-agents).
 Open the native hub with `lf hub` to browse history, edit the dictionary and
 cleanup styles, or review the selected models. If you installed the separate
 LocalFlow Preview (native GPUI app, [`rust/lf-desktop`](rust/lf-desktop/README.md)),
-`lf hub` and `lf phrases` open it instead on Linux and Windows; on macOS use
+`lf hub` and `lf phrases` open it instead on Linux and Windows once LocalFlow
+is set up; on macOS use
 `--gpui` or set `LOCALFLOW_UI=gpui`. `lf setup` opens the preview's wizard only
 when asked that way, because it downloads native speech models the Python runtime
 can't use. Without the preview they open the usual window, and anything wrong

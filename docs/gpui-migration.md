@@ -12,7 +12,8 @@ when installed.** PR 3 added a separate, opt-in preview package and installer
 (`lf hub`, bare `lf phrases`, the `lf setup` window) open it when asked (`--gpui` or
 `LOCALFLOW_UI=gpui`), with a legacy fallback, and made `lf-hub` on Linux (which had
 no UI) open it. Scope 4b (this PR) makes `lf hub` and bare `lf phrases` prefer it by
-default on Linux and Windows: an installed preview opens; when none is installed the
+default on Linux and Windows: an installed preview opens once LocalFlow is set up
+(otherwise one notice and the Python Tk window, PR 103); when none is installed the
 Python Tk window opens silently; `LOCALFLOW_RUNTIME=python`, `--legacy` or
 `LOCALFLOW_UI=legacy` always select the Python Tk window. The `lf setup` window still
 opens the Python Tk wizard unless asked (`--gpui` / `LOCALFLOW_UI=gpui`), because the
