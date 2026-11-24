@@ -1172,8 +1172,8 @@ const OLLAMA_PORT: u16 = 11434;
 
 /// A terminal command that starts the Ollama server `base_url` points at,
 /// or `None` when there's no safe one: not on this computer, an unreadable
-/// port, a custom port on Windows (no `VAR=value cmd` syntax), or neither
-/// the `ollama` command nor (macOS, default port) the app to open. Only
+/// port, a non-default address on Windows (no `VAR=value cmd` syntax), or
+/// neither the `ollama` command nor (macOS, default address) the app. Only
 /// the validated loopback host and `u16` port reach the command.
 fn start_ollama_command(base_url: &str, system: &str, cli: bool) -> Option<String> {
     let (host, port) = if base_url.is_empty() {
@@ -1188,7 +1188,11 @@ fn start_ollama_command(base_url: &str, system: &str, cli: bool) -> Option<Strin
         None => OLLAMA_PORT,
         Some(port) => port.parse::<u16>().ok()?,
     };
-    match (cli, port == OLLAMA_PORT) {
+    // Plain `ollama serve` and the app listen on 127.0.0.1:11434 only; any
+    // other loopback address or port needs `OLLAMA_HOST`.
+    let default_target =
+        port == OLLAMA_PORT && (host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1");
+    match (cli, default_target) {
         (true, true) => Some("ollama serve".into()),
         (true, false) if system != "Windows" => {
             // Rebuilt from the parsed address: canonical, IPv6 bracketed.
@@ -2614,9 +2618,6 @@ mod tests {
             "http://localhost:11434",
             "http://LOCALHOST:11434/",
             "http://127.0.0.1:11434",
-            "http://[::1]:11434",
-            "http://[0:0:0:0:0:0:0:1]:11434",
-            "http://127.0.0.2:11434",
             "http://localhost",
             "localhost:11434",
         ] {
@@ -2709,6 +2710,14 @@ mod tests {
             ),
             None
         );
+        // …and only on 127.0.0.1.
+        for url in ["http://[::1]:11434", "http://127.0.0.2:11434"] {
+            assert_eq!(
+                ollama_fix(&app_only("Darwin"), url, "ollama-running"),
+                None,
+                "{url}"
+            );
+        }
         for system in ["Linux", "Windows"] {
             assert_eq!(
                 ollama_fix(&app_only(system), "", "ollama-running"),
@@ -2755,7 +2764,19 @@ mod tests {
                     "http://127.0.0.2:11435",
                     "OLLAMA_HOST=127.0.0.2:11435 ollama serve",
                 ),
+                // Plain `ollama serve` binds 127.0.0.1 only: other loopback
+                // addresses need OLLAMA_HOST even on the default port.
+                ("http://[::1]:11434", "OLLAMA_HOST=[::1]:11434 ollama serve"),
+                (
+                    "http://[0:0:0:0:0:0:0:1]:11434",
+                    "OLLAMA_HOST=[::1]:11434 ollama serve",
+                ),
+                (
+                    "http://127.0.0.2:11434",
+                    "OLLAMA_HOST=127.0.0.2:11434 ollama serve",
+                ),
                 ("http://localhost:11434", "ollama serve"),
+                ("http://127.0.0.1:11434", "ollama serve"),
             ] {
                 assert_eq!(
                     ollama_fix(&stopped(system), url, "ollama-running"),
@@ -2778,14 +2799,17 @@ mod tests {
             }
         }
         // Windows shells don't take `VAR=value command`.
-        assert_eq!(
-            ollama_fix(
-                &stopped("Windows"),
-                "http://localhost:11435",
-                "ollama-running"
-            ),
-            None
-        );
+        for url in [
+            "http://localhost:11435",
+            "http://[::1]:11434",
+            "http://127.0.0.2:11434",
+        ] {
+            assert_eq!(
+                ollama_fix(&stopped("Windows"), url, "ollama-running"),
+                None,
+                "{url}"
+            );
+        }
         assert_eq!(
             ollama_fix(
                 &stopped("Windows"),
