@@ -78,6 +78,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Packages must not depend on the packaging runner's CPU (no -march=native).
+  GGML_NATIVE: "OFF"
 
 jobs:
   package:
@@ -115,6 +117,7 @@ jobs:
         with:
           workspaces: rust/lf-desktop
           key: gpui-package-${{ matrix.platform }}
+          env-vars: GGML_NATIVE
       # As in rust.yml: a cached whisper-rs-sys CMake cache can name an older
       # runner image's MSVC path; rebuild only that crate on Windows.
       - name: Drop cached whisper-rs-sys CMake state (Windows)

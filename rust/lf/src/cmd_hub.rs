@@ -45,8 +45,9 @@ pub(crate) fn run(page: Option<String>, gpui: bool, legacy: bool, io: &mut Io<'_
     let explicit = page.as_deref().map(page_choice).transpose()?;
     let flag = flag_choice(gpui, legacy)?;
     let page = explicit.unwrap_or(DEFAULT_PAGE);
-    // Bare `hub` sends no page to LocalFlow Preview (its first-run wizard
-    // still opens); the legacy Hub always gets the canonical page.
+    // Bare `hub` sends no page to LocalFlow Preview (opened only once LocalFlow
+    // is set up, so never its first-run wizard); the legacy Hub always gets
+    // the canonical page.
     Launcher::system().launch(flag, explicit, &mut |_| open_legacy(page), io)
 }
 

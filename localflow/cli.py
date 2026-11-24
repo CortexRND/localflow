@@ -339,11 +339,56 @@ def history_raw(entry_id: str) -> None:
     click.echo("Copied raw transcript.")
 
 
+class _NoSpeechModel(click.ClickException):
+    exit_code = 3
+
+
+def _transcribe_history_json(entry_id: str, data_dir: Path) -> None:
+    """LocalFlow Preview's Retry with this app's model: print the result as one
+    JSON line and change nothing (the window saves it to its own history).
+    Exits 3 when the configured model isn't cached (run offline, it never
+    downloads)."""
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    from localflow.app import transcribe_history_entry
+    from localflow.hotphrases import HotPhraseStore
+
+    config = load_config()
+    store = HistoryStore(data_dir / "history.sqlite", data_dir / "clips")
+    try:
+        entry = store.get(int(entry_id))
+    except ValueError as exc:
+        raise click.ClickException(f"invalid history entry {entry_id!r}") from exc
+    if entry is None:
+        raise click.ClickException(f"history entry {entry_id} not found")
+    try:
+        entry, raw_text, text = transcribe_history_entry(
+            entry["id"], store, config,
+            dictionary_store=DictionaryStore(data_dir / "dictionary.json"),
+            hot_phrases=HotPhraseStore(data_dir / "hot_phrases.json"),
+        )
+    except LocalEntryNotFoundError as exc:  # offline (HF_HUB_OFFLINE) and not cached
+        raise _NoSpeechModel(f"the {config.model_size} speech model isn't downloaded") from exc
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    # `ts` as text: the window compares it exactly with its own row.
+    click.echo(json.dumps({
+        "id": entry["id"], "ts": repr(entry["ts"]), "raw_text": raw_text, "final_text": text,
+    }))
+
+
 @history_cli.command("retry")
 @click.argument("entry_id")
-def history_retry(entry_id: str) -> None:
+@click.option("--json", "as_json", is_flag=True, hidden=True)
+@click.option("--data-dir", type=click.Path(file_okay=False, path_type=Path), hidden=True)
+def history_retry(entry_id: str, as_json: bool, data_dir: Path | None) -> None:
     from localflow.app import retry_history_entry
 
+    if as_json:
+        from localflow.history import history_dir
+
+        _transcribe_history_json(entry_id, data_dir or history_dir())
+        return
     store = _history_store()
     try:
         text = retry_history_entry(_history_entry(entry_id)["id"], store)

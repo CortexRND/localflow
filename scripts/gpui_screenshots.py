@@ -1,9 +1,12 @@
 """Capture the Linux GPUI sandbox window in both themes and at both gate sizes."""
 
 import argparse
+import json
 import multiprocessing
 import os
+import re
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,6 +19,8 @@ PAGES = (
 SIZES = ((1280, 850), (960, 640))
 # GPUI 0.2 on X11 reads this before Xft.dpi and RandR, so it pins captures to scale 1.
 SCALE_ENV = "GPUI_X11_SCALE_FACTOR"
+# rust/lf-desktop/src/main.rs prints this before falling back to Home for an unknown --page.
+UNKNOWN_PAGE = re.compile(r"^lf-desktop: There's no page called “(.*)”", re.MULTILINE)
 
 
 def arguments(description):
@@ -81,19 +86,27 @@ def sandbox_window(binary, sandbox, *route):
         runtime = sandbox.parent / "runtime"
         runtime.mkdir(mode=0o700, exist_ok=True)
         env["XDG_RUNTIME_DIR"] = str(runtime)
-    process = subprocess.Popen([binary, "--sandbox", "--data-dir", sandbox, *route], env=env)
+    # A file, not a pipe: the app logs a lot and nothing drains a pipe while we wait.
+    log = sandbox.parent / "lf-desktop.stderr"
+    with open(log, "wb") as stderr:
+        process = subprocess.Popen(
+            [binary, "--sandbox", "--data-dir", sandbox, *route], env=env, stderr=stderr
+        )
+
+    def output():
+        return log.read_text(encoding="utf-8", errors="replace")
+
+    def require_known_page():
+        name = rejected_page(output())
+        if name is not None:
+            raise RuntimeError(f"lf-desktop has no page called {name!r}; it showed Home instead")
+
     def started_environ():
         # Popen can return before execve has published the new environment,
         # so /proc/<pid>/environ is briefly empty; retry until it is populated.
         if process.poll() is not None:
             raise RuntimeError(f"Sandbox exited before starting ({process.returncode})")
         return process_environ(process.pid)
-
-    try:
-        require_unit_scale(wait_for(started_environ, "the sandbox process environment", timeout=5))
-    except BaseException:
-        stop(process)
-        raise
 
     def mapped_window():
         if process.poll() is not None:
@@ -108,14 +121,25 @@ def sandbox_window(binary, sandbox, *route):
         return windows.splitlines()[0] if windows else None
 
     try:
+        require_unit_scale(wait_for(started_environ, "the sandbox process environment", timeout=5))
         window = wait_for(mapped_window, "the GPUI sandbox window")
+        require_known_page()
         yield window
         xdotool("windowactivate", "--sync", window)
         xdotool("key", "ctrl+q")
         if process.wait(timeout=10):
             raise RuntimeError(f"Sandbox failed to close cleanly ({process.returncode})")
+        require_known_page()
     finally:
         stop(process)
+        sys.stderr.write(output())
+        sys.stderr.flush()
+
+
+def rejected_page(stderr_text):
+    """Return the --page name lf-desktop said it does not know, or None."""
+    match = UNKNOWN_PAGE.search(stderr_text)
+    return match.group(1) if match else None
 
 
 def process_environ(pid):
@@ -214,10 +238,41 @@ def matches_capture(stats, theme, width, height):
     )
 
 
+def duplicate_captures(digests):
+    """Group captures with identical pixels, so two routes (or a page and a stale frame of another) cannot pass as distinct."""
+    groups = {}
+    for name, digest in digests.items():
+        groups.setdefault(digest, []).append(name)
+    return sorted(tuple(sorted(names)) for names in groups.values() if len(names) > 1)
+
+
+def manifest(digests):
+    captures = []
+    for name in sorted(digests):
+        page, theme, size = Path(name).stem.rsplit("-", 2)
+        width, height = (int(side) for side in size.split("x"))
+        captures.append({
+            "file": name, "page": page, "theme": theme,
+            "width": width, "height": height, "signature": digests[name],
+        })
+    return {"captures": captures}
+
+
+def record(output, paths):
+    """Write manifest.json before checking, so a failed run still leaves the evidence."""
+    digests = {path.name: run("identify", "-format", "%#", path) for path in paths}
+    (output / "manifest.json").write_text(json.dumps(manifest(digests), indent=2) + "\n")
+    duplicates = duplicate_captures(digests)
+    if duplicates:
+        groups = "; ".join(", ".join(group) for group in duplicates)
+        raise RuntimeError(f"Captures share identical pixels: {groups}")
+
+
 def main():
     args = arguments(__doc__)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    paths = []
     with TemporaryDirectory(prefix="gpui-screenshots-", dir=output.parent) as scratch, window_manager():
         for theme in ("light", "dark"):
             with appearance(theme):
@@ -228,8 +283,10 @@ def main():
                         for width, height in SIZES:
                             path = output / f"{page}-{theme}-{width}x{height}.png"
                             capture(window, path, theme, width, height, previous)
+                            paths.append(path)
                             previous = path
-    print(f"Gate 8 captured {len(PAGES) * len(SIZES) * 2} PNGs for review ({output})")
+    record(output, paths)
+    print(f"Gate 8 captured {len(PAGES) * len(SIZES) * 2} distinct PNGs for review ({output}/manifest.json)")
 
 
 if __name__ == "__main__":

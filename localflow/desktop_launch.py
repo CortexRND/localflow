@@ -11,7 +11,10 @@ a native binary: an absolute `LOCALFLOW_DESKTOP_BIN`, else the package that
 `scripts/install_gpui_preview.sh` owns. PATH and build trees are never
 searched. Anything wrong prints one short notice and opens exactly today's
 legacy window once. A sandbox request (`LOCALFLOW_SANDBOX`) is refused rather
-than turned into a real-data launch.
+than turned into a real-data launch. The Hub routes (`lf hub`, `lf phrases`)
+open the preview only once LocalFlow is set up (the active config has the
+setup marker), so they never land in the preview's own first-run wizard; only
+`lf setup --gpui` opens that.
 """
 
 from __future__ import annotations
@@ -33,6 +36,9 @@ UI_CHOICES = ("gpui", "legacy")
 UI_ENV = "LOCALFLOW_UI"
 BIN_ENV = "LOCALFLOW_DESKTOP_BIN"
 SANDBOX_ENV = "LOCALFLOW_SANDBOX"
+# The interpreter running this `lf`, for History Retry's fallback to this
+# install's speech model (`python -m localflow.cli history retry --json`).
+PYTHON_ENV = "LOCALFLOW_PYTHON"
 
 # Ownership metadata written by scripts/install_gpui_preview.sh.
 LINUX_ROOT = (".local", "share", "localflow-preview")
@@ -71,6 +77,7 @@ NOTICE_PROBE = (
     f"LocalFlow Preview{_LEGACY}"
 )
 NOTICE_SPAWN = f"{_PREFIX}couldn't start LocalFlow Preview{_LEGACY}"
+NOTICE_NOT_SET_UP = f"{_PREFIX}LocalFlow isn't set up yet (run lf setup){_LEGACY}"
 NOTICE_EARLY_EXIT = f"{_PREFIX}LocalFlow Preview exited during startup (code {{code}}){_LEGACY}"
 SANDBOX_REFUSAL = (
     f"{SANDBOX_ENV} is set, and `lf` opens LocalFlow Preview only on your real data. "
@@ -257,6 +264,21 @@ def probe(exe: Path, timeout: float | None = None) -> bool:
     )
 
 
+def set_up() -> bool:
+    """The active config file has the setup marker (`main_app.is_configured`).
+
+    Only the active config is read: an unmigrated legacy flat file stays on the
+    legacy window (which migrates it) and counts from the next launch.
+    """
+    from localflow.config import config_path
+    from localflow.main_app import is_configured
+
+    try:
+        return config_path().exists() and is_configured()
+    except OSError:  # e.g. an untraversable config directory
+        return False
+
+
 def desktop_argv(exe: Path, *, page: str | None = None, setup: bool = False) -> list[str]:
     """Closed argv: nothing from the user's command line, never --engine/--sandbox."""
     from localflow.hub_route import canonical_page
@@ -278,12 +300,16 @@ def spawn(argv: list[str], wait: float | None = None) -> tuple[bool, str | None]
     `wait` isn't seen here. stderr is inherited (nothing captured or logged).
     """
     popen_kwargs = {"start_new_session": True} if os.name == "posix" else {}
+    env = dict(os.environ)
+    if sys.executable:
+        env[PYTHON_ENV] = sys.executable
     try:
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             close_fds=True,
+            env=env,
             **popen_kwargs,
         )
     except OSError:
@@ -322,6 +348,8 @@ def launch(
     exe, notice = find_desktop(env)
     if exe is not None and not probe(exe):
         exe, notice = None, NOTICE_PROBE
+    if exe is not None and not setup and not set_up():
+        exe, notice = None, NOTICE_NOT_SET_UP  # never the preview's own wizard
     if exe is not None:
         started, notice = spawn(desktop_argv(exe, page=page, setup=setup))
         if started:

@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{div, prelude::*, px, Context, Entity, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, ClipboardItem, Context, Entity, FontWeight, SharedString, Window};
 
 use crate::app::PageCx;
 use crate::controllers::jobs::{self, JobState};
@@ -75,6 +75,8 @@ impl SetupView {
     fn build(&mut self, cx: &mut Context<Self>) {
         let config = self.pcx.services.config();
         let deps = self.pcx.services.setup.clone();
+        // The same file Apply writes (real or sandbox root).
+        let root = self.pcx.services.root.clone();
         cx.spawn(async move |this, cx| {
             let built = cx
                 .background_executor()
@@ -86,6 +88,8 @@ impl SetupView {
                         deps.platform.as_ref(),
                         deps.launch_agent.as_ref(),
                         deps.simulated,
+                        crate::controllers::setup::configured(&root)
+                            || ctl::legacy_speech_saved(&root),
                     )
                 })
                 .await;
@@ -281,6 +285,25 @@ impl SetupView {
             }
         }
         cx.notify();
+    }
+
+    /// A checkup row's fix button. The sandbox opens no external URL and
+    /// says what it would have opened; step navigation and copy still work.
+    fn apply_fix(&mut self, action: ctl::CheckAction, cx: &mut Context<Self>) {
+        match ctl::fix_effect(action, self.pcx.services.setup.simulated) {
+            ctl::FixEffect::Open(url) => cx.open_url(&url),
+            ctl::FixEffect::GoTo(step) => self.go(step, cx),
+            ctl::FixEffect::Copy(cmd) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(cmd.clone()));
+                // Name the command: the toast is the only confirmation of
+                // what's on the clipboard.
+                self.pcx.toast(
+                    format!("Copied “{cmd}” — run it in a terminal, then Check again."),
+                    cx,
+                );
+            }
+            ctl::FixEffect::Notice(message) => self.pcx.toast(message, cx),
+        }
     }
 
     fn next(&mut self, cx: &mut Context<Self>) {
@@ -578,7 +601,7 @@ impl SetupView {
     }
 
     fn render_track(&self, t: &Theme, flow: &SetupFlow, cx: &mut Context<Self>) -> gpui::Div {
-        let mut track = div().flex().flex_1().gap(space::s2());
+        let mut track = div().flex().items_center();
         for step in Step::ALL {
             let done_or_current = step.index() <= flow.step.index() || flow.visited(step);
             let problem = flow.visited(step)
@@ -592,15 +615,22 @@ impl SetupView {
             } else if done_or_current {
                 t.accent
             } else {
-                t.bg_muted
+                t.border_control
+            };
+            let width = if step == flow.step {
+                space::s7()
+            } else {
+                space::s3()
             };
             let segment = div()
                 .id(("setup-track", step.index() as u64))
-                .flex_1()
-                .h(px(4.))
-                .rounded(size::radius_inner())
-                .bg(color)
-                .tooltip(move |_, cx| ui::Tooltip::view(step.label().into(), cx));
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(space::s8())
+                .min_w(space::s8())
+                .tooltip(move |_, cx| ui::Tooltip::view(step.label().into(), cx))
+                .child(div().w(width).h(space::s3()).rounded_full().bg(color));
             let segment = if flow.visited(step) {
                 segment
                     .cursor_pointer()
@@ -610,23 +640,10 @@ impl SetupView {
             };
             track = track.child(segment);
         }
-        div()
-            .flex()
-            .items_center()
-            .gap(space::s6())
-            .child(track)
-            .child(ui::supporting(
-                t,
-                format!(
-                    "Step {} of {} · {}",
-                    flow.step.index() + 1,
-                    Step::ALL.len(),
-                    flow.step.label()
-                ),
-            ))
+        track
     }
 
-    fn check_rows(&self, t: &Theme, flow: &SetupFlow) -> gpui::Div {
+    fn check_rows(&self, t: &Theme, flow: &SetupFlow, cx: &mut Context<Self>) -> gpui::Div {
         let mut list = ui::list(t);
         match &flow.checks {
             Loadable::Ready(checks) => {
@@ -659,14 +676,29 @@ impl SetupView {
                                     .min_w_0()
                                     .child(ui::label(t, check.label.clone()))
                                     .child(ui::supporting(t, check.detail.clone())),
-                            ),
+                            )
+                            .when_some(ctl::check_fix(check), |row, fix| {
+                                let tooltip = ctl::fix_tooltip(&fix.action);
+                                let action = fix.action;
+                                row.child(
+                                    Button::new(
+                                        SharedString::from(format!("setup-fix-{}", check.key)),
+                                        fix.label,
+                                    )
+                                    .small()
+                                    .tooltip(tooltip)
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.apply_fix(action.clone(), cx),
+                                    )),
+                                )
+                            }),
                     );
                 }
             }
             _ => {
                 list = list.child(
                     div()
-                        .px(space::s4())
+                        .px(ui::row_inset())
                         .py(space::s4())
                         .child(ui::secondary(t, "Checking…")),
                 );
@@ -681,7 +713,7 @@ impl SetupView {
         let mut body = div().flex().flex_col().gap(space::s6());
         match flow.step {
             Step::Checkup => {
-                body = body.child(self.check_rows(t, flow));
+                body = body.child(self.check_rows(t, flow, cx));
                 if flow.failed_checks() > 0 {
                     body = body.child(ui::banner(
                         t,
@@ -845,7 +877,7 @@ impl SetupView {
                                     ),
                                 )),
                         )
-                        .child(ui::supporting(t, row.blurb).pl(px(28.)));
+                        .child(ui::supporting(t, row.blurb).pl(size::icon() + space::s4()));
                     if let crate::controllers::model_storage::RowState::Downloading(job) =
                         &row.state
                     {
@@ -856,7 +888,7 @@ impl SetupView {
                                 .flex()
                                 .items_center()
                                 .gap(space::s4())
-                                .pl(px(28.))
+                                .pl(size::icon() + space::s4())
                                 .child(div().flex_1().child(ui::progress(t, job.fraction())))
                                 .child(ui::supporting(t, job.progress_text()))
                                 .child(
@@ -871,12 +903,13 @@ impl SetupView {
                         if job.stalled(Instant::now()) {
                             item = item.child(
                                 ui::supporting(t, "Still working… check your connection.")
-                                    .pl(px(28.)),
+                                    .pl(size::icon() + space::s4()),
                             );
                         }
                     }
                     if let crate::controllers::model_storage::RowState::Failed(error) = &row.state {
-                        item = item.child(ui::error_line(t, error.clone()).pl(px(28.)));
+                        item = item
+                            .child(ui::error_line(t, error.clone()).pl(size::icon() + space::s4()));
                     }
                     if i > 0 {
                         list = list.child(ui::separator(
@@ -911,20 +944,23 @@ impl SetupView {
                 let modes: Vec<CleanupMode> = options.iter().map(|(m, _)| *m).collect();
                 let this = cx.entity().downgrade();
                 body = body.child(
-                    ui::Segmented::new(
-                        "cleanup-mode",
-                        options.into_iter().map(|(_, l)| l),
-                        selected,
-                    )
-                    .on_select(move |i, _, cx| {
-                        let _ = this.update(cx, |this, cx| {
-                            if let (Some(flow), Some(mode)) = (this.flow.as_mut(), modes.get(i)) {
-                                flow.set_cleanup(*mode);
-                            }
-                            this.enter_step(cx);
-                            cx.notify();
-                        });
-                    }),
+                    div().flex().justify_center().child(
+                        ui::Segmented::new(
+                            "cleanup-mode",
+                            options.into_iter().map(|(_, l)| l),
+                            selected,
+                        )
+                        .on_select(move |i, _, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                if let (Some(flow), Some(mode)) = (this.flow.as_mut(), modes.get(i))
+                                {
+                                    flow.set_cleanup(*mode);
+                                }
+                                this.enter_step(cx);
+                                cx.notify();
+                            });
+                        }),
+                    ),
                 );
                 match flow.cleanup {
                     CleanupMode::Local => {
@@ -988,15 +1024,13 @@ impl SetupView {
                             Loadable::Failed(error) => (Tone::Warning, format!("{error}. Install or start Ollama (https://ollama.com/download), then come back.")),
                             _ => (Tone::Neutral, "Asking Ollama…".into()),
                         };
-                        body = body.child(ui::status_dot(t, state.0, state.1));
+                        body = body.child(ui::status_dot(t, state.0, state.1).px(ui::row_inset()));
                         if let Some(id) = flow.choices.llm_id.as_deref() {
                             if let Some(job) = services.downloads.state(&jobs::cleanup_key(id)) {
-                                body = body.child(job_line(
-                                    t,
-                                    &job,
-                                    &services.downloads,
-                                    &jobs::cleanup_key(id),
-                                ));
+                                body = body.child(
+                                    job_line(t, &job, &services.downloads, &jobs::cleanup_key(id))
+                                        .px(ui::row_inset()),
+                                );
                             }
                         }
                     }
@@ -1008,7 +1042,7 @@ impl SetupView {
                             }, None));
                     }
                     CleanupMode::Off => {
-                        body = body.child(ui::secondary(t, "Transcripts are pasted as spoken. You can turn cleanup on later in Style."));
+                        body = body.child(ui::secondary(t, "Transcripts are pasted as spoken. You can turn cleanup on later in Style.").px(ui::row_inset()));
                     }
                 }
             }
@@ -1050,7 +1084,7 @@ impl SetupView {
                 }
                 body = body.child(list);
                 if let Some(error) = &flow.hotkey_error {
-                    body = body.child(ui::error_line(t, error.clone()));
+                    body = body.child(ui::error_line(t, error.clone()).px(ui::row_inset()));
                 }
                 match crate::controllers::runtime_state::Session::detect() {
                     crate::controllers::runtime_state::Session::Wayland => {
@@ -1174,12 +1208,13 @@ impl SetupView {
                         .into_any_element(),
                     );
                 }
-                body = body
-                    .child(ui::group_rows(t, rows, ui::row_inset()))
-                    .child(ui::supporting(
+                body = body.child(ui::group_rows(t, rows, ui::row_inset())).child(
+                    ui::supporting(
                         t,
                         format!("Saves to {}.", services.root.config_path.display()),
-                    ));
+                    )
+                    .px(ui::row_inset()),
+                );
                 if let Applying::Failed(error) = &flow.apply {
                     body = body.child(ui::banner(
                         t,
@@ -1202,7 +1237,9 @@ impl SetupView {
             right = right.child(
                 ui::supporting(t, reason.clone())
                     .text_color(t.tone(Tone::Error).0)
-                    .max_w(px(320.)),
+                    .max_w(px(320.))
+                    .min_w_0()
+                    .text_right(),
             );
         }
         let missing = flow.installed(&flow.choices.stt_id) == Some(false);
@@ -1260,12 +1297,11 @@ impl SetupView {
         };
         div()
             .flex()
+            .flex_none()
             .items_center()
             .justify_between()
             .gap(space::s6())
-            .pt(space::s6())
-            .border_t_1()
-            .border_color(t.border)
+            .pt(space::s4())
             .child(
                 Button::new("setup-back", "Back")
                     .disabled(flow.step == Step::Checkup || applying)
@@ -1273,6 +1309,49 @@ impl SetupView {
             )
             .child(right.child(primary))
     }
+}
+
+fn step_glyph(step: Step) -> &'static str {
+    match step {
+        Step::Checkup => "list-checks",
+        Step::Microphone => "mic",
+        Step::Speech => "cpu",
+        Step::Cleanup => "sparkles",
+        Step::Shortcut => "keyboard",
+        Step::Trial => "play",
+        Step::Review => "circle-check",
+    }
+}
+
+/// Centred step header (tile, eyebrow, title, intro), outside the scroll
+/// area so it stays put while the body scrolls.
+fn step_header(t: &Theme, flow: &SetupFlow) -> gpui::Div {
+    let step = flow.step;
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(space::s2())
+        .child(div().pb(space::s3()).child(ui::glyph_tile(
+            step_glyph(step),
+            t.icon_accent,
+            t.accent_muted,
+        )))
+        .child(ui::supporting(
+            t,
+            format!(
+                "Step {} of {} · {}",
+                step.index() + 1,
+                Step::ALL.len(),
+                step.label()
+            ),
+        ))
+        .child(ui::title(t, step.title()).text_center())
+        .child(
+            ui::secondary(t, step.intro())
+                .text_center()
+                .max_w(px(size::READING)),
+        )
 }
 
 fn row_token(state: &crate::controllers::model_storage::RowState) -> (Tone, String) {
@@ -1319,15 +1398,31 @@ fn job_line(
 impl Render for SetupView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        let header = div()
+        let indicator = match (&self.flow, &self.init_error) {
+            (Some(flow), None) => self.render_track(&t, flow, cx),
+            _ => div(),
+        };
+        let top_bar = div()
             .flex()
             .items_center()
             .gap(space::s5())
-            .child(ui::brand(&t))
-            .child(ui::heading(&t, "Set up LocalFlow").flex_1())
+            .h(size::control_sm())
             .child(
-                IconButton::new("setup-close", "x", "Close setup")
-                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(space::s5())
+                    .child(ui::brand(&t))
+                    .child(ui::label(&t, "Set up LocalFlow")),
+            )
+            .child(div().flex_none().child(indicator))
+            .child(
+                div().flex_1().flex().justify_end().child(
+                    IconButton::new("setup-close", "x", "Close setup")
+                        .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                ),
             );
         let content = match (&self.flow, &self.init_error) {
             (_, Some(error)) => div().flex().flex_col().gap(space::s6()).child(ui::banner(
@@ -1336,34 +1431,29 @@ impl Render for SetupView {
                 format!("Setup can't start: {error}"),
                 None,
             )),
-            (None, None) => div().child(ui::secondary(&t, "Getting setup ready…")),
-            (Some(flow), None) => {
-                let step = flow.step;
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .gap(space::s8())
-                    .child(self.render_track(&t, flow, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(space::s1())
-                            .child(ui::title(&t, step.title()))
-                            .child(ui::secondary(&t, step.intro())),
-                    )
-                    .child(
-                        div()
-                            .id("setup-body")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .child(self.body(&t, flow, cx)),
-                    )
-                    .child(self.footer(&t, flow, cx))
-            }
+            (None, None) => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(ui::secondary(&t, "Getting setup ready…")),
+            (Some(flow), None) => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .gap(space::s7())
+                .child(step_header(&t, flow))
+                .child(
+                    div()
+                        .id("setup-body")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .pb(space::s4())
+                        .child(self.body(&t, flow, cx)),
+                )
+                .child(self.footer(&t, flow, cx)),
         };
         div()
             .id("setup-overlay")
@@ -1376,14 +1466,14 @@ impl Render for SetupView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::s8())
+                    .gap(space::s7())
                     .w_full()
                     .max_w(px(size::COLUMN))
                     .h_full()
                     .px(space::s10())
                     .py(space::s8())
                     .font_weight(FontWeight::NORMAL)
-                    .child(header)
+                    .child(top_bar)
                     .child(content),
             )
     }

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ffi::OsStr,
     fs::{self, File},
     io::Read,
     path::Path,
@@ -49,8 +50,20 @@ fn strip_frontmatter(text: &str) -> &str {
     text
 }
 
-fn read_body(entry: &Entry) -> Option<String> {
-    let path = expand_user(Path::new(text(entry, "path"))).ok()?;
+/// A relative path is read against `cwd` (`LOCALFLOW_MCP_PROMPTS_CWD`) when
+/// set; a set but non-absolute `cwd` leaves relative paths unread.
+fn read_body(entry: &Entry, cwd: Option<&OsStr>) -> Option<String> {
+    let mut path = expand_user(Path::new(text(entry, "path"))).ok()?;
+    if let Some(cwd) = cwd.filter(|_| path.is_relative()) {
+        let base = Path::new(cwd);
+        if !base.is_absolute() {
+            return None;
+        }
+        path = base.join(&path);
+        if !path.is_absolute() {
+            return None;
+        }
+    }
     if !path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
@@ -111,7 +124,13 @@ fn hit(entry: &Entry, snippet: String) -> Value {
     })
 }
 
-pub fn search(path: &Path, query: &str, status: Option<&str>, limit: usize) -> Result<Value> {
+pub fn search(
+    path: &Path,
+    cwd: Option<&OsStr>,
+    query: &str,
+    status: Option<&str>,
+    limit: usize,
+) -> Result<Value> {
     let mut entries = read_queue(path);
     if let Some(status) = status {
         entries.retain(|e| text(e, "status") == status);
@@ -125,7 +144,7 @@ pub fn search(path: &Path, query: &str, status: Option<&str>, limit: usize) -> R
             .map(|e| {
                 hit(
                     e,
-                    snippet(&read_body(e).unwrap_or_default(), &Default::default()),
+                    snippet(&read_body(e, cwd).unwrap_or_default(), &Default::default()),
                 )
             })
             .collect();
@@ -136,7 +155,7 @@ pub fn search(path: &Path, query: &str, status: Option<&str>, limit: usize) -> R
     let texts: HashMap<_, _> = entries
         .iter()
         .map(|e| {
-            let body = read_body(e).unwrap_or_default();
+            let body = read_body(e, cwd).unwrap_or_default();
             let full = [text(e, "title"), text(e, "meeting"), &body]
                 .into_iter()
                 .filter(|part| !part.is_empty())
@@ -183,12 +202,12 @@ pub fn search(path: &Path, query: &str, status: Option<&str>, limit: usize) -> R
     Ok(results("substring", hits))
 }
 
-pub fn get(path: &Path, id: &str) -> Result<Value> {
+pub fn get(path: &Path, cwd: Option<&OsStr>, id: &str) -> Result<Value> {
     let entry = read_queue(path)
         .into_iter()
         .find(|e| text(e, "id") == id)
         .ok_or_else(|| anyhow!("no work prompt with id {}", repr_str(id)))?;
-    let body = read_body(&entry);
+    let body = read_body(&entry, cwd);
     let (body_text, truncated) = cut(body.as_deref().unwrap_or(""));
     let mut out = json!({
         "id": id,

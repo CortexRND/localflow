@@ -67,6 +67,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   MANIFEST: rust/lf-desktop/Cargo.toml
+  # Cached whisper.cpp objects must run on any runner CPU (no -march=native).
+  GGML_NATIVE: "OFF"
 
 jobs:
   linux:
@@ -90,6 +92,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/lf-desktop
+          env-vars: GGML_NATIVE
       # rust-cache prunes the sherpa SDK copied next to the build output;
       # rebuild the sys crate so it is restored (same as rust.yml).
       - name: Restore native runtimes pruned by Rust cache
@@ -128,6 +131,7 @@ jobs:
           export XDG_RUNTIME_DIR="$HOME" LOCALFLOW_CONFIG=""
           mkdir -p "$XDG_CONFIG_HOME/localflow" "$HOME/.localflow"
           printf '# Gate 2 fixture\n' > "$XDG_CONFIG_HOME/localflow/config.toml"
+          printf 'gate2-fixture-token\n' > "$XDG_CONFIG_HOME/localflow/api-token"
           printf '{"words": [], "replacements": {}}\n' > "$HOME/.localflow/dictionary.json"
           dbus-run-session -- bash -e -o pipefail -c '
             printf %s cutover-fixture | gnome-keyring-daemon --unlock --components=secrets
@@ -152,7 +156,9 @@ jobs:
         if: ${{ !cancelled() && steps.cutover-deps.outcome == 'success' }}
         with:
           name: gpui-screenshots
-          path: artifacts/gpui-screenshots/*.png
+          path: |
+            artifacts/gpui-screenshots/*.png
+            artifacts/gpui-screenshots/manifest.json
 
   macos:
     # Verifies the macOS cfg paths (GPUI Metal backend, xattr shim, CGEventTap
@@ -166,6 +172,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/lf-desktop
+          env-vars: GGML_NATIVE
       - name: Restore native runtimes pruned by Rust cache
         shell: bash
         run: |
@@ -179,6 +186,10 @@ jobs:
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --locked
       - name: Type-check lf-desktop (runtime feature)
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --features runtime --locked
+      # Library unit tests only (GPUI TestAppContext is headless); tests/cli.rs
+      # spawns the real binary and stays Linux-only.
+      - name: lf-desktop unit tests (default build)
+        run: cargo test --manifest-path "$MANIFEST" -p lf-desktop --lib --locked
 
   windows:
     runs-on: windows-latest
@@ -189,5 +200,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/lf-desktop
+          env-vars: GGML_NATIVE
       - name: Type-check lf-desktop and Windows tray
         run: cargo check --manifest-path "$env:MANIFEST" -p lf-desktop --all-targets --locked
+      - name: lf-desktop unit tests (default build; library only, headless)
+        run: cargo test --manifest-path "$env:MANIFEST" -p lf-desktop --lib --locked
