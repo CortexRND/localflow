@@ -27,7 +27,7 @@ impl WhisperEngine {
     pub fn new(size: &str, language: Option<String>, provider: &str) -> Result<Self> {
         LOGGING.call_once(whisper_rs::install_logging_hooks);
         if whisper_cpp_file(size).is_none() {
-            bail!("unsupported whisper.cpp model size: {size}");
+            bail!("{}: {size}", super::UNSUPPORTED_WHISPER_SIZE);
         }
         if !matches!(provider, "auto" | "cpu" | "metal") {
             bail!("unsupported whisper.cpp provider: {provider}");

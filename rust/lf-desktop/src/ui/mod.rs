@@ -55,6 +55,33 @@ pub fn ring_over(t: &Theme, fill: Hsla) -> Vec<BoxShadow> {
     shadows
 }
 
+/// How a focusable control draws focus. Opt-in per control: the default
+/// keeps the control's own [`ring`] / [`ring_over`] and focus edge on any
+/// focus, exactly as before.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum FocusRing {
+    /// The control's own ring.
+    #[default]
+    Default,
+    /// No ring and no focus edge (focus came from the pointer). Focus
+    /// itself, the caret and selection are unchanged.
+    Hidden,
+    /// These shadows instead of the control's own ring.
+    Shadows(Vec<BoxShadow>),
+}
+
+impl FocusRing {
+    /// The shadows to draw while focused (`own` is the control's default
+    /// ring); `None` when hidden.
+    pub fn shadows(&self, own: impl FnOnce() -> Vec<BoxShadow>) -> Option<Vec<BoxShadow>> {
+        match self {
+            FocusRing::Default => Some(own()),
+            FocusRing::Hidden => None,
+            FocusRing::Shadows(s) => Some(s.clone()),
+        }
+    }
+}
+
 pub fn icon(name: &str, color: Hsla) -> gpui::Svg {
     svg()
         .path(SharedString::from(format!("icons/{name}.svg")))
@@ -208,6 +235,8 @@ pub struct Button {
     /// Use this handle instead of an automatic tab stop, so the owner can
     /// move focus to the button (dialogs).
     focus: Option<FocusHandle>,
+    /// Opt-in focus decoration (see [`FocusRing`]).
+    focus_ring: FocusRing,
 }
 
 impl Button {
@@ -223,7 +252,13 @@ impl Button {
             tooltip: None,
             on_click: None,
             focus: None,
+            focus_ring: FocusRing::Default,
         }
+    }
+    /// Replace or hide the focus ring (default: the button's own).
+    pub fn focus_ring(mut self, ring: FocusRing) -> Self {
+        self.focus_ring = ring;
+        self
     }
     pub fn primary(mut self) -> Self {
         self.variant = Variant::Primary;
@@ -316,11 +351,13 @@ impl RenderOnce for Button {
         } else {
             self.icon
         };
-        let ring = if self.variant == Variant::Ghost {
-            ring_over(&t, t.bg_card)
-        } else {
-            ring(&t)
-        };
+        let ring = self.focus_ring.shadows(|| {
+            if self.variant == Variant::Ghost {
+                ring_over(&t, t.bg_card)
+            } else {
+                ring(&t)
+            }
+        });
         let mut el = div()
             .id(self.id)
             .flex()
@@ -350,8 +387,10 @@ impl RenderOnce for Button {
             el = el
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
-                .active(move |s| s.bg(pressed))
-                .focus(move |s| s.shadow(ring.clone()));
+                .active(move |s| s.bg(pressed));
+            if let Some(ring) = ring {
+                el = el.focus(move |s| s.shadow(ring.clone()));
+            }
             if let Some(f) = self.on_click {
                 el = el.on_click(move |e, w, cx| f(e, w, cx));
             }
@@ -943,6 +982,23 @@ pub fn setting_row(
     control: AnyElement,
     note: Option<(Tone, SharedString)>,
 ) -> Div {
+    let description = supporting(t, description);
+    #[cfg(test)]
+    let description = description.debug_selector(|| "setting-desc".into());
+    let text_column = div()
+        .flex()
+        .flex_col()
+        .gap(space::s1())
+        .child(label(t, label_text))
+        .child(description)
+        .when_some(note, |d, (tone, text)| {
+            d.child(match tone {
+                Tone::Error => error_line(t, text),
+                _ => supporting(t, text).text_color(t.tone(tone).0),
+            })
+        });
+    #[cfg(test)]
+    let text_column = text_column.debug_selector(|| "setting-text".into());
     div()
         .flex()
         .items_center()
@@ -953,21 +1009,13 @@ pub fn setting_row(
         .px(row_inset())
         .py(space::s5())
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::s1())
-                .flex_1()
-                .min_w_0()
-                .max_w(px(440.))
-                .child(label(t, label_text))
-                .child(supporting(t, description))
-                .when_some(note, |d, (tone, text)| {
-                    d.child(match tone {
-                        Tone::Error => error_line(t, text),
-                        _ => supporting(t, text).text_color(t.tone(tone).0),
-                    })
-                }),
+            // A 440 px flex basis that never grows and shrinks (down to
+            // nothing) when a wide control leaves less room. The width stays
+            // `auto`, so text wraps at the resolved size: 440 px when it fits,
+            // the remaining room otherwise. A fixed `w(440)` ran under wide
+            // controls; `flex_1()` + `max_w(440)` (or a nested slot) let the
+            // row's height be measured at a wider, unclamped width.
+            text_column.flex_basis(px(440.)).flex_shrink().min_w_0(),
         )
         .child(
             div()
@@ -1060,4 +1108,29 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
                 .on_click(move |_, w, cx| f(value, w, cx))
                 .child(*name)
         }))
+}
+
+#[cfg(test)]
+mod layout_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Controls that don't opt in keep their own ring, so every page other
+    /// than Ask renders focus exactly as before.
+    #[test]
+    fn focus_ring_defaults_to_the_controls_own_ring() {
+        let t = Theme::light();
+        assert_eq!(FocusRing::default(), FocusRing::Default);
+        assert_eq!(FocusRing::Default.shadows(|| ring(&t)), Some(ring(&t)));
+        let over = ring_over(&t, t.bg_card);
+        assert_eq!(FocusRing::Default.shadows(|| over.clone()), Some(over));
+        assert_eq!(FocusRing::Hidden.shadows(|| ring(&t)), None);
+        let custom = ring_over(&t, t.bg_surface);
+        assert_eq!(
+            FocusRing::Shadows(custom.clone()).shadows(|| ring(&t)),
+            Some(custom)
+        );
+    }
 }

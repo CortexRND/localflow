@@ -14,6 +14,10 @@
 //! own OS thread, registered as a pending write so a close waits for it
 //! (bounded) without depending on the UI executor. Speech recognition can't
 //! be interrupted, so nothing claims to cancel it.
+//!
+//! When the configured native model isn't downloaded (or the native engine
+//! has no such size, e.g. `distil-large-v3`), a real (never sandbox) window transcribes with the Python app's model instead
+//! ([`PythonRetry`]) and commits its result the same way.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,10 +32,23 @@ use lf_runtime::context::AppInfo;
 use lf_runtime::engine::SpeechEngine;
 use lf_runtime::pipeline::{process_clip, Models, Vocabulary};
 
+use crate::controllers::retry_python::{PythonError, PythonRetry, Transcript};
 use crate::data::{open_history, DataRoot};
 
 /// The only clip rate the native engines accept.
 pub const CLIP_RATE: u32 = 16_000;
+
+/// How `lf_stt::runtime::hub_speech_cached` says the configured model isn't
+/// installed.
+pub const NOT_DOWNLOADED: &str = "isn't downloaded";
+
+/// How the native engine says it has no such model size (a size or repo
+/// only faster-whisper has). `lf_stt::engines::UNSUPPORTED_WHISPER_SIZE`,
+/// copied because default builds don't link lf-stt (a test pins it).
+pub const NO_NATIVE_SIZE: &str = "unsupported whisper.cpp model size";
+
+/// What a missing native model's error ends with.
+pub const MODELS_HINT: &str = "Download it in Models & keys, then try again.";
 
 /// Persistent supporting text when results are simulated (sandbox).
 pub const SIMULATED_NOTE: &str = "Sandbox: simulated result. No speech model ran.";
@@ -52,6 +69,11 @@ pub trait RetryBackend: Send + Sync {
     /// Results come from a deterministic simulation, not a model.
     fn simulated(&self) -> bool {
         false
+    }
+    /// The Python app's model, used when `open` reports the configured
+    /// native model isn't downloaded (real windows only).
+    fn python(&self) -> Option<&PythonRetry> {
+        None
     }
 }
 
@@ -80,6 +102,7 @@ impl RetryBackend for UnavailableRetry {
 #[cfg(feature = "runtime")]
 pub struct NativeRetry {
     pub secrets: Arc<dyn lf_providers::SecretStore + Send + Sync>,
+    pub python: PythonRetry,
 }
 
 #[cfg(feature = "runtime")]
@@ -89,8 +112,8 @@ impl RetryBackend for NativeRetry {
     }
     fn open(&self, config: &Config) -> Result<Arc<dyn SpeechEngine>, String> {
         let speech = lf_stt::runtime::hub_speech_cached(config).map_err(|error| {
-            if error.contains("isn't downloaded") {
-                format!("{error}. Download it in Models & keys, then try again.")
+            if error.contains(NOT_DOWNLOADED) {
+                format!("{error}. {MODELS_HINT}")
             } else {
                 error
             }
@@ -104,6 +127,9 @@ impl RetryBackend for NativeRetry {
             self.secrets.as_ref(),
         )
         .ok()
+    }
+    fn python(&self) -> Option<&PythonRetry> {
+        Some(&self.python)
     }
 }
 
@@ -266,15 +292,32 @@ pub fn retry_entry(
         name: entry.app_name.clone().unwrap_or_default(),
         bundle_id: entry.bundle_id.clone().unwrap_or_default(),
     });
-    let speech = Opened(backend.open(config).map_err(RetryError::Unavailable)?);
-    let llm = backend.llm(config);
-    let models = Models {
-        speech: speech.0.as_ref(),
-        llm: llm.as_deref(),
+    let (raw, final_text) = match backend.open(config) {
+        Ok(speech) => {
+            let speech = Opened(speech);
+            let llm = backend.llm(config);
+            let models = Models {
+                speech: speech.0.as_ref(),
+                llm: llm.as_deref(),
+            };
+            let processed = process_clip(&samples, config, &models, &vocab, app_info.as_ref());
+            drop(speech);
+            processed.map_err(RetryError::Failed)?
+        }
+        Err(why) => {
+            let no_size = why.contains(NO_NATIVE_SIZE);
+            match backend
+                .python()
+                .filter(|_| (no_size || why.contains(NOT_DOWNLOADED)) && !root.is_sandbox())
+            {
+                Some(python) => {
+                    let python_only = no_size.then(|| config.field_str("model_size").unwrap_or(""));
+                    python_text(python.transcribe(root, entry.id), &entry, &why, python_only)?
+                }
+                None => return Err(RetryError::Unavailable(why)),
+            }
+        }
     };
-    let processed = process_clip(&samples, config, &models, &vocab, app_info.as_ref());
-    drop(speech);
-    let (raw, final_text) = processed.map_err(RetryError::Failed)?;
     if final_text.trim().is_empty() {
         return Err(RetryError::Empty);
     }
@@ -288,6 +331,54 @@ pub fn retry_entry(
         .update_if_unchanged(&entry, &changes)
         .map_err(|e| RetryError::Failed(format!("{e:#}")))?
         .ok_or(RetryError::Changed)
+}
+
+/// The Python app's result for `entry`, or why there is none. `why` is the
+/// native error: the model "isn't downloaded", or (`python_only`: the
+/// configured size) the native engine has no such size at all.
+fn python_text(
+    result: Result<Transcript, PythonError>,
+    entry: &HistoryEntry,
+    why: &str,
+    python_only: Option<&str>,
+) -> Result<(String, String), RetryError> {
+    let both_ways = |reason: &str| {
+        RetryError::Unavailable(match python_only {
+            Some(size) => {
+                let size = if size.is_empty() {
+                    "configured".into()
+                } else {
+                    format!("`{size}`")
+                };
+                format!(
+                    "The {size} speech model only runs in the Python LocalFlow app, and {reason}. Download the Python app's model with `lf models download`, or pick another model in Models & keys, then try again."
+                )
+            }
+            None => {
+                let missing = why.strip_suffix(MODELS_HINT).unwrap_or(why).trim_end();
+                let missing = missing.strip_suffix('.').unwrap_or(missing);
+                format!(
+                    "{missing}, and {reason}. Download it in Models & keys, or download the Python app's model with `lf models download`, then try again."
+                )
+            }
+        })
+    };
+    match result {
+        Ok(t) if (RetryKey { id: t.id, ts: t.ts }).matches(entry) => Ok((t.raw_text, t.final_text)),
+        Ok(_) => Err(RetryError::Failed(
+            "the Python app read a different history, so nothing was changed.".into(),
+        )),
+        Err(PythonError::Missing) => Err(both_ways("the Python LocalFlow app wasn't found")),
+        Err(PythonError::Unsupported) => Err(both_ways(
+            "the `lf` found isn't a Python LocalFlow app that can retry",
+        )),
+        Err(PythonError::NoModel) => Err(both_ways(if python_only.is_some() {
+            "it isn't downloaded there"
+        } else {
+            "the Python app's model isn't downloaded either"
+        })),
+        Err(PythonError::Failed(why)) => Err(RetryError::Failed(why)),
+    }
 }
 
 /// Shown when another row's retry is running.
@@ -625,6 +716,7 @@ mod tests {
         failing_llm: bool,
         gate: Mutex<Option<mpsc::Receiver<()>>>,
         started: Option<mpsc::Sender<()>>,
+        python: Option<PythonRetry>,
     }
 
     impl Fake {
@@ -636,6 +728,7 @@ mod tests {
                 failing_llm: false,
                 gate: Mutex::new(None),
                 started: None,
+                python: None,
             }
         }
         /// Inference waits for `go`; `started` fires once it's running.
@@ -675,6 +768,9 @@ mod tests {
             self.counts.llms.fetch_add(1, Ordering::SeqCst);
             self.failing_llm
                 .then(|| Box::new(FailingLlm) as Box<dyn LlmProvider>)
+        }
+        fn python(&self) -> Option<&PythonRetry> {
+            self.python.as_ref()
         }
     }
 
@@ -1610,5 +1706,566 @@ mod tests {
             Err(RetryError::Unavailable(reason))
         );
         assert_eq!(f.store.get(entry.id).unwrap().unwrap(), entry);
+    }
+
+    #[cfg(unix)]
+    mod python_fallback {
+        use std::collections::HashMap;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
+
+        use super::*;
+        use crate::controllers::retry_python::PYTHON_ENV;
+        use crate::data::Mode;
+
+        // A script written while another test forks can fail to exec with
+        // ETXTBSY, so the tests that write and run scripts take turns.
+        static SCRIPTS: Mutex<()> = Mutex::new(());
+
+        fn serial() -> MutexGuard<'static, ()> {
+            SCRIPTS.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        const MISSING: &str = "the Whisper base model isn't downloaded \
+            (ggerganov/whisper.cpp/ggml-base.bin). Download it in Models & keys, then try again.";
+
+        /// A fake Python `lf` (or interpreter) at `<dir>/<name>`: records its
+        /// argv and environment, prints `stdout`/`stderr`, exits `code` (or
+        /// hangs).
+        struct FakeLf {
+            dir: PathBuf,
+            exe: PathBuf,
+        }
+
+        impl FakeLf {
+            fn new(dir: &Path, name: &str) -> Self {
+                std::fs::create_dir_all(dir).unwrap();
+                let exe = dir.join(name);
+                let here = dir.display();
+                let script = format!(
+                    "#!/bin/sh\nhere='{here}'\n\
+                     {{ for a in \"$@\"; do printf 'arg=%s\\n' \"$a\"; done\n\
+                     printf 'LOCALFLOW_CONFIG=%s\\nHF_HUB_OFFLINE=%s\\nPWD=%s\\nPID=%s\\n' \
+                     \"$LOCALFLOW_CONFIG\" \"$HF_HUB_OFFLINE\" \"$(pwd)\" \"$$\"; }} > \"$here/record.tmp\"\n\
+                     mv \"$here/record.tmp\" \"$here/record\"\n\
+                     cat \"$here/stdout\"\ncat \"$here/stderr\" >&2\n\
+                     if [ -f \"$here/hang\" ]; then exec sleep 30; fi\n\
+                     exit \"$(cat \"$here/code\")\"\n"
+                );
+                std::fs::write(&exe, script).unwrap();
+                std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let fake = FakeLf {
+                    dir: dir.to_path_buf(),
+                    exe,
+                };
+                fake.reply(0, "", "");
+                fake
+            }
+            fn reply(&self, code: i32, stdout: &str, stderr: &str) {
+                std::fs::write(self.dir.join("code"), code.to_string()).unwrap();
+                std::fs::write(self.dir.join("stdout"), stdout).unwrap();
+                std::fs::write(self.dir.join("stderr"), stderr).unwrap();
+            }
+            fn hang(&self) {
+                std::fs::write(self.dir.join("hang"), "").unwrap();
+            }
+            fn record(&self) -> Option<Vec<String>> {
+                let text = std::fs::read_to_string(self.dir.join("record")).ok()?;
+                Some(text.lines().map(String::from).collect())
+            }
+            fn value(&self, name: &str) -> String {
+                let prefix = format!("{name}=");
+                self.record()
+                    .unwrap()
+                    .iter()
+                    .find_map(|line| line.strip_prefix(&prefix).map(String::from))
+                    .unwrap()
+            }
+            fn args(&self) -> Vec<String> {
+                self.record()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|line| line.strip_prefix("arg=").map(String::from))
+                    .collect()
+            }
+        }
+
+        /// A real-mode window's data, in a directory whose path has spaces.
+        fn real_fixture() -> Fixture {
+            let dir = tempfile::tempdir().unwrap();
+            let mut root = DataRoot::sandbox(&dir.path().join("data root"));
+            root.mode = Mode::Real;
+            root.sandbox_dir = None;
+            let store = open_history(&root).unwrap();
+            Fixture {
+                _dir: dir,
+                root,
+                store,
+            }
+        }
+
+        /// A backend whose native model isn't downloaded, with the Python
+        /// fallback seeing only `env`.
+        fn missing_native(env: &[(&str, &Path)], timeout: Duration) -> Fake {
+            let env: HashMap<String, OsString> = env
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.as_os_str().to_owned()))
+                .collect();
+            let mut fake = Fake::new(Say::text());
+            fake.open_error = Some(MISSING);
+            fake.python = Some(PythonRetry::with(
+                Box::new(move |name| env.get(name).cloned()),
+                timeout,
+            ));
+            fake
+        }
+
+        /// What `lf history retry --json` prints (`ts` as Python's `repr`,
+        /// which is also Rust's shortest round-trip form).
+        fn reply_for(entry: &HistoryEntry, raw: &str, text: &str) -> String {
+            serde_json::json!({
+                "id": entry.id,
+                "ts": format!("{:?}", entry.ts),
+                "raw_text": raw,
+                "final_text": text,
+            })
+            .to_string()
+        }
+
+        fn unchanged(f: &Fixture, before: &[HistoryEntry]) {
+            assert_eq!(f.rows(), before);
+        }
+
+        #[test]
+        fn a_missing_native_model_retries_with_this_windows_python_app() {
+            let _serial = serial();
+            let f = real_fixture();
+            let mut other = NewEntry::new("dictate");
+            other.final_text = "Untouched.".into();
+            f.store.add(&other).unwrap();
+            let entry = f.retryable();
+            let before = f.rows();
+            let config_bytes = std::fs::read(&f.root.config_path).ok();
+            let python = FakeLf::new(&f._dir.path().join("python env"), "python3");
+            python.reply(
+                0,
+                &format!(
+                    "python raw  (12ms)\n{}\n",
+                    reply_for(&entry, "python raw", "Python final.")
+                ),
+                "a warning on stderr\n",
+            );
+            let fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+
+            let updated = f.retry(&config(), &entry, &fake).unwrap();
+            assert_eq!(updated.status, "ok");
+            assert_eq!(updated.raw_text, "python raw");
+            assert_eq!(updated.final_text, "Python final.");
+            // The interpreter the launcher exported runs this window's
+            // data directory and config, offline.
+            let data_dir = f.root.localflow_dir.to_string_lossy().into_owned();
+            assert_eq!(
+                python.args(),
+                [
+                    "-m",
+                    "localflow.cli",
+                    "history",
+                    "retry",
+                    &entry.id.to_string(),
+                    "--json",
+                    "--data-dir",
+                    &data_dir,
+                ]
+            );
+            assert_eq!(
+                python.value("LOCALFLOW_CONFIG"),
+                f.root.config_path.to_string_lossy()
+            );
+            assert_eq!(python.value("HF_HUB_OFFLINE"), "1");
+            assert_eq!(
+                PathBuf::from(python.value("PWD")).canonicalize().unwrap(),
+                f.root.localflow_dir.canonicalize().unwrap()
+            );
+            // The native model was only asked for, never used.
+            assert_eq!(fake.opens(), 1);
+            assert_eq!(fake.counts.transcribes.load(Ordering::SeqCst), 0);
+            assert_eq!(fake.counts.llms.load(Ordering::SeqCst), 0);
+            // Only that row changed; no config write, no last.txt.
+            let after = f.rows();
+            assert_eq!(after.len(), before.len());
+            for (before, after) in before.iter().zip(&after) {
+                if before.id == entry.id {
+                    assert_eq!(after, &updated);
+                } else {
+                    assert_eq!(after, before);
+                }
+            }
+            assert_eq!(std::fs::read(&f.root.config_path).ok(), config_bytes);
+            assert!(!f.root.localflow_dir.join("last.txt").exists());
+            // The page reloads it through the job slot like a native result.
+            let jobs = RetryJobs::new();
+            let mut seen = jobs.seq();
+            let second = f.retryable();
+            python.reply(0, &reply_for(&second, "again", "Again."), "");
+            assert!(jobs.start(
+                f.root.clone(),
+                config(),
+                RetryKey::of(&second),
+                Arc::new(missing_native(&[(PYTHON_ENV, &python.exe)], WAIT)),
+            ));
+            assert!(jobs.wait_idle(WAIT));
+            let observed = jobs.observe(&mut seen);
+            assert_eq!(observed.updated.len(), 1);
+            assert_eq!(observed.updated[0].final_text, "Again.");
+            assert_eq!(
+                f.store.get(second.id).unwrap().unwrap(),
+                observed.updated[0]
+            );
+        }
+
+        #[test]
+        fn without_the_launcher_an_lf_on_path_is_used_but_never_lf_rs() {
+            let _serial = serial();
+            let f = real_fixture();
+            let entry = f.retryable();
+            let base = f._dir.path();
+            let rs = FakeLf::new(&base.join("rust bin"), "lf-rs");
+            std::os::unix::fs::symlink(&rs.exe, base.join("rust bin").join("lf")).unwrap();
+            let lf = FakeLf::new(&base.join("python bin"), "lf");
+            lf.reply(0, &reply_for(&entry, "raw", "From PATH."), "");
+            let path = std::env::join_paths([
+                PathBuf::from("relative"),
+                base.join("rust bin"),
+                base.join("python bin"),
+            ])
+            .unwrap();
+            let fake = missing_native(&[("PATH", Path::new(&path))], WAIT);
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap().final_text,
+                "From PATH."
+            );
+            assert_eq!(lf.args()[..2], ["history", "retry"]);
+            assert!(rs.record().is_none(), "lf-rs has no faster-whisper");
+            // A relative or non-file override falls back to PATH as well.
+            let entry = f.retryable();
+            lf.reply(0, &reply_for(&entry, "raw", "Still PATH."), "");
+            let fake = missing_native(
+                &[
+                    (PYTHON_ENV, Path::new("python3")),
+                    ("PATH", Path::new(&path)),
+                ],
+                WAIT,
+            );
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap().final_text,
+                "Still PATH."
+            );
+        }
+
+        #[test]
+        fn an_installed_native_model_never_runs_python() {
+            let _serial = serial();
+            let f = real_fixture();
+            let entry = f.retryable();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            let mut fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            fake.open_error = None;
+            let updated = f.retry(&config(), &entry, &fake).unwrap();
+            assert_eq!(updated.raw_text, "teh quarterly review moved to thursday.");
+            assert!(python.record().is_none());
+            // Other native errors aren't a missing model: no fallback either.
+            fake.open_error = Some("the speech helper crashed");
+            assert_eq!(
+                f.retry(&config(), &f.retryable(), &fake).unwrap_err(),
+                RetryError::Unavailable("the speech helper crashed".into())
+            );
+            assert!(python.record().is_none());
+        }
+
+        #[test]
+        fn the_sandbox_never_runs_python() {
+            let _serial = serial();
+            let f = fixture();
+            assert!(f.root.is_sandbox());
+            let entry = f.retryable();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            python.reply(0, &reply_for(&entry, "raw", "Real text."), "");
+            let fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap_err(),
+                RetryError::Unavailable(MISSING.into())
+            );
+            assert!(python.record().is_none());
+            assert_eq!(f.store.get(entry.id).unwrap().unwrap(), entry);
+        }
+
+        #[test]
+        fn a_failing_python_app_is_one_short_sentence_and_changes_nothing() {
+            let _serial = serial();
+            let f = real_fixture();
+            let entry = f.retryable();
+            let before = f.rows();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            let fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            let traceback = "retry failed for history entry 1\n\
+                Traceback (most recent call last):\n  File \"app.py\", line 9, in retry\n\
+                ValueError: audio clip must be mono 16-bit PCM\n";
+            let cases = [
+                (
+                    format!("{traceback}Error: audio clip must be mono 16-bit PCM\n"),
+                    "Transcription failed: the Python app reported: audio clip must be mono 16-bit PCM.",
+                ),
+                (
+                    traceback.into(),
+                    "Transcription failed: the Python app reported: ValueError: audio clip must be mono 16-bit PCM.",
+                ),
+                (String::new(), "Transcription failed: the Python app exited with code 1."),
+            ];
+            for (stderr, expected) in cases {
+                python.reply(1, "partial output\n", &stderr);
+                let error = f.retry(&config(), &entry, &fake).unwrap_err();
+                assert_eq!(error.message(), expected);
+                assert!(!error.message().contains("Traceback"));
+                unchanged(&f, &before);
+            }
+            let long = format!("Error: {}\n", "word ".repeat(100));
+            python.reply(1, "", &long);
+            let message = f.retry(&config(), &entry, &fake).unwrap_err().message();
+            assert!(
+                message.chars().count() < 220 && message.ends_with('…'),
+                "{message}"
+            );
+            // A reply about another row (another data location) or with no
+            // speech is never saved.
+            let mut elsewhere = entry.clone();
+            elsewhere.ts += 1.0;
+            python.reply(0, &reply_for(&elsewhere, "raw", "Other."), "");
+            assert!(matches!(
+                f.retry(&config(), &entry, &fake),
+                Err(RetryError::Failed(m)) if m.contains("different history")
+            ));
+            python.reply(0, &reply_for(&entry, "", ""), "");
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap_err(),
+                RetryError::Empty
+            );
+            unchanged(&f, &before);
+        }
+
+        #[test]
+        fn no_python_app_or_model_names_both_ways_out() {
+            let _serial = serial();
+            let f = real_fixture();
+            let entry = f.retryable();
+            let before = f.rows();
+            let both_ways = |reason: &str| {
+                RetryError::Unavailable(format!(
+                    "the Whisper base model isn't downloaded (ggerganov/whisper.cpp/ggml-base.bin), \
+                     and {reason}. Download it in Models & keys, or download the Python app's \
+                     model with `lf models download`, then try again."
+                ))
+            };
+            let nowhere = missing_native(&[], WAIT);
+            assert_eq!(
+                f.retry(&config(), &entry, &nowhere).unwrap_err(),
+                both_ways("the Python LocalFlow app wasn't found")
+            );
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            let fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            python.reply(3, "", "Error: the fw-base speech model isn't downloaded\n");
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap_err(),
+                both_ways("the Python app's model isn't downloaded either")
+            );
+            // An `lf` without `--json` (lf-rs, an older Python app) or one
+            // that prints no result.
+            for (code, stdout) in [(2, ""), (0, "Retried dictation and copied the result.\n")] {
+                python.reply(code, stdout, "Error: No such option: --json\n");
+                assert_eq!(
+                    f.retry(&config(), &entry, &fake).unwrap_err(),
+                    both_ways("the `lf` found isn't a Python LocalFlow app that can retry")
+                );
+            }
+            unchanged(&f, &before);
+        }
+
+        #[cfg(feature = "runtime")]
+        #[test]
+        fn the_unsupported_size_wording_is_lf_stts() {
+            assert_eq!(NO_NATIVE_SIZE, lf_stt::engines::UNSUPPORTED_WHISPER_SIZE);
+        }
+
+        /// The real cache-only factory, not an injected error: it refuses a
+        /// faster-whisper-only size before looking for weights.
+        #[cfg(feature = "runtime")]
+        #[test]
+        fn the_native_backend_reports_a_python_only_size_as_no_native_size() {
+            let native = NativeRetry {
+                secrets: Arc::new(crate::data::MemorySecrets::default()),
+                python: PythonRetry::system(),
+            };
+            let mut config = config();
+            config.set_field("model_size", serde_json::json!("distil-large-v3"));
+            let why = native.open(&config).err().expect("no native distil model");
+            assert!(why.contains(NO_NATIVE_SIZE), "{why}");
+            assert!(!why.contains(NOT_DOWNLOADED), "{why}");
+        }
+
+        #[test]
+        fn a_size_only_python_has_retries_with_the_python_app() {
+            let _serial = serial();
+            let f = real_fixture();
+            let mut config = config();
+            config.set_field("model_size", serde_json::json!("distil-large-v3"));
+            let no_size = "unsupported whisper.cpp model size: distil-large-v3";
+            let entry = f.retryable();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            python.reply(0, &reply_for(&entry, "raw", "Distil."), "");
+            let mut fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            fake.open_error = Some(no_size);
+            let updated = f.retry(&config, &entry, &fake).unwrap();
+            assert_eq!(updated.final_text, "Distil.");
+            assert_eq!(f.store.get(entry.id).unwrap().unwrap(), updated);
+
+            // Without the Python app (or its model) the message says the
+            // size is Python-only, not "download it in Models & keys".
+            let entry = f.retryable();
+            let before = f.rows();
+            let python_only = |reason: &str| {
+                RetryError::Unavailable(format!(
+                    "The `distil-large-v3` speech model only runs in the Python LocalFlow app, \
+                     and {reason}. Download the Python app's model with `lf models download`, \
+                     or pick another model in Models & keys, then try again."
+                ))
+            };
+            let mut nowhere = missing_native(&[], WAIT);
+            nowhere.open_error = Some(no_size);
+            assert_eq!(
+                f.retry(&config, &entry, &nowhere).unwrap_err(),
+                python_only("the Python LocalFlow app wasn't found")
+            );
+            python.reply(3, "", "Error: the speech model isn't downloaded\n");
+            assert_eq!(
+                f.retry(&config, &entry, &fake).unwrap_err(),
+                python_only("it isn't downloaded there")
+            );
+            unchanged(&f, &before);
+
+            // Other native errors (provider, language, a corrupt model)
+            // never run Python.
+            std::fs::remove_file(python.dir.join("record")).unwrap();
+            for error in [
+                "unsupported whisper.cpp provider: cuda",
+                "unsupported Whisper language: xx",
+                "failed to load the Whisper model: invalid model file",
+            ] {
+                fake.open_error = Some(error);
+                assert_eq!(
+                    f.retry(&config, &entry, &fake).unwrap_err(),
+                    RetryError::Unavailable(error.into())
+                );
+            }
+            assert!(python.record().is_none());
+            unchanged(&f, &before);
+        }
+
+        #[test]
+        fn a_python_lf_in_local_bin_is_found_off_path_but_never_lf_rs() {
+            let _serial = serial();
+            let f = real_fixture();
+            let entry = f.retryable();
+            let base = f._dir.path();
+            let empty_path = base.join("empty bin");
+            std::fs::create_dir_all(&empty_path).unwrap();
+            // HOME/.local/bin/lf → lf-rs is skipped.
+            let rs_home = base.join("rs home");
+            let rs = FakeLf::new(&rs_home.join("rust"), "lf-rs");
+            std::fs::create_dir_all(rs_home.join(".local/bin")).unwrap();
+            std::os::unix::fs::symlink(&rs.exe, rs_home.join(".local/bin/lf")).unwrap();
+            let fake = missing_native(&[("PATH", &empty_path), ("HOME", &rs_home)], WAIT);
+            assert!(matches!(
+                f.retry(&config(), &entry, &fake),
+                Err(RetryError::Unavailable(m)) if m.contains("wasn't found")
+            ));
+            assert!(rs.record().is_none());
+            // The Python CLI install.sh links there is used.
+            let home = base.join("home");
+            let lf = FakeLf::new(&home.join(".local/bin"), "lf");
+            lf.reply(0, &reply_for(&entry, "raw", "From local bin."), "");
+            let fake = missing_native(&[("PATH", &empty_path), ("HOME", &home)], WAIT);
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap().final_text,
+                "From local bin."
+            );
+            assert_eq!(lf.args()[..2], ["history", "retry"]);
+        }
+
+        #[test]
+        fn a_relative_config_path_reaches_python_absolute() {
+            let _serial = serial();
+            let mut f = real_fixture();
+            f.root.config_path = PathBuf::from("relative dir/config.toml");
+            let entry = f.retryable();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            python.reply(0, &reply_for(&entry, "raw", "Text."), "");
+            let fake = missing_native(&[(PYTHON_ENV, &python.exe)], WAIT);
+            f.retry(&config(), &entry, &fake).unwrap();
+            assert_eq!(
+                PathBuf::from(python.value("LOCALFLOW_CONFIG")),
+                std::env::current_dir()
+                    .unwrap()
+                    .join("relative dir/config.toml")
+            );
+        }
+
+        fn reaped(python: &FakeLf) {
+            let pid = python.value("PID");
+            if cfg!(target_os = "linux") {
+                assert!(
+                    !Path::new(&format!("/proc/{pid}")).exists(),
+                    "the child was killed and reaped (no zombie)"
+                );
+            }
+        }
+
+        #[test]
+        fn a_timeout_or_a_close_kills_and_reaps_the_child_and_changes_nothing() {
+            let _serial = serial();
+            let f = real_fixture();
+            let entry = f.retryable();
+            let before = f.rows();
+            let python = FakeLf::new(&f._dir.path().join("py"), "python3");
+            python.hang();
+            let started = std::time::Instant::now();
+            let fake = missing_native(&[(PYTHON_ENV, &python.exe)], Duration::from_millis(300));
+            assert_eq!(
+                f.retry(&config(), &entry, &fake).unwrap_err().message(),
+                "Transcription failed: the Python app didn't finish within 300 ms"
+            );
+            assert!(started.elapsed() < Duration::from_secs(10));
+            reaped(&python);
+            unchanged(&f, &before);
+
+            // A window close stops it mid-run.
+            std::fs::remove_file(python.dir.join("record")).unwrap();
+            let fake = Arc::new(missing_native(&[(PYTHON_ENV, &python.exe)], WAIT));
+            let job = {
+                let (root, fake) = (f.root.clone(), fake.clone());
+                let key = RetryKey::of(&entry);
+                std::thread::spawn(move || retry_entry(&root, &config(), key, fake.as_ref()))
+            };
+            let deadline = std::time::Instant::now() + WAIT;
+            while python.record().is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            fake.python().unwrap().stop();
+            assert_eq!(
+                job.join().unwrap().unwrap_err().message(),
+                "Transcription failed: it was stopped because LocalFlow is closing"
+            );
+            reaped(&python);
+            unchanged(&f, &before);
+        }
     }
 }

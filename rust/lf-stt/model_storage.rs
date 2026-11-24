@@ -85,6 +85,8 @@ pub fn faster_whisper_repo(size: &str) -> Option<String> {
         })
 }
 
+/// Size-neutral: inventory names the ggml files actually stored.
+const WHISPER_CPP_LABEL: &str = "Whisper (whisper.cpp)";
 const WHISPER_CATALOG_LABELS: &[(&str, &str)] = &[
     ("tiny", "Tiny"),
     ("base", "Base"),
@@ -125,7 +127,7 @@ pub fn catalog() -> Vec<(String, String)> {
         (repo.to_string(), format!("Whisper {label} (Apple Silicon)"))
     }));
     result.push((PARAKEET_REPO.into(), "Parakeet v2".into()));
-    result.push((WHISPER_CPP_REPO.into(), "Whisper Base (whisper.cpp)".into()));
+    result.push((WHISPER_CPP_REPO.into(), WHISPER_CPP_LABEL.into()));
     result.push((PARAKEET_ONNX_REPO.into(), "Parakeet v2 (ONNX)".into()));
     result
 }
@@ -310,13 +312,13 @@ pub fn protection(
     guard
 }
 
-pub fn folder_size(folder: &Path) -> u64 {
+/// Visits regular files under `folder` as (entry path, resolved path, metadata),
+/// following symlinks only to files inside `folder`.
+fn walk_files(folder: &Path, mut visit: impl FnMut(&Path, &Path, &fs::Metadata)) {
     let Ok(root) = folder.canonicalize() else {
-        return 0;
+        return;
     };
     let mut stack = vec![folder.to_path_buf()];
-    let mut seen = HashSet::new();
-    let mut total = 0;
     while let Some(current) = stack.pop() {
         let Ok(entries) = fs::read_dir(current) else {
             continue;
@@ -326,7 +328,7 @@ pub fn folder_size(folder: &Path) -> u64 {
             let Ok(info) = path.symlink_metadata() else {
                 continue;
             };
-            let (path, info) = if info.is_symlink() {
+            let (resolved, info) = if info.is_symlink() {
                 let Ok(target) = path.canonicalize() else {
                     continue;
                 };
@@ -342,30 +344,68 @@ pub fn folder_size(folder: &Path) -> u64 {
                     stack.push(path);
                     continue;
                 }
-                (path, info)
+                (path.clone(), info)
             };
-            if !info.is_file() {
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let _ = path;
-                if seen.insert((info.dev(), info.ino())) {
-                    total += info.len();
-                }
-            }
-            #[cfg(windows)]
-            {
-                if let Ok(handle) = same_file::Handle::from_path(&path) {
-                    if seen.insert(handle) {
-                        total += info.len();
-                    }
-                }
+            if info.is_file() {
+                visit(&path, &resolved, &info);
             }
         }
     }
+}
+
+pub fn folder_size(folder: &Path) -> u64 {
+    let mut seen = HashSet::new();
+    let mut total = 0;
+    walk_files(folder, |_, path, info| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let _ = path;
+            if seen.insert((info.dev(), info.ino())) {
+                total += info.len();
+            }
+        }
+        #[cfg(windows)]
+        {
+            if let Ok(handle) = same_file::Handle::from_path(path) {
+                if seen.insert(handle) {
+                    total += info.len();
+                }
+            }
+        }
+    });
     total
+}
+
+/// Names the ggml sizes present in a whisper.cpp repository snapshot.
+fn whisper_cpp_label(folder: &Path) -> String {
+    let snapshots = folder.join("snapshots");
+    let mut names = HashSet::new();
+    walk_files(folder, |entry, _, _| {
+        if entry.starts_with(&snapshots) {
+            if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
+                names.insert(name.to_owned());
+            }
+        }
+    });
+    let sizes: Vec<_> = WHISPER_CPP_FILES
+        .iter()
+        .filter(|(_, file)| names.contains(*file))
+        .map(|(size, _)| match size.strip_suffix(".en") {
+            Some(base) => format!(
+                "{} (English)",
+                lookup(WHISPER_CATALOG_LABELS, base).unwrap_or(base)
+            ),
+            None => lookup(WHISPER_CATALOG_LABELS, size)
+                .unwrap_or(size)
+                .to_owned(),
+        })
+        .collect();
+    if sizes.is_empty() {
+        WHISPER_CPP_LABEL.into()
+    } else {
+        format!("Whisper {} (whisper.cpp)", sizes.join(", "))
+    }
 }
 
 pub fn model_folder(cache: &Path, repo: &str) -> Option<PathBuf> {
@@ -417,6 +457,11 @@ pub fn inventory(
                 status => status,
             }
             .into();
+            let label = if repo == WHISPER_CPP_REPO {
+                whisper_cpp_label(&path)
+            } else {
+                label
+            };
             Some(CachedModel {
                 size_bytes: folder_size(&path),
                 repo,
@@ -738,6 +783,51 @@ mod tests {
             Some(&[])
         )
         .is_empty());
+    }
+
+    #[test]
+    fn whisper_cpp_inventory_names_the_stored_sizes() {
+        let label = |files: &[&str]| {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join(repo_folder_name(WHISPER_CPP_REPO));
+            let snap = folder.join("snapshots/rev1");
+            fs::create_dir_all(folder.join("blobs")).unwrap();
+            fs::create_dir_all(folder.join(".no_exist/rev1")).unwrap();
+            fs::create_dir_all(folder.join(".locks")).unwrap();
+            fs::create_dir_all(&snap).unwrap();
+            fs::write(folder.join(".no_exist/rev1/ggml-small.bin"), "").unwrap();
+            fs::write(folder.join(".locks/ggml-medium.bin.lock"), "").unwrap();
+            fs::write(folder.join("blobs/partial.incomplete"), [0; 8]).unwrap();
+            for (i, file) in files.iter().enumerate() {
+                let blob = format!("blob{i}");
+                fs::write(folder.join("blobs").join(&blob), [0; 8]).unwrap();
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(format!("../../blobs/{blob}"), snap.join(file)).unwrap();
+                #[cfg(not(unix))]
+                fs::copy(folder.join("blobs").join(&blob), snap.join(file)).unwrap();
+            }
+            #[cfg(unix)]
+            {
+                let outside = root.path().join("ggml-large-v3.bin");
+                fs::write(&outside, [0; 8]).unwrap();
+                std::os::unix::fs::symlink(&outside, snap.join("ggml-large-v3.bin")).unwrap();
+            }
+            let cfg = config("parakeet", "base", "auto");
+            let inv = inventory(&cfg, Some(root.path()), || false, Some(&[]));
+            assert_eq!(inv.len(), 1);
+            assert_eq!(inv[0].repo, WHISPER_CPP_REPO);
+            inv[0].label.clone()
+        };
+        assert_eq!(label(&["ggml-tiny.bin"]), "Whisper Tiny (whisper.cpp)");
+        assert_eq!(
+            label(&["ggml-base.en.bin", "ggml-tiny.bin"]),
+            "Whisper Tiny, Base (English) (whisper.cpp)"
+        );
+        assert_eq!(
+            label(&["ggml-large-v3-turbo.bin", "ggml-tiny.en.bin"]),
+            "Whisper Tiny (English), Large v3 Turbo (whisper.cpp)"
+        );
+        assert_eq!(label(&[]), "Whisper (whisper.cpp)");
     }
 
     #[test]

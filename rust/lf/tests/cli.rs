@@ -813,6 +813,34 @@ mod hub_unix {
         );
         let mut gpui = env.to_vec();
         gpui.push(("LOCALFLOW_DESKTOP_BIN", desktop.to_str().unwrap()));
+        // Not set up yet: probed, never started (no preview first-run wizard).
+        for args in [&["hub", "--gpui"][..], &["hub", "--gpui", "--page", "home"]] {
+            let run = sandbox.run_with(args, &gpui, "");
+            assert_eq!(
+                (code(&run), stderr(&run)),
+                (
+                    0,
+                    "lf: LocalFlow isn't set up yet (run lf setup); opening the legacy window.\n"
+                        .into()
+                ),
+                "{args:?}"
+            );
+        }
+        assert_eq!(lines(&launched, 2), ["--help", "--help"]);
+        assert_eq!(
+            lines(&record, 4)[2..],
+            [
+                "-m localflow.hub_window --page Home",
+                "-m localflow.hub_window --page Home"
+            ]
+        );
+        std::fs::remove_file(&launched).unwrap();
+        std::fs::create_dir_all(sandbox.config().parent().unwrap()).unwrap();
+        std::fs::write(
+            sandbox.config(),
+            "config_version = 2\n\n[setup]\nversion = 1\n",
+        )
+        .unwrap();
         for args in [&["hub", "--gpui"][..], &["hub", "--gpui", "--page", "home"]] {
             let run = sandbox.run_with(args, &gpui, "");
             assert_eq!((code(&run), stderr(&run)), (0, String::new()), "{args:?}");
@@ -831,6 +859,6 @@ mod hub_unix {
                     .into()
             )
         );
-        assert_eq!(lines(&record, 3)[2], "-m localflow.hub_window --page Ask");
+        assert_eq!(lines(&record, 5)[4], "-m localflow.hub_window --page Ask");
     }
 }

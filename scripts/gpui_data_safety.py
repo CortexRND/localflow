@@ -1,11 +1,14 @@
-"""Compare the real Linux LocalFlow stores around a sandbox Dictionary edit."""
+"""Compare the real Linux LocalFlow stores around a sandbox session that writes every store."""
 
 import hashlib
 import hmac
 import json
 import os
 import re
+import sqlite3
 import stat
+import subprocess
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -58,9 +61,29 @@ def fingerprint(path, key):
     return digest.hexdigest()
 
 
-def xdg_path(variable, fallback):
-    path = Path(os.environ.get(variable, ""))
+def xdg_path(environ, variable, fallback):
+    path = Path(environ.get(variable, ""))
     return path if path.is_absolute() else fallback
+
+
+def real_store_paths(environ, home):
+    """Every real location a sandbox session must leave untouched.
+
+    ``config_dir`` is the whole LocalFlow config directory (``config.toml``,
+    ``api-token``, ``launch/`` and anything added later), hashed recursively.
+    """
+    config_dir = xdg_path(environ, "XDG_CONFIG_HOME", home / ".config") / "localflow"
+    return {
+        "config_dir": config_dir,
+        "config": Path(environ.get("LOCALFLOW_CONFIG") or config_dir / "config.toml"),
+        "legacy_config": home / ".localflow.toml",
+        "localflow_dir": home / ".localflow",
+        "keyring": xdg_path(environ, "XDG_DATA_HOME", home / ".local/share") / "keyrings",
+    }
+
+
+def changed_stores(before, after):
+    return [name for name in before if before[name] != after.get(name)]
 
 
 COLLECTION_PREFIX = "/org/freedesktop/secrets/collection/"
@@ -102,8 +125,8 @@ def monitored_stores():
     home = Path.home()
     if not home.is_absolute():
         raise RuntimeError("HOME must be an absolute path")
-    config = xdg_path("XDG_CONFIG_HOME", home / ".config") / "localflow" / "config.toml"
-    keyrings = xdg_path("XDG_DATA_HOME", home / ".local/share") / "keyrings"
+    stores = real_store_paths(os.environ, home)
+    keyrings = stores["keyring"]
     bus = dbus.SessionBus()
     service = "org.freedesktop.secrets"
     secrets = bus.get_object(service, "/org/freedesktop/secrets")
@@ -135,12 +158,7 @@ def monitored_stores():
             f"Legacy keyrings directory {legacy} exists; gnome-keyring-daemon may use it "
             f"instead of {keyrings}, so Gate 2 cannot tell which keyring is live"
         )
-    return {
-        "config": Path(os.environ.get("LOCALFLOW_CONFIG") or config),
-        "legacy_config": home / ".localflow.toml",
-        "localflow_dir": home / ".localflow",
-        "keyring": keyrings,
-    }
+    return stores
 
 
 def exercise_dictionary(binary, sandbox):
@@ -152,6 +170,55 @@ def exercise_dictionary(binary, sandbox):
         xdotool("key", "Return")
         dictionary = sandbox / "localflow" / "dictionary.json"
         wait_for(lambda: word in dictionary.read_text(), "sandbox Dictionary write")
+
+
+EXERCISED = ("settings", "models", "hot phrases", "history", "prompts")
+EXERCISE_PHRASE = "cutover gate phrase"
+NOT_DRIVEN = (
+    "API token: lf-desktop never creates or rotates it; the whole real config "
+    "directory (api-token, launch/) is still hashed"
+)
+
+
+def sandbox_state(sandbox):
+    """Read the file-backed sandbox stores the exercise writes."""
+    localflow = sandbox / "localflow"
+    uri = f"{(localflow / 'history.sqlite').as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as db:
+        history = db.execute("SELECT COUNT(*) FROM dictations").fetchone()[0]
+    return {
+        "config": (sandbox / "config" / "config.toml").read_bytes(),
+        "hot_phrases": (localflow / "hot_phrases.json").read_text(),
+        "history": history,
+    }
+
+
+def missing_writes(report, before, after):
+    """Return the sandbox writes that did not demonstrably happen."""
+    reported = {line.split(":", 1)[0] for line in report.splitlines()}
+    missing = [store for store in EXERCISED if store not in reported]
+    if after["config"] == before["config"]:
+        missing.append("settings (sandbox config.toml unchanged)")
+    if EXERCISE_PHRASE in before["hot_phrases"] or EXERCISE_PHRASE not in after["hot_phrases"]:
+        missing.append("hot phrases (phrase not added to the sandbox store)")
+    if after["history"] != before["history"] - 1:
+        missing.append("history (no sandbox entry deleted)")
+    return missing
+
+
+def exercise_stores(binary, sandbox):
+    """Write once to every other sandbox store with ``--sandbox-exercise``."""
+    before = sandbox_state(sandbox)
+    result = subprocess.run(
+        [binary, "--sandbox", "--data-dir", sandbox, "--sandbox-exercise"],
+        check=False, capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Sandbox exercise failed ({result.returncode}): {result.stderr.strip()}")
+    missing = missing_writes(result.stdout, before, sandbox_state(sandbox))
+    if missing:
+        raise RuntimeError(f"Sandbox exercise did not write: {', '.join(missing)}")
+    return result.stdout.splitlines()
 
 
 def main():
@@ -171,14 +238,20 @@ def main():
 
     before = snapshot("before")
     try:
-        with TemporaryDirectory(prefix="gpui-data-safety-", dir=output.parent) as scratch, window_manager():
-            exercise_dictionary(args.binary, Path(scratch) / "sandbox")
+        with TemporaryDirectory(prefix="gpui-data-safety-", dir=output.parent) as scratch:
+            sandbox = Path(scratch) / "sandbox"
+            with window_manager():
+                exercise_dictionary(args.binary, sandbox)
+            written = ["dictionary: added a word (keyboard, in the window)"]
+            written += exercise_stores(args.binary, sandbox)
     finally:
         after = snapshot("after")
-        changed = [name for name in before if before[name] != after[name]]
+        changed = changed_stores(before, after)
         if changed:
             raise SystemExit(f"Gate 2 failed: changed stores: {', '.join(changed)}")
-    print(f"Gate 2 passed: sandbox Dictionary edited; real stores unchanged ({output})")
+    print("Sandbox writes:", *written, sep="\n  ")
+    print(f"Not driven:\n  {NOT_DRIVEN}")
+    print(f"Gate 2 passed: real stores unchanged ({output})")
 
 
 if __name__ == "__main__":
