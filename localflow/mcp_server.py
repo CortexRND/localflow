@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -59,11 +60,18 @@ class InvalidParams(Exception):
 
 # ----------------------------------------------------------------- sources ---
 
+PROMPTS_CWD_ENV = "LOCALFLOW_MCP_PROMPTS_CWD"
+
+
 @dataclass(frozen=True)
 class Sources:
     history_path: Path
     queue_path: Path
     history_enabled: Callable[[], bool]
+    # ``LOCALFLOW_MCP_PROMPTS_CWD``: the launching app's cwd, the base for
+    # relative queue prompt paths. None (unset) keeps this process's cwd;
+    # set but not absolute leaves relative paths unread.
+    prompts_cwd: str | None = None
 
 
 def _config_history_enabled() -> bool:
@@ -90,6 +98,7 @@ def default_sources() -> Sources:
         history_path=history_path(),
         queue_path=QUEUE_PATH,
         history_enabled=_config_history_enabled,
+        prompts_cwd=os.environ.get(PROMPTS_CWD_ENV),
     )
 
 
@@ -337,11 +346,21 @@ def _read_queue(path: Path) -> list[dict]:
     return [e for e in data if isinstance(e, dict) and isinstance(e.get("id"), str)]
 
 
-def _read_prompt_body(path_value: object) -> str | None:
-    """Prompt body without frontmatter, or None if the file is missing/unsafe."""
+def _read_prompt_body(path_value: object, cwd: str | None = None) -> str | None:
+    """Prompt body without frontmatter, or None if the file is missing/unsafe.
+
+    A relative path is read against ``cwd`` (``Sources.prompts_cwd``) when set.
+    """
     if not path_value:
         return None
     path = Path(str(path_value)).expanduser()
+    if cwd is not None and not path.is_absolute():
+        base = Path(cwd)
+        if not base.is_absolute():
+            return None
+        path = base / path
+        if not path.is_absolute():  # e.g. a Windows drive-relative `C:x.md`
+            return None
     try:
         if path.suffix.lower() != ".md" or not path.is_file():
             return None
@@ -388,7 +407,7 @@ def search_prompts(
         }
 
     def full_text(entry: dict) -> str:
-        body = _read_prompt_body(entry.get("path")) or ""
+        body = _read_prompt_body(entry.get("path"), src.prompts_cwd) or ""
         return "\n".join(
             part for part in (entry.get("title") or "", entry.get("meeting") or "", body)
             if part
@@ -396,7 +415,9 @@ def search_prompts(
 
     if not query:
         results = [
-            result(e, recall._snippet(_read_prompt_body(e.get("path")) or "", set()))
+            result(e, recall._snippet(
+                _read_prompt_body(e.get("path"), src.prompts_cwd) or "", set(),
+            ))
             for e in entries[:limit]
         ]
         return {"count": len(results), "match": "recent", "results": results}
@@ -432,7 +453,7 @@ def get_prompt(src: Sources, *, id: str) -> dict:
     entry = next((e for e in _read_queue(src.queue_path) if e["id"] == id), None)
     if entry is None:
         raise ToolError(f"no work prompt with id {id!r}")
-    body = _read_prompt_body(entry.get("path"))
+    body = _read_prompt_body(entry.get("path"), src.prompts_cwd)
     text, truncated = _cut(body)
     out = {
         "id": entry["id"],

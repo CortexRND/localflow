@@ -84,6 +84,8 @@ pub struct Confirm {
     pub on_confirm: ui::Action,
 }
 
+type HealthCheckDone = Box<dyn FnOnce(&mut App)>;
+
 /// Shared by every page: services plus a handle to the shell.
 ///
 /// Every call that changes the shell is deferred to the end of the current
@@ -151,6 +153,13 @@ impl PageCx {
     }
     pub fn recheck_health(&self, cx: &mut App) {
         self.with_shell(cx, |shell, cx| shell.check_health(cx));
+    }
+    /// [`PageCx::recheck_health`], then `done` once this check's result is
+    /// stored (also when health didn't change).
+    pub fn recheck_health_then(&self, cx: &mut App, done: impl FnOnce(&mut App) + 'static) {
+        self.with_shell(cx, move |shell, cx| {
+            shell.check_health_then(Some(Box::new(done)), cx)
+        });
     }
     /// Open (or resume) the setup wizard overlay.
     pub fn open_setup(&self, cx: &mut App) {
@@ -797,6 +806,12 @@ impl Shell {
     }
 
     pub fn check_health(&mut self, cx: &mut Context<Self>) {
+        self.check_health_then(None, cx);
+    }
+
+    /// [`Shell::check_health`], then `done` once the result is stored
+    /// (also when health didn't change), outside the shell's update.
+    fn check_health_then(&mut self, done: Option<HealthCheckDone>, cx: &mut Context<Self>) {
         let remote = self.cx.services.remote.clone();
         let config = self.cx.services.config();
         cx.spawn(async move |this, cx| {
@@ -812,6 +827,9 @@ impl Shell {
                     cx.notify();
                 }
             });
+            if let Some(done) = done {
+                let _ = cx.update(done);
+            }
         })
         .detach();
     }
@@ -1027,6 +1045,12 @@ impl Shell {
         }
         match self.find(self.page) {
             Some(View::History(v)) => v.update(cx, |p, cx| p.clear_search(window, cx)),
+            // Escape stops a running Ask question; otherwise it passes on.
+            Some(View::Ask(v)) => {
+                if !v.update(cx, |p, cx| p.escape(cx)) {
+                    cx.propagate();
+                }
+            }
             _ => cx.propagate(),
         }
     }
