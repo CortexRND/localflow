@@ -1,5 +1,6 @@
 import logging
-from dataclasses import fields
+import tomllib
+from dataclasses import fields, replace
 
 import pytest
 from click.testing import CliRunner
@@ -277,6 +278,38 @@ def test_meetings_enabled_platform_override(isolated_config, monkeypatch):
     assert config.load_config().meetings_enabled is True
     monkeypatch.setattr(config.sys, "platform", "linux")
     assert config.load_config().meetings_enabled is False
+
+
+def test_save_keeps_file_meetings_value_forced_off_on_load(isolated_config, monkeypatch):
+    monkeypatch.setattr(config.sys, "platform", "darwin")
+    config.save_config(Config(meetings_enabled=True))
+    monkeypatch.setattr(config.sys, "platform", "linux")
+    loaded = config.load_config()
+    assert loaded.meetings_enabled is False
+
+    updated = config.apply_config_update(loaded, {"cleanup": {"style_work": "casual"}})
+    config.save_config(replace(updated, sounds_enabled=False))
+
+    written = tomllib.loads(isolated_config.read_text())
+    assert written["cleanup"]["style_work"] == "casual"
+    assert written["features"]["meetings"] is True
+    assert config.load_config() == replace(updated, sounds_enabled=False)
+
+
+def test_save_writes_explicit_meetings_edit_over_file_value(isolated_config, monkeypatch):
+    monkeypatch.setattr(config.sys, "platform", "darwin")
+    config.save_config(Config(meetings_enabled=True))
+    monkeypatch.setattr(config.sys, "platform", "linux")
+
+    config.save_config(
+        config.apply_config_update(config.load_config(), {"features": {"meetings": False}})
+    )
+    assert tomllib.loads(isolated_config.read_text())["features"]["meetings"] is False
+
+    config.save_config(
+        config.apply_config_update(config.load_config(), {"features": {"meetings": True}})
+    )
+    assert tomllib.loads(isolated_config.read_text())["features"]["meetings"] is True
 
 
 def test_config_table_covers_every_dataclass_field():

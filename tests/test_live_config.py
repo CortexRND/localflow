@@ -392,6 +392,30 @@ def test_server_adopts_live_settings_and_toggles_meeting_watch(monkeypatch):
     assert watcher.calls == ["stop", "start"]
 
 
+def test_server_reload_tracks_file_meetings_value_for_later_saves(monkeypatch, tmp_path):
+    import tomllib
+
+    from localflow import config as config_module
+    from localflow import server
+
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(path))
+    monkeypatch.setattr(config_module, "legacy_config_path", lambda: tmp_path / "legacy.toml")
+    monkeypatch.setattr(config_module.sys, "platform", "linux")
+    path.write_text("[features]\nmeetings = true\n")
+    monkeypatch.setattr(server, "_config", config_module.load_config())
+
+    # Another process (`lf config set features.meetings false`) edits the file.
+    path.write_text("[features]\nmeetings = false\n")
+    server._apply_live_config(config_module.load_config())
+    assert server._config.meetings_enabled is False
+
+    server.api_config_update({"cleanup": {"style_work": "casual"}})
+    written = tomllib.loads(path.read_text())
+    assert written["cleanup"]["style_work"] == "casual"
+    assert written["features"]["meetings"] is False
+
+
 def test_meeting_watcher_stops_and_restarts_with_one_thread(monkeypatch):
     class Probe:
         def mic_in_use(self):
