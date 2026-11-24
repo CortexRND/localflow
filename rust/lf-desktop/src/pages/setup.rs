@@ -75,6 +75,8 @@ impl SetupView {
     fn build(&mut self, cx: &mut Context<Self>) {
         let config = self.pcx.services.config();
         let deps = self.pcx.services.setup.clone();
+        // The same file Apply writes (real or sandbox root).
+        let root = self.pcx.services.root.clone();
         cx.spawn(async move |this, cx| {
             let built = cx
                 .background_executor()
@@ -86,6 +88,8 @@ impl SetupView {
                         deps.platform.as_ref(),
                         deps.launch_agent.as_ref(),
                         deps.simulated,
+                        crate::controllers::setup::configured(&root)
+                            || ctl::legacy_speech_saved(&root),
                     )
                 })
                 .await;
