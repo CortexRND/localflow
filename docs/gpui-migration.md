@@ -23,7 +23,7 @@ Each PR leaves every existing entry point working.
 |---|---|---|
 | **1. Parallel GPUI front end** | Standalone crate `rust/lf-desktop` (pinned `gpui = 0.2.2`, own `Cargo.lock`, outside the `rust/` workspace). One token and component layer. Library and config workflows connected to the real stores. Ask, Meetings and Prompts over the existing local HTTP service. Isolated persistent `--sandbox`. Controller, store and editing tests. Additive `gpui.yml` CI (Linux full, macOS type-check). `scripts/run_gpui.sh` | Done |
 | **2. Runtime and global-input parity** | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
-| **3. Packaging** (PR 65, merged) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Done. Linux package built and smoke-installed on the VM; fixture tests for builder/installer/publisher. All three `gpui-package.yml` legs (Linux x86_64, macOS arm64, macOS x86_64) build the release package, verify it, re-verify it outside the checkout and smoke-install/uninstall it in a temporary HOME, running `lf-desktop --version`; macOS relocation and signing are verified only by those CI legs. No interactive GUI, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
+| **3. Packaging** (PR 65, merged) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Done. Linux package built and smoke-installed on the VM; fixture tests for builder/installer/publisher. All three `gpui-package.yml` legs (Linux x86_64, macOS arm64, macOS x86_64) build the release package, verify it, re-verify it outside the checkout and smoke-install/uninstall it in a temporary HOME, running `lf-desktop --version`; macOS relocation and signing are verified only by those CI legs. The Linux x86_64 package was installed, launched, reinstalled and uninstalled by hand (gate 5); Windows and macOS have no interactive, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
 | **4a. Opt-in launch** (PR 66, merged) | `localflow/desktop_launch.py`, called only by `lf hub`, bare `lf phrases` and the `lf setup` window: `--gpui` / `--legacy`, then `LOCALFLOW_UI=gpui\|legacy`, then `DEFAULT_UI = "legacy"` (no config key). Discovery only after a GPUI selection: absolute `LOCALFLOW_DESKTOP_BIN`, else only the preview installer's package (manifest name / bundle id checked). Bounded `--help` probe for the `--page`/`--setup` interface and the `EXIT STATUS (launch-status: 1):` line; `lf-desktop` now exits 1 when no window can open (it used to exit 0), so Scope 3 packages, which lack the line, must be updated before `lf` or `lf-hub` will open them. Closed argv, detached, 1.5 s startup watch; exit 0 is a hand-off. Any failure: one notice, then the legacy window once. `LOCALFLOW_SANDBOX` with a GPUI selection is refused (no fallback). `lf-hub` on Linux `exec`s the preview through the same rules (`lf_ui::desktop_launch`). Details: [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md#opening-it-from-lf-step-4a) | Implemented; unit and fake-executable subprocess tests (Python and Rust, temporary HOME, no GUI). Not exercised against a real window or on macOS hardware (GUI probing waived by the owner) |
 | 4b. Default-launch promotion | `DEFAULT_UI` becomes `gpui` (per platform), keeping the 4a fallback and `--legacy` | Not started. Needs the open gates below (1 parity, 5 packaging QA, 8 UI verification) and the owner's decision |
 | 5. Legacy retirement | Remove the launch paths that are no longer used and the controller code duplicated from `lf_ui::mac` (done on macOS). Bundle Figtree. Screen-reader support once GPUI has an accessibility tree | Not started |
@@ -115,10 +115,40 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    compared with `lf hub` in `tests/test_rust_parity.py`).
 5. **Packaging.** The installers ship a release `lf-desktop` and its system-library
    requirements are documented per distribution. The `rust/` workspace CI matrix
-   isn't weakened. PR 3 ships it as a separate preview package and installer;
-   before PR 4 the package still needs interactive install/upgrade/uninstall
-   and permission checks on each platform, and the default installers don't
-   ship it yet.
+   isn't weakened. PR 3 ships it as a separate preview package and installer.
+
+   Checked by hand on Linux x86_64 on 2026-11-24: Ubuntu, X11 under Xvfb, the
+   `gpui-preview-linux-x86_64` CI artifact, installed with
+   `scripts/install_gpui_preview.sh --archive … --sha256 …` into a fresh HOME
+   that already had `~/.localflow` and `config.toml`.
+   - Install creates only the three documented paths:
+     `~/.local/share/localflow-preview/`, the `~/.local/bin/localflow-preview`
+     link and `localflow-preview.desktop`. The desktop entry passes
+     `desktop-file-validate`.
+   - The installed files are owned by the user. No file is setuid, setgid or
+     world-writable. `ldd` resolves every library and finds Sherpa-ONNX and ONNX
+     Runtime inside the package.
+   - The install step opens the window on Home. The desktop entry's `Exec` opens
+     it too, and with `--page History` it opens on History. Both close with
+     Ctrl+Q.
+   - Installing again over the existing copy works. A wrong checksum is refused,
+     and so is a foreign file at an owned path. Nothing changes in either case.
+   - Uninstall removes the three paths. `~/.localflow` and `config.toml` are
+     byte-identical after install and after uninstall.
+
+   Still open, so this gate isn't met:
+   - No release carries the preview package yet. Packaging landed after
+     `v0.2.2`, so the installer's default (`PREVIEW_RELEASE="v0.2.2"`) fails
+     with "Release v0.2.2 has no SHA256SUMS-gpui-preview". It installs only from
+     `--archive` until the next tag publishes the assets (see "Before tagging"
+     in [releasing.md](releasing.md)). For the same reason a real
+     version-to-version upgrade wasn't checked; only a reinstall of 0.2.2 over
+     0.2.2 was.
+   - Windows: the zip has no installer. `gpui-package.yml` checks its PE imports
+     and launches `lf-desktop.exe --sandbox` on `windows-latest`, but nobody has
+     unzipped and run it by hand. macOS: CI smoke-install only, with no
+     Gatekeeper or permission check.
+   - The default installers (`install.sh`, `install.ps1`) still don't ship it.
 6. **Honest runtime status.** Home and the sidebar report listening, input device
    and warnings from a runtime signal (PR 2: status-file protocol 2 from the Rust
    runtime). HTTP reachability alone is never shown as dictation readiness. Before
