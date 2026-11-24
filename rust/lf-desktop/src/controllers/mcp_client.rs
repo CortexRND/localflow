@@ -592,15 +592,26 @@ pub fn child_config_override(
     }
 }
 
+/// The desktop's cwd for the server (`localflow/mcp_server.py` and
+/// `localflow-mcp` alike): queue entries may hold relative prompt paths,
+/// which the server reads against this instead of its own cwd. An
+/// unreadable cwd is sent as empty, which leaves relative paths unread.
+pub const PROMPTS_CWD_ENV: &str = "LOCALFLOW_MCP_PROMPTS_CWD";
+
 /// The server's `Command`: fixed arguments, no shell, its own directory as
 /// cwd (never the inherited one: `python -m` imports from it), the
-/// desktop's config file, piped stdin/stdout, stderr discarded.
+/// desktop's config file and cwd, piped stdin/stdout, stderr discarded.
 fn server_command(
     command: &McpCommand,
     config_env: Option<OsString>,
     desktop_cwd: impl FnOnce() -> std::io::Result<PathBuf>,
 ) -> Result<Command, McpError> {
-    let config = child_config_override(config_env, desktop_cwd)?;
+    // Read once; both the config override and the prompts base use it.
+    let cwd = desktop_cwd().ok().filter(|cwd| cwd.is_absolute());
+    let config = child_config_override(config_env, || {
+        cwd.clone()
+            .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+    })?;
     let mut cmd = Command::new(&command.program);
     cmd.args(command.kind.args())
         .stdin(Stdio::piped())
@@ -612,6 +623,7 @@ fn server_command(
     if let Some(config) = config {
         cmd.env(CONFIG_ENV, config);
     }
+    cmd.env(PROMPTS_CWD_ENV, cwd.unwrap_or_default());
     if command.kind == McpKind::PythonModule {
         cmd.env("PYTHONSAFEPATH", "1");
     }
@@ -1753,6 +1765,57 @@ mod tests {
             McpStatus::from_error(&McpError::ConfigUnresolved),
             McpStatus::Failed(_)
         ));
+    }
+
+    /// The child runs from its own directory but gets the desktop's cwd for
+    /// relative queue prompt paths; an unreadable cwd is sent as empty
+    /// (relative paths unread) and still fails closed for a relative config.
+    #[cfg(unix)]
+    #[test]
+    fn child_gets_the_desktops_cwd_for_relative_prompt_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let desktop_cwd = dir.path().join("desktop");
+        let server_dir = dir.path().join("venv").join("bin");
+        std::fs::create_dir_all(desktop_cwd.join("prompts")).unwrap();
+        std::fs::create_dir_all(&server_dir).unwrap();
+        std::fs::write(desktop_cwd.join("prompts/brief.md"), "walrus").unwrap();
+        let server = server_dir.join("localflow-mcp");
+        // Reads the queue's relative path against the supplied base.
+        std::fs::write(
+            &server,
+            "#!/bin/sh\npwd\ncat \"$LOCALFLOW_MCP_PROMPTS_CWD/prompts/brief.md\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let command = McpCommand {
+            program: server,
+            kind: McpKind::LocalflowMcp,
+        };
+        let cwd = desktop_cwd.clone();
+        let mut cmd = server_command(&command, None, move || Ok(cwd)).unwrap();
+        let env = |cmd: &Command| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == PROMPTS_CWD_ENV)
+                .and_then(|(_, v)| v.map(PathBuf::from))
+        };
+        assert_eq!(env(&cmd), Some(desktop_cwd));
+        assert_eq!(cmd.get_current_dir(), Some(server_dir.as_path()));
+        let text = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            std::fs::canonicalize(lines[0]).unwrap(),
+            server_dir.canonicalize().unwrap()
+        );
+        assert_eq!(lines[1], "walrus");
+        // Unreadable desktop cwd: no base is guessed.
+        let unread = || -> std::io::Result<PathBuf> { Err(std::io::ErrorKind::NotFound.into()) };
+        let cmd = server_command(&command, None, unread).unwrap();
+        assert_eq!(env(&cmd), Some(PathBuf::new()));
+        assert_eq!(
+            server_command(&command, Some("conf/config.toml".into()), unread).err(),
+            Some(McpError::ConfigUnresolved)
+        );
     }
 
     /// End to end with a real child process: the desktop's relative
