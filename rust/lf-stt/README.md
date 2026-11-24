@@ -29,8 +29,9 @@ the slot. Access to each native engine is serialized.
 
 Native audio and models use **16 kHz**. Config-based dictation constructors reject other
 `sample_rate` values instead of letting the runtime miscalculate duration/gates.
-`LazySpeechAdapter::for_16khz_pcm` (used by `lf-rs serve` meetings, whose
-capture resamples to 16 kHz itself) does not consult that dictation setting.
+`LazySpeechAdapter::for_16khz_pcm` and `server::SharedSpeech` (used by
+`lf-rs serve` meetings, whose capture resamples to 16 kHz itself) do not
+consult that dictation setting.
 Set `[dictation] sample_rate = 16000`; input-device changes require rebuilding
 the audio source/restarting the runtime. No microphone or real-model tests run
 automatically; fakes cover snapshots, prompts, reload/failure, sharing and leases.
@@ -64,18 +65,25 @@ any status poller.
 The `server` Cargo feature is off by default for library consumers of
 `lf-stt`. The `lf-rs` CLI enables it (`rust/lf/Cargo.toml` depends on
 `lf-stt` with `features = ["runtime", "server"]`), and `lf-rs serve` uses it
-by default: `rust/lf/src/cmd_serve.rs` wraps its `MeetingsBackend` as
-`SttBackend<MeetingsBackend>` and binds that via
-`ServerState::load_with_backend`, so the served `/transcribe` route is handled
-by this adapter without any extra flag.
+by default: `rust/lf/src/cmd_serve.rs` builds one `SharedSpeech`, gives it to
+both its meeting capture and an inner `SttBackend::with_speech`, and binds the
+`MeetingsBackend` via `ServerState::load_with_backend`, so the served
+`/transcribe` route is handled by this adapter without any extra flag and a
+model loaded by either a phone upload or a meeting serves the other. A meeting
+transcribes every chunk with the config it started with: if an upload switches
+the model mid-meeting, the next chunk switches back (one reload each way), and
+an upload whose model fails to load does not affect the meeting.
 
 Other hosts opt in by enabling the `server` feature on their `lf-stt`
 dependency and passing `SttBackend::new(inner_backend)` from `lf_stt::server`
 to `lf_server::ServerState::load_with_backend(Arc::new(backend))`.
 Every other route and autostart status delegates unchanged to `inner_backend`.
-Provider availability follows compiled engine features; loaded state comes
-from a mutex-protected `SttSlot`. Requests sharing that slot serialize model
-selection/inference so a switch cannot unload an in-flight model.
+Provider availability follows compiled engine features; the model lives in a
+mutex-protected `SttSlot` (`SharedSpeech`). Requests sharing that slot
+serialize model selection/inference so a switch cannot unload an in-flight
+model. Loaded state is an atomic flag updated on every select, after the load
+and after inference, so `/api/status` answers without waiting for a download
+and reports a cold model loaded as soon as its first inference starts.
 
 `POST /transcribe` accepts multipart `file` and integer query `clean`, uses
 the Python server's 25 MiB ceiling and ffmpeg input-format/protocol whitelist,
@@ -219,8 +227,10 @@ faster-whisper fallback models. Always pass a freshly read Config to deletion.
 All whisper.cpp ggml sizes share `ggerganov/whisper.cpp`; a selected/active
 size protects the **whole repository**, not just one file. The mapping covers
 tiny/base/small/medium, their `.en` variants, large-v3 and large-v3-turbo.
-There are no large-v3 `.en` models upstream. Catalog has one repository row
-("Whisper Base (whisper.cpp)") because inventory/deletion are repository-level.
+There are no large-v3 `.en` models upstream. Catalog has one size-neutral
+repository row ("Whisper (whisper.cpp)") because inventory/deletion are
+repository-level; inventory labels it from the ggml files in its snapshots
+(e.g. "Whisper Tiny, Base (English) (whisper.cpp)").
 
 Parakeet ONNX is the **int8** repo
 `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`, verified with the HF

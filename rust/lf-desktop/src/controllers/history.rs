@@ -289,9 +289,29 @@ pub fn row_text(entry: &HistoryEntry) -> String {
     hub_model::history_row_text(&entry.final_text, &entry.raw_text)
 }
 
+/// Single-line list preview: all whitespace runs (including newlines)
+/// collapse to one space so the row ellipsizes instead of showing a break.
+pub fn row_preview(entry: &HistoryEntry) -> String {
+    row_text(entry)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Whether "Copy original" adds anything.
 pub fn has_distinct_original(entry: &HistoryEntry) -> bool {
     !entry.raw_text.is_empty() && entry.raw_text != entry.final_text
+}
+
+/// The dictation count a fresh load reads ([`Loaded::stats`]).
+pub fn total(root: &DataRoot) -> Result<i64> {
+    Ok(open_history(root)?.stats(None)?.total_dictations)
+}
+
+/// The line under the History heading.
+pub fn count_line(total: i64) -> String {
+    let plural = if total == 1 { "" } else { "s" };
+    format!("{total} dictation{plural} on this device")
 }
 
 pub fn delete(root: &DataRoot, id: i64) -> Result<bool> {
@@ -323,6 +343,15 @@ mod tests {
             store.add(&e).unwrap();
         }
         (dir, root)
+    }
+
+    #[test]
+    fn row_preview_is_single_line() {
+        let (_d, root) = seeded(1);
+        let mut entry = load(&root, 1, "", 0, false).unwrap().entries.remove(0);
+        entry.final_text = "  first line\n\nsecond\tline  ".into();
+        assert_eq!(row_preview(&entry), "first line second line");
+        assert!(entry.final_text.contains('\n'));
     }
 
     #[test]
@@ -442,6 +471,13 @@ mod tests {
         assert!(!list.replace(reused));
         assert!(!list.replace(all[110].clone()));
         assert_eq!(list, before);
+    }
+
+    #[test]
+    fn count_line_is_singular_only_for_one() {
+        assert_eq!(count_line(0), "0 dictations on this device");
+        assert_eq!(count_line(1), "1 dictation on this device");
+        assert_eq!(count_line(2), "2 dictations on this device");
     }
 
     #[test]

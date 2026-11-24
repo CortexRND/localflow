@@ -441,6 +441,7 @@ fn real_storage(caps: &Capabilities) -> Arc<dyn SpeechStorage> {
 fn real_retry(secrets: &Arc<dyn SecretStore + Send + Sync>) -> Arc<dyn RetryBackend> {
     Arc::new(crate::controllers::retry::NativeRetry {
         secrets: secrets.clone(),
+        python: crate::controllers::retry_python::PythonRetry::system(),
     })
 }
 
@@ -535,6 +536,14 @@ mod tests {
         // Storage is in memory: no cache directory, no disk inventory.
         let inventory = services.storage.inventory(&services.config()).unwrap();
         assert!(inventory.cache_dir.is_none());
+        // Ask uses in-process fake tools and model: no MCP server is started.
+        let agent = services.remote.agent(
+            services.config(),
+            services.secrets.clone(),
+            std::time::Duration::ZERO,
+        );
+        assert!(agent.simulated());
+        assert_eq!(agent.model(1).unwrap().id(), "sandbox");
         // Secrets never reach the OS keyring: a test-only entry (not any
         // provider's key name, so a wiring regression can't clobber a real
         // credential) round-trips through the in-memory store. The marker

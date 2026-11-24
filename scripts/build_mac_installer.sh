@@ -171,6 +171,8 @@ ref="${LOCALFLOW_REF:-$PINNED_REF}"
     cat <<'INNER'
 trap 'rm -rf "$WORKDIR"' EXIT
 clear
+echo "Install LocalFlow"
+echo
 echo "Installing LocalFlow — this takes a few minutes; LocalFlow will open when done."
 echo "Afterwards, find it in Applications → LocalFlow."
 echo
@@ -178,7 +180,7 @@ bash "$INSTALLER"
 status=$?
 if [ "$status" -ne 0 ]; then
     echo
-    echo "LocalFlow installation failed (exit code $status). Scroll up for details."
+    echo "LocalFlow could not be installed (exit code $status). Scroll up for details."
     echo "Press Return to close this window."
     read -r _
 fi
@@ -269,6 +271,8 @@ README_TEXT='Install LocalFlow
    LocalFlow opens when it is done. Afterwards, find it in Applications >
    LocalFlow (the Applications folder inside your home folder).
 
+If macOS says the DMG is damaged
+
 If macOS said the DMG "is damaged and can'"'"'t be opened" (macOS 15 and
 later, with only Cancel and Move to Trash), the right choice was Cancel, not
 Move to Trash. Privacy & Security has no Open Anyway for that dialog. Either
@@ -276,6 +280,8 @@ use the verified one-line Terminal install in the LocalFlow README
 (recommended), or run
   xattr -d com.apple.quarantine ~/Downloads/LocalFlow-Installer.dmg
 on the DMG downloaded from the official release, then open it again.
+
+Allowing Install LocalFlow to open
 
 Install LocalFlow is not signed or notarized by Apple, so macOS blocks it
 the first time you open it. To allow it:
@@ -285,6 +291,8 @@ the first time you open it. To allow it:
      confirm with Open Anyway and your password or Touch ID.
 On macOS 15 and later, right-click > Open no longer offers this bypass; use
 System Settings as above.
+
+What gets installed
 
 The default app uses Rust, not Python. Rust is provisioned automatically;
 accept the Apple Command Line Tools dialog if prompted. Missing CMake is
