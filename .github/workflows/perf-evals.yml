@@ -42,7 +42,7 @@ jobs:
       LF_PERF_CACHE_DIR: ${{ github.workspace }}/.perf-cache/corpus
       PYNPUT_BACKEND: dummy
       # Untrusted inputs go through env, never straight into a script.
-      PERF_SUITES_INPUT: ${{ inputs.suites || 'stt,dictation' }}
+      PERF_SUITES_INPUT: ${{ inputs.suites || 'stt,dictation,recall' }}
       PERF_RUNTIMES_INPUT: ${{ inputs.runtimes || 'python,rust' }}
     steps:
       - uses: actions/checkout@v4
@@ -114,6 +114,10 @@ jobs:
       - name: Build candidate parity (dictation text pipeline)
         if: contains(env.PERF_RUNTIMES, 'rust') && contains(env.PERF_SUITES, 'dictation')
         run: cargo build --manifest-path rust/Cargo.toml --locked --release -p lf --example parity
+
+      - name: Build candidate bench_search (recall)
+        if: contains(env.PERF_RUNTIMES, 'rust') && contains(env.PERF_SUITES, 'recall')
+        run: cargo build --manifest-path rust/Cargo.toml --locked --release -p lf-ask --example bench_search
 
       - name: Warm model cache on cold miss
         shell: bash
@@ -207,8 +211,17 @@ jobs:
                     parity_env="$GITHUB_WORKSPACE/rust/target/release/examples/parity"
                   fi
                 fi
+                recall_env=""
+                if printf ',%s,' "$PERF_SUITES" | grep -q ',recall,'; then
+                  if grep -q -- '--queries' "$baseline/rust/lf-ask/examples/bench_search.rs" 2>/dev/null \
+                      && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/rust/target" cargo build \
+                        --manifest-path "$baseline/rust/Cargo.toml" --locked --release -p lf-ask --example bench_search; then
+                    recall_env="$GITHUB_WORKSPACE/rust/target/release/examples/bench_search"
+                  fi
+                fi
                 (cd "$baseline" && LF_PERF_STT_BENCH_BIN="$GITHUB_WORKSPACE/rust/target/release/examples/stt_bench" \
                   LF_PERF_PARITY_BIN="$parity_env" \
+                  LF_PERF_RECALL_BIN="$recall_env" \
                   python -m evals.perf run --tier smoke --runtime rust --suite "$PERF_SUITES" \
                   --runner-label ubuntu-latest --output "$out") \
                   || echo "Baseline Rust run at ${base_sha:0:12} exited non-zero." > "$note"
