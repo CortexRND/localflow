@@ -998,12 +998,6 @@ pub fn provider_label(id: &str) -> String {
 pub fn checks(config: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
     let mut rows = flow::run_checks(config, platform);
     if platform.system() == "Linux" {
-        for row in rows.iter_mut().filter(|r| r.key == "ffmpeg") {
-            if row.ok == Some(false) {
-                row.detail = "Not found — install ffmpeg with your package manager".into();
-                row.fix_url = String::new();
-            }
-        }
         let session = lf_input::linux::session();
         let (ok, detail) = match session {
             lf_input::linux::Session::X11 => (
@@ -2192,5 +2186,7 @@ mod tests {
             .any(|r| r.key == "paste-tool" && r.ok == Some(false)));
         let ffmpeg = rows.iter().find(|r| r.key == "ffmpeg").unwrap();
         assert!(!ffmpeg.detail.contains("brew"));
+        assert!(ffmpeg.detail.contains("sudo apt install ffmpeg"));
+        assert_eq!(ffmpeg.fix_url, "https://ffmpeg.org/download.html");
     }
 }

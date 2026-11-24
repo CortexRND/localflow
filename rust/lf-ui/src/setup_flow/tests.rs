@@ -352,7 +352,7 @@ fn run_checks_reports_all_cross_platform_requirements() {
         checks.iter().map(|c| c.ok).collect::<Vec<_>>(),
         vec![Some(true), Some(true), Some(false), Some(true)]
     );
-    assert_eq!(checks[0].fix_url, "https://formulae.brew.sh/formula/ffmpeg");
+    assert_eq!(checks[0].fix_url, "https://ffmpeg.org/download.html");
     assert_eq!(checks[2].detail, "Not running");
     assert_eq!(checks[3].detail, "1 input device(s) found");
 }
@@ -392,6 +392,43 @@ fn run_checks_uses_provider_info_without_ollama_checks() {
     );
     assert_eq!(checks[2].detail, "No input devices found");
     assert_eq!(checks[2].ok, Some(false));
+}
+
+#[test]
+fn run_checks_gives_a_platform_specific_ffmpeg_install_hint() {
+    let cases = [
+        (
+            "Darwin",
+            "Not found — run: brew install ffmpeg",
+            "https://formulae.brew.sh/formula/ffmpeg",
+        ),
+        (
+            "Windows",
+            "Not found — run: winget install Gyan.FFmpeg",
+            "https://ffmpeg.org/download.html",
+        ),
+        (
+            "Linux",
+            "Not found — install it with your package manager (e.g. sudo apt install ffmpeg)",
+            "https://ffmpeg.org/download.html",
+        ),
+    ];
+    for (system, detail, url) in cases {
+        let mut p = platform();
+        p.system = system.into();
+        let ffmpeg = run_checks(&cfg(&[]), &p).remove(0);
+        assert_eq!(
+            ffmpeg,
+            Check::new(
+                "ffmpeg",
+                "ffmpeg",
+                Some(false),
+                detail,
+                "Install ffmpeg",
+                url
+            )
+        );
+    }
 }
 
 #[test]
