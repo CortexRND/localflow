@@ -235,6 +235,7 @@ mod tests {
             input: &mut reader,
             clipboard,
             server_url: None,
+            terminal: false,
         };
         let args = HistoryArgs {
             limit: 50,

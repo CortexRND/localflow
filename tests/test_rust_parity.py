@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import ast
 import hashlib
 import types
@@ -40,11 +41,14 @@ from typing import ClassVar
 from urllib.parse import urlsplit
 
 import pytest
+from click.testing import CliRunner
 
+from localflow import cli as py_cli
 from localflow import config as py_config
 from localflow import dictionary as py_dictionary
 from localflow import formatting as py_formatting
 from localflow import hotphrases as py_hotphrases
+from localflow import secrets as py_secrets
 from localflow import settings_agent as py_settings
 from localflow import symbols as py_symbols
 from localflow.config import (
@@ -1739,6 +1743,253 @@ def test_cli_keys_list_masks_values(rust_build, sandbox):
     assert "OpenAI: ••••9876" in lines
     assert "Fireworks: No key" in lines
     assert "sk-secret" not in result.stdout
+
+
+# `keys import` and the hidden `secret` group: Python's CLI runs in-process
+# (CliRunner) against a dict keyring; the Rust CLI runs in-process in the
+# parity driver against a seeded MemoryKeyring, with the same env and stdin.
+
+PROVIDER_ENV = (
+    "FIREWORKS_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY",
+    "TOGETHER_API_KEY", "OPENAI_COMPAT_API_KEY", "LLM_API_KEY",
+)
+SAVE_PROMPT = "Save this key? [y/N]: "
+
+
+class _DeleteError(Exception):
+    """Stands in for keyring's PasswordDeleteError (same text as the driver)."""
+
+
+@pytest.fixture
+def keys_env(sandbox, py_env, monkeypatch):
+    """No provider keys or LOCALFLOW_<SECRET> overrides on either side, so
+    only the test's own environment and keyring are seen."""
+    for name in PROVIDER_ENV + tuple(f"LOCALFLOW_{n.upper()}" for n in SECRET_NAMES):
+        monkeypatch.delenv(name, raising=False)
+        sandbox["env"].pop(name, None)
+    return sandbox
+
+
+def _python_keyring_cli(monkeypatch, args, stdin, env, keyring, failing):
+    values = dict(keyring)
+
+    def check():
+        if failing:
+            raise RuntimeError(failing)
+
+    def get_password(service, name):
+        check()
+        return values.get(name)
+
+    def set_password(service, name, value):
+        check()
+        values[name] = value
+
+    def delete_password(service, name):
+        check()
+        if name not in values:
+            raise _DeleteError("Password not found")
+        del values[name]
+
+    fake = types.SimpleNamespace(
+        get_password=get_password, set_password=set_password, delete_password=delete_password,
+    )
+    # Outside pytest these records reach stderr through logging's last-resort
+    # handler; pytest's own handlers keep them out of `result.stderr`.
+    warnings = _WarningRecords()
+    logger = logging.getLogger("localflow")
+    logger.addHandler(warnings)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(py_secrets, "keyring", fake)
+            patch.setattr(py_secrets, "_keyring_warned", False)
+            result = CliRunner().invoke(py_cli.cli, args, input=stdin, env=env)
+    finally:
+        logger.removeHandler(warnings)
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+    return {"code": result.exit_code, "out": result.stdout, "err": result.stderr, "keyring": values,
+            "warnings": warnings.messages}
+
+
+class _WarningRecords(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _unecho(out: str, prompt: str, stdin: str) -> str:
+    """CliRunner echoes each answer after a visible prompt; a real piped
+    stdin (and lf-rs) does not."""
+    answers = iter(stdin.splitlines())
+    parts = out.split(prompt)
+    for index in range(1, len(parts)):
+        answer = next(answers, None)
+        if answer is not None:
+            assert parts[index].startswith(answer + "\n"), (prompt, parts[index])
+            parts[index] = parts[index][len(answer) + 1:]
+    return prompt.join(parts)
+
+
+def cli_parity(rust_build, sandbox, monkeypatch, args, *, stdin="", env=None, keyring=None,
+               failing=None, secrets=(), full_err=True):
+    """Run `lf ARGS` in Python and Rust; compare exit code, stdout, the final
+    keyring, logged warnings and stderr (the whole of it, its last line for
+    click usage errors, or only the `Error: ` prefix when `full_err` is
+    False, which also compares only the number of warnings)."""
+    env = env or {}
+    keyring = keyring or {}
+    python = _python_keyring_cli(monkeypatch, args, stdin, env, keyring, failing)
+    request = {"op": "cli", "args": list(args), "stdin": stdin, "keyring": keyring}
+    if failing:
+        request["failing_keyring"] = failing
+    rust = drive1(rust_build, {"env": {**sandbox["env"], **env}}, request)
+    assert "error" not in rust, rust
+    for value in secrets:
+        assert value not in rust["out"] + rust["err"] + "".join(rust["warnings"]), value
+    assert rust["code"] == python["code"], (rust, python)
+    assert rust["keyring"] == python["keyring"]
+    if full_err:
+        assert rust["warnings"] == python["warnings"]
+    else:
+        assert len(rust["warnings"]) == len(python["warnings"])
+    if python["code"] == 2:
+        last = rust["err"].splitlines()[-1]
+        if last.startswith("Error: "):  # lf-rs reports this one as click does
+            assert last == python["err"].splitlines()[-1]
+        return rust
+    assert rust["out"] == _unecho(python["out"], SAVE_PROMPT, stdin)
+    if full_err:
+        assert rust["err"] == python["err"]
+    else:
+        assert rust["err"].startswith("Error: ") and python["err"].startswith("Error: ")
+        assert len(rust["err"].splitlines()) == len(python["err"].splitlines()) == 1
+    return rust
+
+
+def test_keys_import_nothing_found(rust_build, keys_env, monkeypatch):
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import"])
+    assert rust["out"] == "No keys found\n" and rust["keyring"] == {}
+    cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import", "--yes"],
+               env={"OPENAI_API_KEY": "  ", "GROQ_API_KEY": "$OTHER"})
+
+
+KEY_FILE = """\
+# provider keys
+export OPENAI_API_KEY="sk-open-file-1111"
+GROQ_API_KEY='gsk-file-2222'
+TOGETHER_API_KEY=$TOGETHER_FROM_ENV
+FIREWORKS_API_KEY=fw-file-3333
+LLM_API_KEY=" custom-file-6666 "
+"""
+KEY_VALUES = (
+    "sk-open-file-1111", "gsk-file-2222", "fw-file-3333", "custom-file-6666", "fw-env-5555",
+)
+
+
+@pytest.mark.parametrize("stdin", [
+    "y\nn\nmaybe\nyes\n\nY\n",
+    "n\n NO \nn\nn\nn\n",
+    "y\ny\ny\ny\ny",
+])
+def test_keys_import_file_and_environment(rust_build, keys_env, monkeypatch, tmp_path, stdin):
+    path = tmp_path / ".env"
+    path.write_text(KEY_FILE, encoding="utf-8")
+    env = {"FIREWORKS_API_KEY": "fw-env-5555"}
+    seeded = {"provider_key_groq": "old-groq-0000"}
+    args = ["keys", "import", "--file", str(path)]
+    rust = cli_parity(rust_build, keys_env, monkeypatch, args, stdin=stdin, env=env,
+                      keyring=seeded, secrets=KEY_VALUES)
+    assert rust["code"] == 0
+    assert rust["out"].count(SAVE_PROMPT) >= 5
+    if stdin.startswith("y\n"):
+        assert rust["keyring"]["fireworks_api_key"] == rust["keyring"]["provider_key_fireworks"]
+    rust = cli_parity(rust_build, keys_env, monkeypatch, [*args, "--yes"], env=env,
+                      keyring=seeded, secrets=KEY_VALUES)
+    assert SAVE_PROMPT not in rust["out"] and rust["out"].endswith("Saved 5 key(s)\n")
+    assert rust["keyring"]["fireworks_api_key"] == "fw-file-3333"
+    assert rust["keyring"]["provider_key_custom"] == "custom-file-6666"
+
+
+@pytest.mark.parametrize("stdin", ["", "y\n", "y\nmaybe\n", "y\nn\ny"])
+def test_keys_import_end_of_input_aborts_without_saving(rust_build, keys_env, monkeypatch,
+                                                         tmp_path, stdin):
+    path = tmp_path / "profile"
+    path.write_text(KEY_FILE, encoding="utf-8")
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import", "--file", str(path)],
+                      stdin=stdin, env={"FIREWORKS_API_KEY": "fw-env-5555"},
+                      keyring={"llm_api_key": "keep"}, secrets=KEY_VALUES)
+    assert (rust["code"], rust["err"]) == (1, "Aborted!\n")
+    assert rust["keyring"] == {"llm_api_key": "keep"}
+
+
+def test_keys_import_file_errors(rust_build, keys_env, monkeypatch, tmp_path):
+    missing = tmp_path / "missing.env"
+    binary = tmp_path / "binary.env"
+    binary.write_bytes(b"OPENAI_API_KEY=sk-\xff\xfe-9999\n")
+    env = {"GROQ_API_KEY": "gsk-env-8888"}
+    for target, code in ((missing, 2), (tmp_path, 2), (binary, 1)):
+        rust = cli_parity(rust_build, keys_env, monkeypatch,
+                          ["keys", "import", "--file", str(target)], env=env,
+                          secrets=("gsk-env-8888",))
+        assert rust["code"] == code and rust["keyring"] == {}
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["keys", "import", "--file"])
+    assert rust["code"] == 2
+
+
+def test_keys_import_keyring_failure_is_sanitized(rust_build, keys_env, monkeypatch, tmp_path):
+    path = tmp_path / ".env"
+    path.write_text(KEY_FILE, encoding="utf-8")
+    args = ["keys", "import", "--file", str(path)]
+    failing = "backend down"
+    rust = cli_parity(rust_build, keys_env, monkeypatch, [*args, "--yes"], failing=failing,
+                      secrets=KEY_VALUES)
+    assert (rust["code"], rust["err"]) == (1, "Error: Unable to save keys; check Keychain access\n")
+    assert failing not in rust["err"]
+    assert rust["warnings"] == [f"keyring unavailable: {failing}"]
+    # Nothing confirmed: nothing is written, so the broken keyring is never hit.
+    rust = cli_parity(rust_build, keys_env, monkeypatch, args, stdin="n\n" * 5, failing=failing,
+                      secrets=KEY_VALUES)
+    assert rust["out"].endswith("Saved 0 key(s)\n")
+
+
+@pytest.mark.parametrize("stdin", ["sk-typed-7777\n", "\n\n sk-typed-7777 \n", "sk-typed-7777", "", "\n"])
+def test_secret_set(rust_build, keys_env, monkeypatch, stdin):
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["secret", "set", "llm_api_key"],
+                      stdin=stdin, keyring={"fireworks_api_key": "fw-old"},
+                      secrets=("sk-typed-7777",))
+    assert rust["code"] == (0 if "sk-typed" in stdin else 1)
+
+
+def test_secret_unset_status_and_usage(rust_build, keys_env, monkeypatch):
+    stored = {"llm_api_key": "sk-stored-1234", "fireworks_api_key": "fw-stored-5678"}
+    values = ("sk-stored-1234", "fw-stored-5678", "sk-env-1111", "fw-legacy-2222")
+    for name in ("llm_api_key", "missing_name"):
+        cli_parity(rust_build, keys_env, monkeypatch, ["secret", "unset", name], keyring=stored)
+    for keyring, env in (
+        ({}, {}),
+        ({"llm_api_key": "sk-stored-1234"}, {}),
+        (stored, {"LOCALFLOW_FIREWORKS_API_KEY": ""}),
+        ({}, {"LOCALFLOW_LLM_API_KEY": "sk-env-1111"}),
+        ({}, {"FIREWORKS_API_KEY": "fw-legacy-2222"}),
+    ):
+        cli_parity(rust_build, keys_env, monkeypatch, ["secret", "status"], env=env,
+                   keyring=keyring, secrets=values)
+    for args in (["secret"], ["secret", "set"], ["secret", "unset"], ["secret", "bogus"]):
+        assert cli_parity(rust_build, keys_env, monkeypatch, args)["code"] == 2
+
+
+def test_secret_failing_keyring(rust_build, keys_env, monkeypatch):
+    failing = "keyring backend unavailable"
+    for args, stdin in ((["secret", "set", "llm_api_key"], "sk-typed-7777\n"),
+                        (["secret", "unset", "llm_api_key"], "")):
+        rust = cli_parity(rust_build, keys_env, monkeypatch, args, stdin=stdin, failing=failing,
+                          secrets=("sk-typed-7777",), full_err=False)
+        assert rust["code"] == 1
+    rust = cli_parity(rust_build, keys_env, monkeypatch, ["secret", "status"], failing=failing)
+    assert rust["out"] == "llm_api_key: not configured\nfireworks_api_key: not configured\n"
 
 
 def _free_port() -> int:

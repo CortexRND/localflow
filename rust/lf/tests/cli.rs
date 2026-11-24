@@ -48,12 +48,13 @@ impl Sandbox {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lf-rs"));
         command.args(args);
         for (key, _) in std::env::vars_os() {
-            let key = key.to_string_lossy().into_owned();
-            if key.starts_with("LOCALFLOW_")
-                || key.starts_with("XDG_")
-                || key == "FIREWORKS_API_KEY"
-                || key == "DISPLAY"
-                || key == "WAYLAND_DISPLAY"
+            // Windows names are case-insensitive, so match them upper-cased.
+            let name = key.to_string_lossy().to_uppercase();
+            if name.starts_with("LOCALFLOW_")
+                || name.starts_with("XDG_")
+                || name.ends_with("_API_KEY")
+                || name == "DISPLAY"
+                || name == "WAYLAND_DISPLAY"
             {
                 command.env_remove(&key);
             }
@@ -395,6 +396,88 @@ fn keys_list_only_shows_masked_values() {
     assert!(text.contains("Groq: ••••4321\n"));
     assert!(text.contains("OpenAI: No key\n"));
     assert!(!text.contains("very-secret"));
+}
+
+// The keys-import cases below never confirm a key, so nothing reaches the
+// real keychain.
+#[test]
+fn keys_import_reports_and_validates_without_saving() {
+    let sandbox = Sandbox::new();
+    let none = sandbox.run(&["keys", "import"]);
+    assert_eq!((code(&none), stdout(&none)), (0, "No keys found\n".into()));
+
+    let missing = sandbox.root().join("missing.env");
+    let missing = missing.to_str().unwrap();
+    let result = sandbox.run(&["keys", "import", "--file", missing]);
+    assert_eq!(code(&result), 2);
+    // click shows the path with Python's repr (backslashes doubled).
+    let repr = |path: &str| path.replace('\\', "\\\\");
+    assert!(stderr(&result).ends_with(&format!(
+        "Error: Invalid value for '--file': File '{}' does not exist.\n",
+        repr(missing)
+    )));
+    let dir = sandbox.root().to_str().unwrap();
+    let result = sandbox.run(&["keys", "import", "--file", dir]);
+    assert_eq!(code(&result), 2);
+    assert!(stderr(&result).ends_with(&format!(
+        "Error: Invalid value for '--file': File '{}' is a directory.\n",
+        repr(dir)
+    )));
+    let binary = sandbox.root().join("binary.env");
+    std::fs::write(&binary, b"OPENAI_API_KEY=\xff\xfe\n").unwrap();
+    let result = sandbox.run(&["keys", "import", "--file", binary.to_str().unwrap()]);
+    assert_eq!(
+        (code(&result), stderr(&result)),
+        (1, "Error: Unable to read the selected key file\n".into())
+    );
+
+    let env = [("GROQ_API_KEY", "gsk-env-secret-4321")];
+    let declined = sandbox.run_with(&["keys", "import"], &env, "maybe\nn\n");
+    assert_eq!(code(&declined), 0, "{}", stderr(&declined));
+    assert_eq!(
+        stdout(&declined),
+        "Groq: ••••4321 (environment: GROQ_API_KEY)\nSave this key? [y/N]: \
+         Error: invalid input\nSave this key? [y/N]: Saved 0 key(s)\n"
+    );
+    let aborted = sandbox.run_with(&["keys", "import"], &env, "");
+    assert_eq!((code(&aborted), stderr(&aborted)), (1, "Aborted!\n".into()));
+    for output in [&declined, &aborted] {
+        assert!(!stdout(output).contains("env-secret") && !stderr(output).contains("env-secret"));
+    }
+}
+
+/// Windows environment names are case-insensitive; Python sees them upper-cased.
+#[cfg(windows)]
+#[test]
+fn keys_import_finds_mixed_case_environment_names() {
+    let sandbox = Sandbox::new();
+    let env = [("Groq_Api_Key", "gsk-env-secret-4321")];
+    let declined = sandbox.run_with(&["keys", "import"], &env, "n\n");
+    assert_eq!(code(&declined), 0, "{}", stderr(&declined));
+    assert_eq!(
+        stdout(&declined),
+        "Groq: ••••4321 (environment: GROQ_API_KEY)\nSave this key? [y/N]: Saved 0 key(s)\n"
+    );
+}
+
+#[test]
+fn secret_status_uses_env_overrides_and_group_is_hidden() {
+    let sandbox = Sandbox::new();
+    let status = sandbox.run_with(
+        &["secret", "status"],
+        &[("LOCALFLOW_LLM_API_KEY", "sk-override")],
+        "",
+    );
+    assert_eq!(code(&status), 0, "{}", stderr(&status));
+    assert_eq!(
+        stdout(&status),
+        "llm_api_key: configured\nfireworks_api_key: not configured\n"
+    );
+    let help = stdout(&sandbox.run(&["--help"]));
+    assert!(!help.lines().any(|l| l.trim_start().starts_with("secret")));
+    assert_eq!(code(&sandbox.run(&["secret", "--help"])), 0);
+    assert_eq!(code(&sandbox.run(&["secret"])), 2);
+    assert_eq!(code(&sandbox.run(&["secret", "unset"])), 2);
 }
 
 #[test]

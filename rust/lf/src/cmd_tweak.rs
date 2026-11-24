@@ -187,6 +187,7 @@ mod tests {
                 input: &mut reader,
                 clipboard: &mut clipboard,
                 server_url: None,
+                terminal: false,
             };
             let result = run_with(parsed, &mut io, || {
                 *self.agents.borrow_mut() += 1;

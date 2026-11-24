@@ -14,7 +14,7 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 use clap::Parser;
 
@@ -31,6 +31,7 @@ mod cmd_llm;
 mod cmd_meeting;
 mod cmd_prompts;
 mod cmd_recall;
+mod cmd_secret;
 mod cmd_serve;
 mod cmd_setup;
 mod cmd_status;
@@ -39,6 +40,7 @@ mod cmd_token;
 mod cmd_tweak;
 pub mod desktop_launch;
 mod native;
+mod prompt;
 pub mod pyfmt;
 mod pyfs;
 mod python;
@@ -57,6 +59,9 @@ pub struct Io<'a> {
     pub clipboard: &'a mut dyn Clipboard,
     /// Base URL override for `status` (tests); `None` = from config.
     pub server_url: Option<String>,
+    /// Stdin is a terminal: hidden prompts read from it without echo instead
+    /// of reading a line of `input`.
+    pub terminal: bool,
 }
 
 /// A user-facing failure. `Failed` is click's `ClickException` (prints
@@ -176,6 +181,7 @@ where
     // Unlocked (stderr is unbuffered): holding the lock for the whole run
     // would block log records from other threads until exit.
     let mut err = io::stderr();
+    let terminal = stdin.is_terminal();
     let mut input = stdin.lock();
     let mut clipboard = SystemClipboard;
     let mut io = Io {
@@ -184,6 +190,7 @@ where
         input: &mut input,
         clipboard: &mut clipboard,
         server_url: None,
+        terminal,
     };
     run(args, &mut io)
 }
@@ -267,6 +274,7 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Llm(command) => cmd_llm::run(command, io),
         Command::Stt(command) => cmd_stt::run(command, io),
         Command::Keys(command) => cmd_keys::run(command, io),
+        Command::Secret(command) => cmd_secret::run(command, io),
         Command::Status { json } => cmd_status::run(json, io),
         Command::Meeting(command) => cmd_meeting::run(command, io),
         Command::Prompts(command) => cmd_prompts::run(command, io),
@@ -305,6 +313,16 @@ mod tests {
         let start = run_cli(&["meeting", "start", "--help"]);
         assert!(start.out.contains("--title") && start.out.contains("--category"));
         assert!(help.err.is_empty());
+        // `secret` is hidden like Python's `@cli.group(hidden=True)`.
+        assert!(!help
+            .out
+            .lines()
+            .any(|l| l.trim_start().starts_with("secret")));
+        let secret = run_cli(&["secret", "--help"]);
+        assert_eq!(secret.code, 0);
+        for name in ["set", "unset", "status"] {
+            assert!(secret.out.contains(name), "{name}");
+        }
         let sub = run_cli(&["history", "clear", "--help"]);
         assert_eq!(sub.code, 0);
         assert!(sub.out.contains("--yes"));
@@ -353,6 +371,10 @@ mod tests {
             &["dict", "import"],
             &["llm", "use"],
             &["keys"],
+            &["keys", "import", "--file"],
+            &["secret"],
+            &["secret", "set"],
+            &["secret", "unset"],
             &["meeting"],
             &["meeting", "bogus"],
             &["prompts"],

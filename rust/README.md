@@ -293,7 +293,8 @@ lf-rs history [--limit N] [--search TEXT]
 lf-rs history list [--limit 20] | search QUERY [--limit 100]
 lf-rs history copy ID|last | raw ID|last | delete ID|last | clear [--yes] | stats
 lf-rs llm list [--provider P] [--base-url URL] [--json] | use PROVIDER [--base-url URL] [--model M] | test [...]
-lf-rs keys list
+lf-rs keys list | import [--file PATH] [--yes]
+lf-rs secret set NAME | unset NAME | status
 lf-rs status [--json]
 lf-rs serve [--host HOST] [--port PORT]
 lf-rs meeting start [-t TITLE] [-c CATEGORY] | stop | dismiss
@@ -368,6 +369,18 @@ lf-rs setup install-app
   `meeting.server: down`; a rejected/missing token is reported as
   `meeting.server: unauthorized`.
 * `keys list` only prints masked values.
+* `keys import` looks for provider keys in the environment, then in the
+  optional `--file` (`.env` or shell profile; literal assignments only, never
+  executed or expanded). It prints each key masked with its source and asks
+  `Save this key? [y/N]` unless `--yes` is given. Confirmed keys are saved
+  after the last prompt, so ending input mid-way (`Aborted!`, status 1) saves
+  nothing. A keychain failure is reported without backend details.
+* `secret` is hidden from `--help`, as in Python. `secret set NAME` prompts for
+  the value (not echoed on a terminal; an empty answer asks again) and stores
+  it in the keyring; `secret unset NAME` deletes it (a missing entry is an
+  error); `secret status` reports whether `llm_api_key` and `fireworks_api_key`
+  are configured, honouring the `LOCALFLOW_<NAME>` and `FIREWORKS_API_KEY`
+  overrides.
 * `dictation` uses the shared enabled setting. `stt use` updates the shared STT
   settings without loading a model; `stt download` fills the Hugging Face cache
   without selecting the model. `stt list` checks Python runtime availability
@@ -580,7 +593,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
   `watch`, `notes`, `open`, `models`, `stt`, bare `setup`,
-  `history retry`, `keys import`, `secret`, …);
+  `history retry`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;
 * `config set` refuses non-finite floats and integers outside the 64-bit

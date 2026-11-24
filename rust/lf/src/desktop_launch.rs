@@ -679,6 +679,7 @@ mod tests {
             input: &mut input,
             clipboard: &mut clipboard,
             server_url: None,
+            terminal: false,
         };
         let mut legacy = 0;
         let result = launcher.launch(

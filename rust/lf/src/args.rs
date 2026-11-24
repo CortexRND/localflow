@@ -49,9 +49,12 @@ pub enum Command {
     /// Inspect and select speech-to-text providers.
     #[command(subcommand)]
     Stt(SttCommand),
-    /// Inspect inference provider keys in the system keychain.
+    /// Import and inspect inference provider keys in the system keychain.
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Manage provider API-key secrets.
+    #[command(subcommand, hide = true)]
+    Secret(SecretCommand),
     /// Show localflow status (asks the running server when it is up).
     Status {
         /// Print JSON.
@@ -391,4 +394,29 @@ pub enum LlmCommand {
 pub enum KeysCommand {
     /// Show masked provider key status.
     List,
+    /// Scan environment and an optional .env or shell profile; confirm before saving.
+    Import {
+        /// A .env file or shell profile to scan as well.
+        #[arg(long = "file", value_name = "FILE_PATH")]
+        file: Option<PathBuf>,
+        /// Save all discovered keys without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretCommand {
+    /// Prompt for and store NAME in the keyring.
+    Set {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Delete NAME from the keyring.
+    Unset {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Show whether each supported secret is configured.
+    Status,
 }
