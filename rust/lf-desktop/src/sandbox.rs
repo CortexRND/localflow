@@ -378,18 +378,18 @@ pub fn exercise(services: &Services) -> Result<Vec<String>> {
     let rows = prompts::load(queue.as_ref()).map_err(anyhow::Error::msg)?;
     let row = rows
         .iter()
-        .find(|r| r.can_approve)
-        .context("no sandbox prompt to approve")?;
+        .find(|r| r.status == "pending")
+        .context("no pending sandbox prompt to approve")?;
     prompts::review(queue.as_ref(), &row.id, true).map_err(anyhow::Error::msg)?;
     let after = prompts::load(queue.as_ref()).map_err(anyhow::Error::msg)?;
     anyhow::ensure!(
         after
             .iter()
-            .any(|r| r.id == row.id && r.status != row.status),
-        "prompt {} was not reviewed in the sandbox queue",
+            .any(|r| r.id == row.id && r.status == "approved"),
+        "pending prompt {} is not approved in the sandbox queue",
         row.id
     );
-    done.push(format!("prompts: approved {}", row.id));
+    done.push(format!("prompts: approved pending prompt {}", row.id));
     Ok(done)
 }
 
@@ -915,6 +915,23 @@ mod tests {
         assert!(phrases.contains(EXERCISE_PHRASE));
         let after_history = services.history().unwrap().recent(100, None, 0).unwrap();
         assert_eq!(after_history.len() + 1, before_history.len());
+        let queue = services.remote.prompts(&services.config());
+        let statuses = |status: &str| queue.list(Some(status)).unwrap().len();
+        assert_eq!(
+            (
+                statuses("pending"),
+                statuses("approved"),
+                statuses("failed")
+            ),
+            (1, 1, 1),
+            "one pending prompt approved; the failed one untouched"
+        );
+        let approved = done.last().unwrap();
+        let id = queue.list(Some("approved")).unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(approved, &format!("prompts: approved pending prompt {id}"));
     }
 
     #[test]
