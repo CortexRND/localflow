@@ -151,7 +151,9 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
      release; a copy of the installer from before it stays pinned to `v0.2.2`
      and needs `--release <tag>`. For the same reason a real
      version-to-version upgrade wasn't checked; only a reinstall of 0.2.2 over
-     0.2.2 was.
+     0.2.2 was. Decided by the owner (Taj, 2026-11-24, "Tag next release"): the
+     next release tag includes the preview package. This item closes once that
+     tag exists and the installer's default has been checked against it.
    - Windows: the zip has no installer. `gpui-package.yml` checks its PE imports
      and launches `lf-desktop.exe --sandbox` on `windows-latest`, but nobody has
      unzipped and run it by hand. macOS: CI smoke-install only, with no
