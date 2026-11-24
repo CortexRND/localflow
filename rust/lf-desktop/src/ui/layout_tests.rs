@@ -42,7 +42,7 @@ fn cases() -> Vec<Case> {
         Case {
             name: "launch at login",
             label: "Launch at login",
-            description: "Not available on Linux yet. Start LocalFlow from your session's autostart if you want it at login.".into(),
+            description: crate::pages::settings::launch_at_login_description("linux").into(),
             control_w: 120.,
             segmented: false,
             wraps_only_at_measure: false,
