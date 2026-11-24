@@ -224,7 +224,10 @@ def cases_from_report(entry: dict, report: dict, clips: list[dict]) -> list[dict
     engine_result = results[0]
     requested = str(entry.get("provider") or "").lower()
     effective = str(engine_result.get("effective_provider") or "").lower()
-    if requested and requested != "auto" and effective and effective != requested:
+    provider_matched = effective == requested or (
+        effective.startswith(f"{requested} ") and "fallback" not in effective
+    )
+    if requested and requested != "auto" and effective and not provider_matched:
         return _non_ok(
             entry,
             [c["id"] for c in clips],

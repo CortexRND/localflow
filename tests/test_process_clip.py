@@ -363,6 +363,26 @@ def test_retry_history_entry_reprocesses_clip_without_pasting(tmp_path, monkeypa
     assert updated["final_text"] == "retried words"
 
 
+def test_retry_history_entry_loads_config_once(tmp_path, monkeypatch):
+    store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
+    clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)
+    entry_id = store.add(kind="dictate", status="failed", audio_path=clip,
+                         raw_text="", final_text="")
+    monkeypatch.setattr(app, "write_last_text", lambda _text: None)
+    load_config = Mock(return_value=_config())
+    monkeypatch.setattr(app, "load_config", load_config)
+
+    app.retry_history_entry(
+        entry_id, store,
+        transcriber=Mock(transcribe=Mock(return_value="retried words")),
+        cleaner=Mock(clean=Mock(side_effect=lambda value, **_kwargs: value)),
+        dictionary_store=DictionaryStore(tmp_path / "dictionary.json"),
+        hot_phrases=HotPhraseStore(tmp_path / "phrases.json"),
+    )
+
+    assert load_config.call_count == 1
+
+
 def test_retry_exception_leaves_history_fields_unchanged(tmp_path):
     store = HistoryStore(tmp_path / "history.sqlite", tmp_path / "clips")
     clip = store.write_clip(np.full(16000, 0.1, dtype=np.float32), 16000)

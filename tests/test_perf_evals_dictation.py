@@ -355,7 +355,7 @@ def test_read_token_prefers_newest(tmp_path):
 # --------------------------------------------------------------------------
 
 SERVER_STUB = r'''
-import json, os, sys, time, secrets, http.server
+import json, os, socketserver, sys, time, secrets, http.server
 from email.parser import BytesParser
 from email.policy import HTTP
 
@@ -409,7 +409,12 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, {"transcript": "x"})
         self._send(200, {"text": answers[clip], "ms": 12 + seen["n"]})
 
-http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+class S(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+S(("127.0.0.1", port), H).serve_forever()
 '''
 
 

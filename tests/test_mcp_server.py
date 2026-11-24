@@ -299,6 +299,42 @@ def test_corrupt_queue_is_empty(tmp_path):
     assert mcp.search_prompts(_sources(tmp_path))["results"] == []
 
 
+def test_relative_prompt_path_reads_from_supplied_cwd(tmp_path, monkeypatch):
+    """A child started in its own directory reads relative prompt paths
+    against the launching app's cwd, never its own."""
+    runtime, child = tmp_path / "runtime", tmp_path / "child"
+    for base, body in ((runtime, "Runtime walrus body"), (child, "Child decoy")):
+        (base / "prompts").mkdir(parents=True)
+        (base / "prompts" / "brief.md").write_text(body, encoding="utf-8")
+    absolute = tmp_path / "abs.md"
+    absolute.write_text("Absolute body", encoding="utf-8")
+    (tmp_path / "queue.json").write_text(json.dumps([
+        {"id": "rel", "title": "Rel", "path": "prompts/brief.md"},
+        {"id": "abs", "title": "Abs", "path": str(absolute)},
+    ]), encoding="utf-8")
+    monkeypatch.chdir(child)
+
+    def sources(cwd):
+        return Sources(
+            history_path=tmp_path / "history.sqlite", queue_path=tmp_path / "queue.json",
+            history_enabled=lambda: True, prompts_cwd=cwd,
+        )
+
+    src = sources(str(runtime))
+    assert mcp.get_prompt(src, id="rel")["body"] == "Runtime walrus body"
+    assert mcp.search_prompts(src, query="walrus")["results"][0]["id"] == "rel"
+    assert mcp.get_prompt(src, id="abs")["body"] == "Absolute body"
+    # Unset: standalone behaviour (this process's cwd) is unchanged.
+    assert mcp.get_prompt(sources(None), id="rel")["body"] == "Child decoy"
+    # Set but not absolute (the desktop couldn't read its cwd): not guessed.
+    for unresolved in ("", "runtime"):
+        got = mcp.get_prompt(sources(unresolved), id="rel")
+        assert got["note"] == "prompt file missing", unresolved
+        assert mcp.get_prompt(sources(unresolved), id="abs")["body"] == "Absolute body"
+    monkeypatch.setenv(mcp.PROMPTS_CWD_ENV, str(runtime))
+    assert mcp.default_sources().prompts_cwd == str(runtime)
+
+
 # -------------------------------------------------------------- protocol ---
 
 def _call(src, method, params=None, request_id=1):

@@ -17,7 +17,7 @@ use lf_ui::backends::meeting::FakeMeetingClient;
 use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, WorkPrompt};
 use serde_json::{json, Map, Value};
 
-use crate::data::{open_history, DataRoot, SANDBOX_MARKER};
+use crate::data::{open_history, DataRoot, Services, SANDBOX_MARKER};
 
 const MARKER_TEXT: &str = "This directory is a LocalFlow desktop sandbox.\n\
 It holds example data only. Nothing here is your real LocalFlow data.\n\
@@ -58,6 +58,15 @@ const HISTORY: &[(i64, &str, &str, &str, &str, &str)] = &[
         "ok",
     ),
     (240, "Editor", "work", "", "", "silent"),
+    // Answers the built-in "What have I dictated about the launch?".
+    (
+        300,
+        "Notes",
+        "work",
+        "launch plan announce the desktop preview on monday and share the release notes with the team",
+        "Launch plan: announce the desktop preview on Monday and share the release notes with the team.",
+        "ok",
+    ),
     (
         1500,
         "Browser",
@@ -335,6 +344,95 @@ pub fn meeting_client(root: &DataRoot) -> FakeMeetingClient {
         "Sandbox answer: the example meeting agreed to ship the native app beside the existing Hub.",
     ));
     client
+}
+
+// ---------------------------------------------------- --sandbox-exercise ---
+
+/// The trigger `--sandbox-exercise` adds to the sandbox Hot Phrases.
+pub const EXERCISE_PHRASE: &str = "cutover gate phrase";
+
+/// `--sandbox-exercise`: one write per sandbox store through the same
+/// controllers the pages call, each read back from the sandbox. Returns one
+/// line per store; `scripts/gpui_data_safety.py` checks the real stores.
+pub fn exercise(services: &Services) -> Result<Vec<String>> {
+    use crate::controllers::{history, models, prompts, settings};
+    use lf_ui::hot_phrases_editor::HotPhrasesEditor;
+
+    anyhow::ensure!(
+        services.is_sandbox(),
+        "the exercise only runs in the sandbox"
+    );
+    let mut done = Vec::new();
+
+    let spec = settings::spec("dictation", "enabled").context("no Dictation setting")?;
+    let enabled = !services
+        .config()
+        .field_bool("dictation_enabled")
+        .unwrap_or(true);
+    services.set_cached_config(settings::save(&services.config_file, spec, json!(enabled))?);
+    anyhow::ensure!(
+        services.config_file.load()?.field_bool("dictation_enabled") == Some(enabled),
+        "the Settings change did not reach the sandbox config"
+    );
+    done.push(format!("settings: dictation enabled = {enabled}"));
+
+    let key = "sandbox-exercise-key";
+    models::save_key_and_apply(
+        services.secrets.as_ref(),
+        &services.config_file,
+        "groq",
+        key,
+    )?;
+    anyhow::ensure!(
+        services.secrets.get("provider_key_groq") == key,
+        "the provider key did not reach the sandbox secrets"
+    );
+    done.push("models: groq key saved to the in-memory sandbox keyring".into());
+
+    let mut editor = HotPhrasesEditor::new(services.phrases_model()?);
+    anyhow::ensure!(editor.new_phrase(), "couldn't start a new hot phrase");
+    editor.edit(
+        Some(EXERCISE_PHRASE),
+        Some("Sandbox hot phrase."),
+        Some(true),
+    );
+    anyhow::ensure!(editor.flush(), "the hot phrase was not saved");
+    let saved = HotPhraseStore::new(services.root.hot_phrases_path.clone())
+        .list()
+        .iter()
+        .any(|p| p.get("trigger").and_then(Value::as_str) == Some(EXERCISE_PHRASE));
+    anyhow::ensure!(saved, "the hot phrase did not reach the sandbox store");
+    done.push(format!("hot phrases: added {EXERCISE_PHRASE:?}"));
+
+    let newest = services.history()?.recent(1, None, 0)?;
+    let id = newest.first().context("the sandbox history is empty")?.id;
+    anyhow::ensure!(
+        history::delete(&services.root, id)?,
+        "history entry {id} was not deleted"
+    );
+    anyhow::ensure!(
+        services.history()?.get(id)?.is_none(),
+        "history entry {id} is still in the sandbox store"
+    );
+    done.push(format!("history: deleted entry {id}"));
+
+    let queue = services.remote.prompts(&services.config());
+    let rows = prompts::load(queue.as_ref()).map_err(anyhow::Error::msg)?;
+    let row = rows
+        .iter()
+        .find(|r| r.status == "pending")
+        .context("no pending sandbox prompt to approve")?;
+    prompts::review(queue.as_ref(), &row.id, true).map_err(anyhow::Error::msg)?;
+    let after = prompts::load(queue.as_ref()).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        after
+            .iter()
+            .any(|r| r.id == row.id && r.status == "approved"),
+        "pending prompt {} is not approved in the sandbox queue",
+        row.id
+    );
+    done.push(format!("prompts: approved pending prompt {}", row.id));
+    Ok(done)
 }
 
 // ------------------------------------------------- simulated model work ---
@@ -733,16 +831,698 @@ pub fn setup_platform() -> lf_ui::setup_flow::FakeSetupPlatform {
     }
 }
 
+// ------------------------------------------------------------ Ask tools ---
+
+/// Sandbox Ask: fake LocalFlow tools over the sandbox history and prompt
+/// queue, a scripted model, and `remote::sandbox_answer` as the fallback.
+/// No process is started and nothing leaves the process.
+pub struct SandboxAgent {
+    root: DataRoot,
+    prompts: std::sync::Arc<FakePromptQueue>,
+    latency: std::time::Duration,
+}
+
+impl SandboxAgent {
+    /// `latency` paces each fake tool call and model step so the UI's
+    /// thinking and running states are visible; tests pass zero.
+    pub fn new(
+        root: DataRoot,
+        prompts: std::sync::Arc<FakePromptQueue>,
+        latency: std::time::Duration,
+    ) -> Self {
+        SandboxAgent {
+            root,
+            prompts,
+            latency,
+        }
+    }
+}
+
+/// Wait `latency` in short slices; `false` when stopped meanwhile.
+fn pause(latency: std::time::Duration, cancel: &std::sync::atomic::AtomicBool) -> bool {
+    use std::sync::atomic::Ordering;
+    let end = std::time::Instant::now() + latency;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(crate::controllers::mcp_client::POLL));
+    }
+}
+
+impl crate::controllers::ask_agent::AgentBackend for SandboxAgent {
+    fn simulated(&self) -> bool {
+        true
+    }
+
+    fn connect(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<
+        Box<dyn crate::controllers::mcp_client::ToolTransport>,
+        crate::controllers::mcp_client::McpError,
+    > {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::controllers::mcp_client::McpError::Cancelled);
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(crate::controllers::mcp_client::McpError::Deadline);
+        }
+        Ok(Box::new(SandboxTools {
+            root: self.root.clone(),
+            prompts: self.prompts.clone(),
+            latency: self.latency,
+        }))
+    }
+
+    fn model(&self, _: i64) -> Result<Box<dyn lf_providers::LlmProvider>, String> {
+        Ok(Box::new(SandboxModel {
+            latency: self.latency,
+        }))
+    }
+
+    /// In-process and instant: the budget has nothing to bound.
+    fn recall(
+        &self,
+        question: &str,
+        _: &str,
+        _: std::time::Duration,
+    ) -> lf_ui::backends::ask::Turn {
+        crate::remote::sandbox_answer(&self.root, question)
+    }
+}
+
+/// The four LocalFlow tools over sandbox data, with the Python server's
+/// result shapes (`localflow/mcp_server.py`).
+pub struct SandboxTools {
+    root: DataRoot,
+    prompts: std::sync::Arc<FakePromptQueue>,
+    latency: std::time::Duration,
+}
+
+fn local_when(ts: f64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(ts as i64, 0)
+        .single()
+        .map(|t| t.format("%Y-%m-%dT%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+/// `recall.parse_since` (+ one day for a named `until` day), epoch seconds.
+fn bound(value: Option<&str>, end: bool, now: chrono::DateTime<chrono::Local>) -> Option<f64> {
+    use chrono::TimeZone;
+    let text = value?.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+    let midnight = |d: chrono::NaiveDate| {
+        chrono::Local
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+            .earliest()
+            .map(|t| t.timestamp() as f64)
+    };
+    let day = 86_400.0;
+    let extra = if end { day } else { 0.0 };
+    match text.as_str() {
+        "today" => midnight(now.date_naive()).map(|t| t + extra),
+        "yesterday" => midnight(now.date_naive()).map(|t| t - day + extra),
+        _ => {
+            if let Some(n) = text
+                .strip_suffix('d')
+                .and_then(|n| n.trim().parse::<f64>().ok())
+            {
+                Some(now.timestamp() as f64 - n * day)
+            } else {
+                chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+                    .ok()
+                    .and_then(midnight)
+                    .map(|t| t + extra)
+            }
+        }
+    }
+}
+
+/// Question words that carry no topic. Short topic words ("git", "k8s",
+/// "CI") are kept: a length cut-off would drop them.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "all", "an", "and", "any", "are", "as", "at", "be", "by", "can", "could", "did",
+    "do", "does", "for", "from", "had", "has", "have", "how", "i", "if", "in", "is", "it", "me",
+    "my", "of", "on", "or", "our", "said", "say", "so", "tell", "that", "the", "this", "to", "us",
+    "was", "we", "were", "what", "when", "where", "which", "who", "why", "with", "you", "your",
+];
+
+/// Lowercase alphanumeric tokens of `text`, in order.
+fn tokens(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+}
+
+/// Distinct search terms of a query or question: every token except
+/// stopwords, whatever its length.
+fn words(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in tokens(text) {
+        if !STOPWORDS.contains(&token.as_str()) && !out.contains(&token) {
+            out.push(token);
+        }
+    }
+    out
+}
+
+/// Words that frame a question about the history ("what have I dictated
+/// about …") rather than name its topic.
+const FRAMING: &[&str] = &[
+    "dictate",
+    "dictated",
+    "dictation",
+    "dictations",
+    "mention",
+    "mentioned",
+    "talk",
+    "talked",
+    "write",
+    "wrote",
+    "written",
+];
+
+/// Conversational qualifiers that can trail a question ("… about again?")
+/// without naming its topic.
+const QUALIFIERS: &[&str] = &["again", "anyway", "exactly", "now", "please", "then"];
+
+/// `terms` without any of `drop`, or `None` when nothing would be left.
+fn without(terms: &[String], drop: &[&str]) -> Option<Vec<String>> {
+    let kept: Vec<String> = terms
+        .iter()
+        .filter(|w| !drop.contains(&w.as_str()))
+        .cloned()
+        .collect();
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// The sandbox model's search terms for a question: its topic only.
+///
+/// - "about" followed by a topic: what follows the last "about", minus
+///   trailing qualifiers ("What have I dictated about the launch?" ->
+///   `launch`).
+/// - "about" followed only by qualifiers: the words before it, minus framing
+///   words and qualifiers, when there are any ("What was that Kubernetes
+///   dictation about again?" -> `kubernetes`); otherwise the qualifier is
+///   itself the topic ("What did I write about again?" -> `again`).
+/// - No "about": the question minus framing words, unless that leaves
+///   nothing ("dictated" -> `dictated`). Qualifiers are dropped only in the
+///   "about …" phrase, never elsewhere.
+fn question_topic(question: &str) -> Vec<String> {
+    // One tokenization pass; `terms` is `words` over a slice of it.
+    let all: Vec<String> = tokens(question).collect();
+    let terms = |slice: &[String]| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for token in slice {
+            if !STOPWORDS.contains(&token.as_str()) && !out.contains(token) {
+                out.push(token.clone());
+            }
+        }
+        out
+    };
+    if let Some(at) = all.iter().rposition(|t| t == "about") {
+        let suffix = terms(&all[at + 1..]);
+        if !suffix.is_empty() {
+            return match without(&suffix, QUALIFIERS) {
+                Some(topic) => topic,
+                None => without(&terms(&all[..at]), FRAMING)
+                    .and_then(|prefix| without(&prefix, QUALIFIERS))
+                    .unwrap_or(suffix),
+            };
+        }
+    }
+    let whole = terms(&all);
+    without(&whole, FRAMING).unwrap_or(whole)
+}
+
+/// A search query from `terms` that `ask_agent::validate_args` accepts: at
+/// most `max` Unicode characters (not bytes), whole terms joined by spaces,
+/// in order. A term that doesn't fit is skipped, never ending the query, so
+/// later terms that fit are still searched. Only when no whole term fits at
+/// all is the first one cut to `max` characters: still a prefix of the word
+/// (long terms match word starts), so an explicit topic never turns into an
+/// unfiltered listing. Empty only for no terms.
+fn bounded_query(terms: &[String], max: usize) -> String {
+    let mut query = String::new();
+    let mut used = 0;
+    for term in terms {
+        let len = term.chars().count();
+        let extra = if used == 0 { len } else { len + 1 };
+        if len == 0 || used + extra > max {
+            continue;
+        }
+        if used > 0 {
+            query.push(' ');
+        }
+        query.push_str(term);
+        used += extra;
+    }
+    if query.is_empty() {
+        if let Some(first) = terms.iter().find(|t| !t.is_empty()) {
+            query = first.chars().take(max).collect();
+        }
+    }
+    query
+}
+
+/// Japanese (kanji/Han, hiragana, katakana) is written without spaces, so a
+/// whole sentence is one token and word rules can't find a phrase in it.
+fn unspaced_script(c: char) -> bool {
+    matches!(c as u32,
+        0x3005 | 0x3007            // 々 〇
+        | 0x3040..=0x309F          // hiragana
+        | 0x30A0..=0x30FF          // katakana
+        | 0x31F0..=0x31FF          // katakana phonetic extensions
+        | 0xFF66..=0xFF9F          // half-width katakana
+        | 0x3400..=0x4DBF          // CJK extension A
+        | 0x4E00..=0x9FFF          // CJK unified ideographs
+        | 0xF900..=0xFAFF          // CJK compatibility ideographs
+        | 0x20000..=0x3134F // CJK extensions B–G
+    )
+}
+
+/// How many `terms` occur in `text`. Terms under four characters must be a
+/// whole word (so "git" doesn't match inside "digital"); longer ones may
+/// start a word, as the old substring match allowed ("fail" -> "failed").
+/// A term with Japanese characters may occur anywhere inside a word
+/// ("午後二時" in "会議は木曜日の午後二時に移動しました").
+fn term_score(terms: &[String], text: &str) -> usize {
+    let present: Vec<String> = tokens(text).collect();
+    terms
+        .iter()
+        .filter(|t| {
+            present.iter().any(|w| {
+                if t.chars().any(unspaced_script) {
+                    w.contains(t.as_str())
+                } else if t.chars().count() < 4 {
+                    w == *t
+                } else {
+                    w.starts_with(t.as_str())
+                }
+            })
+        })
+        .count()
+}
+
+/// The query's terms, or `None` for no query at all (list the latest). A
+/// non-empty query with no searchable term gives an empty term list, which
+/// matches nothing rather than everything.
+fn query_terms(query: Option<&str>) -> Option<Vec<String>> {
+    query.map(str::trim).filter(|q| !q.is_empty()).map(words)
+}
+
+fn tool_error(text: impl Into<String>) -> crate::controllers::mcp_client::ToolOutput {
+    crate::controllers::mcp_client::ToolOutput {
+        is_error: true,
+        text: text.into(),
+        structured: None,
+    }
+}
+
+fn tool_ok(data: Value) -> crate::controllers::mcp_client::ToolOutput {
+    crate::controllers::mcp_client::ToolOutput {
+        is_error: false,
+        text: data.to_string(),
+        structured: Some(data),
+    }
+}
+
+impl SandboxTools {
+    fn search_dictations(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let s = |k: &str| args.get(k).and_then(Value::as_str);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(10)
+            .clamp(1, 50) as usize;
+        let now = chrono::Local::now();
+        let (since, until) = (bound(s("since"), false, now), bound(s("until"), true, now));
+        let Ok(store) = open_history(&self.root) else {
+            return tool_error("cannot read dictation history");
+        };
+        let entries = store.recent(200, None, 0).unwrap_or_default();
+        let app = s("app")
+            .map(str::to_lowercase)
+            .filter(|a| !a.trim().is_empty());
+        let terms = query_terms(s("query"));
+        let mut hits: Vec<(usize, &lf_core::history::HistoryEntry)> = entries
+            .iter()
+            .filter(|e| e.status == "ok")
+            .filter(|e| since.is_none_or(|t| e.ts >= t) && until.is_none_or(|t| e.ts < t))
+            .filter(|e| s("kind").is_none_or(|k| e.kind == k))
+            .filter(|e| {
+                app.as_ref().is_none_or(|a| {
+                    e.app_name
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(a.as_str())
+                        || e.bundle_id.as_deref() == s("app")
+                })
+            })
+            .map(|e| match &terms {
+                None => (0, e),
+                Some(terms) => (
+                    term_score(terms, &format!("{} {}", e.final_text, e.raw_text)),
+                    e,
+                ),
+            })
+            .filter(|(score, _)| terms.is_none() || *score > 0)
+            .collect();
+        // Stable: newest first within one score.
+        hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        let results: Vec<Value> = hits
+            .iter()
+            .take(limit)
+            .map(|(_, e)| {
+                json!({
+                    "id": e.id,
+                    "when": local_when(e.ts),
+                    "kind": e.kind,
+                    "app": e.app_name.clone().unwrap_or_default(),
+                    "category": e.category.clone().unwrap_or_default(),
+                    "words": e.words,
+                    "duration_s": e.duration_s,
+                    "snippet": e.final_text.chars().take(160).collect::<String>(),
+                })
+            })
+            .collect();
+        tool_ok(json!({
+            "count": results.len(),
+            "match": if terms.is_none() { "recent" } else { "ranked" },
+            "results": results,
+        }))
+    }
+
+    fn get_dictation(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let id = args.get("id").and_then(Value::as_i64).unwrap_or_default();
+        let entry = open_history(&self.root)
+            .ok()
+            .and_then(|store| store.get(id).ok().flatten());
+        let Some(e) = entry else {
+            return tool_error(format!("no dictation with id {id}"));
+        };
+        tool_ok(json!({
+            "id": e.id,
+            "when": local_when(e.ts),
+            "kind": e.kind,
+            "status": e.status,
+            "app": e.app_name.clone().unwrap_or_default(),
+            "bundle_id": e.bundle_id.clone().unwrap_or_default(),
+            "category": e.category.clone().unwrap_or_default(),
+            "words": e.words,
+            "duration_s": e.duration_s,
+            "final_text": e.final_text,
+            "raw_text": e.raw_text,
+            "truncated": false,
+        }))
+    }
+
+    fn prompt_fields(entry: &Map<String, Value>) -> Value {
+        let f = |k: &str| {
+            entry
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        json!({
+            "id": f("id"),
+            "title": f("title"),
+            "meeting": f("meeting"),
+            "status": f("status"),
+            "created": f("created"),
+        })
+    }
+
+    fn search_prompts(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let status = args.get("status").and_then(Value::as_str);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(10)
+            .clamp(1, 50) as usize;
+        let terms = query_terms(args.get("query").and_then(Value::as_str));
+        let Ok(mut entries) = self.prompts.list(status) else {
+            return tool_error("prompt queue unreadable");
+        };
+        entries.sort_by(|a, b| {
+            let created = |e: &Map<String, Value>| {
+                e.get("created")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            created(b).cmp(&created(a))
+        });
+        let results: Vec<Value> = entries
+            .iter()
+            .filter(|e| {
+                let Some(terms) = &terms else {
+                    return true;
+                };
+                let text = format!(
+                    "{} {}",
+                    e.get("title").and_then(Value::as_str).unwrap_or(""),
+                    e.get("meeting").and_then(Value::as_str).unwrap_or("")
+                );
+                term_score(terms, &text) > 0
+            })
+            .take(limit)
+            .map(|e| {
+                let mut v = Self::prompt_fields(e);
+                v["snippet"] = json!("Example prompt.");
+                v
+            })
+            .collect();
+        tool_ok(json!({
+            "count": results.len(),
+            "match": if terms.is_none() { "recent" } else { "ranked" },
+            "results": results,
+        }))
+    }
+
+    fn get_prompt(&self, args: &Value) -> crate::controllers::mcp_client::ToolOutput {
+        let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+        match self.prompts.get(id) {
+            Ok(Some(entry)) => {
+                let mut v = Self::prompt_fields(&entry);
+                v["body"] = json!("Example prompt.");
+                v["error"] = json!(entry.get("error").and_then(Value::as_str).unwrap_or(""));
+                v["truncated"] = json!(false);
+                tool_ok(v)
+            }
+            _ => tool_error(format!("no work prompt with id {id:?}")),
+        }
+    }
+}
+
+impl crate::controllers::mcp_client::ToolTransport for SandboxTools {
+    fn tools(&self) -> Vec<String> {
+        crate::controllers::mcp_client::ALLOWED_TOOLS
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    }
+
+    fn call(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::controllers::mcp_client::ToolOutput, crate::controllers::mcp_client::McpError>
+    {
+        self.paced_call(name, arguments, cancel, None)
+    }
+
+    fn call_until(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &std::sync::atomic::AtomicBool,
+        deadline: std::time::Instant,
+    ) -> Result<crate::controllers::mcp_client::ToolOutput, crate::controllers::mcp_client::McpError>
+    {
+        self.paced_call(name, arguments, cancel, Some(deadline))
+    }
+}
+
+impl SandboxTools {
+    /// The UI pacing never waits past the Ask run's `deadline`.
+    fn paced_call(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancel: &std::sync::atomic::AtomicBool,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::controllers::mcp_client::ToolOutput, crate::controllers::mcp_client::McpError>
+    {
+        use crate::controllers::mcp_client::McpError;
+        let pace = match deadline {
+            Some(d) => self
+                .latency
+                .min(d.saturating_duration_since(std::time::Instant::now())),
+            None => self.latency,
+        };
+        if !pause(pace, cancel) {
+            return Err(McpError::Cancelled);
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(McpError::Deadline);
+        }
+        Ok(match name {
+            "search_dictations" => self.search_dictations(arguments),
+            "get_dictation" => self.get_dictation(arguments),
+            "search_prompts" => self.search_prompts(arguments),
+            "get_prompt" => self.get_prompt(arguments),
+            _ => return Err(McpError::UnknownTool),
+        })
+    }
+}
+
+/// A scripted model that reads only its prompt, like a real one: search,
+/// open the best dictation, answer from it (or list matching work prompts).
+pub struct SandboxModel {
+    latency: std::time::Duration,
+}
+
+impl lf_providers::LlmProvider for SandboxModel {
+    fn id(&self) -> &'static str {
+        "sandbox"
+    }
+
+    fn offline(&self) -> bool {
+        true
+    }
+
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        _: Option<i64>,
+    ) -> Result<String, lf_providers::ProviderError> {
+        use crate::controllers::ask_agent::{prompt_question, prompt_results};
+        // UI pacing only (never in tests): a model step takes a moment.
+        std::thread::sleep(self.latency);
+        let question = prompt_question(user).unwrap_or("").to_lowercase();
+        let results = prompt_results(user);
+        let final_only = system.contains("can't call any more tools");
+        let no_answer = json!({"answer": lf_ui::backends::ask::NO_ANSWER}).to_string();
+        let parse = |body: &str| serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+        let wants_prompts = ["prompt", "next step", "task"]
+            .iter()
+            .any(|w| question.contains(w))
+            && system.contains("search_prompts");
+        let Some((name, status, body)) = results.last() else {
+            if final_only {
+                return Ok(no_answer);
+            }
+            // Short topic words ("git") stay in the query. A question with
+            // no topic word at all lists the latest dictations (no query).
+            // A detailed question is cut to what the tool accepts.
+            let query = bounded_query(
+                &question_topic(&question),
+                crate::controllers::ask_agent::MAX_ARG_CHARS,
+            );
+            let tool = if wants_prompts {
+                "search_prompts"
+            } else {
+                "search_dictations"
+            };
+            let arguments = if wants_prompts {
+                json!({})
+            } else if query.is_empty() {
+                json!({"limit": 5})
+            } else {
+                json!({"query": query, "limit": 5})
+            };
+            return Ok(json!({"tool": tool, "arguments": arguments}).to_string());
+        };
+        let data = parse(body);
+        let reply = match (name.as_str(), status.as_str()) {
+            ("search_dictations", "ok") => {
+                match data.pointer("/results/0/id").and_then(Value::as_i64) {
+                    Some(id) if !final_only => {
+                        json!({"tool": "get_dictation", "arguments": {"id": id}})
+                    }
+                    _ => return Ok(no_answer),
+                }
+            }
+            ("get_dictation", "ok") => {
+                let text: String = data["final_text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect();
+                json!({
+                    "answer": format!(
+                        "Sandbox answer (scripted model, no network): your {} dictation says “{}”",
+                        data["app"].as_str().unwrap_or("example"),
+                        text
+                    ),
+                    "sources": [data["id"]],
+                })
+            }
+            ("search_prompts", "ok") => {
+                let titles: Vec<&str> = data["results"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r["title"].as_str())
+                    .collect();
+                if titles.is_empty() {
+                    return Ok(no_answer);
+                }
+                json!({"answer": format!(
+                    "Sandbox answer (scripted model, no network): your example work prompts are: {}.",
+                    titles.join("; ")
+                )})
+            }
+            _ => return Ok(no_answer),
+        };
+        Ok(reply.to_string())
+    }
+
+    fn list_models(&self) -> Result<Vec<lf_providers::ModelInfo>, lf_providers::ProviderError> {
+        Ok(Vec::new())
+    }
+
+    fn healthcheck(&self) -> lf_providers::Health {
+        lf_providers::Health::ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The temp dir in the same style `persisted_clip_path` stores clips in.
+    fn temp_base(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        if cfg!(windows) {
+            dir.path().to_path_buf()
+        } else {
+            fs::canonicalize(dir.path()).unwrap()
+        }
+    }
 
     #[test]
     fn sandbox_retry_is_a_labelled_simulation_over_sandbox_data_only() {
         use crate::controllers::model_storage::SpeechStorage;
         use crate::controllers::retry::{retry_entry, RetryBackend, RetryKey};
         let dir = tempfile::tempdir().unwrap();
-        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let base = temp_base(&dir);
+        let root = prepare(&base.join("sb"), false).unwrap();
         let services = crate::data::Services::open(root.clone()).unwrap();
         assert!(services.retry.simulated());
         assert!(services.retry.unavailable().is_none());
@@ -789,7 +1569,7 @@ mod tests {
         let error = retry.open(&services.config()).err().unwrap();
         assert!(error.contains("isn't downloaded"), "{error}");
         for path in services.root.all_paths() {
-            assert!(path.starts_with(dir.path()));
+            assert!(path.starts_with(&base));
         }
     }
 
@@ -1215,10 +1995,584 @@ mod tests {
     }
 
     #[test]
+    fn exercise_writes_every_sandbox_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let services = Services::open(root.clone()).unwrap();
+        let before_config = fs::read(&root.config_path).unwrap();
+        let before_history = services.history().unwrap().recent(100, None, 0).unwrap();
+        let done = exercise(&services).unwrap();
+        let stores: Vec<&str> = done.iter().filter_map(|l| l.split(':').next()).collect();
+        assert_eq!(
+            stores,
+            ["settings", "models", "hot phrases", "history", "prompts"]
+        );
+        assert_ne!(fs::read(&root.config_path).unwrap(), before_config);
+        assert_eq!(
+            services.secrets.get("provider_key_groq"),
+            "sandbox-exercise-key"
+        );
+        let phrases = fs::read_to_string(&root.hot_phrases_path).unwrap();
+        assert!(phrases.contains(EXERCISE_PHRASE));
+        let after_history = services.history().unwrap().recent(100, None, 0).unwrap();
+        assert_eq!(after_history.len() + 1, before_history.len());
+        let queue = services.remote.prompts(&services.config());
+        let statuses = |status: &str| queue.list(Some(status)).unwrap().len();
+        assert_eq!(
+            (
+                statuses("pending"),
+                statuses("approved"),
+                statuses("failed")
+            ),
+            (1, 1, 1),
+            "one pending prompt approved; the failed one untouched"
+        );
+        let approved = done.last().unwrap();
+        let id = queue.list(Some("approved")).unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(approved, &format!("prompts: approved pending prompt {id}"));
+    }
+
+    #[test]
     fn seed_queue_has_pending_and_failed() {
         let queue = seed_prompt_queue();
         let all = queue.list(None).unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(queue.list(Some("failed")).unwrap().len(), 1);
+    }
+
+    fn sandbox_ask(
+        root: &DataRoot,
+        text: &str,
+        filter: &str,
+    ) -> Vec<crate::controllers::ask_agent::AgentEvent> {
+        use crate::controllers::ask_agent::{answer, Question, LIMITS};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let agent = SandboxAgent::new(
+            root.clone(),
+            Arc::new(seed_prompt_queue()),
+            std::time::Duration::ZERO,
+        );
+        let mut events = Vec::new();
+        let question = Question {
+            text: text.into(),
+            filter: filter.into(),
+            context: Vec::new(),
+        };
+        answer(
+            &agent,
+            &question,
+            &LIMITS,
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+        );
+        events
+    }
+
+    #[test]
+    fn sandbox_ask_runs_the_tool_loop_offline() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        use crate::controllers::mcp_client::McpStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let events = sandbox_ask(&root, "When did the Kubernetes rollout fail?", "Any time");
+        assert!(events.contains(&AgentEvent::Status(McpStatus::Simulated)));
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["search_dictations", "get_dictation"]);
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(done
+            .turn
+            .answer
+            .starts_with("Sandbox answer (scripted model"));
+        assert!(done.turn.answer.contains("Kubernetes"));
+        let id: i64 = done.turn.citations[0].reference.parse().unwrap();
+        let entry = open_history(&root).unwrap().get(id).unwrap().unwrap();
+        assert!(entry.final_text.contains("Kubernetes"));
+
+        let events = sandbox_ask(&root, "What are my next steps for the project?", "Any time");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert!(
+            done.turn.answer.contains("cutover checklist"),
+            "{}",
+            done.turn.answer
+        );
+
+        // With a time range, prompts are not searched; nothing found is said so.
+        let events = sandbox_ask(&root, "zebra quantum", "Past week");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
+        assert!(done.turn.citations.is_empty());
+    }
+
+    /// "git" is three characters: it must reach the search (not be dropped
+    /// so the newest dictation answers instead) and match the git dictation.
+    #[test]
+    fn short_topic_words_find_their_dictation_not_the_newest() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        use crate::controllers::mcp_client::ToolTransport;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let entries = open_history(&root).unwrap().recent(100, None, 0).unwrap();
+        let newest = entries.iter().find(|e| e.status == "ok").unwrap();
+        let git = entries
+            .iter()
+            .find(|e| e.final_text.starts_with("git commit"))
+            .unwrap();
+        assert_ne!(newest.id, git.id, "the example must not be the newest");
+        assert!(!newest.final_text.to_lowercase().contains("git"));
+
+        // Through the production Ask agent and the sandbox model.
+        let events = sandbox_ask(&root, "What did I say about git?", "Any time");
+        let queries: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, args, .. } if name == "search_dictations" => {
+                    Some(args.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queries.len(), 1);
+        assert!(queries[0].contains("query: \"git\""), "{}", queries[0]);
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert_eq!(done.turn.citations.len(), 1);
+        let cite = &done.turn.citations[0];
+        assert_eq!(cite.source, "dictation");
+        assert_eq!(cite.reference, git.id.to_string());
+        assert_eq!(cite.app, "Terminal");
+        assert!(
+            done.turn.answer.contains("git commit"),
+            "{}",
+            done.turn.answer
+        );
+        assert!(!done.turn.answer.contains(&newest.final_text));
+
+        // The tool itself: whole-word short terms, no broadening.
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: std::time::Duration::ZERO,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut search = |args: Value| {
+            tools
+                .call("search_dictations", &args, &cancel)
+                .unwrap()
+                .structured
+                .unwrap()
+        };
+        let found = search(json!({"query": "git"}));
+        assert_eq!(found["count"], 1);
+        assert_eq!(found["results"][0]["id"], git.id);
+        // A non-empty query with nothing searchable matches nothing...
+        for query in ["the", "what did I say", "!!"] {
+            let none = search(json!({"query": query}));
+            assert_eq!(
+                (none["count"].as_i64(), none["match"].as_str()),
+                (Some(0), Some("ranked")),
+                "{query}"
+            );
+        }
+        // ...while no query (or a blank one) still lists the latest.
+        for args in [json!({}), json!({"query": "  "})] {
+            let latest = search(args);
+            assert_eq!(latest["match"], "recent");
+            assert_eq!(latest["results"][0]["id"], newest.id);
+        }
+        // Longer terms still match word starts; short ones never inside words.
+        assert_eq!(search(json!({"query": "fail"}))["count"], 1);
+        assert_eq!(words("What did I say about git and CI?"), ["git", "ci"]);
+        assert_eq!(term_score(&words("ci"), "Check the readiness probe"), 0);
+    }
+
+    /// The built-in "What have I dictated about the launch?" once searched
+    /// for its framing words too ("have" matched "Happy birthday! Hope you
+    /// have a great day."). It must search the topic only, find the one
+    /// launch example and cite it, never the birthday message.
+    #[test]
+    fn built_in_launch_question_searches_its_topic_and_cites_the_launch_note() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        let question = lf_ui::backends::ask::EXAMPLES
+            .iter()
+            .find(|q| q.contains("launch"))
+            .expect("built-in launch question");
+        assert_eq!(question_topic(question), ["launch"]);
+        // The framing word is still searchable when it is the topic.
+        assert_eq!(
+            question_topic("What did I dictate about dictated notes?"),
+            ["dictated", "notes"]
+        );
+        assert_eq!(question_topic("dictated"), ["dictated"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let events = sandbox_ask(&root, question, "Any time");
+        let calls: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, args, .. } => Some((name.as_str(), args.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls[0].0, "search_dictations");
+        assert!(calls[0].1.contains("query: \"launch\""), "{}", calls[0].1);
+        // One search, then the found dictation is opened.
+        assert_eq!(
+            calls.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["search_dictations", "get_dictation"],
+            "{calls:?}"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { id: 1, ok: true, summary, .. } if summary == "1 result"
+        )));
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(done.turn.error.is_empty(), "{}", done.turn.error);
+        assert_ne!(done.turn.answer, lf_ui::backends::ask::NO_ANSWER);
+        assert!(
+            done.turn.answer.contains("Launch plan"),
+            "{}",
+            done.turn.answer
+        );
+        assert!(!done.turn.answer.to_lowercase().contains("birthday"));
+        assert_eq!(done.turn.citations.len(), 1, "{:?}", done.turn.citations);
+        let id: i64 = done.turn.citations[0].reference.parse().unwrap();
+        let entry = open_history(&root).unwrap().get(id).unwrap().unwrap();
+        assert!(
+            entry.final_text.starts_with("Launch plan:"),
+            "{}",
+            entry.final_text
+        );
+        assert!(!done.turn.citations[0]
+            .snippet
+            .to_lowercase()
+            .contains("birthday"));
+    }
+
+    /// A trailing qualifier after "about" is not the topic: "What was that
+    /// Kubernetes dictation about again?" searched for `again` and found
+    /// nothing. It must search the words before "about" and find the example.
+    #[test]
+    fn trailing_qualifier_after_about_keeps_the_real_topic() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        let question = "What was that Kubernetes dictation about again?";
+        assert_eq!(question_topic(question), ["kubernetes"]);
+        // Explicit topics after "about" are unchanged.
+        assert_eq!(
+            question_topic("What have I dictated about the launch?"),
+            ["launch"]
+        );
+        assert_eq!(
+            question_topic("What did I dictate about dictated notes?"),
+            ["dictated", "notes"]
+        );
+        // A qualifier is still searched when it is all there is.
+        assert_eq!(question_topic("again"), ["again"]);
+        assert_eq!(question_topic("What did I say about again?"), ["again"]);
+        // Only framing before a trailing qualifier: the qualifier is the topic.
+        assert_eq!(question_topic("What did I write about again?"), ["again"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let events = sandbox_ask(&root, question, "Any time");
+        let calls: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, args, .. } => Some((name.as_str(), args.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls[0].0, "search_dictations");
+        assert!(
+            calls[0].1.contains("query: \"kubernetes\""),
+            "{}",
+            calls[0].1
+        );
+        assert_eq!(calls[1].0, "get_dictation", "{calls:?}");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(
+            done.turn.answer.contains("Kubernetes"),
+            "{}",
+            done.turn.answer
+        );
+        let id: i64 = done.turn.citations[0].reference.parse().unwrap();
+        let entry = open_history(&root).unwrap().get(id).unwrap().unwrap();
+        assert!(entry.final_text.contains("Kubernetes"));
+    }
+
+    /// A detailed question has more distinct terms than one query may hold
+    /// (`MAX_ARG_CHARS`): the first search must still pass validation, run
+    /// and answer from the fixture, not be rejected into "not found".
+    #[test]
+    fn detailed_questions_still_search_within_the_argument_limit() {
+        use crate::controllers::ask_agent::{
+            spec, validate_args, AgentEvent, Scope, Via, MAX_ARG_CHARS,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let fillers: Vec<String> = (0..40).map(|i| format!("zylophant{i:02}")).collect();
+        let question = format!(
+            "When did the Kubernetes rollout fail, considering {}?",
+            fillers.join(" ")
+        );
+        let terms = words(&question);
+        assert!(
+            terms.join(" ").chars().count() > MAX_ARG_CHARS,
+            "the unbounded query would be rejected"
+        );
+        let query = bounded_query(&terms, MAX_ARG_CHARS);
+        assert!(query.chars().count() <= MAX_ARG_CHARS);
+        assert!(query.starts_with("kubernetes rollout fail"));
+        assert!(validate_args(
+            spec("search_dictations").unwrap(),
+            &json!({"query": query, "limit": 5}),
+            &Scope::default()
+        )
+        .is_ok());
+
+        // The production loop: the first search runs and succeeds.
+        let events = sandbox_ask(&root, &question, "Any time");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolFinished {
+                    id: 1,
+                    ok: true,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStarted { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["search_dictations", "get_dictation"]);
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert!(
+            done.turn.answer.contains("Kubernetes"),
+            "{}",
+            done.turn.answer
+        );
+        let cite = &done.turn.citations[0];
+        assert_eq!(cite.source, "dictation");
+        let entry = open_history(&root)
+            .unwrap()
+            .get(cite.reference.parse().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(entry.final_text.contains("Kubernetes rollout failed"));
+    }
+
+    #[test]
+    fn bounded_queries_count_characters_and_keep_overlong_topics() {
+        let s = |v: &[&str]| v.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        // Unicode: characters, not bytes, and whole terms only.
+        let wide: Vec<String> = (0..60).map(|i| format!("日本語{i:02}")).collect();
+        let query = bounded_query(&wide, 200);
+        assert!(query.len() > 200, "more bytes than characters");
+        assert!(query.chars().count() <= 200);
+        assert!(query.split(' ').all(|t| wide.contains(&t.to_string())));
+        assert_eq!(query.split(' ').count(), 33, "5 chars, then 6 with a space");
+        // An overlong first term is skipped, not the end of the query.
+        let long = "a".repeat(250);
+        assert_eq!(bounded_query(&s(&[&long, "git", "ci"]), 200), "git ci");
+        assert_eq!(bounded_query(&s(&["git", &long, "ci"]), 200), "git ci");
+        // Only overlong terms: a prefix of the first, never no query at all.
+        let only = bounded_query(&s(&[&"é".repeat(250), &long]), 200);
+        assert_eq!(only, "é".repeat(200));
+        // Exactly at the limit, and the existing cases.
+        let exact = "b".repeat(196);
+        assert_eq!(
+            bounded_query(&s(&[&exact, "git"]), 200),
+            format!("{exact} git")
+        );
+        assert_eq!(bounded_query(&s(&[&exact, "gits"]), 200), exact);
+        assert_eq!(bounded_query(&[], 200), "");
+        assert_eq!(
+            bounded_query(&words("What did I say about git?"), 200),
+            "git"
+        );
+    }
+
+    #[test]
+    fn sandbox_pacing_never_outlasts_the_run_deadline() {
+        use crate::controllers::mcp_client::{McpError, ToolTransport};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: Duration::from_secs(30),
+        };
+        let started = Instant::now();
+        assert_eq!(
+            tools
+                .call_until(
+                    "search_dictations",
+                    &json!({}),
+                    &AtomicBool::new(false),
+                    Instant::now() + Duration::from_millis(100),
+                )
+                .err(),
+            Some(McpError::Deadline)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let agent = SandboxAgent::new(root, Arc::new(seed_prompt_queue()), Duration::ZERO);
+        use crate::controllers::ask_agent::AgentBackend;
+        assert_eq!(
+            agent
+                .connect(&AtomicBool::new(false), Some(Instant::now()))
+                .err(),
+            Some(McpError::Deadline)
+        );
+        assert!(agent.connect(&AtomicBool::new(false), None).is_ok());
+    }
+
+    /// An unspaced Japanese sentence is one token: a phrase from its middle
+    /// must still find it, without loosening ASCII word matching.
+    #[test]
+    fn japanese_phrases_match_inside_unspaced_sentences() {
+        use crate::controllers::ask_agent::{AgentEvent, Via};
+        use crate::controllers::mcp_client::ToolTransport;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let entries = open_history(&root).unwrap().recent(100, None, 0).unwrap();
+        let meeting = entries
+            .iter()
+            .find(|e| e.final_text == "会議は木曜日の午後二時に移動しました。")
+            .unwrap();
+
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: std::time::Duration::ZERO,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut search = |query: &str| {
+            tools
+                .call("search_dictations", &json!({ "query": query }), &cancel)
+                .unwrap()
+                .structured
+                .unwrap()
+        };
+        for phrase in [
+            "午後二時",
+            "木曜日",
+            "移動",
+            "会議は木曜日の午後二時に移動しました",
+        ] {
+            let found = search(phrase);
+            assert_eq!(found["count"], 1, "{phrase}");
+            assert_eq!(found["results"][0]["id"], meeting.id, "{phrase}");
+        }
+        assert_eq!(search("午前九時")["count"], 0);
+
+        // Through the production Ask agent.
+        let events = sandbox_ask(&root, "午後二時", "Any time");
+        let Some(AgentEvent::Finished(done)) = events.last() else {
+            panic!("unfinished");
+        };
+        assert_eq!(done.via, Via::Tools);
+        assert_eq!(done.turn.citations.len(), 1);
+        assert_eq!(done.turn.citations[0].reference, meeting.id.to_string());
+        assert!(
+            done.turn.answer.contains("午後二時"),
+            "{}",
+            done.turn.answer
+        );
+
+        // ASCII semantics unchanged.
+        let t = |s: &str| vec![s.to_string()];
+        assert_eq!(
+            term_score(&t("午後二時"), "会議は木曜日の午後二時に移動しました。"),
+            1
+        );
+        assert_eq!(term_score(&t("git"), "digital git"), 1);
+        assert_eq!(term_score(&t("git"), "digital"), 0);
+        assert_eq!(term_score(&t("fail"), "failed"), 1);
+        assert_eq!(term_score(&t("fail"), "unfailing"), 0);
+    }
+
+    #[test]
+    fn sandbox_tools_follow_the_server_shapes_and_bounds() {
+        use crate::controllers::mcp_client::ToolTransport;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let mut tools = SandboxTools {
+            root: root.clone(),
+            prompts: Arc::new(seed_prompt_queue()),
+            latency: std::time::Duration::ZERO,
+        };
+        let cancel = AtomicBool::new(false);
+        let recent = tools
+            .call("search_dictations", &json!({"limit": 2}), &cancel)
+            .unwrap();
+        let data = recent.structured.unwrap();
+        assert_eq!(
+            (data["count"].as_i64(), data["match"].as_str()),
+            (Some(2), Some("recent"))
+        );
+        // Every example is from the last few hours: none before today's start minus a day.
+        let old = tools
+            .call(
+                "search_dictations",
+                &json!({"until": "2000-01-01"}),
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(old.structured.unwrap()["count"], 0);
+        let missing = tools
+            .call("get_dictation", &json!({"id": 999_999}), &cancel)
+            .unwrap();
+        assert!(missing.is_error);
+        let failed = tools
+            .call("search_prompts", &json!({"status": "failed"}), &cancel)
+            .unwrap();
+        assert_eq!(failed.structured.unwrap()["count"], 1);
+        assert!(tools.call("exec", &json!({}), &cancel).is_err());
+        assert!(tools
+            .call("search_dictations", &json!({}), &AtomicBool::new(true))
+            .is_err());
     }
 }
