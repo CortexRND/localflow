@@ -1423,7 +1423,7 @@ mod tests {
                 .manual_errors
                 .insert("hotkey".into(), "e ".repeat(120));
             let layout = manual_layout(width, &rows, &state, &measure);
-            assert_eq!(layout.rows.len(), 22);
+            assert_eq!(layout.rows.len(), 24);
             assert_eq!(
                 layout
                     .groups
@@ -1610,7 +1610,7 @@ mod tests {
     #[test]
     fn preview_runs_off_thread_then_apply_and_undo() {
         let (backend, mut controller) = setup();
-        assert_eq!(controller.manual_rows.len(), 22);
+        assert_eq!(controller.manual_rows.len(), 24);
         assert!(controller.state.undo_lines.is_none());
         backend.script_proposal(proposal("gemma4:e4b"));
         assert!(controller.start_preview("   ").is_none());
@@ -1662,6 +1662,32 @@ mod tests {
         controller.apply();
         assert_eq!(controller.state.status, Status::Error);
         assert_eq!(backend.calls().len(), asked);
+    }
+
+    #[test]
+    fn a_dictation_preview_shows_its_line_and_safety_warning() {
+        let (backend, mut controller) = setup();
+        let off = Change::setting("dictation_enabled", json!(true), json!(false));
+        backend.script_proposal(Proposal::new(
+            "Turn off dictation.",
+            "gemma4:e4b",
+            vec![off.clone()],
+            vec![],
+        ));
+        let job = controller.start_preview("Turn off dictation.").unwrap();
+        std::thread::spawn(move || job.run()).join().unwrap();
+        assert!(controller.preview_done());
+        assert_eq!(controller.state.status, Status::Preview);
+        assert_eq!(controller.state.lines, vec!["Dictation: On → Off"]);
+        assert_eq!(
+            controller.state.warnings,
+            vec!["Dictation: On → Off — Check: turns Dictation off."]
+        );
+
+        backend.script_apply(applied(vec![off], "Applied 1 change."));
+        controller.apply();
+        assert_eq!(controller.state.status, Status::Applied);
+        assert_eq!(controller.state.lines, vec!["Dictation: On → Off"]);
     }
 
     #[test]

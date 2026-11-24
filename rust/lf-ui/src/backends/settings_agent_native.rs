@@ -555,6 +555,110 @@ mod tests {
     }
 
     #[test]
+    fn ui_display_tables_match_lf_agent() {
+        use crate::backends::settings_agent::{
+            display_value, ALLOWLIST, BOOL_KEYS, MANUAL_GROUPS, SHORTCUT_KEYS,
+        };
+
+        assert_eq!(ALLOWLIST.as_slice(), lf_agent::ALLOWLIST);
+        for key in lf_agent::ALLOWLIST {
+            assert_eq!(label(key), Some(lf_agent::label(key)), "{key}");
+        }
+        assert_eq!(MANUAL_GROUPS.as_slice(), lf_agent::MANUAL_GROUPS);
+        assert_eq!(BOOL_KEYS.as_slice(), lf_agent::BOOL_KEYS);
+        let samples = [
+            json!(true),
+            json!(false),
+            json!(""),
+            json!("alt_r"),
+            json!("<ctrl>+<alt>+d"),
+            json!("osascript"),
+            json!("very_casual"),
+        ];
+        for key in lf_agent::ALLOWLIST {
+            for value in &samples {
+                assert_eq!(
+                    display_value(key, value),
+                    lf_agent::display_value(key, value),
+                    "{key} = {value}"
+                );
+            }
+        }
+        assert!(SHORTCUT_KEYS.iter().all(|k| ALLOWLIST.contains(k)));
+
+        // Every key `normalize_combo` accepts (its named-key list in
+        // lf-agent's private `validation.rs`, f1–f20, single characters) and
+        // every modifier / hold key, alone and in combos.
+        let named = [
+            "space",
+            "tab",
+            "enter",
+            "backspace",
+            "delete",
+            "home",
+            "end",
+            "page_up",
+            "page_down",
+            "up",
+            "down",
+            "left",
+            "right",
+            "insert",
+        ];
+        let modifiers = [
+            "alt", "alt_l", "alt_r", "alt_gr", "ctrl", "ctrl_l", "ctrl_r", "cmd", "cmd_l", "cmd_r",
+            "shift", "shift_l", "shift_r",
+        ];
+        let mut keys: Vec<String> = named.iter().map(|k| k.to_string()).collect();
+        keys.extend((1..=20).map(|n| format!("f{n}")));
+        keys.extend(["d", "1", "/", "caps_lock"].map(String::from));
+        keys.extend(modifiers.iter().map(|m| m.to_string()));
+        let mut shortcuts = Vec::new();
+        for key in &keys {
+            shortcuts.push(key.clone());
+            shortcuts.push(format!("<ctrl>+{key}"));
+            shortcuts.push(format!("<cmd>+<shift>+{key}"));
+        }
+        shortcuts.extend(modifiers.iter().map(|m| format!("<{m}>+<alt>+1")));
+        for shortcut in &shortcuts {
+            assert_eq!(
+                super::super::settings_agent::format_shortcut(shortcut),
+                lf_agent::format_shortcut(shortcut),
+                "{shortcut}"
+            );
+            for key in SHORTCUT_KEYS {
+                let value = json!(shortcut);
+                assert_eq!(
+                    display_value(key, &value),
+                    lf_agent::display_value(key, &value),
+                    "{key} = {shortcut}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_real_toggle_shortcut_preview_has_a_shortcut_line() {
+        let (_dir, adapter) = setup(vec![call(
+            "set_setting",
+            json!({"key": "dictation_toggle_hotkey", "value": "ctrl+alt+d"}),
+        )]);
+        let proposal = adapter
+            .propose("set the toggle dictation shortcut to ctrl+alt+d")
+            .unwrap();
+        assert_eq!(proposal.changes.len(), 1, "{:?}", proposal.rejected);
+        let change = &proposal.changes[0];
+        assert_eq!(
+            change.line(),
+            format!("Toggle dictation shortcut: {} → {}", change.old, change.new)
+        );
+        assert_eq!(
+            change.warning(&proposal.request),
+            "Check: changes a keyboard shortcut."
+        );
+    }
+
+    #[test]
     fn a_real_preview_translates_and_apply_writes_through_lf_agent() {
         let (_dir, adapter) = setup(vec![call(
             "set_setting",
@@ -571,9 +675,15 @@ mod tests {
         assert_eq!(change.old, "On");
         assert_eq!(change.new, "Off");
         assert_eq!(change.kind, KIND_SETTING);
+        assert_eq!(change.line(), "Dictation: On → Off");
+        assert_eq!(
+            change.warning(&proposal.request),
+            "Check: turns Dictation off."
+        );
         let applied = adapter.apply(&proposal.changes).unwrap();
         assert_eq!(applied.applied.len(), 1);
         assert_eq!(applied.applied[0].label, "Dictation");
+        assert_eq!(applied.applied[0].line(), "Dictation: On → Off");
         assert_eq!(applied.message, "Applied 1 change.");
         assert_eq!(
             adapter.load().unwrap().field_bool("dictation_enabled"),

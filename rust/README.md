@@ -221,7 +221,7 @@ but no application installer consumes them.
 | `lf` | the `lf-rs` CLI (this README's focus) and the parity test driver (`lf/examples/parity.rs`) |
 | `lf-audio` | standalone microphone recorder, level meter and dictation gates; see [crate README](lf-audio/README.md) |
 | `lf-stt` | Whisper/Parakeet inference, downloads, model cache protection, Python-compatible leases and lazy engine slot; [API and gaps](lf-stt/README.md) |
-| `lf-input` | global hotkeys (`KeyboardHub`, pynput-compatible key names, order-insensitive chords, macOS CGEventTap with the Input Monitoring checks) and paste/clipboard (`Injector`) |
+| `lf-input` | global hotkeys (`KeyboardHub`, pynput-compatible key names, order-insensitive chords, macOS CGEventTap with the Input Monitoring checks, X11 XInput2 raw events, Windows low-level keyboard hook) and paste/clipboard (`Injector`) |
 | `lf-runtime` | the dictation controller state machine, worker and text pipeline, live config reload, the `dictation_enabled` switch, menu bar model + macOS NSStatusItem, single-instance lock; parity driver `lf-runtime/examples/runtime_parity.rs` |
 | `lf-server` | optional axum HTTP server, embedded web UI, auth, config/provider/key APIs and runtime backend interface (see `lf-server/README.md`) |
 | `lf-ui` | native Hub pages, settings/setup flows and shared UI primitives; builds the `lf-hub` binary (AppKit on macOS) that the macOS installer ships |
@@ -236,7 +236,9 @@ Audio and speech-to-text come in through the `AudioSource` and
 feature supplies real lf-audio capture and SttSlot adapters, a worker factory
 and `run_options` ([integration and HTTP stacking](lf-stt/README.md#dictation-runtime-optional));
 `lf_runtime::run::run` wires everything, and
-`lf-hub` runs it on macOS.
+`lf-hub` runs it on macOS. The `lf-desktop` preview can run it on Linux,
+Windows and macOS: in a `--features runtime` build started with `--engine`,
+once **Start here** is pressed on Home.
 
 Everything is event-driven. The controller blocks on its channel and only
 sets a deadline for the double-tap window and the max-duration timer. The
@@ -564,9 +566,10 @@ Transcripts/timing need not be bit-identical across models/backends. See the
 
 Outside the shipped macOS `lf-hub` app this is not a full application port:
 
-* `lf-hub` ships on macOS only; on Linux and Windows there is no Hub, setup or
-  native settings window. `serve` hosts the web UI, core APIs, HTTP-upload
-  transcription (`POST /transcribe`, via ffmpeg and the native engines;
+* `lf-hub` ships on macOS only; on Linux and Windows the only native Hub, setup
+  and settings window is the opt-in `lf-desktop` preview
+  ([`lf-desktop/README.md`](lf-desktop/README.md)). `serve` hosts the web UI,
+  core APIs, HTTP-upload transcription (`POST /transcribe`, via ffmpeg and the native engines;
   [integration](lf-stt/README.md#http-backend-optional)) and the meetings,
   Ask and prompt routes, including explicit meeting start/stop. It does not
   run the meeting watcher (no auto-detect or auto-start) or manage
@@ -574,10 +577,12 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   `GET` reports it as unavailable;
 * `lf-rs` has no `dictate` command, and `lf-rs serve` does not start a
   global hotkey dictation runtime; HTTP uploads are its only dictation path;
-* hotkeys and the menu bar are implemented on macOS only: on Linux and
-  Windows `lf_input::listener::run_forever` returns `Unsupported`, and no
-  tray icon is drawn. Paste works everywhere (CGEvent Cmd+V or `osascript`
-  on macOS, `wtype`/`xdotool` on Linux, `SendInput` on Windows; Linux
+* global hotkeys work on macOS, X11 (XInput 2.1 or newer) and Windows; on
+  Wayland, in a session with no display and on other platforms
+  `lf_input::listener::run_forever` returns `Unsupported`. `lf-hub` draws the
+  macOS menu bar item and the `lf-desktop` preview draws its own menu bar or
+  tray item on macOS, Linux and Windows; `lf-rs` draws none. Paste works
+  everywhere (CGEvent Cmd+V or `osascript` on macOS, `wtype`/`xdotool` on Linux, `SendInput` on Windows; Linux
   `pynput` paste is not ported). Keys are mapped by US-layout keycode, plus
   the character Shift types (as pynput reports it), so `<ctrl>++` works;
   Option never changes the key;
@@ -592,7 +597,7 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
 * `lf-rs` implements only the commands listed above (no `dictate`,
-  `watch`, `notes`, `open`, `models`, `stt`, bare `setup`,
+  `watch`, `notes`, `open`, `models`, bare `setup`,
   `history retry`, …);
 * `status` without a server cannot read the autostart state (the platform
   layer is not ported) and reports it as unknown;

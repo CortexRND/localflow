@@ -177,7 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         try:
-            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stdout.reconfigure(
+                encoding="utf-8",
+                errors="surrogateescape" if sys.platform != "win32" else "replace",
+            )
         except (OSError, ValueError):
             sys.stderr.write("warning: could not reconfigure stdout to utf-8\n")
     parser = build_parser()
