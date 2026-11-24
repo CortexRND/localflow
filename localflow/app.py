@@ -671,6 +671,7 @@ def retry_history_entry(
     dictionary_store: DictionaryStore | None = None,
     hot_phrases: HotPhraseStore | None = None,
 ) -> str:
+    config = config or load_config()
     _entry, raw_text, text = transcribe_history_entry(
         entry_id, history_store, config, transcriber, cleaner, dictionary_store, hot_phrases,
     )
@@ -687,7 +688,6 @@ def retry_history_entry(
         write_last_text(text)
     except Exception:
         log.exception("could not write retried text to last.txt")
-    config = config or load_config()
     history_store.prune_audio_clips(getattr(config, "keep_audio_clips", 5))
     return text
 
