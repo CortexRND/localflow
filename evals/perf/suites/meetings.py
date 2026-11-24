@@ -71,7 +71,7 @@ def model_available(names: list[str], model: str) -> bool:
     if model in names:
         return True
     if ":" not in model:
-        return any(n.split(":", 1)[0] == model for n in names)
+        return f"{model}:latest" in names
     base, _, tag = model.partition(":")
     return tag == "latest" and base in names
 
@@ -94,10 +94,15 @@ def ollama_status(url: str, model: str, *, timeout: float = OLLAMA_TIMEOUT_S) ->
 
 
 def missing_deps(python: str, sut: Path) -> list[str] | None:
-    """Product modules ``python`` cannot find (``None`` if it cannot even run)."""
+    """Product modules ``python`` cannot find or initialize (``None`` if it cannot even run)."""
     code = (
-        "import importlib.util as u, sys\n"
+        "import importlib.util as u\n"
         f"m = [n for n in {PRODUCT_DEPS!r} if u.find_spec(n) is None]\n"
+        "if 'sounddevice' not in m:\n"
+        "    try:\n"
+        "        import sounddevice  # noqa: F401\n"
+        "    except Exception:\n"
+        "        m.append('sounddevice')\n"
         "print(','.join(m))\n"
     )
     try:
@@ -149,7 +154,7 @@ def _python(ctx: RunContext) -> str:
 
 
 def _sut(ctx: RunContext) -> Path:
-    return Path(ctx.options.get("sut") or os.environ.get("SIM_SUT") or ctx.repo_root).expanduser()
+    return Path(ctx.options.get("sut") or os.environ.get("SIM_SUT") or ctx.repo_root).expanduser().resolve()
 
 
 def driver_command(ctx: RunContext) -> list[str]:
@@ -225,10 +230,10 @@ def run_gates(ctx: RunContext, run_dir: Path, *, sut: Path, scenarios_file: Path
 def _output_dir(opts: dict) -> Path:
     chosen = opts.get("output_dir") or os.environ.get("LF_PERF_MEETING_OUT")
     if chosen:
-        path = Path(chosen).expanduser()
+        path = Path(chosen).expanduser().resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
-    return Path(tempfile.mkdtemp(prefix="lf-perf-meetings-"))
+    return Path(tempfile.mkdtemp(prefix="lf-perf-meetings-")).resolve()
 
 
 # --------------------------------------------------------------------------
@@ -272,6 +277,15 @@ def run_live(ctx: RunContext) -> list[dict]:
     scenarios = plan_scenarios(load_scenarios(), opts.get("scenarios"))
     repeats = plan_repeats(ctx.tier, opts.get("repeats"))
     run_dir = _output_dir(opts)
+    # Clear stale outputs if reusing an existing output directory so gates.py / adapt_run_dir
+    # never score leftover rK/results/*.json or an old gates.json.
+    for stale in (run_dir / "gates.json", run_dir / "matrix.log"):
+        if stale.is_file():
+            stale.unlink()
+    for stale_repeat in run_dir.glob("r*"):
+        if stale_repeat.is_dir() and stale_repeat.name[1:].isdigit():
+            for old_json in (stale_repeat / "results").glob("*.json"):
+                old_json.unlink()
     # gates.py counts every scenario in the file, so a subset run gets its own file.
     scenarios_file = run_dir / "scenarios.json"
     scenarios_file.write_text(json.dumps({"scenarios": scenarios}, indent=1), encoding="utf-8")
@@ -292,5 +306,5 @@ def run_meetings(ctx: RunContext) -> list[dict]:
         return not_exercised_cases(ctx.runtime, RUST_REASON)
     run_dir = ctx.options.get("run_dir") or os.environ.get("LF_PERF_MEETING_RUN_DIR")
     if run_dir:
-        return adapt_run_dir(ctx, Path(run_dir).expanduser())
+        return adapt_run_dir(ctx, Path(run_dir).expanduser().resolve())
     return run_live(ctx)
