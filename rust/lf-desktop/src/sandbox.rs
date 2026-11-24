@@ -17,7 +17,7 @@ use lf_ui::backends::meeting::FakeMeetingClient;
 use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, WorkPrompt};
 use serde_json::{json, Map, Value};
 
-use crate::data::{open_history, DataRoot, SANDBOX_MARKER};
+use crate::data::{open_history, DataRoot, Services, SANDBOX_MARKER};
 
 const MARKER_TEXT: &str = "This directory is a LocalFlow desktop sandbox.\n\
 It holds example data only. Nothing here is your real LocalFlow data.\n\
@@ -302,6 +302,95 @@ pub fn meeting_client(root: &DataRoot) -> FakeMeetingClient {
         "Sandbox answer: the example meeting agreed to ship the native app beside the existing Hub.",
     ));
     client
+}
+
+// ---------------------------------------------------- --sandbox-exercise ---
+
+/// The trigger `--sandbox-exercise` adds to the sandbox Hot Phrases.
+pub const EXERCISE_PHRASE: &str = "cutover gate phrase";
+
+/// `--sandbox-exercise`: one write per sandbox store through the same
+/// controllers the pages call, each read back from the sandbox. Returns one
+/// line per store; `scripts/gpui_data_safety.py` checks the real stores.
+pub fn exercise(services: &Services) -> Result<Vec<String>> {
+    use crate::controllers::{history, models, prompts, settings};
+    use lf_ui::hot_phrases_editor::HotPhrasesEditor;
+
+    anyhow::ensure!(
+        services.is_sandbox(),
+        "the exercise only runs in the sandbox"
+    );
+    let mut done = Vec::new();
+
+    let spec = settings::spec("dictation", "enabled").context("no Dictation setting")?;
+    let enabled = !services
+        .config()
+        .field_bool("dictation_enabled")
+        .unwrap_or(true);
+    services.set_cached_config(settings::save(&services.config_file, spec, json!(enabled))?);
+    anyhow::ensure!(
+        services.config_file.load()?.field_bool("dictation_enabled") == Some(enabled),
+        "the Settings change did not reach the sandbox config"
+    );
+    done.push(format!("settings: dictation enabled = {enabled}"));
+
+    let key = "sandbox-exercise-key";
+    models::save_key_and_apply(
+        services.secrets.as_ref(),
+        &services.config_file,
+        "groq",
+        key,
+    )?;
+    anyhow::ensure!(
+        services.secrets.get("provider_key_groq") == key,
+        "the provider key did not reach the sandbox secrets"
+    );
+    done.push("models: groq key saved to the in-memory sandbox keyring".into());
+
+    let mut editor = HotPhrasesEditor::new(services.phrases_model()?);
+    anyhow::ensure!(editor.new_phrase(), "couldn't start a new hot phrase");
+    editor.edit(
+        Some(EXERCISE_PHRASE),
+        Some("Sandbox hot phrase."),
+        Some(true),
+    );
+    anyhow::ensure!(editor.flush(), "the hot phrase was not saved");
+    let saved = HotPhraseStore::new(services.root.hot_phrases_path.clone())
+        .list()
+        .iter()
+        .any(|p| p.get("trigger").and_then(Value::as_str) == Some(EXERCISE_PHRASE));
+    anyhow::ensure!(saved, "the hot phrase did not reach the sandbox store");
+    done.push(format!("hot phrases: added {EXERCISE_PHRASE:?}"));
+
+    let newest = services.history()?.recent(1, None, 0)?;
+    let id = newest.first().context("the sandbox history is empty")?.id;
+    anyhow::ensure!(
+        history::delete(&services.root, id)?,
+        "history entry {id} was not deleted"
+    );
+    anyhow::ensure!(
+        services.history()?.get(id)?.is_none(),
+        "history entry {id} is still in the sandbox store"
+    );
+    done.push(format!("history: deleted entry {id}"));
+
+    let queue = services.remote.prompts(&services.config());
+    let rows = prompts::load(queue.as_ref()).map_err(anyhow::Error::msg)?;
+    let row = rows
+        .iter()
+        .find(|r| r.can_approve)
+        .context("no sandbox prompt to approve")?;
+    prompts::review(queue.as_ref(), &row.id, true).map_err(anyhow::Error::msg)?;
+    let after = prompts::load(queue.as_ref()).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        after
+            .iter()
+            .any(|r| r.id == row.id && r.status != row.status),
+        "prompt {} was not reviewed in the sandbox queue",
+        row.id
+    );
+    done.push(format!("prompts: approved {}", row.id));
+    Ok(done)
 }
 
 // ------------------------------------------------- simulated model work ---
@@ -802,6 +891,30 @@ mod tests {
             .unwrap()
             .1
             .contains(&"qwen2.5:7b".to_string()));
+    }
+
+    #[test]
+    fn exercise_writes_every_sandbox_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let services = Services::open(root.clone()).unwrap();
+        let before_config = fs::read(&root.config_path).unwrap();
+        let before_history = services.history().unwrap().recent(100, None, 0).unwrap();
+        let done = exercise(&services).unwrap();
+        let stores: Vec<&str> = done.iter().filter_map(|l| l.split(':').next()).collect();
+        assert_eq!(
+            stores,
+            ["settings", "models", "hot phrases", "history", "prompts"]
+        );
+        assert_ne!(fs::read(&root.config_path).unwrap(), before_config);
+        assert_eq!(
+            services.secrets.get("provider_key_groq"),
+            "sandbox-exercise-key"
+        );
+        let phrases = fs::read_to_string(&root.hot_phrases_path).unwrap();
+        assert!(phrases.contains(EXERCISE_PHRASE));
+        let after_history = services.history().unwrap().recent(100, None, 0).unwrap();
+        assert_eq!(after_history.len() + 1, before_history.len());
     }
 
     #[test]

@@ -92,8 +92,10 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    (X11 and Wayland) and macOS before this gate is met, and the remaining Missing
    row (History retry) needs a decision.
 2. **Data safety.** [`gpui_data_safety.py`](../scripts/gpui_data_safety.py) compares
-   the real config file, `~/.localflow` and the keyring by hash before and after a
-   scripted sandbox session. In real mode, every write goes through `config_write`
+   the whole real config directory (including `api-token` and `launch/`),
+   `~/.localflow` and the keyring by hash before and after a scripted sandbox
+   session that writes every sandbox store, and fails if any of those writes did not
+   happen. In real mode, every write goes through `config_write`
    or the existing store APIs. The unit tests in `data.rs`, `sandbox.rs` and
    `controllers/*` cover this already.
 3. **Platforms.** The app builds and passes tests on Linux (X11 and Wayland) and
@@ -162,8 +164,15 @@ alias resolves to a collection whose `<name>.keyring` file is in the monitored
 keyrings directory used by the running daemon, and it refuses to run while a legacy
 `~/.gnome2/keyrings` directory exists. Run it with LocalFlow and other
 writers to the monitored stores stopped. It adds a word to the **sandbox**
-Dictionary and checks that the real config (including legacy fallback),
-`~/.localflow`, and the GNOME Keyring backing files did not change. `before.json`
+Dictionary with the keyboard in the window, then runs `lf-desktop --sandbox
+--sandbox-exercise`. That makes one write through the page controllers to each other
+sandbox store (a Settings change, a provider key saved to the in-memory keyring, a Hot
+Phrase, a History delete and a Prompt approval) and reads each one back. The script
+also checks the file-backed sandbox stores itself, and fails if any write is missing.
+It then checks that the whole real config directory (`config.toml`, `api-token`,
+`launch/` and any other file), `LOCALFLOW_CONFIG` and the legacy config,
+`~/.localflow`, and the GNOME Keyring backing files did not change. `lf-desktop`
+never creates or rotates the API token, so no token write is scripted. `before.json`
 and `after.json` contain only per-store HMAC-SHA256 digests with a per-run key;
 compare them only within the same run. Other keyring backends are not supported by
 this script. Gate 8 writes 44 PNGs (10 pages and Setup × two themes × two sizes).

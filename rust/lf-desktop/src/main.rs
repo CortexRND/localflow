@@ -74,6 +74,20 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if args.sandbox_exercise {
+        return match lf_desktop::sandbox::exercise(&services) {
+            Ok(done) => {
+                for line in done {
+                    println!("{line}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("lf-desktop: sandbox exercise failed: {err:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let notice = args
         .unknown_page
         .as_ref()

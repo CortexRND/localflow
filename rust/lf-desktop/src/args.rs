@@ -24,6 +24,9 @@ OPTIONS:
                        $XDG_DATA_HOME/localflow-desktop-sandbox). Kept between runs.
     --sandbox-reset    Re-seed the sandbox directory with fresh example data
                        (refused while that sandbox is open in another window)
+    --sandbox-exercise Write once to each sandbox store (Settings, a provider key,
+                       Hot Phrases, History, Prompts), print what was written and
+                       exit without a window (only with --sandbox)
     -h, --help         Print this help
     -V, --version      Print the version
 
@@ -49,6 +52,7 @@ pub struct Args {
     pub engine: bool,
     pub sandbox: bool,
     pub sandbox_reset: bool,
+    pub sandbox_exercise: bool,
     pub data_dir: Option<PathBuf>,
     pub help: bool,
     pub version: bool,
@@ -80,6 +84,7 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
             "-V" | "--version" => out.version = true,
             "--sandbox" => out.sandbox = true,
             "--sandbox-reset" => out.sandbox_reset = true,
+            "--sandbox-exercise" => out.sandbox_exercise = true,
             "--setup" => out.setup = true,
             "--engine" => out.engine = true,
             "--page" => {
@@ -97,9 +102,9 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
             other => return Err(ArgError(format!("unknown argument: {other}"))),
         }
     }
-    if (out.data_dir.is_some() || out.sandbox_reset) && !out.sandbox {
+    if (out.data_dir.is_some() || out.sandbox_reset || out.sandbox_exercise) && !out.sandbox {
         return Err(ArgError(
-            "--data-dir and --sandbox-reset only apply with --sandbox".into(),
+            "--data-dir, --sandbox-reset and --sandbox-exercise only apply with --sandbox".into(),
         ));
     }
     Ok(out)
@@ -163,6 +168,12 @@ mod tests {
         assert!(p(&["--page"]).is_err());
         assert!(p(&["--data-dir", "/tmp/x"]).is_err());
         assert!(p(&["--sandbox-reset"]).is_err());
+        assert!(p(&["--sandbox-exercise"]).is_err());
+        assert!(
+            p(&["--sandbox", "--sandbox-exercise"])
+                .unwrap()
+                .sandbox_exercise
+        );
         let a = p(&["--sandbox", "--data-dir", "/tmp/x", "--sandbox-reset"]).unwrap();
         assert_eq!(a.data_dir, Some(PathBuf::from("/tmp/x")));
         assert!(parse(Vec::new(), true).unwrap().sandbox);
