@@ -141,7 +141,7 @@ impl log::Log for StderrLogger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if !self.enabled(record.metadata()) {
+        if !self.enabled(record.metadata()) || config_log_quieted(record.target()) {
             return;
         }
         let level = match record.level() {
@@ -159,6 +159,40 @@ impl log::Log for StderrLogger {
 }
 
 static STDERR_LOGGER: StderrLogger = StderrLogger;
+
+thread_local! {
+    /// Depth of active [`quiet_config_log`] scopes on this thread.
+    static QUIET_CONFIG_LOG: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// True when `target` is the config target and this thread is inside a
+/// [`quiet_config_log`] scope. Other targets and threads are never quieted.
+fn config_log_quieted(target: &str) -> bool {
+    target == lf_core::config::LOG_TARGET
+        && QUIET_CONFIG_LOG
+            .try_with(|depth| depth.get() > 0)
+            .unwrap_or(false)
+}
+
+/// Leaves a [`quiet_config_log`] scope on drop, so a panic unwinding out of
+/// the scope (or a nested one) restores the depth.
+struct QuietConfigLog;
+
+impl Drop for QuietConfigLog {
+    fn drop(&mut self) {
+        let _ = QUIET_CONFIG_LOG.try_with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Run `f` with [`StderrLogger`] dropping only `localflow.config` records on
+/// this thread, as Python's launcher guard silences that logger around its
+/// read-only configured check. The global level, stderr and every other
+/// target and thread are unchanged; scopes nest.
+pub(crate) fn quiet_config_log<R>(f: impl FnOnce() -> R) -> R {
+    QUIET_CONFIG_LOG.with(|depth| depth.set(depth.get() + 1));
+    let _scope = QuietConfigLog;
+    f()
+}
 
 /// Install [`StderrLogger`] unless a logger is already installed (then that
 /// one and its level filter are kept).
@@ -469,5 +503,32 @@ mod tests {
         super::init_stderr_logger();
         super::init_stderr_logger();
         assert!(log::max_level() >= log::LevelFilter::Warn);
+    }
+
+    #[test]
+    fn quiet_config_log_drops_only_config_records_in_scope() {
+        use super::{config_log_quieted, quiet_config_log};
+        let config = lf_core::config::LOG_TARGET;
+        assert!(!config_log_quieted(config));
+        quiet_config_log(|| {
+            assert!(config_log_quieted(config));
+            assert!(!config_log_quieted("localflow.secrets"));
+            assert!(!config_log_quieted("lf"));
+            // Another thread is never quieted.
+            assert!(!std::thread::spawn(move || config_log_quieted(config))
+                .join()
+                .unwrap());
+            // Nested scopes restore the outer one.
+            assert!(quiet_config_log(|| config_log_quieted(config)));
+            assert!(config_log_quieted(config));
+        });
+        assert!(!config_log_quieted(config));
+        // A panic inside (nested) scopes restores the depth on unwind.
+        let caught = std::panic::catch_unwind(|| {
+            quiet_config_log(|| quiet_config_log(|| panic!("boom")));
+        });
+        assert!(caught.is_err());
+        assert!(!config_log_quieted(config));
+        assert_eq!(quiet_config_log(|| 7), 7);
     }
 }

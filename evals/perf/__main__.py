@@ -26,6 +26,9 @@ from .schema import (
     validate_result,
     write_result,
 )
+from .suites import load_builtin_suites
+
+load_builtin_suites()
 
 EXIT_OK = 0
 EXIT_BLOCKED = 1

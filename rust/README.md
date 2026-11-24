@@ -342,9 +342,16 @@ lf-rs setup install-app
   `prompts list/show/approve/reject` and `recall` are hidden, as in Python.
 * `token` prints the API token and never creates it (exit 1 with a hint when
   there is none). `hub` follows `localflow/desktop_launch.py`
-  (`lf/src/desktop_launch.rs`): `--gpui`/`LOCALFLOW_UI=gpui` opens LocalFlow
-  Preview under the same discovery, probe and notice rules; the legacy window
-  is `python -m localflow.hub_window --page PAGE` from the Python install
+  (`lf/src/desktop_launch.rs`): on Linux and macOS it opens an installed
+  LocalFlow Preview by default once LocalFlow is set up (the Python
+  `main_app.is_configured` marker in the active config file, without its
+  legacy flat fallback), or with `--gpui`/`LOCALFLOW_UI=gpui`,
+  under the same discovery, probe and notice rules; it quietly opens the
+  legacy window when the preview isn't installed, on first run and for the
+  Setup page; `--legacy`/`LOCALFLOW_UI=legacy` always
+  opens the legacy window (builds after v0.2.2; the released v0.2.2 CLIs
+  don't have this selector). The legacy window is
+  `python -m localflow.hub_window --page PAGE` from the Python install
   (the one `setup install-app` uses).
 * `tweak` asks the loopback Ollama (the saved `llm.base_url` when the
   provider is `ollama` and the URL is loopback, else `localhost:11434`)
