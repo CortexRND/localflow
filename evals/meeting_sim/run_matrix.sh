@@ -31,11 +31,13 @@ fi
 if [ -z "$OUT" ]; then
   echo "run_matrix.sh: set OUT or pass --out DIR" >&2; exit 2
 fi
-mkdir -p "$OUT"
-OUT="$(cd "$OUT" && pwd)"
-SIM_SUT="$(cd "$SIM_SUT" && pwd)"
+OUT="${OUT/#\~/$HOME}"
+SIM_SUT="${SIM_SUT/#\~/$HOME}"
+mkdir -p "$OUT" || exit 2
+OUT="$(cd "$OUT" && pwd)" || exit 2
+SIM_SUT="$(cd "$SIM_SUT" && pwd)" || exit 2
 export SIM_SUT
-cd "$HERE"
+cd "$HERE" || exit 2
 for k in $(seq 1 "$REPEATS"); do for s in $SCENARIOS; do
   timeout 1800 "$PYTHON" driver.py --sut "$SIM_SUT" --scenario "$s" --out "$OUT/r$k/results/$s.json" >> "$OUT/matrix.log" 2>&1 || echo "NOT_EXERCISED r$k $s exit $?" >> "$OUT/matrix.log"
 done; done; echo MATRIX_DONE >> "$OUT/matrix.log"
