@@ -310,7 +310,7 @@ def crash(exc):
     text = "".join(report.format())
     return text if report.stack else "Traceback (most recent call last):\n" + text
 
-sys.stdout.write("lf-stt-probe:")
+sys.stdout.write("lf-stt-probe:%d:" % available("localflow"))
 sys.stdout.flush()
 mode, selected = sys.argv[1:]
 result = {}
@@ -358,32 +358,54 @@ print(json.dumps(result))
 
 // Availability and entry points describe the installed Python runtime, not Rust
 // engine features. Only probe that boundary; config, catalogs and downloads are native.
+// The interpreter LocalFlow is installed in answers, like the Python CLI; with no
+// such candidate, the first one that ran the probe does (crashes included).
 fn probe_python(mode: &str, provider: &str) -> Value {
-    crate::python::candidates()
-        .into_iter()
-        .find_map(|interpreter| {
-            let output = crate::python::probe(&interpreter, PROBE)
-                .args([mode, provider])
-                .output()
-                .ok()?;
-            probe_result(output.status.code(), &output.stdout, &output.stderr)
-        })
-        .unwrap_or(Value::Null)
+    let results = crate::python::candidates().into_iter().map(|interpreter| {
+        let output = crate::python::probe(&interpreter, PROBE)
+            .args([mode, provider])
+            .output()
+            .ok()?;
+        probe_result(output.status.code(), &output.stdout, &output.stderr)
+    });
+    choose(results)
 }
 
-/// `None` when the interpreter could not start the probe (spawn or imports).
-/// Any later failure is that interpreter's answer, like Python's crash.
-fn probe_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Option<Value> {
+/// The first answer from an interpreter with LocalFlow installed, else the
+/// first answer at all. Stops probing at the first LocalFlow answer.
+fn choose(results: impl IntoIterator<Item = Option<(bool, Value)>>) -> Value {
+    let mut first = None;
+    for (localflow, result) in results.into_iter().flatten() {
+        if localflow {
+            return result;
+        }
+        first.get_or_insert(result);
+    }
+    first.unwrap_or(Value::Null)
+}
+
+/// `None` when the interpreter could not start the probe (spawn or imports);
+/// otherwise whether it has LocalFlow installed and its answer. Any failure
+/// after the start is that answer, like Python's crash.
+fn probe_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Option<(bool, Value)> {
     let stdout = stdout.strip_prefix(b"lf-stt-probe:")?;
+    let (localflow, stdout) = match stdout {
+        [b'1', b':', rest @ ..] => (true, rest),
+        [b'0', b':', rest @ ..] => (false, rest),
+        _ => return None,
+    };
     if code == Some(0) {
         if let Ok(result) = serde_json::from_slice(stdout) {
-            return Some(result);
+            return Some((localflow, result));
         }
     }
-    Some(json!({
-        "traceback": String::from_utf8_lossy(stderr),
-        "exit": code.filter(|&code| code != 0).unwrap_or(1),
-    }))
+    Some((
+        localflow,
+        json!({
+            "traceback": String::from_utf8_lossy(stderr),
+            "exit": code.filter(|&code| code != 0).unwrap_or(1),
+        }),
+    ))
 }
 
 /// Python lets a plug-in's exception escape click: traceback, exit 1.
@@ -402,28 +424,57 @@ fn crashed(probe: &Value, io: &mut Io<'_>) -> Result<()> {
 mod tests {
     use serde_json::json;
 
-    use super::{effective_width, probe_result, progress_line};
+    use super::{choose, effective_width, probe_result, progress_line};
 
     #[test]
     fn only_interpreters_that_cannot_run_the_probe_are_skipped() {
         assert_eq!(probe_result(Some(1), b"", b"SyntaxError"), None);
         assert_eq!(probe_result(Some(0), b"{}", b""), None);
+        assert_eq!(probe_result(Some(0), b"lf-stt-probe:{}", b""), None);
         assert_eq!(
-            probe_result(Some(0), b"lf-stt-probe:{\"plugins\": {}}\r\n", b""),
-            Some(json!({"plugins": {}}))
+            probe_result(Some(0), b"lf-stt-probe:1:{\"plugins\": {}}\r\n", b""),
+            Some((true, json!({"plugins": {}})))
         );
         assert_eq!(
-            probe_result(Some(3), b"lf-stt-probe:", b"bye\n"),
-            Some(json!({"traceback": "bye\n", "exit": 3}))
+            probe_result(Some(3), b"lf-stt-probe:0:", b"bye\n"),
+            Some((false, json!({"traceback": "bye\n", "exit": 3})))
         );
         assert_eq!(
-            probe_result(None, b"lf-stt-probe:", b""),
-            Some(json!({"traceback": "", "exit": 1}))
+            probe_result(None, b"lf-stt-probe:1:", b""),
+            Some((true, json!({"traceback": "", "exit": 1})))
         );
         assert_eq!(
-            probe_result(Some(0), b"lf-stt-probe:", b"oops"),
-            Some(json!({"traceback": "oops", "exit": 1}))
+            probe_result(Some(0), b"lf-stt-probe:0:", b"oops"),
+            Some((false, json!({"traceback": "oops", "exit": 1})))
         );
+    }
+
+    #[test]
+    fn the_localflow_interpreter_answers() {
+        let other = json!({"plugins": {}});
+        let install = json!({"plugins": {"demo": false}});
+        let crash = json!({"traceback": "boom", "exit": 1});
+        let first = json!({"plugins": {"first": null}});
+        let answer = |localflow, value: &serde_json::Value| Some((localflow, value.clone()));
+        assert_eq!(
+            choose([None, answer(false, &other), answer(true, &install)]),
+            install
+        );
+        assert_eq!(
+            choose([answer(false, &other), answer(true, &crash), None]),
+            crash
+        );
+        assert_eq!(
+            choose([None, answer(false, &first), answer(false, &other)]),
+            first
+        );
+        assert_eq!(choose([None, None]), serde_json::Value::Null);
+        let mut probed = 0;
+        let results = [Some((true, json!(1))), Some((true, json!(2)))]
+            .into_iter()
+            .inspect(|_| probed += 1);
+        assert_eq!(choose(results), json!(1));
+        assert_eq!(probed, 1);
     }
 
     #[test]
