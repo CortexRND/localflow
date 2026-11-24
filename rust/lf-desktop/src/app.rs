@@ -1839,6 +1839,7 @@ pub fn run(launch: Launch) -> RunStatus {
             );
             match window {
                 Ok(window) => {
+                    crate::console::detach();
                     let _ = window.update(cx, |shell, window, cx| {
                         window.focus(&shell.focus_handle(cx));
                         Shell::install_focus_recovery(window, cx);

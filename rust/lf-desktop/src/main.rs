@@ -13,7 +13,7 @@ use lf_desktop::launch::{self, Launched};
 use lf_desktop::page::Page;
 
 fn main() -> ExitCode {
-    let console = console::attach_parent();
+    lf_desktop::console::attach_parent();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let env_sandbox = std::env::var("LOCALFLOW_SANDBOX").is_ok_and(|v| v == "1" || v == "true");
     #[cfg(feature = "runtime")]
@@ -91,7 +91,6 @@ fn main() -> ExitCode {
         lf_ui::hub_route::plan_initial_route(configured, args.page.map(|p| p.route())),
         Ok(lf_ui::hub_route::InitialRoute::Setup { .. })
     );
-    console.detach();
     let status = app::run(Launch {
         services,
         page: args.page.unwrap_or(Page::Home),
@@ -147,55 +146,4 @@ fn speech_helper(env_sandbox: bool) -> Option<ExitCode> {
             }
         },
     )
-}
-
-/// Release builds on Windows are GUI-subsystem programs, so a terminal does
-/// not give them a console. When no output handles were inherited (an
-/// unredirected launch from `cmd` or PowerShell), borrow the parent's console
-/// for the command-line output, and leave it before the window opens so
-/// closing that terminal does not end the app.
-#[cfg(all(windows, not(debug_assertions)))]
-mod console {
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::System::Console::{
-        AttachConsole, FreeConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
-        STD_OUTPUT_HANDLE,
-    };
-
-    pub struct Parent(bool);
-
-    pub fn attach_parent() -> Parent {
-        let missing = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
-            .into_iter()
-            .any(|which| {
-                // SAFETY: GetStdHandle only reads this process's standard handles.
-                let handle = unsafe { GetStdHandle(which) };
-                handle.is_null() || handle == INVALID_HANDLE_VALUE
-            });
-        // SAFETY: a GUI-subsystem process starts without a console; a failed
-        // attach (no parent console) leaves the process unchanged.
-        Parent(missing && unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0)
-    }
-
-    impl Parent {
-        pub fn detach(self) {
-            if self.0 {
-                // SAFETY: frees only the console this process attached to.
-                unsafe { FreeConsole() };
-            }
-        }
-    }
-}
-
-#[cfg(not(all(windows, not(debug_assertions))))]
-mod console {
-    pub struct Parent;
-
-    pub fn attach_parent() -> Parent {
-        Parent
-    }
-
-    impl Parent {
-        pub fn detach(self) {}
-    }
 }
