@@ -8,6 +8,10 @@ pub use parakeet::ParakeetEngine;
 #[cfg(feature = "whisper")]
 pub use whisper::WhisperEngine;
 
+/// How `WhisperEngine::new` says whisper.cpp has no such model size (a
+/// faster-whisper-only size or repo); followed by `: <size>`.
+pub const UNSUPPORTED_WHISPER_SIZE: &str = "unsupported whisper.cpp model size";
+
 /// The original Parakeet model preprocessor uses n_fft=512 at 16 kHz.
 pub const PARAKEET_MIN_SAMPLES: usize = 512;
 

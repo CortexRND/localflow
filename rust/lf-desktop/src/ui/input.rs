@@ -137,6 +137,8 @@ pub struct TextInput {
     selecting: bool,
     layout: Option<Layout>,
     accessible_label: SharedString,
+    /// Opt-in focus decoration (see [`super::FocusRing`]).
+    focus_ring: super::FocusRing,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -168,6 +170,16 @@ impl TextInput {
             selecting: false,
             layout: None,
             accessible_label: SharedString::default(),
+            focus_ring: super::FocusRing::Default,
+        }
+    }
+
+    /// Replace or hide the focus ring and focus edge (default: its own).
+    /// Hidden keeps focus, the caret and the selection.
+    pub fn set_focus_ring(&mut self, ring: super::FocusRing, cx: &mut Context<Self>) {
+        if self.focus_ring != ring {
+            self.focus_ring = ring;
+            cx.notify();
         }
     }
 
@@ -1143,6 +1155,11 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let focused = self.focus.is_focused(window);
+        // `None` while unfocused or with the ring hidden.
+        let ring = self
+            .focus_ring
+            .shadows(|| super::ring(&t))
+            .filter(|_| focused);
         let (font, line) = if self.multiline {
             text::reading()
         } else {
@@ -1150,7 +1167,7 @@ impl Render for TextInput {
         };
         let border = if self.invalid {
             t.tone(crate::theme::Tone::Error).0
-        } else if focused {
+        } else if ring.is_some() {
             t.focus
         } else {
             t.border_control
@@ -1194,9 +1211,9 @@ impl Render for TextInput {
         } else {
             root = root.h(tsize::control_md());
         }
-        if focused {
+        if let Some(ring) = ring {
             // Neutral edge plus the shared focus ring (no layout shift).
-            root = root.shadow(super::ring(&t));
+            root = root.shadow(ring);
         }
         if !self.disabled {
             root = root

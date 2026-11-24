@@ -251,7 +251,7 @@ The default is unchanged: `lf hub`, `lf phrases` and `lf setup` open the legacy
 windows. To use the preview instead:
 
 ```bash
-lf hub --gpui                 # no page: the preview's own first-run wizard still applies
+lf hub --gpui                 # sends no page; only once LocalFlow is set up (below)
 lf hub --gpui --page history  # sends --page History
 lf phrases --gpui             # sends --page "Hot Phrases"
 lf setup --gpui               # sends --setup
@@ -296,6 +296,15 @@ lf hub --legacy               # always the legacy window; nothing is probed
   an already open preview window (no second window); a non-zero exit, a failed
   start, a missing/unrecognised install or a failed probe prints one short notice
   and opens the legacy window once. A crash after those 1.5 s isn't detected.
+- **Not set up yet:** `lf hub` and `lf phrases` open the preview only when the
+  active config (`LOCALFLOW_CONFIG` or the default path) has the setup marker
+  (`[setup] version > 0` or an explicit `[stt] provider`/`model`). Only the
+  active config is read: an unmigrated legacy `~/.localflow.toml` stays on the
+  legacy window (which migrates it) and counts from the next launch. Otherwise,
+  after the probe, they print `lf: LocalFlow isn't set up yet (run lf setup);
+  opening the legacy window.` and open the legacy window once, so they never
+  land in the preview's own first-run wizard. `lf setup --gpui` is the only `lf` command
+  that opens that wizard.
   With the preview, `lf phrases` and `lf setup` return once the window has
   started instead of when it closes.
 - **Sandbox:** with `LOCALFLOW_SANDBOX=1` (or `true`) a GPUI selection is refused
@@ -405,7 +414,9 @@ meantime, are kept. The running LocalFlow runtime reads the same file.
   this existed have no clip on that row; run `--sandbox-reset` to re-seed.
 - Keys live in memory only. The OS keyring is never read or written.
 - Ask, Meetings and Prompts use the existing in-process fakes, and no socket is
-  opened. Ask answers with a labelled keyword match over the example history.
+  opened. Ask runs its tool loop with fake LocalFlow tools over the example
+  history and prompt queue and a scripted offline model (no MCP server is
+  started); its basic-recall fallback is a labelled keyword match.
 - Setup, model storage, key import, Test connection and the runtime status are
   simulated: downloads tick to 100 % in about 3 s, the microphone meter plays a
   canned curve (the microphone is never opened), the trial returns a fixed
@@ -647,7 +658,7 @@ once the tap is installed with Input Monitoring granted (otherwise it stays
 | Enter / Space | Activate the focused button, switch, segment, row or menu item |
 | Up / Down | Move between sidebar pages (when the sidebar is focused), history rows, or menu items |
 | Delete, Ctrl+C | Delete (with confirmation) or copy the selected History entry |
-| Escape | Close the dialog, menu or toast, close the setup wizard (the draft is kept), or clear the History search |
+| Escape | Close the dialog, menu or toast, close the setup wizard (the draft is kept), clear the History search, or stop a running Ask question |
 | Ctrl+Q / Ctrl+W | Quit (waits for pending writes) / close the window |
 
 Text fields handle Unicode graphemes, IME composition, mouse and keyboard selection,
@@ -662,6 +673,98 @@ Confirmation dialogs move focus to **Cancel**. Tab and Shift+Tab stay inside the
 dialog, and Escape cancels without running the action. Navigation and the
 search and new-item shortcuts are blocked while a dialog is open, and focus
 returns to where it was when the dialog closes.
+
+## Ask and LocalFlow's MCP tools
+
+Ask answers with the model configured on the Models page, which calls
+LocalFlow's own read-only [MCP server](../../README.md#mcp-server-for-agents)
+(`search_dictations`, `get_dictation`, `search_prompts`, `get_prompt`). Each call
+is shown inline as a card with its name, arguments, status (Running, Done or
+Error) and, when expanded, a preview of the result. Follow-up questions send
+the last three answered turns as context.
+
+- **Finding the server.** `LOCALFLOW_MCP_BIN` may be set to an absolute path to
+  `localflow-mcp`, to `lf` (run as `lf mcp`) or to a Python interpreter (run as
+  `python -m localflow.mcp_server`). The file name decides which. When it is set,
+  nothing else is tried. An absolute path that doesn't exist counts as not
+  installed; any other unusable value (relative, a directory, not executable)
+  is an error, and `LOCALFLOW_MCP_BIN=off` turns the tools off. Without it,
+  Ask looks beside the `lf-desktop` executable and then in the absolute `PATH` directories for
+  `localflow-mcp`, then for `lf` (only next to a `localflow` entry point, so an
+  unrelated `lf` is never started), then for `python3`/`python`. The server is
+  started without a shell, with fixed arguments, from its own directory, and
+  with stderr discarded. A relative `LOCALFLOW_CONFIG` is made absolute against
+  the desktop's working directory first, so the server reads the same config
+  file (if that fails, the server isn't started and basic recall answers).
+- **Only the four tools.** A tool is used only if the server marks it read-only
+  and advertises the same input schema as `localflow/mcp_server.py`. Arguments
+  are checked locally (types, enums, 200-character strings, `limit` at most 10).
+  The model can't run commands, open files or reach URLs. The server's own
+  instructions and tool descriptions are never given to the model. Tool results
+  are passed as fenced data that the model is told not to follow. Card text is
+  masked for credential-like strings, and tool data is never logged.
+- **Time filter.** "Past week" and "Past month" always set
+  `search_dictations.since` to `7d` / `30d`, the same values `/api/recall`
+  uses. The model can narrow the range with `until` but can't widen it. Work
+  prompts have no date filter, so the prompt tools aren't offered while a range
+  is selected, and only dictations returned by a search can be opened.
+- **Sources.** The tools search dictations and work prompts. Meeting
+  transcripts and notes are searched only by basic recall, and the Sources
+  tokens show which set is in use.
+- **Model and privacy.** The provider is built like the service's recall model
+  (`build_llm` with the configured provider, endpoint, endpoint-bound key and
+  `num_ctx` 8192), from the desktop process. With a cloud provider, the tool
+  results shown in the cards (dictations and work prompts) are sent to it, as
+  the note under the composer says. Ask never switches to another model.
+- **Limits.** Each question has one 180-second deadline, started before the
+  server is looked for. Everything below is also capped by what is left of
+  it: starting the server and `initialize` (5 s per candidate), `tools/list`
+  (5 s), each tool call (15 s), each model request (at most 60 s, set per
+  request as the provider's HTTP timeout) and the basic-recall fallback's
+  `/api/recall` request (otherwise 300 s). When the deadline passes, the
+  running tool card ends as "Ran out of time" and the answer says Ask ran out
+  of time; basic recall is not started then (nor with under a second left).
+  The tools check when the page opens keeps its own 5 s caps. At most 6 model
+  completions per question (the last
+  one may only answer, and no extra completion is made after it) and 8 tool
+  calls. Replies are capped at 800 tokens (OpenAI o-series and GPT-5 models,
+  also as `openai/o4-mini`, `openai/gpt-5-mini` and the like, get 4,096 in
+  total, since their cap also counts hidden reasoning), a JSON-RPC line at
+  1 MiB, and the result text of one call at 6,000 characters. Each model
+  request also caps all tool result text it resends together at 8,000 UTF-8
+  bytes (after `<` and `>` are neutralised, cut markers included), filled
+  newest first: the latest result gets all of it except the space the earlier
+  results' excerpts take (at most 500 bytes each and 2,000 together), so a
+  short latest result is sent whole; the call tags, arguments and
+  statuses are always sent in full and in order. This bounds the results,
+  not the whole prompt: the instructions, question, earlier turns and call
+  metadata come on top, so it is not a token ceiling. Ollama `num_ctx` is
+  8192.
+- **Fallback.** If the server is missing, turned off or fails to start, or
+  stops responding during a question, Ask answers with basic recall
+  (`/api/recall`, as before) and says so under the answer. The indicator next
+  to the time filter distinguishes "Tools not installed", "Tools off" and
+  "Tools unavailable"; click it to check again. A model error is shown as an
+  error, never retried on another model.
+- **Warning banner.** The tools (started from the desktop process) don't need
+  the local service, and basic recall doesn't need the tools, so Ask warns only
+  when neither can answer: the tools are not installed, off or failed **and**
+  the service's health check reported it offline. Nothing is shown while
+  either check is still running, when the tools are connected, or when the
+  service is up. "Try again" checks both again. Send stays enabled either way;
+  the question reports what actually answered.
+- **Stop.** Stop (or Escape) discards the running answer and puts the question
+  back in the composer. Every wait checks the stop flag every 100 ms, and the
+  server (with its process group on Unix) is killed and reaped. A model request
+  already in flight can't be interrupted. Its result is dropped, and the worker
+  exits within that request's timeout.
+- **Focus rings.** On Ask, the neutral 2 px ring shows after Tab or Shift-Tab
+  and hides on the next mouse press on the page. A click still focuses (the
+  composer shows its caret) but draws no ring or focus edge. Other pages show
+  the ring on any focus.
+
+`LOCALFLOW_MCP_TEST_PYTHON=/abs/python cargo test … optional_real_python_server`
+also runs the client against the real Python server (with a temporary `HOME`).
 
 ## Known limitations
 

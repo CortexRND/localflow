@@ -279,6 +279,34 @@ def test_prompt_search_and_get(sandbox):
     assert all(r["structuredContent"]["note"] == "prompt file missing" for r in results[6:10])
 
 
+def test_relative_prompt_path_reads_from_supplied_cwd(sandbox):
+    """Both servers run with cwd=ROOT (standing in for their own directory)
+    and read a relative prompt path against LOCALFLOW_MCP_PROMPTS_CWD."""
+    home, config, env = sandbox
+    runtime = home.parent / "runtime"
+    (runtime / "notes").mkdir(parents=True)
+    (runtime / "notes" / "walrus-brief.md").write_text("Runtime walrus body", encoding="utf-8")
+    assert not (ROOT / "notes" / "walrus-brief.md").exists()
+    data = home / ".localflow"
+    data.mkdir()
+    (data / "queue.json").write_text(json.dumps([
+        {"id": "rel", "title": "Rel", "created": "2024-06-20T13:04:00",
+         "path": "notes/walrus-brief.md"},
+    ]), encoding="utf-8")
+    requests = (call("get_prompt", id="rel"), call("search_prompts", query="walrus"))
+    supplied = (home, config, {**env, "LOCALFLOW_MCP_PROMPTS_CWD": str(runtime)})
+    get, search = compare(supplied, *requests)
+    assert get["structuredContent"]["body"] == "Runtime walrus body"
+    assert search["structuredContent"]["results"][0]["id"] == "rel"
+    # Unset: standalone servers keep reading against their own cwd.
+    get, _ = compare(sandbox, *requests)
+    assert get["structuredContent"]["note"] == "prompt file missing"
+    # Supplied but empty (desktop cwd unreadable): relative paths stay unread.
+    empty = (home, config, {**env, "LOCALFLOW_MCP_PROMPTS_CWD": ""})
+    get, _ = compare(empty, *requests)
+    assert get["structuredContent"]["note"] == "prompt file missing"
+
+
 def test_missing_and_malformed_queue(sandbox):
     home, _, _ = sandbox
     req = call("search_prompts")

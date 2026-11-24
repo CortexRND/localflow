@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -11,9 +12,14 @@ use lf_core::{
 };
 use serde_json::{json, Value};
 
+/// The launching app's cwd, the base for relative queue prompt paths.
+pub const PROMPTS_CWD_ENV: &str = "LOCALFLOW_MCP_PROMPTS_CWD";
+
 pub struct Sources {
     pub history: PathBuf,
     pub queue: PathBuf,
+    /// [`PROMPTS_CWD_ENV`]; `None` (unset) keeps this process's cwd.
+    pub prompts_cwd: Option<OsString>,
 }
 
 impl Sources {
@@ -21,6 +27,7 @@ impl Sources {
         Self {
             history: history::history_path(),
             queue: localflow_dir().join("queue.json"),
+            prompts_cwd: std::env::var_os(PROMPTS_CWD_ENV),
         }
     }
 }
