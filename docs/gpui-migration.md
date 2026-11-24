@@ -99,13 +99,14 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    happen. In real mode, every write goes through `config_write`
    or the existing store APIs. The unit tests in `data.rs`, `sandbox.rs` and
    `controllers/*` cover this already.
-3. **Platforms.** The app builds and passes tests on Linux (X11 and Wayland) and
-   macOS in CI. Today `gpui.yml` runs fmt, clippy, tests and the build for both the
-   default and the `--features runtime` build on Linux, and type-checks both on
-   macOS; `gpui-package.yml` builds, verifies and smoke-installs the release
-   (runtime) package on Linux x86_64, macOS arm64 and macOS x86_64. The
-   `lf-desktop` test suite does not run on macOS CI. Launching it on a machine with
-   no GPU shows a clear error, not a crash.
+3. **Platforms.** The app builds and passes tests on Linux (X11; Wayland is not
+   exercised) and macOS in CI. Today `gpui.yml` runs fmt, clippy, tests and the
+   build for both the default and the `--features runtime` build on Linux, and
+   type-checks both on macOS; `gpui-package.yml` builds, verifies and
+   smoke-installs the release (runtime) package on Linux x86_64, macOS arm64 and
+   macOS x86_64. On macOS and Windows CI only the `lf-desktop` library unit tests
+   of the default build run. Launching it on a machine with no GPU shows a clear
+   error, not a crash.
 4. **Launch integration.** `lf hub --page X` opens `lf-desktop` on page X when
    it's installed and falls back to the current UI otherwise. Two launches hand
    over the page instead of opening two windows. 4a implements this behind the

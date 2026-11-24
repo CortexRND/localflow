@@ -2469,7 +2469,9 @@ elif args[:2] == ["worktree", "create"]:
 """
 
 
-def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+def _dispatch_without_orca(rust_build, sandbox, tmp_path):
+    """Dispatch refusals and dry runs, which need no orca; returns what the
+    orca checks continue from, with orca configured and `approved` approved."""
     paths = _require_isolated(rust_build, sandbox, "history_path")
     home = Path(paths["history_path"]).parent.parent
     queue_path = _seed_prompt_queue(home)
@@ -2503,9 +2505,18 @@ def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
     no_approved.set_status(approved, "rejected")
     check("prompts", "dispatch", "--all", code=0)
     no_approved.set_status(approved, "approved", expect=("rejected",))
-    if os.name == "nt":
-        return  # subprocess needs a real orca.exe; the rest is covered on POSIX
+    return queue_path, check, (pending, approved, failed)
 
+
+def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+    _dispatch_without_orca(rust_build, sandbox, tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake orca is a POSIX shell script")
+def test_cli_prompts_dispatch_through_orca(rust_build, sandbox, tmp_path):
+    from localflow import dispatch as py_dispatch
+
+    queue_path, check, (pending, approved, failed) = _dispatch_without_orca(rust_build, sandbox, tmp_path)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     (bin_dir / "fake_orca.py").write_text(_FAKE_ORCA, encoding="utf-8")
@@ -3605,11 +3616,66 @@ _NO_INSTALL = "no Python LocalFlow install found; activate its virtualenv or put
 def _install_or_skip(python: Path) -> Path:
     """The `localflow` script lf-rs finds for `python`: next to it, or in
     Scripts\\ for a non-venv Windows Python. Without one `agent install` refuses."""
+    script = _script_of(python)
+    if script is None:
+        _missing_install(f"no localflow script for {python}; lf-rs refuses to install")
+    return script
+
+
+def _script_of(python: Path) -> Path | None:
     names = [Path("localflow.exe"), Path("Scripts", "localflow.exe")] if os.name == "nt" else [Path("localflow")]
-    for name in names:
-        if (python.parent / name).exists():
-            return python.parent / name
-    pytest.skip(f"no localflow script for {python}; lf-rs refuses to install")
+    return next((python.parent / name for name in names if (python.parent / name).is_file()), None)
+
+
+def _missing_install(reason: str) -> None:
+    if REQUIRED:
+        pytest.fail(f"LF_RUST_PARITY_REQUIRED=1 but {reason} (pip install -e . for this interpreter)")
+    pytest.skip(reason)
+
+
+# python.rs `probe` + `IMPORT_PROBE`: the working directory is not an install.
+_IMPORT_PROBE = (
+    "import sys\nsys.path[:] = [entry for entry in sys.path if entry]\n"
+    "import importlib.util\nsys.exit(importlib.util.find_spec('localflow') is None)"
+)
+
+
+def _interpreter_or_skip(python: Path, env: dict) -> None:
+    """lf-rs's `find_interpreter` test for `python` (its `localflow` script, or
+    an installed localflow), probed with the env and cwd `_run_cli` gives lf-rs."""
+    if _script_of(python) is None and _run_cli([str(python), "-c", _IMPORT_PROBE], env).returncode != 0:
+        _missing_install(f"{python} has no localflow script and no installed localflow; lf-rs refuses install-app")
+
+
+def test_missing_install_fails_when_parity_is_required(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules[__name__], "REQUIRED", False)
+    with pytest.raises(pytest.skip.Exception):
+        _install_or_skip(tmp_path / "python3")
+    monkeypatch.setattr(sys.modules[__name__], "REQUIRED", True)
+    with pytest.raises((pytest.skip.Exception, pytest.fail.Exception)) as outcome:
+        _install_or_skip(tmp_path / "python3")
+    assert outcome.type is pytest.fail.Exception
+    assert "LF_RUST_PARITY_REQUIRED=1" in str(outcome.value)
+
+
+def test_interpreter_without_an_install_skips_or_fails(monkeypatch, tmp_path):
+    probes, codes = [], iter([1, 0, 1])  # import fails, succeeds, fails
+
+    def fake_run_cli(command, env):
+        probes.append(command)
+        return types.SimpleNamespace(returncode=next(codes))
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_run_cli", fake_run_cli)
+    monkeypatch.setattr(module, "REQUIRED", False)
+    with pytest.raises(pytest.skip.Exception):
+        _interpreter_or_skip(tmp_path / "python3", {})
+    _interpreter_or_skip(tmp_path / "python3", {})
+    monkeypatch.setattr(module, "REQUIRED", True)
+    with pytest.raises((pytest.skip.Exception, pytest.fail.Exception)) as outcome:
+        _interpreter_or_skip(tmp_path / "python3", {})
+    assert outcome.type is pytest.fail.Exception
+    assert probes == [[str(tmp_path / "python3"), "-c", _IMPORT_PROBE]] * 3
 
 
 def _stub_python(directory: Path, body: str) -> Path:
@@ -3912,7 +3978,7 @@ def test_cli_agent_platform_errors(rust_build, sandbox):
 
 def test_cli_setup_install_app(rust_build, sandbox):
     python, env = _same_python(sandbox)
-    _install_or_skip(python)
+    _interpreter_or_skip(python, env)
     apps = sandbox["home"] / "Applications"
     for _ in range(2):  # the second run rewrites the existing bundles
         rust, _ = _both_clis(rust_build, [apps], python, env, "setup", "install-app")
