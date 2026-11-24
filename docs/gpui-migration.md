@@ -181,18 +181,31 @@ integration and legacy retirement still require these gates.
      `~/.localflow/desktop/main-app.lock` and, in a home without one,
      `~/.localflow/history.sqlite`. Uninstall leaves both in place.
 
+   Checked against the published release on 2026-11-24. `v0.2.3` (tag at
+   `eb8b88a`) is the first release that carries the preview package, as the
+   owner decided (Taj, 2026-11-24, "Tag next release").
+   - The release has the four archives (`linux-x86_64`, `macos-arm64`,
+     `macos-x86_64`, `windows-x86_64`) and `SHA256SUMS-gpui-preview`, and every
+     archive matches its line in that file.
+   - On Linux x86_64 (Ubuntu, X11 under Xvfb), in a fresh HOME that already had
+     `~/.localflow` and `config.toml`, the tag's
+     `scripts/install_gpui_preview.sh` run with no arguments downloaded
+     `v0.2.3`, verified it and installed 0.2.3 over a 0.2.2 CI package: a real
+     version-to-version upgrade. The installed `lf-desktop` has the same
+     SHA-256 as the one in the release archive. The window opened on Home and
+     closed with Ctrl+Q.
+   - With no display, the same no-argument run installs without opening the
+     app. After it and after its uninstall, every file under `~/.localflow`
+     and `~/.config` has the same SHA-256 as before. Opening the window changed
+     two header fields of an existing `history.sqlite` (SQLite's file change
+     counter and version-valid-for number); its dump is identical.
+   - `--release v0.2.2` is refused with "Release v0.2.2 has no
+     SHA256SUMS-gpui-preview" and leaves the installed 0.2.3 in place. A copy
+     of the installer from before `v0.2.3` stays pinned to `v0.2.2` and needs
+     `--release v0.2.3`.
+   - Not checked: the default download on macOS.
+
    Still open, so this gate isn't met:
-   - No release carries the preview package yet. Packaging landed after
-     `v0.2.2`, so the installer's default (`PREVIEW_RELEASE="v0.2.2"`) fails
-     with "Release v0.2.2 has no SHA256SUMS-gpui-preview". It installs only from
-     `--archive` until the next tag publishes the assets (see "Before tagging"
-     in [releasing.md](releasing.md)). That tag's installer defaults to the new
-     release; a copy of the installer from before it stays pinned to `v0.2.2`
-     and needs `--release <tag>`. For the same reason a real
-     version-to-version upgrade wasn't checked; only a reinstall of 0.2.2 over
-     0.2.2 was. Decided by the owner (Taj, 2026-11-24, "Tag next release"): the
-     next release tag includes the preview package. This item closes once that
-     tag exists and the installer's default has been checked against it.
    - Windows: the zip has no installer. `gpui-package.yml` checks its PE imports
      and launches `lf-desktop.exe --sandbox` on `windows-latest`, but nobody has
      unzipped and run it by hand. macOS: CI smoke-install only, with no
