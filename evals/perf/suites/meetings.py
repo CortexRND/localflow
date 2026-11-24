@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -364,11 +365,7 @@ def run_matrix(ctx: RunContext, base: list[str], *, url: str, model: str, sut: P
             stale.unlink()
     for stale_repeat in run_dir.glob("r*"):
         if stale_repeat.is_dir() and not stale_repeat.is_symlink() and stale_repeat.name[1:].isdigit():
-            results_dir = stale_repeat / "results"
-            if results_dir.is_dir() and not results_dir.is_symlink():
-                for old_json in results_dir.glob("*.json"):
-                    if not old_json.is_symlink():
-                        old_json.unlink()
+            shutil.rmtree(stale_repeat)
     # gates.py counts every scenario in the file, so a subset run gets its own file.
     scenarios_file = run_dir / "scenarios.json"
     scenarios_file.write_text(json.dumps({"scenarios": scenarios}, indent=1), encoding="utf-8")
