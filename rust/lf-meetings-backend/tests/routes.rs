@@ -598,6 +598,24 @@ fn stop_request(f: &Fixture) -> std::thread::JoinHandle<lf_server::backend::Back
     })
 }
 
+fn start_request(f: &Fixture) -> std::thread::JoinHandle<u16> {
+    let (backend, config) = (f.backend.clone(), f.config.clone());
+    std::thread::spawn(move || {
+        let mut request = BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/meeting/start".into(),
+            body: "{}".into(),
+            headers: Default::default(),
+            query: Default::default(),
+            config,
+        };
+        request
+            .headers
+            .insert("content-type", "application/json".parse().unwrap());
+        backend.handle(request).status
+    })
+}
+
 #[tokio::test]
 async fn saved_transcript_wait_ignores_an_earlier_meetings_save() {
     let f = Fixture::new();
@@ -640,21 +658,7 @@ async fn a_starting_meeting_is_active_and_a_failed_start_leaves_no_meeting() {
     let (release, released) = mpsc::channel();
     *f.capture.gate.lock().unwrap() = Some((entered, released));
     f.capture.stt_fail.store(true, Ordering::SeqCst);
-    let (backend, config) = (f.backend.clone(), f.config.clone());
-    let start = std::thread::spawn(move || {
-        let mut request = BackendRequest {
-            method: "POST".parse().unwrap(),
-            path: "/meeting/start".into(),
-            body: "{}".into(),
-            headers: Default::default(),
-            query: Default::default(),
-            config,
-        };
-        request
-            .headers
-            .insert("content-type", "application/json".parse().unwrap());
-        backend.handle(request).status
-    });
+    let start = start_request(&f);
     loading.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(f.backend.session_active());
     let (finished, done) = mpsc::channel();
@@ -670,6 +674,36 @@ async fn a_starting_meeting_is_active_and_a_failed_start_leaves_no_meeting() {
     );
     waiter.join().unwrap();
     assert!(!f.backend.session_active());
+}
+
+#[tokio::test]
+async fn a_wait_begun_while_starting_ends_at_that_meetings_transcript() {
+    let f = Fixture::new();
+    let (entered, loading) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.capture.gate.lock().unwrap() = Some((entered, released));
+    let start = start_request(&f);
+    loading.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (finished, done) = mpsc::channel();
+    let backend = f.backend.clone();
+    let waiter =
+        std::thread::spawn(move || finished.send(backend.wait_for_saved_transcript()).unwrap());
+    assert!(done.recv_timeout(Duration::from_millis(50)).is_err());
+    release.send(()).unwrap();
+    assert_eq!(start.join().unwrap(), 200);
+    assert!(done.recv_timeout(Duration::from_millis(50)).is_err());
+    let (entered, summarizing) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.models.gate.lock().unwrap() = Some((entered, released));
+    let stop = stop_request(&f);
+    summarizing.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        done.recv_timeout(Duration::from_secs(5)).unwrap(),
+        MeetingSave::Transcript
+    );
+    release.send(()).unwrap();
+    assert_eq!(stop.join().unwrap().status, 500);
+    waiter.join().unwrap();
 }
 
 #[tokio::test]

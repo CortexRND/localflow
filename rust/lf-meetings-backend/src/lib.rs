@@ -40,7 +40,7 @@ pub enum MeetingSave {
     Unsaved,
     /// The full transcript is saved as a recovery note, without AI notes.
     Transcript,
-    /// The final note, including AI notes, is saved.
+    /// The final note is saved (its AI notes may be the summarizer's fallback text).
     Note,
 }
 
