@@ -230,25 +230,26 @@ impl Translator {
             event.scan
         };
         let id = (code, event.extended);
-        if event.down {
-            // Key-ups on the secure desktop (Ctrl+Alt+Del, Win+L, UAC) never
-            // reach the hook. The event being handled may not be reflected in
-            // the async state yet, so only the other keys are checked. The
-            // hook queues a key-up before the async state changes, so a key
-            // that reads as up while nothing is queued (checked after the
-            // read) lost its key-up; with events queued, they come in order.
-            let mut missed: Vec<_> = self
-                .pressed
-                .iter()
-                .filter(|(other, pressed)| **other != id && !physically_down(pressed.vk))
-                .map(|(other, _)| *other)
-                .collect();
-            if !missed.is_empty() && caught_up() {
-                missed.sort_unstable();
-                for other in missed {
-                    self.release(other, hub);
-                }
+        // Key-ups on the secure desktop (Ctrl+Alt+Del, Win+L, UAC) never reach
+        // the hook. The event being handled may not be reflected in the async
+        // state yet, so only the other keys are checked. The hook queues every
+        // event, down or up, before the async state changes, so a key that
+        // reads as up while nothing is queued (checked after the read) lost its
+        // key-up; with events queued, they come in order. Checking on key-ups
+        // too lets the last event of a burst repair what was missed.
+        let mut missed: Vec<_> = self
+            .pressed
+            .iter()
+            .filter(|(other, pressed)| **other != id && !physically_down(pressed.vk))
+            .map(|(other, _)| *other)
+            .collect();
+        if !missed.is_empty() && caught_up() {
+            missed.sort_unstable();
+            for other in missed {
+                self.release(other, hub);
             }
+        }
+        if event.down {
             if self.pressed.contains_key(&id) {
                 return; // auto-repeat
             }
@@ -469,6 +470,40 @@ mod tests {
         feed(VK_LMENU, false);
         assert_eq!(rx.try_recv(), Ok("up"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_missed_key_up_is_released_on_a_later_key_up_once_caught_up() {
+        let (tx, rx) = mpsc::channel();
+        let (down, up) = (tx.clone(), tx);
+        let (hub, warnings) = KeyboardHub::new(
+            &Shortcuts {
+                hold_key: "alt_l".into(),
+                ..Default::default()
+            },
+            HubActions {
+                on_down: Arc::new(move || down.send("down").unwrap()),
+                on_up: Arc::new(move || up.send("up").unwrap()),
+                ..HubActions::noop()
+            },
+        );
+        assert!(warnings.is_empty());
+        let mut translator = Translator::default();
+        let event = |vk, down| KeyEvent {
+            vk,
+            scan: 0,
+            extended: false,
+            down,
+        };
+        translator.feed(event(VK_LMENU, true), &hub, &|_| true, &mut || true);
+        assert_eq!(rx.try_recv(), Ok("down"));
+        // Alt's key-up went to the secure desktop; A's key-up is still queued.
+        translator.feed(event(VK_A, true), &hub, &|vk| vk == VK_A, &mut || false);
+        assert!(rx.try_recv().is_err());
+        translator.feed(event(VK_A, false), &hub, &|_| false, &mut || true);
+        assert_eq!(rx.try_recv(), Ok("up"));
+        assert!(rx.try_recv().is_err());
+        assert!(translator.pressed.is_empty());
     }
 
     #[test]
