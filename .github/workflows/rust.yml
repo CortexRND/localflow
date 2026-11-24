@@ -212,6 +212,8 @@ jobs:
       PYNPUT_BACKEND: dummy
       # The parity suite fails instead of skipping when the binary is missing.
       LF_RUST_PARITY_REQUIRED: "1"
+      # Cached whisper.cpp objects must run on any runner CPU (no -march=native).
+      GGML_NATIVE: "OFF"
     steps:
       - uses: actions/checkout@v4
 
@@ -224,6 +226,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+          env-vars: GGML_NATIVE
 
       # cpal needs ALSA headers; whisper-rs needs CMake and libclang.
       # lf-core vendors libdbus; arboard uses X11 and HTTPS uses rustls.
@@ -285,11 +288,17 @@ jobs:
           cargo clippy -p lf-meetings --features capture --all-targets -- -D warnings
           cargo test -p lf-meetings --features capture
 
+      # Parity results stay visible when fmt, clippy or a Rust unit test fails;
+      # the job is still red. They are skipped only if these binaries do not build.
       - name: Build lf-rs and localflow-mcp
+        id: parity-bins
+        if: ${{ !cancelled() }}
         working-directory: rust
         run: cargo build --bin lf-rs --bin localflow-mcp
 
       - uses: actions/setup-python@v5
+        id: parity-python
+        if: ${{ !cancelled() && steps.parity-bins.outcome == 'success' }}
         with:
           python-version: "3.12"
           cache: pip
@@ -298,10 +307,13 @@ jobs:
       # Include faster-whisper because localflow.models imports its model table.
       # Install the package without the remaining heavy speech/UI dependencies.
       - name: Install Python parity dependencies
+        id: parity-deps
+        if: ${{ !cancelled() && steps.parity-python.outcome == 'success' }}
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest numpy platformdirs keyring requests sounddevice fastapi uvicorn python-multipart click rich huggingface_hub faster-whisper
           python -m pip install --no-deps -e .
 
       - name: Rust/Python parity tests
+        if: ${{ !cancelled() && steps.parity-deps.outcome == 'success' }}
         run: python -m pytest -q -s tests/test_rust_parity.py tests/test_rust_server.py tests/test_rust_mcp.py

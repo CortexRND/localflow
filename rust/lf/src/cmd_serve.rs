@@ -1,32 +1,34 @@
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::Result;
 use lf_core::config::{load_config, Config};
 use lf_meetings::{system_audio, AudioSource, Transcriber};
-use lf_meetings_backend::{CaptureFactory, MeetingsBackend};
-use lf_runtime::engine::SpeechEngine;
-use lf_server::{Server, ServerState};
-use lf_stt::{runtime::LazySpeechAdapter, server::SttBackend};
+use lf_meetings_backend::{CaptureFactory, MeetingSave, MeetingsBackend};
+use lf_server::{backend::UnavailableBackend, Server, ServerState};
+use lf_stt::server::{SharedSpeech, SttBackend};
 
 use crate::{outln, Io};
 
-struct MeetingSpeech(LazySpeechAdapter);
+/// Transcribes with the config the meeting started with, so another caller's
+/// model switch (even a failed one) cannot change or break the meeting's model.
+struct MeetingSpeech(SharedSpeech, Config);
 
 impl Transcriber for MeetingSpeech {
     fn transcribe(&self, audio: &[f32], prompt: Option<&str>) -> Result<String> {
-        self.0.transcribe(audio, prompt).map_err(anyhow::Error::msg)
+        Ok(self.0.transcribe(&self.1, audio, prompt)?.text)
     }
 }
 
-struct MeetingCapture;
+/// Meetings share the `/transcribe` model, so neither caller loads a second copy.
+struct MeetingCapture(SharedSpeech);
 
 impl CaptureFactory for MeetingCapture {
     fn transcriber(&self, config: &Config) -> Result<Arc<dyn Transcriber>> {
         // Meeting capture resamples to 16 kHz itself; the dictation
         // `sample_rate` setting only governs the dictation recorder.
-        let speech = LazySpeechAdapter::for_16khz_pcm(config.clone());
-        speech.load().map_err(anyhow::Error::msg)?;
-        Ok(Arc::new(MeetingSpeech(speech)))
+        self.0.load(config)?;
+        Ok(Arc::new(MeetingSpeech(self.0.clone(), config.clone())))
     }
 
     fn microphone(&self, config: &Config) -> Result<Box<dyn AudioSource>> {
@@ -58,9 +60,16 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
         .max_blocking_threads(16)
         .enable_all()
         .build()?;
-    let meetings = MeetingsBackend::new()?.with_capture(Arc::new(MeetingCapture));
-    let backend = SttBackend::new(meetings);
-    let state = Arc::new(ServerState::load_with_backend(Arc::new(backend))?);
+    let speech = SharedSpeech::new();
+    let meetings = Arc::new(
+        MeetingsBackend::new()?
+            .with_capture(Arc::new(MeetingCapture(speech.clone())))
+            .with_inner(Arc::new(SttBackend::with_speech(
+                UnavailableBackend,
+                speech,
+            ))),
+    );
+    let state = Arc::new(ServerState::load_with_backend(meetings.clone())?);
     let server = runtime.block_on(Server::bind_with_state(host, port, state.clone()))?;
     outln!(
         io.out,
@@ -68,15 +77,383 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
         lf_server::server_url::base_url(host, server.local_addr()?.port())
     )?;
     io.out.flush()?;
-    let served = runtime.block_on(server.run());
-    let shutdown = state.shutdown();
-    served.and(shutdown)
+    // One listener for the whole run, so a second signal is seen even while
+    // the server still drains an in-flight `/meeting/stop`.
+    let mut signals = runtime.block_on(async { Signals::new() })?;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut serving = runtime.spawn(server.run_until(async {
+        let _ = stopped.await;
+    }));
+    let early = runtime.block_on(async {
+        tokio::select! {
+            served = &mut serving => Some(served),
+            () = signals.recv() => None,
+        }
+    });
+    let active = early.is_none() && meetings.session_active();
+    let _ = stop.send(());
+    let handle = runtime.handle().clone();
+    let shutdown = finish_shutdown(
+        &runtime,
+        io,
+        active,
+        move || {
+            let served = early.unwrap_or_else(|| handle.block_on(serving));
+            let shutdown = state.shutdown();
+            served?.and(shutdown)
+        },
+        move || meetings.wait_for_saved_transcript(),
+        async move { signals.recv().await },
+    );
+    // A skipped save leaves its LLM steps running; do not wait for them.
+    runtime.shutdown_background();
+    shutdown
+}
+
+/// Saves an active meeting before exit, announcing it. A second interrupt
+/// skips the remaining LLM steps once the raw transcript is on disk.
+fn finish_shutdown(
+    runtime: &tokio::runtime::Runtime,
+    io: &mut Io<'_>,
+    meeting_active: bool,
+    shutdown: impl FnOnce() -> Result<()> + Send + 'static,
+    wait_for_saved_transcript: impl FnOnce() -> MeetingSave + Send + 'static,
+    interrupt: impl Future<Output = ()>,
+) -> Result<()> {
+    if !meeting_active {
+        return shutdown();
+    }
+    // Announcements are best-effort: a closed stdout must not stop the save.
+    let _ = writeln!(io.out, "Saving meeting…").and_then(|()| io.out.flush());
+    let saving = runtime.spawn_blocking(shutdown);
+    let saved = runtime.block_on(async {
+        tokio::select! {
+            result = saving => Some(result),
+            () = interrupt => None,
+        }
+    });
+    if let Some(result) = saved {
+        return result?;
+    }
+    match runtime.block_on(runtime.spawn_blocking(wait_for_saved_transcript))? {
+        MeetingSave::NoMeeting | MeetingSave::Note => Ok(()),
+        MeetingSave::Transcript => {
+            let _ = writeln!(io.out, "Meeting transcript saved without AI notes.")
+                .and_then(|()| io.out.flush());
+            Ok(())
+        }
+        MeetingSave::Unsaved => anyhow::bail!("could not save meeting during shutdown"),
+    }
+}
+
+/// Ctrl-C, plus SIGTERM on Unix, as in `lf_server::Server::run`.
+struct Signals {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl Signals {
+    fn new() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                ctrl_c: tokio::signal::windows::ctrl_c()?,
+            })
+        }
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.interrupt.recv() => {},
+            _ = self.terminate.recv() => {},
+        }
+        #[cfg(windows)]
+        self.ctrl_c.recv().await;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lf_server::backend::Backend;
+    use lf_stt::{EngineSpec, LoadInfo, SpeechEngine, SttSlot, Transcript};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct Fake {
+        loads: Arc<AtomicUsize>,
+        loaded: bool,
+        model: String,
+    }
+
+    impl SpeechEngine for Fake {
+        fn id(&self) -> &str {
+            "fake"
+        }
+        fn load(&mut self) -> Result<LoadInfo> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            anyhow::ensure!(self.model != "broken", "broken model");
+            self.loaded = true;
+            Ok(LoadInfo::default())
+        }
+        fn transcribe(&mut self, _: &[f32], _: Option<&str>) -> Result<Transcript> {
+            Ok(Transcript {
+                text: format!("{} words", self.model),
+                ..Transcript::default()
+            })
+        }
+        fn unload(&mut self) {
+            self.loaded = false;
+        }
+        fn loaded(&self) -> bool {
+            self.loaded
+        }
+    }
+
+    #[test]
+    fn meetings_reuse_the_model_loaded_for_transcribe_and_report_it_loaded() {
+        let root = tempfile::tempdir().unwrap();
+        let (speech, loads) = fake_speech(root.path());
+        let transcribe = SttBackend::with_speech(UnavailableBackend, speech.clone());
+        let capture = MeetingCapture(speech);
+        assert!(!transcribe.transcriber_loaded());
+        let first = capture.transcriber(&model("tiny")).unwrap();
+        assert!(transcribe.transcriber_loaded());
+        let second = capture.transcriber(&model("tiny")).unwrap();
+        assert_eq!(first.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(second.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_failed_model_switch_by_an_upload_does_not_break_the_running_meeting() {
+        let root = tempfile::tempdir().unwrap();
+        let (speech, loads) = fake_speech(root.path());
+        let meeting = MeetingCapture(speech.clone())
+            .transcriber(&model("tiny"))
+            .unwrap();
+        let upload = speech.transcribe(&model("broken"), &[0.25], None);
+        assert_eq!(upload.unwrap_err().to_string(), "broken model");
+        assert_eq!(meeting.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(
+            speech
+                .transcribe(&model("small"), &[0.25], None)
+                .unwrap()
+                .text,
+            "small words"
+        );
+        assert_eq!(meeting.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(loads.load(Ordering::SeqCst), 5);
+    }
+
+    fn model(name: &str) -> Config {
+        let mut config = Config::default();
+        config.set_field("model_size", json!(name));
+        config
+    }
+
+    fn fake_speech(root: &std::path::Path) -> (SharedSpeech, Arc<AtomicUsize>) {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let counter = loads.clone();
+        let speech = SharedSpeech::with_factory(SttSlot::with_lease_root(root.into()), {
+            move |config| {
+                let model = config.field_str("model_size").unwrap_or("base").to_string();
+                Ok(EngineSpec {
+                    key: model.clone(),
+                    backend: "whisper-cpp".into(),
+                    model_size: model.clone(),
+                    engine: Box::new(Fake {
+                        loads: counter.clone(),
+                        loaded: false,
+                        model,
+                    }),
+                })
+            }
+        });
+        (speech, loads)
+    }
+
+    fn shutdown_output(
+        meeting_active: bool,
+        shutdown: impl FnOnce() -> Result<()> + Send + 'static,
+        wait_for_saved_transcript: impl FnOnce() -> MeetingSave + Send + 'static,
+        interrupt: impl Future<Output = ()>,
+    ) -> (Result<()>, String) {
+        let mut out = Vec::new();
+        let result = shutdown_writing_to(
+            &mut out,
+            meeting_active,
+            shutdown,
+            wait_for_saved_transcript,
+            interrupt,
+        );
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    fn shutdown_writing_to(
+        out: &mut dyn std::io::Write,
+        meeting_active: bool,
+        shutdown: impl FnOnce() -> Result<()> + Send + 'static,
+        wait_for_saved_transcript: impl FnOnce() -> MeetingSave + Send + 'static,
+        interrupt: impl Future<Output = ()>,
+    ) -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let mut err = Vec::new();
+        let mut input = std::io::Cursor::new(Vec::new());
+        let mut clipboard = crate::testing::FakeClipboard::default();
+        let mut io = Io {
+            out,
+            err: &mut err,
+            input: &mut input,
+            clipboard: &mut clipboard,
+            server_url: None,
+            terminal: false,
+        };
+        let result = finish_shutdown(
+            &runtime,
+            &mut io,
+            meeting_active,
+            shutdown,
+            wait_for_saved_transcript,
+            interrupt,
+        );
+        runtime.shutdown_background();
+        assert!(err.is_empty());
+        result
+    }
+
+    struct ClosedPipe;
+
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn a_closed_stdout_neither_skips_nor_fails_the_meeting_save() {
+        let (saved, saves) = mpsc::channel();
+        let result = shutdown_writing_to(
+            &mut ClosedPipe,
+            true,
+            move || {
+                saved.send(()).unwrap();
+                Ok(())
+            },
+            || unreachable!(),
+            std::future::pending(),
+        );
+        assert!(result.is_ok());
+        saves.try_recv().unwrap();
+        let (never_finishes, blocked) = mpsc::channel::<()>();
+        let result = shutdown_writing_to(
+            &mut ClosedPipe,
+            true,
+            move || {
+                let _ = blocked.recv();
+                Ok(())
+            },
+            || MeetingSave::Transcript,
+            std::future::ready(()),
+        );
+        assert!(result.is_ok());
+        drop(never_finishes);
+    }
+
+    #[test]
+    fn shutdown_is_silent_without_a_meeting_and_announces_a_meeting_save() {
+        let (result, out) =
+            shutdown_output(false, || Ok(()), || unreachable!(), std::future::pending());
+        assert!(result.is_ok());
+        assert_eq!(out, "");
+        let (result, out) = shutdown_output(
+            true,
+            || anyhow::bail!("could not save meeting during shutdown"),
+            || unreachable!(),
+            std::future::pending(),
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "could not save meeting during shutdown"
+        );
+        assert_eq!(out, "Saving meeting…\n");
+    }
+
+    #[test]
+    fn second_interrupt_reports_what_was_actually_saved() {
+        for (saved, outcome, out_expected) in [
+            (MeetingSave::Note, Ok(()), "Saving meeting…\n"),
+            (MeetingSave::NoMeeting, Ok(()), "Saving meeting…\n"),
+            (
+                MeetingSave::Unsaved,
+                Err("could not save meeting during shutdown"),
+                "Saving meeting…\n",
+            ),
+        ] {
+            let (llm_running, llm_never_finishes) = mpsc::channel::<()>();
+            let (result, out) = shutdown_output(
+                true,
+                move || {
+                    let _ = llm_never_finishes.recv();
+                    Ok(())
+                },
+                move || saved,
+                std::future::ready(()),
+            );
+            assert_eq!(
+                result.map_err(|error| error.to_string()),
+                outcome.map_err(String::from)
+            );
+            assert_eq!(out, out_expected);
+            drop(llm_running);
+        }
+    }
+
+    #[test]
+    fn second_interrupt_returns_once_the_raw_transcript_is_saved() {
+        let (llm_running, llm_never_finishes) = mpsc::channel::<()>();
+        let (saved_tx, saved_rx) = mpsc::channel();
+        let (result, out) = shutdown_output(
+            true,
+            move || {
+                let _ = llm_never_finishes.recv();
+                Ok(())
+            },
+            move || {
+                saved_tx.send(()).unwrap();
+                MeetingSave::Transcript
+            },
+            std::future::ready(()),
+        );
+        assert!(result.is_ok());
+        saved_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            out,
+            "Saving meeting…\nMeeting transcript saved without AI notes.\n"
+        );
+        drop(llm_running);
+    }
 
     #[test]
     fn meeting_transcriber_loads_up_front_ignoring_the_dictation_sample_rate() {
@@ -86,7 +463,10 @@ mod tests {
         let mut config = Config::default();
         config.set_field("sample_rate", json!(22050));
         config.set_field("stt_backend", json!("test-unknown"));
-        let error = MeetingCapture.transcriber(&config).err().unwrap();
+        let error = MeetingCapture(SharedSpeech::new())
+            .transcriber(&config)
+            .err()
+            .unwrap();
         assert_eq!(
             error.to_string(),
             "unsupported speech provider: test-unknown"
