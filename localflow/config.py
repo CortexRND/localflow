@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import InitVar, dataclass, field, replace
 from pathlib import Path
 
 import platformdirs
@@ -177,6 +177,13 @@ class Config:
     setup_version: int = 0
     history_enabled: bool = True
     keep_audio_clips: int = 5
+    # The file's meetings_enabled when load forced it off, saved in its place
+    # until an update sets the field. An InitVar so it is not a config field
+    # (fields(), ==, repr) yet survives replace().
+    _file_meetings_enabled: InitVar[bool | None] = None
+
+    def __post_init__(self, _file_meetings_enabled: bool | None) -> None:
+        self._file_meetings_enabled = _file_meetings_enabled
 
 
 def config_dir() -> Path:
@@ -253,6 +260,8 @@ def _config_from_v2(data: dict) -> Config:
                 continue
             setattr(config, field_name, value)
     if sys.platform != "darwin":
+        if isinstance(config.meetings_enabled, bool):
+            config._file_meetings_enabled = config.meetings_enabled
         config.meetings_enabled = False
     return config
 
@@ -273,6 +282,8 @@ def config_toml(config: Config) -> str:
         lines.append(f"[{section}]")
         for file_key, field_name in mapping.items():
             value = getattr(config, field_name)
+            if field_name == "meetings_enabled" and config._file_meetings_enabled is not None:
+                value = config._file_meetings_enabled
             if value is None:
                 continue
             lines.append(f"{file_key} = {_toml_value(value)}")
@@ -490,4 +501,6 @@ def apply_config_update(config: Config, update: dict) -> Config:
     if endpoint_changed:
         changes["llm_key_ref"] = ""
         changes.setdefault("llm_fast_model", "")
+    if "meetings_enabled" in changes:
+        changes["_file_meetings_enabled"] = None
     return replace(config, **changes)

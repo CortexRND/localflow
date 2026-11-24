@@ -309,6 +309,7 @@ mod tests {
         Sources {
             history: dir.join("history.sqlite"),
             queue: dir.join("queue.json"),
+            prompts_cwd: None,
         }
     }
 

@@ -578,10 +578,32 @@
   });
 
   // ---- advanced ----
+  // Only the edited keys: the editor shows the runtime config, which can differ
+  // from the file (features.meetings is forced off outside macOS), so sending
+  // the whole document would overwrite those file values.
+  function changedKeys(edited, base) {
+    const update = {};
+    for (const [section, values] of Object.entries(edited)) {
+      const old = (base || {})[section];
+      if (values === null || typeof values !== "object" || Array.isArray(values) || old === null || typeof old !== "object") {
+        if (JSON.stringify(values) !== JSON.stringify(old)) update[section] = values;
+        continue;
+      }
+      const keys = {};
+      for (const [key, value] of Object.entries(values)) {
+        if (JSON.stringify(value) !== JSON.stringify(old[key])) keys[key] = value;
+      }
+      if (Object.keys(keys).length) update[section] = keys;
+    }
+    return update;
+  }
   $("adv-save").addEventListener("click", async () => {
     let update;
     try { update = JSON.parse($("adv-json").value); } catch (e) { setMsg("adv-msg", `invalid JSON: ${e.message}`, false); return; }
+    if (update === null || typeof update !== "object" || Array.isArray(update)) { setMsg("adv-msg", "config must be a JSON object", false); return; }
     delete update.config_version;
+    update = changedKeys(update, config);
+    if (!Object.keys(update).length) { setMsg("adv-msg", "no changes", true); return; }
     if (await saveSection(update, "adv-msg")) await loadConfig();
   });
   $("adv-reload").addEventListener("click", () => loadConfig().then(() => setMsg("adv-msg", "reloaded", true)));

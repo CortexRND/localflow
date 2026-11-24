@@ -160,7 +160,11 @@ def test_body_read_failures_are_clean_messages(tweak_env, monkeypatch, tmp_path,
     ("settings", "Settings"), ("Settings", "Settings"), ("hot phrases", "Hot Phrases"),
     ("MODELS", "Models"), ("Home", "Home"),
 ])
-def test_hub_page_is_case_insensitive_and_canonical(monkeypatch, typed, page):
+def test_hub_page_is_case_insensitive_and_canonical(monkeypatch, tmp_path, typed, page):
+    # No LocalFlow Preview package here, so the GPUI default opens the legacy hub.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LOCALFLOW_DESKTOP_BIN", raising=False)
+    monkeypatch.delenv("LOCALFLOW_UI", raising=False)
     launched = []
     monkeypatch.setattr(cli_module.subprocess, "Popen", lambda argv: launched.append(argv))
     result = CliRunner().invoke(cli_module.cli, ["hub", "--page", typed])
