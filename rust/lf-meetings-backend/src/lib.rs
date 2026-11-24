@@ -61,6 +61,8 @@ struct State {
     meta: Metadata,
     last_saved: Option<Value>,
     transcript_saved: bool,
+    publishing: bool,
+    abandoned: bool,
 }
 
 pub struct MeetingsBackend {
@@ -133,17 +135,39 @@ impl MeetingsBackend {
     pub fn session_active(&self) -> bool {
         matches!(self.state().phase, Phase::Running | Phase::Stopping)
     }
-    /// Blocks until the stopping meeting's full transcript is on disk (as a
-    /// recovery note, before any LLM step) or no meeting remains to save.
-    /// Returns whether that transcript was saved.
+    /// Blocks until the current meeting's full transcript is on disk (as a
+    /// recovery note, before any LLM step) or no meeting remains to save, then
+    /// abandons the rest of the stop: a file write already under way finishes
+    /// first and no later one starts, so the process can exit without leaving
+    /// a partly written note. Returns whether that transcript was saved.
     pub fn wait_for_saved_transcript(&self) -> bool {
         let state = self.state();
-        self.idle
+        let mut state = self
+            .idle
             .wait_while(state, |state| {
-                state.phase != Phase::Idle && !state.transcript_saved
+                state.publishing || (state.phase != Phase::Idle && !state.transcript_saved)
             })
-            .unwrap_or_else(|error| error.into_inner())
-            .transcript_saved
+            .unwrap_or_else(|error| error.into_inner());
+        state.abandoned = true;
+        state.transcript_saved
+    }
+    fn publish<T>(&self, write: impl FnOnce() -> T) -> Option<T> {
+        {
+            let mut state = self.state();
+            if state.abandoned {
+                return None;
+            }
+            state.publishing = true;
+        }
+        struct Published<'a>(&'a MeetingsBackend);
+        impl Drop for Published<'_> {
+            fn drop(&mut self) {
+                self.0.state().publishing = false;
+                self.0.idle.notify_all();
+            }
+        }
+        let _published = Published(self);
+        Some(write())
     }
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
@@ -283,6 +307,8 @@ impl MeetingsBackend {
         };
         state.session = Some(session);
         state.last_saved = None;
+        state.transcript_saved = false;
+        state.abandoned = false;
         state.phase = Phase::Running;
         reset.armed = false;
         Ok(response)
@@ -310,7 +336,6 @@ impl MeetingsBackend {
             }
             let session = state.session.take().ok_or_else(internal)?;
             state.phase = Phase::Stopping;
-            state.transcript_saved = false;
             (session, state.meta.clone())
         };
         let _reset = ResetSlot {
@@ -377,7 +402,7 @@ impl MeetingsBackend {
                 let prompts_md = workprompts::generate(&*llm, &notes);
                 if !prompts_md.is_empty() {
                     notes.push_str(&format!("\n\n## Suggested Work Prompts\n\n{prompts_md}"));
-                    let _ = (|| -> Result<()> {
+                    let _ = self.publish(|| -> Result<()> {
                         let prompts = dispatch::parse_work_prompts(&prompts_md);
                         if !prompts.is_empty() {
                             let dir = expanded(config, "prompts_dir");
@@ -391,26 +416,31 @@ impl MeetingsBackend {
                             extra = json!({"prompts":paths.len(),"prompts_dir":dir});
                         }
                         Ok(())
-                    })();
+                    });
                 }
             }
         }
-        let saved = writer
-            .write(&WriteNote {
-                title: &title,
-                category: &meta.category,
-                started_at: finished.started_at,
-                duration_seconds: finished.seconds,
-                notes_md: &notes,
-                segments: &finished.segments,
-                user_notes: &meta.user_notes,
-                template: &template.id,
-                generated_title: meta.title_auto,
+        let note = WriteNote {
+            title: &title,
+            category: &meta.category,
+            started_at: finished.started_at,
+            duration_seconds: finished.seconds,
+            notes_md: &notes,
+            segments: &finished.segments,
+            user_notes: &meta.user_notes,
+            template: &template.id,
+            generated_title: meta.title_auto,
+        };
+        let saved = self
+            .publish(|| {
+                let saved = writer.write(&note)?;
+                if let Some(recovery) = recovery {
+                    remove_recovery(recovery);
+                }
+                std::io::Result::Ok(saved)
             })
+            .ok_or_else(internal)?
             .map_err(|_| internal())?;
-        if let Some(recovery) = recovery {
-            remove_recovery(recovery);
-        }
         let mut payload = json!({"title":saved.title,"title_generated":generated,"notes_path":saved.notes_path,"log_path":saved.log_path,"segments":finished.segments.len(),"template":template.id,"enhanced":!py::strip(&meta.user_notes).is_empty()});
         payload
             .as_object_mut()
@@ -729,6 +759,17 @@ mod shutdown_tests {
             assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), saved);
             waiter.join().unwrap();
         }
+    }
+
+    #[test]
+    fn a_panicking_publish_still_lets_the_saved_transcript_wait_finish() {
+        let backend = MeetingsBackend::new().unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            backend.publish(|| panic!("write failed"))
+        }));
+        assert!(panicked.is_err());
+        assert!(!backend.state().publishing);
+        assert!(!backend.wait_for_saved_transcript());
     }
 
     #[test]

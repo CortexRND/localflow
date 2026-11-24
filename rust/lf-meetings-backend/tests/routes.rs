@@ -581,6 +581,85 @@ async fn raw_notes_and_transcript_are_durable_before_slow_finalization() {
     assert!(Path::new(saved.body["log_path"].as_str().unwrap()).is_file());
 }
 
+fn stop_request(f: &Fixture) -> std::thread::JoinHandle<lf_server::backend::BackendResponse> {
+    let backend = f.backend.clone();
+    let config = f.config.clone();
+    std::thread::spawn(move || {
+        backend.handle(BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/meeting/stop".into(),
+            body: Default::default(),
+            headers: Default::default(),
+            query: Default::default(),
+            config,
+        })
+    })
+}
+
+#[tokio::test]
+async fn saved_transcript_wait_ignores_an_earlier_meetings_save() {
+    let f = Fixture::new();
+    for title in ["First", "Second"] {
+        let body = json!({"title": title, "auto_title": false});
+        assert_eq!(
+            request(f.app(), "POST", "/meeting/start", Some(body))
+                .await
+                .0,
+            200
+        );
+        if title == "First" {
+            assert_eq!(request(f.app(), "POST", "/meeting/stop", None).await.0, 200);
+        }
+    }
+    let (finished, done) = mpsc::channel();
+    let backend = f.backend.clone();
+    let waiter =
+        std::thread::spawn(move || finished.send(backend.wait_for_saved_transcript()).unwrap());
+    assert!(done.recv_timeout(Duration::from_millis(50)).is_err());
+    stop_request(&f).join().unwrap();
+    assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
+    waiter.join().unwrap();
+    let saved = request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"].clone();
+    let log = saved["log_path"].as_str().unwrap();
+    assert!(log.contains("Second"));
+    assert!(fs::read_to_string(log)
+        .unwrap()
+        .contains("we will launch on March 3"));
+}
+
+#[tokio::test]
+async fn abandoned_stop_keeps_the_recovery_note_and_publishes_nothing_more() {
+    let f = Fixture::new();
+    assert_eq!(
+        request(
+            f.app(),
+            "POST",
+            "/meeting/start",
+            Some(json!({"title":"Abandoned", "auto_title":false}))
+        )
+        .await
+        .0,
+        200
+    );
+    let (entered, summarizing) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.models.gate.lock().unwrap() = Some((entered, released));
+    let stop = stop_request(&f);
+    summarizing.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(f.backend.wait_for_saved_transcript());
+    release.send(()).unwrap();
+    assert_eq!(stop.join().unwrap().status, 500);
+    let saved = request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"].clone();
+    assert_eq!(saved["recovery"], true);
+    assert!(fs::read_to_string(saved["log_path"].as_str().unwrap())
+        .unwrap()
+        .contains("we will launch on March 3"));
+    let notes_dir = Path::new(saved["notes_path"].as_str().unwrap())
+        .parent()
+        .unwrap();
+    assert_eq!(fs::read_dir(notes_dir).unwrap().count(), 1);
+}
+
 #[tokio::test]
 async fn server_shutdown_waits_for_an_already_stopping_meeting() {
     let f = Fixture::new();
