@@ -9,7 +9,7 @@ use lf_core::history::{HistoryEntry, HistoryStore};
 use crate::args::{HistoryArgs, HistoryCommand};
 use crate::cmd_config::parse_py_int;
 use crate::pyfmt;
-use crate::{fail, outln, CliError, Io};
+use crate::{abort, confirm, fail, outln, Io};
 
 /// `HistoryStore(enabled=load_config().history_enabled)`.
 fn open_store() -> Result<HistoryStore> {
@@ -74,8 +74,7 @@ pub(crate) fn run_with(store: &HistoryStore, args: HistoryArgs, io: &mut Io<'_>)
         }
         Some(HistoryCommand::Clear { yes }) => {
             if !yes && !confirm("Delete all history entries and stored clips?", io)? {
-                outln!(io.err, "Aborted!")?;
-                return Err(CliError::Exit(1).into());
+                return abort(io);
             }
             let count = store.clear()?;
             outln!(io.out, "Cleared {count} history entries.")
@@ -108,25 +107,6 @@ fn resolve(store: &HistoryStore, entry_id: &str) -> Result<HistoryEntry> {
     match entry {
         Some(entry) => Ok(entry),
         None => fail(format!("history entry {entry_id} not found")),
-    }
-}
-
-/// `click.confirm(text, default=False)`: y/yes or n/no (any case); empty
-/// means no; anything else asks again; end of input aborts.
-fn confirm(text: &str, io: &mut Io<'_>) -> Result<bool> {
-    loop {
-        write!(io.out, "{text} [y/N]: ")?;
-        io.out.flush()?;
-        let mut line = String::new();
-        if io.input.read_line(&mut line)? == 0 {
-            outln!(io.out)?;
-            return Ok(false);
-        }
-        match line.trim_end_matches(['\r', '\n']).to_lowercase().as_str() {
-            "y" | "yes" => return Ok(true),
-            "n" | "no" | "" => return Ok(false),
-            _ => outln!(io.err, "Error: invalid input")?,
-        }
     }
 }
 
@@ -230,6 +210,7 @@ fn show_stats(store: &HistoryStore, io: &mut Io<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testing::FakeClipboard;
+    use crate::CliError;
     use lf_core::history::NewEntry;
     use std::io::Cursor;
 
@@ -254,6 +235,7 @@ mod tests {
             input: &mut reader,
             clipboard,
             server_url: None,
+            terminal: false,
         };
         let args = HistoryArgs {
             limit: 50,

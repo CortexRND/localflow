@@ -259,9 +259,13 @@ def activate(
     key = secrets.get_secret(f"provider_key_{preset.id}") if preset.needs_key else ""
     if preset.needs_key and not key:
         raise ValueError("Save a provider key before activating it")
+    endpoint_changed = (
+        preset.llm_provider != base.llm_provider
+        or llm_activation.endpoint(url) != llm_activation.endpoint(base.llm_base_url)
+    )
     updated = replace(
         base, llm_provider=preset.llm_provider, llm_base_url=url, llm_key_ref="",
-        llm_model=chosen,
+        llm_model=chosen, llm_fast_model="" if endpoint_changed else base.llm_fast_model,
     )
     if not preset.needs_key:
         save_config(updated)  # keyless (Ollama): nothing to pair

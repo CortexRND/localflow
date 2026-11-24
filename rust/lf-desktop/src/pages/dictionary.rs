@@ -95,8 +95,29 @@ impl DictionaryPage {
         cx.notify();
     }
 
+    /// Words plus replacements.
+    fn total(&self) -> usize {
+        let store = &self.pcx.services.dictionary;
+        store.words().len() + store.replacements().len()
+    }
+
+    /// The filter is only shown once the list is long enough to need it.
+    fn shows_filter(total: usize) -> bool {
+        total > 12
+    }
+
+    /// Find: focus the filter when it is shown; otherwise keep focus where
+    /// it is (focusing a hidden input would leave nothing focused).
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.filter.read(cx).focus(window);
+        if Self::shows_filter(self.total()) {
+            self.filter.read(cx).focus(window);
+        }
+    }
+
+    /// The filter's focus handle, for shell tests.
+    #[cfg(test)]
+    pub(crate) fn filter_focus(&self, cx: &gpui::App) -> gpui::FocusHandle {
+        gpui::Focusable::focus_handle(self.filter.read(cx), cx)
     }
 
     pub fn focus_new_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -318,8 +339,8 @@ impl Render for DictionaryPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let store = &self.pcx.services.dictionary;
-        let total = store.words().len() + store.replacements().len();
-        let filter_text = if total > 12 {
+        let total = self.total();
+        let filter_text = if Self::shows_filter(total) {
             self.filter.read(cx).text().to_string()
         } else {
             String::new()
@@ -376,7 +397,7 @@ impl Render for DictionaryPage {
                 .when_some(self.import_notice.clone(), |d, (tone, msg)| d.child(ui::banner(&t, tone, msg, None))),
             );
         }
-        if total > 12 {
+        if Self::shows_filter(total) {
             body = body.child(
                 div()
                     .flex()

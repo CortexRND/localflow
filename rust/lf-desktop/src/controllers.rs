@@ -16,6 +16,7 @@ pub mod model_storage;
 pub mod models;
 pub mod prompts;
 pub mod provider_ops;
+pub mod retry;
 pub mod runtime_state;
 pub mod settings;
 pub mod setup;

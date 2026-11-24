@@ -24,6 +24,13 @@ enum Request {
     Load {
         fields: BTreeMap<String, serde_json::Value>,
     },
+    /// Load only an already installed model, never downloading it. A
+    /// separate op (not a field on `Load`, which serde would silently ignore):
+    /// a helper built before it existed can't parse the request and exits
+    /// before loading anything.
+    LoadCached {
+        fields: BTreeMap<String, serde_json::Value>,
+    },
     Transcribe {
         samples: usize,
         prompt: Option<String>,
@@ -192,11 +199,7 @@ impl Session {
             )
     }
 
-    fn call(
-        &self,
-        fields: &BTreeMap<String, serde_json::Value>,
-        pcm: Option<(&[f32], Option<&str>)>,
-    ) -> Result<String, String> {
+    fn call(&self, load: &Request, pcm: Option<(&[f32], Option<&str>)>) -> Result<String, String> {
         let mut pipes = self
             .pipes
             .lock()
@@ -217,15 +220,7 @@ impl Session {
             })
         };
         if !pipes.ready {
-            match exchange(
-                &mut pipes,
-                &Request::Load {
-                    fields: fields.clone(),
-                },
-                &[],
-            )
-            .map_err(|e| e.to_string())?
-            {
+            match exchange(&mut pipes, load, &[]).map_err(|e| e.to_string())? {
                 Reply::Ready => {
                     pipes.ready = true;
                     self.ready.store(true, Ordering::Release);
@@ -313,13 +308,36 @@ impl Session {
 
 pub struct HelperSpeechEngine {
     executable: PathBuf,
-    fields: BTreeMap<String, serde_json::Value>,
+    /// The first request of every helper session (`Load` or `LoadCached`).
+    load: Request,
     session: Mutex<Option<Arc<Session>>>,
 }
 
 impl HelperSpeechEngine {
     pub fn new(executable: PathBuf, config: &Config) -> Self {
-        let fields = [
+        let fields = Self::fields(config);
+        Self::with_load(executable, Request::Load { fields })
+    }
+
+    /// A helper that may only load the already installed configured model.
+    /// Needs a helper served by [`serve_stdio_with`]; any other helper,
+    /// including one built before cache-only loading existed, fails the
+    /// load before it reads or downloads a model.
+    pub fn cached(executable: PathBuf, config: &Config) -> Self {
+        let fields = Self::fields(config);
+        Self::with_load(executable, Request::LoadCached { fields })
+    }
+
+    fn with_load(executable: PathBuf, load: Request) -> Self {
+        Self {
+            executable,
+            load,
+            session: Mutex::new(None),
+        }
+    }
+
+    fn fields(config: &Config) -> BTreeMap<String, serde_json::Value> {
+        [
             "stt_backend",
             "model_size",
             "language",
@@ -333,12 +351,7 @@ impl HelperSpeechEngine {
                 .get(key)
                 .map(|value| (key.to_owned(), value.clone()))
         })
-        .collect();
-        Self {
-            executable,
-            fields,
-            session: Mutex::new(None),
-        }
+        .collect()
     }
 
     pub fn child_pid(&self) -> Option<u32> {
@@ -364,7 +377,7 @@ impl HelperSpeechEngine {
             }
             slot.as_ref().unwrap().clone()
         };
-        match session.call(&self.fields, pcm) {
+        match session.call(&self.load, pcm) {
             Ok(text) => Ok(text),
             Err(error) => {
                 let mut slot = self.session.lock().unwrap_or_else(|p| p.into_inner());
@@ -440,8 +453,29 @@ fn protocol_stdout() -> io::Result<Box<dyn Write>> {
 }
 
 /// Only call in the dedicated helper process: EOF terminates even a busy engine.
+/// A cache-only load request is refused before `make` runs (see
+/// [`serve_stdio_with`] for a helper that supports it).
 pub fn serve_stdio(
     make: impl FnOnce(Config) -> Result<Arc<dyn SpeechEngine>, String>,
+) -> Result<(), String> {
+    serve_stdio_with(|config, cache_only| {
+        if cache_only {
+            Err(CACHE_ONLY_UNSUPPORTED.into())
+        } else {
+            make(config)
+        }
+    })
+}
+
+/// Why a helper refused a cache-only load.
+pub const CACHE_ONLY_UNSUPPORTED: &str =
+    "this speech helper can't load an installed model without downloading; nothing was loaded";
+
+/// [`serve_stdio`] whose `make` also receives whether the parent asked for
+/// a cache-only load (`HelperSpeechEngine::cached`); `make` must then never
+/// download.
+pub fn serve_stdio_with(
+    make: impl FnOnce(Config, bool) -> Result<Arc<dyn SpeechEngine>, String>,
 ) -> Result<(), String> {
     let mut output = protocol_stdout().map_err(|e| e.to_string())?;
     let (send, recv) = std::sync::mpsc::sync_channel(1);
@@ -477,12 +511,14 @@ pub fn serve_stdio(
             .and_then(|()| output.flush())
             .map_err(|e| e.to_string())
     };
-    let (Request::Load { fields }, _) = recv.recv().map_err(|e| e.to_string())? else {
-        return Err("expected speech load".into());
+    let (fields, cache_only) = match recv.recv().map_err(|e| e.to_string())? {
+        (Request::Load { fields }, _) => (fields, false),
+        (Request::LoadCached { fields }, _) => (fields, true),
+        _ => return Err("expected speech load".into()),
     };
     let mut config = Config::default();
     config.fields.extend(fields);
-    let engine = match make(config).and_then(|engine| engine.load().map(|()| engine)) {
+    let engine = match make(config, cache_only).and_then(|engine| engine.load().map(|()| engine)) {
         Ok(engine) => engine,
         Err(error) => {
             reply(&mut output, Reply::Error(error))?;
@@ -502,7 +538,9 @@ pub fn serve_stdio(
                     },
                 )?;
             }
-            Request::Load { .. } => return Err("speech model already configured".into()),
+            Request::Load { .. } | Request::LoadCached { .. } => {
+                return Err("speech model already configured".into())
+            }
         }
     }
     Ok(())
@@ -548,6 +586,53 @@ mod tests {
         let tail = Mutex::new(VecDeque::new());
         drain_stderr(input.as_slice(), Broken, &tail);
         assert_eq!(tail.lock().unwrap().len(), STDERR_LIMIT);
+    }
+
+    /// The request enum as helpers built before `LoadCached` declared it.
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum OldRequest {
+        Load {
+            fields: BTreeMap<String, serde_json::Value>,
+        },
+        Transcribe {
+            samples: usize,
+            prompt: Option<String>,
+        },
+        Unload,
+    }
+
+    #[test]
+    fn cache_only_load_is_unreadable_to_old_helpers_and_plain_load_is_unchanged() {
+        let config = {
+            let mut config = Config::default();
+            config.set_field("model_size", serde_json::json!("base"));
+            config.set_field("profile", serde_json::json!("not forwarded"));
+            config
+        };
+        let frame = |engine: &HelperSpeechEngine| {
+            let mut bytes = Vec::new();
+            write_header(&mut bytes, &engine.load).unwrap();
+            bytes
+        };
+        let exe = PathBuf::from("unused");
+        let plain = frame(&HelperSpeechEngine::new(exe.clone(), &config));
+        match read_header::<OldRequest>(&mut plain.as_slice()).unwrap() {
+            Some(OldRequest::Load { fields }) => {
+                assert_eq!(fields["model_size"], "base");
+                assert!(!fields.contains_key("profile"), "only speech fields");
+            }
+            other => panic!("{other:?}"),
+        }
+        let cached = frame(&HelperSpeechEngine::cached(exe, &config));
+        // An old helper's input reader fails here and exits before `make`.
+        assert!(read_header::<OldRequest>(&mut cached.as_slice()).is_err());
+        assert!(matches!(
+            read_header::<Request>(&mut cached.as_slice()).unwrap(),
+            Some(Request::LoadCached { fields })
+                if fields["model_size"] == "base" && !fields.contains_key("profile")
+        ));
     }
 
     #[test]

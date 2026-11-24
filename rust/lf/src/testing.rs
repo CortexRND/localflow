@@ -3,8 +3,13 @@
 //! `tests/cli.rs` with a per-process environment instead.
 
 use std::io::Cursor;
+use std::sync::Mutex;
 
 use crate::{run, Clipboard, Io};
+
+/// Held by unit tests that change the process environment or the
+/// process-wide keyring backend.
+pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Default)]
 pub struct FakeClipboard {
@@ -38,6 +43,7 @@ pub fn run_with(args: &[&str], input: &str, clipboard: &mut FakeClipboard) -> Ou
         input: &mut reader,
         clipboard,
         server_url: None,
+        terminal: false,
     };
     let mut argv = vec!["lf-rs"];
     argv.extend_from_slice(args);

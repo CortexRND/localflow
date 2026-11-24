@@ -50,21 +50,24 @@ env_logger = "0.11"
 # Appearance save completions (awaited on the UI thread, no blocking wait).
 async-channel = "2"
 
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.2", default-features = false, features = ["async-io", "blocking"] }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon = { version = "0.21.2", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
-# Native titlebar follows the chosen appearance (src/native_appearance.rs).
-# Versions already in the lockfile through GPUI's dependency tree.
+# Native titlebar follows the chosen appearance (src/native_appearance.rs) and
+# frontmost-app pid for the menu bar item's paste-target check. Versions
+# already in the lockfile (GPUI / lf-runtime).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSResponder"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSAppearance", "NSApplication", "NSResponder", "NSRunningApplication", "NSWorkspace"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 # Runtime-status probe: signal-0 liveness check of the PID a status file names.
 [target.'cfg(unix)'.dependencies]
@@ -72,6 +75,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Headless GPUI windows (`TestAppContext`) for shell keyboard tests. Dev-only:
+# the binary's gpui features are unchanged.
+gpui = { version = "=0.2.2", features = ["test-support"] }
 
 # GPUI 0.2.2 -> zed-async-tar -> xattr 0.2.3 does not build against the libc
 # that lf-core's keyring backend requires. See vendor/xattr-shim/src/lib.rs.

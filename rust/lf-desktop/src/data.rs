@@ -23,6 +23,7 @@ use lf_ui::backends::settings_agent::SettingsAgent;
 use crate::controllers::capabilities::Capabilities;
 use crate::controllers::jobs::Downloads;
 use crate::controllers::model_storage::SpeechStorage;
+use crate::controllers::retry::{RetryBackend, RetryJobs};
 use crate::controllers::runtime_state::SimulatedState;
 use crate::controllers::setup_flow::SetupDeps;
 use crate::remote::Remote;
@@ -254,7 +255,20 @@ pub struct Services {
     pub assistant: Arc<dyn SettingsAgent>,
     /// Sandbox-only: which runtime state Home simulates.
     pub simulated_runtime: std::cell::Cell<SimulatedState>,
+    /// History retry models: native (runtime), unavailable, or simulated.
+    pub retry: Arc<dyn RetryBackend>,
+    /// The process's one History retry job and its last result.
+    pub retry_jobs: RetryJobs,
 }
+
+/// Storage, setup, Settings assistant and History retry backends, composed
+/// together so sandbox and real runs pick one consistent set.
+type Backends = (
+    Arc<dyn SpeechStorage>,
+    SetupDeps,
+    Arc<dyn SettingsAgent>,
+    Arc<dyn RetryBackend>,
+);
 
 impl Services {
     pub fn open(root: DataRoot) -> Result<Self> {
@@ -290,20 +304,16 @@ impl Services {
         };
         let remote = Remote::for_root(&root);
         let undo_path = root.localflow_dir.join("settings-undo.json");
-        let (storage, setup, assistant): (
-            Arc<dyn SpeechStorage>,
-            SetupDeps,
-            Arc<dyn SettingsAgent>,
-        ) = if root.is_sandbox() {
+        let (storage, setup, assistant, retry): Backends = if root.is_sandbox() {
             // One simulated model inventory behind storage, downloads, the
-            // setup wizard and Ollama pulls, so they always agree.
+            // setup wizard, Ollama pulls and History retry, so they agree.
             let sim = crate::sandbox::SimSpeech::seeded();
             (
                 Arc::new(crate::sandbox::SimStorage::new(sim.clone())),
                 SetupDeps {
                     platform: Arc::new(crate::sandbox::setup_platform()),
                     models: Arc::new(crate::sandbox::SimSetupBackend::with_state(
-                        sim,
+                        sim.clone(),
                         std::time::Duration::from_millis(100),
                     )),
                     meter: Arc::new(crate::sandbox::SimMeterInput),
@@ -319,6 +329,7 @@ impl Services {
                     root.dictionary_path.clone(),
                     undo_path,
                 ),
+                Arc::new(crate::sandbox::SimRetry::new(sim)),
             )
         } else {
             (
@@ -337,9 +348,12 @@ impl Services {
                     root.dictionary_path.clone(),
                     undo_path,
                 ),
+                real_retry(&secrets),
             )
         };
         Ok(Services {
+            retry,
+            retry_jobs: RetryJobs::new(),
             dictionary: DictionaryStore::new(Some(root.dictionary_path.clone())),
             config_file,
             config: RefCell::new(config),
@@ -421,6 +435,18 @@ fn real_storage(caps: &Capabilities) -> Arc<dyn SpeechStorage> {
     Arc::new(crate::controllers::model_storage::UnavailableStorage {
         reason: caps.native_speech_reason().unwrap_or_default(),
     })
+}
+
+#[cfg(feature = "runtime")]
+fn real_retry(secrets: &Arc<dyn SecretStore + Send + Sync>) -> Arc<dyn RetryBackend> {
+    Arc::new(crate::controllers::retry::NativeRetry {
+        secrets: secrets.clone(),
+    })
+}
+
+#[cfg(not(feature = "runtime"))]
+fn real_retry(_: &Arc<dyn SecretStore + Send + Sync>) -> Arc<dyn RetryBackend> {
+    Arc::new(crate::controllers::retry::UnavailableRetry)
 }
 
 /// Open history for reading and editing regardless of `[history] enabled`

@@ -256,6 +256,20 @@ fn seed(root: &DataRoot) -> Result<()> {
         entry.status = (*status).into();
         entry.duration_s = 4.0 + (text.len() as f64 / 12.0);
         entry.ts = Some(now - (*minutes as f64) * 60.0);
+        if *status == "failed" {
+            // A synthetic tone (well above the -50 dBFS silence gate) so the
+            // failed example can be retried; written inside the sandbox clips.
+            let tone: Vec<f32> = (0..24_000)
+                .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 220.0 / 16_000.0).sin() * 0.1)
+                .collect();
+            entry.duration_s = tone.len() as f64 / 16_000.0;
+            // Persist an absolute path: a relative `--sandbox` root would
+            // otherwise store a cwd-relative path that breaks on relaunch.
+            let clip = history.write_clip(&tone, 16_000)?;
+            let clip = persisted_clip_path(&clip)
+                .with_context(|| format!("resolve {}", clip.display()))?;
+            entry.audio_path = Some(clip.to_string_lossy().into());
+        }
         history.add(&entry)?;
     }
 
@@ -271,6 +285,25 @@ fn seed(root: &DataRoot) -> Result<()> {
         phrases.add(trigger, text, *enabled)?;
     }
     Ok(())
+}
+
+/// The absolute form of a freshly written clip path, stable across a cwd
+/// change and in the same prefix style as the (possibly relative) clips root,
+/// so `HistoryStore`'s containment check still matches it.
+///
+/// Windows: `std::path::absolute` (GetFullPathNameW) only prepends the cwd and
+/// normalizes lexically. `fs::canonicalize` would return a `\\?\C:\...`
+/// verbatim path that never `starts_with` an ordinary `C:\...` clips root.
+#[cfg(windows)]
+fn persisted_clip_path(clip: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    std::path::absolute(clip)
+}
+
+/// Elsewhere: `fs::canonicalize`, so a relative root reached through `..`
+/// doesn't store the old working directory (which may be deleted) as a prefix.
+#[cfg(not(windows))]
+fn persisted_clip_path(clip: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    fs::canonicalize(clip)
 }
 
 /// The sandbox prompt queue: three example prompts, one failed.
@@ -453,6 +486,81 @@ impl crate::controllers::model_storage::SpeechStorage for SimStorage {
         }
         self.state.installed().retain(|id| sim_repo(id) != repo);
         Ok(model.size_bytes)
+    }
+}
+
+/// The fixed sandbox History retry transcript.
+pub const SIMULATED_RETRY: &str = "this is a simulated retry no audio was transcribed";
+
+/// Sandbox History retry: the real pipeline (sandbox dictionary, snippets,
+/// row app context) over a fixed fake transcript, never a model. "Opening"
+/// the model succeeds only while the shared [`SimSpeech`] inventory has the
+/// exact configured model (like native cache-only retry, which needs that
+/// one file, not merely its repo), so a missing size or a deleted repo shows
+/// "not downloaded". No cleanup provider (a real one could make an HTTP
+/// call) and no keys.
+pub struct SimRetry {
+    state: std::sync::Arc<SimSpeech>,
+}
+
+impl SimRetry {
+    pub fn new(state: std::sync::Arc<SimSpeech>) -> Self {
+        SimRetry { state }
+    }
+}
+
+/// The simulated inventory id of the configured speech model, mirroring the
+/// native factory (`lf_stt::factory::canonical_backend`, not linked here):
+/// missing `stt_backend` is `auto`, missing `model_size` is `base`; every
+/// Whisper alias selects the whisper.cpp GGML file of that size (the `fw-*`
+/// catalog entry), Parakeet ignores the size. Unknown backends and sizes
+/// outside the catalog are errors, never another model.
+pub fn sim_model_id(config: &Config) -> std::result::Result<String, String> {
+    let backend = config.field_str("stt_backend").unwrap_or("auto");
+    let size = config.field_str("model_size").unwrap_or("base");
+    let id = match backend {
+        "auto" | "faster-whisper" | "mlx" | "mlx-whisper" | "whisper-cpp" => format!("fw-{size}"),
+        "parakeet" | "parakeet-onnx" => "parakeet-v2".to_string(),
+        _ => return Err(format!("unsupported speech provider: {backend}")),
+    };
+    match lf_ui::setup_flow::stt_model_by_id(&id) {
+        Some(_) => Ok(id),
+        None => Err(format!(
+            "The selected speech model ({backend} {size}) isn't available in the sandbox example."
+        )),
+    }
+}
+
+struct SimRetrySpeech;
+
+impl lf_runtime::engine::SpeechEngine for SimRetrySpeech {
+    fn load(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+    fn transcribe(&self, _: &[f32], _: Option<&str>) -> std::result::Result<String, String> {
+        Ok(SIMULATED_RETRY.into())
+    }
+    fn unload(&self) {}
+}
+
+impl crate::controllers::retry::RetryBackend for SimRetry {
+    fn unavailable(&self) -> Option<String> {
+        None
+    }
+    fn open(
+        &self,
+        config: &Config,
+    ) -> std::result::Result<std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>, String> {
+        if !self.state.is_installed(&sim_model_id(config)?) {
+            return Err("The selected speech model isn't downloaded (sandbox example). Download it in Models & keys, then try again.".into());
+        }
+        Ok(std::sync::Arc::new(SimRetrySpeech))
+    }
+    fn llm(&self, _: &Config) -> Option<Box<dyn lf_providers::LlmProvider>> {
+        None
+    }
+    fn simulated(&self) -> bool {
+        true
     }
 }
 
@@ -1309,6 +1417,308 @@ impl lf_providers::LlmProvider for SandboxModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_retry_is_a_labelled_simulation_over_sandbox_data_only() {
+        use crate::controllers::model_storage::SpeechStorage;
+        use crate::controllers::retry::{retry_entry, RetryBackend, RetryKey};
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        assert!(services.retry.simulated());
+        assert!(services.retry.unavailable().is_none());
+        assert!(
+            services.retry.llm(&services.config()).is_none(),
+            "no provider"
+        );
+        let history = open_history(&root).unwrap();
+        let failed: Vec<_> = history
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.status == "failed")
+            .collect();
+        assert_eq!(failed.len(), 1);
+        let entry = failed[0].clone();
+        let shown =
+            crate::controllers::retry::view(&entry, services.retry.as_ref(), &services.retry_jobs);
+        assert!(shown.blocked.is_none());
+        assert!(shown
+            .note
+            .starts_with(crate::controllers::retry::SIMULATED_NOTE));
+        let clip = std::path::PathBuf::from(entry.audio_path.clone().unwrap());
+        assert!(clip.starts_with(&root.clips_dir) && clip.is_file());
+        let updated = retry_entry(
+            &root,
+            &services.config(),
+            RetryKey::of(&entry),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+        assert_eq!(updated.id, entry.id);
+        assert_eq!(history.recent(100, None, 0).unwrap().len(), HISTORY.len());
+
+        // Without the simulated Whisper model, "open" refuses honestly.
+        let sim = SimSpeech::seeded();
+        let storage = std::sync::Arc::new(SimStorage::new(sim.clone()));
+        let mut other = Config::defaults_for(false);
+        other.set_field("stt_backend", json!("parakeet"));
+        storage.delete(lf_stt_repo::WHISPER_CPP, &other).unwrap();
+        let retry = SimRetry::new(sim);
+        let error = retry.open(&services.config()).err().unwrap();
+        assert!(error.contains("isn't downloaded"), "{error}");
+        for path in services.root.all_paths() {
+            assert!(path.starts_with(dir.path()));
+        }
+    }
+
+    /// Retry needs the exact configured model in the one shared simulated
+    /// inventory (as native cache-only retry needs that exact file), not
+    /// merely another size in the same whisper.cpp repo.
+    #[test]
+    fn sandbox_retry_requires_the_exact_selected_simulated_model() {
+        use crate::controllers::retry::{retry_entry, RetryKey};
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare(&dir.path().join("sb"), false).unwrap();
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        let failed = open_history(&root)
+            .unwrap()
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "failed")
+            .unwrap();
+        let entry = || failed.clone();
+        let with = |backend: &str, size: &str| {
+            let mut c = services.config();
+            c.set_field("stt_backend", json!(backend));
+            c.set_field("model_size", json!(size));
+            c
+        };
+        let not_downloaded = |config: &Config| {
+            let error = services.retry.open(config).err().unwrap();
+            assert!(error.contains("isn't downloaded"), "{error}");
+        };
+
+        // Seeded fw-base: retry works.
+        let base = with("faster-whisper", "base");
+        services.retry.open(&base).unwrap();
+        let first = entry();
+        let updated =
+            retry_entry(&root, &base, RetryKey::of(&first), services.retry.as_ref()).unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+
+        // Medium/large are not downloaded although the whisper.cpp repo is
+        // (fw-base, fw-small), under every supported Whisper alias.
+        assert!(services
+            .storage
+            .inventory(&base)
+            .unwrap()
+            .models
+            .iter()
+            .any(|m| m.repo == lf_stt_repo::WHISPER_CPP));
+        for backend in [
+            "faster-whisper",
+            "auto",
+            "mlx",
+            "mlx-whisper",
+            "whisper-cpp",
+        ] {
+            not_downloaded(&with(backend, "medium"));
+            not_downloaded(&with(backend, "large-v3"));
+        }
+        let medium = with("faster-whisper", "medium");
+        let err = retry_entry(
+            &root,
+            &medium,
+            RetryKey::of(&entry()),
+            services.retry.as_ref(),
+        );
+        assert!(err.is_err());
+
+        // Simulated download (through the services' own setup backend, so
+        // the same shared inventory) of exactly medium makes medium work.
+        let model = lf_ui::setup_flow::stt_model_by_id("fw-medium").unwrap();
+        services
+            .setup
+            .models
+            .download_speech(
+                &model,
+                Box::new(|_| {}),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .unwrap();
+        services.retry.open(&medium).unwrap();
+        services.retry.open(&with("mlx-whisper", "medium")).unwrap();
+        not_downloaded(&with("faster-whisper", "large-v3"));
+        let again = retry_entry(
+            &root,
+            &medium,
+            RetryKey::of(&entry()),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(again.status, "ok");
+
+        // Deleting the simulated repo (with Parakeet selected, so Whisper
+        // isn't protected) makes it fail again.
+        services
+            .storage
+            .delete(lf_stt_repo::WHISPER_CPP, &with("parakeet", "base"))
+            .unwrap();
+        not_downloaded(&medium);
+        not_downloaded(&base);
+        // Parakeet ignores the size and is still seeded.
+        services.retry.open(&with("parakeet", "medium")).unwrap();
+        services.retry.open(&with("parakeet-onnx", "base")).unwrap();
+
+        // Unsupported or unknown identities never select another model.
+        for (backend, size) in [
+            ("whisper", "base"),
+            ("openai", "base"),
+            ("", "base"),
+            ("faster-whisper", "huge"),
+            ("faster-whisper", ""),
+        ] {
+            let error = services.retry.open(&with(backend, size)).err().unwrap();
+            assert!(
+                !error.contains("isn't downloaded"),
+                "{backend}/{size}: {error}"
+            );
+        }
+        assert_eq!(
+            sim_model_id(&with("whisper", "base")).unwrap_err(),
+            "unsupported speech provider: whisper"
+        );
+        // Missing fields follow the native defaults (auto, base).
+        let mut bare = Config::defaults_for(false);
+        bare.fields.remove("stt_backend");
+        bare.fields.remove("model_size");
+        assert_eq!(sim_model_id(&bare).unwrap(), "fw-base");
+        assert!(services.retry.llm(&medium).is_none());
+        assert!(services.retry.simulated());
+    }
+
+    /// A relative `--sandbox` root must not leave cwd-relative clip paths in
+    /// SQLite: relaunching the same root by absolute path (as from another
+    /// working directory) still finds the clip and retries as a simulation.
+    #[cfg(unix)]
+    #[test]
+    fn relative_sandbox_root_saves_a_clip_path_that_survives_relaunch() {
+        use crate::controllers::retry::{retry_entry, RetryKey};
+        let dir = tempfile::tempdir().unwrap();
+        let absolute = fs::canonicalize(dir.path()).unwrap().join("sb");
+        // Reach the tempdir relative to the current cwd, without chdir.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(absolute.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+
+        let seeded = prepare(&relative, false).unwrap();
+        assert!(seeded.clips_dir.is_relative(), "root kept as given");
+        let stored = open_history(&seeded)
+            .unwrap()
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "failed")
+            .unwrap();
+        let clip = std::path::PathBuf::from(stored.audio_path.clone().unwrap());
+        assert!(clip.is_absolute(), "{}", clip.display());
+        assert!(clip.starts_with(absolute.join("")), "{}", clip.display());
+
+        // Relaunch by absolute path: no reseed, same row, real loader.
+        let root = prepare(&absolute, false).unwrap();
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        assert!(services.retry.simulated());
+        let entry = open_history(&root)
+            .unwrap()
+            .get(stored.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.audio_path, stored.audio_path);
+        let updated = retry_entry(
+            &root,
+            &services.config(),
+            RetryKey::of(&entry),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+        for path in services.root.all_paths() {
+            assert!(path.starts_with(&absolute));
+        }
+    }
+
+    /// An ordinary absolute root (e.g. `C:\scratch\sandbox` on Windows) saves
+    /// a clip path in the root's own prefix style, so HistoryStore's real
+    /// containment checks load, retry and then delete it. A verbatim
+    /// `\\?\C:\...` clip under a non-verbatim `C:\...` root fails all three.
+    #[test]
+    fn absolute_sandbox_root_clip_loads_retries_and_deletes() {
+        use crate::controllers::retry::{retry_entry, RetryKey};
+        use std::path::{Component, Path};
+        // The Windows prefix of a path, if any, and whether it is verbatim;
+        // no assumption about which style the test temp dir uses.
+        fn verbatim(path: &Path) -> Option<bool> {
+            match path.components().next() {
+                Some(Component::Prefix(p)) => Some(p.kind().is_verbatim()),
+                _ => None,
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::path::absolute(dir.path().join("sb")).unwrap();
+        let root = prepare(&base, false).unwrap();
+        assert!(root.clips_dir.is_absolute());
+        let history = open_history(&root).unwrap();
+        let entry = history
+            .recent(100, None, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "failed")
+            .unwrap();
+        let clip = std::path::PathBuf::from(entry.audio_path.clone().unwrap());
+        assert!(clip.is_absolute(), "{}", clip.display());
+        assert_eq!(
+            verbatim(&clip),
+            verbatim(&root.clips_dir),
+            "{} vs {}",
+            clip.display(),
+            root.clips_dir.display()
+        );
+        assert!(clip.is_file(), "{}", clip.display());
+
+        // The store's own loader accepts it as inside the clips directory.
+        let (samples, rate) = history.load_clip(&clip).unwrap();
+        assert_eq!(rate, 16_000);
+        assert_eq!(samples.len(), 24_000);
+
+        // Retry (which loads through the store) works as a simulation.
+        let services = crate::data::Services::open(root.clone()).unwrap();
+        let updated = retry_entry(
+            &root,
+            &services.config(),
+            RetryKey::of(&entry),
+            services.retry.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(updated.status, "ok");
+        assert_eq!(updated.raw_text, SIMULATED_RETRY);
+        assert_eq!(updated.audio_path, entry.audio_path);
+        assert!(clip.is_file(), "retry keeps the clip");
+
+        // Deleting the row removes the clip (only possible inside the root).
+        assert!(history.delete(entry.id).unwrap());
+        assert!(!clip.exists(), "{}", clip.display());
+        assert!(history.get(entry.id).unwrap().is_none());
+    }
 
     #[test]
     fn seeding_is_isolated_persistent_and_resettable() {

@@ -1336,6 +1336,7 @@
         meetingSaved.style.display = 'none';
         meetingChat.style.display = 'none';
         chatLog.textContent = '';
+        const sentNotes = meetingNotes.value;
         const resp = await meetingFetch('/meeting/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1345,13 +1346,18 @@
             auto_title: !meetingTitle.value.trim(),
             category: meetingCategory.value,
             template: meetingTemplate.value,
-            user_notes: meetingNotes.value,
+            user_notes: sentNotes,
           }),
         });
         if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText);
-        notesDirty = false;
+        meetingActive = true;
         notesLoadedFor = 'local';
-        setNotesStatus(meetingNotes.value ? 'Saved' : '');
+        if (meetingNotes.value === sentNotes) {
+          notesDirty = false;
+          setNotesStatus(sentNotes ? 'Saved' : '');
+        } else {
+          saveNotes();  // typed while the (possibly slow) start was in flight
+        }
       } else {
         const notesSaved = await saveNotes();
         if (!notesSaved || notesDirty) {

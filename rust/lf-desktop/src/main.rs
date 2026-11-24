@@ -128,13 +128,17 @@ fn speech_helper(env_sandbox: bool) -> Option<ExitCode> {
     }
     log::info!("starting speech helper");
     Some(
-        match lf_stt::helper::serve_stdio(|config| {
-            lf_stt::runtime::SpeechAdapter::from_config(&config)
-                .map(|engine| {
-                    std::sync::Arc::new(engine)
-                        as std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>
-                })
-                .map_err(|error| error.to_string())
+        // A cache-only request (History retry) never downloads a model.
+        match lf_stt::helper::serve_stdio_with(|config, cache_only| {
+            if cache_only {
+                lf_stt::runtime::SpeechAdapter::from_config_cached(&config)
+            } else {
+                lf_stt::runtime::SpeechAdapter::from_config(&config)
+            }
+            .map(|engine| {
+                std::sync::Arc::new(engine) as std::sync::Arc<dyn lf_runtime::engine::SpeechEngine>
+            })
+            .map_err(|error| error.to_string())
         }) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

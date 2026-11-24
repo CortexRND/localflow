@@ -18,6 +18,26 @@ pub fn canonical_backend(provider: &str) -> Result<&'static str> {
 }
 
 pub fn from_config(config: &Config, provider_override: Option<&str>) -> Result<EngineSpec> {
+    spec(config, provider_override, None)
+}
+
+/// [`from_config`] for an already installed model in the HF cache at
+/// `cache_root` only: construction fails when the configured model's files
+/// aren't there, and the engine never downloads them later. Same backend,
+/// model, language, provider and key; no other model or backend is chosen.
+pub fn from_config_cached(
+    config: &Config,
+    provider_override: Option<&str>,
+    cache_root: &std::path::Path,
+) -> Result<EngineSpec> {
+    spec(config, provider_override, Some(cache_root))
+}
+
+fn spec(
+    config: &Config,
+    provider_override: Option<&str>,
+    cache_root: Option<&std::path::Path>,
+) -> Result<EngineSpec> {
     let backend = canonical_backend(config.field_str("stt_backend").unwrap_or("auto"))?;
     let model = config.field_str("model_size").unwrap_or("base");
     let language = config
@@ -25,7 +45,7 @@ pub fn from_config(config: &Config, provider_override: Option<&str>) -> Result<E
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
     let provider = provider_override.unwrap_or_else(|| saved_device(config));
-    let engine = build_engine(backend, model, language.clone(), provider)?;
+    let engine = build_engine(backend, model, language.clone(), provider, cache_root)?;
     Ok(EngineSpec {
         key: serde_json::to_string(&(backend, model, &language, provider))?,
         backend: backend.into(),
@@ -56,14 +76,21 @@ fn build_engine(
     _model: &str,
     _language: Option<String>,
     _provider: &str,
+    _cache_root: Option<&std::path::Path>,
 ) -> Result<Box<dyn crate::SpeechEngine>> {
     match backend {
         #[cfg(feature = "whisper")]
-        "whisper-cpp" => Ok(Box::new(crate::engines::WhisperEngine::new(
-            _model, _language, _provider,
-        )?)),
+        "whisper-cpp" => Ok(Box::new(match _cache_root {
+            Some(root) => {
+                crate::engines::WhisperEngine::cached(_model, _language, _provider, root)?
+            }
+            None => crate::engines::WhisperEngine::new(_model, _language, _provider)?,
+        })),
         #[cfg(feature = "parakeet")]
-        "parakeet-onnx" => Ok(Box::new(crate::engines::ParakeetEngine::new(_provider)?)),
+        "parakeet-onnx" => Ok(Box::new(match _cache_root {
+            Some(root) => crate::engines::ParakeetEngine::cached(_provider, root)?,
+            None => crate::engines::ParakeetEngine::new(_provider)?,
+        })),
         _ => bail!(
             "{backend} feature is disabled; rebuild lf-stt with the corresponding engine feature"
         ),
@@ -152,6 +179,62 @@ mod tests {
             assert_eq!(config.field_str("stt_device"), Some("cuda"));
         }
     }
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn cached_specs_keep_the_configured_model_and_refuse_missing_files() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.fields.insert("model_size".into(), json!("small.en"));
+        let error = from_config_cached(&config, Some("cpu"), cache.path())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("small.en"), "{error}");
+        crate::downloads::install_for_test(
+            cache.path(),
+            crate::model_storage::WHISPER_CPP_REPO,
+            &[("ggml-small.en.bin", b"weights")],
+        );
+        let cached = from_config_cached(&config, Some("cpu"), cache.path()).unwrap();
+        let plain = from_config(&config, Some("cpu")).unwrap();
+        assert_eq!(
+            (&cached.key, &cached.backend, &cached.model_size),
+            (&plain.key, &plain.backend, &plain.model_size)
+        );
+        assert!(!cached.engine.loaded());
+        // A Parakeet selection never silently becomes the installed Whisper.
+        config
+            .fields
+            .insert("stt_backend".into(), json!("parakeet"));
+        assert!(from_config_cached(&config, Some("cpu"), cache.path()).is_err());
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn cached_saved_cuda_gets_the_same_cpu_spec_as_normal_construction() {
+        let cache = tempfile::tempdir().unwrap();
+        crate::downloads::install_for_test(
+            cache.path(),
+            crate::model_storage::WHISPER_CPP_REPO,
+            &[("ggml-base.bin", b"fake weights")],
+        );
+        let mut config = Config::default();
+        config.set_field("stt_backend", json!("faster-whisper"));
+        config.set_field("model_size", json!("base"));
+        config.set_field("stt_device", json!("cuda"));
+        let cached = from_config_cached(&config, None, cache.path()).unwrap();
+        let plain = from_config(&config, None).unwrap();
+        assert_eq!(
+            (&cached.key, &cached.backend, &cached.model_size),
+            (&plain.key, &plain.backend, &plain.model_size)
+        );
+        assert_eq!(cached.key, from_config(&config, Some("cpu")).unwrap().key);
+        assert!(!cached.key.contains("cuda"));
+        assert!(!cached.engine.loaded(), "nothing loaded or downloaded");
+        assert!(from_config_cached(&config, Some("cuda"), cache.path()).is_err());
+        assert_eq!(config.field_str("stt_device"), Some("cuda"));
+    }
+
     #[cfg(feature = "whisper")]
     #[test]
     fn key_covers_language_model_and_provider() {

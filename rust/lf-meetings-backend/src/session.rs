@@ -10,6 +10,8 @@ use std::{
 
 /// Factories execute on the session's owning thread, including for !Send devices.
 pub trait CaptureFactory: Send + Sync + 'static {
+    /// Returns a transcriber that is ready to transcribe (its model loaded).
+    /// An error aborts the meeting start before any audio is captured.
     fn transcriber(&self, config: &Config) -> Result<Arc<dyn Transcriber>>;
     fn microphone(&self, config: &Config) -> Result<Box<dyn AudioSource>>;
     fn system_audio(&self, _config: &Config) -> Result<Option<Box<dyn AudioSource>>> {
@@ -65,10 +67,12 @@ impl SessionActor {
                         } else {
                             (None, String::new())
                         };
+                    let microphone = factory.microphone(&config)?;
+                    let transcriber = factory.transcriber(&config)?;
                     let mut session = MeetingSession::new(
-                        factory.transcriber(&config)?,
+                        transcriber,
                         lock,
-                        factory.microphone(&config)?,
+                        microphone,
                         system_audio,
                         Duration::from_secs(
                             config

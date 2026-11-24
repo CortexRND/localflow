@@ -438,6 +438,32 @@ def test_title_uses_its_own_short_timeout_client_of_the_current_model(api, monke
     assert llm.timeout == 300  # the shared summarizer client is untouched
 
 
+def test_fast_model_is_used_for_auto_title_but_not_summary_or_chat(api, monkeypatch):
+    from dataclasses import replace
+
+    main, fast = TitleLLM(), TimedLLM()
+    fast.model = "fast-model"
+    config = replace(server._config, llm_model="main-model", llm_fast_model=fast.model)
+    monkeypatch.setattr(server, "_config", config)
+    monkeypatch.setattr(server, "_summarizer", MeetingSummarizer(main))
+    builds = []
+
+    def build(selected, **options):
+        builds.append((selected, options))
+        return fast
+
+    monkeypatch.setattr(server, "build_llm", build)
+    body = _meeting(api)
+    assert body["title"] == "Budget review"
+    assert [call[0] for call in main.calls] == ["summary"]
+    assert [call[0] for call in fast.calls] == ["title"]
+    assert fast.seen[0][1:] == (meetings.TITLE_TIMEOUT_SECONDS, "fast-model")
+    assert builds == [(replace(config, llm_model="fast-model"), {"timeout": 300, "num_ctx": 8192})]
+    assert api.post("/meeting/chat", json={"question": "What was discussed?"}).status_code == 200
+    assert [call[0] for call in main.calls] == ["summary", "summary"]
+    assert len(fast.calls) == 1
+
+
 def test_title_client_copies_the_provider_snapshot():
     from localflow.providers.llm_ollama import OllamaLLM
     from localflow.providers.llm_openai_compat import OpenAICompatLLM

@@ -1,6 +1,6 @@
 use lf_core::config::Config;
 use lf_runtime::engine::SpeechEngine;
-use lf_stt::helper::{serve_stdio, HelperSpeechEngine};
+use lf_stt::helper::{serve_stdio, serve_stdio_with, HelperSpeechEngine};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +33,9 @@ impl SpeechEngine for Fake {
         }
         if pcm.is_empty() {
             return Err("empty fake input".into());
+        }
+        if self.0.field_bool("cache_only_marker") == Some(true) {
+            return Ok(format!("cache-only:{}", pcm.len()));
         }
         Ok(format!(
             "{}:{}:{}",
@@ -80,7 +83,21 @@ fn gone(pid: u32) -> bool {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--speech-helper") {
-        serve_stdio(|config| Ok(Arc::new(Fake(config, std::sync::Mutex::new(None))))).unwrap();
+        let legacy = std::env::args()
+            .next()
+            .is_some_and(|argv0| argv0.contains("legacy-helper"));
+        if legacy {
+            // A helper without cache-only support (plain `serve_stdio`).
+            serve_stdio(|config| Ok(Arc::new(Fake(config, std::sync::Mutex::new(None))))).unwrap();
+        } else {
+            serve_stdio_with(|mut config, cache_only| {
+                if cache_only {
+                    config.set_field("cache_only_marker", serde_json::json!(true));
+                }
+                Ok(Arc::new(Fake(config, std::sync::Mutex::new(None))))
+            })
+            .unwrap();
+        }
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--parent") {
@@ -138,6 +155,31 @@ fn main() {
     let missing =
         HelperSpeechEngine::new(exe.with_file_name("missing-executable"), &config("normal"));
     assert!(missing.load().unwrap_err().contains("spawn speech helper"));
+
+    // Cache-only loads reach a helper that supports them, and only as such.
+    let cached = HelperSpeechEngine::cached(exe.clone(), &config("normal"));
+    assert_eq!(cached.transcribe(&[0.5; 3], None).unwrap(), "cache-only:3");
+    let pid = cached.child_pid().unwrap();
+    drop(cached);
+    assert!(gone(pid));
+    no_leases(pid);
+    // A helper without cache-only support refuses before `make`/load runs.
+    let copies = tempfile::tempdir().unwrap();
+    let legacy_exe = copies
+        .path()
+        .join(format!("legacy-helper{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(&exe, &legacy_exe).unwrap();
+    let legacy = HelperSpeechEngine::cached(legacy_exe.clone(), &config("normal"));
+    let error = legacy.load().unwrap_err();
+    assert!(
+        error.contains(lf_stt::helper::CACHE_ONLY_UNSUPPORTED),
+        "{error}"
+    );
+    assert!(legacy.child_pid().is_none() && !legacy.loaded());
+    // The ordinary load path on that helper is unchanged.
+    let plain = HelperSpeechEngine::new(legacy_exe, &config("normal"));
+    assert_eq!(plain.transcribe(&[0.5], None).unwrap(), "1:0.5:");
+    drop(plain);
 
     let root = tempfile::tempdir().unwrap();
     let flag = root.path().join("crash-once");
