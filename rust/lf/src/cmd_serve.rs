@@ -10,11 +10,13 @@ use lf_stt::server::{SharedSpeech, SttBackend};
 
 use crate::{outln, Io};
 
-struct MeetingSpeech(SharedSpeech);
+/// Transcribes with the config the meeting started with, so another caller's
+/// model switch (even a failed one) cannot change or break the meeting's model.
+struct MeetingSpeech(SharedSpeech, Config);
 
 impl Transcriber for MeetingSpeech {
     fn transcribe(&self, audio: &[f32], prompt: Option<&str>) -> Result<String> {
-        Ok(self.0.transcribe_current(audio, prompt)?.text)
+        Ok(self.0.transcribe(&self.1, audio, prompt)?.text)
     }
 }
 
@@ -26,7 +28,7 @@ impl CaptureFactory for MeetingCapture {
         // Meeting capture resamples to 16 kHz itself; the dictation
         // `sample_rate` setting only governs the dictation recorder.
         self.0.load(config)?;
-        Ok(Arc::new(MeetingSpeech(self.0.clone())))
+        Ok(Arc::new(MeetingSpeech(self.0.clone(), config.clone())))
     }
 
     fn microphone(&self, config: &Config) -> Result<Box<dyn AudioSource>> {
@@ -75,19 +77,37 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
         lf_server::server_url::base_url(host, server.local_addr()?.port())
     )?;
     io.out.flush()?;
-    let served = runtime.block_on(server.run());
-    let active = meetings.session_active();
+    // One listener for the whole run, so a second signal is seen even while
+    // the server still drains an in-flight `/meeting/stop`.
+    let mut signals = runtime.block_on(async { Signals::new() })?;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut serving = runtime.spawn(server.run_until(async {
+        let _ = stopped.await;
+    }));
+    let early = runtime.block_on(async {
+        tokio::select! {
+            served = &mut serving => Some(served),
+            () = signals.recv() => None,
+        }
+    });
+    let active = early.is_none() && meetings.session_active();
+    let _ = stop.send(());
+    let handle = runtime.handle().clone();
     let shutdown = finish_shutdown(
         &runtime,
         io,
         active,
-        move || state.shutdown(),
+        move || {
+            let served = early.unwrap_or_else(|| handle.block_on(serving));
+            let shutdown = state.shutdown();
+            served?.and(shutdown)
+        },
         move || meetings.wait_for_saved_transcript(),
-        interrupted(),
+        async move { signals.recv().await },
     );
     // A skipped save leaves its LLM steps running; do not wait for them.
     runtime.shutdown_background();
-    served.and(shutdown)
+    shutdown
 }
 
 /// Saves an active meeting before exit, announcing it. A second interrupt
@@ -103,8 +123,8 @@ fn finish_shutdown(
     if !meeting_active {
         return shutdown();
     }
-    outln!(io.out, "Saving meeting…")?;
-    io.out.flush()?;
+    // Announcements are best-effort: a closed stdout must not stop the save.
+    let _ = writeln!(io.out, "Saving meeting…").and_then(|()| io.out.flush());
     let saving = runtime.spawn_blocking(shutdown);
     let saved = runtime.block_on(async {
         tokio::select! {
@@ -116,26 +136,50 @@ fn finish_shutdown(
         return result?;
     }
     if runtime.block_on(runtime.spawn_blocking(wait_for_saved_transcript))? {
-        outln!(io.out, "Meeting transcript saved without AI notes.")?;
-        io.out.flush()?;
+        let _ = writeln!(io.out, "Meeting transcript saved without AI notes.")
+            .and_then(|()| io.out.flush());
         Ok(())
     } else {
         anyhow::bail!("could not save meeting during shutdown")
     }
 }
 
-async fn interrupted() {
+/// Ctrl-C, plus SIGTERM on Unix, as in `lf_server::Server::run`.
+struct Signals {
     #[cfg(unix)]
-    {
-        if let Ok(mut terminate) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl Signals {
+    fn new() -> std::io::Result<Self> {
+        #[cfg(unix)]
         {
-            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
-            return;
+            use tokio::signal::unix::{signal, SignalKind};
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                ctrl_c: tokio::signal::windows::ctrl_c()?,
+            })
         }
     }
-    if tokio::signal::ctrl_c().await.is_err() {
-        std::future::pending::<()>().await;
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.interrupt.recv() => {},
+            _ = self.terminate.recv() => {},
+        }
+        #[cfg(windows)]
+        self.ctrl_c.recv().await;
     }
 }
 
@@ -152,6 +196,7 @@ mod tests {
     struct Fake {
         loads: Arc<AtomicUsize>,
         loaded: bool,
+        model: String,
     }
 
     impl SpeechEngine for Fake {
@@ -160,12 +205,13 @@ mod tests {
         }
         fn load(&mut self) -> Result<LoadInfo> {
             self.loads.fetch_add(1, Ordering::SeqCst);
+            anyhow::ensure!(self.model != "broken", "broken model");
             self.loaded = true;
             Ok(LoadInfo::default())
         }
         fn transcribe(&mut self, _: &[f32], _: Option<&str>) -> Result<Transcript> {
             Ok(Transcript {
-                text: "meeting words".into(),
+                text: format!("{} words", self.model),
                 ..Transcript::default()
             })
         }
@@ -180,31 +226,64 @@ mod tests {
     #[test]
     fn meetings_reuse_the_model_loaded_for_transcribe_and_report_it_loaded() {
         let root = tempfile::tempdir().unwrap();
+        let (speech, loads) = fake_speech(root.path());
+        let transcribe = SttBackend::with_speech(UnavailableBackend, speech.clone());
+        let capture = MeetingCapture(speech);
+        assert!(!transcribe.transcriber_loaded());
+        let first = capture.transcriber(&model("tiny")).unwrap();
+        assert!(transcribe.transcriber_loaded());
+        let second = capture.transcriber(&model("tiny")).unwrap();
+        assert_eq!(first.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(second.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_failed_model_switch_by_an_upload_does_not_break_the_running_meeting() {
+        let root = tempfile::tempdir().unwrap();
+        let (speech, loads) = fake_speech(root.path());
+        let meeting = MeetingCapture(speech.clone())
+            .transcriber(&model("tiny"))
+            .unwrap();
+        let upload = speech.transcribe(&model("broken"), &[0.25], None);
+        assert_eq!(upload.unwrap_err().to_string(), "broken model");
+        assert_eq!(meeting.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(
+            speech
+                .transcribe(&model("small"), &[0.25], None)
+                .unwrap()
+                .text,
+            "small words"
+        );
+        assert_eq!(meeting.transcribe(&[0.25], None).unwrap(), "tiny words");
+        assert_eq!(loads.load(Ordering::SeqCst), 5);
+    }
+
+    fn model(name: &str) -> Config {
+        let mut config = Config::default();
+        config.set_field("model_size", json!(name));
+        config
+    }
+
+    fn fake_speech(root: &std::path::Path) -> (SharedSpeech, Arc<AtomicUsize>) {
         let loads = Arc::new(AtomicUsize::new(0));
         let counter = loads.clone();
-        let speech = SharedSpeech::with_factory(SttSlot::with_lease_root(root.path().into()), {
+        let speech = SharedSpeech::with_factory(SttSlot::with_lease_root(root.into()), {
             move |config| {
                 let model = config.field_str("model_size").unwrap_or("base").to_string();
                 Ok(EngineSpec {
                     key: model.clone(),
                     backend: "whisper-cpp".into(),
-                    model_size: model,
+                    model_size: model.clone(),
                     engine: Box::new(Fake {
                         loads: counter.clone(),
                         loaded: false,
+                        model,
                     }),
                 })
             }
         });
-        let transcribe = SttBackend::with_speech(UnavailableBackend, speech.clone());
-        let capture = MeetingCapture(speech);
-        assert!(!transcribe.transcriber_loaded());
-        let first = capture.transcriber(&Config::default()).unwrap();
-        assert!(transcribe.transcriber_loaded());
-        let second = capture.transcriber(&Config::default()).unwrap();
-        assert_eq!(first.transcribe(&[0.25], None).unwrap(), "meeting words");
-        assert_eq!(second.transcribe(&[0.25], None).unwrap(), "meeting words");
-        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        (speech, loads)
     }
 
     fn shutdown_output(
@@ -213,15 +292,33 @@ mod tests {
         wait_for_saved_transcript: impl FnOnce() -> bool + Send + 'static,
         interrupt: impl Future<Output = ()>,
     ) -> (Result<()>, String) {
+        let mut out = Vec::new();
+        let result = shutdown_writing_to(
+            &mut out,
+            meeting_active,
+            shutdown,
+            wait_for_saved_transcript,
+            interrupt,
+        );
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    fn shutdown_writing_to(
+        out: &mut dyn std::io::Write,
+        meeting_active: bool,
+        shutdown: impl FnOnce() -> Result<()> + Send + 'static,
+        wait_for_saved_transcript: impl FnOnce() -> bool + Send + 'static,
+        interrupt: impl Future<Output = ()>,
+    ) -> Result<()> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .build()
             .unwrap();
-        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut err = Vec::new();
         let mut input = std::io::Cursor::new(Vec::new());
         let mut clipboard = crate::testing::FakeClipboard::default();
         let mut io = Io {
-            out: &mut out,
+            out,
             err: &mut err,
             input: &mut input,
             clipboard: &mut clipboard,
@@ -238,7 +335,48 @@ mod tests {
         );
         runtime.shutdown_background();
         assert!(err.is_empty());
-        (result, String::from_utf8(out).unwrap())
+        result
+    }
+
+    struct ClosedPipe;
+
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn a_closed_stdout_neither_skips_nor_fails_the_meeting_save() {
+        let (saved, saves) = mpsc::channel();
+        let result = shutdown_writing_to(
+            &mut ClosedPipe,
+            true,
+            move || {
+                saved.send(()).unwrap();
+                Ok(())
+            },
+            || unreachable!(),
+            std::future::pending(),
+        );
+        assert!(result.is_ok());
+        saves.try_recv().unwrap();
+        let (never_finishes, blocked) = mpsc::channel::<()>();
+        let result = shutdown_writing_to(
+            &mut ClosedPipe,
+            true,
+            move || {
+                let _ = blocked.recv();
+                Ok(())
+            },
+            || true,
+            std::future::ready(()),
+        );
+        assert!(result.is_ok());
+        drop(never_finishes);
     }
 
     #[test]

@@ -69,7 +69,10 @@ by default: `rust/lf/src/cmd_serve.rs` builds one `SharedSpeech`, gives it to
 both its meeting capture and an inner `SttBackend::with_speech`, and binds the
 `MeetingsBackend` via `ServerState::load_with_backend`, so the served
 `/transcribe` route is handled by this adapter without any extra flag and a
-model loaded by either a phone upload or a meeting serves the other.
+model loaded by either a phone upload or a meeting serves the other. A meeting
+transcribes every chunk with the config it started with: if an upload switches
+the model mid-meeting, the next chunk switches back (one reload each way), and
+an upload whose model fails to load does not affect the meeting.
 
 Other hosts opt in by enabling the `server` feature on their `lf-stt`
 dependency and passing `SttBackend::new(inner_backend)` from `lf_stt::server`
@@ -78,8 +81,9 @@ Every other route and autostart status delegates unchanged to `inner_backend`.
 Provider availability follows compiled engine features; the model lives in a
 mutex-protected `SttSlot` (`SharedSpeech`). Requests sharing that slot
 serialize model selection/inference so a switch cannot unload an in-flight
-model. Loaded state is an atomic flag updated on every select, load and
-inference, so `/api/status` answers without waiting for a download.
+model. Loaded state is an atomic flag updated on every select, after the load
+and after inference, so `/api/status` answers without waiting for a download
+and reports a cold model loaded as soon as its first inference starts.
 
 `POST /transcribe` accepts multipart `file` and integer query `clean`, uses
 the Python server's 25 MiB ceiling and ffmpeg input-format/protocol whitelist,

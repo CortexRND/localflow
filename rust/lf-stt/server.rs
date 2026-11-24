@@ -29,9 +29,12 @@ const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const INPUT_FORMATS: &str = "matroska,webm,ogg,mov,mp4,m4a,wav,mp3,aac,flac,caf";
 type EngineFactory = dyn Fn(&Config) -> Result<EngineSpec> + Send + Sync;
 
-/// One config-selected speech model shared by every caller in a process. A
-/// selection with the same engine key reuses the loaded model; a different one
-/// replaces it. `loaded` never waits for an in-flight download or inference.
+/// One config-selected speech model shared by every caller in a process. Each
+/// call selects the model its config describes: the same engine key reuses the
+/// loaded model, a different one replaces it. A caller holding an older config
+/// (a running meeting) therefore switches back to its model on its next call,
+/// and a failed switch by another caller does not affect it. `loaded` never
+/// waits for an in-flight download or inference.
 #[derive(Clone)]
 pub struct SharedSpeech(Arc<SharedSlot>);
 
@@ -70,7 +73,7 @@ impl SharedSpeech {
 
     /// Selects the model `config` describes and loads it.
     pub fn load(&self, config: &Config) -> Result<()> {
-        self.with_slot(Some(config), SttSlot::load)
+        self.with_loaded(config, |_| Ok(()))
     }
 
     /// Selects the model `config` describes, loading it if needed.
@@ -80,17 +83,12 @@ impl SharedSpeech {
         pcm: &[f32],
         prompt: Option<&str>,
     ) -> Result<Transcript> {
-        self.with_slot(Some(config), |slot| slot.transcribe(pcm, prompt))
+        self.with_loaded(config, |slot| slot.transcribe(pcm, prompt))
     }
 
-    /// Uses whichever model is currently selected, loading it if needed.
-    pub fn transcribe_current(&self, pcm: &[f32], prompt: Option<&str>) -> Result<Transcript> {
-        self.with_slot(None, |slot| slot.transcribe(pcm, prompt))
-    }
-
-    fn with_slot<T>(
+    fn with_loaded<T>(
         &self,
-        config: Option<&Config>,
+        config: &Config,
         use_slot: impl FnOnce(&mut SttSlot) -> Result<T>,
     ) -> Result<T> {
         let mut slot = self
@@ -98,10 +96,11 @@ impl SharedSpeech {
             .slot
             .lock()
             .map_err(|_| anyhow::anyhow!("speech slot poisoned"))?;
-        if let Some(config) = config {
-            slot.select((self.0.make_engine)(config)?);
-            self.0.loaded.store(slot.loaded(), Ordering::Release);
-        }
+        slot.select((self.0.make_engine)(config)?);
+        self.0.loaded.store(slot.loaded(), Ordering::Release);
+        let loaded = slot.load();
+        self.0.loaded.store(slot.loaded(), Ordering::Release);
+        loaded?;
         let result = use_slot(&mut slot);
         self.0.loaded.store(slot.loaded(), Ordering::Release);
         result
@@ -479,6 +478,20 @@ mod tests {
     struct Gate {
         entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
         release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        during_transcribe: bool,
+    }
+    impl Gate {
+        fn hold(&self, transcribing: bool) {
+            if self.during_transcribe != transcribing {
+                return;
+            }
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                release.recv().unwrap();
+            }
+        }
     }
     impl SpeechEngine for FakeEngine {
         fn id(&self) -> &str {
@@ -486,12 +499,7 @@ mod tests {
         }
         fn load(&mut self) -> Result<LoadInfo> {
             if let Some(gate) = &self.gate {
-                if let Some(entered) = gate.entered.lock().unwrap().take() {
-                    entered.send(()).unwrap();
-                }
-                if let Some(release) = gate.release.lock().unwrap().take() {
-                    release.recv().unwrap();
-                }
+                gate.hold(false);
             }
             self.loads.fetch_add(1, Ordering::SeqCst);
             self.loaded = true;
@@ -508,6 +516,9 @@ mod tests {
         }
         fn transcribe(&mut self, _: &[f32], prompt: Option<&str>) -> Result<Transcript> {
             assert!(prompt.is_some_and(|s| s.contains("LocalFlow")));
+            if let Some(gate) = &self.gate {
+                gate.hold(true);
+            }
             anyhow::ensure!(!self.fail, "fake inference error");
             Ok(Transcript {
                 text: self.text.clone(),
@@ -734,7 +745,7 @@ mod tests {
         assert_eq!(response.body["text"], "shared");
         assert_eq!(
             speech
-                .transcribe_current(&[0.25; 1600], Some("LocalFlow"))
+                .transcribe(&Config::default(), &[0.25; 1600], Some("LocalFlow"))
                 .unwrap()
                 .text,
             "shared"
@@ -750,25 +761,36 @@ mod tests {
 
     #[test]
     fn loaded_state_answers_while_another_thread_holds_the_engine_loading() {
-        let root = tempfile::tempdir().unwrap();
-        let (entered, started) = std::sync::mpsc::channel();
-        let (release, held) = std::sync::mpsc::channel();
-        let gate = Arc::new(Gate {
-            entered: std::sync::Mutex::new(Some(entered)),
-            release: std::sync::Mutex::new(Some(held)),
-        });
-        let (speech, loads, _) = fake_speech(root.path(), false, "slow", Some(gate));
-        let backend = Arc::new(SttBackend::with_speech(Inner, speech.clone()));
-        let loading = std::thread::spawn(move || speech.load(&Config::default()).unwrap());
-        started.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (answer, answered) = std::sync::mpsc::channel();
-        let status = backend.clone();
-        std::thread::spawn(move || answer.send(status.transcriber_loaded()).unwrap());
-        assert!(!answered.recv_timeout(Duration::from_secs(5)).unwrap());
-        release.send(()).unwrap();
-        loading.join().unwrap();
-        assert_eq!(loads.load(Ordering::SeqCst), 1);
-        assert!(backend.transcriber_loaded());
+        // A cold transcribe reports loaded once the load ends, not after inference.
+        for during_transcribe in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (entered, started) = std::sync::mpsc::channel();
+            let (release, held) = std::sync::mpsc::channel();
+            let gate = Arc::new(Gate {
+                entered: std::sync::Mutex::new(Some(entered)),
+                release: std::sync::Mutex::new(Some(held)),
+                during_transcribe,
+            });
+            let (speech, loads, _) = fake_speech(root.path(), false, "slow", Some(gate));
+            let backend = Arc::new(SttBackend::with_speech(Inner, speech.clone()));
+            let busy = std::thread::spawn(move || {
+                speech
+                    .transcribe(&Config::default(), &[0.25], Some("LocalFlow"))
+                    .unwrap()
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (answer, answered) = std::sync::mpsc::channel();
+            let status = backend.clone();
+            std::thread::spawn(move || answer.send(status.transcriber_loaded()).unwrap());
+            assert_eq!(
+                answered.recv_timeout(Duration::from_secs(5)).unwrap(),
+                during_transcribe
+            );
+            release.send(()).unwrap();
+            assert_eq!(busy.join().unwrap().text, "slow");
+            assert_eq!(loads.load(Ordering::SeqCst), 1);
+            assert!(backend.transcriber_loaded());
+        }
     }
 
     #[test]
