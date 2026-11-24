@@ -205,17 +205,17 @@ On release tags `mac-installer.yml` publishes them (see `docs/releasing.md`).
 `plutil`, `codesign` and `open`.
 
 ```bash
-scripts/install_gpui_preview.sh                    # this release's package, checked against SHA256SUMS-gpui-preview
-scripts/install_gpui_preview.sh --release v0.2.3   # another release
-scripts/install_gpui_preview.sh --archive LocalFlow-Preview-0.2.2-linux-x86_64.tar.gz \
-    --sha256 LocalFlow-Preview-0.2.2-linux-x86_64.tar.gz.sha256 --no-launch   # CI artifact or offline copy
+scripts/install_gpui_preview.sh                    # the v0.2.3 package, checked against SHA256SUMS-gpui-preview
+scripts/install_gpui_preview.sh --release vX.Y.Z   # a later release (v0.2.3 or newer)
+scripts/install_gpui_preview.sh --archive LocalFlow-Preview-0.2.3-linux-x86_64.tar.gz \
+    --sha256 LocalFlow-Preview-0.2.3-linux-x86_64.tar.gz.sha256 --no-launch   # CI artifact or offline copy
 scripts/install_gpui_preview.sh --uninstall
 ```
 
-The `v0.2.2` release predates the package, so downloads work from the first
-release tagged with this workflow; until then use a `gpui-preview-<platform>`
-artifact with `--archive` and `--sha256` (a `.sha256` file, a
-`SHA256SUMS-gpui-preview` file or the digest itself).
+The default download installs from the `v0.2.3` release, the first one that
+carries preview assets; earlier releases have none. Without a release, use a
+`gpui-preview-<platform>` artifact with `--archive` and `--sha256` (a
+`.sha256` file, a `SHA256SUMS-gpui-preview` file or the digest itself).
 
 | Platform | Installed (and the only paths the script owns) |
 |---|---|

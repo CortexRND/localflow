@@ -4,7 +4,7 @@ Local push-to-talk dictation for macOS, with best-effort Linux and Windows suppo
 
 See the [Wispr Flow feature parity comparison](docs/wispr-parity.md) for a feature-by-feature overview.
 
-Release maintainers: [v0.2.2 asset build and publishing](docs/releasing.md).
+Release maintainers: [v0.2.3 asset build and publishing](docs/releasing.md).
 
 ## Easiest install (no Terminal needed)
 
@@ -94,7 +94,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.2/install.sh && echo "06912837b524c70b73fa987adc950c050663c8a7914552440068c80c243870f2  install.sh" | shasum -a 256 -c - && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.3/install.sh && echo "bbb213cea04a223ac290b5e19eb0fa2b11adf05eb9c8479e9cac6db0639f846c  install.sh" | shasum -a 256 -c - && bash install.sh
 ```
 
 (`sha256sum -c -` works too.) To install and start Ollama for optional
@@ -102,11 +102,11 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.2/install.sh && echo "06912837b524c70b73fa987adc950c050663c8a7914552440068c80c243870f2  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.3/install.sh && echo "bbb213cea04a223ac290b5e19eb0fa2b11adf05eb9c8479e9cac6db0639f846c  install.sh" | shasum -a 256 -c - && bash install.sh --with-ollama
 ```
 
-The installer is pinned to release `v0.2.2`. Whether or not git is installed,
-it downloads `localflow-0.2.2.tar.gz` from that release and verifies it against
+The installer is pinned to release `v0.2.3`. Whether or not git is installed,
+it downloads `localflow-0.2.3.tar.gz` from that release and verifies it against
 the release's `SHA256SUMS` before unpacking; it stops and deletes the download
 if the checksum file or hash is missing or does not match. An existing install
 in `~/.localflow/app` (including an older git checkout made by a previous
@@ -163,15 +163,15 @@ installer prints a warning saying so.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.2.2/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq 'EE594470A2AC0AE262CB1C619D08A3A0CF3CA89C6C6D656A96AF2B6245040720') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/CortexRND/localflow/v0.2.3/install.ps1 -OutFile install.ps1; if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq 'E6F3C35E4A6637249F71FA2ABD92DECE3BB7207C10E9CE769F436B9AD2C5B407') { powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 } else { Write-Error 'install.ps1 checksum mismatch; not running it' }
 ```
 
 To install and start Ollama for optional transcript cleanup, add
 `-WithOllama` to the `powershell` command inside the success branch.
 
-Without git, the installer downloads `localflow-0.2.2.zip` from the `v0.2.2`
+Without git, the installer downloads `localflow-0.2.3.zip` from the `v0.2.3`
 release and verifies it against the release's `SHA256SUMS`
-(`Get-FileHash -Algorithm SHA256`); with git it checks out the `v0.2.2` tag.
+(`Get-FileHash -Algorithm SHA256`); with git it checks out the `v0.2.3` tag.
 As on macOS and Linux, `LOCALFLOW_REF` is an unverified override.
 
 Or run from a checkout:
