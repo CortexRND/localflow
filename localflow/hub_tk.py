@@ -10,7 +10,13 @@ from datetime import datetime
 from tkinter import filedialog, messagebox
 from tkinter import font as tkfont
 
-from localflow.config import apply_config_update, load_config, save_config
+from localflow.config import (
+    ConfigError,
+    apply_config_update,
+    config_path,
+    load_config,
+    save_config,
+)
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
 from localflow.hub_model import (
@@ -375,9 +381,15 @@ class HubWindow:
             if index < len(rows) - 1:
                 tk.Frame(listing, bg=self.tokens["line"], height=1).pack(fill="x")
 
+    def _perf_config(self):
+        try:
+            return load_config() if config_path().exists() else self._live_config.get()
+        except (ConfigError, OSError, ValueError):
+            return self._live_config.get()
+
     def _speed_card(self):
         """The Speed card under the stats line; nothing at all without data."""
-        card = home_speed_card(self.perf_summary, self._live_config.get())
+        card = home_speed_card(self.perf_summary, self._perf_config())
         self.speed_card = card
         if card is None:
             return

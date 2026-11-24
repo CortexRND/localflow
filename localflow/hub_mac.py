@@ -28,7 +28,13 @@ from AppKit import (
 )
 from Foundation import NSMakePoint, NSMakeSize, NSObject, NSTimer
 
-from localflow.config import ConfigError, apply_config_update, load_config, save_config
+from localflow.config import (
+    ConfigError,
+    apply_config_update,
+    config_path,
+    load_config,
+    save_config,
+)
 from localflow.dictionary import DictionaryStore
 from localflow.dispatch import PromptQueue
 from localflow.history import HistoryStore
@@ -866,11 +872,18 @@ class HubWindowController(NSObject):
                 listing.addSubview_(divider)
 
     @objc.python_method
+    def _perf_config(self):
+        try:
+            return load_config() if config_path().exists() else self._live_config.get()
+        except (ConfigError, OSError, ValueError):
+            return self._live_config.get()
+
+    @objc.python_method
     def _speed_card(self, width):
         """The Speed card under the stats line; nothing at all without data
         (`perf_summary` unset, perf metrics off or no dictations in 7 days)."""
         card = home_speed_card(
-            getattr(self, "perf_summary", None), self._live_config.get(),
+            getattr(self, "perf_summary", None), self._perf_config(),
         )
         self.speed_card = card
         if card is None:
