@@ -310,41 +310,41 @@ def crash(exc):
     text = "".join(report.format())
     return text if report.stack else "Traceback (most recent call last):\n" + text
 
-sys.stdout.write("lf-stt-probe:")
-sys.stdout.flush()
 mode, selected = sys.argv[1:]
 result = {}
 if mode in ("runtime", "list"):
     result["modules"] = {m: available(m) for m in ("faster_whisper", "mlx_whisper", "parakeet_mlx")}
     result["apple_silicon"] = sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64")
+entries = {}
 if mode in ("list", "use"):
     builtins = ("faster-whisper", "mlx-whisper", "parakeet")
-    entries = {}
     for entry in importlib.metadata.entry_points(group="localflow.stt_providers"):
         if entry.name not in builtins:
             entries.setdefault(entry.name, entry)
     result["plugins"] = dict.fromkeys(entries)
-    with contextlib.redirect_stdout(sys.stderr):
-        if mode == "list":
-            for name in sorted(entries):
-                try:
-                    result["plugins"][name] = entries[name].load().offline
-                except Exception as exc:
-                    result["traceback"] = crash(exc)
-                    break
-            if selected in entries and "traceback" not in result:
-                try:
-                    models = [dataclasses.asdict(m) for m in entries[selected].load()().list_models()]
-                    result["selected"] = {"models": models, "error": None}
-                except Exception as exc:
-                    result["selected"] = {"models": [], "error": str(exc)}
-        elif selected in entries:
+sys.stdout.write("lf-stt-probe:")
+sys.stdout.flush()
+with contextlib.redirect_stdout(sys.stderr):
+    if mode == "list":
+        for name in sorted(entries):
             try:
-                entries[selected].load()
-            except KeyError as exc:
-                result["error"] = str(exc)
+                result["plugins"][name] = entries[name].load().offline
             except Exception as exc:
                 result["traceback"] = crash(exc)
+                break
+        if selected in entries and "traceback" not in result:
+            try:
+                models = [dataclasses.asdict(m) for m in entries[selected].load()().list_models()]
+                result["selected"] = {"models": models, "error": None}
+            except Exception as exc:
+                result["selected"] = {"models": [], "error": str(exc)}
+    elif mode == "use" and selected in entries:
+        try:
+            entries[selected].load()
+        except KeyError as exc:
+            result["error"] = str(exc)
+        except Exception as exc:
+            result["traceback"] = crash(exc)
 print(json.dumps(result))
 "#;
 
@@ -363,8 +363,9 @@ fn probe_python(mode: &str, provider: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `None` when the interpreter could not run the probe at all. A probe that
-/// started and then died is that interpreter's answer, like Python's crash.
+/// `None` when the interpreter failed before loading plug-ins (spawn, imports,
+/// entry-point discovery). A failure after that is a plug-in's and is that
+/// interpreter's answer, like Python's crash.
 fn probe_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Option<Value> {
     let stdout = stdout.strip_prefix(b"lf-stt-probe:")?;
     if code == Some(0) {
