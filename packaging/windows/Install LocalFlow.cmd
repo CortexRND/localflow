@@ -1,6 +1,8 @@
 @echo off
 setlocal
 title Install LocalFlow
+echo Install LocalFlow
+echo.
 echo Installing LocalFlow - this takes a few minutes; LocalFlow Setup will open when done.
 echo.
 
@@ -18,7 +20,7 @@ exit /b 0
 
 :failed
 echo.
-echo LocalFlow installation failed. Scroll up for details.
+echo LocalFlow could not be installed. Scroll up for details.
 del "%LF_SCRIPT%" >nul 2>&1
 pause
 exit /b 1

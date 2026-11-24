@@ -1391,6 +1391,7 @@ impl Shell {
             let _ = handle.update(cx, |_, window, _| window.focus(&focus));
         });
         let downloads = self.cx.services.downloads.clone();
+        let retry = self.cx.services.retry.clone();
         let engine = self.engine.take();
         cx.spawn(async move |this, cx| {
             let (jobs_stopped, engine_outcome, engine) = cx
@@ -1399,6 +1400,9 @@ impl Shell {
                     // Downloads are cancelled; deletions and persistent writes
                     // (keys, provider, setup, settings) are waited for.
                     downloads.cancel_all();
+                    if let Some(python) = retry.python() {
+                        python.stop();
+                    }
                     let jobs_stopped = downloads.wait_idle(Duration::from_secs(3))
                         && lf_ui::shutdown::wait_for_pending_writes(Duration::from_secs(3));
                     let (outcome, engine) = match engine {
@@ -1940,10 +1944,13 @@ pub fn run(launch: Launch) -> RunStatus {
                     cx.quit();
                 }
             }
+            // A window-manager close reaches this from inside the platform's
+            // event handler (X11 still holds its client state), so the quit
+            // runs on the next turn of the event loop.
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     lf_ui::shutdown::wait_for_pending_writes(Duration::from_secs(5));
-                    cx.quit();
+                    cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
                 }
             })
             .detach();
@@ -2255,5 +2262,77 @@ mod focus_tests {
         cx.simulate_keystrokes("secondary-k");
         assert!(focused(&filter, cx), "Find focuses the filter");
         assert!(in_shell(&shell, cx), "which is on screen");
+    }
+
+    /// The History heading counts what a fresh load would after every
+    /// change made from the page: a deleted failed row, a successful retry
+    /// (applied by the page's own poll of the shared slot) and a deleted
+    /// ok row.
+    #[gpui::test]
+    fn the_history_count_follows_delete_and_retry(cx: &mut TestAppContext) {
+        use lf_core::history::NewEntry;
+        let (shell, cx, _dir) = open_with(
+            Page::History,
+            |root| {
+                let store = crate::data::open_history(root).unwrap();
+                store.clear().unwrap();
+                let mut ok = NewEntry::new("dictate");
+                ok.final_text = "Already transcribed.".into();
+                store.add(&ok).unwrap();
+                let tone: Vec<f32> = (0..24_000)
+                    .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 220.0 / 16_000.0).sin() * 0.1)
+                    .collect();
+                for clip in [true, false] {
+                    let mut failed = NewEntry::new("dictate");
+                    failed.status = "failed".into();
+                    failed.duration_s = 1.5;
+                    if clip {
+                        let path = store.write_clip(&tone, 16_000).unwrap();
+                        failed.audio_path = Some(path.to_string_lossy().into());
+                    }
+                    store.add(&failed).unwrap();
+                }
+            },
+            cx,
+        );
+        let view = shell.read_with(cx, |shell, _| match shell.find(Page::History) {
+            Some(View::History(view)) => view.clone(),
+            _ => panic!("History isn't open"),
+        });
+        let jobs = shell.read_with(cx, |shell, _| shell.cx.services.retry_jobs.clone());
+        let count = |cx: &mut VisualTestContext| view.read_with(cx, |page, _| page.count_line());
+        let rows = |cx: &mut VisualTestContext| view.read_with(cx, |page, _| page.rows());
+        let one = Some("1 dictation on this device".to_string());
+        assert_eq!(rows(cx).len(), 3);
+        assert_eq!(count(cx), one);
+
+        let unretryable = rows(cx)
+            .into_iter()
+            .find(|e| e.status == "failed" && e.audio_path.is_none())
+            .unwrap();
+        view.update(cx, |page, cx| page.delete(unretryable.id, cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx).len(), 2);
+        assert_eq!(count(cx), one, "a failed row was never counted");
+
+        let failed = rows(cx).into_iter().find(|e| e.status == "failed").unwrap();
+        view.update(cx, |page, cx| {
+            page.start_retry(crate::controllers::retry::RetryKey::of(&failed), cx)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while jobs.running().is_some() {
+            assert!(std::time::Instant::now() < deadline, "retry never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(rows(cx).iter().all(|e| e.status == "ok"), "{:?}", rows(cx));
+        assert_eq!(count(cx), Some("2 dictations on this device".to_string()));
+
+        view.update(cx, |page, cx| page.delete(failed.id, cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx).len(), 1);
+        assert_eq!(count(cx), one);
     }
 }

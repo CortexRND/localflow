@@ -3434,7 +3434,7 @@ def test_stt_catalog_runtime_selection_and_sizes(stt_driver):
     assert catalog[:len(ms.catalog())] == [list(item) for item in ms.catalog().items()]
     cpp = "ggerganov/whisper.cpp"
     onnx = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
-    assert dict(catalog)[cpp] == "Whisper Base (whisper.cpp)"
+    assert dict(catalog)[cpp] == "Whisper (whisper.cpp)"
     assert dict(catalog)[onnx] == "Parakeet v2 (ONNX)"
     for backend, size, repo in [("whisper-cpp", "base.en", cpp),
                                  ("parakeet-onnx", "ignored", onnx)]:
