@@ -2784,24 +2784,41 @@ def test_cli_hub_usage_errors_and_sandbox_refusal(hub):
         "'dictionary', 'prompts', 'meetings', 'history', 'style', 'models', 'settings'."
     )
     for args, env in [(("hub", "--gpui"), {"LOCALFLOW_SANDBOX": "1"}),
-                      (("hub", "--page", "ask"), {"LOCALFLOW_UI": "gpui", "LOCALFLOW_SANDBOX": "true"})]:
+                      (("hub", "--page", "ask"), {"LOCALFLOW_UI": "gpui", "LOCALFLOW_SANDBOX": "true"}),
+                      (("hub", "--gpui"), {"LOCALFLOW_SANDBOX": "1", "LOCALFLOW_RUNTIME": "python"})]:
         python, legacy, desktop = _same_hub(hub(*args, env=env))
         assert (python.returncode, python.stderr) == (1, f"Error: {SANDBOX_REFUSAL}\n")
         assert legacy == desktop == []
 
 
 def test_cli_hub_legacy_launches(hub):
-    from localflow.desktop_launch import NOTICE_INVALID_ENV, NOTICE_PLATFORM
+    from localflow import desktop_launch as dl
 
+    # Nothing is installed in the sandbox HOME / LOCALAPPDATA, so the platform
+    # default (GPUI on Linux and Windows, legacy on macOS) opens the legacy
+    # window silently everywhere.
     cases = [
         (("hub",), {}, "Home", ""),
         (("hub", "--page", "hot phrases"), {}, "Hot Phrases", ""),
+        (("hub",), {"LOCALFLOW_UI": ""}, "Home", ""),
+        (("hub",), {"LOCALFLOW_RUNTIME": "rust"}, "Home", ""),
+        (("hub",), {"LOCALFLOW_RUNTIME": "secret-garbage"}, "Home", ""),
         (("hub", "--legacy", "--page", "SETTINGS"), {"LOCALFLOW_UI": "gpui"}, "Settings", ""),
-        (("hub",), {"LOCALFLOW_UI": " Bogus "}, "Home", NOTICE_INVALID_ENV + "\n"),
+        (("hub",), {"LOCALFLOW_UI": " Bogus "}, "Home", dl.NOTICE_INVALID_ENV + "\n"),
         (("hub", "--page", "Ask"), {"LOCALFLOW_SANDBOX": "1", "LOCALFLOW_UI": "legacy"}, "Ask", ""),
+        # The default with a sandbox request: legacy, no refusal.
+        (("hub", "--page", "Ask"), {"LOCALFLOW_SANDBOX": "1"}, "Ask", ""),
+        (("hub",), {"LOCALFLOW_SANDBOX": "true", "LOCALFLOW_DESKTOP_BIN": "relative"}, "Home", ""),
+        # LOCALFLOW_RUNTIME=python beats LOCALFLOW_UI, silently.
+        (("hub", "--page", "models"), {"LOCALFLOW_RUNTIME": " Python ", "LOCALFLOW_UI": "gpui"}, "Models", ""),
+        (("hub",), {"LOCALFLOW_RUNTIME": "python", "LOCALFLOW_UI": "bogus",
+                    "LOCALFLOW_DESKTOP_BIN": "relative", "LOCALFLOW_SANDBOX": "1"}, "Home", ""),
     ]
-    if os.name == "nt":  # no preview package: one notice, then the legacy window
-        cases.append((("hub", "--gpui", "--page", "models"), {}, "Models", NOTICE_PLATFORM + "\n"))
+    if os.name == "nt":  # nothing in %LOCALAPPDATA%\Programs: the Windows notice
+        cases.append((("hub", "--gpui", "--page", "models"), {}, "Models",
+                      dl.NOTICE_NOT_INSTALLED_WINDOWS + "\n"))
+        cases.append((("hub", "--page", "models"), {"LOCALFLOW_UI": "gpui"}, "Models",
+                      dl.NOTICE_NOT_INSTALLED_WINDOWS + "\n"))
     for args, env, page, stderr in cases:
         python, legacy, desktop = _same_hub(hub(*args, env=env))
         assert (python.returncode, python.stdout, python.stderr) == (0, "", stderr), args
@@ -2833,7 +2850,17 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
         (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": "gpui"}, dl.NOTICE_NOT_SET_UP,
          "Hot Phrases", [probe]),
         (("hub", "--gpui", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
+        # The platform default with nothing installed stays silent before setup too.
+        (("hub",), {}, "", "Home", []),
     ]
+    if sys.platform.startswith("linux"):
+        # The Linux default gets the same set-up rule as an explicit choice.
+        not_set_up += [
+            (("hub", "--page", "hot phrases"), good, dl.NOTICE_NOT_SET_UP, "Hot Phrases", [probe]),
+            (("hub",), {**good, "LOCALFLOW_RUNTIME": "rust"}, dl.NOTICE_NOT_SET_UP, "Home", [probe]),
+        ]
+    else:  # macOS: the default is legacy and never looks at the binary
+        not_set_up.append((("hub", "--page", "hot phrases"), good, "", "Hot Phrases", []))
     assert not sandbox["config"].exists()
     for unmarked in (False, True):
         if unmarked:
@@ -2841,7 +2868,8 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
             sandbox["config"].write_text("config_version = 2\n\n[setup]\nversion = 0\n")
         for args, env, stderr, page, launches in not_set_up:
             python, legacy, desktop = _same_hub(hub(*args, env=env))
-            assert (python.returncode, python.stdout, python.stderr) == (0, "", stderr + "\n"), args
+            expected_err = stderr + "\n" if stderr else ""
+            assert (python.returncode, python.stdout, python.stderr) == (0, "", expected_err), args
             assert (legacy, desktop) == (_legacy(page), launches), args
 
     sandbox["config"].write_text("config_version = 2\n\n[setup]\nversion = 1\n")
@@ -2856,9 +2884,29 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
         (("hub", "--gpui"), good, "native-stderr", None, [probe, []]),
         (("hub", "--gpui", "--page", "Home"), good, "native-stderr", None, [probe, ["--page", "Home"]]),
         (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": "GPUI"}, "native-stderr", None, [probe, launch]),
-        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": ""}, "", "Hot Phrases", []),
         (("hub", "--gpui"), staying, "native-stderr", None, [probe, []]),
+        # --gpui beats LOCALFLOW_RUNTIME=python; the runtime beats LOCALFLOW_UI.
+        (("hub", "--gpui", "--page", "hot phrases"), {**good, "LOCALFLOW_RUNTIME": "python"},
+         "native-stderr", None, [probe, launch]),
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_RUNTIME": "Python", "LOCALFLOW_UI": "gpui"},
+         "", "Hot Phrases", []),
+        # The default with a sandbox request never looks at the binary.
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_SANDBOX": "1"}, "", "Hot Phrases", []),
     ]
+    if sys.platform.startswith("linux"):
+        # The Linux default prefers lf-desktop: a good binary opens silently,
+        # any other failure keeps its notice.
+        cases += [
+            (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": ""}, "native-stderr", None,
+             [probe, launch]),
+            (("hub",), {**good, "LOCALFLOW_RUNTIME": "rust"}, "native-stderr", None, [probe, []]),
+            (("hub", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
+            (("hub", "--page", "hot phrases"), early,
+             "native-stderr\n" + dl.NOTICE_EARLY_EXIT.format(code=2), "Hot Phrases", [probe, launch]),
+            (("hub",), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop"}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
+        ]
+    else:  # macOS: the default stays legacy, and an override alone is not an opt-in
+        cases.append((("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": ""}, "", "Hot Phrases", []))
     for args, env, stderr, page, launches in cases:
         python, legacy, desktop = _same_hub(hub(*args, env=env))
         assert (python.returncode, python.stdout) == (0, ""), args
@@ -2872,6 +2920,24 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
     python, legacy, desktop = _same_hub(hub("hub", "--gpui", "--page", "models"))
     assert python.stderr == dl.NOTICE_NOT_OWNED + "\n"
     assert (legacy, desktop) == (_legacy("Models"), [])
+    # The platform default reports it too on Linux (macOS: legacy, silently).
+    python, legacy, desktop = _same_hub(hub("hub", "--page", "models"))
+    assert python.stderr == (dl.NOTICE_NOT_OWNED + "\n" if linux else "")
+    assert (legacy, desktop) == (_legacy("Models"), [])
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the default prefers lf-desktop on Linux")
+def test_cli_hub_linux_default_with_nothing_installed_is_silent(hub):
+    from localflow import desktop_launch as dl
+
+    for args, env, page in [(("hub",), {}, "Home"), (("hub", "--page", "ask"), {"LOCALFLOW_UI": " "}, "Ask")]:
+        python, legacy, desktop = _same_hub(hub(*args, env=env))
+        assert (python.returncode, python.stdout, python.stderr) == (0, "", ""), args
+        assert (legacy, desktop) == (_legacy(page), []), args
+    # An explicit choice still says it isn't installed.
+    python, legacy, desktop = _same_hub(hub("hub", "--gpui"))
+    assert python.stderr == dl.NOTICE_NOT_INSTALLED + "\n"
+    assert (legacy, desktop) == (_legacy("Home"), [])
 
 
 # ------------------------------------------------------------------ tweak ---

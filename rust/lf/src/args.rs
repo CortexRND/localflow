@@ -76,12 +76,15 @@ pub enum Command {
         /// Hub page to open.  [default: Home]
         #[arg(long, value_name = "PAGE", allow_hyphen_values = true)]
         page: Option<String>,
-        /// Open LocalFlow Preview (native GPUI app, if installed) instead of
-        /// the legacy window. No screen-reader support yet: use --legacy (or
+        /// Open LocalFlow Preview (native GPUI app, if installed; the default
+        /// for lf hub and lf phrases on Linux and Windows) instead of the
+        /// legacy window. No screen-reader support yet: use --legacy (or
         /// lf-hub on macOS).
         #[arg(long)]
         gpui: bool,
-        /// Open the legacy window (the default).
+        /// Open the legacy Python window (the default for lf setup, on macOS,
+        /// when LocalFlow Preview isn't installed, or with
+        /// LOCALFLOW_RUNTIME=python).
         #[arg(long)]
         legacy: bool,
     },
