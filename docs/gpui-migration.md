@@ -133,8 +133,12 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
      Ctrl+Q.
    - Installing again over the existing copy works. A wrong checksum is refused,
      and so is a foreign file at an owned path. Nothing changes in either case.
-   - Uninstall removes the three paths. `~/.localflow` and `config.toml` are
-     byte-identical after install and after uninstall.
+   - Uninstall removes the three paths. After a `--no-launch` install and after
+     its uninstall, every file under `~/.localflow` and `~/.config` has the same
+     SHA-256 as before. Opening the app is not covered by that comparison: the
+     launched window left `config.toml` as it was but wrote
+     `~/.localflow/desktop/main-app.lock` and, in a home without one,
+     `~/.localflow/history.sqlite`. Uninstall leaves both in place.
 
    Still open, so this gate isn't met:
    - No release carries the preview package yet. Packaging landed after
