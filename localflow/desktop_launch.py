@@ -1,4 +1,4 @@
-"""Opt-in launch of LocalFlow Preview (`lf-desktop`) from the `lf` CLI.
+"""Launch of LocalFlow Preview (`lf-desktop`) from the `lf` CLI.
 
 Only `lf hub`, bare `lf phrases` and the `lf setup` window call `launch`, after
 their own validation. The direct window dispatchers (`python -m
@@ -6,7 +6,7 @@ localflow.hub_window`, `phrases_window`, `setup_window`) never come here, so
 they stay the stable legacy escape paths and can't recurse.
 
 Selection, highest first: `--gpui` / `--legacy`, then `LOCALFLOW_UI`, then
-`DEFAULT_UI` (legacy). There is no config key. Only a GPUI selection looks for
+`DEFAULT_UI` (gpui). There is no config key. Only a GPUI selection looks for
 a native binary: an absolute `LOCALFLOW_DESKTOP_BIN`, else the package that
 `scripts/install_gpui_preview.sh` owns. PATH and build trees are never
 searched. Anything wrong prints one short notice and opens exactly today's
@@ -15,10 +15,27 @@ than turned into a real-data launch. The Hub routes (`lf hub`, `lf phrases`)
 open the preview only once LocalFlow is set up (the active config has the
 setup marker), so they never land in the preview's own first-run wizard; only
 `lf setup --gpui` opens that.
+
+The default is conditional and covers only configured Hub / phrases windows.
+When GPUI comes only from `DEFAULT_UI` (no flag, blank or absent
+`LOCALFLOW_UI`), these open the legacy window quietly, as before: a setup
+request (`lf setup`, or the Setup page); an unsupported platform, or no
+override and nothing at the package root; and a config without the setup
+marker in the active config file (`main_app.is_configured`, without its
+legacy flat fallback; this launcher never migrates or writes, though the
+CLI's own config load may already have migrated a flat file into an active
+config, which then counts), because LocalFlow Preview would open its
+own first-run wizard, whose native model choices the Python runtime that owns
+dictation may not be able to run. Otherwise anything at the package root, or
+a non-empty override, is a candidate and goes through the same checks and
+notices as `--gpui`. An explicit `--gpui` / `LOCALFLOW_UI=gpui` skips these
+quiet checks but not the set-up check above: after the probe, a Hub route that
+isn't set up prints `NOTICE_NOT_SET_UP` and opens the legacy window.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import plistlib
 import re
@@ -31,7 +48,7 @@ from pathlib import Path
 
 import click
 
-DEFAULT_UI = "legacy"  # Scope 4b (global default promotion) would change this.
+DEFAULT_UI = "gpui"  # Scope 4b. Rollback: "legacy" here and in lf-rs restores 4a.
 UI_CHOICES = ("gpui", "legacy")
 UI_ENV = "LOCALFLOW_UI"
 BIN_ENV = "LOCALFLOW_DESKTOP_BIN"
@@ -87,10 +104,14 @@ SANDBOX_REFUSAL = (
 )
 
 GPUI_HELP = (
-    "Open LocalFlow Preview (native GPUI app, if installed) instead of the "
-    "legacy window. No screen-reader support yet: use --legacy (or lf-hub on macOS)."
+    "Open LocalFlow Preview (native GPUI app) instead of the legacy window. "
+    "Without this flag, only lf hub and lf phrases use it, on Linux and macOS, "
+    "once LocalFlow is set up and the preview is installed; setup and first run "
+    "stay legacy. No screen-reader support yet: use --legacy (or lf-hub on macOS)."
 )
-LEGACY_HELP = "Open the legacy window (the default)."
+LEGACY_HELP = (
+    "Open the legacy window (also used when LocalFlow Preview isn't installed)."
+)
 
 
 def ui_options(func):
@@ -115,6 +136,11 @@ def choose_ui(flag: str | None, env: Mapping[str, str]) -> tuple[str, str | None
     if value in UI_CHOICES:
         return value, None
     return "legacy", NOTICE_INVALID_ENV
+
+
+def implicit_choice(flag: str | None, env: Mapping[str, str]) -> bool:
+    """True when the choice comes only from `DEFAULT_UI` (no flag, blank env)."""
+    return flag is None and not env.get(UI_ENV, "").strip()
 
 
 def sandbox_requested(env: Mapping[str, str]) -> bool:
@@ -219,6 +245,55 @@ def find_desktop(
     return owned_install(key, home)
 
 
+def candidate_absent(
+    env: Mapping[str, str], platform: str | None = None, home: Path | None = None
+) -> bool:
+    """For the implicit default only: nothing to try, so stay quiet.
+
+    True on an unsupported platform, or with no override and nothing at the
+    package root (or no absolute HOME). Anything at the root, owned or not,
+    is a candidate that `find_desktop` then checks and reports.
+    """
+    key = platform_key(platform)
+    if key is None:
+        return True
+    if env.get(BIN_ENV, ""):
+        return False
+    if home is None:
+        try:
+            home = Path.home()
+        except RuntimeError:  # no HOME and no passwd entry: nothing to find (as in lf-rs)
+            return True
+    if not home.is_absolute():
+        return True
+    return not os.path.lexists(home.joinpath(*(LINUX_ROOT if key == "linux" else MAC_APP)))
+
+
+def setup_route(page: str | None, setup: bool) -> bool:
+    """A setup request: `lf setup`'s window, or the Setup page."""
+    return setup or (page is not None and page.strip() == "Setup")
+
+
+def configured() -> bool:
+    """An active config that passes `main_app.is_configured()`, read-only and quiet.
+
+    The same marker LocalFlow Preview and the legacy app use to skip the
+    first-run wizard: `[setup] version > 0` or an explicit STT provider/model,
+    but only in the active config file. Deliberately stricter than
+    `main_app.is_configured`, which falls back to the legacy flat file: native
+    checks only the active file. This helper never writes or migrates
+    anything on disk. A flat file the CLI's eager `load_config()` already
+    migrated is an active config like any other; when that migration is
+    deferred or fails, no active file exists and the legacy window opens,
+    which handles its migration as before. Config warnings are silenced here so that the implicit default stays
+    quiet, as in lf-rs; a home that can't be resolved counts as not configured.
+    """
+    try:
+        return set_up(quiet=True)
+    except RuntimeError:  # no HOME and no passwd entry (Path.home)
+        return False
+
+
 # Exact tokens, as in lf_ui::desktop_launch::help_has_interface: the identity
 # can't continue with a word character or `-`, and each flag line is the exact
 # token followed by whitespace or the end of the line.
@@ -264,19 +339,26 @@ def probe(exe: Path, timeout: float | None = None) -> bool:
     )
 
 
-def set_up() -> bool:
+def set_up(*, quiet: bool = False) -> bool:
     """The active config file has the setup marker (`main_app.is_configured`).
 
     Only the active config is read: an unmigrated legacy flat file stays on the
-    legacy window (which migrates it) and counts from the next launch.
+    legacy window (which migrates it) and counts from the next launch. `quiet`
+    silences `localflow.config` warnings (the implicit default).
     """
+    # Config readers only; no GUI, audio or runtime.
     from localflow.config import config_path
     from localflow.main_app import is_configured
 
+    logger = logging.getLogger("localflow.config")
+    disabled = logger.disabled
+    logger.disabled = disabled or quiet
     try:
         return config_path().exists() and is_configured()
     except OSError:  # e.g. an untraversable config directory
         return False
+    finally:
+        logger.disabled = disabled
 
 
 def desktop_argv(exe: Path, *, page: str | None = None, setup: bool = False) -> list[str]:
@@ -343,12 +425,19 @@ def launch(
     if choice != "gpui":
         legacy()
         return
+    # The conditional default covers configured Hub / phrases only: setup and
+    # first run stay on the legacy wizard, and nothing installed stays legacy.
+    # Cheapest first, so a setup request inspects nothing.
+    implicit = implicit_choice(flag, env)
+    if implicit and (setup_route(page, setup) or candidate_absent(env) or not configured()):
+        legacy()
+        return
     if sandbox_requested(env):
         raise click.ClickException(SANDBOX_REFUSAL)
     exe, notice = find_desktop(env)
     if exe is not None and not probe(exe):
         exe, notice = None, NOTICE_PROBE
-    if exe is not None and not setup and not set_up():
+    if exe is not None and not setup and not set_up(quiet=implicit):
         exe, notice = None, NOTICE_NOT_SET_UP  # never the preview's own wizard
     if exe is not None:
         started, notice = spawn(desktop_argv(exe, page=page, setup=setup))
