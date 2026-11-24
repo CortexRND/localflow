@@ -1152,9 +1152,16 @@ fn url_host(url: &str) -> &str {
     host_port(url).0
 }
 
-/// `localhost`, `127.0.0.1` or `::1`.
+/// `localhost` or any loopback address (`127.0.0.0/8`, `::1` in any
+/// spelling).
 fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    host.eq_ignore_ascii_case("localhost") || loopback_ip(host).is_some()
+}
+
+fn loopback_ip(host: &str) -> Option<std::net::IpAddr> {
+    host.parse::<std::net::IpAddr>()
+        .ok()
+        .filter(std::net::IpAddr::is_loopback)
 }
 
 fn is_loopback(url: &str) -> bool {
@@ -1184,10 +1191,10 @@ fn start_ollama_command(base_url: &str, system: &str, cli: bool) -> Option<Strin
     match (cli, port == OLLAMA_PORT) {
         (true, true) => Some("ollama serve".into()),
         (true, false) if system != "Windows" => {
-            let authority = if host == "::1" {
-                format!("[::1]:{port}")
-            } else {
-                format!("{}:{port}", host.to_ascii_lowercase())
+            // Rebuilt from the parsed address: canonical, IPv6 bracketed.
+            let authority = match loopback_ip(host) {
+                Some(ip) => std::net::SocketAddr::new(ip, port).to_string(),
+                None => format!("localhost:{port}"),
             };
             Some(format!("OLLAMA_HOST={authority} ollama serve"))
         }
@@ -2608,6 +2615,8 @@ mod tests {
             "http://LOCALHOST:11434/",
             "http://127.0.0.1:11434",
             "http://[::1]:11434",
+            "http://[0:0:0:0:0:0:0:1]:11434",
+            "http://127.0.0.2:11434",
             "http://localhost",
             "localhost:11434",
         ] {
@@ -2623,6 +2632,7 @@ mod tests {
             "http://localhost.example.com:11434",
             "http://localhost@evil.example:11434",
             "http://[2001:db8::1]:11434",
+            "http://128.0.0.1:11434",
         ] {
             assert_eq!(
                 ollama_fix(&stopped, remote, "ollama-running"),
@@ -2736,6 +2746,15 @@ mod tests {
                     "OLLAMA_HOST=127.0.0.1:8080 ollama serve",
                 ),
                 ("http://[::1]:11435", "OLLAMA_HOST=[::1]:11435 ollama serve"),
+                // Loopback aliases are written canonically.
+                (
+                    "http://[0:0:0:0:0:0:0:1]:11435",
+                    "OLLAMA_HOST=[::1]:11435 ollama serve",
+                ),
+                (
+                    "http://127.0.0.2:11435",
+                    "OLLAMA_HOST=127.0.0.2:11435 ollama serve",
+                ),
                 ("http://localhost:11434", "ollama serve"),
             ] {
                 assert_eq!(
