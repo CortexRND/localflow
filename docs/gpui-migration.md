@@ -165,6 +165,8 @@ integration and legacy retirement still require these gates.
      - A second launch with an unknown page while setup is open leaves the
        wizard covering Home and the notice until the wizard is closed.
      - After a cancelled download, Models keeps a "0 bytes" stored-file card.
+     - The Weston 9.0.0 start panic above. The owner hasn't accepted it as a
+       known limit.
    - Not reviewed: macOS; a real microphone (the trial, dictation); a real
      model for the settings assistant; the native file picker; mouse input
      on Wayland outside Cage; an X11 desktop with a real GPU.
