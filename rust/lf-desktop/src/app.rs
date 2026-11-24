@@ -2074,6 +2074,40 @@ mod focus_tests {
     }
 
     #[gpui::test]
+    fn ask_page_fills_the_main_pane(cx: &mut TestAppContext) {
+        let (_shell, cx, _dir) = open(Page::Ask, cx);
+        for (w, h) in [(1280., 850.), (960., 640.), (1280., 850.)] {
+            cx.simulate_resize(gpui::size(gpui::px(w), gpui::px(h)));
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            // Measure the elements themselves, not their wrappers: a block
+            // wrapper is full width even when the child inside shrank. The
+            // main pane is the window minus the 240 px sidebar, less 2 x 32 px
+            // page padding.
+            let inner = w - 240. - 64.;
+            let banner = cx.debug_bounds("ask-banner").expect("banner").size.width;
+            assert_eq!(banner, gpui::px(inner), "banner at {w}x{h}");
+            let convo = cx.debug_bounds("ask-convo").expect("convo").size.width;
+            assert_eq!(
+                convo,
+                gpui::px(inner.min(crate::theme::size::COLUMN)),
+                "conversation column at {w}x{h}"
+            );
+            // Beside Send (under 140 px wide) and a 16 px gap.
+            let input = cx
+                .debug_bounds("text-input-Ask about your dictations and notes")
+                .expect("question box")
+                .size
+                .width;
+            assert!(
+                input > gpui::px(inner - 16. - 140.),
+                "question box is {input:?} wide at {w}x{h}"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn shortcuts_keep_working_after_leaving_a_focused_history_list(cx: &mut TestAppContext) {
         let (shell, cx, _dir) = open(Page::History, cx);
         let list = shell.read_with(cx, |shell, cx| match shell.find(Page::History) {

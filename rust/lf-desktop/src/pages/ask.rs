@@ -301,7 +301,14 @@ impl Render for AskPage {
                     .flex()
                     .items_end()
                     .gap(space::s4())
-                    .child(div().flex_1().child(self.composer.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.composer.clone()),
+                    )
                     .child(
                         Button::new("ask-send", "Send")
                             .primary()
@@ -347,10 +354,21 @@ impl Render for AskPage {
                 .flex()
                 .flex_col()
                 .size_full()
-                .children(banner.map(|b| div().px(space::s10()).pt(space::s5()).child(b)))
+                .children(banner.map(|b| {
+                    div()
+                        // Block wrappers shrink-wrap `w_full` children
+                        // inside a flex column, so keep these flex.
+                        .flex()
+                        .flex_col()
+                        .px(space::s10())
+                        .pt(space::s5())
+                        .child(b.debug_selector(|| "ask-banner".into()))
+                }))
                 .child(
                     div()
                         .id("ask-scroll")
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
@@ -360,7 +378,12 @@ impl Render for AskPage {
                                 .justify_center()
                                 .px(space::s10())
                                 .py(space::s8())
-                                .child(convo.w_full().max_w(px(size::COLUMN))),
+                                .child(
+                                    convo
+                                        .debug_selector(|| "ask-convo".into())
+                                        .w_full()
+                                        .max_w(px(size::COLUMN)),
+                                ),
                         ),
                 )
                 .child(composer),
