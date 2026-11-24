@@ -51,11 +51,14 @@ from localflow.hub_model import (
     PROMPTS_UNREADABLE,
     RECENT_EMPTY,
     RECENT_ROW_H,
+    SPEED_TITLE,
     STYLE_AUTOSAVE_HINT,
     STYLE_SAVE_FAILED,
     dictation_state,
     dictionary_entries,
     home_decoration_frame,
+    home_speed_card,
+    load_perf_summary,
     meeting_capture_status,
     meeting_form_layout,
     meeting_notes_height,
@@ -836,6 +839,7 @@ class HubWindowController(NSObject):
             )
         )
         self.cursor_y += 36
+        self._speed_card(width)
         self._add_text("Recent dictations", size=15, weight="semibold")
         rows = self.history.recent(limit=4)
         if not rows:
@@ -860,6 +864,63 @@ class HubWindowController(NSObject):
                 divider.setWantsLayer_(True)
                 divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
                 listing.addSubview_(divider)
+
+    @objc.python_method
+    def _speed_card(self, width):
+        """The Speed card under the stats line; nothing at all without data
+        (`perf_summary` unset, perf metrics off or no dictations in 7 days)."""
+        card = home_speed_card(
+            getattr(self, "perf_summary", None), self._live_config.get(),
+        )
+        self.speed_card = card
+        if card is None:
+            return
+        view = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, self.cursor_y, width, card.height())
+        )
+        style_surface(view, self.tokens)
+        view.addSubview_(
+            _label(
+                SPEED_TITLE.upper(), 16, 14, 160, 12, "muted",
+                palette=self.tokens, height=16, weight="semibold",
+            )
+        )
+        caption = _label(
+            card.caption, width - 236, 14, 220, 12, "muted",
+            palette=self.tokens, height=16,
+        )
+        caption.setAlignment_(AppKit.NSTextAlignmentRight)
+        view.addSubview_(caption)
+        column_w = (width - 32) / 3
+        for index, (label, value) in enumerate(card.metrics()):
+            x = 16 + index * column_w
+            view.addSubview_(
+                _label(label, x, 40, column_w - 12, 12, "muted", palette=self.tokens, height=16)
+            )
+            number = _label(
+                value, x, 58, column_w - 12, 22, "ink", palette=self.tokens, height=30,
+            )
+            # Tabular digits: the numbers do not jiggle as they change.
+            number.setFont_(
+                AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(
+                    22, AppKit.NSFontWeightSemibold,
+                )
+            )
+            view.addSubview_(number)
+        if card.hint:
+            dot = NSView.alloc().initWithFrame_(NSMakeRect(16, 104, 8, 8))
+            dot.setWantsLayer_(True)
+            dot.layer().setBackgroundColor_(_color("sun", self.tokens).CGColor())
+            dot.layer().setCornerRadius_(4)
+            view.addSubview_(dot)
+            view.addSubview_(
+                _label(
+                    card.hint, 32, 99, width - 48, 12, "ink",
+                    palette=self.tokens, height=18,
+                )
+            )
+        self.body.addSubview_(view)
+        self.cursor_y += card.height() + 24
 
     def toggleDictation_(self, sender):
         try:
@@ -4148,12 +4209,17 @@ class HubWindowController(NSObject):
 def build_window(
     history=None, dictionary=None, config=None, meeting_client=None,
     initial_page="Home", prompt_queue=None, phrase_store=None,
-    phrases_model=None,
+    phrases_model=None, perf_summary=None,
 ):
+    """`perf_summary()` feeds the Home Speed card. Injected stores (snapshots,
+    tests) show no card unless one is passed; the real Hub reads the ledger."""
     config = config or load_config()
     if phrases_model is None and phrase_store is not None:
         phrases_model = PhrasesModel(phrase_store, config)
-    return HubWindowController.alloc().initWithHistory_dictionary_config_meetingClient_promptQueue_phrasesModel_initialPage_(
+    if perf_summary is None and history is None:
+        # `perf_metrics` is checked against the live config on every render.
+        perf_summary = load_perf_summary
+    controller = HubWindowController.alloc().initWithHistory_dictionary_config_meetingClient_promptQueue_phrasesModel_initialPage_(
         history or HistoryStore(enabled=config.history_enabled),
         dictionary or DictionaryStore(),
         config,
@@ -4162,6 +4228,11 @@ def build_window(
         phrases_model,
         initial_page,
     )
+    if perf_summary is not None:
+        controller.perf_summary = perf_summary
+        if controller.page == "Home":
+            controller.show_page("Home")
+    return controller
 
 
 def main(initial_page="Home"):

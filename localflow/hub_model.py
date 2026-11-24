@@ -4,8 +4,10 @@ Kept separate from hub_mac so the rules (dictionary validation, prompt review,
 responsive sizing) can be unit-tested on any platform.
 """
 
+import math
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -86,6 +88,151 @@ def stat_layout(width: int, count: int = 4) -> tuple[int, int]:
     while columns > 1 and (width - STAT_GAP * (columns - 1)) // columns < STAT_FOUR_COLUMN_MIN_CARD:
         columns //= 2
     return columns, (width - STAT_GAP * (columns - 1)) // columns
+
+
+# ------------------------------------------------------------------- speed ---
+
+# The Home "Speed" card reads the perf ledger summary over this window
+# (`summarize_events(...)["dictation"]`, the same numbers as /api/perf).
+SPEED_WINDOW = "7d"
+SPEED_TITLE = "Speed"
+SPEED_CAPTION_PREFIX = "Last 7 days"
+SPEED_NONE = "—"
+SPEED_STAGE_LABELS = {
+    "queue_ms": "Queue",
+    "stt_ms": "STT",
+    "llm_ms": "Cleanup LLM",
+    "render_ms": "Render",
+    "paste_ms": "Paste",
+}
+# (label, field) of the card's three metrics, left to right.
+SPEED_METRICS = (
+    ("Median time", "median"),
+    ("Median RTF", "rtf"),
+    ("Slowest step", "slowest"),
+)
+SPEED_CARD_H = 112
+SPEED_CARD_HINT_H = 22  # extra height when the hint line is shown
+
+
+@dataclass(frozen=True)
+class SpeedCard:
+    """Display strings of the Home "Speed" card (see `speed_card_from_summary`)."""
+
+    count: int
+    median: str
+    rtf: str
+    slowest: str
+    hint: str | None
+    caption: str
+
+    def metrics(self) -> list[tuple[str, str]]:
+        return [(label, getattr(self, field)) for label, field in SPEED_METRICS]
+
+    def height(self) -> int:
+        return SPEED_CARD_H + (SPEED_CARD_HINT_H if self.hint else 0)
+
+
+def _half_up(value: float) -> int:
+    """Round half away from zero for non-negative values (identical in Rust)."""
+    return math.floor(value + 0.5)
+
+
+def _number(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def format_speed_ms(ms) -> str:
+    """`420 ms` below a second, else seconds to one decimal (`1.2 s`)."""
+    value = _number(ms)
+    if value is None:
+        return SPEED_NONE
+    whole = _half_up(value)
+    if whole < 1000:
+        return f"{whole} ms"
+    tenths = _half_up(value / 100)
+    return f"{tenths // 10}.{tenths % 10} s"
+
+
+def format_rtf(rtf) -> str:
+    """Real-time factor to two decimals (`0.12×`); tiny but non-zero is `<0.01×`."""
+    value = _number(rtf)
+    if value is None:
+        return SPEED_NONE
+    hundredths = _half_up(value * 100)
+    if hundredths == 0 and value > 0:
+        return "<0.01×"
+    return f"{hundredths // 100}.{hundredths % 100:02d}×"
+
+
+def speed_stage_label(stage) -> str:
+    return SPEED_STAGE_LABELS.get(stage, SPEED_NONE) if isinstance(stage, str) else SPEED_NONE
+
+
+def _sentence(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def speed_card_from_summary(summary, *, enabled: bool = True) -> SpeedCard | None:
+    """The Speed card for a `/api/perf` summary, or None to hide the card.
+
+    Hidden when perf metrics are off, the summary is missing or malformed,
+    or the window has no timed dictation (no `median_total_ms`), so a new
+    user never sees an empty card and empty-state Home looks as before.
+    """
+    if not enabled or not isinstance(summary, dict):
+        return None
+    dictation = summary.get("dictation")
+    if not isinstance(dictation, dict):
+        return None
+    count = dictation.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return None
+    if _number(dictation.get("median_total_ms")) is None:
+        return None
+    hint = dictation.get("hint")
+    hint = _sentence(hint.strip()) if isinstance(hint, str) and hint.strip() else None
+    plural = "" if count == 1 else "s"
+    return SpeedCard(
+        count=count,
+        median=format_speed_ms(dictation.get("median_total_ms")),
+        rtf=format_rtf(dictation.get("median_rtf")),
+        slowest=speed_stage_label(dictation.get("slowest_stage")),
+        hint=hint,
+        caption=f"{SPEED_CAPTION_PREFIX} · {count} dictation{plural}",
+    )
+
+
+def load_perf_summary(config=None) -> dict | None:
+    """The local perf ledger's `SPEED_WINDOW` summary; None when perf metrics
+    are off or the ledger cannot be read (the Hub never fails over it)."""
+    if not _perf_enabled(config):
+        return None
+    try:
+        from localflow import perf_ledger
+
+        return perf_ledger.summarize(window=SPEED_WINDOW)
+    except Exception:  # noqa: BLE001 - an unreadable ledger just hides the card
+        return None
+
+
+def home_speed_card(source, config=None) -> SpeedCard | None:
+    """Call the Hub's perf `source()` (None: no card) and build the card."""
+    if source is None or not _perf_enabled(config):
+        return None
+    try:
+        summary = source()
+    except Exception:  # noqa: BLE001 - a failing source just hides the card
+        return None
+    return speed_card_from_summary(summary)
+
+
+def _perf_enabled(config) -> bool:
+    """`perf_metrics` (on unless explicitly false, like `perf_ledger.enabled`)."""
+    return getattr(config, "perf_metrics", True) is not False
 
 
 def meeting_notes_height(viewport_height: int, top: int) -> int:

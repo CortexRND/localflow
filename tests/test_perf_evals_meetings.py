@@ -47,7 +47,8 @@ LOG_PATH = "/sim/vault/log.md"
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for var in ("LF_PERF_MEETING_RUN_DIR", "LF_PERF_MEETING_OUT", "LF_PERF_OLLAMA_URL",
-                "LF_PERF_OLLAMA_MODEL", "LF_PERF_PYTHON", "SIM_SUT", "SIM_LLM_URL", "SIM_LLM_MODEL"):
+                "LF_PERF_OLLAMA_MODEL", "LF_PERF_PYTHON", "SIM_SUT", "SIM_LLM_URL", "SIM_LLM_MODEL",
+                "LF_PERF_MEETING_SIM_BIN", "LF_PERF_MEETING_RUST_RUN_DIR"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -453,12 +454,114 @@ def test_compare_slower_stop_to_notes_warns_then_blocks(scored_run):
 # --------------------------------------------------------------------------
 
 
-def test_rust_is_not_exercised():
-    cases = meetings.run_meetings(_ctx("rust"))
+def _rust_ctx(tmp_path: Path, tier: str = "smoke", **options) -> RunContext:
+    """A Rust context whose repo root has no ``rust/target`` build (unless a binary is given)."""
+    return RunContext(tier=tier, runtime="rust", repo_root=tmp_path / "checkout", options=options)
+
+
+def test_rust_without_binary_is_not_exercised(tmp_path, monkeypatch):
+    cases = meetings.run_meetings(_rust_ctx(tmp_path))
     _valid(cases, "rust")
     assert len(cases) == 14
     assert all(c["status"] == "not_exercised" and c["error"] == meetings.RUST_REASON for c in cases)
     assert "meetings/timings/rust" in _by_case(cases)
+    assert "--example meeting_sim" in meetings.RUST_REASON
+    monkeypatch.setenv(meetings.RUST_BIN_ENV, str(tmp_path / "missing-bin"))
+    cases = meetings.run_meetings(_rust_ctx(tmp_path))
+    assert all(c["status"] == "not_exercised" and "is not a file" in c["error"] for c in cases)
+
+
+def test_rust_binary_discovery(tmp_path, monkeypatch):
+    ctx = _rust_ctx(tmp_path)
+    assert meetings.rust_sim_binary(ctx) is None
+    exe = "meeting_sim.exe" if sys.platform == "win32" else "meeting_sim"
+    debug = tmp_path / "checkout" / "rust" / "target" / "debug" / "examples" / exe
+    debug.parent.mkdir(parents=True)
+    debug.write_text("")
+    assert meetings.rust_sim_binary(ctx) == debug.resolve()
+    release = tmp_path / "checkout" / "rust" / "target" / "release" / "examples" / exe
+    release.parent.mkdir(parents=True)
+    release.write_text("")
+    assert meetings.rust_sim_binary(ctx) == release.resolve()  # release wins
+    custom = tmp_path / "custom"
+    custom.write_text("")
+    monkeypatch.setenv(meetings.RUST_BIN_ENV, str(custom))
+    assert meetings.rust_sim_binary(ctx) == custom.resolve()
+    assert meetings.rust_sim_binary(_rust_ctx(tmp_path, meeting_sim_bin=str(debug))) == debug.resolve()
+
+
+def test_rust_run_dir_env_is_adapted_as_rust(scored_run, monkeypatch, tmp_path):
+    monkeypatch.setenv(meetings.RUST_RUN_DIR_ENV, str(scored_run))
+    cases = meetings.run_meetings(_rust_ctx(tmp_path))
+    _valid(cases, "rust")
+    by = _by_case(cases)
+    assert all(c["status"] == "ok" for c in cases)
+    assert by["meetings/timings/rust"]["evidence"]["run_dir"] == str(scored_run)
+    assert by["meetings/gate/M1"]["dims"]["runtime"] == "rust"
+    # The Python env var does not leak into the Rust path (and vice versa).
+    assert all(c["status"] == "not_exercised" for c in meetings.run_meetings(
+        _ctx("python", ollama_url=_closed_port_url(), ollama_timeout_s=0.5)))
+
+
+def _stub_seam(tmp_path: Path, fail: str = "") -> tuple[Path, Path]:
+    """An executable stand-in for the Rust ``meeting_sim`` binary (same flags as driver.py)."""
+    if sys.platform == "win32":
+        pytest.skip("shebang stub binary")
+    cmd, fixtures = _stub_driver(tmp_path, fail=fail)
+    for f in fixtures.glob("*.json"):
+        res = json.loads(f.read_text())
+        f.write_text(json.dumps({**res, "runtime": "rust"}))
+    binary = tmp_path / "meeting_sim"
+    binary.write_text(f"#!{sys.executable}\n" + Path(cmd[1]).read_text())
+    binary.chmod(0o755)
+    return binary, fixtures
+
+
+def test_rust_without_ollama_is_not_exercised(tmp_path, monkeypatch):
+    binary, fixtures = _stub_seam(tmp_path)
+    monkeypatch.setenv(meetings.RUST_BIN_ENV, str(binary))
+    monkeypatch.setenv("LF_PERF_MEETING_OUT", str(tmp_path / "out"))
+    cases = meetings.run_meetings(_rust_ctx(tmp_path, ollama_url=_closed_port_url(), ollama_timeout_s=0.5))
+    _valid(cases, "rust")
+    assert all(c["status"] == "not_exercised" and "Ollama not reachable" in c["error"] for c in cases)
+    assert not (tmp_path / "out").exists() and not (fixtures / "calls.log").exists()
+
+
+def test_rust_without_model_or_gates_helpers_is_not_exercised(fake_ollama, tmp_path):
+    binary, _ = _stub_seam(tmp_path)
+    srv = fake_ollama(["llama3.2:1b"])
+    cases = meetings.run_meetings(_rust_ctx(tmp_path, meeting_sim_bin=str(binary), ollama_url=srv.url))
+    assert all(c["status"] == "not_exercised" and "'llama3.2:3b' not available" in c["error"] for c in cases)
+    stub = tmp_path / "py"
+    stub.write_text(f"#!/bin/sh\nexec {sys.executable} -I -S \"$@\"\n")
+    stub.chmod(0o755)
+    cases = meetings.run_meetings(_rust_ctx(tmp_path, meeting_sim_bin=str(binary), ollama_url=srv.url,
+                                            llm_model="llama3.2:1b", python=str(stub), sut=str(tmp_path)))
+    assert all(c["status"] == "not_exercised" and "cannot import gates.py helpers" in c["error"] for c in cases)
+
+
+def test_rust_live_run_with_stub_seam_and_real_gates(fake_ollama, tmp_path, monkeypatch):
+    binary, fixtures = _stub_seam(tmp_path, fail="one-on-one")
+    srv = fake_ollama(["llama3.2:3b"])
+    monkeypatch.setenv(meetings.RUST_BIN_ENV, str(binary))
+    out = tmp_path / "out"
+    cases = meetings.run_meetings(_rust_ctx(tmp_path, tier="nightly", output_dir=str(out), repeats=2,
+                                            ollama_url=srv.url, sut=str(REPO_ROOT)))
+    _valid(cases, "rust")
+    by = _by_case(cases)
+    assert set(by) == {f"meetings/gate/M{i}" for i in range(1, 14)} | {"meetings/timings/rust"}
+    calls = (fixtures / "calls.log").read_text().splitlines()
+    assert len(calls) == 2 * (len(SCENARIOS) - 1)
+    assert all(c.endswith(f"{srv.url} llama3.2:3b True") for c in calls)
+    gates = json.loads((out / "gates.json").read_text())
+    assert gates["summary"]["M2"]["pass_count"] == "2/2"
+    assert by["meetings/gate/M1"]["evidence"]["failures"] == {"r1": ["one-on-one:missing"],
+                                                              "r2": ["one-on-one:missing"]}
+    timing = by["meetings/timings/rust"]
+    assert timing["status"] == "ok"
+    assert timing["evidence"]["meeting_sim_bin"] == str(binary.resolve())
+    assert [f["scenario"] for f in timing["evidence"]["driver_failures"]] == ["one-on-one", "one-on-one"]
+    assert all(c["dims"]["runtime"] == "rust" for c in cases)
 
 
 def test_python_run_dir_option_and_env(scored_run, monkeypatch):
@@ -693,3 +796,49 @@ def test_real_driver_records_ms_timings(fake_ollama, tmp_path, monkeypatch):
     assert not Path(res["tmp"]).exists()  # --cleanup
     assert srv.prompts
     assert _by_case(cases)["meetings/timings/python"]["status"] == "ok"
+
+
+# --------------------------------------------------------------------------
+# Real Rust seam (the meeting_sim example binary) against a stub Ollama
+# --------------------------------------------------------------------------
+
+RUST_SIM_BIN = meetings.rust_sim_binary(RunContext(tier="smoke", runtime="rust", repo_root=REPO_ROOT, options={}))
+HAS_GATES_HELPERS = meetings.gates_import_error(sys.executable, REPO_ROOT) is None
+
+
+@pytest.mark.skipif(RUST_SIM_BIN is None, reason=f"needs the Rust seam: {meetings.RUST_BUILD_HINT}")
+@pytest.mark.skipif(not HAS_GATES_HELPERS, reason="gates.py needs localflow.meetings importable")
+def test_real_rust_seam_is_scored_by_gates(fake_ollama, tmp_path, monkeypatch):
+    srv = fake_ollama(["llama3.2:3b"])
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    out = tmp_path / "out"
+    ids = ["pricing-review", "vendor-call-micfallback"]
+    cases = meetings.run_meetings(RunContext(
+        tier="smoke", runtime="rust", repo_root=REPO_ROOT,
+        options={"ollama_url": srv.url, "output_dir": str(out), "scenarios": ",".join(ids), "timeout_s": 300}))
+    _valid(cases, "rust")
+    by = _by_case(cases)
+    # Deterministic lifecycle gates pass through the Rust backend whatever the LLM says.
+    for gate in ("M1", "M2", "M3", "M12", "M13"):
+        case = by[f"meetings/gate/{gate}"]
+        assert case["status"] == "ok", case
+        assert case["metrics"][gate]["value"] == 1.0, case
+    for sid in ids:
+        res = json.loads((out / "r1" / "results" / f"{sid}.json").read_text())
+        assert res["runtime"] == "rust"
+        assert res["llm"] == {"url": srv.url, "model": "llama3.2:3b"}
+        t = res["timings"]
+        assert t["summarize_ms"] == t["stop_to_notes_ms"] > 0
+        sc = next(s for s in SCENARIOS if s["id"] == sid)
+        assert len(t["chat_ms"]) == len(sc["chat"]) and t["restart_chat_ms"] > 0
+        # Summary (a retry is allowed: the stub's notes miss the user's headings), one call
+        # per question, one restart chat.
+        assert res["summarize_calls"] >= 1
+        assert t["llm_calls_count"] == len(res["llm_calls"]) == len(t["llm_call_ms"])
+        assert t["llm_calls_count"] == res["summarize_calls"] + len(sc["chat"]) + 1
+        assert all("ms" in c and "secs" in c for c in res["llm_calls"] + res["http"])
+        assert not Path(res["tmp"]).exists()  # --cleanup
+    timing = by["meetings/timings/rust"]
+    assert timing["status"] == "ok"
+    assert timing["evidence"]["meeting_sim_bin"] == str(RUST_SIM_BIN)
+    assert srv.prompts

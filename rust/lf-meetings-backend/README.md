@@ -48,6 +48,17 @@ the Python server. FastAPI validation envelopes/statuses are mirrored; malformed
 JSON parser wording/offsets and native I/O errors can differ. Hardware is never
 opened by tests, and no speech-to-text implementation is bundled.
 
+## Meeting sim (eval only)
+
+`examples/meeting_sim` is the Rust side of `evals/meeting_sim`: it injects a
+scripted transcript through `with_capture` and times the real configured LLM
+through `with_providers`, then drives the real `lf-server` router through a
+whole meeting. It takes `driver.py`'s flags and writes its result JSON, so
+`gates.py` scores it unchanged. Nothing test-only ships in the library or in
+`lf-rs`/`lf-hub`. `python -m evals.perf run --suite meetings --runtime rust`
+runs it after `cargo build -p lf-meetings-backend --example meeting_sim`.
+`tests/meeting_sim.rs` covers it against a local mock Ollama.
+
 ## Runtime menu and dictation composition
 
 `MeetingStatusPoller` accepts a fetch closure, not an HTTP client. Call

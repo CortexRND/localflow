@@ -13,7 +13,12 @@ from tkinter import font as tkfont
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
-from localflow.hub_model import dictation_state
+from localflow.hub_model import (
+    SPEED_TITLE,
+    dictation_state,
+    home_speed_card,
+    load_perf_summary,
+)
 from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, vault_notes_path
 from localflow.ui_tokens import (
@@ -46,6 +51,7 @@ class HubWindow:
         theme="light",
         meeting_client=None,
         initial_page="Home",
+        perf_summary=None,
     ):
         self.root = root
         self.tokens = tokens_for(theme)
@@ -58,6 +64,14 @@ class HubWindow:
             else HistoryStore(enabled=self.config.history_enabled)
         )
         self.dictionary = dictionary_store or DictionaryStore()
+        # `perf_summary()` returns the /api/perf summary behind the Home Speed
+        # card. Injected stores (tests, snapshots) show no card unless a source
+        # is passed; the real Hub reads the local perf ledger.
+        if perf_summary is None and history_store is None:
+            # `perf_metrics` is checked against the live config on every render.
+            perf_summary = load_perf_summary
+        self.perf_summary = perf_summary
+        self.speed_card = None
         self.meeting_client = meeting_client or MeetingClient()
         self._meeting_after = None
         self._meeting_notes_after = None
@@ -338,6 +352,7 @@ class HubWindow:
             bg=self.tokens["paper"],
             fg=self.tokens["muted"],
         ).pack(anchor="w", pady=(10, 0))
+        self._speed_card()
         tk.Label(
             self.body, text="Recent dictations", bg=self.tokens["paper"],
             fg=self.tokens["ink"], font=(self.font_family, 15, "bold"),
@@ -359,6 +374,52 @@ class HubWindow:
             self._history_line(listing, row, actions=False)
             if index < len(rows) - 1:
                 tk.Frame(listing, bg=self.tokens["line"], height=1).pack(fill="x")
+
+    def _speed_card(self):
+        """The Speed card under the stats line; nothing at all without data."""
+        card = home_speed_card(self.perf_summary, self._live_config.get())
+        self.speed_card = card
+        if card is None:
+            return
+        background = self.tokens["surface"]
+        surface = tk.Frame(
+            self.body, bg=background, padx=CARD_PADDING, pady=14,
+            highlightbackground=self.tokens["line"], highlightthickness=1,
+        )
+        surface.pack(fill="x", pady=(16, 0))
+        header = tk.Frame(surface, bg=background)
+        header.pack(fill="x")
+        tk.Label(
+            header, text=SPEED_TITLE.upper(), bg=background, fg=self.tokens["muted"],
+            font=(self.font_family, 11, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            header, text=card.caption, bg=background, fg=self.tokens["muted"],
+            font=(self.font_family, 11),
+        ).pack(side="right")
+        metrics = tk.Frame(surface, bg=background)
+        metrics.pack(fill="x", pady=(10, 0))
+        for label, value in card.metrics():
+            column = tk.Frame(metrics, bg=background)
+            column.pack(side="left", fill="x", expand=True)
+            tk.Label(
+                column, text=label, bg=background, fg=self.tokens["muted"],
+                font=(self.font_family, 11),
+            ).pack(anchor="w")
+            tk.Label(
+                column, text=value, bg=background, fg=self.tokens["ink"],
+                font=(self.font_family, 20, "bold"),
+            ).pack(anchor="w", pady=(2, 0))
+        if card.hint:
+            hint = tk.Frame(surface, bg=background)
+            hint.pack(fill="x", pady=(10, 0))
+            dot = tk.Canvas(hint, width=8, height=8, bg=background, highlightthickness=0)
+            dot.create_oval(0, 0, 8, 8, fill=self.tokens["sun"], outline="")
+            dot.pack(side="left", padx=(0, 8))
+            tk.Label(
+                hint, text=card.hint, bg=background, fg=self.tokens["ink"],
+                font=(self.font_family, 12),
+            ).pack(side="left")
 
     def _toggle_dictation(self):
         try:
