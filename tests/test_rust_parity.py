@@ -1345,6 +1345,38 @@ def test_cli_stt_python_plugin(rust_build, sandbox):
     )
 
 
+def test_cli_stt_broken_python_plugin(rust_build, sandbox):
+    packages = sandbox["root"] / "site-packages"
+    metadata = packages / "speech_plugins-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\nbroken = broken_plugin:Broken\ndemo = speech_plugin:Demo\n",
+        encoding="utf-8",
+    )
+    (packages / "broken_plugin.py").write_text("raise RuntimeError('plugin import failed')\n", encoding="utf-8")
+    (packages / "speech_plugin.py").write_text(
+        "class Demo:\n    offline = False\n    def list_models(self):\n        return []\n", encoding="utf-8",
+    )
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    header = "Traceback (most recent call last):\n"
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "broken")):
+        python = _python_cli(sandbox, *args, env=env)
+        rust = lf(rust_build, sandbox, *args, env=env)
+        assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout) == (1, "")
+        assert python.stderr.startswith(header) and rust.stderr.startswith(header)
+        assert python.stderr.endswith(rust.stderr[len(header):])
+        assert "broken_plugin.py" in rust.stderr
+        assert rust.stderr.endswith("RuntimeError: plugin import failed\n")
+        assert not sandbox["config"].exists()
+    args = ("stt", "use", "demo")
+    python = _python_cli(sandbox, *args, env=env)
+    assert python.returncode == 0, python.stderr
+    expected = sandbox["config"].read_bytes()
+    sandbox["config"].unlink()
+    assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == _cli_output(python)
+    assert sandbox["config"].read_bytes() == expected
+
+
 @pytest.mark.parametrize("args", [
     ("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "not-a-provider"),
     ("stt", "download", "mlx-tiny"),

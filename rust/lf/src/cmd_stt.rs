@@ -57,6 +57,7 @@ fn list(json_output: bool, io: &mut Io<'_>) -> Result<()> {
     let config = config::load_config()?;
     let provider = api::resolve_stt_provider(config.field_str("stt_backend").unwrap_or("auto"));
     let probe = probe_python("list", provider);
+    crashed(&probe, io)?;
     let ids = provider_ids(&probe);
     let providers = ids
         .iter()
@@ -120,6 +121,7 @@ fn select(provider: &str, model: Option<String>, device: SttDevice, io: &mut Io<
     let selected = api::resolve_stt_provider(provider);
     if !STT_IDS.contains(&selected) {
         let probe = probe_python("use", selected);
+        crashed(&probe, io)?;
         let ids = provider_ids(&probe);
         if !ids.contains(&selected) {
             return fail(unknown_provider(selected, &ids));
@@ -161,6 +163,7 @@ fn download(model_id: &str, io: &mut Io<'_>) -> Result<()> {
     };
     if let Some((extra, provider)) = apple_runtime {
         let probe = probe_python("runtime", provider);
+        crashed(&probe, io)?;
         if probe["modules"][runtime_module(provider)] != true {
             return fail(format!("install the runtime: pip install -e '.[{extra}]'"));
         }
@@ -293,6 +296,7 @@ import importlib.util
 import json
 import platform
 import sys
+import traceback
 
 def available(module):
     try:
@@ -300,6 +304,14 @@ def available(module):
     except (ImportError, ValueError):
         return False
 
+def crash(exc):
+    report = traceback.TracebackException.from_exception(exc)
+    del report.stack[0]
+    text = "".join(report.format())
+    return text if report.stack else "Traceback (most recent call last):\n" + text
+
+sys.stdout.write("lf-stt-probe:")
+sys.stdout.flush()
 mode, selected = sys.argv[1:]
 result = {}
 if mode in ("runtime", "list"):
@@ -314,9 +326,13 @@ if mode in ("list", "use"):
     result["plugins"] = dict.fromkeys(entries)
     with contextlib.redirect_stdout(sys.stderr):
         if mode == "list":
-            for name, entry in entries.items():
-                result["plugins"][name] = entry.load().offline
-            if selected in entries:
+            for name in sorted(entries):
+                try:
+                    result["plugins"][name] = entries[name].load().offline
+                except Exception as exc:
+                    result["traceback"] = crash(exc)
+                    break
+            if selected in entries and "traceback" not in result:
                 try:
                     models = [dataclasses.asdict(m) for m in entries[selected].load()().list_models()]
                     result["selected"] = {"models": models, "error": None}
@@ -325,8 +341,10 @@ if mode in ("list", "use"):
         elif selected in entries:
             try:
                 entries[selected].load()
-            except Exception as exc:
+            except KeyError as exc:
                 result["error"] = str(exc)
+            except Exception as exc:
+                result["traceback"] = crash(exc)
 print(json.dumps(result))
 "#;
 
@@ -340,17 +358,65 @@ fn probe_python(mode: &str, provider: &str) -> Value {
                 .args([mode, provider])
                 .output()
                 .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            serde_json::from_slice(&output.stdout).ok()
+            probe_result(output.status.code(), &output.stdout, &output.stderr)
         })
         .unwrap_or(Value::Null)
 }
 
+/// `None` when the interpreter could not run the probe at all. A probe that
+/// started and then died is that interpreter's answer, like Python's crash.
+fn probe_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Option<Value> {
+    let stdout = stdout.strip_prefix(b"lf-stt-probe:")?;
+    if code == Some(0) {
+        if let Ok(result) = serde_json::from_slice(stdout) {
+            return Some(result);
+        }
+    }
+    Some(json!({
+        "traceback": String::from_utf8_lossy(stderr),
+        "exit": code.filter(|&code| code != 0).unwrap_or(1),
+    }))
+}
+
+/// Python lets a plug-in's exception escape click: traceback, exit 1.
+fn crashed(probe: &Value, io: &mut Io<'_>) -> Result<()> {
+    let Some(traceback) = probe["traceback"].as_str() else {
+        return Ok(());
+    };
+    write!(io.err, "{traceback}")?;
+    let code = probe["exit"]
+        .as_i64()
+        .and_then(|code| i32::try_from(code).ok());
+    Err(CliError::Exit(code.unwrap_or(1)).into())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{effective_width, progress_line};
+    use serde_json::json;
+
+    use super::{effective_width, probe_result, progress_line};
+
+    #[test]
+    fn only_interpreters_that_cannot_run_the_probe_are_skipped() {
+        assert_eq!(probe_result(Some(1), b"", b"SyntaxError"), None);
+        assert_eq!(probe_result(Some(0), b"{}", b""), None);
+        assert_eq!(
+            probe_result(Some(0), b"lf-stt-probe:{\"plugins\": {}}\r\n", b""),
+            Some(json!({"plugins": {}}))
+        );
+        assert_eq!(
+            probe_result(Some(3), b"lf-stt-probe:", b"bye\n"),
+            Some(json!({"traceback": "bye\n", "exit": 3}))
+        );
+        assert_eq!(
+            probe_result(None, b"lf-stt-probe:", b""),
+            Some(json!({"traceback": "", "exit": 1}))
+        );
+        assert_eq!(
+            probe_result(Some(0), b"lf-stt-probe:", b"oops"),
+            Some(json!({"traceback": "oops", "exit": 1}))
+        );
+    }
 
     #[test]
     fn legacy_windows_reserves_last_column_like_rich() {
