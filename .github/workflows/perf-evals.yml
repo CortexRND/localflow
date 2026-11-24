@@ -1,0 +1,307 @@
+name: Perf evals
+
+# Smoke tier of docs/plans/PLAN-perf-evals.md §7: same-runner A/B of the
+# merge-base against the PR, one sticky PR comment, artifacts + step summary.
+# rust-bench.yml and the rust.yml memory job keep running alongside this.
+
+on:
+  pull_request:
+    paths:
+      - 'localflow/**'
+      - 'rust/**'
+      - 'evals/**'
+      - '.github/workflows/perf-evals.yml'
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: 'Comma-separated suites to run'
+        required: false
+        default: 'stt'
+      runtimes:
+        description: 'Comma-separated runtimes (python, rust)'
+        required: false
+        default: 'python,rust'
+
+permissions:
+  contents: read
+  pull-requests: write # sticky comment; only used on same-repo PRs
+
+concurrency:
+  group: perf-evals-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: always
+      HF_HUB_CACHE: ${{ github.workspace }}/.hf-cache/hub
+      LF_PERF_CORPUS_CACHE: ${{ github.workspace }}/.perf-cache/corpus
+      # evals/perf/corpus/download.py reads LF_PERF_CACHE_DIR (clips land in <dir>/stt).
+      LF_PERF_CACHE_DIR: ${{ github.workspace }}/.perf-cache/corpus
+      PYNPUT_BACKEND: dummy
+      # Untrusted inputs go through env, never straight into a script.
+      PERF_SUITES_INPUT: ${{ inputs.suites || 'stt,dictation' }}
+      PERF_RUNTIMES_INPUT: ${{ inputs.runtimes || 'python,rust' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # test-merge commit + baseline worktree for the same-runner A/B
+
+      # ffmpeg decodes the FLAC corpus; the rest is what rust.yml installs to
+      # build lf-stt (cpal: ALSA, whisper-rs: CMake + libclang) and import localflow.
+      - name: Install ffmpeg and build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg pkg-config libasound2-dev cmake libclang-dev libportaudio2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Cache HF models
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: perf-hf-v1-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Cache perf corpus
+        uses: actions/cache@v4
+        with:
+          path: .perf-cache
+          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}
+
+      - name: Select suites and runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          suites="$(printf '%s' "$PERF_SUITES_INPUT" | tr -d ' ')"
+          if ! printf '%s' "$suites" | grep -Eq '^[a-z_]+(,[a-z_]+)*$'; then
+            echo "::error::invalid suites input: $suites"; exit 2
+          fi
+          runtimes=""
+          for rt in $(printf '%s' "$PERF_RUNTIMES_INPUT" | tr ',' ' '); do
+            case "$rt" in
+              python|rust) runtimes="$runtimes $rt" ;;
+              *) echo "::error::invalid runtime: $rt (python, rust)"; exit 2 ;;
+            esac
+          done
+          [ -n "$runtimes" ] || { echo "::error::no runtimes selected"; exit 2; }
+          echo "PERF_SUITES=$suites" >> "$GITHUB_ENV"
+          echo "PERF_RUNTIMES=${runtimes# }" >> "$GITHUB_ENV"
+          mkdir -p perf-results
+
+      - name: Install Python dependencies (candidate)
+        run: pip install -e .
+
+      - name: Restore native runtimes pruned by Rust cache
+        shell: bash
+        run: |
+          if [ -d rust/target/sherpa-onnx-prebuilt ]; then
+            find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
+
+      - name: Build candidate stt_bench
+        if: contains(env.PERF_RUNTIMES, 'rust')
+        run: cargo build --manifest-path rust/Cargo.toml --locked --release -p lf-stt --example stt_bench
+
+      - name: Build candidate parity (dictation text pipeline)
+        if: contains(env.PERF_RUNTIMES, 'rust') && contains(env.PERF_SUITES, 'dictation')
+        run: cargo build --manifest-path rust/Cargo.toml --locked --release -p lf --example parity
+
+      - name: Warm model cache on cold miss
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ ! -d "$HF_HUB_CACHE" ] || [ -z "$(ls -A "$HF_HUB_CACHE" 2>/dev/null)" ]; then
+            echo "Cold HF cache detected; warming smoke models before timed A/B runs"
+            for rt in $PERF_RUNTIMES; do
+              python -m evals.perf run --tier smoke --runtime "$rt" --suite "$PERF_SUITES" \
+                --runner-label ubuntu-latest --output /dev/null || true
+            done
+          fi
+
+      - name: Run candidate smoke suites
+        shell: bash
+        run: |
+          set -uo pipefail
+          for rt in $PERF_RUNTIMES; do
+            python -m evals.perf run --tier smoke --runtime "$rt" --suite "$PERF_SUITES" \
+              --runner-label ubuntu-latest --output "perf-results/candidate-$rt.json" \
+              || echo "::warning::candidate $rt run exited $?"
+          done
+
+      # Baseline = merge-base, measured on this same runner with the
+      # candidate's evals/perf harness overlaid, so only product code differs.
+      - name: Same-runner A/B baseline (merge-base)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -uo pipefail
+          results="$GITHUB_WORKSPACE/perf-results"
+          baseline="$(cd "$GITHUB_WORKSPACE/.." && pwd)/perf-baseline"
+          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+            base_sha="$(git rev-parse HEAD^1)"
+          else
+            base_sha="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)" || {
+              for rt in $PERF_RUNTIMES; do
+                echo "Could not compute merge-base with origin/${GITHUB_BASE_REF}; candidate-only." > "$results/note-$rt.txt"
+              done
+              exit 0
+            }
+          fi
+          echo "BASE_SHA=$base_sha" >> "$GITHUB_ENV"
+          echo "Baseline: $base_sha"
+          git worktree remove --force ../perf-baseline 2>/dev/null || true
+          if ! git worktree add --detach ../perf-baseline "$base_sha"; then
+            for rt in $PERF_RUNTIMES; do
+              echo "Could not create a worktree at merge-base ${base_sha:0:12}; candidate-only." > "$results/note-$rt.txt"
+            done
+            exit 0
+          fi
+          rm -rf "$baseline/evals/perf"
+          mkdir -p "$baseline/evals"
+          cp -R evals/perf "$baseline/evals/perf"
+          find "$baseline/evals/perf" -name __pycache__ -type d -prune -exec rm -rf {} +
+
+          for rt in $PERF_RUNTIMES; do
+            note="$results/note-$rt.txt"
+            out="$results/baseline-$rt.json"
+            case "$rt" in
+              python)
+                if ! grep -q '^class Transcriber' "$baseline/localflow/stt.py" 2>/dev/null; then
+                  echo "Bootstrap: merge-base ${base_sha:0:12} has no localflow.stt.Transcriber; no Python baseline." > "$note"
+                  continue
+                fi
+                origin="$(cd "$baseline" && PYTHONPATH="$baseline" python -c 'import localflow; print(localflow.__file__)' 2>/dev/null || true)"
+                case "$origin" in
+                  "$baseline"/*) ;;
+                  *) echo "Could not import the merge-base localflow (got '${origin:-nothing}'); no Python baseline." > "$note"; continue ;;
+                esac
+                (cd "$baseline" && python -m evals.perf run --tier smoke --runtime python --suite "$PERF_SUITES" \
+                  --runner-label ubuntu-latest --output "$out") \
+                  || echo "Baseline Python run at ${base_sha:0:12} exited non-zero." > "$note"
+                ;;
+              rust)
+                if ! grep -Eq 'manifest: *Option<' "$baseline/rust/lf-stt/examples/stt_bench.rs" 2>/dev/null; then
+                  echo "Bootstrap: merge-base ${base_sha:0:12} stt_bench has no --manifest; no Rust baseline." > "$note"
+                  continue
+                fi
+                # Share the target dir so registry deps are reused; the candidate
+                # binary has already been measured, so overwriting it is fine.
+                if ! CARGO_TARGET_DIR="$GITHUB_WORKSPACE/rust/target" cargo build \
+                    --manifest-path "$baseline/rust/Cargo.toml" --locked --release -p lf-stt --example stt_bench; then
+                  echo "Baseline stt_bench at ${base_sha:0:12} failed to build; no Rust baseline." > "$note"
+                  continue
+                fi
+                parity_env=""
+                if printf ',%s,' "$PERF_SUITES" | grep -q ',dictation,'; then
+                  if CARGO_TARGET_DIR="$GITHUB_WORKSPACE/rust/target" cargo build \
+                      --manifest-path "$baseline/rust/Cargo.toml" --locked --release -p lf --example parity; then
+                    parity_env="$GITHUB_WORKSPACE/rust/target/release/examples/parity"
+                  fi
+                fi
+                (cd "$baseline" && LF_PERF_STT_BENCH_BIN="$GITHUB_WORKSPACE/rust/target/release/examples/stt_bench" \
+                  LF_PERF_PARITY_BIN="$parity_env" \
+                  python -m evals.perf run --tier smoke --runtime rust --suite "$PERF_SUITES" \
+                  --runner-label ubuntu-latest --output "$out") \
+                  || echo "Baseline Rust run at ${base_sha:0:12} exited non-zero." > "$note"
+                ;;
+            esac
+          done
+          exit 0
+
+      - name: Remove baseline worktree
+        if: always() && github.event_name == 'pull_request'
+        run: git worktree remove --force ../perf-baseline || true
+
+      - name: Compare and combine
+        if: always()
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -uo pipefail
+          mkdir -p perf-results
+          args=()
+          for rt in ${PERF_RUNTIMES:-python rust}; do
+            entry="runtime=$rt,candidate=perf-results/candidate-$rt.json"
+            if [ -f "perf-results/baseline-$rt.json" ] && [ -f "perf-results/candidate-$rt.json" ]; then
+              rc=0
+              python -m evals.perf compare \
+                --baseline "perf-results/baseline-$rt.json" --candidate "perf-results/candidate-$rt.json" \
+                --output "perf-results/report-$rt.md" --json "perf-results/compare-$rt.json" > /dev/null || rc=$?
+              echo "compare $rt exit code: $rc"
+              entry="$entry,compare=perf-results/compare-$rt.json,report=perf-results/report-$rt.md"
+            elif [ ! -f "perf-results/note-$rt.txt" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+              echo "$GITHUB_EVENT_NAME run: no merge-base baseline; candidate-only." > "perf-results/note-$rt.txt"
+            fi
+            if [ -f "perf-results/note-$rt.txt" ]; then
+              entry="$entry,note_file=perf-results/note-$rt.txt"
+            fi
+            args+=(--entry "$entry")
+          done
+          python -m evals.perf.ci_report --output perf-results/report.md \
+            --sha "$HEAD_SHA" --base-sha "${BASE_SHA:-}" \
+            --status-json perf-results/status.json --no-fail "${args[@]}" > /dev/null
+          cat perf-results/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-smoke-${{ runner.os }}-${{ runner.arch }}
+          path: perf-results/
+          if-no-files-found: warn
+
+      # Fork PRs get a read-only token, so only comment on same-repo PRs.
+      - name: Sticky PR comment
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- lf-perf-smoke-report -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let body;
+            try {
+              body = fs.readFileSync('perf-results/report.md', 'utf8');
+            } catch (err) {
+              body = `${marker}\n## ❌ Perf smoke: report missing\n\nThe combine step did not produce a report; see the run logs.\n`;
+            }
+            if (!body.includes(marker)) body = `${marker}\n${body}`;
+            body += `\n<sub>[Workflow run](${runUrl})</sub>\n`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(
+              (c) => c.user && c.user.type === 'Bot' && (c.body || '').includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Gate on perf status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, sys
+          from pathlib import Path
+          path = Path("perf-results/status.json")
+          if not path.is_file():
+              sys.exit("perf-results/status.json missing: combine step did not run")
+          status = json.loads(path.read_text(encoding="utf-8"))
+          print(f"perf smoke status: {status.get('status')} (exit_code {status.get('exit_code')})")
+          sys.exit(1 if status.get("exit_code", 1) != 0 else 0)
+          PY
