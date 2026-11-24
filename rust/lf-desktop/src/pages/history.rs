@@ -423,7 +423,7 @@ impl HistoryPage {
         let now = history::now();
         let searching = !self.search.read(cx).is_empty();
         let focused = self.list_focus.is_focused(window);
-        let mut rows = div().flex().flex_col();
+        let mut rows = div().flex().flex_col().w_full().min_w_0();
         if self.list.entries.is_empty() && !self.loading {
             let (h, d, button, _) = hub_model::history_empty_state(searching, false);
             let action = if searching {
@@ -464,6 +464,8 @@ impl HistoryPage {
                     .relative()
                     .flex()
                     .flex_col()
+                    .w_full()
+                    .min_w_0()
                     .gap(space::s1())
                     .px(space::s6())
                     .py(space::s4())
@@ -493,37 +495,47 @@ impl HistoryPage {
                         div()
                             .flex()
                             .items_center()
+                            .w_full()
+                            .min_w_0()
                             .gap(space::s4())
                             .child(
+                                // No `whitespace_nowrap`: GPUI then skips the
+                                // truncating re-measure and clips mid-letter.
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .whitespace_nowrap()
+                                    .line_clamp(1)
                                     .text_ellipsis()
                                     .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
-                                    .child(history::row_text(entry)),
+                                    .child(history::row_preview(entry)),
                             )
                             .when_some(chip, |d, (label, failed)| {
-                                d.child(ui::token(
+                                d.child(div().flex_none().child(ui::token(
                                     &t,
                                     if failed { Tone::Error } else { Tone::Neutral },
                                     label,
-                                ))
+                                )))
                             }),
                     )
-                    .child(ui::supporting(
-                        &t,
-                        format!(
-                            "{}  ·  {}",
-                            history::time_label(entry.ts),
-                            entry
-                                .app_name
-                                .clone()
-                                .filter(|a| !a.is_empty())
-                                .unwrap_or_else(|| "Unknown app".into())
-                        ),
-                    )),
+                    .child(
+                        ui::supporting(
+                            &t,
+                            format!(
+                                "{}  ·  {}",
+                                history::time_label(entry.ts),
+                                entry
+                                    .app_name
+                                    .clone()
+                                    .filter(|a| !a.is_empty())
+                                    .unwrap_or_else(|| "Unknown app".into())
+                            ),
+                        )
+                        .min_w_0()
+                        .overflow_hidden()
+                        .line_clamp(1)
+                        .text_ellipsis(),
+                    ),
             );
         }
         if self.list.more {
