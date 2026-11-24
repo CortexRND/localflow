@@ -2122,6 +2122,76 @@ mod focus_tests {
     }
 
     #[gpui::test]
+    fn ask_page_fills_the_main_pane(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Ask, cx);
+        for (w, h) in [(1280., 850.), (960., 640.), (1280., 850.)] {
+            cx.simulate_resize(gpui::size(gpui::px(w), gpui::px(h)));
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            // Measure the elements themselves, not their wrappers: a block
+            // wrapper is full width even when the child inside shrank. The
+            // main pane is the window minus the 240 px sidebar, less 2 x 32 px
+            // page padding, capped at `size::COLUMN` (760 px).
+            let column = (w - 240. - 64.).min(crate::theme::size::COLUMN);
+            let banner = cx.debug_bounds("ask-banner").expect("banner").size.width;
+            assert_eq!(banner, gpui::px(column), "banner at {w}x{h}");
+            let convo = cx.debug_bounds("ask-convo").expect("convo").size.width;
+            assert_eq!(convo, gpui::px(column), "conversation column at {w}x{h}");
+            // Beside the 96 px Send/Stop slot and an `s4` gap.
+            let input = cx
+                .debug_bounds("text-input-Ask about your dictations and work prompts")
+                .expect("question box")
+                .size
+                .width;
+            assert_eq!(
+                input,
+                gpui::px(column - 96.) - crate::theme::space::s4(),
+                "question box is {input:?} wide at {w}x{h}"
+            );
+        }
+
+        // Long conversations must overflow the scroll viewport vertically so
+        // GPUI computes a positive scroll range instead of shrinking the list.
+        let ask = shell.read_with(cx, |shell, _| match shell.find(Page::Ask) {
+            Some(View::Ask(view)) => view.clone(),
+            _ => panic!("Ask isn't open"),
+        });
+        cx.update(|_, cx| {
+            ask.update(cx, |page, cx| {
+                for i in 0..12 {
+                    page.push_turn(
+                        crate::controllers::ask::AgentTurn {
+                            question: format!("Question {i}"),
+                            answer: format!("Answer {i} with enough text to take up vertical space in the conversation."),
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                }
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let scroll = cx
+            .debug_bounds("ask-scroll")
+            .expect("ask-scroll")
+            .size
+            .height;
+        let content = cx
+            .debug_bounds("ask-scroll-content")
+            .expect("ask-scroll-content")
+            .size
+            .height;
+        let convo = cx.debug_bounds("ask-convo").expect("ask-convo").size.height;
+        assert!(
+            content >= convo && content > scroll,
+            "direct scroll child ({content:?}) must wrap convo ({convo:?}) and exceed scroll viewport ({scroll:?})"
+        );
+    }
+
+    #[gpui::test]
     fn shortcuts_keep_working_after_leaving_a_focused_history_list(cx: &mut TestAppContext) {
         let (shell, cx, _dir) = open(Page::History, cx);
         let list = shell.read_with(cx, |shell, cx| match shell.find(Page::History) {

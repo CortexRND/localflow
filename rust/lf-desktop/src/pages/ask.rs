@@ -289,6 +289,12 @@ impl AskPage {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn push_turn(&mut self, turn: AgentTurn, cx: &mut Context<Self>) {
+        self.convo.turns.push(turn);
+        cx.notify();
+    }
+
     /// Escape: stop a running question. `false` when there was none.
     pub fn escape(&mut self, cx: &mut Context<Self>) -> bool {
         if self.convo.running() {
@@ -969,19 +975,27 @@ impl Render for AskPage {
                 .flex_col()
                 .size_full()
                 .children(banner.map(|b| {
-                    layout
-                        .line()
-                        .pt(space::s5())
-                        .child(div().w(column).child(b))
+                    layout.line().pt(space::s5()).child(
+                        div()
+                            .w(column)
+                            .child(b.debug_selector(|| "ask-banner".into())),
+                    )
                 }))
                 .child(
                     div()
                         .id("ask-scroll")
+                        .debug_selector(|| "ask-scroll".into())
                         .w(pane)
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .child(layout.line().py(space::s8()).child(convo.w(column))),
+                        .child(
+                            layout
+                                .line()
+                                .debug_selector(|| "ask-scroll-content".into())
+                                .py(space::s8())
+                                .child(convo.debug_selector(|| "ask-convo".into()).w(column)),
+                        ),
                 )
                 .child(composer),
         )
