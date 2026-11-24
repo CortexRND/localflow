@@ -349,7 +349,7 @@ lf-rs setup install-app
   under the same discovery, probe and notice rules; it quietly opens the
   legacy window when the preview isn't installed, on first run and for the
   Setup page; `--legacy`/`LOCALFLOW_UI=legacy` always
-  opens the legacy window (builds after v0.2.2; the released v0.2.2 CLIs
+  opens the legacy window (v0.2.3 and later; v0.2.2 and earlier CLIs
   don't have this selector). The legacy window is
   `python -m localflow.hub_window --page PAGE` from the Python install
   (the one `setup install-app` uses).

@@ -371,11 +371,12 @@ export LOCALFLOW_UI=legacy    # the same for every one of these commands (rollba
   session; neither looks at the preview at all. In the source, setting
   `DEFAULT_UI` back to legacy in `localflow/desktop_launch.py` and
   `rust/lf/src/desktop_launch.rs` restores the 4a behaviour exactly.
-- **Installers:** their bytes, package and bundle identities are unchanged,
-  and none ships the preview. The pinned one-liner installs the v0.2.2 release,
-  whose `lf` has no selector and always opens the legacy window. Source installs
-  run this updated CLI, though: `install.sh` run from a checkout or with
-  `LOCALFLOW_REF`, and the macOS `setup.sh` editable install. Their final bare
+- **Installers:** their package and bundle identities are unchanged, and none
+  ships the preview. The pinned one-liner installs the v0.2.3 release, the
+  first whose `lf` has this selector, as do source installs (`install.sh` run
+  from a checkout or with `LOCALFLOW_REF`, and the macOS `setup.sh` editable
+  install); with no preview installed it opens the legacy window as before.
+  Their final bare
   `lf setup`, and the Linux **LocalFlow Setup** menu entry that `install.sh`
   writes (`Exec=… setup`), are setup requests, so they keep opening the legacy
   wizard by default even for preview owners. No installer pin is needed for
