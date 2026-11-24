@@ -337,7 +337,10 @@ def _gate_target(rule: dict, metric: dict, values: list[float]) -> float | None:
     (or 0.0 when lower is better, e.g. a mismatch rate). Other exact metrics
     (arbitrary counts) are compared for equality/direction against baseline.
     """
-    is_gate = metric.get("unit") == "bool" or (bool(values) and all(0.0 <= v <= 1.0 for v in values))
+    unit = metric.get("unit")
+    is_gate = unit == "bool" or (
+        unit == "ratio" and bool(values) and all(0.0 <= v <= 1.0 for v in values)
+    )
     if not is_gate:
         return None
     return 0.0 if rule["better"] == "lower" else 1.0
