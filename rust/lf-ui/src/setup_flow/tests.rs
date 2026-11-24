@@ -411,6 +411,104 @@ fn run_checks_reports_unlistable_devices_and_unprobed_ollama_as_unknown() {
 }
 
 #[test]
+fn windows_machine_names_match_python_platform_machine() {
+    assert_eq!(windows_machine_name(0x8664), Some("AMD64"));
+    assert_eq!(windows_machine_name(0xaa64), Some("ARM64"));
+    assert_eq!(windows_machine_name(0x014c), Some("x86"));
+    assert_eq!(windows_machine_name(0x01c4), Some("ARM"));
+    assert_eq!(windows_machine_name(0), None);
+}
+
+#[test]
+fn windows_hardware_reports_python_system_and_host_units() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let hw = windows_hardware("AMD64", 16 * GIB, 250 * GIB + GIB / 2);
+    assert_eq!(
+        hw,
+        HardwareInfo::new("Windows", "AMD64", 16.0, false, 250.5)
+    );
+    let hw = windows_hardware("ARM64", 8 * GIB, GIB);
+    assert!(!hw.apple_silicon);
+    assert_eq!(
+        recommend(&hw, &platform()),
+        ("fw-base".to_string(), Some("llama3.2:1b".to_string()))
+    );
+    // 17.07e9 bytes is 15.9 GiB: Python's 8 GB tier, not the 16 GB one.
+    let hw = windows_hardware("AMD64", 17_070_000_000, GIB);
+    assert_eq!(
+        recommend(&hw, &platform()),
+        ("fw-base".to_string(), Some("llama3.2:1b".to_string()))
+    );
+}
+
+#[test]
+fn windows_hardware_ram_tier_boundary_is_binary_gb() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    assert!(windows_hardware("AMD64", 16 * GIB - 1, 0).ram_gb < 16.0);
+    assert!(windows_hardware("AMD64", 16 * GIB, 0).ram_gb >= 16.0);
+    assert!(windows_hardware("AMD64", 8 * GIB - 1, 0).ram_gb < 8.0);
+    assert!(windows_hardware("AMD64", 8 * GIB, 0).ram_gb >= 8.0);
+}
+
+#[test]
+fn windows_directory_name_is_nul_terminated_with_trailing_backslash() {
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+    fn terminated(s: &str) -> Vec<u16> {
+        let mut units = wide(s);
+        units.push(0);
+        units
+    }
+    assert_eq!(
+        windows_directory_name(&wide(r"C:\Users\me")),
+        Ok(terminated(r"C:\Users\me\"))
+    );
+    assert_eq!(
+        windows_directory_name(&wide(r"\\server\share")),
+        Ok(terminated(r"\\server\share\"))
+    );
+    assert_eq!(
+        windows_directory_name(&wide(r"C:\")),
+        Ok(terminated(r"C:\"))
+    );
+    assert_eq!(
+        windows_directory_name(&wide("C:/Users/me/")),
+        Ok(terminated("C:/Users/me/"))
+    );
+    assert_eq!(
+        windows_directory_name(&wide("C:\\Users\0me")),
+        Err("the home path contains a NUL character".to_string())
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_host_detects_hardware() {
+    use windows_sys::Win32::System::SystemInformation::{
+        IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_ARMNT,
+        IMAGE_FILE_MACHINE_I386,
+    };
+    assert_eq!(
+        windows_machine_name(IMAGE_FILE_MACHINE_AMD64),
+        Some("AMD64")
+    );
+    assert_eq!(
+        windows_machine_name(IMAGE_FILE_MACHINE_ARM64),
+        Some("ARM64")
+    );
+    assert_eq!(windows_machine_name(IMAGE_FILE_MACHINE_I386), Some("x86"));
+    assert_eq!(windows_machine_name(IMAGE_FILE_MACHINE_ARMNT), Some("ARM"));
+
+    let hardware = HostPlatform.detect_hardware().unwrap();
+    assert_eq!(hardware.system, "Windows");
+    assert!(!hardware.machine.is_empty());
+    assert!(!hardware.apple_silicon);
+    assert!(hardware.ram_gb > 0.0);
+    assert!(hardware.free_disk_gb > 0.0);
+}
+
+#[test]
 fn host_platform_never_claims_what_it_did_not_check() {
     let host = HostPlatform;
     let checks = run_checks(&cfg(&[("llm_provider", json!("x"))]), &host);
@@ -428,7 +526,7 @@ fn host_platform_never_claims_what_it_did_not_check() {
         assert!(hardware.ram_gb > 0.0);
         assert!(hardware.free_disk_gb > 0.0);
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     assert!(host.detect_hardware().is_err());
     assert_eq!(host.mic_authorization(), None);
     assert!(!host.which("definitely-not-a-real-command-xyz"));
