@@ -301,12 +301,21 @@ class PerfLedger:
             return False
 
     def _append(self, line: str) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._rotate_if_full()
         data = line.encode("utf-8")
         # One O_APPEND write per line, so concurrent writers never interleave.
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
         try:
+            if os.name != "nt":
+                try:
+                    os.fchmod(fd, 0o600)
+                except OSError:
+                    pass
+            if os.fstat(fd).st_size > 0:
+                os.lseek(fd, -1, os.SEEK_END)
+                if os.read(fd, 1) != b"\n":
+                    data = b"\n" + data
             os.write(fd, data)
         finally:
             os.close(fd)

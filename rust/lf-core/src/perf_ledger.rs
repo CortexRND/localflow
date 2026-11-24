@@ -17,7 +17,7 @@
 //! failure is logged at debug. `perf_metrics = false` makes it a no-op.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -403,16 +403,43 @@ impl PerfLedger {
 
     fn try_record(&self, event: &PerfEvent) -> io::Result<()> {
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(parent)?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::create_dir_all(parent)?;
+            }
         }
         self.rotate_if_full();
         let mut line = event.to_line();
         line.push('\n');
         // One O_APPEND write per line, so concurrent writers never interleave.
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut opts = OpenOptions::new();
+        opts.read(true).create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+        }
+        if file.metadata().is_ok_and(|meta| meta.len() > 0) && file.seek(SeekFrom::End(-1)).is_ok()
+        {
+            let mut tail = [0u8; 1];
+            if file.read_exact(&mut tail).is_ok() && tail[0] != b'\n' {
+                line.insert(0, '\n');
+            }
+        }
         file.write_all(line.as_bytes())
     }
 
