@@ -1345,6 +1345,39 @@ def test_cli_stt_python_plugin(rust_build, sandbox):
     )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the stand-in interpreters are shell scripts")
+def test_cli_stt_plugins_come_from_the_localflow_python(rust_build, sandbox):
+    """An earlier candidate without LocalFlow does not hide the LocalFlow interpreter's plug-ins."""
+    packages = sandbox["root"] / "site-packages"
+    metadata = packages / "speech_plugin-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\ndemo = speech_plugin:Demo\n", encoding="utf-8",
+    )
+    (packages / "speech_plugin.py").write_text(
+        "class Demo:\n    offline = False\n    def list_models(self):\n        return []\n", encoding="utf-8",
+    )
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    python = shlex.quote(sys.executable)
+    unrelated, installed = sandbox["root"] / "unrelated-python", sandbox["root"] / "localflow-python"
+    for root, run in ((unrelated / "bin", f"unset PYTHONPATH\nexec {python} -S"), (installed, f"exec {python}")):
+        root.mkdir(parents=True)
+        (root / "python3").write_text(f"#!/bin/sh\n{run} \"$@\"\n", encoding="utf-8")
+        (root / "python3").chmod(0o755)
+    rust_env = {**env, "PATH": str(installed)}
+    alone = lf(rust_build, sandbox, "stt", "list", env={**rust_env, "PATH": "", "VIRTUAL_ENV": str(unrelated)})
+    assert alone.returncode == 0 and "faster-whisper: " in alone.stdout and "demo" not in alone.stdout
+    rust_env["VIRTUAL_ENV"] = str(unrelated)
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "demo")):
+        expected = _python_cli(sandbox, *args, env=env)
+        assert expected.returncode == 0, expected.stderr
+        saved = sandbox["config"].read_bytes() if sandbox["config"].exists() else None
+        sandbox["config"].unlink(missing_ok=True)
+        assert _cli_output(lf(rust_build, sandbox, *args, env=rust_env)) == _cli_output(expected)
+        assert (sandbox["config"].read_bytes() if sandbox["config"].exists() else None) == saved
+    assert b"demo" in saved and "demo" in expected.stdout + _python_cli(sandbox, "stt", "list", env=env).stdout
+
+
 def _behind_healthy_python(rust_build, sandbox, env):
     """Rust's env with a later candidate that sees no plug-ins and answers healthily (POSIX only)."""
     if os.name != "posix":
