@@ -38,7 +38,7 @@ Each PR leaves every existing entry point working.
 |---|---|---|
 | **1. Parallel GPUI front end** | Standalone crate `rust/lf-desktop` (pinned `gpui = 0.2.2`, own `Cargo.lock`, outside the `rust/` workspace). One token and component layer. Library and config workflows connected to the real stores. Ask, Meetings and Prompts over the existing local HTTP service. Isolated persistent `--sandbox`. Controller, store and editing tests. Additive `gpui.yml` CI (Linux full, macOS type-check). `scripts/run_gpui.sh` | Done |
 | **2. Runtime and global-input parity** | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
-| **3. Packaging** (PR 65, merged) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Done. Linux package built and smoke-installed on the VM; fixture tests for builder/installer/publisher. All three `gpui-package.yml` legs (Linux x86_64, macOS arm64, macOS x86_64) build the release package, verify it, re-verify it outside the checkout and smoke-install/uninstall it in a temporary HOME, running `lf-desktop --version`; macOS relocation and signing are verified only by those CI legs. The Linux x86_64 package was installed, launched, reinstalled and uninstalled by hand (gate 5); Windows and macOS have no interactive, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
+| **3. Packaging** (PR 65, merged) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Done. Linux package built and smoke-installed on the VM; fixture tests for builder/installer/publisher. All three `gpui-package.yml` legs (Linux x86_64, macOS arm64, macOS x86_64) build the release package, verify it, re-verify it outside the checkout and smoke-install/uninstall it in a temporary HOME, running `lf-desktop --version`; macOS relocation and signing are verified only by those CI legs. The Linux x86_64 package was installed, launched, reinstalled and uninstalled by hand (gate 5), and the Windows zip was unzipped and run by hand (gate 5); macOS has no interactive, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
 | **4a. Opt-in launch** (PR 66, merged) | `localflow/desktop_launch.py`, called only by `lf hub`, bare `lf phrases` and the `lf setup` window: `--gpui` / `--legacy`, then `LOCALFLOW_UI=gpui\|legacy`, then `DEFAULT_UI = "legacy"` (no config key). Discovery only after a GPUI selection: absolute `LOCALFLOW_DESKTOP_BIN`, else only the preview installer's package (manifest name / bundle id checked). Bounded `--help` probe for the `--page`/`--setup` interface and the `EXIT STATUS (launch-status: 1):` line; `lf-desktop` now exits 1 when no window can open (it used to exit 0), so Scope 3 packages, which lack the line, must be updated before `lf` or `lf-hub` will open them. Closed argv, detached, 1.5 s startup watch; exit 0 is a hand-off. `lf hub` / `lf phrases` open the preview only once LocalFlow is set up (the active config has the setup marker), so they never show its first-run wizard; only `lf setup --gpui` does. Any failure (including not set up yet): one notice, then the legacy window once. `LOCALFLOW_SANDBOX` with a GPUI selection is refused (no fallback). `lf-hub` on Linux `exec`s the preview through the same rules (`lf_ui::desktop_launch`). Details: [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md#opening-it-from-lf-step-4a) | Implemented; unit and fake-executable subprocess tests (Python and Rust, temporary HOME, no GUI). Not exercised against a real window or on macOS hardware (GUI probing waived by the owner) |
 | **4b. Default-launch promotion** (this PR, conditional default only) | `DEFAULT_UI = "gpui"` in `localflow/desktop_launch.py` and `rust/lf/src/desktop_launch.rs`; selection order unchanged (`--gpui`/`--legacy`, then `LOCALFLOW_UI`, then the default). When GPUI comes only from the default (no flag, blank or unset `LOCALFLOW_UI`), the legacy window opens quietly with no discovery, probe or sandbox check, in this order: for a setup request (`lf setup`, the Setup page; nothing is read); on an unsupported platform, or with no `LOCALFLOW_DESKTOP_BIN` and nothing at the preview package root (or no usable HOME); and on first run, i.e. no active config file with the setup marker of `main_app.is_configured` / `lf_ui::hub_route::configuration_marker` (`[setup] version > 0` or an explicit `stt.provider`/`stt.model`; only the active config file, which is all `lf-desktop` checks, not the legacy flat fallback, so a `~/.localflow.toml` the Python CLI's own config load already migrated is an active config like any other, while one whose migration was deferred or failed leaves no active file and stays on the legacy window, which handles that migration as before; missing, unreadable or malformed counts as not set up; read-only, the launcher never migrates or writes; `LOCALFLOW_CONFIG` honoured; the launcher's checks are quiet, but the Python CLI still loads config when it starts, as before, so its existing load errors and warnings come before route selection: a malformed config can error before any launch and an unversioned one can already warn), because `lf-desktop` opens its own first-run wizard even for a page. The native wizard offers and writes models the native engines can run, not necessarily the Python runtime (for example Parakeet on a source macOS install without `parakeet-mlx`), and its downloads and trial prepare whisper.cpp files rather than Python's faster-whisper model, so a passing native trial says nothing about Python dictation. Only a configured Hub / phrases window remains: anything else is a candidate and takes exactly the 4a path: a not-owned or malformed root, a missing executable, a bad override, an old (Scope 3) package, a failed probe, spawn or early exit each print the existing notice once, then open the legacy window once; exit 0 is a hand-off. `LOCALFLOW_DESKTOP_BIN` alone now takes effect on Linux and macOS. `LOCALFLOW_SANDBOX` with a candidate on a configured Hub / phrases window is refused before any probe; for setup, first run or with nothing installed it keeps its legacy behaviour. Explicit `--gpui` / `LOCALFLOW_UI=gpui` keep the exact 4a path, including its set-up check: an explicit Hub / phrases window before setup is probed, prints the not-set-up notice and opens the legacy window; only `lf setup --gpui` opens the native wizard, with the model compatibility limits above. Explicit `--gpui`, `--legacy`, `LOCALFLOW_UI` and every notice are unchanged. Not changed: `lf-hub` (macOS AppKit, Linux), the direct dispatchers, package and bundle identities, trust files, stores, engine ownership and every installer's bytes (source installs run this CLI; their bare `lf setup` is a setup request and stays legacy). Rollback: `--legacy` or `LOCALFLOW_UI=legacy` per user; setting both `DEFAULT_UI` constants back to legacy restores 4a exactly | Implemented; unit and fake-executable subprocess tests in Python and Rust, with Python/Rust parity for implicit and explicit cases, temporary HOME, no GUI. The owner's acceptance for this PR is Devin's review plus a simulated GitHub CI run; native interactive QA is waived. Gates 1, 5 and 8 are not verified (see below). Not exercised against a real window or on macOS hardware. Default installers still don't ship the preview, so this changes nothing for users who haven't installed it |
 | Default-installer integration | The default installers ship and install `lf-desktop`, so the default reaches users who haven't run the preview installer | Not started. Needs gate 5 and the owner's decision on installer identities. Until then, `install.sh` (Linux) ends with `exec … lf setup`; the pinned one-liner installs the v0.2.3 release, whose `lf` has the 4b selector, as source installs (`install.sh` from a checkout or with `LOCALFLOW_REF`, macOS `setup.sh`) do, and the installer's bytes are pinned by the README checksum. None ships the preview, so without a separately installed preview `lf hub` and bare `lf phrases` open the legacy window; the bare `lf setup` and the Linux "LocalFlow Setup" menu entry `install.sh` writes (`Exec=… setup`) are setup requests, so 4b keeps them on the legacy wizard for preview owners too; no installer pin or guard is needed for that. Shipping native setup by default needs the native wizard to respect the runtime that owns dictation (its models, model files and login registration) |
@@ -181,22 +181,55 @@ integration and legacy retirement still require these gates.
      `~/.localflow/desktop/main-app.lock` and, in a home without one,
      `~/.localflow/history.sqlite`. Uninstall leaves both in place.
 
+   Checked against the published release on 2026-11-24. `v0.2.3` (tag at
+   `eb8b88a`) is the first release that carries the preview package, as the
+   owner decided (Taj, 2026-11-24, "Tag next release").
+   - The release has the four archives (`linux-x86_64`, `macos-arm64`,
+     `macos-x86_64`, `windows-x86_64`) and `SHA256SUMS-gpui-preview`, and every
+     archive matches its line in that file.
+   - On Linux x86_64 (Ubuntu, X11 under Xvfb), in a fresh HOME that already had
+     `~/.localflow` and `config.toml`, the tag's
+     `scripts/install_gpui_preview.sh` run with no arguments downloaded
+     `v0.2.3`, verified it and installed 0.2.3 over a 0.2.2 CI package: a real
+     version-to-version upgrade. The installed `lf-desktop` has the same
+     SHA-256 as the one in the release archive. The window opened on Home and
+     closed with Ctrl+Q.
+   - With no display, the same no-argument run installs without opening the
+     app. After it and after its uninstall, every file under `~/.localflow`
+     and `~/.config` has the same SHA-256 as before. Opening the window changed
+     two header fields of an existing `history.sqlite` (SQLite's file change
+     counter and version-valid-for number); its dump is identical.
+   - `--release v0.2.2` is refused with "Release v0.2.2 has no
+     SHA256SUMS-gpui-preview" and leaves the installed 0.2.3 in place. A copy
+     of the installer from before `v0.2.3` stays pinned to `v0.2.2` and needs
+     `--release v0.2.3`.
+   - Not checked: the default download on macOS.
+
+   Checked by hand on Windows on 2026-11-24: Windows Server 2022 (build 20348),
+   `LocalFlow-Preview-0.2.3-windows-x86_64.zip` from the `v0.2.3` release,
+   downloaded in Chrome and extracted with Explorer.
+   - The download matches `SHA256SUMS-gpui-preview`. The folder holds
+     `lf-desktop.exe`, four DLLs, `README.txt` and `MANIFEST.json`.
+   - `lf-desktop.exe` is unsigned. The first double-click stops at SmartScreen's
+     "Windows protected your PC"; **More info**, then **Run anyway** (publisher
+     "Unknown publisher") starts it, as `README.txt` warns. The second launch
+     didn't prompt.
+   - It opens with no console window, on setup's Quick checkup in a profile
+     with no LocalFlow config. Home, History, Settings and Models & keys open.
+     The title-bar X leaves no process, tray icon or crash event.
+     `lf-desktop.exe --version` prints `lf-desktop 0.2.3`.
+   - A second double-click while the window is open brings that window forward
+     on Home, still as one process.
+   - Deleting the folder removes the app. Nothing was added to the Start Menu,
+     Desktop, Startup, the Run keys, `%LOCALAPPDATA%` or `%APPDATA%`. The app
+     wrote only `history.sqlite` (no rows) and two lock files in `desktop\`
+     under `%USERPROFILE%\.localflow`, which stay.
+   - Not checked: setup's Apply, model downloads, dictation, and other Windows
+     versions or SmartScreen policies.
+
    Still open, so this gate isn't met:
-   - No release carries the preview package yet. Packaging landed after
-     `v0.2.2`, so the installer's default (`PREVIEW_RELEASE="v0.2.2"`) fails
-     with "Release v0.2.2 has no SHA256SUMS-gpui-preview". It installs only from
-     `--archive` until the next tag publishes the assets (see "Before tagging"
-     in [releasing.md](releasing.md)). That tag's installer defaults to the new
-     release; a copy of the installer from before it stays pinned to `v0.2.2`
-     and needs `--release <tag>`. For the same reason a real
-     version-to-version upgrade wasn't checked; only a reinstall of 0.2.2 over
-     0.2.2 was. Decided by the owner (Taj, 2026-11-24, "Tag next release"): the
-     next release tag includes the preview package. This item closes once that
-     tag exists and the installer's default has been checked against it.
-   - Windows: the zip has no installer. `gpui-package.yml` checks its PE imports
-     and launches `lf-desktop.exe --sandbox` on `windows-latest`, but nobody has
-     unzipped and run it by hand. macOS: CI smoke-install only, with no
-     Gatekeeper or permission check.
+   - macOS: CI smoke-install only, with no Gatekeeper or permission check, and
+     the installer's default download wasn't run there.
 
    Waived by the owner for the launcher switch (Taj, 2026-11-24, "Waive for
    launcher"): the default installers (`install.sh`, `install.ps1`) still don't
