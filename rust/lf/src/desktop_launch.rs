@@ -2,8 +2,10 @@
 //! `lf-rs hub`. Selection: `--gpui`/`--legacy`, then `LOCALFLOW_UI`, then
 //! legacy. A GPUI selection opens only an absolute `LOCALFLOW_DESKTOP_BIN` or
 //! the package `scripts/install_gpui_preview.sh` owns, after a bounded
-//! `--help` probe; anything wrong prints one notice and opens the legacy
-//! window once. Notices are byte-identical to Python's. `lf-hub` keeps its own
+//! `--help` probe, and only once LocalFlow is set up (the active config has
+//! `lf_core::config::configuration_marker`), so the preview never opens its
+//! own first-run wizard from `hub`; anything wrong prints one notice and opens
+//! the legacy window once. Notices are byte-identical to Python's. `lf-hub` keeps its own
 //! copy of the probe in `lf_ui::desktop_launch` (different messages, no
 //! fallback), so the shared constants are checked against it in the tests.
 
@@ -46,6 +48,8 @@ pub const NOTICE_BAD_OVERRIDE: &str = "lf: LOCALFLOW_DESKTOP_BIN must be an abso
 pub const NOTICE_PROBE: &str = "lf: that lf-desktop is too old (update LocalFlow Preview) \
      or isn't LocalFlow Preview; opening the legacy window.";
 pub const NOTICE_SPAWN: &str = "lf: couldn't start LocalFlow Preview; opening the legacy window.";
+pub const NOTICE_NOT_SET_UP: &str =
+    "lf: LocalFlow isn't set up yet (run lf setup); opening the legacy window.";
 pub const SANDBOX_REFUSAL: &str = "LOCALFLOW_SANDBOX is set, and `lf` opens LocalFlow Preview \
      only on your real data. Run the preview directly instead: lf-desktop --sandbox \
      (Linux: localflow-preview --sandbox; macOS: open -a \"LocalFlow Preview\" --args \
@@ -92,6 +96,8 @@ pub struct Launcher<'a> {
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
     pub platform: Option<Platform>,
     pub home: Option<PathBuf>,
+    /// Whether the active config is set up; asked only right before a spawn.
+    pub set_up: &'a dyn Fn() -> bool,
     pub probe_timeout: Duration,
     pub startup_wait: Duration,
 }
@@ -106,6 +112,7 @@ impl Launcher<'static> {
             env: &process_env,
             platform: platform_key(),
             home: lf_core::home::python_home().ok(),
+            set_up: &lf_core::config::active_config_set_up,
             probe_timeout: PROBE_TIMEOUT,
             startup_wait: STARTUP_WAIT,
         }
@@ -184,6 +191,8 @@ impl Launcher<'_> {
                 Err(NOTICE_PROBE)
             }
         });
+        // The preview must never open its own first-run wizard from a Hub route.
+        let found = found.and_then(|exe| (self.set_up)().then_some(exe).ok_or(NOTICE_NOT_SET_UP));
         let notice = match found {
             Ok(exe) => match spawn(&desktop_argv(&exe, page), self.startup_wait) {
                 Ok(()) => return Ok(()),
@@ -440,9 +449,18 @@ mod tests {
             env: &**env,
             platform,
             home: home.map(Path::to_path_buf),
+            set_up: &set_up_yes,
             probe_timeout: PROBE_TIMEOUT,
             startup_wait: STARTUP_WAIT,
         }
+    }
+
+    fn set_up_yes() -> bool {
+        true
+    }
+
+    fn set_up_no() -> bool {
+        false
     }
 
     fn env_of(pairs: &[(&str, &str)]) -> Env {
@@ -722,6 +740,20 @@ mod tests {
 
         let run = run_launch(&launcher(&none, None, None), Some(Ui::Gpui), None);
         assert_eq!((run.err, run.legacy), (format!("{NOTICE_PLATFORM}\n"), 1));
+
+        // The set-up check comes after the refusals and a missing preview.
+        fn set_up_unused() -> bool {
+            panic!("asked whether LocalFlow is set up without a preview to open")
+        }
+        for (env, flag) in [(&none, None), (&bogus, None), (&sandbox, Some(Ui::Gpui))] {
+            let mut l = launcher(env, Some(Platform::Linux), None);
+            l.set_up = &set_up_unused;
+            run_launch(&l, flag, None);
+        }
+        let mut l = launcher(&none, None, None);
+        l.set_up = &set_up_unused;
+        let run = run_launch(&l, Some(Ui::Gpui), None);
+        assert_eq!((run.err, run.legacy), (format!("{NOTICE_PLATFORM}\n"), 1));
     }
 
     #[cfg(unix)]
@@ -814,6 +846,64 @@ mod tests {
                 Some(Ui::Gpui),
                 None,
             );
+            assert_eq!(
+                (run.err, run.legacy),
+                (format!("{NOTICE_NOT_INSTALLED}\n"), 1)
+            );
+        }
+
+        #[test]
+        fn not_set_up_never_spawns_the_preview() {
+            let _serial = serial();
+            let linux = Some(Platform::Linux);
+            let dir = tempfile::tempdir().unwrap();
+            let (exe, record) = fake(dir.path(), GOOD_HELP, 0);
+            let env = env_path(BIN_ENV, &exe);
+            let mut not_set_up = launcher(&env, linux, None);
+            not_set_up.set_up = &set_up_no;
+            for page in [None, Some("Home"), Some("Hot Phrases")] {
+                let run = run_launch(&not_set_up, Some(Ui::Gpui), page);
+                assert!(run.result.is_ok(), "{:?}", run.result);
+                assert_eq!(
+                    (run.err, run.legacy),
+                    (format!("{NOTICE_NOT_SET_UP}\n"), 1),
+                    "{page:?}"
+                );
+            }
+            // The probe is waited for; nothing else ever ran.
+            assert_eq!(
+                std::fs::read_to_string(&record).unwrap(),
+                "--help\n--help\n--help\n"
+            );
+
+            // LOCALFLOW_UI=gpui is the same selection.
+            let gpui_env: Env = {
+                let exe = exe.clone().into_os_string();
+                Box::new(move |name| match name {
+                    BIN_ENV => Some(exe.clone()),
+                    UI_ENV => Some("gpui".into()),
+                    _ => None,
+                })
+            };
+            let mut by_env = launcher(&gpui_env, linux, None);
+            by_env.set_up = &set_up_no;
+            let run = run_launch(&by_env, None, None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_SET_UP}\n"), 1));
+
+            // Earlier notices keep their precedence.
+            let old = tempfile::tempdir().unwrap();
+            let (old_exe, _) = fake(old.path(), &GOOD_HELP.replace("    --setup", ""), 0);
+            let old_env = env_path(BIN_ENV, &old_exe);
+            let mut too_old = launcher(&old_env, linux, None);
+            too_old.set_up = &set_up_no;
+            let run = run_launch(&too_old, Some(Ui::Gpui), None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_PROBE}\n"), 1));
+
+            let none = env_of(&[]);
+            let home = tempfile::tempdir().unwrap();
+            let mut missing = launcher(&none, linux, Some(home.path()));
+            missing.set_up = &set_up_no;
+            let run = run_launch(&missing, Some(Ui::Gpui), None);
             assert_eq!(
                 (run.err, run.legacy),
                 (format!("{NOTICE_NOT_INSTALLED}\n"), 1)

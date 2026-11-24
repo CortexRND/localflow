@@ -234,7 +234,7 @@ The default is unchanged: `lf hub`, `lf phrases` and `lf setup` open the legacy
 windows. To use the preview instead:
 
 ```bash
-lf hub --gpui                 # no page: the preview's own first-run wizard still applies
+lf hub --gpui                 # sends no page; only once LocalFlow is set up (below)
 lf hub --gpui --page history  # sends --page History
 lf phrases --gpui             # sends --page "Hot Phrases"
 lf setup --gpui               # sends --setup
@@ -279,6 +279,14 @@ lf hub --legacy               # always the legacy window; nothing is probed
   an already open preview window (no second window); a non-zero exit, a failed
   start, a missing/unrecognised install or a failed probe prints one short notice
   and opens the legacy window once. A crash after those 1.5 s isn't detected.
+- **Not set up yet:** `lf hub` and `lf phrases` open the preview only when the
+  active config (`LOCALFLOW_CONFIG` or the default path; the legacy
+  `~/.localflow.toml` alone doesn't count) has the setup marker (`[setup]
+  version > 0` or an explicit `[stt] provider`/`model`). Otherwise, after the
+  probe, they print `lf: LocalFlow isn't set up yet (run lf setup); opening the
+  legacy window.` and open the legacy window once, so they never land in the
+  preview's own first-run wizard. `lf setup --gpui` is the only `lf` command
+  that opens that wizard.
   With the preview, `lf phrases` and `lf setup` return once the window has
   started instead of when it closes.
 - **Sandbox:** with `LOCALFLOW_SANDBOX=1` (or `true`) a GPUI selection is refused
