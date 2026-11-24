@@ -2397,7 +2397,7 @@ def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
     check("prompts", "dispatch", "--all", code=0)
     no_approved.set_status(approved, "approved", expect=("rejected",))
     if os.name == "nt":
-        return  # subprocess needs a real orca.exe; the rest is covered on POSIX
+        pytest.skip("dispatching through orca needs the POSIX fake-orca shell script; covered on POSIX")
 
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
@@ -3502,7 +3502,21 @@ def _install_or_skip(python: Path) -> Path:
     for name in names:
         if (python.parent / name).exists():
             return python.parent / name
-    pytest.skip(f"no localflow script for {python}; lf-rs refuses to install")
+    reason = f"no localflow script for {python}; lf-rs refuses to install"
+    if REQUIRED:
+        pytest.fail(f"LF_RUST_PARITY_REQUIRED=1 but {reason} (pip install -e . for this interpreter)")
+    pytest.skip(reason)
+
+
+def test_missing_install_fails_when_parity_is_required(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules[__name__], "REQUIRED", False)
+    with pytest.raises(pytest.skip.Exception):
+        _install_or_skip(tmp_path / "python3")
+    monkeypatch.setattr(sys.modules[__name__], "REQUIRED", True)
+    with pytest.raises((pytest.skip.Exception, pytest.fail.Exception)) as outcome:
+        _install_or_skip(tmp_path / "python3")
+    assert outcome.type is pytest.fail.Exception
+    assert "LF_RUST_PARITY_REQUIRED=1" in str(outcome.value)
 
 
 def _stub_python(directory: Path, body: str) -> Path:

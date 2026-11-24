@@ -179,6 +179,10 @@ jobs:
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --locked
       - name: Type-check lf-desktop (runtime feature)
         run: cargo check --manifest-path "$MANIFEST" --workspace --all-targets --features runtime --locked
+      # Library unit tests only (GPUI TestAppContext is headless); tests/cli.rs
+      # spawns the real binary and stays Linux-only.
+      - name: lf-desktop unit tests (default build)
+        run: cargo test --manifest-path "$MANIFEST" -p lf-desktop --lib --locked
 
   windows:
     runs-on: windows-latest
@@ -191,3 +195,5 @@ jobs:
           workspaces: rust/lf-desktop
       - name: Type-check lf-desktop and Windows tray
         run: cargo check --manifest-path "$env:MANIFEST" -p lf-desktop --all-targets --locked
+      - name: lf-desktop unit tests (default build; library only, headless)
+        run: cargo test --manifest-path "$env:MANIFEST" -p lf-desktop --lib --locked
