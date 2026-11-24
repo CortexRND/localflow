@@ -29,6 +29,21 @@ use std::{
 };
 use validation::{Body, ResponseResult};
 
+/// What is on disk for the current meeting, as reported by
+/// [`MeetingsBackend::wait_for_saved_transcript`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum MeetingSave {
+    /// No meeting was recorded (none started, or its start failed).
+    #[default]
+    NoMeeting,
+    /// A meeting was recorded but its transcript could not be saved.
+    Unsaved,
+    /// The full transcript is saved as a recovery note, without AI notes.
+    Transcript,
+    /// The final note, including AI notes, is saved.
+    Note,
+}
+
 #[derive(Default, PartialEq)]
 enum Phase {
     #[default]
@@ -60,7 +75,7 @@ struct State {
     session: Option<Arc<SessionActor>>,
     meta: Metadata,
     last_saved: Option<Value>,
-    transcript_saved: bool,
+    saved: MeetingSave,
     publishing: bool,
     abandoned: bool,
 }
@@ -131,25 +146,27 @@ impl MeetingsBackend {
         self.transcribe_lock = lock;
         self
     }
-    /// Whether a recorded meeting is still to be saved (running or stopping).
+    /// Whether a meeting is starting, running or stopping, so may still need saving.
     pub fn session_active(&self) -> bool {
-        matches!(self.state().phase, Phase::Running | Phase::Stopping)
+        self.state().phase != Phase::Idle
     }
     /// Blocks until the current meeting's full transcript is on disk (as a
     /// recovery note, before any LLM step) or no meeting remains to save, then
     /// abandons the rest of the stop: a file write already under way finishes
     /// first and no later one starts, so the process can exit without leaving
-    /// a partly written note. Returns whether that transcript was saved.
-    pub fn wait_for_saved_transcript(&self) -> bool {
+    /// a partly written note. Returns what is then on disk for the meeting.
+    pub fn wait_for_saved_transcript(&self) -> MeetingSave {
         let state = self.state();
         let mut state = self
             .idle
             .wait_while(state, |state| {
-                state.publishing || (state.phase != Phase::Idle && !state.transcript_saved)
+                state.publishing
+                    || (state.phase != Phase::Idle
+                        && !matches!(state.saved, MeetingSave::Transcript | MeetingSave::Note))
             })
             .unwrap_or_else(|error| error.into_inner());
         state.abandoned = true;
-        state.transcript_saved
+        state.saved
     }
     fn publish<T>(&self, write: impl FnOnce() -> T) -> Option<T> {
         {
@@ -248,6 +265,8 @@ impl MeetingsBackend {
                 ));
             }
             state.phase = Phase::Starting;
+            state.saved = MeetingSave::NoMeeting;
+            state.abandoned = false;
         }
         let mut reset = ResetSlot {
             backend: self,
@@ -307,8 +326,7 @@ impl MeetingsBackend {
         };
         state.session = Some(session);
         state.last_saved = None;
-        state.transcript_saved = false;
-        state.abandoned = false;
+        state.saved = MeetingSave::Unsaved;
         state.phase = Phase::Running;
         reset.armed = false;
         Ok(response)
@@ -371,7 +389,7 @@ impl MeetingsBackend {
             if let Some(previous) = recovery.replace(saved) {
                 remove_recovery(previous);
             }
-            self.state().transcript_saved = true;
+            self.state().saved = MeetingSave::Transcript;
             self.idle.notify_all();
         }
         let transcript = format_transcript(&finished.segments);
@@ -434,6 +452,7 @@ impl MeetingsBackend {
         let saved = self
             .publish(|| {
                 let saved = writer.write(&note)?;
+                self.state().saved = MeetingSave::Note;
                 if let Some(recovery) = recovery {
                     remove_recovery(recovery);
                 }
@@ -731,22 +750,29 @@ mod shutdown_tests {
 
     #[test]
     fn saved_transcript_wait_ends_at_the_raw_save_or_when_idle() {
+        use MeetingSave::*;
         let backend = Arc::new(MeetingsBackend::new().unwrap());
         assert!(!backend.session_active());
-        assert!(!backend.wait_for_saved_transcript());
-        backend.state().phase = Phase::Starting;
-        assert!(!backend.session_active());
-        for (finish, saved) in [
+        assert_eq!(backend.wait_for_saved_transcript(), NoMeeting);
+        backend.state().phase = Phase::Running;
+        assert!(backend.session_active());
+        let idle = (|state: &mut State| state.phase = Phase::Idle) as fn(&mut State);
+        for (phase, finish, saved) in [
+            (Phase::Starting, idle, NoMeeting),
+            (Phase::Stopping, idle, Unsaved),
             (
-                (|state: &mut State| state.transcript_saved = true) as fn(&mut State),
-                true,
+                Phase::Stopping,
+                |state| state.saved = Transcript,
+                Transcript,
             ),
-            (|state: &mut State| state.phase = Phase::Idle, false),
+            (Phase::Stopping, |state| state.saved = Note, Note),
         ] {
-            backend.state().phase = Phase::Running;
-            assert!(backend.session_active());
-            backend.state().phase = Phase::Stopping;
-            backend.state().transcript_saved = false;
+            backend.state().saved = if phase == Phase::Starting {
+                NoMeeting
+            } else {
+                Unsaved
+            };
+            backend.state().phase = phase;
             assert!(backend.session_active());
             let (finished, done) = mpsc::channel();
             let waiting = backend.clone();
@@ -762,6 +788,36 @@ mod shutdown_tests {
     }
 
     #[test]
+    fn a_wait_during_the_final_note_write_reports_the_note() {
+        let backend = Arc::new(MeetingsBackend::new().unwrap());
+        backend.state().phase = Phase::Stopping;
+        backend.state().saved = MeetingSave::Transcript;
+        let (entered, writing) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let publishing = backend.clone();
+        let writer = std::thread::spawn(move || {
+            publishing.publish(|| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                publishing.state().saved = MeetingSave::Note;
+            })
+        });
+        writing.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (finished, done) = mpsc::channel();
+        let waiting = backend.clone();
+        let waiter =
+            std::thread::spawn(move || finished.send(waiting.wait_for_saved_transcript()).unwrap());
+        assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
+        release.send(()).unwrap();
+        assert_eq!(
+            done.recv_timeout(Duration::from_secs(5)).unwrap(),
+            MeetingSave::Note
+        );
+        assert!(writer.join().unwrap().is_some());
+        waiter.join().unwrap();
+    }
+
+    #[test]
     fn a_panicking_publish_still_lets_the_saved_transcript_wait_finish() {
         let backend = MeetingsBackend::new().unwrap();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -769,7 +825,7 @@ mod shutdown_tests {
         }));
         assert!(panicked.is_err());
         assert!(!backend.state().publishing);
-        assert!(!backend.wait_for_saved_transcript());
+        assert_eq!(backend.wait_for_saved_transcript(), MeetingSave::NoMeeting);
     }
 
     #[test]

@@ -12,7 +12,9 @@ use lf_meetings::{
     dispatch::{PromptQueue, WorkPrompt},
     AudioCallback, AudioSource, SystemAudioUnavailable, Transcriber,
 };
-use lf_meetings_backend::{CaptureFactory, MeetingsBackend, ProviderFactory, TitleLlm};
+use lf_meetings_backend::{
+    CaptureFactory, MeetingSave, MeetingsBackend, ProviderFactory, TitleLlm,
+};
 use lf_providers::{Health, LlmProvider, ModelInfo, ProviderError};
 use lf_server::{
     backend::{Backend, BackendRequest, BackendResponse},
@@ -609,6 +611,7 @@ async fn saved_transcript_wait_ignores_an_earlier_meetings_save() {
         );
         if title == "First" {
             assert_eq!(request(f.app(), "POST", "/meeting/stop", None).await.0, 200);
+            assert_eq!(f.backend.wait_for_saved_transcript(), MeetingSave::Note);
         }
     }
     let (finished, done) = mpsc::channel();
@@ -617,7 +620,10 @@ async fn saved_transcript_wait_ignores_an_earlier_meetings_save() {
         std::thread::spawn(move || finished.send(backend.wait_for_saved_transcript()).unwrap());
     assert!(done.recv_timeout(Duration::from_millis(50)).is_err());
     stop_request(&f).join().unwrap();
-    assert!(done.recv_timeout(Duration::from_secs(5)).unwrap());
+    assert!(matches!(
+        done.recv_timeout(Duration::from_secs(5)).unwrap(),
+        MeetingSave::Transcript | MeetingSave::Note
+    ));
     waiter.join().unwrap();
     let saved = request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"].clone();
     let log = saved["log_path"].as_str().unwrap();
@@ -625,6 +631,45 @@ async fn saved_transcript_wait_ignores_an_earlier_meetings_save() {
     assert!(fs::read_to_string(log)
         .unwrap()
         .contains("we will launch on March 3"));
+}
+
+#[tokio::test]
+async fn a_starting_meeting_is_active_and_a_failed_start_leaves_no_meeting() {
+    let f = Fixture::new();
+    let (entered, loading) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.capture.gate.lock().unwrap() = Some((entered, released));
+    f.capture.stt_fail.store(true, Ordering::SeqCst);
+    let (backend, config) = (f.backend.clone(), f.config.clone());
+    let start = std::thread::spawn(move || {
+        let mut request = BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/meeting/start".into(),
+            body: "{}".into(),
+            headers: Default::default(),
+            query: Default::default(),
+            config,
+        };
+        request
+            .headers
+            .insert("content-type", "application/json".parse().unwrap());
+        backend.handle(request).status
+    });
+    loading.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(f.backend.session_active());
+    let (finished, done) = mpsc::channel();
+    let backend = f.backend.clone();
+    let waiter =
+        std::thread::spawn(move || finished.send(backend.wait_for_saved_transcript()).unwrap());
+    assert!(done.recv_timeout(Duration::from_millis(50)).is_err());
+    release.send(()).unwrap();
+    assert_eq!(start.join().unwrap(), 500);
+    assert_eq!(
+        done.recv_timeout(Duration::from_secs(5)).unwrap(),
+        MeetingSave::NoMeeting
+    );
+    waiter.join().unwrap();
+    assert!(!f.backend.session_active());
 }
 
 #[tokio::test]
@@ -646,7 +691,10 @@ async fn abandoned_stop_keeps_the_recovery_note_and_publishes_nothing_more() {
     *f.models.gate.lock().unwrap() = Some((entered, released));
     let stop = stop_request(&f);
     summarizing.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(f.backend.wait_for_saved_transcript());
+    assert_eq!(
+        f.backend.wait_for_saved_transcript(),
+        MeetingSave::Transcript
+    );
     release.send(()).unwrap();
     assert_eq!(stop.join().unwrap().status, 500);
     let saved = request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"].clone();

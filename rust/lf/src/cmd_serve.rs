@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use lf_core::config::{load_config, Config};
 use lf_meetings::{system_audio, AudioSource, Transcriber};
-use lf_meetings_backend::{CaptureFactory, MeetingsBackend};
+use lf_meetings_backend::{CaptureFactory, MeetingSave, MeetingsBackend};
 use lf_server::{backend::UnavailableBackend, Server, ServerState};
 use lf_stt::server::{SharedSpeech, SttBackend};
 
@@ -117,7 +117,7 @@ fn finish_shutdown(
     io: &mut Io<'_>,
     meeting_active: bool,
     shutdown: impl FnOnce() -> Result<()> + Send + 'static,
-    wait_for_saved_transcript: impl FnOnce() -> bool + Send + 'static,
+    wait_for_saved_transcript: impl FnOnce() -> MeetingSave + Send + 'static,
     interrupt: impl Future<Output = ()>,
 ) -> Result<()> {
     if !meeting_active {
@@ -135,12 +135,14 @@ fn finish_shutdown(
     if let Some(result) = saved {
         return result?;
     }
-    if runtime.block_on(runtime.spawn_blocking(wait_for_saved_transcript))? {
-        let _ = writeln!(io.out, "Meeting transcript saved without AI notes.")
-            .and_then(|()| io.out.flush());
-        Ok(())
-    } else {
-        anyhow::bail!("could not save meeting during shutdown")
+    match runtime.block_on(runtime.spawn_blocking(wait_for_saved_transcript))? {
+        MeetingSave::NoMeeting | MeetingSave::Note => Ok(()),
+        MeetingSave::Transcript => {
+            let _ = writeln!(io.out, "Meeting transcript saved without AI notes.")
+                .and_then(|()| io.out.flush());
+            Ok(())
+        }
+        MeetingSave::Unsaved => anyhow::bail!("could not save meeting during shutdown"),
     }
 }
 
@@ -289,7 +291,7 @@ mod tests {
     fn shutdown_output(
         meeting_active: bool,
         shutdown: impl FnOnce() -> Result<()> + Send + 'static,
-        wait_for_saved_transcript: impl FnOnce() -> bool + Send + 'static,
+        wait_for_saved_transcript: impl FnOnce() -> MeetingSave + Send + 'static,
         interrupt: impl Future<Output = ()>,
     ) -> (Result<()>, String) {
         let mut out = Vec::new();
@@ -307,7 +309,7 @@ mod tests {
         out: &mut dyn std::io::Write,
         meeting_active: bool,
         shutdown: impl FnOnce() -> Result<()> + Send + 'static,
-        wait_for_saved_transcript: impl FnOnce() -> bool + Send + 'static,
+        wait_for_saved_transcript: impl FnOnce() -> MeetingSave + Send + 'static,
         interrupt: impl Future<Output = ()>,
     ) -> Result<()> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -372,7 +374,7 @@ mod tests {
                 let _ = blocked.recv();
                 Ok(())
             },
-            || true,
+            || MeetingSave::Transcript,
             std::future::ready(()),
         );
         assert!(result.is_ok());
@@ -399,6 +401,36 @@ mod tests {
     }
 
     #[test]
+    fn second_interrupt_reports_what_was_actually_saved() {
+        for (saved, outcome, out_expected) in [
+            (MeetingSave::Note, Ok(()), "Saving meeting…\n"),
+            (MeetingSave::NoMeeting, Ok(()), "Saving meeting…\n"),
+            (
+                MeetingSave::Unsaved,
+                Err("could not save meeting during shutdown"),
+                "Saving meeting…\n",
+            ),
+        ] {
+            let (llm_running, llm_never_finishes) = mpsc::channel::<()>();
+            let (result, out) = shutdown_output(
+                true,
+                move || {
+                    let _ = llm_never_finishes.recv();
+                    Ok(())
+                },
+                move || saved,
+                std::future::ready(()),
+            );
+            assert_eq!(
+                result.map_err(|error| error.to_string()),
+                outcome.map_err(String::from)
+            );
+            assert_eq!(out, out_expected);
+            drop(llm_running);
+        }
+    }
+
+    #[test]
     fn second_interrupt_returns_once_the_raw_transcript_is_saved() {
         let (llm_running, llm_never_finishes) = mpsc::channel::<()>();
         let (saved_tx, saved_rx) = mpsc::channel();
@@ -410,7 +442,7 @@ mod tests {
             },
             move || {
                 saved_tx.send(()).unwrap();
-                true
+                MeetingSave::Transcript
             },
             std::future::ready(()),
         );
