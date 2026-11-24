@@ -585,9 +585,15 @@ impl RetryJobs {
         state.running = None;
     }
 
+    /// Record a failed retry of `key` without running one. Test helper.
+    #[cfg(test)]
+    pub(crate) fn fail_for_test(&self, key: RetryKey, error: RetryError) {
+        self.finish(key, Err(error));
+    }
+
     /// Wait (bounded) for a running job. Test helper.
     #[cfg(test)]
-    fn wait_idle(&self, wait: std::time::Duration) -> bool {
+    pub(crate) fn wait_idle(&self, wait: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + wait;
         while self.running().is_some() {
             if std::time::Instant::now() >= deadline {

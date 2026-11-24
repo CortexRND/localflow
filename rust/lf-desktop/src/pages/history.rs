@@ -612,7 +612,11 @@ impl HistoryPage {
         let can_retry = hub_model::history_row_actions(&entry.kind, has_audio)
             .iter()
             .any(|(name, _)| *name == "Retry");
-        let mut actions = div().flex().flex_wrap().gap(space::s4());
+        let mut actions = div()
+            .debug_selector(|| "history-actions".into())
+            .flex()
+            .flex_wrap()
+            .gap(space::s4());
         actions = actions.child(
             Button::new("copy-final", "Copy")
                 .primary()
@@ -672,14 +676,19 @@ impl HistoryPage {
         };
         div()
             .id("history-detail")
+            .debug_selector(|| "history-detail".into())
             .size_full()
+            .min_w_0()
             .overflow_y_scroll()
             .child(
                 div()
+                    .debug_selector(|| "history-detail-column".into())
                     .flex()
                     .flex_col()
                     .gap(space::s6())
                     .p(space::s10())
+                    .w_full()
+                    .min_w_0()
                     .max_w(px(size::READING + 64.))
                     .when(narrow, |d| {
                         d.child(
@@ -723,24 +732,29 @@ impl HistoryPage {
                         retry_view.as_ref().and_then(|v| v.error.clone()),
                         |d, message| {
                             let key = RetryKey::of(&entry);
-                            d.child(ui::banner(
-                                &t,
-                                Tone::Error,
-                                format!("Retry failed. {message}"),
-                                Some(
-                                    Button::new("retry-again", "Try again")
-                                        .small()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.start_retry(key, cx)
-                                        }))
-                                        .into_any_element(),
-                                ),
-                            ))
+                            d.child(
+                                ui::banner(
+                                    &t,
+                                    Tone::Error,
+                                    format!("Retry failed. {message}"),
+                                    Some(
+                                        Button::new("retry-again", "Try again")
+                                            .small()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.start_retry(key, cx)
+                                            }))
+                                            .into_any_element(),
+                                    ),
+                                )
+                                .debug_selector(|| "history-retry-banner".into()),
+                            )
                         },
                     )
                     .child(actions)
                     .when_some(retry_view.map(|v| v.note), |d, note| {
-                        d.child(ui::supporting(&t, note))
+                        d.child(
+                            ui::supporting(&t, note).debug_selector(|| "history-retry-note".into()),
+                        )
                     })
                     .when(distinct, |d| {
                         let open = self.show_original;
@@ -824,6 +838,7 @@ impl Render for HistoryPage {
                 .flex()
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .child(self.render_detail(true, cx))
         } else if narrow {
             div()
