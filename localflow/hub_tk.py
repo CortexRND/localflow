@@ -914,8 +914,10 @@ class HubWindow:
             }
         }
         try:
-            self.config = apply_config_update(self.config, update)
-            save_config(self.config)
+            fresh = load_config()
+            updated = apply_config_update(fresh, update)
+            save_config(updated)
+            self.config = updated
             self.page_errors.pop("Style", None)
             self.show_page("Style")
         except Exception as exc:  # noqa: BLE001

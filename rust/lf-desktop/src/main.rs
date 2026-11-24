@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use lf_desktop::app::{self, Launch};
 use lf_desktop::args::{self, USAGE};
 use lf_desktop::controllers::capabilities::Capabilities;
-use lf_desktop::controllers::instance::Route;
+use lf_desktop::controllers::instance::{Request, Route};
 use lf_desktop::data::{default_sandbox_dir, DataRoot, Services};
 use lf_desktop::launch::{self, Launched};
 use lf_desktop::page::Page;
@@ -39,21 +39,25 @@ fn main() -> ExitCode {
         eprintln!("lf-desktop: {}", err.0);
         return ExitCode::from(2);
     }
-    let route = if args.setup {
-        Route::Setup
-    } else {
-        Route::Page(args.page.unwrap_or(Page::Home))
+    let request = Request {
+        route: if args.setup {
+            Route::Setup
+        } else {
+            Route::Page(args.page.unwrap_or(Page::Home))
+        },
+        unknown_page: args.unknown_page.clone(),
     };
+    let notice = request.notice();
     let launched = if args.sandbox {
         let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
         launch::sandbox(
             &dir,
             args.sandbox_reset,
-            (!args.sandbox_exercise).then_some(route),
+            (!args.sandbox_exercise).then(|| request.clone()),
         )
     } else {
         match DataRoot::real() {
-            Ok(root) => launch::real(root, route),
+            Ok(root) => launch::real(root, request.clone()),
             Err(err) => Err(format!(
                 "couldn't resolve LocalFlow's data locations: {err:#}"
             )),
@@ -62,9 +66,12 @@ fn main() -> ExitCode {
     let (root, instance) = match launched {
         Ok(Launched::Window(root, instance)) => (*root, instance),
         Ok(Launched::HandedOff) => {
+            if let Some(n) = &notice {
+                eprintln!("lf-desktop: {n}");
+            }
             eprintln!(
                 "lf-desktop: LocalFlow is already open; sent it to {}.",
-                route.id()
+                request.route.id()
             );
             return ExitCode::SUCCESS;
         }
@@ -95,10 +102,6 @@ fn main() -> ExitCode {
             }
         };
     }
-    let notice = args
-        .unknown_page
-        .as_ref()
-        .map(|p| format!("There's no page called “{p}”, so Home is shown."));
     if let Some(n) = &notice {
         eprintln!("lf-desktop: {n}");
     }
