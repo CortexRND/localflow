@@ -88,7 +88,7 @@ def test_append_run_writes_run_file_and_index(tmp_path):
     assert all(": " not in line for line in lines)  # compact
     first = json.loads(lines[0])
     assert set(first) == {"ts", "date", "sha", "os", "runner_label", "runtime", "tier", "suite",
-                          "case", "status", "metrics"}
+                          "case", "dims", "status", "metrics"}
     assert first["date"] == "2026-11-01" and first["os"] == "linux" and first["runner_label"] == "ubuntu-latest"
     assert first["metrics"]["latency_ms"] == {"value": 100.0, "median": 100.0, "p95": 100.0,
                                               "unit": "ms", "better": "lower"}

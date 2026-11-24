@@ -110,6 +110,7 @@ def index_lines(result: dict) -> list[dict]:
             "tier": run.get("tier"),
             "suite": case["suite"],
             "case": case["case"],
+            "dims": case.get("dims") or {},
             "status": case["status"],
             "metrics": metrics,
         })
@@ -240,21 +241,33 @@ def _points(entries: list[dict], tier: str | None = None) -> dict[tuple, list[di
                 "value": float(metric["value"]),
                 "unit": metric.get("unit"),
                 "better": metric.get("better") or "lower",
+                "dims": entry.get("dims") or {},
             })
     for points in series.values():
         points.sort(key=lambda p: p["ts"])
     return series
 
 
-def case_base(case: str, runtime: str | None = None) -> str:
-    """Case name with its runtime path segment removed (``rust/1k`` -> ``1k``).
+_STT_ENGINE_ALIASES = (
+    ("faster-whisper-", "whisper-"),
+    ("whisper-rs-", "whisper-"),
+    ("sherpa-onnx-", "parakeet-"),
+    ("parakeet-onnx-", "parakeet-"),
+)
 
-    STT cases carry no runtime segment, so they are returned unchanged.
-    """
+
+def case_base(case: str, runtime: str | None = None) -> str:
+    """Case name normalized across runtimes (``rust/1k`` -> ``1k``, engine prefixes unified)."""
     parts = str(case).split("/")
     drop = (runtime,) if runtime else RUNTIMES
     kept = [p for p in parts if p not in drop]
-    return "/".join(kept) if kept and len(kept) < len(parts) else str(case)
+    base = "/".join(kept) if kept and len(kept) < len(parts) else str(case)
+    head, sep, tail = base.partition("/")
+    for prefix, canonical in _STT_ENGINE_ALIASES:
+        if head.startswith(prefix):
+            head = canonical + head[len(prefix):]
+            return f"{head}{sep}{tail}" if sep else head
+    return base
 
 
 def _fmt(value: float | None, unit: str | None = None) -> str:
@@ -447,7 +460,7 @@ def _one_value_result(suite: str, case: str, name: str, point: dict, value: floa
         os_name="linux", arch="x86_64", runner=_SYNTH_RUNNER, started_at="1970-01-01T00:00:00Z",
     )
     metric = {"unit": point["unit"] or "ratio", "better": point["better"], "value": value}
-    return make_result(run, [make_case(suite=suite, case=case, dims={}, metrics={name: metric})])
+    return make_result(run, [make_case(suite=suite, case=case, dims=point.get("dims") or {}, metrics={name: metric})])
 
 
 def judge(policy: dict, suite: str, case: str, name: str, baseline: float, point: dict) -> tuple[str, str]:
@@ -510,7 +523,17 @@ def detect_consecutive_regressions(
     consecutive = max(1, int(consecutive))
     policy = load_policy(Path(policy_path or DEFAULT_POLICY_PATH))
     active, recovered, pending = [], [], []
-    series = _points(read_index(index_path), tier)
+    entries = read_index(index_path)
+    series = _points(entries, tier)
+    # Track timestamps of non-ok runs per (runner, runtime, suite, case) so an
+    # unmeasured run between two slow runs breaks a consecutive regression streak.
+    gap_ts: dict[tuple, list[str]] = {}
+    for entry in entries:
+        if tier is not None and entry.get("tier") != tier:
+            continue
+        if entry.get("status") != "ok":
+            gkey = (_label(entry), entry.get("runtime"), entry.get("suite"), entry.get("case"))
+            gap_ts.setdefault(gkey, []).append(str(entry.get("ts") or ""))
     for skey in sorted(series, key=lambda k: tuple(str(x) for x in k)):
         label, runtime, suite, case, name = skey
         points = series[skey]
@@ -524,8 +547,12 @@ def detect_consecutive_regressions(
                 healthy.append(point["value"])
         key = metric_key(label, runtime, suite, case, name)
         tail = verdicts[-consecutive:]
-        if len(tail) == consecutive and all(v[0] == "regressed" for v in tail):
-            recent = points[-consecutive:]
+        recent = points[-consecutive:]
+        gaps = gap_ts.get((label, runtime, suite, case), [])
+        has_gap = len(recent) == consecutive and any(
+            recent[0]["ts"] < g < recent[-1]["ts"] or g > recent[-1]["ts"] for g in gaps
+        )
+        if len(tail) == consecutive and not has_gap and all(v[0] == "regressed" for v in tail):
             item = {
                 "metric_key": key,
                 "os": label,
