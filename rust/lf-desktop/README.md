@@ -280,12 +280,13 @@ lf hub --legacy               # always the legacy window; nothing is probed
   start, a missing/unrecognised install or a failed probe prints one short notice
   and opens the legacy window once. A crash after those 1.5 s isn't detected.
 - **Not set up yet:** `lf hub` and `lf phrases` open the preview only when the
-  active config (`LOCALFLOW_CONFIG` or the default path; the legacy
-  `~/.localflow.toml` alone doesn't count) has the setup marker (`[setup]
-  version > 0` or an explicit `[stt] provider`/`model`). Otherwise, after the
-  probe, they print `lf: LocalFlow isn't set up yet (run lf setup); opening the
-  legacy window.` and open the legacy window once, so they never land in the
-  preview's own first-run wizard. `lf setup --gpui` is the only `lf` command
+  active config (`LOCALFLOW_CONFIG` or the default path) has the setup marker
+  (`[setup] version > 0` or an explicit `[stt] provider`/`model`). Only the
+  active config is read: an unmigrated legacy `~/.localflow.toml` stays on the
+  legacy window (which migrates it) and counts from the next launch. Otherwise,
+  after the probe, they print `lf: LocalFlow isn't set up yet (run lf setup);
+  opening the legacy window.` and open the legacy window once, so they never
+  land in the preview's own first-run wizard. `lf setup --gpui` is the only `lf` command
   that opens that wizard.
   With the preview, `lf phrases` and `lf setup` return once the window has
   started instead of when it closes.

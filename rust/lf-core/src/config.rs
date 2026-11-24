@@ -939,9 +939,9 @@ pub fn configuration_marker(data: &Map<String, Value>) -> bool {
             })
 }
 
-/// Whether the active config file (no legacy `~/.localflow.toml` fallback)
-/// loads and has [`configuration_marker`]: at least as strict as
-/// `lf-desktop`'s own first-run check.
+/// Whether the active config file loads and has [`configuration_marker`].
+/// Only the active config is read: an unmigrated legacy `~/.localflow.toml`
+/// stays on the legacy window (which migrates it) and counts from the next launch.
 pub fn active_config_set_up() -> bool {
     try_config_path().is_ok_and(|path| set_up_at(&path))
 }
