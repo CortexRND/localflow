@@ -2824,6 +2824,27 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
     old = fake("old", help_text=_DESKTOP_HELP.replace("    --setup ", "    --set "))
     staying = fake("stay", code=1, stay=2.5)
     probe, launch = ["--help"], ["--page", "Hot Phrases"]
+    # Not set up yet (no active config, then one without the setup marker): the
+    # preview would open its own first-run wizard, so neither side spawns it.
+    not_set_up = [
+        (("hub", "--gpui"), {}, dl.NOTICE_NOT_INSTALLED, "Home", []),
+        (("hub", "--gpui"), good, dl.NOTICE_NOT_SET_UP, "Home", [probe]),
+        (("hub", "--gpui", "--page", "Home"), good, dl.NOTICE_NOT_SET_UP, "Home", [probe]),
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": "gpui"}, dl.NOTICE_NOT_SET_UP,
+         "Hot Phrases", [probe]),
+        (("hub", "--gpui", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
+    ]
+    assert not sandbox["config"].exists()
+    for unmarked in (False, True):
+        if unmarked:
+            sandbox["config"].parent.mkdir(parents=True, exist_ok=True)
+            sandbox["config"].write_text("config_version = 2\n\n[setup]\nversion = 0\n")
+        for args, env, stderr, page, launches in not_set_up:
+            python, legacy, desktop = _same_hub(hub(*args, env=env))
+            assert (python.returncode, python.stdout, python.stderr) == (0, "", stderr + "\n"), args
+            assert (legacy, desktop) == (_legacy(page), launches), args
+
+    sandbox["config"].write_text("config_version = 2\n\n[setup]\nversion = 1\n")
     cases = [
         (("hub", "--gpui"), {}, dl.NOTICE_NOT_INSTALLED, "Home", []),
         (("hub", "--gpui"), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop"}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
