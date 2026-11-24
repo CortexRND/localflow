@@ -125,7 +125,7 @@ reason and the removal condition are in `vendor/xattr-shim/src/lib.rs`.
 |---|---|
 | Linux (X11, and Wayland through GPUI's Wayland backend) | Built and unit-tested here (Ubuntu, Mesa llvmpipe). Native rendering was not verified interactively: first paint was transparent under X11/VNC, and under Cage/Wayland redraws appeared only after a resize |
 | macOS | Expected to build (GPUI's Metal backend; the code has no Linux-only parts). Not verified in this PR. `lf-hub` stays the macOS app |
-| Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. This packaging change adds neither Windows hotkeys nor the tray |
+| Windows | Preview package only (`windows-x86_64` zip, below): built, PE-checked and launched in `--sandbox` on `windows-latest` by `gpui-package.yml`. No installer; `install.ps1` and the Python runtime are unchanged. It includes the native tray and, with `--engine`, the engine's Windows global hotkeys. Windows CI exercises the `lf-input` keyboard hook, type-checks the tray and launches the package in `--sandbox`; none of this is verified interactively |
 
 Linux build packages (Debian/Ubuntu names): `build-essential cmake clang pkg-config
 libasound2-dev libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev
@@ -713,11 +713,11 @@ These are tracked in `docs/gpui-migration.md`:
   the development VM; behaviour is covered by controller, sandbox and CLI
   subprocess tests. macOS runtime behaviour (tap readiness, engine, Metal
   whisper) is type-checked in CI only.
-- The engine runs only on LocalFlow's own data folders, has no tray item, and
-  runs only in builds made with `--features runtime` (the preview package is one).
+- The engine runs only on LocalFlow's own data folders and only in builds made
+  with `--features runtime` (the preview package is one).
 - Wayland global shortcuts are not possible (see above). On Windows only the
-  preview package is built; the packaging change adds neither Windows global
-  hotkeys nor the tray.
+  preview package is built; its tray and global hotkeys are not interactively
+  verified.
 - The Python runtime still writes protocol-1 status, so Home shows it as
   "Running · status limited".
 - `lf-hub` / the Python Hub and this window don't route to each other until the
