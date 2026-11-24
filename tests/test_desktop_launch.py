@@ -185,6 +185,19 @@ def _gpui_env(desktop, **extra):
     return {"LOCALFLOW_DESKTOP_BIN": str(desktop.path), **extra}
 
 
+SET_UP = "config_version = 2\n\n[setup]\nversion = 1\n"
+
+
+@pytest.fixture
+def configured(tmp_path, monkeypatch):
+    """LocalFlow is set up: the active config carries the setup marker."""
+    config = tmp_path / "config" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(SET_UP)
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(config))
+    return config
+
+
 # --------------------------------------------------------------- selection ---
 
 
@@ -430,6 +443,7 @@ ROUTES = [
 def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, home, tmp_path):
     desktop = fake()
     config = tmp_path / "my config.toml"
+    config.write_text(SET_UP)
     env = _gpui_env(desktop, LOCALFLOW_CONFIG=str(config))
     if opt_in == "flag":
         args = [args[0], "--gpui", *args[1:]]
@@ -444,7 +458,7 @@ def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, 
     assert launched["HOME"] == str(home) and launched["LOCALFLOW_CONFIG"] == str(config)
     assert launched["LOCALFLOW_SANDBOX"] is None
     assert result.output == ""  # nothing from the native child is relayed
-    assert not (home / ".localflow").exists() and not config.exists()  # no launcher writes
+    assert not (home / ".localflow").exists() and config.read_text() == SET_UP  # no launcher writes
 
 
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
@@ -506,7 +520,7 @@ def test_not_installed_falls_back_once(legacy):
 
 
 @posix_only
-def test_owned_install_is_used_without_an_override(home, fake, legacy):
+def test_owned_install_is_used_without_an_override(home, fake, legacy, configured):
     if sys.platform == "darwin":
         app, _ = _mac_install(home)
         directory = app / "Contents/MacOS"
@@ -518,6 +532,97 @@ def test_owned_install_is_used_without_an_override(home, fake, legacy):
     assert result.exit_code == 0, result.output
     assert desktop.argvs() == [["--help"], []]
     assert legacy.calls == []
+
+
+# --------------------------------------------- not set up: no preview wizard ---
+
+HUB_ROUTES = [
+    (["hub", "--gpui"], {}, _hub_legacy(), []),
+    (["hub", "--page", "Home", "--gpui"], {}, _hub_legacy(), ["--page", "Home"]),
+    (["hub"], {"LOCALFLOW_UI": "gpui"}, _hub_legacy(), []),
+    (["phrases", "--gpui"], {}, ("phrases", None), ["--page", "Hot Phrases"]),
+]
+
+
+@pytest.fixture
+def active_config(tmp_path, monkeypatch):
+    """The active config path, not yet written (an empty home has no config)."""
+    config = tmp_path / "config" / "config.toml"
+    config.parent.mkdir()
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(config))
+    return config
+
+
+@posix_only
+@pytest.mark.parametrize(("args", "extra", "expected", "_child"), HUB_ROUTES)
+@pytest.mark.parametrize("state", ["missing", "empty", "legacy-flat-file-only", "setup-0", "malformed"])
+def test_hub_routes_never_open_the_preview_wizard_before_setup(
+        args, extra, expected, _child, state, fake, legacy, home, active_config):
+    if state == "empty":
+        active_config.write_text("")
+    elif state == "legacy-flat-file-only":
+        (home / ".localflow.toml").write_text('model_size = "small"\n')  # not migrated yet
+    elif state == "setup-0":
+        active_config.write_text("[setup]\nversion = 0\n")
+    elif state == "malformed":
+        active_config.write_text("[setup\nversion = 1\n")
+    desktop = fake()
+    result = _invoke(args, env=_gpui_env(desktop, **extra))
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"]]  # probed, never started
+    assert result.output == desktop_launch.NOTICE_NOT_SET_UP + "\n"
+    assert legacy.calls == [expected]
+
+
+@posix_only
+def test_unreadable_config_location_is_not_set_up(fake, legacy, monkeypatch, tmp_path):
+    from localflow import config
+
+    class Untraversable(type(tmp_path)):
+        def exists(self, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(config, "config_path", lambda: Untraversable(tmp_path / "locked" / "config.toml"))
+    desktop = fake()
+    result = _invoke(["hub", "--gpui"], env=_gpui_env(desktop))
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"]]
+    assert result.output == desktop_launch.NOTICE_NOT_SET_UP + "\n"
+    assert legacy.calls == [_hub_legacy()]
+
+
+@posix_only
+@pytest.mark.parametrize(("args", "extra", "_expected", "child_args"), HUB_ROUTES)
+@pytest.mark.parametrize("marker", [SET_UP, 'config_version = 2\n\n[stt]\nmodel = "base"\n'])
+def test_hub_routes_open_the_preview_once_set_up(
+        args, extra, _expected, child_args, marker, fake, legacy, active_config):
+    active_config.write_text(marker)
+    desktop = fake()
+    result = _invoke(args, env=_gpui_env(desktop, **extra))
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"], child_args]
+    assert result.output == "" and legacy.calls == []
+
+
+@posix_only
+def test_setup_route_still_opens_the_preview_wizard_before_setup(fake, legacy, active_config):
+    desktop = fake()
+    result = _invoke(["setup", "--gpui"], env=_gpui_env(desktop))
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"], ["--setup"]]
+    assert result.output == "" and legacy.calls == []
+    assert not active_config.exists()
+
+
+@pytest.mark.parametrize(("args", "extra", "expected", "_child"), HUB_ROUTES)
+def test_missing_preview_before_setup_keeps_the_not_installed_notice(
+        args, extra, expected, _child, legacy, active_config):
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    result = _invoke(args, env=extra)
+    assert result.exit_code == 0
+    assert result.output == desktop_launch.NOTICE_NOT_INSTALLED + "\n"
+    assert legacy.calls == [expected]
 
 
 # ------------------------------------------------------- sandbox boundary ---
@@ -547,7 +652,7 @@ def test_sandbox_env_keeps_its_legacy_semantics(legacy):
 
 
 @posix_only
-def test_non_native_sandbox_values_are_not_a_sandbox(fake, legacy):
+def test_non_native_sandbox_values_are_not_a_sandbox(fake, legacy, configured):
     desktop = fake()
     result = _invoke(["hub", "--gpui"], env=_gpui_env(desktop, LOCALFLOW_SANDBOX="0"))
     assert result.exit_code == 0 and legacy.calls == []
@@ -624,7 +729,7 @@ def test_scope3_preview_is_never_launched_because_its_exit_0_proves_nothing(
 
 
 @posix_only
-def test_window_open_failure_status_falls_back_once(fake, legacy):
+def test_window_open_failure_status_falls_back_once(fake, legacy, configured):
     # A current build that couldn't open a window now exits 1 (not 0).
     desktop = fake(launch="exit1")
     result = _invoke(["hub", "--gpui"], env=_gpui_env(desktop))
@@ -643,7 +748,7 @@ def test_hanging_probe_falls_back_once(fake, legacy, monkeypatch):
 
 
 @posix_only
-def test_spawn_failure_falls_back_once(fake, legacy):
+def test_spawn_failure_falls_back_once(fake, legacy, configured):
     desktop = fake(vanish=True)  # passes the probe, then is gone
     result = _invoke(["phrases", "--gpui"], env=_gpui_env(desktop))
     assert result.exit_code == 0
@@ -653,7 +758,7 @@ def test_spawn_failure_falls_back_once(fake, legacy):
 
 @posix_only
 @pytest.mark.parametrize("code", [1, 2])
-def test_early_exit_falls_back_once_without_relaying_output(code, fake, legacy):
+def test_early_exit_falls_back_once_without_relaying_output(code, fake, legacy, configured):
     desktop = fake(launch=f"exit{code}")
     result = _invoke(["hub", "--gpui", "--page", "models"], env=_gpui_env(desktop))
     assert result.exit_code == 0
@@ -664,7 +769,7 @@ def test_early_exit_falls_back_once_without_relaying_output(code, fake, legacy):
 
 @posix_only
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-def test_exit_zero_is_a_handoff_not_a_fallback(command, fake, legacy):
+def test_exit_zero_is_a_handoff_not_a_fallback(command, fake, legacy, configured):
     desktop = fake(launch="exit0")
     result = _invoke([command, "--gpui"], env=_gpui_env(desktop))
     assert result.exit_code == 0 and result.output == ""
@@ -696,7 +801,8 @@ def test_healthy_window_is_left_running_after_the_startup_wait(fake, legacy, mon
 
 
 @posix_only
-def test_override_path_with_spaces_and_metacharacters_is_not_shell_interpreted(fake, legacy, tmp_path):
+def test_override_path_with_spaces_and_metacharacters_is_not_shell_interpreted(
+        fake, legacy, tmp_path, configured):
     directory = tmp_path / "dir with space $(touch pwned) ; `touch pwned2` & 'q'"
     desktop = fake(directory=directory)
     result = _invoke(["hub", "--gpui", "--page", "dictionary"], env=_gpui_env(desktop))

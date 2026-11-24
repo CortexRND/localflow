@@ -27,7 +27,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::pystr::PyStr;
 
@@ -192,27 +192,8 @@ pub fn ported_page(page: Option<&str>) -> &'static str {
         .unwrap_or(DEFAULT_PAGE)
 }
 
-/// Inspect the raw v2 TOML like Python `main_app.is_configured`: defaults added
-/// by [`lf_core::config::load_config`] must not make an empty file configured.
-pub fn configuration_marker(data: &Map<String, Value>) -> bool {
-    let setup_done = data
-        .get("setup")
-        .and_then(Value::as_object)
-        .and_then(|setup| setup.get("version"))
-        .and_then(Value::as_i64)
-        .is_some_and(|version| version > 0);
-    setup_done
-        || data
-            .get("stt")
-            .and_then(Value::as_object)
-            .is_some_and(|stt| {
-                ["provider", "model"].into_iter().any(|key| {
-                    stt.get(key)
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| !value.py_strip().is_empty())
-                })
-            })
-}
+/// The setup-marker rule lives in `lf-core`, next to the config it inspects.
+pub use lf_core::config::configuration_marker;
 
 /// Whether the real config contains the setup marker or an explicit speech
 /// provider/model. Missing, malformed and legacy-unreadable configs are not
@@ -840,26 +821,6 @@ mod tests {
         assert_eq!(canonical_page("hot\u{1c}phrases"), Some("Hot Phrases"));
         assert_eq!(canonical_page(" \u{1f}SETTINGS\u{2003}"), Some("Settings"));
         assert_eq!(validate_page("\u{1c}Home\u{1f}"), Some("Home"));
-    }
-
-    #[test]
-    fn configuration_marker_uses_only_explicit_raw_values() {
-        assert!(!configuration_marker(&Map::new()));
-        assert!(!configuration_marker(
-            &serde_json::from_value(json!({"setup": {"version": 0}})).unwrap()
-        ));
-        assert!(!configuration_marker(
-            &serde_json::from_value(json!({"setup": {"version": true}})).unwrap()
-        ));
-        assert!(!configuration_marker(
-            &serde_json::from_value(json!({"stt": {"provider": "  ", "model": 2}})).unwrap()
-        ));
-        assert!(configuration_marker(
-            &serde_json::from_value(json!({"setup": {"version": 1}})).unwrap()
-        ));
-        assert!(configuration_marker(
-            &serde_json::from_value(json!({"stt": {"model": "base"}})).unwrap()
-        ));
     }
 
     #[test]
