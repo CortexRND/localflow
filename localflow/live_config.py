@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 from localflow.config import Config, ConfigError, config_path, load_config
@@ -63,7 +63,7 @@ def merge_live(
         name for name in LIVE_FIELDS if getattr(running, name) != getattr(fresh, name)
     )
     others = [
-        name for name in running.__dataclass_fields__
+        name for name in (spec.name for spec in fields(running))
         if name not in LIVE_FIELDS and name not in reloaded
         and getattr(running, name) != getattr(fresh, name)
     ]

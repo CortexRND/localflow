@@ -295,14 +295,41 @@ impl PromptQueue for HttpPromptQueue {
 pub struct HttpAskBackend {
     http: HttpTransport,
     turns: Vec<Turn>,
+    /// Whole-request timeout of `/api/recall`, in seconds.
+    recall_timeout: u64,
+    /// Decode `"answer": null` with citations as a sources-only turn
+    /// ([`Turn::sources_only`]). Off by default: callers that render the
+    /// answer text without knowing that case keep the previous behaviour
+    /// (a generic error).
+    sources_only: bool,
 }
+
+/// Default `/api/recall` timeout in seconds.
+pub const RECALL_TIMEOUT_SECS: u64 = 300;
 
 impl HttpAskBackend {
     pub fn new(http: HttpTransport) -> Self {
         Self {
             http,
             turns: Vec::new(),
+            recall_timeout: RECALL_TIMEOUT_SECS,
+            sources_only: false,
         }
+    }
+
+    /// Opt in to sources-only turns: when the model couldn't answer
+    /// (`"answer": null`), keep the matching citations instead of failing.
+    /// Only for callers that render [`Turn::sources_only`] turns.
+    pub fn with_sources_only_replies(mut self) -> Self {
+        self.sources_only = true;
+        self
+    }
+
+    /// A shorter `/api/recall` timeout (seconds, at least 1, at most the
+    /// default), for a caller with its own deadline.
+    pub fn with_recall_timeout(mut self, secs: u64) -> Self {
+        self.recall_timeout = secs.clamp(1, RECALL_TIMEOUT_SECS);
+        self
     }
 }
 
@@ -343,37 +370,51 @@ impl AskBackend for HttpAskBackend {
                 &["api", "recall"],
                 &[],
                 Some(json!({"question":question,"since":since,"k":8,"llm":true})),
-                300,
+                self.recall_timeout,
             ) {
                 Ok(value) => {
-                    if let Some(answer) = value.get("answer").and_then(Value::as_str) {
-                        let answer = answer.py_strip();
-                        if answer.is_empty()
-                            || answer
-                                .to_lowercase()
-                                .contains(NO_ANSWER.trim_end_matches('.').to_lowercase().as_str())
-                        {
-                            turn.answer = NO_ANSWER.into();
-                        } else if let Some(citations) =
-                            value.get("citations").and_then(Value::as_array)
-                        {
-                            let decoded: Result<Vec<Citation>, _> = citations
-                                .iter()
-                                .cloned()
-                                .map(serde_json::from_value)
-                                .collect();
-                            match decoded {
-                                Ok(citations) => {
-                                    turn.answer = answer.into();
-                                    turn.citations = citations;
-                                }
-                                Err(_) => turn.error = ERROR_GENERIC.into(),
+                    // A `citations` list whose every item decodes; `None` when
+                    // it is missing, not a list or has a malformed item.
+                    let citations = || -> Option<Vec<Citation>> {
+                        value
+                            .get("citations")?
+                            .as_array()?
+                            .iter()
+                            .cloned()
+                            .map(serde_json::from_value)
+                            .collect::<Result<Vec<Citation>, _>>()
+                            .ok()
+                    };
+                    match value.get("answer") {
+                        Some(Value::String(answer)) => {
+                            let answer = answer.py_strip();
+                            if answer.is_empty()
+                                || answer.to_lowercase().contains(
+                                    NO_ANSWER.trim_end_matches('.').to_lowercase().as_str(),
+                                )
+                            {
+                                turn.answer = NO_ANSWER.into();
+                            } else if let Some(citations) = citations() {
+                                turn.answer = answer.into();
+                                turn.citations = citations;
+                            } else {
+                                turn.error = ERROR_GENERIC.into();
                             }
-                        } else {
-                            turn.error = ERROR_GENERIC.into();
                         }
-                    } else {
-                        turn.error = ERROR_GENERIC.into();
+                        // An explicit `null` (opted in): recall matched
+                        // passages but the model couldn't answer (both the
+                        // Rust and Python servers). Sources only, no prose:
+                        // see `Turn::sources_only`. With no passages there is
+                        // nothing to show, which is the no-answer reply.
+                        // Without the opt-in, `null` stays a generic error.
+                        Some(Value::Null) if self.sources_only => match citations() {
+                            Some(citations) if citations.is_empty() => {
+                                turn.answer = NO_ANSWER.into();
+                            }
+                            Some(citations) => turn.citations = citations,
+                            None => turn.error = ERROR_GENERIC.into(),
+                        },
+                        _ => turn.error = ERROR_GENERIC.into(),
                     }
                 }
                 Err(_) => turn.error = ERROR_UNREACHABLE.into(),

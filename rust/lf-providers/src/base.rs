@@ -58,6 +58,15 @@ pub trait LlmProvider {
     ) -> Result<String, ProviderError>;
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
     fn healthcheck(&self) -> Health;
+
+    /// The `max_tokens` to pass to [`complete`](Self::complete) when a caller
+    /// wants about `visible` tokens of reply text. Opt-in: callers that ask
+    /// use it; `complete` itself never changes an explicit bound. The default
+    /// is `visible`; a model whose bound also counts hidden reasoning
+    /// returns a larger, still bounded allowance.
+    fn reply_budget(&self, visible: i64) -> i64 {
+        visible
+    }
 }
 
 #[cfg(test)]
