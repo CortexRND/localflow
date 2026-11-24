@@ -483,6 +483,9 @@ def run_http_case(
         config = root / "config" / "localflow" / "config.toml"
         env = _model_cache_env(isolated_env(root, repo_root=ctx.repo_root if runtime == "python" else None,
                                             config=config))
+        # Both Rust lf-core::config::platform_config_base and Python platformdirs
+        # honor WIN_PD_OVERRIDE_LOCAL_APPDATA on Windows so api-token stays under root/config/localflow.
+        env["WIN_PD_OVERRIDE_LOCAL_APPDATA"] = str((root / "config").resolve())
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(http_config_text(port, model, ctx.options.get("stt_provider")), encoding="utf-8")
         seed_token(root)
