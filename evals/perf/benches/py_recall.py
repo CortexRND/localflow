@@ -34,6 +34,7 @@ import argparse
 import json
 import sys
 import time
+import types
 from datetime import datetime
 from pathlib import Path
 
@@ -166,6 +167,13 @@ def run_bench(
     db: Path, vault: Path, queries: list[tuple[str, str | None]], *,
     iterations: int, warmup: int, now: datetime,
 ) -> dict:
+    if "sounddevice" not in sys.modules:
+        try:
+            import sounddevice  # noqa: F401
+        except Exception:  # noqa: BLE001 - PortAudioError inherits directly from Exception
+            # Headless Linux runners without PulseAudio fail PortAudio init on
+            # `import sounddevice` via localflow.meetings, though recall never uses audio.
+            sys.modules["sounddevice"] = types.ModuleType("sounddevice")
     from localflow.history import HistoryStore
     from localflow.recall import search
 
