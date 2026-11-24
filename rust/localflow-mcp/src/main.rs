@@ -190,8 +190,18 @@ fn call_tool(src: &Sources, params: &Map<String, Value>) -> Result<Value, String
         "get_dictation" => {
             dictations::get(&src.history, args["id"].as_number().expect("validated id"))
         }
-        "search_prompts" => prompts::search(&src.queue, query, args["status"].as_str(), limit),
-        "get_prompt" => prompts::get(&src.queue, args["id"].as_str().expect("validated id")),
+        "search_prompts" => prompts::search(
+            &src.queue,
+            src.prompts_cwd.as_deref(),
+            query,
+            args["status"].as_str(),
+            limit,
+        ),
+        "get_prompt" => prompts::get(
+            &src.queue,
+            src.prompts_cwd.as_deref(),
+            args["id"].as_str().expect("validated id"),
+        ),
         _ => unreachable!("registered tool has no handler"),
     };
     Ok(match value {
