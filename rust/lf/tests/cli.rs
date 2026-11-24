@@ -833,4 +833,149 @@ mod hub_unix {
         );
         assert_eq!(lines(&record, 3)[2], "-m localflow.hub_window --page Ask");
     }
+
+    /// Where `scripts/install_gpui_preview.sh` puts the package, with its
+    /// ownership metadata; `None` where there is no preview package.
+    fn install_preview(home: &Path, help: &str, launched: &Path) -> Option<PathBuf> {
+        let (root, exe) = if cfg!(target_os = "linux") {
+            let root = home.join(".local").join("share").join("localflow-preview");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("MANIFEST.json"),
+                "{\"name\": \"localflow-preview\"}",
+            )
+            .unwrap();
+            let exe = root.join("bin").join("lf-desktop");
+            (root, exe)
+        } else if cfg!(target_os = "macos") {
+            let root = home.join("Applications").join("LocalFlow Preview.app");
+            std::fs::create_dir_all(root.join("Contents")).unwrap();
+            std::fs::write(
+                root.join("Contents").join("Info.plist"),
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+                 <key>CFBundleIdentifier</key>\
+                 <string>com.cortexrnd.localflow.desktop-preview</string></dict></plist>\n",
+            )
+            .unwrap();
+            let exe = root.join("Contents").join("MacOS").join("lf-desktop");
+            (root, exe)
+        } else {
+            return None;
+        };
+        script(
+            &exe,
+            &format!(
+                "echo \"$*\" >> '{}'\nif [ \"$1\" = --help ]; then printf '%s' '{help}'; exit 0; fi",
+                launched.display()
+            ),
+        );
+        Some(root)
+    }
+
+    #[test]
+    fn bare_hub_prefers_an_installed_preview_and_explicit_legacy_bypasses_it() {
+        let sandbox = Sandbox::new();
+        let venv = sandbox.root().join("venv");
+        let other = sandbox.root().join("other");
+        fake_python(&venv, false);
+        let record = fake_python(&other, true);
+        let path = other.join("bin");
+        let env = [
+            ("VIRTUAL_ENV", venv.to_str().unwrap()),
+            ("PATH", path.to_str().unwrap()),
+        ];
+        fn plus<'a>(
+            base: &[(&'a str, &'a str)],
+            extra: &[(&'a str, &'a str)],
+        ) -> Vec<(&'a str, &'a str)> {
+            let mut all = base.to_vec();
+            all.extend_from_slice(extra);
+            all
+        }
+        let quiet = |run: &Output| {
+            assert_eq!(
+                (code(run), stdout(run), stderr(run)),
+                (0, String::new(), String::new())
+            );
+        };
+        let launched = sandbox.root().join("desktop.txt");
+        let override_exe = sandbox.root().join("desktop").join("lf-desktop");
+        script(
+            &override_exe,
+            &format!(
+                "echo \"$*\" >> '{}'\nif [ \"$1\" = --help ]; then printf '%s' '{GOOD_HELP}'; exit 0; fi",
+                launched.display()
+            ),
+        );
+        let over = override_exe.to_str().unwrap();
+
+        let Some(root) = install_preview(&sandbox.home(), GOOD_HELP, &launched) else {
+            // No package on this platform: the default stays quietly legacy,
+            // even with an override.
+            quiet(&sandbox.run_with(
+                &["hub"],
+                &plus(&env, &[("LOCALFLOW_DESKTOP_BIN", over)]),
+                "",
+            ));
+            assert!(lines(&launched, 0).is_empty());
+            assert_eq!(lines(&record, 1), ["-m localflow.hub_window --page Home"]);
+            return;
+        };
+        // The installed package opens by default, with the closed argv.
+        quiet(&sandbox.run_with(&["hub"], &env, ""));
+        quiet(&sandbox.run_with(
+            &["hub", "--page", "models"],
+            &plus(&env, &[("LOCALFLOW_UI", " ")]),
+            "",
+        ));
+        assert_eq!(
+            lines(&launched, 4),
+            ["--help", "", "--help", "--page Models"]
+        );
+        // An explicit rollback never probes it, even with a sandbox request.
+        quiet(&sandbox.run_with(&["hub", "--legacy"], &env, ""));
+        quiet(&sandbox.run_with(
+            &["hub"],
+            &plus(
+                &env,
+                &[("LOCALFLOW_UI", "legacy"), ("LOCALFLOW_SANDBOX", "1")],
+            ),
+            "",
+        ));
+        assert_eq!(lines(&record, 2).len(), 2);
+        assert_eq!(lines(&launched, 4).len(), 4);
+        // A sandbox request with an installed package is refused, not downgraded.
+        let refused = sandbox.run_with(&["hub"], &plus(&env, &[("LOCALFLOW_SANDBOX", "true")]), "");
+        assert_eq!(code(&refused), 1);
+        assert!(stderr(&refused).starts_with("Error: LOCALFLOW_SANDBOX is set, and `lf` opens"));
+
+        // An old package is noticed once, then legacy opens once.
+        std::fs::remove_dir_all(&root).unwrap();
+        let old_help = "lf-desktop\n    --page <PAGE>  x\n";
+        assert!(install_preview(&sandbox.home(), old_help, &launched).is_some());
+        let old = sandbox.run_with(&["hub"], &env, "");
+        assert_eq!(
+            (code(&old), stderr(&old)),
+            (
+                0,
+                "lf: that lf-desktop is too old (update LocalFlow Preview) or isn't LocalFlow \
+                 Preview; opening the legacy window.\n"
+                    .into()
+            )
+        );
+        assert_eq!(lines(&launched, 5)[4], "--help");
+        assert_eq!(lines(&record, 3)[2], "-m localflow.hub_window --page Home");
+
+        // Without the package: quiet legacy, but an override alone is used.
+        std::fs::remove_dir_all(&root).unwrap();
+        quiet(&sandbox.run_with(&["hub"], &plus(&env, &[("LOCALFLOW_SANDBOX", "1")]), ""));
+        assert_eq!(lines(&record, 4).len(), 4);
+        quiet(&sandbox.run_with(
+            &["hub", "--page", "ask"],
+            &plus(&env, &[("LOCALFLOW_DESKTOP_BIN", over)]),
+            "",
+        ));
+        assert_eq!(lines(&launched, 7)[5..], ["--help", "--page Ask"]);
+        assert_eq!(lines(&record, 4).len(), 4);
+    }
 }

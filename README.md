@@ -531,10 +531,12 @@ search it read-only through the [MCP server](#mcp-server-for-agents).
 Open the native hub with `lf hub` to browse history, edit the dictionary and
 cleanup styles, or review the selected models. If you installed the separate
 LocalFlow Preview (native GPUI app, [`rust/lf-desktop`](rust/lf-desktop/README.md)),
-`lf hub --gpui`, `lf phrases --gpui` and `lf setup --gpui` open it instead, or set
-`LOCALFLOW_UI=gpui`; anything missing or wrong falls back to the usual window.
-The default is unchanged, and `--legacy` always opens the usual window. The
-CLI can search and manage history without opening the hub:
+`lf hub`, `lf phrases` and `lf setup` open it instead on Linux and macOS; if
+something is wrong with it, they say so once and open the usual window. Without
+the preview (it isn't part of the standard install) and on Windows, nothing
+changes. `--legacy` or `LOCALFLOW_UI=legacy` always opens the usual window, and
+`--gpui` asks for the preview explicitly. The CLI can search and manage history
+without opening the hub:
 
 ```bash
 lf history list

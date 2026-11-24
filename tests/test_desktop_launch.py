@@ -1,4 +1,5 @@
-"""Opt-in LocalFlow Preview launch from `lf hub`, `lf phrases` and `lf setup`.
+"""LocalFlow Preview launch from `lf hub`, `lf phrases` and `lf setup`: GPUI
+by default when a package is installed, else the legacy window.
 
 Process-boundary tests use real fake `lf-desktop` executables in a temporary
 HOME; nothing opens a GUI. Policy tests run on every platform; tests that need
@@ -8,6 +9,7 @@ a POSIX executable fixture are skipped elsewhere.
 import json
 import os
 import plistlib
+import re
 import signal
 import sys
 import textwrap
@@ -188,9 +190,10 @@ def _gpui_env(desktop, **extra):
 # --------------------------------------------------------------- selection ---
 
 
-def test_selection_precedence_is_flag_then_env_then_legacy_default():
-    assert desktop_launch.DEFAULT_UI == "legacy"
-    assert desktop_launch.choose_ui(None, {}) == ("legacy", None)
+def test_selection_precedence_is_flag_then_env_then_gpui_default():
+    assert desktop_launch.DEFAULT_UI == "gpui"
+    assert desktop_launch.choose_ui(None, {}) == ("gpui", None)
+    assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": " \t"}) == ("gpui", None)
     assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": "gpui"}) == ("gpui", None)
     assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": " GPUI "}) == ("gpui", None)
     assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": "legacy"}) == ("legacy", None)
@@ -199,8 +202,41 @@ def test_selection_precedence_is_flag_then_env_then_legacy_default():
     assert desktop_launch.choose_ui("gpui", {"LOCALFLOW_UI": "bogus"}) == ("gpui", None)
     assert desktop_launch.choose_ui(None, {"LOCALFLOW_UI": "bogus"}) == (
         "legacy", desktop_launch.NOTICE_INVALID_ENV)
-    # A binary override alone is not an opt-in.
-    assert desktop_launch.choose_ui(None, {"LOCALFLOW_DESKTOP_BIN": "/x/lf-desktop"})[0] == "legacy"
+    # Only the default itself is implicit (quiet when nothing is installed).
+    implicit = desktop_launch.implicit_choice
+    assert implicit(None, {}) and implicit(None, {"LOCALFLOW_UI": " \n"})
+    assert implicit(None, {"LOCALFLOW_DESKTOP_BIN": "/x/lf-desktop"})
+    for env in ({"LOCALFLOW_UI": "gpui"}, {"LOCALFLOW_UI": " Legacy "}, {"LOCALFLOW_UI": "bogus"}):
+        assert not implicit(None, env), env
+    assert not implicit("gpui", {}) and not implicit("legacy", {})
+
+
+def test_candidate_absent_only_for_nothing_to_try(home, tmp_path, monkeypatch):
+    absent = desktop_launch.candidate_absent
+    override = {"LOCALFLOW_DESKTOP_BIN": "anything, even invalid"}
+    for platform in ("win32", "cygwin", "freebsd14"):
+        assert absent({}, platform, home) and absent(override, platform, home)
+    for platform in ("linux", "darwin"):
+        assert absent({}, platform, home)
+        assert absent({"LOCALFLOW_DESKTOP_BIN": ""}, platform, home)
+        assert absent({}, platform, Path("relhome"))
+        assert not absent(override, platform, home)
+        assert not absent(override, platform, Path("relhome"))
+    monkeypatch.setenv("HOME", "relhome")
+    assert absent({}, "linux")
+    # Anything at the package root is a candidate, however malformed.
+    root = home / ".local/share/localflow-preview"
+    root.parent.mkdir(parents=True)
+    root.write_text("not a package")
+    assert not absent({}, "linux", home) and absent({}, "darwin", home)
+    root.unlink()
+    if os.name == "posix":
+        root.symlink_to(tmp_path / "dangling")
+        assert not absent({}, "linux", home)
+        root.unlink()
+    app = home / "Applications/LocalFlow Preview.app"
+    app.mkdir(parents=True)
+    assert not absent({}, "darwin", home) and absent({}, "linux", home)
 
 
 def test_flags_are_mutually_exclusive():
@@ -426,14 +462,17 @@ ROUTES = [
 
 @posix_only
 @pytest.mark.parametrize(("args", "child_args"), ROUTES)
-@pytest.mark.parametrize("opt_in", ["flag", "env"])
+@pytest.mark.parametrize("opt_in", ["flag", "env", "default"])
 def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, home, tmp_path):
+    if opt_in == "default" and desktop_launch.platform_key() is None:
+        pytest.skip("the default never looks for a preview package here")
     desktop = fake()
     config = tmp_path / "my config.toml"
+    # Under the GPUI default, the override alone is used.
     env = _gpui_env(desktop, LOCALFLOW_CONFIG=str(config))
     if opt_in == "flag":
         args = [args[0], "--gpui", *args[1:]]
-    else:
+    elif opt_in == "env":
         env["LOCALFLOW_UI"] = "gpui"
     result = _invoke(args, env=env)
 
@@ -447,24 +486,183 @@ def test_gpui_routes_send_a_closed_argv(args, child_args, opt_in, fake, legacy, 
     assert not (home / ".localflow").exists() and not config.exists()  # no launcher writes
 
 
+CHILD_ARGS_FOR = {"hub": [], "phrases": ["--page", "Hot Phrases"], "setup": ["--setup"]}
+
+
+def _never_discovered(monkeypatch):
+    """Fail the test if the launcher looks for, probes or starts lf-desktop."""
+    def boom(*args, **kwargs):
+        raise AssertionError("looked for LocalFlow Preview")
+
+    for name in ("find_desktop", "owned_install", "probe", "spawn"):
+        monkeypatch.setattr(desktop_launch, name, boom)
+
+
+def _owned_package(home, fake, **kwargs):
+    """The preview installer's package for this platform, running a fake."""
+    if sys.platform == "darwin":
+        app, _ = _mac_install(home)
+        directory = app / "Contents/MacOS"
+    else:
+        root, _ = _linux_install(home)
+        directory = root / "bin"
+    return fake(directory=directory, **kwargs)
+
+
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-def test_default_is_unchanged_and_override_alone_does_not_opt_in(command, legacy, tmp_path):
-    desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
-    for env in ({}, {"LOCALFLOW_DESKTOP_BIN": str(desktop.path)}, {"LOCALFLOW_UI": ""}):
+def test_default_without_a_candidate_is_quiet_legacy_once(command, legacy, monkeypatch):
+    _never_discovered(monkeypatch)
+    for env in ({}, {"LOCALFLOW_UI": ""}, {"LOCALFLOW_UI": "  "}, {"LOCALFLOW_DESKTOP_BIN": ""},
+                {"LOCALFLOW_SANDBOX": "1"}):
         legacy.calls.clear()
         result = _invoke([command], env=env)
         assert result.exit_code == 0, result.output
-        assert legacy.calls == [LEGACY_FOR[command]]
-        assert result.output == ""
-    assert desktop.runs() == []  # never probed
+        assert legacy.calls == [LEGACY_FOR[command]], env
+        assert result.output == "", env
 
 
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-def test_explicit_legacy_never_probes_even_when_env_opts_in(command, legacy, tmp_path):
+def test_default_on_unsupported_platforms_is_quiet_even_with_an_override(
+        command, legacy, monkeypatch, tmp_path, home):
     desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
-    result = _invoke([command, "--legacy"], env=_gpui_env(desktop, LOCALFLOW_UI="gpui"))
-    assert result.exit_code == 0, result.output
+    _linux_install(home)
+    _mac_install(home)
+    monkeypatch.setattr(desktop_launch.sys, "platform", "win32")
+    for env in (_gpui_env(desktop), {"LOCALFLOW_DESKTOP_BIN": "relative"}):
+        legacy.calls.clear()
+        result = _invoke([command], env=env)
+        assert result.exit_code == 0 and result.output == ""
+        assert legacy.calls == [LEGACY_FOR[command]]
+    assert desktop.runs() == []
+
+
+@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
+def test_default_with_a_relative_home_is_quiet(command, legacy, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    _linux_install(Path("relhome"))
+    _mac_install(Path("relhome"))
+    monkeypatch.setenv("HOME", "relhome")
+    _never_discovered(monkeypatch)
+    result = _invoke([command])
+    assert result.exit_code == 0 and result.output == ""
     assert legacy.calls == [LEGACY_FOR[command]]
+
+
+@posix_only
+@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
+def test_default_opens_the_owned_package_with_a_closed_argv(command, home, fake, legacy):
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    desktop = _owned_package(home, fake)
+    result = _invoke([command])
+    assert result.exit_code == 0, result.output
+    assert result.output == "" and legacy.calls == []  # a hand-off, no legacy window
+    assert desktop.argvs() == [["--help"], CHILD_ARGS_FOR[command]]
+    assert desktop.runs()[1]["env"]["LOCALFLOW_SANDBOX"] is None
+
+
+def _bare_root(home):
+    (home / ".local/share/localflow-preview").mkdir(parents=True)
+    (home / "Applications/LocalFlow Preview.app").mkdir(parents=True)
+
+
+def _root_is_a_file(home):
+    for root in (home / ".local/share/localflow-preview", home / "Applications/LocalFlow Preview.app"):
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.write_text("not a package")
+
+
+def _symlinked_root(home):
+    root, _ = _linux_install(home / "real")
+    app, _ = _mac_install(home / "real")
+    (home / ".local/share").mkdir(parents=True)
+    (home / ".local/share/localflow-preview").symlink_to(root)
+    (home / "Applications").mkdir()
+    (home / "Applications/LocalFlow Preview.app").symlink_to(app)
+
+
+def _owned_without_executable(home):
+    _linux_install(home, exe=False)
+    _mac_install(home)[1].unlink()
+
+
+@pytest.mark.parametrize(("arrange", "notice"), [
+    (_bare_root, desktop_launch.NOTICE_NOT_OWNED),
+    (_root_is_a_file, desktop_launch.NOTICE_NOT_OWNED),
+    pytest.param(_symlinked_root, desktop_launch.NOTICE_NOT_OWNED, marks=posix_only),
+    (_owned_without_executable, desktop_launch.NOTICE_NOT_INSTALLED),
+])
+@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
+def test_default_with_a_malformed_install_notices_once_then_legacy_once(
+        command, arrange, notice, home, legacy):
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    arrange(home)
+    result = _invoke([command])
+    assert result.exit_code == 0
+    assert legacy.calls == [LEGACY_FOR[command]]
+    assert result.output == notice + "\n"
+
+
+@pytest.mark.parametrize("override", ["lf-desktop", "relative/lf-desktop", "/nonexistent/lf-desktop"])
+def test_default_with_a_bad_override_notices_once(override, legacy):
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    result = _invoke(["phrases"], env={"LOCALFLOW_DESKTOP_BIN": override})
+    assert result.exit_code == 0
+    assert legacy.calls == [("phrases", None)]
+    assert result.output == desktop_launch.NOTICE_BAD_OVERRIDE + "\n"
+
+
+@posix_only
+@pytest.mark.parametrize(("kwargs", "notice", "argvs"), [
+    ({"help_text": OLD_HELP}, desktop_launch.NOTICE_PROBE, [["--help"]]),
+    ({"help_text": SCOPE3_HELP}, desktop_launch.NOTICE_PROBE, [["--help"]]),
+    ({"help_hang": True}, desktop_launch.NOTICE_PROBE, [["--help"]]),
+    ({"vanish": True}, desktop_launch.NOTICE_SPAWN, [["--help"]]),
+    ({"launch": "exit1"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=1), [["--help"], ["--setup"]]),
+    ({"launch": "exit2"}, desktop_launch.NOTICE_EARLY_EXIT.format(code=2), [["--help"], ["--setup"]]),
+])
+@pytest.mark.parametrize("where", ["package", "override"])
+def test_default_candidate_failures_notice_once_then_legacy_once(
+        kwargs, notice, argvs, where, home, fake, legacy, monkeypatch):
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    monkeypatch.setattr(desktop_launch, "PROBE_TIMEOUT", 1.0)
+    if where == "package":
+        desktop, env = _owned_package(home, fake, **kwargs), {}
+    else:
+        desktop = fake(**kwargs)
+        env = _gpui_env(desktop)
+    result = _invoke(["setup"], env=env)
+    assert result.exit_code == 0
+    assert legacy.calls == [("setup", None)]
+    assert result.output.strip() == notice
+    assert "SECRET" not in result.output
+    assert desktop.argvs() == argvs
+
+
+@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
+@pytest.mark.parametrize("rollback", [["--legacy"], "LOCALFLOW_UI=legacy", "LOCALFLOW_UI= Legacy "])
+def test_explicit_legacy_never_probes_even_with_a_candidate(
+        command, rollback, legacy, home, tmp_path, monkeypatch):
+    desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
+    _linux_install(home)  # an owned package, and a bad override, both ignored
+    _mac_install(home)
+    args, env = [command], {"LOCALFLOW_SANDBOX": "1"}
+    if isinstance(rollback, list):
+        args += rollback
+        env["LOCALFLOW_UI"] = "gpui"
+    else:
+        env["LOCALFLOW_UI"] = rollback.split("=", 1)[1]
+    for override in (str(desktop.path), "relative"):
+        legacy.calls.clear()
+        with monkeypatch.context() as patched:
+            _never_discovered(patched)
+            result = _invoke(args, env={**env, "LOCALFLOW_DESKTOP_BIN": override})
+        assert result.exit_code == 0, result.output
+        assert result.output == ""
+        assert legacy.calls == [LEGACY_FOR[command]]
     assert desktop.runs() == []
 
 
@@ -524,19 +722,35 @@ def test_owned_install_is_used_without_an_override(home, fake, legacy):
 
 
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-@pytest.mark.parametrize("opt_in", [["--gpui"], []])
+@pytest.mark.parametrize("opt_in", [["--gpui"], "env", "default"])
 def test_sandbox_request_is_refused_not_downgraded(command, opt_in, legacy, home, tmp_path):
+    if opt_in == "default" and desktop_launch.platform_key() is None:
+        pytest.skip("the default never looks for a preview package here")
     desktop = FakeDesktop(tmp_path / "bin/lf-desktop", tmp_path / "record.jsonl")
     for value in ("1", "true"):
+        # Under the default, the override alone makes this a candidate.
         env = _gpui_env(desktop, LOCALFLOW_SANDBOX=value)
-        if not opt_in:
+        if opt_in == "env":
             env["LOCALFLOW_UI"] = "gpui"
-        result = _invoke([command, *opt_in], env=env)
+        result = _invoke([command, *(opt_in if isinstance(opt_in, list) else [])], env=env)
         assert result.exit_code == 1
         assert "lf-desktop --sandbox" in result.output and "LOCALFLOW_SANDBOX" in result.output
     assert legacy.calls == []  # no un-sandboxed fallback
     assert desktop.runs() == []  # nothing probed or launched
     assert list(home.iterdir()) == []  # no launcher logs or data
+
+
+@posix_only
+@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
+def test_sandbox_request_with_an_installed_package_is_refused_under_the_default(
+        command, home, fake, legacy):
+    if desktop_launch.platform_key() is None:
+        pytest.skip("no preview package for this platform")
+    desktop = _owned_package(home, fake)
+    result = _invoke([command], env={"LOCALFLOW_SANDBOX": "1"})
+    assert result.exit_code == 1
+    assert "lf-desktop --sandbox" in result.output
+    assert legacy.calls == [] and desktop.runs() == []
 
 
 def test_sandbox_env_keeps_its_legacy_semantics(legacy):
@@ -569,6 +783,9 @@ def test_terminal_setup_and_its_errors_ignore_ui_flags(monkeypatch, legacy, tmp_
     assert yes.exit_code == 2 and "--yes requires --cli" in yes.output
     unknown = _invoke(["setup", "--cli", "--yes", "--stt", "nope", "--gpui"], env=env)
     assert unknown.exit_code == 1 and "unknown speech model" in unknown.output
+    # The GPUI default with a candidate doesn't touch the terminal path either.
+    assert _invoke(["setup", "--cli"], env=_gpui_env(desktop)).exit_code == 0
+    assert ran == [(None, None, False, None)] * 2
     assert legacy.calls == [] and desktop.runs() == []
 
 
@@ -718,6 +935,24 @@ def test_only_the_cli_uses_the_launcher_and_dispatchers_stay_legacy():
 
 
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
-def test_help_documents_the_opt_in(command):
+def test_help_documents_the_conditional_default(command):
     result = _invoke([command, "--help"])
     assert "--gpui" in result.output and "--legacy" in result.output
+    text = " ".join(result.output.split())
+    assert "default on Linux and macOS when it is installed" in text
+    assert "No screen-reader support yet" in text
+    assert "(the default)" not in text
+
+
+def test_linux_installer_setup_stays_legacy_once_a_release_ships_the_default():
+    # install.sh still installs the v0.2.2 release archive, whose `lf setup`
+    # defaults to legacy; its bytes are pinned by the README checksum. The
+    # first release that ships the GPUI default must pin the installer's own
+    # setup window to --legacy so installer behaviour doesn't change.
+    script = (ROOT / "install.sh").read_text(encoding="utf-8")
+    release = re.search(r'^LOCALFLOW_RELEASE="([^"]+)"$', script, re.MULTILINE).group(1)
+    setups = re.findall(r"^exec \.venv/bin/lf setup.*$", script, re.MULTILINE)
+    if release == "v0.2.2":
+        assert setups == ["exec .venv/bin/lf setup"]
+    else:
+        assert setups == ["exec .venv/bin/lf setup --legacy"]

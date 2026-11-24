@@ -1,9 +1,12 @@
 //! Port of `localflow/desktop_launch.py` (the `lf --gpui` launcher) for
 //! `lf-rs hub`. Selection: `--gpui`/`--legacy`, then `LOCALFLOW_UI`, then
-//! legacy. A GPUI selection opens only an absolute `LOCALFLOW_DESKTOP_BIN` or
-//! the package `scripts/install_gpui_preview.sh` owns, after a bounded
-//! `--help` probe; anything wrong prints one notice and opens the legacy
-//! window once. Notices are byte-identical to Python's. `lf-hub` keeps its own
+//! [`DEFAULT_UI`] (GPUI). A GPUI selection opens only an absolute
+//! `LOCALFLOW_DESKTOP_BIN` or the package `scripts/install_gpui_preview.sh`
+//! owns, after a bounded `--help` probe; anything wrong prints one notice and
+//! opens the legacy window once. When GPUI comes only from the default, an
+//! unsupported platform or no candidate at all (no override, nothing at the
+//! package root) opens the legacy window quietly, as Python does.
+//! Notices are byte-identical to Python's. `lf-hub` keeps its own
 //! copy of the probe in `lf_ui::desktop_launch` (different messages, no
 //! fallback), so the shared constants are checked against it in the tests.
 
@@ -60,6 +63,9 @@ pub enum Ui {
     Gpui,
     Legacy,
 }
+
+/// Python `DEFAULT_UI` (Scope 4b). Rollback: `Ui::Legacy` here and in Python.
+pub const DEFAULT_UI: Ui = Ui::Gpui;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
@@ -119,7 +125,7 @@ impl Launcher<'_> {
             .unwrap_or_default()
     }
 
-    /// (choice, notice): flag, then `LOCALFLOW_UI`, then legacy.
+    /// (choice, notice): flag, then `LOCALFLOW_UI`, then [`DEFAULT_UI`].
     pub fn choose_ui(&self, flag: Option<Ui>) -> (Ui, Option<&'static str>) {
         if let Some(flag) = flag {
             return (flag, None);
@@ -128,10 +134,38 @@ impl Launcher<'_> {
             .to_lowercase()
             .as_str()
         {
-            "" | "legacy" => (Ui::Legacy, None),
+            "" => (DEFAULT_UI, None),
+            "legacy" => (Ui::Legacy, None),
             "gpui" => (Ui::Gpui, None),
             _ => (Ui::Legacy, Some(NOTICE_INVALID_ENV)),
         }
+    }
+
+    /// Python `implicit_choice`: no flag and a blank `LOCALFLOW_UI`.
+    pub fn implicit_choice(&self, flag: Option<Ui>) -> bool {
+        flag.is_none() && crate::pyfmt::py_strip(&self.var(UI_ENV)).is_empty()
+    }
+
+    /// Python `candidate_absent`, for the implicit default only: an
+    /// unsupported platform, or no override and nothing at the package root
+    /// (or no absolute home). Anything at the root, owned or not, is a
+    /// candidate that [`Self::find_desktop`] then checks and reports.
+    pub fn candidate_absent(&self) -> bool {
+        let Some(key) = self.platform else {
+            return true;
+        };
+        if (self.env)(BIN_ENV).is_some_and(|value| !value.is_empty()) {
+            return false;
+        }
+        let Some(home) = self.home.as_deref().filter(|home| home.is_absolute()) else {
+            return true;
+        };
+        let parts: &[&str] = match key {
+            Platform::Linux => &LINUX_ROOT,
+            Platform::Macos => &MAC_APP,
+        };
+        let root = parts.iter().fold(home.to_path_buf(), |p, s| p.join(s));
+        std::fs::symlink_metadata(root).is_err()
     }
 
     /// `lf-desktop`'s own rule: `LOCALFLOW_SANDBOX` is exactly `1` or `true`.
@@ -173,6 +207,9 @@ impl Launcher<'_> {
         }
         if choice != Ui::Gpui {
             return legacy(io);
+        }
+        if self.implicit_choice(flag) && self.candidate_absent() {
+            return legacy(io); // the conditional default: nothing installed
         }
         if self.sandbox_requested() {
             return fail(SANDBOX_REFUSAL);
@@ -472,25 +509,36 @@ mod tests {
     }
 
     #[test]
-    fn selection_is_flag_then_env_then_legacy() {
+    fn selection_is_flag_then_env_then_gpui_default() {
+        assert_eq!(DEFAULT_UI, Ui::Gpui);
         assert!(flag_choice(true, true).is_err());
         assert_eq!(flag_choice(true, false).unwrap(), Some(Ui::Gpui));
         assert_eq!(flag_choice(false, true).unwrap(), Some(Ui::Legacy));
         assert_eq!(flag_choice(false, false).unwrap(), None);
-        let choose = |flag, value: Option<&str>| {
-            let pairs: Vec<(&str, &str)> = value.map(|v| (UI_ENV, v)).into_iter().collect();
-            launcher(&env_of(&pairs), None, None).choose_ui(flag)
+        let pairs_for = |value: Option<&'static str>| -> Vec<(&'static str, &'static str)> {
+            value.map(|v| (UI_ENV, v)).into_iter().collect()
         };
-        assert_eq!(choose(None, None), (Ui::Legacy, None));
+        let choose = |flag, value: Option<&'static str>| {
+            launcher(&env_of(&pairs_for(value)), None, None).choose_ui(flag)
+        };
+        let implicit = |flag, value: Option<&'static str>| {
+            launcher(&env_of(&pairs_for(value)), None, None).implicit_choice(flag)
+        };
+        assert_eq!(choose(None, None), (Ui::Gpui, None));
         assert_eq!(choose(None, Some(" GPUI\n")), (Ui::Gpui, None));
         assert_eq!(choose(None, Some("legacy")), (Ui::Legacy, None));
-        assert_eq!(choose(None, Some("  ")), (Ui::Legacy, None));
+        assert_eq!(choose(None, Some("  ")), (Ui::Gpui, None));
         assert_eq!(
             choose(None, Some("bogus")),
             (Ui::Legacy, Some(NOTICE_INVALID_ENV))
         );
         assert_eq!(choose(Some(Ui::Gpui), Some("bogus")), (Ui::Gpui, None));
         assert_eq!(choose(Some(Ui::Legacy), Some("gpui")), (Ui::Legacy, None));
+        // Only the default itself is implicit; an explicit choice never is.
+        assert!(implicit(None, None) && implicit(None, Some(" \t\n")));
+        assert!(!implicit(None, Some("gpui")) && !implicit(None, Some(" GPUI ")));
+        assert!(!implicit(None, Some("legacy")) && !implicit(None, Some("bogus")));
+        assert!(!implicit(Some(Ui::Gpui), None) && !implicit(Some(Ui::Legacy), None));
     }
 
     #[test]
@@ -724,6 +772,127 @@ mod tests {
         assert_eq!((run.err, run.legacy), (format!("{NOTICE_PLATFORM}\n"), 1));
     }
 
+    fn quiet_legacy(run: Run) {
+        assert!(run.result.is_ok(), "{:?}", run.result);
+        assert_eq!((run.err.as_str(), run.legacy), ("", 1));
+    }
+
+    #[test]
+    fn implicit_default_without_a_candidate_is_quiet_legacy() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = home.path().join("missing-lf-desktop");
+        let linux = Some(Platform::Linux);
+        let mac = Some(Platform::Macos);
+        // Unsupported platform: quiet, even with an override (explicit --gpui
+        // still reports NOTICE_PLATFORM, above).
+        let over = env_path(BIN_ENV, &missing);
+        assert!(launcher(&over, None, Some(home.path())).candidate_absent());
+        quiet_legacy(run_launch(
+            &launcher(&over, None, Some(home.path())),
+            None,
+            None,
+        ));
+        let blank_ui = env_of(&[(UI_ENV, "  ")]);
+        let none = env_of(&[]);
+        for env in [&none, &blank_ui] {
+            for platform in [linux, mac] {
+                for dir in [None, Some(Path::new("relative")), Some(home.path())] {
+                    assert!(launcher(env, platform, dir).candidate_absent());
+                    quiet_legacy(run_launch(&launcher(env, platform, dir), None, None));
+                }
+            }
+        }
+        // Explicit GPUI keeps reporting the same absence.
+        let run = run_launch(
+            &launcher(&none, linux, Some(home.path())),
+            Some(Ui::Gpui),
+            None,
+        );
+        assert_eq!(
+            (run.err, run.legacy),
+            (format!("{NOTICE_NOT_INSTALLED}\n"), 1)
+        );
+        // A sandbox request with nothing installed keeps its legacy semantics.
+        let sandbox = env_of(&[(SANDBOX_ENV, "1")]);
+        quiet_legacy(run_launch(
+            &launcher(&sandbox, linux, Some(home.path())),
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn implicit_candidate_problems_are_noticed_once() {
+        let none = env_of(&[]);
+        let linux = Some(Platform::Linux);
+        let mac = Some(Platform::Macos);
+        let once = |selected: &Launcher<'_>, notice: &str| {
+            let run = run_launch(selected, None, None);
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!((run.err, run.legacy), (format!("{notice}\n"), 1));
+        };
+        // A bare root without our manifest, and a plain file at the root.
+        let bare = tempfile::tempdir().unwrap();
+        linux_install(bare.path(), None);
+        assert!(!launcher(&none, linux, Some(bare.path())).candidate_absent());
+        once(&launcher(&none, linux, Some(bare.path())), NOTICE_NOT_OWNED);
+        let file = tempfile::tempdir().unwrap();
+        let root = LINUX_ROOT
+            .iter()
+            .fold(file.path().to_path_buf(), |p, s| p.join(s));
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::fs::write(&root, "not a package").unwrap();
+        once(&launcher(&none, linux, Some(file.path())), NOTICE_NOT_OWNED);
+        // An owned package without its executable.
+        let owned = tempfile::tempdir().unwrap();
+        let exe = linux_install(owned.path(), Some(b"{\"name\": \"localflow-preview\"}"));
+        std::fs::remove_file(exe).unwrap();
+        once(
+            &launcher(&none, linux, Some(owned.path())),
+            NOTICE_NOT_INSTALLED,
+        );
+        // A macOS bundle with someone else's identifier.
+        let other = tempfile::tempdir().unwrap();
+        mac_install(
+            other.path(),
+            b"<plist><dict><key>CFBundleIdentifier</key><string>x</string></dict></plist>",
+        );
+        once(&launcher(&none, mac, Some(other.path())), NOTICE_NOT_OWNED);
+        // A bad override alone now takes effect, so it is noticed.
+        let missing = bare.path().join("missing");
+        for value in [Path::new("lf-desktop"), missing.as_path()] {
+            let env = env_path(BIN_ENV, value);
+            once(&launcher(&env, linux, None), NOTICE_BAD_OVERRIDE);
+        }
+        // A sandbox request with a candidate is refused before any probe.
+        let sandbox: Env = Box::new(|name: &str| match name {
+            SANDBOX_ENV => Some("true".into()),
+            BIN_ENV => Some("lf-desktop".into()),
+            _ => None,
+        });
+        let run = run_launch(&launcher(&sandbox, linux, None), None, None);
+        let err = run.result.unwrap_err();
+        assert!(
+            matches!(err.downcast_ref(), Some(crate::CliError::Failed(m)) if m == SANDBOX_REFUSAL)
+        );
+        assert_eq!((run.err.as_str(), run.legacy), ("", 0));
+        let sandbox = env_of(&[(SANDBOX_ENV, "1")]);
+        let run = run_launch(&launcher(&sandbox, linux, Some(bare.path())), None, None);
+        assert!(run.result.is_err() && run.legacy == 0);
+        // An explicit rollback never looks at the candidate.
+        for (flag, env) in [
+            (Some(Ui::Legacy), env_of(&[])),
+            (None, env_of(&[(UI_ENV, "legacy")])),
+            (None, env_of(&[(UI_ENV, " Legacy "), (SANDBOX_ENV, "1")])),
+        ] {
+            quiet_legacy(run_launch(
+                &launcher(&env, linux, Some(bare.path())),
+                flag,
+                None,
+            ));
+        }
+    }
+
     #[cfg(unix)]
     mod unix {
         use std::os::unix::fs::PermissionsExt as _;
@@ -774,14 +943,91 @@ mod tests {
             let run = run_launch(&launcher(&env, linux, None), Some(Ui::Gpui), None);
             assert!(run.result.is_ok(), "{:?}", run.result);
             assert_eq!((run.err.as_str(), run.legacy), ("", 0));
+            // Under the GPUI default, a binary override alone takes effect.
             let run = run_launch(&launcher(&env, linux, None), None, Some("Hot Phrases"));
-            assert_eq!(run.legacy, 1, "a binary override alone is not an opt-in");
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!((run.err.as_str(), run.legacy), ("", 0));
             let run = run_launch(&launcher(&env, linux, None), Some(Ui::Gpui), Some("Home"));
             assert!(run.result.is_ok() && run.legacy == 0);
             assert_eq!(
-                wait_lines(&record, 4),
-                ["--help", "", "--help", "--page Home"]
+                wait_lines(&record, 6),
+                [
+                    "--help",
+                    "",
+                    "--help",
+                    "--page Hot Phrases",
+                    "--help",
+                    "--page Home"
+                ]
             );
+            // An explicit rollback never runs it, and an unsupported platform
+            // ignores it quietly under the default.
+            for (flag, env, platform) in [
+                (Some(Ui::Legacy), env_path(BIN_ENV, &exe), linux),
+                (None, env_path(BIN_ENV, &exe), None),
+            ] {
+                quiet_legacy(run_launch(&launcher(&env, platform, None), flag, None));
+            }
+            let ui_legacy: Env = {
+                let exe = exe.clone().into_os_string();
+                Box::new(move |name: &str| match name {
+                    UI_ENV => Some("legacy".into()),
+                    BIN_ENV => Some(exe.clone()),
+                    _ => None,
+                })
+            };
+            quiet_legacy(run_launch(&launcher(&ui_legacy, linux, None), None, None));
+            assert_eq!(wait_lines(&record, 6).len(), 6);
+        }
+
+        #[test]
+        fn implicit_default_opens_the_owned_package_or_falls_back_once() {
+            let _serial = serial();
+            let none = env_of(&[]);
+            let linux = Some(Platform::Linux);
+            let install = |help: &str, code: i32| {
+                let home = tempfile::tempdir().unwrap();
+                let exe = linux_install(home.path(), Some(b"{\"name\": \"localflow-preview\"}"));
+                let (_, record) = fake(exe.parent().unwrap(), help, code);
+                (home, record)
+            };
+            let (home, record) = install(GOOD_HELP, 0);
+            let run = run_launch(
+                &launcher(&none, linux, Some(home.path())),
+                None,
+                Some("Models"),
+            );
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!((run.err.as_str(), run.legacy), ("", 0));
+            assert_eq!(wait_lines(&record, 2), ["--help", "--page Models"]);
+
+            let (home, record) = install(&GOOD_HELP.replace("    --setup", ""), 0);
+            let run = run_launch(&launcher(&none, linux, Some(home.path())), None, None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_PROBE}\n"), 1));
+            assert_eq!(wait_lines(&record, 1), ["--help"]);
+
+            let (home, record) = install(GOOD_HELP, 2);
+            let run = run_launch(&launcher(&none, linux, Some(home.path())), None, None);
+            assert_eq!(
+                (run.err, run.legacy),
+                (format!("{}\n", notice_early_exit(2)), 1)
+            );
+            assert_eq!(wait_lines(&record, 2), ["--help", ""]);
+
+            // A symlinked package root is a candidate, then refused.
+            let (real, record) = install(GOOD_HELP, 0);
+            let link = tempfile::tempdir().unwrap();
+            let root = LINUX_ROOT
+                .iter()
+                .fold(link.path().to_path_buf(), |p, s| p.join(s));
+            std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+            let target = LINUX_ROOT
+                .iter()
+                .fold(real.path().to_path_buf(), |p, s| p.join(s));
+            std::os::unix::fs::symlink(target, &root).unwrap();
+            let run = run_launch(&launcher(&none, linux, Some(link.path())), None, None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_OWNED}\n"), 1));
+            assert!(wait_lines(&record, 0).is_empty());
         }
 
         #[test]

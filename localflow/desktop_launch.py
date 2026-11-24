@@ -1,4 +1,4 @@
-"""Opt-in launch of LocalFlow Preview (`lf-desktop`) from the `lf` CLI.
+"""Launch of LocalFlow Preview (`lf-desktop`) from the `lf` CLI.
 
 Only `lf hub`, bare `lf phrases` and the `lf setup` window call `launch`, after
 their own validation. The direct window dispatchers (`python -m
@@ -6,12 +6,18 @@ localflow.hub_window`, `phrases_window`, `setup_window`) never come here, so
 they stay the stable legacy escape paths and can't recurse.
 
 Selection, highest first: `--gpui` / `--legacy`, then `LOCALFLOW_UI`, then
-`DEFAULT_UI` (legacy). There is no config key. Only a GPUI selection looks for
+`DEFAULT_UI` (gpui). There is no config key. Only a GPUI selection looks for
 a native binary: an absolute `LOCALFLOW_DESKTOP_BIN`, else the package that
 `scripts/install_gpui_preview.sh` owns. PATH and build trees are never
 searched. Anything wrong prints one short notice and opens exactly today's
 legacy window once. A sandbox request (`LOCALFLOW_SANDBOX`) is refused rather
 than turned into a real-data launch.
+
+The default is conditional. When GPUI comes only from `DEFAULT_UI` (no flag,
+blank or absent `LOCALFLOW_UI`), an unsupported platform, or no override and
+nothing at the package root, opens the legacy window quietly, as before.
+Anything at the package root, or a non-empty override, is a candidate and
+goes through the same checks and notices as `--gpui`.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from pathlib import Path
 
 import click
 
-DEFAULT_UI = "legacy"  # Scope 4b (global default promotion) would change this.
+DEFAULT_UI = "gpui"  # Scope 4b. Rollback: "legacy" here and in lf-rs restores 4a.
 UI_CHOICES = ("gpui", "legacy")
 UI_ENV = "LOCALFLOW_UI"
 BIN_ENV = "LOCALFLOW_DESKTOP_BIN"
@@ -80,10 +86,13 @@ SANDBOX_REFUSAL = (
 )
 
 GPUI_HELP = (
-    "Open LocalFlow Preview (native GPUI app, if installed) instead of the "
-    "legacy window. No screen-reader support yet: use --legacy (or lf-hub on macOS)."
+    "Open LocalFlow Preview (native GPUI app) instead of the legacy window. "
+    "The default on Linux and macOS when it is installed. No screen-reader "
+    "support yet: use --legacy (or lf-hub on macOS)."
 )
-LEGACY_HELP = "Open the legacy window (the default)."
+LEGACY_HELP = (
+    "Open the legacy window (also used when LocalFlow Preview isn't installed)."
+)
 
 
 def ui_options(func):
@@ -108,6 +117,11 @@ def choose_ui(flag: str | None, env: Mapping[str, str]) -> tuple[str, str | None
     if value in UI_CHOICES:
         return value, None
     return "legacy", NOTICE_INVALID_ENV
+
+
+def implicit_choice(flag: str | None, env: Mapping[str, str]) -> bool:
+    """True when the choice comes only from `DEFAULT_UI` (no flag, blank env)."""
+    return flag is None and not env.get(UI_ENV, "").strip()
 
 
 def sandbox_requested(env: Mapping[str, str]) -> bool:
@@ -210,6 +224,26 @@ def find_desktop(
     if not home.is_absolute():  # same as the Rust helper: absolute paths only
         return None, NOTICE_NOT_INSTALLED
     return owned_install(key, home)
+
+
+def candidate_absent(
+    env: Mapping[str, str], platform: str | None = None, home: Path | None = None
+) -> bool:
+    """For the implicit default only: nothing to try, so stay quiet.
+
+    True on an unsupported platform, or with no override and nothing at the
+    package root (or no absolute HOME). Anything at the root, owned or not,
+    is a candidate that `find_desktop` then checks and reports.
+    """
+    key = platform_key(platform)
+    if key is None:
+        return True
+    if env.get(BIN_ENV, ""):
+        return False
+    home = home if home is not None else Path.home()
+    if not home.is_absolute():
+        return True
+    return not os.path.lexists(home.joinpath(*(LINUX_ROOT if key == "linux" else MAC_APP)))
 
 
 # Exact tokens, as in lf_ui::desktop_launch::help_has_interface: the identity
@@ -316,6 +350,9 @@ def launch(
         _notice(notice)
     if choice != "gpui":
         legacy()
+        return
+    if implicit_choice(flag, env) and candidate_absent(env):
+        legacy()  # the conditional default: nothing installed, as before
         return
     if sandbox_requested(env):
         raise click.ClickException(SANDBOX_REFUSAL)

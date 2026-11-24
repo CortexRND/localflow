@@ -6,13 +6,20 @@ what it doesn't do yet, and the checks that must pass before it can become the
 default. Build and run commands are in
 [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md).
 
-**Current state: preview, opt-in, not the default.** By default `lf hub`,
-`lf phrases`, `lf setup`, `lf-hub` on macOS (the AppKit Hub), the Python runtime and
-all existing installers are unchanged. PR 3 added a separate, opt-in preview package
-and installer (`scripts/install_gpui_preview.sh`). Scope 4a (this PR) lets the three
-`lf` window commands open it only when asked (`--gpui` or `LOCALFLOW_UI=gpui`), with
-a legacy fallback, and makes `lf-hub` on Linux (which had no UI) open it. Promoting
-it to the default (4b) is pending the gates below and the owner's decision.
+**Current state: preview package, preferred by `lf` when installed (4b,
+conditional default).** PR 3 added a separate, opt-in preview package and
+installer (`scripts/install_gpui_preview.sh`); no default installer ships it.
+Scope 4a let the three `lf` window commands open it when asked, with a legacy
+fallback, and made `lf-hub` on Linux (which had no UI) open it. Scope 4b (this
+PR) makes GPUI the CLI default on Linux and macOS for `lf hub`, bare
+`lf phrases`, the `lf setup` window and `lf-rs hub`, but only for users who
+have already installed the preview package themselves (or set
+`LOCALFLOW_DESKTOP_BIN`). Everyone else sees no change: with nothing installed,
+on Windows, and on other platforms, those commands open the legacy window
+quietly, as before. `lf-hub` on macOS (the AppKit Hub, the screen-reader
+escape), `lf-hub` on Linux, the direct Python window dispatchers, the Python
+runtime, the stores and every default installer are unchanged. This is not a
+default-installer cutover and does not retire the legacy windows.
 
 ## PR boundaries
 
@@ -24,8 +31,9 @@ Each PR leaves every existing entry point working.
 | **1. Parallel GPUI front end** | Standalone crate `rust/lf-desktop` (pinned `gpui = 0.2.2`, own `Cargo.lock`, outside the `rust/` workspace). One token and component layer. Library and config workflows connected to the real stores. Ask, Meetings and Prompts over the existing local HTTP service. Isolated persistent `--sandbox`. Controller, store and editing tests. Additive `gpui.yml` CI (Linux full, macOS type-check). `scripts/run_gpui.sh` | Done |
 | **2. Runtime and global-input parity** | Native setup wizard over `lf_ui::setup_flow` / `setup_backend`. Speech-model storage. Settings assistant through `settings_worker`. Key import. Test LLM. A runtime status signal (listening, input device, warnings) to replace HTTP reachability. Linux global hotkeys in the Rust engine. Single instance and `page-request.json` routing. Optional engine mode behind `lf-ui --features runtime` | Implemented; verified by unit, sandbox and CLI subprocess tests and simulated CI. Interactive and macOS runtime QA not done (UI probing on the VM was waived by the owner) |
 | **3. Packaging** (PR 65, merged) | Additive preview packaging: `scripts/build_gpui_package.sh` builds a release `lf-desktop` with `--features runtime` and its bundled Sherpa-ONNX/ONNX Runtime libraries for Linux x86_64 (`ubuntu-22.04`) and macOS arm64 (`macos-latest`) and x86_64 (`macos-15-intel`), natively in `gpui-package.yml`. `scripts/verify_gpui_package.sh` checks the extracted archive (library closure, relative search paths, glibc/libstdc++ floor, ad-hoc signatures). Separate `LocalFlow Preview.app` (`com.cortexrnd.localflow.desktop-preview`, no `LocalFlowRuntime` key, no login agent). Dedicated `scripts/install_gpui_preview.sh` (checksum-verified, transactional, owns only preview paths). Tag-only publishing with its own `SHA256SUMS-gpui-preview`. `lf-desktop --speech-helper` for the macOS same-executable speech helper. Per-distribution libraries in the README | Done. Linux package built and smoke-installed on the VM; fixture tests for builder/installer/publisher. All three `gpui-package.yml` legs (Linux x86_64, macOS arm64, macOS x86_64) build the release package, verify it, re-verify it outside the checkout and smoke-install/uninstall it in a temporary HOME, running `lf-desktop --version`; macOS relocation and signing are verified only by those CI legs. No interactive GUI, permission or Gatekeeper QA. `install.sh` and every launcher default unchanged |
-| **4a. Opt-in launch** (this PR) | `localflow/desktop_launch.py`, called only by `lf hub`, bare `lf phrases` and the `lf setup` window: `--gpui` / `--legacy`, then `LOCALFLOW_UI=gpui\|legacy`, then `DEFAULT_UI = "legacy"` (no config key). Discovery only after a GPUI selection: absolute `LOCALFLOW_DESKTOP_BIN`, else only the preview installer's package (manifest name / bundle id checked). Bounded `--help` probe for the `--page`/`--setup` interface and the `EXIT STATUS (launch-status: 1):` line; `lf-desktop` now exits 1 when no window can open (it used to exit 0), so Scope 3 packages, which lack the line, must be updated before `lf` or `lf-hub` will open them. Closed argv, detached, 1.5 s startup watch; exit 0 is a hand-off. Any failure: one notice, then the legacy window once. `LOCALFLOW_SANDBOX` with a GPUI selection is refused (no fallback). `lf-hub` on Linux `exec`s the preview through the same rules (`lf_ui::desktop_launch`). Details: [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md#opening-it-from-lf-step-4a) | Implemented; unit and fake-executable subprocess tests (Python and Rust, temporary HOME, no GUI). Not exercised against a real window or on macOS hardware (GUI probing waived by the owner) |
-| 4b. Default-launch promotion | `DEFAULT_UI` becomes `gpui` (per platform), keeping the 4a fallback and `--legacy` | Not started. Needs the open gates below (1 parity, 5 packaging QA, 8 UI verification) and the owner's decision |
+| **4a. Opt-in launch** | `localflow/desktop_launch.py`, called only by `lf hub`, bare `lf phrases` and the `lf setup` window: `--gpui` / `--legacy`, then `LOCALFLOW_UI=gpui\|legacy`, then `DEFAULT_UI = "legacy"` (no config key). Discovery only after a GPUI selection: absolute `LOCALFLOW_DESKTOP_BIN`, else only the preview installer's package (manifest name / bundle id checked). Bounded `--help` probe for the `--page`/`--setup` interface and the `EXIT STATUS (launch-status: 1):` line; `lf-desktop` now exits 1 when no window can open (it used to exit 0), so Scope 3 packages, which lack the line, must be updated before `lf` or `lf-hub` will open them. Closed argv, detached, 1.5 s startup watch; exit 0 is a hand-off. Any failure: one notice, then the legacy window once. `LOCALFLOW_SANDBOX` with a GPUI selection is refused (no fallback). `lf-hub` on Linux `exec`s the preview through the same rules (`lf_ui::desktop_launch`). Details: [`rust/lf-desktop/README.md`](../rust/lf-desktop/README.md#opening-it-from-lf-step-4a) | Implemented; unit and fake-executable subprocess tests (Python and Rust, temporary HOME, no GUI). Not exercised against a real window or on macOS hardware (GUI probing waived by the owner) |
+| **4b. Default-launch promotion** (this PR, conditional default only) | `DEFAULT_UI = "gpui"` in `localflow/desktop_launch.py` and `rust/lf/src/desktop_launch.rs`; selection order unchanged (`--gpui`/`--legacy`, then `LOCALFLOW_UI`, then the default). When GPUI comes only from the default (no flag, blank or unset `LOCALFLOW_UI`): on an unsupported platform, or with no `LOCALFLOW_DESKTOP_BIN` and nothing at the preview package root (or no absolute HOME), the legacy window opens quietly with no discovery or sandbox check. Anything else is a candidate and takes exactly the 4a path: a not-owned or malformed root, a missing executable, a bad override, an old (Scope 3) package, a failed probe, spawn or early exit each print the existing notice once, then open the legacy window once; exit 0 is a hand-off. `LOCALFLOW_DESKTOP_BIN` alone now takes effect on Linux and macOS. `LOCALFLOW_SANDBOX` with a candidate is refused before any probe; with nothing installed it keeps its legacy behaviour. Explicit `--gpui`, `--legacy`, `LOCALFLOW_UI` and every notice are unchanged. Not changed: `lf-hub` (macOS AppKit, Linux), the direct dispatchers, package and bundle identities, trust files, stores, engine ownership and every installer. Rollback: `--legacy` or `LOCALFLOW_UI=legacy` per user; setting both `DEFAULT_UI` constants back to legacy restores 4a exactly | Implemented; unit and fake-executable subprocess tests in Python and Rust, with Python/Rust parity for implicit and explicit cases, temporary HOME, no GUI. The owner's acceptance for this PR is Devin's review plus a simulated GitHub CI run; native interactive QA is waived. Gates 1, 5 and 8 are not verified (see below). Not exercised against a real window or on macOS hardware. Default installers still don't ship the preview, so this changes nothing for users who haven't installed it |
+| Default-installer integration | The default installers ship and install `lf-desktop`, so the default reaches users who haven't run the preview installer | Not started. Needs gate 5 and the owner's decision on installer identities. Until then, `install.sh` (Linux) ends with `lf setup`; it still installs the v0.2.2 release, which defaults to legacy, and its bytes are pinned by the README checksum. The first release that ships 4b must pin that line to `lf setup --legacy` so the installer's own window doesn't change for preview owners (guarded by `tests/test_desktop_launch.py`) |
 | 5. Legacy retirement | Remove the launch paths that are no longer used and the controller code duplicated from `lf_ui::mac` (done on macOS). Bundle Figtree. Screen-reader support once GPUI has an accessibility tree | Not started |
 
 ## Feature matrix (after PR 2)
@@ -85,6 +93,17 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
 
 ## Cutover gates (all required before 4b, the default promotion)
 
+**Status at 4b.** The owner chose to promote the conditional default (4b)
+after closing the tray, History retry and accessibility items, with Devin's
+review and a simulated GitHub CI run as the acceptance check and native
+interactive QA waived. That decision does not mark the gates below met: gate 1
+(interactive parity review), gate 5 (interactive install/upgrade/uninstall,
+permission and Gatekeeper checks; default installers don't ship the preview)
+and gate 8 (screenshot review) remain unverified. Gate 8's captures are
+produced by the scripted Linux CI job, not by new interactive QA. Gate 7 is met
+by the owner's acceptance of keyboard-only support. Default-installer
+integration and legacy retirement still require these gates.
+
 1. **Parity.** Every row marked Missing above that the Python Hub or `lf-hub` offers
    works in `lf-desktop`, or the owner explicitly waives it. PR 2 implemented the
    setup wizard, model storage, the settings assistant, key import, Test LLM, and
@@ -107,10 +126,12 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
 4. **Launch integration.** `lf hub --page X` opens `lf-desktop` on page X when
    it's installed and falls back to the current UI otherwise. Two launches hand
    over the page instead of opening two windows. 4a implements this behind the
-   opt-in (a hand-off exits 0 and is not treated as a failure); verified by
-   fake-executable tests only, not against a real window. `lf-rs hub` follows
-   the same rules with byte-identical notices (`rust/lf/src/desktop_launch.rs`,
-   compared with `lf hub` in `tests/test_rust_parity.py`).
+   opt-in (a hand-off exits 0 and is not treated as a failure); 4b applies it
+   by default on Linux and macOS when a candidate is installed, quietly opening
+   the legacy window when nothing is. Verified by fake-executable tests only,
+   not against a real window. `lf-rs hub` follows the same rules with
+   byte-identical notices (`rust/lf/src/desktop_launch.rs`, compared with
+   `lf hub` in `tests/test_rust_parity.py`).
 5. **Packaging.** The installers ship a release `lf-desktop` and its system-library
    requirements are documented per distribution. The `rust/` workspace CI matrix
    isn't weakened. PR 3 ships it as a separate preview package and installer;
