@@ -290,7 +290,7 @@ impl SetupView {
             ctl::FixEffect::Open(url) => cx.open_url(&url),
             ctl::FixEffect::GoTo(step) => self.go(step, cx),
             ctl::FixEffect::Copy(cmd) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(cmd.to_string()));
+                cx.write_to_clipboard(ClipboardItem::new_string(cmd.clone()));
                 // Name the command: the toast is the only confirmation of
                 // what's on the clipboard.
                 self.pcx.toast(

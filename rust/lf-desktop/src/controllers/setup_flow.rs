@@ -1017,17 +1017,26 @@ pub fn checks(config: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
             }
         }
     }
-    // Starting Ollama here only makes sense once it's installed (until then
-    // the one fix offered is Get Ollama), and only for a server on this
-    // computer: `ollama serve` can't start a remote one.
+    // A remote Ollama server needs nothing installed or started here.
+    // Locally, starting it only makes sense once it's installed (until then
+    // the one fix offered is Get Ollama), and only with a command that
+    // really starts the configured server; the command goes in `fix_url`.
     let ollama_missing = rows
         .iter()
         .any(|r| r.key == "ollama-installed" && r.ok == Some(false));
     let base_url = config.field_str("llm_base_url").unwrap_or("").trim();
     let remote = !base_url.is_empty() && !is_loopback(base_url);
-    if ollama_missing || remote {
-        for row in rows.iter_mut().filter(|r| r.key == "ollama-running") {
-            row.fix_label.clear();
+    let start = (!ollama_missing && !remote)
+        .then(|| start_ollama_command(base_url, &system, platform.which("ollama")))
+        .flatten();
+    for row in rows.iter_mut() {
+        match row.key.as_str() {
+            "ollama-installed" if remote => row.fix_label.clear(),
+            "ollama-running" => match &start {
+                Some(command) => row.fix_url = command.clone(),
+                None => row.fix_label.clear(),
+            },
+            _ => {}
         }
     }
     if system == "Linux" {
@@ -1085,7 +1094,7 @@ pub enum CheckAction {
     OpenUrl(String),
     GoTo(Step),
     /// Copy a terminal command.
-    Copy(&'static str),
+    Copy(String),
 }
 
 /// A row's fix button: its label and what it does.
@@ -1102,7 +1111,7 @@ pub struct CheckFix {
 pub enum FixEffect {
     Open(String),
     GoTo(Step),
-    Copy(&'static str),
+    Copy(String),
     Notice(String),
 }
 
@@ -1117,24 +1126,75 @@ fn openable(url: &str) -> Option<CheckAction> {
     (web || settings).then(|| CheckAction::OpenUrl(url.to_string()))
 }
 
-/// The host of `scheme://userinfo@host:port/path?query#fragment` (any part
-/// but the host optional; IPv6 hosts without their brackets).
-fn url_host(url: &str) -> &str {
+/// Host and raw port text of `scheme://userinfo@host:port/path?query#fragment`
+/// (any part but the host optional; IPv6 hosts without their brackets).
+fn host_port(url: &str) -> (&str, Option<&str>) {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '#', '?']).next().unwrap_or(rest);
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     match host.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or(v6),
-        None => host.split(':').next().unwrap_or(host),
+        // Anything after `]` but `:port` is kept so the port fails to parse.
+        Some(v6) => match v6.split_once(']') {
+            Some((host, "")) => (host, None),
+            Some((host, after)) => (host, Some(after.strip_prefix(':').unwrap_or(after))),
+            None => (v6, None),
+        },
+        None => match host.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host, None),
+        },
     }
 }
 
+fn url_host(url: &str) -> &str {
+    host_port(url).0
+}
+
 /// `localhost`, `127.0.0.1` or `::1`.
-fn is_loopback(url: &str) -> bool {
-    let host = url_host(url);
+fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+fn is_loopback(url: &str) -> bool {
+    is_loopback_host(url_host(url))
+}
+
+const OLLAMA_PORT: u16 = 11434;
+
+/// A terminal command that starts the Ollama server `base_url` points at,
+/// or `None` when there's no safe one: not on this computer, an unreadable
+/// port, a custom port on Windows (no `VAR=value cmd` syntax), or neither
+/// the `ollama` command nor (macOS, default port) the app to open. Only
+/// the validated loopback host and `u16` port reach the command.
+fn start_ollama_command(base_url: &str, system: &str, cli: bool) -> Option<String> {
+    let (host, port) = if base_url.is_empty() {
+        ("localhost", None)
+    } else {
+        host_port(base_url)
+    };
+    if !is_loopback_host(host) {
+        return None;
+    }
+    let port = match port {
+        None => OLLAMA_PORT,
+        Some(port) => port.parse::<u16>().ok()?,
+    };
+    match (cli, port == OLLAMA_PORT) {
+        (true, true) => Some("ollama serve".into()),
+        (true, false) if system != "Windows" => {
+            let authority = if host == "::1" {
+                format!("[::1]:{port}")
+            } else {
+                format!("{}:{port}", host.to_ascii_lowercase())
+            };
+            Some(format!("OLLAMA_HOST={authority} ollama serve"))
+        }
+        // Ollama.app without its command line tool on PATH.
+        (false, true) if system == "Darwin" => Some("open -a Ollama".into()),
+        _ => None,
+    }
 }
 
 /// The fix button for a checkup row, or `None` when it's ready or there's
@@ -1146,7 +1206,16 @@ pub fn check_fix(check: &Check) -> Option<CheckFix> {
     let (label, action) = match check.key.as_str() {
         "ffmpeg" => ("Install ffmpeg", openable(&check.fix_url)?),
         "ollama-installed" => ("Get Ollama", openable(&check.fix_url)?),
-        "ollama-running" => ("Copy command", CheckAction::Copy("ollama serve")),
+        // `checks()` stores the start command in `fix_url`; `run_checks`
+        // alone leaves its download link, meaning the plain default.
+        "ollama-running" => {
+            let command = match check.fix_url.as_str() {
+                "" => return None,
+                url if url.starts_with("https://") || url.starts_with("http://") => "ollama serve",
+                command => command,
+            };
+            ("Copy command", CheckAction::Copy(command.to_string()))
+        }
         "microphone-device" => ("Check microphone", CheckAction::GoTo(Step::Microphone)),
         "microphone" | "accessibility" | "input-monitoring" => {
             ("Open Settings", openable(&check.fix_url)?)
@@ -2406,7 +2475,7 @@ mod tests {
                 "ollama-running",
                 "https://ollama.com/download",
                 "Copy command",
-                CheckAction::Copy("ollama serve"),
+                CheckAction::Copy("ollama serve".into()),
             ),
             (
                 "microphone-device",
@@ -2515,41 +2584,36 @@ mod tests {
             Some(CheckAction::OpenUrl("https://ollama.com/download".into()))
         );
         assert_eq!(fix(&rows, "ollama-running"), None);
-        let stopped = FakeSetupPlatform {
+        let stopped = with_cli(FakeSetupPlatform {
             ollama_installed: true,
             ..platform("Linux")
-        };
+        });
         let rows = checks(&config, &stopped);
         assert_eq!(fix(&rows, "ollama-installed"), None);
         assert_eq!(
             fix(&rows, "ollama-running"),
-            Some(CheckAction::Copy("ollama serve"))
+            Some(CheckAction::Copy("ollama serve".into()))
         );
     }
 
     #[test]
     fn start_ollama_is_offered_only_for_a_local_server() {
-        let stopped = FakeSetupPlatform {
+        let stopped = with_cli(FakeSetupPlatform {
             ollama_installed: true,
             ..platform("Linux")
-        };
-        let fix_for = |base_url: &str| {
-            let mut config = Config::defaults_for(false);
-            config.set_field("llm_base_url", serde_json::json!(base_url));
-            let rows = checks(&config, &stopped);
-            check_fix(rows.iter().find(|r| r.key == "ollama-running").unwrap()).map(|f| f.action)
-        };
+        });
         for local in [
             "",
             "http://localhost:11434",
             "http://LOCALHOST:11434/",
             "http://127.0.0.1:11434",
             "http://[::1]:11434",
+            "http://localhost",
             "localhost:11434",
         ] {
             assert_eq!(
-                fix_for(local),
-                Some(CheckAction::Copy("ollama serve")),
+                ollama_fix(&stopped, local, "ollama-running"),
+                Some(CheckAction::Copy("ollama serve".into())),
                 "{local:?}"
             );
         }
@@ -2560,8 +2624,174 @@ mod tests {
             "http://localhost@evil.example:11434",
             "http://[2001:db8::1]:11434",
         ] {
-            assert_eq!(fix_for(remote), None, "{remote:?}");
+            assert_eq!(
+                ollama_fix(&stopped, remote, "ollama-running"),
+                None,
+                "{remote:?}"
+            );
         }
+    }
+
+    fn with_cli(platform: FakeSetupPlatform) -> FakeSetupPlatform {
+        FakeSetupPlatform {
+            commands: vec!["ollama".into()],
+            ..platform
+        }
+    }
+
+    /// The fix on `key` with `llm_base_url = base_url`.
+    fn ollama_fix(platform: &FakeSetupPlatform, base_url: &str, key: &str) -> Option<CheckAction> {
+        let mut config = Config::defaults_for(platform.system == "Darwin");
+        config.set_field("llm_base_url", serde_json::json!(base_url));
+        let rows = checks(&config, platform);
+        check_fix(rows.iter().find(|r| r.key == key).unwrap()).map(|f| f.action)
+    }
+
+    #[test]
+    fn a_remote_ollama_server_needs_nothing_installed_here() {
+        for system in ["Darwin", "Linux", "Windows"] {
+            let nothing_local = platform(system);
+            for url in ["http://192.168.1.20:11434", "https://ollama.example.com"] {
+                assert_eq!(
+                    ollama_fix(&nothing_local, url, "ollama-installed"),
+                    None,
+                    "{system} {url}"
+                );
+                assert_eq!(
+                    ollama_fix(&nothing_local, url, "ollama-running"),
+                    None,
+                    "{system} {url}"
+                );
+            }
+            // Locally it's still offered.
+            assert_eq!(
+                ollama_fix(&nothing_local, "http://localhost:11434", "ollama-installed"),
+                Some(CheckAction::OpenUrl("https://ollama.com/download".into())),
+                "{system}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ollama_app_without_its_command_opens_the_app_on_macos_only() {
+        let app_only = |system: &str| FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform(system)
+        };
+        assert_eq!(
+            ollama_fix(&app_only("Darwin"), "", "ollama-running"),
+            Some(CheckAction::Copy("open -a Ollama".into()))
+        );
+        assert_eq!(
+            ollama_fix(
+                &app_only("Darwin"),
+                "http://127.0.0.1:11434",
+                "ollama-running"
+            ),
+            Some(CheckAction::Copy("open -a Ollama".into()))
+        );
+        // The app always listens on the default port.
+        assert_eq!(
+            ollama_fix(
+                &app_only("Darwin"),
+                "http://localhost:11435",
+                "ollama-running"
+            ),
+            None
+        );
+        for system in ["Linux", "Windows"] {
+            assert_eq!(
+                ollama_fix(&app_only(system), "", "ollama-running"),
+                None,
+                "{system}"
+            );
+        }
+        // With the command line tool, macOS gets `ollama serve` too.
+        assert_eq!(
+            ollama_fix(&with_cli(app_only("Darwin")), "", "ollama-running"),
+            Some(CheckAction::Copy("ollama serve".into()))
+        );
+    }
+
+    #[test]
+    fn a_custom_local_port_is_started_on_that_port() {
+        let stopped = |system: &str| {
+            with_cli(FakeSetupPlatform {
+                ollama_installed: true,
+                ..platform(system)
+            })
+        };
+        for system in ["Darwin", "Linux"] {
+            for (url, command) in [
+                (
+                    "http://localhost:11435",
+                    "OLLAMA_HOST=localhost:11435 ollama serve",
+                ),
+                (
+                    "http://LocalHost:11435/api",
+                    "OLLAMA_HOST=localhost:11435 ollama serve",
+                ),
+                (
+                    "http://127.0.0.1:8080",
+                    "OLLAMA_HOST=127.0.0.1:8080 ollama serve",
+                ),
+                ("http://[::1]:11435", "OLLAMA_HOST=[::1]:11435 ollama serve"),
+                ("http://localhost:11434", "ollama serve"),
+            ] {
+                assert_eq!(
+                    ollama_fix(&stopped(system), url, "ollama-running"),
+                    Some(CheckAction::Copy(command.into())),
+                    "{system} {url}"
+                );
+            }
+            // Never a command built from an unreadable port.
+            for url in [
+                "http://localhost:99999",
+                "http://localhost:11435;rm -rf ~",
+                "http://localhost:",
+                "http://[::1]x:11435",
+            ] {
+                assert_eq!(
+                    ollama_fix(&stopped(system), url, "ollama-running"),
+                    None,
+                    "{system} {url}"
+                );
+            }
+        }
+        // Windows shells don't take `VAR=value command`.
+        assert_eq!(
+            ollama_fix(
+                &stopped("Windows"),
+                "http://localhost:11435",
+                "ollama-running"
+            ),
+            None
+        );
+        assert_eq!(
+            ollama_fix(
+                &stopped("Windows"),
+                "http://localhost:11434",
+                "ollama-running"
+            ),
+            Some(CheckAction::Copy("ollama serve".into()))
+        );
+    }
+
+    #[test]
+    fn the_start_command_comes_from_fix_url() {
+        let running = |url: &str| row("ollama-running", Some(false), url);
+        for raw in ["https://ollama.com/download", "http://localhost:11434"] {
+            assert_eq!(
+                check_fix(&running(raw)).map(|f| f.action),
+                Some(CheckAction::Copy("ollama serve".into())),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            check_fix(&running("open -a Ollama")).map(|f| f.action),
+            Some(CheckAction::Copy("open -a Ollama".into()))
+        );
+        assert_eq!(check_fix(&running("")), None);
     }
 
     #[test]
@@ -2660,8 +2890,8 @@ mod tests {
                 FixEffect::GoTo(Step::Microphone)
             );
             assert_eq!(
-                fix_effect(CheckAction::Copy("ollama serve"), simulated),
-                FixEffect::Copy("ollama serve")
+                fix_effect(CheckAction::Copy("ollama serve".into()), simulated),
+                FixEffect::Copy("ollama serve".into())
             );
         }
     }
@@ -2683,7 +2913,7 @@ mod tests {
             "Go to Microphone step"
         );
         assert_eq!(
-            fix_tooltip(&CheckAction::Copy("ollama serve")),
+            fix_tooltip(&CheckAction::Copy("ollama serve".into())),
             "Copies “ollama serve”"
         );
     }
