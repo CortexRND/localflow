@@ -1185,6 +1185,37 @@ fn edited_fields(
     Ok((edited_config, edited))
 }
 
+/// A legacy flat config (`~/.localflow.toml`) records a speech choice that
+/// the config load would fall back to: only when there is no active file at
+/// `active`, and `legacy` parses with a speech provider/model after
+/// `migrate_v1` (the `hub_route::configuration_marker` rule). Read-only: no
+/// migration, no secrets. Missing, unreadable or malformed legacy → false.
+///
+/// A deferred migration (the keyring couldn't take `fireworks_api_key`)
+/// still loads the legacy speech choice without writing an active file, so
+/// the active-file marker alone would treat it as a first run.
+pub fn legacy_speech_saved_at(active: &std::path::Path, legacy: &std::path::Path) -> bool {
+    if active.exists() {
+        return false;
+    }
+    lf_core::config::parse_toml_file(legacy)
+        .map(|raw| lf_ui::hub_route::configuration_marker(&lf_core::config::migrate_v1(&raw).0))
+        .unwrap_or(false)
+}
+
+/// [`legacy_speech_saved_at`] for `root`, only where `data::load_config_at`
+/// itself falls back to legacy: a real root at the default config path. A
+/// sandbox or explicit-path root never looks at the home legacy file.
+pub fn legacy_speech_saved(root: &crate::data::DataRoot) -> bool {
+    if root.mode != crate::data::Mode::Real
+        || lf_core::config::try_config_path().ok().as_ref() != Some(&root.config_path)
+    {
+        return false;
+    }
+    lf_core::config::try_legacy_config_path()
+        .is_ok_and(|legacy| legacy_speech_saved_at(&root.config_path, &legacy))
+}
+
 /// Write the draft to the explicit config file. Blocking; call off the UI
 /// thread.
 ///
@@ -1984,6 +2015,102 @@ mod tests {
         assert_eq!(saved.field_str("stt_backend"), Some(recommended.backend));
         assert_eq!(saved.field_str("model_size"), Some(recommended.model_size));
         assert_eq!(saved.field_str("input_device"), Some("USB Mic"));
+    }
+
+    #[test]
+    fn a_legacy_speech_choice_counts_only_without_an_active_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("config").join("config.toml");
+        let legacy = dir.path().join(".localflow.toml");
+        let with_legacy = |text: Option<&str>| {
+            let _ = std::fs::remove_file(&legacy);
+            if let Some(text) = text {
+                std::fs::write(&legacy, text).unwrap();
+            }
+            legacy_speech_saved_at(&active, &legacy)
+        };
+        assert!(with_legacy(Some(
+            "stt_backend = \"mlx\"\nmodel_size = \"small\"\n"
+        )));
+        assert!(with_legacy(Some("stt_backend = \"auto\"\n")));
+        assert!(
+            !with_legacy(Some("hotkey = \"f19\"\n")),
+            "no speech keys: still a first run"
+        );
+        assert!(!with_legacy(Some("stt_backend = [\"mlx\"")), "malformed");
+        assert!(!with_legacy(None), "missing");
+        // An active file decides by itself (its own marker), even when the
+        // legacy file has a speech choice.
+        std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+        std::fs::write(&active, "[setup]\nversion = 0\n").unwrap();
+        assert!(!with_legacy(Some("stt_backend = \"mlx\"\n")));
+    }
+
+    #[test]
+    fn only_a_real_default_path_root_looks_at_the_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandbox = crate::data::DataRoot::sandbox(dir.path());
+        assert!(!legacy_speech_saved(&sandbox));
+        // A real root at an explicit (non-default) path: `load_config_at`
+        // never falls back to legacy there, so neither does this.
+        let explicit = crate::data::DataRoot {
+            mode: crate::data::Mode::Real,
+            sandbox_dir: None,
+            ..crate::data::DataRoot::sandbox(dir.path())
+        };
+        assert_ne!(
+            lf_core::config::try_config_path().ok().as_ref(),
+            Some(&explicit.config_path)
+        );
+        assert!(!legacy_speech_saved(&explicit));
+    }
+
+    #[test]
+    fn cleanup_only_apply_keeps_a_deferred_legacy_speech_choice() {
+        for (text, backend, size) in [
+            (
+                "stt_backend = \"mlx\"\nmodel_size = \"small\"\n",
+                "mlx-whisper",
+                "small",
+            ),
+            (
+                "stt_backend = \"auto\"\nmodel_size = \"base\"\n",
+                "auto",
+                "base",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let active = dir.path().join("config").join("config.toml");
+            let legacy = dir.path().join(".localflow.toml");
+            std::fs::write(&legacy, text).unwrap();
+            // What a deferred migration loads: the migrated legacy config,
+            // with no active file written.
+            let raw = lf_core::config::parse_toml_str(text).unwrap();
+            let (loaded, _) =
+                lf_core::config::config_from_v2(&lf_core::config::migrate_v1(&raw).0, false)
+                    .unwrap();
+            assert_eq!(loaded.field_str("stt_backend"), Some(backend));
+            let speech_saved = legacy_speech_saved_at(&active, &legacy);
+            assert!(speech_saved, "{text}");
+            let mut flow = flow_with(&loaded, speech_saved);
+            let preselected = flow.model(&flow.choices.stt_id).unwrap().clone();
+            assert_eq!(preselected.backend, "faster-whisper", "a substitute");
+            assert!(flow.speech_kept());
+            flow.set_cleanup(CleanupMode::Off);
+            let job = flow.begin_apply().unwrap();
+            let fallback = loaded.clone();
+            flow.apply_done(apply(&job, &active, move || Ok(fallback.clone())));
+            assert!(matches!(flow.apply, Applying::Done(_)), "{:?}", flow.apply);
+            let saved = lf_core::config::load_from(&active).unwrap();
+            assert_eq!(saved.field_str("stt_backend"), Some(backend));
+            assert_eq!(saved.field_str("model_size"), Some(size));
+            assert_eq!(
+                saved.field_str("stt_device"),
+                loaded.field_str("stt_device")
+            );
+            assert_eq!(saved.field_bool("cleanup_enabled"), Some(false));
+            assert_eq!(saved.field_i64("setup_version"), Some(1));
+        }
     }
 
     /// A flow over a config whose file already records a speech choice.

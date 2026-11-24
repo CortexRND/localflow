@@ -88,7 +88,8 @@ impl SetupView {
                         deps.platform.as_ref(),
                         deps.launch_agent.as_ref(),
                         deps.simulated,
-                        crate::controllers::setup::configured(&root),
+                        crate::controllers::setup::configured(&root)
+                            || ctl::legacy_speech_saved(&root),
                     )
                 })
                 .await;
