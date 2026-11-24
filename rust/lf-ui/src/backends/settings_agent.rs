@@ -550,8 +550,6 @@ fn shortcut_name(name: &str) -> Option<&'static str> {
         "tab" => "Tab",
         "backspace" => "Backspace",
         "delete" => "Delete",
-        "page_up" => "Page Up",
-        "page_down" => "Page Down",
         _ => return None,
     })
 }

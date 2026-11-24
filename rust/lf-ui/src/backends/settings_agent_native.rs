@@ -585,6 +585,56 @@ mod tests {
             }
         }
         assert!(SHORTCUT_KEYS.iter().all(|k| ALLOWLIST.contains(k)));
+
+        // Every key `normalize_combo` accepts (its named-key list in
+        // lf-agent's private `validation.rs`, f1–f20, single characters) and
+        // every modifier / hold key, alone and in combos.
+        let named = [
+            "space",
+            "tab",
+            "enter",
+            "backspace",
+            "delete",
+            "home",
+            "end",
+            "page_up",
+            "page_down",
+            "up",
+            "down",
+            "left",
+            "right",
+            "insert",
+        ];
+        let modifiers = [
+            "alt", "alt_l", "alt_r", "alt_gr", "ctrl", "ctrl_l", "ctrl_r", "cmd", "cmd_l", "cmd_r",
+            "shift", "shift_l", "shift_r",
+        ];
+        let mut keys: Vec<String> = named.iter().map(|k| k.to_string()).collect();
+        keys.extend((1..=20).map(|n| format!("f{n}")));
+        keys.extend(["d", "1", "/", "caps_lock"].map(String::from));
+        keys.extend(modifiers.iter().map(|m| m.to_string()));
+        let mut shortcuts = Vec::new();
+        for key in &keys {
+            shortcuts.push(key.clone());
+            shortcuts.push(format!("<ctrl>+{key}"));
+            shortcuts.push(format!("<cmd>+<shift>+{key}"));
+        }
+        shortcuts.extend(modifiers.iter().map(|m| format!("<{m}>+<alt>+1")));
+        for shortcut in &shortcuts {
+            assert_eq!(
+                super::super::settings_agent::format_shortcut(shortcut),
+                lf_agent::format_shortcut(shortcut),
+                "{shortcut}"
+            );
+            for key in SHORTCUT_KEYS {
+                let value = json!(shortcut);
+                assert_eq!(
+                    display_value(key, &value),
+                    lf_agent::display_value(key, &value),
+                    "{key} = {shortcut}"
+                );
+            }
+        }
     }
 
     #[test]
