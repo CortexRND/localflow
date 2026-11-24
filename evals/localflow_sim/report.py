@@ -306,7 +306,15 @@ def main() -> int:
     jev = load(run / "jev_out.json")
     tables = jev_tables(jev or {}, gate_data)
     jev_rows = (jev or {}).get("rows", [])
-    has_jev = bool(jev and jev_rows and len(tables["judge_errors"]) < len(jev_rows))
+    graded_rows = [
+        r for r in jev_rows
+        if not r.get("error") and (
+            r.get("sourcesSuffice") is not None
+            or r.get("verdict") is not None
+            or bool(r.get("advisory"))
+        )
+    ]
+    has_jev = bool(jev and jev.get("calls", 0) > 0 and graded_rows)
     verdict, reasons = classify(gate_data, has_jev)
     counts = defaultdict(int)
     for row in gate_data["summary"].values():
