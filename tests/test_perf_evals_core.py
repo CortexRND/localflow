@@ -795,7 +795,7 @@ def _write(path: Path, data: dict) -> Path:
 def _cli(*args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "evals.perf", *args],
-        cwd=cwd, capture_output=True, text=True, timeout=60, check=False,
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
     )
 
 
@@ -821,8 +821,8 @@ def test_cli_compare_exit_codes(tmp_path):
                 "--output", str(report), "--json", str(out_json))
     assert proc.returncode == 0, proc.stderr
     assert "WARN" in proc.stdout
-    assert report.read_text() == proc.stdout
-    assert json.loads(out_json.read_text())["status"] == "WARN"
+    assert report.read_text(encoding="utf-8") == proc.stdout
+    assert json.loads(out_json.read_text(encoding="utf-8"))["status"] == "WARN"
 
     proc = _cli("compare", "--baseline", str(base), "--candidate", str(warn), "--strict")
     assert proc.returncode == 1
