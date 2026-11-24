@@ -404,16 +404,26 @@ pub fn resolve_with(
         push(p, McpKind::LocalflowMcp);
     }
     // `lf` is a common name (a file manager, for one): only a LocalFlow
-    // Python install's `lf`, which sits beside its `localflow` entry point.
+    // Python install's `lf`, which sits beside its `localflow` entry point,
+    // either where it was found or beside its symlink target (install.sh's
+    // `~/.local/bin/lf` -> `.venv/bin/lf`). Only the check follows the link;
+    // the found path is what runs.
+    let beside_localflow = |dir: &Path| {
+        exe_names("localflow")
+            .iter()
+            .any(|n| is_executable(&dir.join(n)))
+    };
     let lf = dirs.iter().find_map(|dir| {
         exe_names("lf")
             .into_iter()
             .map(|n| dir.join(n))
             .find(|p| is_executable(p))
-            .filter(|_| {
-                exe_names("localflow")
-                    .iter()
-                    .any(|n| is_executable(&dir.join(n)))
+            .filter(|p| {
+                beside_localflow(dir)
+                    || std::fs::canonicalize(p)
+                        .ok()
+                        .and_then(|t| t.parent().map(beside_localflow))
+                        .unwrap_or(false)
             })
     });
     if let Some(p) = lf {
@@ -1795,6 +1805,44 @@ mod tests {
             })
             .err(),
             Some(McpError::ConfigUnresolved)
+        );
+    }
+
+    /// install.sh's layout: `~/.local/bin/lf` links to `.venv/bin/lf`, whose
+    /// `localflow` sits beside the target only. The link is used as found;
+    /// an unrelated linked `lf` without `localflow` stays excluded.
+    #[cfg(unix)]
+    #[test]
+    fn installer_lf_symlink_is_found_by_its_target_sibling() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let local_bin = dir.path().join(".local").join("bin");
+        let venv = dir.path().join("repo").join(".venv").join("bin");
+        let other = dir.path().join("opt").join("lf-file-manager");
+        for d in [&local_bin, &venv, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for p in [venv.join("lf"), venv.join("localflow"), other.join("lf")] {
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let link = local_bin.join("lf");
+        // An unrelated `lf` reached by symlink is still not LocalFlow's.
+        symlink(other.join("lf"), &link).unwrap();
+        let path = std::env::join_paths([&local_bin]).unwrap();
+        let none = |_: &Path| false;
+        assert_eq!(
+            resolve_with(None, Some(path.clone()), None, &none),
+            Err(McpError::Missing)
+        );
+        std::fs::remove_file(&link).unwrap();
+        symlink(venv.join("lf"), &link).unwrap();
+        assert_eq!(
+            resolve_with(None, Some(path), None, &none).unwrap(),
+            vec![McpCommand {
+                program: link,
+                kind: McpKind::LfMcp
+            }]
         );
     }
 
