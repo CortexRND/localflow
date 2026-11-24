@@ -105,6 +105,8 @@ def _windows_memory() -> tuple[int | None, int | None]:
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
         handle = kernel32.GetCurrentProcess()
         if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
             return int(counters.WorkingSetSize), int(counters.PeakWorkingSetSize)
