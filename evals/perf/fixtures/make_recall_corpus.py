@@ -414,8 +414,17 @@ def _prepare_out(out: Path) -> None:
         if not out.is_dir():
             raise ValueError(f"{out} exists and is not a directory")
         children = list(out.iterdir())
-        if children and not (out / MANIFEST_NAME).is_file():
-            raise ValueError(f"{out} is not empty and holds no {MANIFEST_NAME}; refusing to overwrite")
+        if children:
+            manifest_path = out / MANIFEST_NAME
+            valid_manifest = False
+            if manifest_path.is_file():
+                try:
+                    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    valid_manifest = isinstance(data, dict) and "generator_version" in data and "digest" in data
+                except (OSError, ValueError):
+                    valid_manifest = False
+            if not valid_manifest:
+                raise ValueError(f"{out} is not empty and holds no valid {MANIFEST_NAME}; refusing to overwrite")
         for name in (MANIFEST_NAME, DB_NAME, QUERIES_NAME):
             if (out / name).exists():
                 (out / name).unlink()
