@@ -289,11 +289,17 @@ export LOCALFLOW_UI=legacy    # the same for every one of these commands (rollba
   (or no usable HOME); and no active config file with the setup marker
   (`main_app.is_configured`'s marker: `[setup] version > 0` or an explicit
   `stt.provider`/`stt.model`, but only in the active config, which the preview
-  also checks; there is no legacy flat fallback, so a `~/.localflow.toml`
-  alone stays on the legacy window, which handles its migration as before;
+  also checks; there is no legacy flat fallback: a `~/.localflow.toml` the
+  Python CLI's own config load already migrated is an active config like any
+  other, while one whose migration was deferred or failed leaves no active
+  file and stays on the legacy window, which handles its migration as before;
   missing, unreadable or malformed means not set up). The marker is only
   read; the launcher never writes or migrates anything on disk, and
-  `LOCALFLOW_CONFIG` is honoured as everywhere. Otherwise anything at the
+  `LOCALFLOW_CONFIG` is honoured as everywhere. The launcher's checks are
+  quiet, but the Python CLI still loads config when it starts, as before, so
+  its existing load errors and warnings come before route selection (a
+  malformed config can error before any launch; an unversioned one can
+  already warn). Otherwise anything at the
   package location (even something the preview installer didn't
   put there), or a non-empty `LOCALFLOW_DESKTOP_BIN`, is a candidate and goes
   through the same discovery, probe, launch and notices as `--gpui`.

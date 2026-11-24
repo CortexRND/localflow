@@ -917,6 +917,10 @@ mod hub_unix {
                 None,
                 Some(&b"model_size = \"base\"\nfireworks_api_key = 123\n"[..]),
             ),
+            // No config_version and an invalid scalar: the probe's config
+            // warnings stay quiet, as in Python.
+            (Some("[llm]\nmodel = \"llama3\"\n"), None),
+            (Some("[cleanup]\nlevel = \"loud\"\n"), None),
             (Some("config_version = 2\n\n[setup]\nversion = 0\n"), None),
             (
                 Some("config_version = 2\n\n[stt]\nprovider = \" \"\nmodel = \"\"\n"),
@@ -959,6 +963,33 @@ mod hub_unix {
         quiet(&sandbox.run_with(&["hub", "--gpui", "--page", "home"], &env, ""));
         assert_eq!(lines(&launched, 4), ["--help", "", "--help", "--page Home"]);
         assert_eq!(lines(&record, runs).len(), runs);
+
+        // Set up without config_version and with an invalid scalar: the
+        // default opens the preview with no config warning from its probe,
+        // while an ordinary config command on the same file still warns.
+        let unversioned = "[setup]\nversion = 1\n\n[cleanup]\nlevel = \"loud\"\n";
+        write_config(&sandbox, unversioned);
+        quiet(&sandbox.run_with(&["hub"], &env, ""));
+        assert_eq!(lines(&launched, 6)[4..], ["--help", ""]);
+        assert_eq!(lines(&record, runs).len(), runs);
+        assert_eq!(
+            std::fs::read_to_string(sandbox.config()).unwrap(),
+            unversioned
+        );
+        let get = sandbox.run_with(&["config", "get", "cleanup.level"], &env, "");
+        assert_eq!((code(&get), stdout(&get)), (0, "light\n".to_string()));
+        assert!(
+            stderr(&get).contains("WARNING: missing config_version; assuming 2\n"),
+            "{}",
+            stderr(&get)
+        );
+        assert!(
+            stderr(&get).contains(
+                "WARNING: invalid config value for cleanup.level: 'loud'; using default\n"
+            ),
+            "{}",
+            stderr(&get)
+        );
     }
 
     #[test]

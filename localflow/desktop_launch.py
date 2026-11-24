@@ -19,7 +19,9 @@ When GPUI comes only from `DEFAULT_UI` (no flag, blank or absent
 request (`lf setup`, or the Setup page); an unsupported platform, or no
 override and nothing at the package root; and a config without the setup
 marker in the active config file (`main_app.is_configured`, without its
-legacy flat fallback; the launcher never migrates or writes), because LocalFlow Preview would open its
+legacy flat fallback; this launcher never migrates or writes, though the
+CLI's own config load may already have migrated a flat file into an active
+config, which then counts), because LocalFlow Preview would open its
 own first-run wizard, whose native model choices the Python runtime that owns
 dictation may not be able to run. Otherwise anything at the package root, or
 a non-empty override, is a candidate and goes through the same checks and
@@ -271,10 +273,11 @@ def configured() -> bool:
     first-run wizard: `[setup] version > 0` or an explicit STT provider/model,
     but only in the active config file. Deliberately stricter than
     `main_app.is_configured`, which falls back to the legacy flat file: native
-    checks only the active file, and a legacy migration can be deferred or
-    fail, so a legacy-flat-only config stays on the legacy window, which
-    handles its migration as before. It never writes or migrates anything on
-    disk. Config warnings are silenced here so that the implicit default stays
+    checks only the active file. This helper never writes or migrates
+    anything on disk. A flat file the CLI's eager `load_config()` already
+    migrated is an active config like any other; when that migration is
+    deferred or fails, no active file exists and the legacy window opens,
+    which handles its migration as before. Config warnings are silenced here so that the implicit default stays
     quiet, as in lf-rs; a home that can't be resolved counts as not configured.
     """
     from localflow import main_app  # config readers only; no GUI, audio or runtime

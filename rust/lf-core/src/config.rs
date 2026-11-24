@@ -24,7 +24,8 @@ use crate::home::passwd_home;
 pub use crate::home::python_home;
 use crate::secrets;
 
-const LOG_TARGET: &str = "localflow.config";
+/// `log` target of config warnings (Python's `localflow.config` logger).
+pub const LOG_TARGET: &str = "localflow.config";
 
 /// Current on-disk config format version.
 pub const CONFIG_VERSION: i64 = 2;

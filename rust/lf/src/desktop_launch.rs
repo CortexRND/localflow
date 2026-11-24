@@ -120,21 +120,27 @@ pub fn setup_page(page: Option<&str>) -> bool {
 /// Python `desktop_launch.configured`, read-only: the active config file must
 /// exist, load, pass `config_from_v2` and carry [`configuration_marker`].
 /// There is deliberately no legacy flat fallback (native checks only the
-/// active file, and a legacy migration can be deferred or fail), so a
-/// legacy-flat-only config stays on the legacy window, which handles its
-/// migration as before; nothing is migrated or written here. Missing,
-/// unreadable or malformed configs, and an unresolvable home, are not
-/// configured. Warnings are discarded.
+/// active file). The launcher never migrates or writes: a flat file already
+/// migrated elsewhere (for example by the Python CLI's own config load) is an
+/// active config like any other, while one whose migration was deferred or
+/// failed leaves no active file and stays on the legacy window, which handles
+/// its migration as before. Missing, unreadable or malformed configs, and an
+/// unresolvable home, are not configured. This probe's `localflow.config`
+/// warnings are dropped on this thread only ([`crate::quiet_config_log`]),
+/// as Python silences that logger; other output is unchanged.
 pub fn is_configured() -> bool {
     use lf_core::config::{config_from_v2, parse_toml_file, try_config_path};
 
-    let Ok(path) = try_config_path() else {
-        return false;
-    };
-    path.exists()
-        && parse_toml_file(&path).is_ok_and(|data| {
-            config_from_v2(&data, cfg!(target_os = "macos")).is_ok() && configuration_marker(&data)
-        })
+    crate::quiet_config_log(|| {
+        let Ok(path) = try_config_path() else {
+            return false;
+        };
+        path.exists()
+            && parse_toml_file(&path).is_ok_and(|data| {
+                config_from_v2(&data, cfg!(target_os = "macos")).is_ok()
+                    && configuration_marker(&data)
+            })
+    })
 }
 
 /// `lf_ui::hub_route::configuration_marker`: `[setup] version > 0`, or an

@@ -2564,9 +2564,22 @@ def test_cli_token(rust_build, sandbox):
 
 # The Python CLI with `cli.subprocess.Popen` recording the legacy argv instead
 # of opening a window; desktop_launch's own Popen (probe, preview) stays real.
+# `localflow.cli` eagerly runs `load_config()` at import, which raises on a
+# malformed config and migrates a valid legacy flat file before any routing.
+# That import-time behaviour is not what the hub cases test (route selection
+# is), so the import alone reads an existing bootstrap config
+# (`LF_TEST_BOOTSTRAP_CONFIG`, outside the sandbox HOME); the requested
+# `LOCALFLOW_CONFIG` (possibly absent) is restored right after the import,
+# before `cli.cli()`, so the launcher sees exactly what lf-rs sees.
 _HUB_PYTHON = """\
-import json, sys, types
+import json, os, sys, types
+requested = os.environ.get("LOCALFLOW_CONFIG")
+os.environ["LOCALFLOW_CONFIG"] = os.environ.pop("LF_TEST_BOOTSTRAP_CONFIG")
 from localflow import cli
+if requested is None:
+    os.environ.pop("LOCALFLOW_CONFIG", None)
+else:
+    os.environ["LOCALFLOW_CONFIG"] = requested
 record = sys.argv.pop(1)
 def popen(argv, **kwargs):
     with open(record, "a", encoding="utf-8") as f:
@@ -2615,6 +2628,11 @@ def hub(rust_build, sandbox, tmp_path):
     (stub / "localflow" / "hub_window.py").write_bytes(_HUB_STUB.encode())
     work = tmp_path / "cwd"  # never the repo root, so `-m` can't find the real package
     work.mkdir()
+    # Read only by the Python side's `import localflow.cli` (see _HUB_PYTHON).
+    bootstrap = tmp_path / "bootstrap" / "config.toml"
+    bootstrap.parent.mkdir()
+    bootstrap_bytes = b"config_version = 2\n"
+    bootstrap.write_bytes(bootstrap_bytes)
     runs = []
 
     def run(*args, env=None):
@@ -2629,11 +2647,13 @@ def hub(rust_build, sandbox, tmp_path):
                 full.update(PYTHONPATH=str(stub), LF_TEST_LEGACY_RECORD=str(legacy))
                 command, cwd = [str(rust_build[0]), *args], work
             else:
+                full["LF_TEST_BOOTSTRAP_CONFIG"] = str(bootstrap)
                 command, cwd = [sys.executable, "-c", _HUB_PYTHON, str(legacy), *args], ROOT
             result = subprocess.run(
                 command, cwd=cwd, env=full, input="", check=False, capture_output=True,
                 text=True, encoding="utf-8", timeout=120,
             )
+            assert bootstrap.read_bytes() == bootstrap_bytes
             sides[side] = (result, _records(legacy), _records(desktop))
         return sides["rust"], sides["python"]
 
