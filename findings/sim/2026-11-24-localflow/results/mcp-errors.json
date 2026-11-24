@@ -1,0 +1,302 @@
+{
+ "cell": "mcp-errors",
+ "suite": "mcp",
+ "kind": "mcp",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:52",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "ids": {
+  "Migrate session storage to Redis": "2a02f5cd",
+  "Update deploy docs for Redis sessions": "711dc55c",
+  "Audit TLS certificates": "e2cadba6"
+ },
+ "db": "home/.localflow/history.sqlite",
+ "queue": "home/.localflow/queue.json",
+ "server_module_in_sut": true,
+ "python": {
+  "exchanges": [
+   {
+    "name": "malformed-json",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 30, \"method\": ",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": null,
+     "error": {
+      "code": -32700,
+      "message": "parse error"
+     }
+    }
+   },
+   {
+    "name": "unknown-method",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 31, \"method\": \"resources/list\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 31, \"error\": {\"code\": -32601, \"message\": \"method not found: resources/list\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 31,
+     "error": {
+      "code": -32601,
+      "message": "method not found: resources/list"
+     }
+    }
+   },
+   {
+    "name": "unknown-tool",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 32, \"method\": \"tools/call\", \"params\": {\"name\": \"delete_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 32, \"error\": {\"code\": -32602, \"message\": \"unknown tool: 'delete_dictation'\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 32,
+     "error": {
+      "code": -32602,
+      "message": "unknown tool: 'delete_dictation'"
+     }
+    }
+   },
+   {
+    "name": "missing-required-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 33, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 33, \"error\": {\"code\": -32602, \"message\": \"missing argument(s): id\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 33,
+     "error": {
+      "code": -32602,
+      "message": "missing argument(s): id"
+     }
+    }
+   },
+   {
+    "name": "unknown-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 34, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"sql\": \"DROP TABLE dictations\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 34, \"error\": {\"code\": -32602, \"message\": \"unknown argument(s): sql\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 34,
+     "error": {
+      "code": -32602,
+      "message": "unknown argument(s): sql"
+     }
+    }
+   },
+   {
+    "name": "wrong-type-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 35, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": \"1\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 35, \"error\": {\"code\": -32602, \"message\": \"id must be a integer\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 35,
+     "error": {
+      "code": -32602,
+      "message": "id must be a integer"
+     }
+    }
+   },
+   {
+    "name": "bad-enum-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 36, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"everything\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 36, \"error\": {\"code\": -32602, \"message\": \"kind must be one of dictate, command, transform\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 36,
+     "error": {
+      "code": -32602,
+      "message": "kind must be one of dictate, command, transform"
+     }
+    }
+   },
+   {
+    "name": "params-not-object",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 37, \"method\": \"tools/call\", \"params\": [1, 2]}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 37, \"error\": {\"code\": -32602, \"message\": \"params must be an object\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 37,
+     "error": {
+      "code": -32602,
+      "message": "params must be an object"
+     }
+    }
+   },
+   {
+    "name": "server-still-alive",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 38, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 38, \"result\": {}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 38,
+     "result": {}
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "5f809018e4a05318427f29b7259f9d8355181e94417e8cbe7ede99e4c8d9f688",
+   "home/.localflow/history.sqlite": "c725b2736be4a6d49b40ab80d74152a008373954a309eb011ee1c6947d75799d",
+   "home/.localflow/queue.json": "9cd908e5807a760edb2009d2941d5bfc987d58bc5061ab3bbe6952b3f8773066",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "11d95d75d0265c1db1eff1bf4926cbeacabc89dde3e19b4291ec405a5fb08bc4",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "866d5b709fef60b3f35c0e8362511d43da310bab47100846752b397102bef01b",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "e4fd5b11fdda6ad6e62f78a9532bb681e34ac424254d1b44b252ba5f68102939"
+  },
+  "hash_after": {
+   "config.toml": "5f809018e4a05318427f29b7259f9d8355181e94417e8cbe7ede99e4c8d9f688",
+   "home/.localflow/history.sqlite": "c725b2736be4a6d49b40ab80d74152a008373954a309eb011ee1c6947d75799d",
+   "home/.localflow/queue.json": "9cd908e5807a760edb2009d2941d5bfc987d58bc5061ab3bbe6952b3f8773066",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "11d95d75d0265c1db1eff1bf4926cbeacabc89dde3e19b4291ec405a5fb08bc4",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "866d5b709fef60b3f35c0e8362511d43da310bab47100846752b397102bef01b",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "e4fd5b11fdda6ad6e62f78a9532bb681e34ac424254d1b44b252ba5f68102939"
+  },
+  "stderr_tail": ""
+ },
+ "rust": {
+  "exchanges": [
+   {
+    "name": "malformed-json",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 30, \"method\": ",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"parse error\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": null,
+     "error": {
+      "code": -32700,
+      "message": "parse error"
+     }
+    }
+   },
+   {
+    "name": "unknown-method",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 31, \"method\": \"resources/list\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":31,\"error\":{\"code\":-32601,\"message\":\"method not found: resources/list\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 31,
+     "error": {
+      "code": -32601,
+      "message": "method not found: resources/list"
+     }
+    }
+   },
+   {
+    "name": "unknown-tool",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 32, \"method\": \"tools/call\", \"params\": {\"name\": \"delete_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":32,\"error\":{\"code\":-32602,\"message\":\"unknown tool: 'delete_dictation'\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 32,
+     "error": {
+      "code": -32602,
+      "message": "unknown tool: 'delete_dictation'"
+     }
+    }
+   },
+   {
+    "name": "missing-required-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 33, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":33,\"error\":{\"code\":-32602,\"message\":\"missing argument(s): id\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 33,
+     "error": {
+      "code": -32602,
+      "message": "missing argument(s): id"
+     }
+    }
+   },
+   {
+    "name": "unknown-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 34, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"sql\": \"DROP TABLE dictations\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":34,\"error\":{\"code\":-32602,\"message\":\"unknown argument(s): sql\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 34,
+     "error": {
+      "code": -32602,
+      "message": "unknown argument(s): sql"
+     }
+    }
+   },
+   {
+    "name": "wrong-type-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 35, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": \"1\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":35,\"error\":{\"code\":-32602,\"message\":\"id must be a integer\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 35,
+     "error": {
+      "code": -32602,
+      "message": "id must be a integer"
+     }
+    }
+   },
+   {
+    "name": "bad-enum-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 36, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"everything\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":36,\"error\":{\"code\":-32602,\"message\":\"kind must be one of dictate, command, transform\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 36,
+     "error": {
+      "code": -32602,
+      "message": "kind must be one of dictate, command, transform"
+     }
+    }
+   },
+   {
+    "name": "params-not-object",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 37, \"method\": \"tools/call\", \"params\": [1, 2]}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":37,\"error\":{\"code\":-32602,\"message\":\"params must be an object\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 37,
+     "error": {
+      "code": -32602,
+      "message": "params must be an object"
+     }
+    }
+   },
+   {
+    "name": "server-still-alive",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 38, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":38,\"result\":{}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 38,
+     "result": {}
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "5f809018e4a05318427f29b7259f9d8355181e94417e8cbe7ede99e4c8d9f688",
+   "home/.localflow/history.sqlite": "c725b2736be4a6d49b40ab80d74152a008373954a309eb011ee1c6947d75799d",
+   "home/.localflow/queue.json": "9cd908e5807a760edb2009d2941d5bfc987d58bc5061ab3bbe6952b3f8773066",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "11d95d75d0265c1db1eff1bf4926cbeacabc89dde3e19b4291ec405a5fb08bc4",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "866d5b709fef60b3f35c0e8362511d43da310bab47100846752b397102bef01b",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "e4fd5b11fdda6ad6e62f78a9532bb681e34ac424254d1b44b252ba5f68102939"
+  },
+  "hash_after": {
+   "config.toml": "5f809018e4a05318427f29b7259f9d8355181e94417e8cbe7ede99e4c8d9f688",
+   "home/.localflow/history.sqlite": "c725b2736be4a6d49b40ab80d74152a008373954a309eb011ee1c6947d75799d",
+   "home/.localflow/queue.json": "9cd908e5807a760edb2009d2941d5bfc987d58bc5061ab3bbe6952b3f8773066",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "11d95d75d0265c1db1eff1bf4926cbeacabc89dde3e19b4291ec405a5fb08bc4",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "866d5b709fef60b3f35c0e8362511d43da310bab47100846752b397102bef01b",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "e4fd5b11fdda6ad6e62f78a9532bb681e34ac424254d1b44b252ba5f68102939"
+  },
+  "stderr_tail": ""
+ },
+ "rust_bin": "localflow-mcp",
+ "finished": "2026-11-24T10:01:52"
+}

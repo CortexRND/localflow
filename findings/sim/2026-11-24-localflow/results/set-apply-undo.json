@@ -1,0 +1,210 @@
+{
+ "cell": "set-apply-undo",
+ "suite": "settings_api",
+ "kind": "apply_undo",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:54",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "steps": [
+  {
+   "step": "initial",
+   "value": null,
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "set_medium",
+   "applied": 1,
+   "message": "Applied 1 change.",
+   "state": {
+    "cleanup_level": "medium",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "undo_medium",
+   "reverted": [
+    "Cleanup level: Light"
+   ],
+   "skipped": [],
+   "message": "Undid the last change.",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "undo_empty",
+   "error": "SettingsAgentError: There's no change to undo.",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "apply_batch",
+   "applied": 3,
+   "message": "Applied 3 changes.",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": false,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [
+     "Qdrant"
+    ],
+    "replacements": [
+     [
+      "post gres",
+      "PostgreSQL"
+     ]
+    ]
+   }
+  },
+  {
+   "step": "pending_undo",
+   "value": [
+    "Sounds: Off \u2192 On",
+    "Remove word \u201cQdrant\u201d",
+    "Remove replacement \u201cpost gres\u201d \u2192 \u201cPostgreSQL\u201d"
+   ],
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": false,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [
+     "Qdrant"
+    ],
+    "replacements": [
+     [
+      "post gres",
+      "PostgreSQL"
+     ]
+    ]
+   }
+  },
+  {
+   "step": "undo_batch",
+   "reverted": [
+    "Sounds: On",
+    "Removed word \u201cQdrant\u201d",
+    "Removed replacement \u201cpost gres\u201d"
+   ],
+   "skipped": [],
+   "message": "Undid the last change.",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "invalid_value",
+   "error": "SettingsAgentError: Cleanup level: choose one of: none, light, medium",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "not_allowlisted",
+   "error": "SettingsAgentError: 'server_port' is not a setting LocalFlow can change here",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "noop",
+   "applied": 0,
+   "message": "Nothing needed changing.",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "shortcut_conflict",
+   "error": "SettingsAgentError: Nothing was changed: Command key: Hold Left Option is already the Dictation shortcut.",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  },
+  {
+   "step": "forged_apply",
+   "error": "SettingsAgentError: This preview isn't valid; preview again.",
+   "state": {
+    "cleanup_level": "light",
+    "sounds_enabled": true,
+    "hotkey": "alt_l",
+    "command_hotkey": "alt_r",
+    "server_port": 8756,
+    "words": [],
+    "replacements": []
+   }
+  }
+ ],
+ "ollama_guard": {
+  "live_provider": "openai-compatible",
+  "live_url_is_loopback": false,
+  "agent_url_for_live_config": "http://localhost:11434",
+  "default_ollama_url": "http://localhost:11434"
+ },
+ "finished": "2026-11-24T10:01:54"
+}

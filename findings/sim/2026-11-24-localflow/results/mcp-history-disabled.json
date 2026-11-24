@@ -1,0 +1,240 @@
+{
+ "cell": "mcp-history-disabled",
+ "suite": "mcp",
+ "kind": "mcp",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:51",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "ids": {
+  "Migrate session storage to Redis": "43119572",
+  "Update deploy docs for Redis sessions": "4aba99e9",
+  "Audit TLS certificates": "674c1554"
+ },
+ "db": "home/.localflow/history.sqlite",
+ "queue": "home/.localflow/queue.json",
+ "server_module_in_sut": true,
+ "python": {
+  "exchanges": [
+   {
+    "name": "disabled-search",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 40, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"query\": \"kubernetes\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 40, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"Dictation history is disabled (`[history] enabled = false`)\"}], \"isError\": true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 40,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "Dictation history is disabled (`[history] enabled = false`)"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "disabled-get",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 41, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 41, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"Dictation history is disabled (`[history] enabled = false`)\"}], \"isError\": true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 41,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "Dictation history is disabled (`[history] enabled = false`)"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "disabled-prompts-still-work",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 42, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 42, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":3,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"674c1554\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.926522\\\",\\\"snippet\\\":\\\"Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"},{\\\"id\\\":\\\"4aba99e9\\\",\\\"title\\\":\\\"Update deploy docs for Redis sessions\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"rejected\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.906054\\\",\\\"snippet\\\":\\\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\\\"},{\\\"id\\\":\\\"43119572\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.885543\\\",\\\"snippet\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"}]}\"}], \"structuredContent\": {\"count\": 3, \"match\": \"recent\", \"results\": [{\"id\": \"674c1554\", \"title\": \"Audit TLS certificates\", \"meeting\": \"Platform sync\", \"status\": \"pending\", \"created\": \"2026-11-24T10:01:51.926522\", \"snippet\": \"Audit the other 12 certificates this week and record every expiry date in the runbook.\"}, {\"id\": \"4aba99e9\", \"title\": \"Update deploy docs for Redis sessions\", \"meeting\": \"Platform sync\", \"status\": \"rejected\", \"created\": \"2026-11-24T10:01:51.906054\", \"snippet\": \"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"}, {\"id\": \"43119572\", \"title\": \"Migrate session storage to Redis\", \"meeting\": \"Platform sync\", \"status\": \"approved\", \"created\": \"2026-11-24T10:01:51.885543\", \"snippet\": \"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 42,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":3,\"match\":\"recent\",\"results\":[{\"id\":\"674c1554\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.926522\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"},{\"id\":\"4aba99e9\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.906054\",\"snippet\":\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"},{\"id\":\"43119572\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.885543\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 3,
+       "match": "recent",
+       "results": [
+        {
+         "id": "674c1554",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.926522",
+         "snippet": "Audit the other 12 certificates this week and record every expiry date in the runbook."
+        },
+        {
+         "id": "4aba99e9",
+         "title": "Update deploy docs for Redis sessions",
+         "meeting": "Platform sync",
+         "status": "rejected",
+         "created": "2026-11-24T10:01:51.906054",
+         "snippet": "Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya."
+        },
+        {
+         "id": "43119572",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.885543",
+         "snippet": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        }
+       ]
+      }
+     }
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "b4f13c9d94180f0567cc0503c4c4a100c5f382fb42fedd90e728da526ab29707",
+   "home/.localflow/history.sqlite": "3955cbd5228481838ac3aa1e227eef559ed84510de93a5722451806462ae4f20",
+   "home/.localflow/queue.json": "35e7b4b3b9401f9be56a8ad8c52121429481798c0af000eb464be5eac83c48f5",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f8ecdf766e8e54eba6e620d93b8046af843b727096a4b6de6de332487b5b0d29",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "b60ee933795fafcd89ae379705f124289a4c0823365c995d0ae0d42ea7adf267",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "393744cefe86544371654a5f70cfc1efb3bdbb5c5fde74a9167a7a786a6dbb77"
+  },
+  "hash_after": {
+   "config.toml": "b4f13c9d94180f0567cc0503c4c4a100c5f382fb42fedd90e728da526ab29707",
+   "home/.localflow/history.sqlite": "3955cbd5228481838ac3aa1e227eef559ed84510de93a5722451806462ae4f20",
+   "home/.localflow/queue.json": "35e7b4b3b9401f9be56a8ad8c52121429481798c0af000eb464be5eac83c48f5",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f8ecdf766e8e54eba6e620d93b8046af843b727096a4b6de6de332487b5b0d29",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "b60ee933795fafcd89ae379705f124289a4c0823365c995d0ae0d42ea7adf267",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "393744cefe86544371654a5f70cfc1efb3bdbb5c5fde74a9167a7a786a6dbb77"
+  },
+  "stderr_tail": ""
+ },
+ "rust": {
+  "exchanges": [
+   {
+    "name": "disabled-search",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 40, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"query\": \"kubernetes\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":40,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Dictation history is disabled (`[history] enabled = false`)\"}],\"isError\":true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 40,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "Dictation history is disabled (`[history] enabled = false`)"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "disabled-get",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 41, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":41,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Dictation history is disabled (`[history] enabled = false`)\"}],\"isError\":true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 41,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "Dictation history is disabled (`[history] enabled = false`)"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "disabled-prompts-still-work",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 42, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":3,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"674c1554\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.926522\\\",\\\"snippet\\\":\\\"Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"},{\\\"id\\\":\\\"4aba99e9\\\",\\\"title\\\":\\\"Update deploy docs for Redis sessions\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"rejected\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.906054\\\",\\\"snippet\\\":\\\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\\\"},{\\\"id\\\":\\\"43119572\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.885543\\\",\\\"snippet\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"}]}\"}],\"structuredContent\":{\"count\":3,\"match\":\"recent\",\"results\":[{\"id\":\"674c1554\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.926522\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"},{\"id\":\"4aba99e9\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.906054\",\"snippet\":\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"},{\"id\":\"43119572\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.885543\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 42,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":3,\"match\":\"recent\",\"results\":[{\"id\":\"674c1554\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.926522\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"},{\"id\":\"4aba99e9\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.906054\",\"snippet\":\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"},{\"id\":\"43119572\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.885543\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 3,
+       "match": "recent",
+       "results": [
+        {
+         "id": "674c1554",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.926522",
+         "snippet": "Audit the other 12 certificates this week and record every expiry date in the runbook."
+        },
+        {
+         "id": "4aba99e9",
+         "title": "Update deploy docs for Redis sessions",
+         "meeting": "Platform sync",
+         "status": "rejected",
+         "created": "2026-11-24T10:01:51.906054",
+         "snippet": "Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya."
+        },
+        {
+         "id": "43119572",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.885543",
+         "snippet": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        }
+       ]
+      }
+     }
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "b4f13c9d94180f0567cc0503c4c4a100c5f382fb42fedd90e728da526ab29707",
+   "home/.localflow/history.sqlite": "3955cbd5228481838ac3aa1e227eef559ed84510de93a5722451806462ae4f20",
+   "home/.localflow/queue.json": "35e7b4b3b9401f9be56a8ad8c52121429481798c0af000eb464be5eac83c48f5",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f8ecdf766e8e54eba6e620d93b8046af843b727096a4b6de6de332487b5b0d29",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "b60ee933795fafcd89ae379705f124289a4c0823365c995d0ae0d42ea7adf267",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "393744cefe86544371654a5f70cfc1efb3bdbb5c5fde74a9167a7a786a6dbb77"
+  },
+  "hash_after": {
+   "config.toml": "b4f13c9d94180f0567cc0503c4c4a100c5f382fb42fedd90e728da526ab29707",
+   "home/.localflow/history.sqlite": "3955cbd5228481838ac3aa1e227eef559ed84510de93a5722451806462ae4f20",
+   "home/.localflow/queue.json": "35e7b4b3b9401f9be56a8ad8c52121429481798c0af000eb464be5eac83c48f5",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f8ecdf766e8e54eba6e620d93b8046af843b727096a4b6de6de332487b5b0d29",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "b60ee933795fafcd89ae379705f124289a4c0823365c995d0ae0d42ea7adf267",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "393744cefe86544371654a5f70cfc1efb3bdbb5c5fde74a9167a7a786a6dbb77"
+  },
+  "stderr_tail": ""
+ },
+ "rust_bin": "localflow-mcp",
+ "finished": "2026-11-24T10:01:52"
+}

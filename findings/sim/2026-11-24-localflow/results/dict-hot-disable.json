@@ -1,0 +1,35 @@
+{
+ "cell": "dict-hot-disable",
+ "suite": "dictation",
+ "kind": "hotphrase",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T09:59:35",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "entries": [
+  {
+   "trigger": "standup notes",
+   "text": "Yesterday / Today / Blockers",
+   "enabled": false
+  }
+ ],
+ "enabled": [],
+ "outputs": [
+  {
+   "mode": "render",
+   "text": "Standup notes.",
+   "output": "Standup notes."
+  },
+  {
+   "mode": "expand",
+   "text": "open standup notes please",
+   "output": "open standup notes please"
+  }
+ ],
+ "finished": "2026-11-24T09:59:35"
+}
