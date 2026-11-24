@@ -1345,6 +1345,113 @@ def test_cli_stt_python_plugin(rust_build, sandbox):
     )
 
 
+def _stt_plugin(packages, name):
+    metadata = packages / f"{name}_plugin-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        f"[localflow.stt_providers]\n{name} = {name}_plugin:Plugin\n", encoding="utf-8",
+    )
+    (packages / f"{name}_plugin.py").write_text(
+        "class Plugin:\n    offline = False\n    def list_models(self):\n        return []\n", encoding="utf-8",
+    )
+    return packages
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the stand-in interpreters are shell scripts")
+def test_cli_stt_plugins_come_from_the_localflow_python(rust_build, sandbox):
+    """An earlier candidate without LocalFlow answers alone, but not ahead of the LocalFlow interpreter."""
+    packages = _stt_plugin(sandbox["root"] / "site-packages", "demo")
+    elsewhere = _stt_plugin(sandbox["root"] / "unrelated-packages", "elsewhere")
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    python = shlex.quote(sys.executable)
+    unrelated, installed = sandbox["root"] / "unrelated-python", sandbox["root"] / "localflow-python"
+    for root, run in (
+        (unrelated / "bin", f"PYTHONPATH={shlex.quote(str(elsewhere))} exec {python} -S"),
+        (installed, f"exec {python}"),
+    ):
+        root.mkdir(parents=True)
+        (root / "python3").write_text(f"#!/bin/sh\n{run} \"$@\"\n", encoding="utf-8")
+        (root / "python3").chmod(0o755)
+    rust_env = {**env, "PATH": str(installed), "VIRTUAL_ENV": str(unrelated)}
+    alone = lf(rust_build, sandbox, "stt", "list", env={**rust_env, "PATH": ""})
+    assert alone.returncode == 0 and "elsewhere" in alone.stdout and "demo" not in alone.stdout
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "demo")):
+        expected = _python_cli(sandbox, *args, env=env)
+        assert expected.returncode == 0 and "elsewhere" not in expected.stdout, expected.stderr
+        saved = sandbox["config"].read_bytes() if sandbox["config"].exists() else None
+        sandbox["config"].unlink(missing_ok=True)
+        assert _cli_output(lf(rust_build, sandbox, *args, env=rust_env)) == _cli_output(expected)
+        assert (sandbox["config"].read_bytes() if sandbox["config"].exists() else None) == saved
+    assert b"demo" in saved and "demo" in _python_cli(sandbox, "stt", "list", env=env).stdout
+
+
+def _behind_healthy_python(rust_build, sandbox, env):
+    """Rust's env with a later candidate that sees no plug-ins and answers healthily (POSIX only)."""
+    if os.name != "posix":
+        return env
+    shim = sandbox["root"] / "healthy-python"
+    shim.mkdir()
+    (shim / "python3").write_text(
+        f"#!/bin/sh\nunset PYTHONPATH\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8",
+    )
+    (shim / "python3").chmod(0o755)
+    rust_env = {**env, "PATH": str(shim)}
+    healthy = lf(rust_build, sandbox, "stt", "list", env={**rust_env, "VIRTUAL_ENV": str(shim)})
+    assert healthy.returncode == 0, healthy.stderr
+    assert "faster-whisper: " in healthy.stdout and "broken" not in healthy.stdout
+    return rust_env
+
+
+def _assert_same_stt_crash(rust_build, sandbox, args, env, rust_env):
+    header = "Traceback (most recent call last):\n"
+    python = _python_cli(sandbox, *args, env=env)
+    rust = lf(rust_build, sandbox, *args, env=rust_env)
+    assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout) == (1, "")
+    assert python.stderr.startswith(header) and rust.stderr.startswith(header)
+    assert python.stderr.endswith(rust.stderr[len(header):])
+    assert not sandbox["config"].exists()
+    return rust
+
+
+def test_cli_stt_malformed_plugin_metadata(rust_build, sandbox):
+    packages = sandbox["root"] / "site-packages"
+    metadata = packages / "speech_plugins-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text("[localflow.stt_providers]\nbroken\n", encoding="utf-8")
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    rust_env = _behind_healthy_python(rust_build, sandbox, env)
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "broken")):
+        rust = _assert_same_stt_crash(rust_build, sandbox, args, env, rust_env)
+        assert "importlib" in rust.stderr and rust.stderr.splitlines()[-1].startswith("TypeError: ")
+
+
+def test_cli_stt_broken_python_plugin(rust_build, sandbox):
+    packages = sandbox["root"] / "site-packages"
+    metadata = packages / "speech_plugins-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\nbroken = broken_plugin:Broken\ndemo = speech_plugin:Demo\n",
+        encoding="utf-8",
+    )
+    (packages / "broken_plugin.py").write_text("raise RuntimeError('plugin import failed')\n", encoding="utf-8")
+    (packages / "speech_plugin.py").write_text(
+        "class Demo:\n    offline = False\n    def list_models(self):\n        return []\n", encoding="utf-8",
+    )
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    rust_env = _behind_healthy_python(rust_build, sandbox, env)
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "broken")):
+        rust = _assert_same_stt_crash(rust_build, sandbox, args, env, rust_env)
+        assert "broken_plugin.py" in rust.stderr
+        assert rust.stderr.endswith("RuntimeError: plugin import failed\n")
+    args = ("stt", "use", "demo")
+    python = _python_cli(sandbox, *args, env=env)
+    assert python.returncode == 0, python.stderr
+    expected = sandbox["config"].read_bytes()
+    sandbox["config"].unlink()
+    assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == _cli_output(python)
+    assert sandbox["config"].read_bytes() == expected
+
+
 @pytest.mark.parametrize("args", [
     ("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "not-a-provider"),
     ("stt", "download", "mlx-tiny"),
