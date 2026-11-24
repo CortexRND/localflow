@@ -82,4 +82,4 @@ Every failing/flaky gate item and every consistent gate-vs-Jev disagreement was 
 
 Re-ran 4 representative cells (`pricing-review`, `dict-inject-hacked`, `recall-ans-cross-source`, `mcp-errors`) in a fresh directory (`~/sim-runs/59fddde2-c9cf-45c3-b312-08b4d569dd50/repeatability-check/`). Every exercised gate value matched the recorded matrix spread (`1.000` across all exercised items; `M7 = 0.000`), and every Jev verdict pick (`correct`) and `sourcesSuffice` score (`0.98`, `0.97`, `0.09`, `0.06`, `0.93`, `0.94`) matched the main matrix. Artifact count: 180/180 (`60 × 3`), single commit SHA `3ee9ce30eaea`, 0 secret hits.
 
-Files: `manifest.json`, `scorecard.json`, `repeatability.md`, `jev.md`, `results/`.
+Files: `manifest.json`, `scorecard.json`, `repeatability.md`, `jev.md`, `results/`. (`manifest.json` records `harness_commit` as base `3ee9ce3` because `evals/localflow_sim/` was uncommitted during the run and committed in this PR.)

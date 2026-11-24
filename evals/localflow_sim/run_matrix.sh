@@ -33,15 +33,17 @@ if [ "$COMMIT" != "$SPEC_COMMIT" ] && [ "${SIM_ALLOW_COMMIT_OVERRIDE:-0}" != "1"
   exit 2
 fi
 HARNESS="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+HARNESS_DIRTY="$(git -C "$REPO" status --porcelain -- evals/localflow_sim 2>/dev/null | head -n 1)"
 
 # The manifest pins the SUT commit for gates.py; it holds no secrets.
-RUN_ID="$RUN_ID" COMMIT="$COMMIT" HARNESS="$HARNESS" REPEATS="$REPEATS" SUITES="$SUITES" \
+RUN_ID="$RUN_ID" COMMIT="$COMMIT" HARNESS="$HARNESS" HARNESS_DIRTY="$HARNESS_DIRTY" REPEATS="$REPEATS" SUITES="$SUITES" \
 MCP_RUST="${MCP_RUST_BIN:+yes}" "$PY" - "$RUN/manifest.json" "$HERE/scenarios.json" <<'PY'
 import json, os, sys, time
 spec = json.load(open(sys.argv[2]))
 json.dump({
     "run_id": os.environ["RUN_ID"], "commit": os.environ["COMMIT"], "sim_sut": os.environ["SIM_SUT"],
-    "harness_commit": os.environ["HARNESS"], "repeats": int(os.environ["REPEATS"]),
+    "harness_commit": os.environ["HARNESS"], "harness_dirty": bool(os.environ.get("HARNESS_DIRTY")),
+    "repeats": int(os.environ["REPEATS"]),
     "suites": os.environ["SUITES"].split(), "llm": spec["llm"], "spec_version": spec["version"],
     "mcp_rust_bin": bool(os.environ.get("MCP_RUST")), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
 }, open(sys.argv[1], "w"), indent=1)
