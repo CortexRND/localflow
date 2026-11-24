@@ -279,7 +279,11 @@ def gate_table(gate_data: dict) -> str:
     rows = []
     for key, row in gate_data["summary"].items():
         per = [gate_data["per_repeat"][r][key] for r in repeats]
-        cells = [f"{fmt(p['value'])} ({p['k']}/{p['n']})" if p["n"] else "-" for p in per]
+        cells = [
+            f"{fmt(p['value'])} ({(p['n'] - p['k']) if key in gates.MAX_GATES else p['k']}/{p['n']})"
+            if p["n"] else "-"
+            for p in per
+        ]
         low, high = row["wilson95_pooled"]
         rows.append([key, row["name"], row["threshold"], row["status"], row["pass_count"], *cells,
                      fmt(row["spread"]), f"{row['pooled_k']}/{row['pooled_n']}",
