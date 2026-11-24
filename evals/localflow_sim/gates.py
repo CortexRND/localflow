@@ -542,6 +542,8 @@ def gate_mcp(res: dict, cell: dict, tally, extras: dict) -> None:
     if rust is None:
         return
     extras["rust_cells"] += 1
+    tally("P4", rust["exit_code"] == 0 and rust["extra_output"] == "", f"{cid}:rust-lifecycle",
+          rust.get("stderr_tail", "")[-200:])
     tally("P3", rust["hash_before"] == rust["hash_after"], f"{cid}:rust-no-file-created-or-changed")
     rust_by_name = {e["name"]: e for e in rust["exchanges"]}
     for exchange in python["exchanges"]:
