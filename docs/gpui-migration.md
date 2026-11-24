@@ -92,6 +92,15 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
    (X11 and Wayland) and macOS before this gate is met. No rows remain marked
    Missing: the tray item (Linux, Windows and macOS) and History retry (runtime
    builds) are implemented but, like the rest, still need interactive review.
+   Known limit, accepted by the owner (Taj, 2026-11-24, answer: "Accept as known
+   limit"): on a remote X11 desktop with software rendering, `lf-desktop` can open
+   with a title bar and an unpainted (blank) window body. It was seen on
+   TigerVNC's X server (Xtigervnc 1.12) with KWin and Mesa's software Vulkan
+   driver (llvmpipe), with compositing on or suspended. The same build renders
+   under nested X11 (Xephyr), Xvfb and Wayland (Cage), and `vkcube` renders on
+   that same desktop. The cause is not pinned down; GPUI picks a 32-bit ARGB
+   visual there. An X11 desktop with a real GPU was not tested. This limit does
+   not by itself keep gate 1 open.
 2. **Data safety.** [`gpui_data_safety.py`](../scripts/gpui_data_safety.py) compares
    the whole real config directory (including `api-token` and `launch/`),
    `~/.localflow` and the keyring by hash before and after a scripted sandbox
