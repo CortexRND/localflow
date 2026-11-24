@@ -12,6 +12,8 @@ struct Case {
     label: &'static str,
     description: String,
     control_w: f32,
+    /// Render the real four-option Style `Segmented` instead of a fixed box.
+    segmented: bool,
     /// Fits on one line at the unclamped slot width but wraps at 440 px, so
     /// only a row measured at the clamped width gets its height right.
     wraps_only_at_measure: bool,
@@ -34,6 +36,7 @@ fn cases() -> Vec<Case> {
             label: "Setup",
             description: "Pick and download a speech model, test your microphone, choose cleanup and a shortcut. Nothing changes until you apply.".into(),
             control_w: 120.,
+            segmented: false,
             wraps_only_at_measure: false,
         },
         Case {
@@ -41,6 +44,7 @@ fn cases() -> Vec<Case> {
             label: "Launch at login",
             description: "Not available on Linux yet. Start LocalFlow from your session's autostart if you want it at login.".into(),
             control_w: 120.,
+            segmented: false,
             wraps_only_at_measure: false,
         },
         Case {
@@ -48,14 +52,15 @@ fn cases() -> Vec<Case> {
             label: "Engine",
             description: "Automatic picks the best engine for this computer when LocalFlow starts.".into(),
             control_w: 120.,
+            segmented: false,
             wraps_only_at_measure: false,
         },
         Case {
             name: "work style",
             label: "Work",
             description: work_style,
-            // The four-option `Segmented` on the Style page.
-            control_w: 320.,
+            control_w: 0.,
+            segmented: true,
             wraps_only_at_measure: false,
         },
         Case {
@@ -63,6 +68,7 @@ fn cases() -> Vec<Case> {
             label: "Engine",
             description: NARROW_WRAP.into(),
             control_w: 120.,
+            segmented: false,
             wraps_only_at_measure: true,
         },
     ]
@@ -72,6 +78,7 @@ struct Harness {
     label: &'static str,
     description: String,
     control_w: f32,
+    segmented: bool,
     /// Widths the two reference descriptions are laid out at: the unclamped
     /// slot and the 440 px measure.
     reference_w: Option<(Pixels, Pixels)>,
@@ -86,11 +93,22 @@ impl Render for Harness {
                 &t,
                 self.label,
                 self.description.clone(),
-                div()
-                    .debug_selector(|| "control".into())
-                    .w(px(self.control_w))
-                    .h(px(28.))
-                    .into_any_element(),
+                if self.segmented {
+                    let titles: Vec<String> = lf_ui::hub_model::STYLE_OPTIONS
+                        .iter()
+                        .map(|o| lf_ui::hub_model::style_option_title(o))
+                        .collect();
+                    div()
+                        .debug_selector(|| "control".into())
+                        .child(Segmented::new("tone", titles, Some(0)))
+                        .into_any_element()
+                } else {
+                    div()
+                        .debug_selector(|| "control".into())
+                        .w(px(self.control_w))
+                        .h(px(28.))
+                        .into_any_element()
+                },
                 None,
             ))
             .into_any_element();
@@ -127,10 +145,13 @@ impl Render for Harness {
 }
 
 fn check(case: &Case, window_w: f32, cx: &mut TestAppContext) {
+    // `Segmented` reads the theme from GPUI globals.
+    cx.update(|cx| cx.set_global(Theme::light()));
     let (view, cx) = cx.add_window_view(|_, _| Harness {
         label: case.label,
         description: case.description.clone(),
         control_w: case.control_w,
+        segmented: case.segmented,
         reference_w: None,
     });
     cx.simulate_resize(size(px(window_w), px(850.)));
@@ -144,7 +165,20 @@ fn check(case: &Case, window_w: f32, cx: &mut TestAppContext) {
         .expect("description laid out");
     let ctx = format!("{} at {window_w}px", case.name);
 
-    // Horizontal: the text column and description stay left of the control.
+    // Horizontal: the text column and description stay left of the control,
+    // and the control stays inside the row's right inset (not clipped).
+    assert!(
+        row.left() <= text.left(),
+        "{ctx}: text starts at {:?}, left of the row at {:?}",
+        text.left(),
+        row.left()
+    );
+    assert!(
+        control.right() <= row.right() - row_inset(),
+        "{ctx}: control ends at {:?}, row's right inset starts at {:?}",
+        control.right(),
+        row.right() - row_inset()
+    );
     assert!(
         text.right() + space::s8() <= control.left(),
         "{ctx}: text column ends at {:?}, control starts at {:?}",
