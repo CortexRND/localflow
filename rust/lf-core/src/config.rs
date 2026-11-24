@@ -937,6 +937,42 @@ pub fn load_from(path: &Path) -> Result<Config> {
     config_from_v2_inner(&data, is_darwin(), &mut warnings)
 }
 
+/// Inspect the raw v2 TOML like Python `main_app.is_configured`: defaults added
+/// by [`load_config`] must not make an empty file configured.
+pub fn configuration_marker(data: &Map<String, Value>) -> bool {
+    let setup_done = data
+        .get("setup")
+        .and_then(Value::as_object)
+        .and_then(|setup| setup.get("version"))
+        .and_then(Value::as_i64)
+        .is_some_and(|version| version > 0);
+    setup_done
+        || data
+            .get("stt")
+            .and_then(Value::as_object)
+            .is_some_and(|stt| {
+                ["provider", "model"].into_iter().any(|key| {
+                    stt.get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !py_strip(value).is_empty())
+                })
+            })
+}
+
+/// Whether the active config file loads and has [`configuration_marker`].
+/// Only the active config is read: an unmigrated legacy `~/.localflow.toml`
+/// stays on the legacy window (which migrates it) and counts from the next launch.
+pub fn active_config_set_up() -> bool {
+    try_config_path().is_ok_and(|path| set_up_at(&path))
+}
+
+fn set_up_at(path: &Path) -> bool {
+    path.exists()
+        && parse_toml_file(path).is_ok_and(|data| {
+            config_from_v2(&data, is_darwin()).is_ok() && configuration_marker(&data)
+        })
+}
+
 /// Python `load_config()`: the v2 file, else a migrated `~/.localflow.toml`,
 /// else defaults (meetings forced off outside macOS).
 pub fn load_config() -> Result<Config> {
@@ -1657,6 +1693,45 @@ mod tests {
     use super::*;
     use crate::secrets::{self, FailingKeyring, KeyringBackend, MemoryKeyring, SERVICE};
     use crate::test_support::{EnvGuard, GLOBAL_LOCK};
+
+    #[test]
+    fn configuration_marker_uses_only_explicit_raw_values() {
+        assert!(!configuration_marker(&Map::new()));
+        assert!(!configuration_marker(
+            &serde_json::from_value(json!({"setup": {"version": 0}})).unwrap()
+        ));
+        assert!(!configuration_marker(
+            &serde_json::from_value(json!({"setup": {"version": true}})).unwrap()
+        ));
+        assert!(!configuration_marker(
+            &serde_json::from_value(json!({"stt": {"provider": "  ", "model": 2}})).unwrap()
+        ));
+        assert!(configuration_marker(
+            &serde_json::from_value(json!({"setup": {"version": 1}})).unwrap()
+        ));
+        assert!(configuration_marker(
+            &serde_json::from_value(json!({"stt": {"model": "base"}})).unwrap()
+        ));
+    }
+
+    #[test]
+    fn set_up_needs_a_loadable_file_with_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(!set_up_at(&path), "missing");
+        for (text, expected) in [
+            ("", false),
+            ("[general]\n", false),
+            ("[setup]\nversion = 0\n", false),
+            ("[setup\n", false),
+            ("[setup]\nversion = 1\n", true),
+            ("[stt]\nmodel = \"base\"\n", true),
+            ("[stt]\nprovider = \"auto\"\n", true),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(set_up_at(&path), expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn win_is_fully_qualified_unicode_unc_does_not_panic() {
