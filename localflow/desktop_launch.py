@@ -343,7 +343,8 @@ def set_up(*, quiet: bool = False) -> bool:
     legacy window (which migrates it) and counts from the next launch. `quiet`
     silences `localflow.config` warnings (the implicit default).
     """
-    from localflow.config import config_path  # config readers only; no GUI, audio or runtime
+    # Config readers only; no GUI, audio or runtime.
+    from localflow.config import config_path
     from localflow.main_app import is_configured
 
     logger = logging.getLogger("localflow.config")
