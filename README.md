@@ -467,13 +467,16 @@ re-reads the file when it changes, so edits apply without a restart.
 Manage them on the Hot Phrases page of the LocalFlow Hub:
 
 ```bash
-lf phrases                  # open the Hub on Hot Phrases (also the menu bar's "Hot Phrases…")
+lf phrases                  # open the Hub on Hot Phrases
 lf hub --page "Hot Phrases" # the same, through the Hub command
 ```
 
-On macOS the Hub is one native window owned by the main LocalFlow app, so
-all of these reach the same window (and bring it forward if it is already
-open). The Hot Phrases page has a searchable list on the left (one row per
+On macOS the Hub is one native window owned by the main LocalFlow app. The
+menu bar's "Hot Phrases…" always opens that window. `lf phrases` and `lf hub`
+reach it too (bringing it forward if it is already open), unless the separate
+LocalFlow Preview is installed and LocalFlow is set up; then they open the
+preview instead, and `--legacy` opens the Hub window (see
+[History & insights](#history--insights)). The Hot Phrases page has a searchable list on the left (one row per
 phrase with an on/off dot) and an editor on the right: "When I say", "Type
 this", an Enabled switch, Delete with Undo, and a "Try it" preview that shows
 what dictation would paste and which triggers matched. Edits autosave as you
