@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::controllers::instance::{self, Claim, Instance, Route};
+use crate::controllers::instance::{self, Claim, Instance, Request};
 use crate::data::DataRoot;
 
 pub enum Launched {
@@ -15,14 +15,14 @@ pub enum Launched {
     HandedOff,
 }
 
-/// `--sandbox` (with `--data-dir` / `--sandbox-reset`). `route` is `None`
-/// for `--sandbox-exercise`, which opens no window.
-pub fn sandbox(dir: &Path, reset: bool, route: Option<Route>) -> Result<Launched, String> {
+/// `--sandbox` (with `--data-dir` / `--sandbox-reset`). `request` is
+/// `None` for `--sandbox-exercise`, which opens no window.
+pub fn sandbox(dir: &Path, reset: bool, request: Option<Request>) -> Result<Launched, String> {
     crate::sandbox::check_dir(dir).map_err(|e| format!("sandbox: {e:#}"))?;
     let inst_dir = instance::sandbox_instance_dir(dir);
     // A reset or an exercise never hands a page over: it must not run while
     // the sandbox is open elsewhere.
-    match instance::claim(&inst_dir, route.filter(|_| !reset))
+    match instance::claim(&inst_dir, request.filter(|_| !reset))
         .map_err(|e| format!("sandbox: {e}"))?
     {
         Claim::Owner(owner) => {
@@ -44,8 +44,10 @@ pub fn sandbox(dir: &Path, reset: bool, route: Option<Route>) -> Result<Launched
 }
 
 /// Real mode for an already-resolved root.
-pub fn real(root: DataRoot, route: Route) -> Result<Launched, String> {
-    match instance::claim(&instance::instance_dir(&root), Some(route)).map_err(|e| e.to_string())? {
+pub fn real(root: DataRoot, request: Request) -> Result<Launched, String> {
+    match instance::claim(&instance::instance_dir(&root), Some(request))
+        .map_err(|e| e.to_string())?
+    {
         Claim::Owner(owner) => Ok(Launched::Window(Box::new(root), owner)),
         Claim::HandedOff => Ok(Launched::HandedOff),
         Claim::Busy => Err("LocalFlow is already open.".into()),
@@ -55,6 +57,7 @@ pub fn real(root: DataRoot, route: Route) -> Result<Launched, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controllers::instance::Route;
     use crate::page::Page;
 
     fn window(l: Launched) -> (DataRoot, Instance) {
@@ -68,11 +71,12 @@ mod tests {
     fn reset_is_refused_while_the_sandbox_is_open_and_keeps_its_lock_dir() {
         let base = tempfile::tempdir().unwrap();
         let dir = base.path().join("sb");
-        let (root, owner) = window(sandbox(&dir, false, Some(Route::Page(Page::Home))).unwrap());
+        let (root, owner) =
+            window(sandbox(&dir, false, Some(Route::Page(Page::Home).into())).unwrap());
         lf_core::dictionary::DictionaryStore::new(Some(root.dictionary_path.clone()))
             .add_word("KeepMe")
             .unwrap();
-        let err = sandbox(&dir, true, Some(Route::Page(Page::Home)))
+        let err = sandbox(&dir, true, Some(Route::Page(Page::Home).into()))
             .err()
             .unwrap();
         assert!(err.contains("open in another LocalFlow window"), "{err}");
@@ -86,14 +90,14 @@ mod tests {
 
         // A normal second launch hands over.
         assert!(matches!(
-            sandbox(&dir, false, Some(Route::Page(Page::Models))).unwrap(),
+            sandbox(&dir, false, Some(Route::Page(Page::Models).into())).unwrap(),
             Launched::HandedOff
         ));
-        assert_eq!(owner.take_request(), Some(Route::Page(Page::Models)));
+        assert_eq!(owner.take_request(), Some(Route::Page(Page::Models).into()));
         drop(owner);
 
         // With the window closed the reset runs and keeps the instance dir.
-        let (root, _owner) = window(sandbox(&dir, true, Some(Route::Setup)).unwrap());
+        let (root, _owner) = window(sandbox(&dir, true, Some(Route::Setup.into())).unwrap());
         assert!(dir.join(instance::SANDBOX_DIR).is_dir());
         let words =
             lf_core::dictionary::DictionaryStore::new(Some(root.dictionary_path.clone())).words();
@@ -104,7 +108,8 @@ mod tests {
     fn exercise_is_refused_while_the_sandbox_is_open_and_hands_nothing_over() {
         let base = tempfile::tempdir().unwrap();
         let dir = base.path().join("sb");
-        let (_root, owner) = window(sandbox(&dir, false, Some(Route::Page(Page::Home))).unwrap());
+        let (_root, owner) =
+            window(sandbox(&dir, false, Some(Route::Page(Page::Home).into())).unwrap());
         let err = sandbox(&dir, false, None).err().unwrap();
         assert!(err.contains("open in another LocalFlow window"), "{err}");
         assert!(err.contains("--sandbox-exercise"), "{err}");
@@ -124,8 +129,8 @@ mod tests {
     fn foreign_directories_are_refused_before_any_lock_file_is_created() {
         let base = tempfile::tempdir().unwrap();
         std::fs::write(base.path().join("precious.txt"), "x").unwrap();
-        assert!(sandbox(base.path(), false, Some(Route::Page(Page::Home))).is_err());
-        assert!(sandbox(base.path(), true, Some(Route::Page(Page::Home))).is_err());
+        assert!(sandbox(base.path(), false, Some(Route::Page(Page::Home).into())).is_err());
+        assert!(sandbox(base.path(), true, Some(Route::Page(Page::Home).into())).is_err());
         assert!(!base.path().join(instance::SANDBOX_DIR).exists());
         assert!(base.path().join("precious.txt").exists());
     }
@@ -140,18 +145,19 @@ mod tests {
             panic!()
         };
         let a = base.path().join("a");
-        let (_a_root, a_owner) = window(sandbox(&a, false, Some(Route::Page(Page::Home))).unwrap());
+        let (_a_root, a_owner) =
+            window(sandbox(&a, false, Some(Route::Page(Page::Home).into())).unwrap());
         for target in [fake_real.clone(), a.join(instance::SANDBOX_DIR)] {
             let name = target.file_name().unwrap().to_string_lossy().into_owned();
             let evil = base.path().join(format!("evil-{name}"));
             std::fs::create_dir_all(&evil).unwrap();
             std::os::unix::fs::symlink(&target, evil.join(instance::SANDBOX_DIR)).unwrap();
-            let err = sandbox(&evil, false, Some(Route::Page(Page::Models)))
+            let err = sandbox(&evil, false, Some(Route::Page(Page::Models).into()))
                 .err()
                 .unwrap();
             assert!(err.contains("symbolic link"), "{err}");
             assert!(
-                sandbox(&evil, true, Some(Route::Setup)).is_err(),
+                sandbox(&evil, true, Some(Route::Setup.into())).is_err(),
                 "reset refused too"
             );
         }
@@ -169,16 +175,28 @@ mod tests {
             b.join(instance::SANDBOX_DIR).join(instance::LOCK_NAME),
         )
         .unwrap();
-        assert!(sandbox(&b, false, Some(Route::Page(Page::Home))).is_err());
+        assert!(sandbox(&b, false, Some(Route::Page(Page::Home).into())).is_err());
         assert_eq!(real_owner.take_request(), None);
     }
 
     #[test]
     fn separate_sandboxes_are_independent_windows() {
         let base = tempfile::tempdir().unwrap();
-        let (_a_root, _a) =
-            window(sandbox(&base.path().join("a"), false, Some(Route::Page(Page::Home))).unwrap());
-        let (_b_root, _b) =
-            window(sandbox(&base.path().join("b"), false, Some(Route::Page(Page::Home))).unwrap());
+        let (_a_root, _a) = window(
+            sandbox(
+                &base.path().join("a"),
+                false,
+                Some(Route::Page(Page::Home).into()),
+            )
+            .unwrap(),
+        );
+        let (_b_root, _b) = window(
+            sandbox(
+                &base.path().join("b"),
+                false,
+                Some(Route::Page(Page::Home).into()),
+            )
+            .unwrap(),
+        );
     }
 }
