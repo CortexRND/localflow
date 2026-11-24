@@ -362,8 +362,8 @@ class HubWindow:
         tk.Label(
             self.body, text="Recent dictations", bg=self.tokens["paper"],
             fg=self.tokens["ink"], font=(self.font_family, 15, "bold"),
-        ).pack(anchor="w", pady=(24, 10))
-        rows = self.history.recent(limit=4)
+        ).pack(anchor="w", pady=(16 if self.speed_card else 24, 10))
+        rows = self.history.recent(limit=2 if self.speed_card else 4)
         if not rows:
             self._empty_state(
                 self.body, "No dictations yet",
