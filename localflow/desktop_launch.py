@@ -264,13 +264,16 @@ def probe(exe: Path, timeout: float | None = None) -> bool:
 def set_up() -> bool:
     """The active config file has the setup marker (`main_app.is_configured`).
 
-    The legacy flat file alone doesn't count: `lf-desktop` ignores it and
-    would open its own first-run wizard.
+    Only the active config is read: an unmigrated legacy flat file stays on the
+    legacy window (which migrates it) and counts from the next launch.
     """
     from localflow.config import config_path
     from localflow.main_app import is_configured
 
-    return config_path().exists() and is_configured()
+    try:
+        return config_path().exists() and is_configured()
+    except OSError:  # e.g. an untraversable config directory
+        return False
 
 
 def desktop_argv(exe: Path, *, page: str | None = None, setup: bool = False) -> list[str]:

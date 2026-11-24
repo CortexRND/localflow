@@ -185,7 +185,7 @@ def _gpui_env(desktop, **extra):
     return {"LOCALFLOW_DESKTOP_BIN": str(desktop.path), **extra}
 
 
-SET_UP = "[setup]\nversion = 1\n"
+SET_UP = "config_version = 2\n\n[setup]\nversion = 1\n"
 
 
 @pytest.fixture
@@ -561,7 +561,7 @@ def test_hub_routes_never_open_the_preview_wizard_before_setup(
     if state == "empty":
         active_config.write_text("")
     elif state == "legacy-flat-file-only":
-        (home / ".localflow.toml").write_text('model_size = "small"\n')  # lf-desktop ignores it
+        (home / ".localflow.toml").write_text('model_size = "small"\n')  # not migrated yet
     elif state == "setup-0":
         active_config.write_text("[setup]\nversion = 0\n")
     elif state == "malformed":
@@ -575,8 +575,25 @@ def test_hub_routes_never_open_the_preview_wizard_before_setup(
 
 
 @posix_only
+def test_unreadable_config_location_is_not_set_up(fake, legacy, monkeypatch, tmp_path):
+    from localflow import config
+
+    class Untraversable(type(tmp_path)):
+        def exists(self, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(config, "config_path", lambda: Untraversable(tmp_path / "locked" / "config.toml"))
+    desktop = fake()
+    result = _invoke(["hub", "--gpui"], env=_gpui_env(desktop))
+    assert result.exit_code == 0, result.output
+    assert desktop.argvs() == [["--help"]]
+    assert result.output == desktop_launch.NOTICE_NOT_SET_UP + "\n"
+    assert legacy.calls == [_hub_legacy()]
+
+
+@posix_only
 @pytest.mark.parametrize(("args", "extra", "_expected", "child_args"), HUB_ROUTES)
-@pytest.mark.parametrize("marker", [SET_UP, '[stt]\nmodel = "base"\n'])
+@pytest.mark.parametrize("marker", [SET_UP, 'config_version = 2\n\n[stt]\nmodel = "base"\n'])
 def test_hub_routes_open_the_preview_once_set_up(
         args, extra, _expected, child_args, marker, fake, legacy, active_config):
     active_config.write_text(marker)
