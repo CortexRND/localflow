@@ -310,8 +310,6 @@ def crash(exc):
     text = "".join(report.format())
     return text if report.stack else "Traceback (most recent call last):\n" + text
 
-if sys.version_info < (3, 11):
-    sys.exit(1)
 sys.stdout.write("lf-stt-probe:")
 sys.stdout.flush()
 mode, selected = sys.argv[1:]
@@ -323,7 +321,12 @@ entries = {}
 if mode in ("list", "use"):
     builtins = ("faster-whisper", "mlx-whisper", "parakeet")
     try:
-        for entry in importlib.metadata.entry_points(group="localflow.stt_providers"):
+        group = importlib.metadata.entry_points()
+        if hasattr(group, "select"):
+            group = group.select(group="localflow.stt_providers")
+        else:
+            group = group.get("localflow.stt_providers", ())
+        for entry in group:
             if entry.name not in builtins:
                 entries.setdefault(entry.name, entry)
     except Exception as exc:
@@ -368,9 +371,8 @@ fn probe_python(mode: &str, provider: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `None` when the interpreter could not start the probe or is older than
-/// LocalFlow supports. Any later failure is that interpreter's answer, like
-/// Python's crash.
+/// `None` when the interpreter could not start the probe (spawn or imports).
+/// Any later failure is that interpreter's answer, like Python's crash.
 fn probe_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Option<Value> {
     let stdout = stdout.strip_prefix(b"lf-stt-probe:")?;
     if code == Some(0) {
