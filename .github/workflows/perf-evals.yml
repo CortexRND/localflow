@@ -1,7 +1,13 @@
 name: Perf evals
 
-# Smoke tier of docs/plans/PLAN-perf-evals.md §7: same-runner A/B of the
-# merge-base against the PR, one sticky PR comment, artifacts + step summary.
+# Tiers of docs/plans/PLAN-perf-evals.md §7-§8:
+#   smoke   (PRs, dispatch tier=smoke): same-runner A/B of the merge-base
+#           against the PR, one sticky PR comment, artifacts + step summary.
+#   nightly (schedule on main, dispatch tier=nightly): full matrix on
+#           ubuntu/macos/windows; publish-trend appends the results to the
+#           orphan perf-data branch, renders trend.md and opens/updates/closes
+#           perf-regression issues for regressions persisting 2 runs.
+#   deep    (dispatch tier=deep): large models and 10k recall on macOS.
 # rust-bench.yml and the rust.yml memory job keep running alongside this.
 
 on:
@@ -11,10 +17,18 @@ on:
       - 'rust/**'
       - 'evals/**'
       - '.github/workflows/perf-evals.yml'
+  schedule:
+    - cron: '0 7 * * *' # nightly, on the default branch (main)
   workflow_dispatch:
     inputs:
+      tier:
+        description: 'Tier to run (smoke, nightly, deep)'
+        required: false
+        type: choice
+        options: [smoke, nightly, deep]
+        default: smoke
       suites:
-        description: 'Comma-separated suites to run'
+        description: 'Comma-separated suites to run (smoke only; nightly/deep use their tier matrix)'
         required: false
         default: 'stt'
       runtimes:
@@ -32,6 +46,7 @@ concurrency:
 
 jobs:
   smoke:
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -318,3 +333,379 @@ jobs:
           print(f"perf smoke status: {status.get('status')} (exit_code {status.get('exit_code')})")
           sys.exit(1 if status.get("exit_code", 1) != 0 else 0)
           PY
+
+  # ------------------------------------------------------------------------
+  # Nightly tier: full suite matrix per OS (windows: stt + dictation, §7).
+  # ------------------------------------------------------------------------
+  nightly:
+    name: nightly (${{ matrix.os }})
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'nightly')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suites: stt,dictation,recall,footprint,meetings
+          - os: macos-latest
+            suites: stt,dictation,recall,footprint
+          - os: windows-latest
+            suites: stt,dictation
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      HF_HUB_CACHE: ${{ github.workspace }}/.hf-cache/hub
+      LF_PERF_CORPUS_CACHE: ${{ github.workspace }}/.perf-cache/corpus
+      LF_PERF_CACHE_DIR: ${{ github.workspace }}/.perf-cache/corpus
+      PYNPUT_BACKEND: dummy
+      PERF_SUITES: ${{ matrix.suites }}
+      PERF_RUNNER: ${{ matrix.os }}
+      # Untrusted inputs go through env, never straight into a script.
+      PERF_RUNTIMES_INPUT: ${{ inputs.runtimes || 'python,rust' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg pkg-config libasound2-dev cmake libclang-dev libportaudio2
+
+      - name: Ensure ffmpeg
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            case "$RUNNER_OS" in
+              macOS) brew install ffmpeg ;;
+              Windows) choco install ffmpeg -y --no-progress ;;
+            esac
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: perf-nightly
+
+      - name: Cache HF models
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: perf-hf-v1-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Cache perf corpus
+        uses: actions/cache@v4
+        with:
+          path: .perf-cache
+          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}
+
+      - name: Select runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtimes=""
+          for rt in $(printf '%s' "$PERF_RUNTIMES_INPUT" | tr ',' ' '); do
+            case "$rt" in
+              python|rust) runtimes="$runtimes $rt" ;;
+              *) echo "::error::invalid runtime: $rt (python, rust)"; exit 2 ;;
+            esac
+          done
+          [ -n "$runtimes" ] || { echo "::error::no runtimes selected"; exit 2; }
+          echo "PERF_RUNTIMES=${runtimes# }" >> "$GITHUB_ENV"
+          mkdir -p perf-results
+
+      - name: Install Python dependencies
+        run: pip install -e .
+
+      - name: Restore native runtimes pruned by Rust cache
+        shell: bash
+        run: |
+          if [ -d rust/target/sherpa-onnx-prebuilt ]; then
+            find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
+          # Cached whisper-rs-sys CMake output can pin an older runner's MSVC path.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cargo clean --manifest-path rust/Cargo.toml -p whisper-rs-sys --release
+          fi
+
+      # A failed build leaves that suite's Rust cases not_exercised instead of
+      # aborting the other suites on this OS.
+      - name: Build Rust benches
+        if: contains(env.PERF_RUNTIMES, 'rust')
+        shell: bash
+        run: |
+          set -uo pipefail
+          has() { printf ',%s,' "$PERF_SUITES" | grep -q ",$1,"; }
+          build() { cargo build --manifest-path rust/Cargo.toml --locked --release "$@" || echo "::warning::cargo build $* failed"; }
+          if has stt; then build -p lf-stt --example stt_bench; fi
+          if has dictation; then build -p lf --example parity; fi
+          if has recall; then build -p lf-ask --example bench_search; fi
+          if has footprint; then
+            # idle.rs reads /proc: Linux only.
+            if [ "$RUNNER_OS" = "Linux" ]; then build -p lf-runtime --example idle; fi
+            build -p lf --bin lf-rs
+          fi
+          exit 0
+
+      - name: Run nightly suites
+        shell: bash
+        run: |
+          set -uo pipefail
+          for rt in $PERF_RUNTIMES; do
+            python -m evals.perf run --tier nightly --runtime "$rt" --suite "$PERF_SUITES" \
+              --runner-label "$PERF_RUNNER" --output "perf-results/nightly-$PERF_RUNNER-$rt.json" \
+              || echo "::warning::nightly $rt run exited $?"
+          done
+
+      - name: Step summary
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          args=()
+          for f in perf-results/nightly-*.json; do
+            if [ -f "$f" ]; then args+=(--append "$f"); fi
+          done
+          if [ ${#args[@]} -eq 0 ]; then
+            echo "## ❌ Perf nightly ($PERF_RUNNER): no results" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python -m evals.perf trend --store .perf-summary-store "${args[@]}" \
+            --output perf-results/summary.md
+          { echo "## Perf nightly ($PERF_RUNNER)"; head -c 900000 perf-results/summary.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-nightly-${{ matrix.os }}
+          path: perf-results/
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------------
+  # Trend store on the orphan perf-data branch: the only job that writes.
+  # ------------------------------------------------------------------------
+  publish-trend:
+    needs: nightly
+    if: always() && (github.event_name == 'schedule' || inputs.tier == 'nightly') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # push to the orphan perf-data branch
+      issues: write # open/update/close perf-regression issues
+    concurrency:
+      group: perf-data-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      # The trend/regression tooling is stdlib-only: no pip install needed.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download nightly results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: perf-nightly-*
+          path: nightly-results
+
+      - name: Check out perf-data branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin perf-data >/dev/null 2>&1; then
+            git fetch --depth=1 origin perf-data:refs/remotes/origin/perf-data
+            git worktree add -B perf-data perf-data-store origin/perf-data
+          else
+            echo "perf-data does not exist yet; creating it as an orphan branch"
+            git worktree add --detach perf-data-store HEAD
+            cd perf-data-store
+            git checkout --orphan perf-data
+            git rm -rfq --ignore-unmatch .
+            git clean -fdxq
+            printf '%s\n' '# perf-data' '' \
+              'Nightly perf trend store written by .github/workflows/perf-evals.yml (publish-trend).' \
+              'runs/: lf-perf-result/v1 files; index.jsonl: one line per (run, case); trend.md: rendered trend.' \
+              > README.md
+          fi
+
+      - name: Append results and render trend.md
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p perf-results
+          shopt -s nullglob
+          files=(nightly-results/*/nightly-*.json)
+          if [ ${#files[@]} -eq 0 ]; then echo "::warning::no nightly result files downloaded"; fi
+          for f in "${files[@]}"; do
+            python -m evals.perf trend-append --store perf-data-store --result "$f" \
+              || echo "::warning::could not append $f"
+          done
+          python -m evals.perf trend --index perf-data-store/index.jsonl --tier nightly \
+            --output perf-data-store/trend.md
+          head -c 900000 perf-data-store/trend.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push perf-data
+        shell: bash
+        working-directory: perf-data-store
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "perf-data unchanged"
+            exit 0
+          fi
+          git commit -q -m "perf-data: nightly ${GITHUB_SHA::12} (run ${GITHUB_RUN_ID})"
+          git push origin HEAD:refs/heads/perf-data
+
+      - name: Detect consecutive regressions
+        shell: bash
+        run: |
+          python -m evals.perf regressions --index perf-data-store/index.jsonl \
+            --policy evals/perf/policy.toml --consecutive 2 --output perf-results/regressions.json
+
+      - name: Sync perf-regression issues
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python -m evals.perf.regression_issues --report perf-results/regressions.json \
+            --repo "$GITHUB_REPOSITORY" --output perf-results/issue-actions.json
+
+      - name: Upload trend
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-trend
+          path: |
+            perf-results/
+            perf-data-store/trend.md
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------------
+  # Deep tier (manual only): large models, 10k recall on macOS.
+  # ------------------------------------------------------------------------
+  deep:
+    if: github.event_name == 'workflow_dispatch' && inputs.tier == 'deep'
+    runs-on: macos-latest
+    timeout-minutes: 240
+    env:
+      CARGO_TERM_COLOR: always
+      HF_HUB_CACHE: ${{ github.workspace }}/.hf-cache/hub
+      LF_PERF_CORPUS_CACHE: ${{ github.workspace }}/.perf-cache/corpus
+      LF_PERF_CACHE_DIR: ${{ github.workspace }}/.perf-cache/corpus
+      PYNPUT_BACKEND: dummy
+      PERF_SUITES: stt,dictation,recall,footprint
+      PERF_RUNNER: macos-latest
+      # Untrusted inputs go through env, never straight into a script.
+      PERF_RUNTIMES_INPUT: ${{ inputs.runtimes || 'python,rust' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure ffmpeg
+        shell: bash
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: perf-deep
+
+      - name: Cache HF models
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: perf-hf-deep-v1-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Cache perf corpus
+        uses: actions/cache@v4
+        with:
+          path: .perf-cache
+          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}
+
+      - name: Select runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtimes=""
+          for rt in $(printf '%s' "$PERF_RUNTIMES_INPUT" | tr ',' ' '); do
+            case "$rt" in
+              python|rust) runtimes="$runtimes $rt" ;;
+              *) echo "::error::invalid runtime: $rt (python, rust)"; exit 2 ;;
+            esac
+          done
+          [ -n "$runtimes" ] || { echo "::error::no runtimes selected"; exit 2; }
+          echo "PERF_RUNTIMES=${runtimes# }" >> "$GITHUB_ENV"
+          mkdir -p perf-results
+
+      - name: Install Python dependencies
+        run: pip install -e .
+
+      - name: Restore native runtimes pruned by Rust cache
+        shell: bash
+        run: |
+          if [ -d rust/target/sherpa-onnx-prebuilt ]; then
+            find rust/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          fi
+          cargo clean --manifest-path rust/Cargo.toml -p sherpa-onnx-sys --release
+
+      - name: Build Rust benches
+        if: contains(env.PERF_RUNTIMES, 'rust')
+        shell: bash
+        run: |
+          set -uo pipefail
+          build() { cargo build --manifest-path rust/Cargo.toml --locked --release "$@" || echo "::warning::cargo build $* failed"; }
+          build -p lf-stt --example stt_bench
+          build -p lf --example parity
+          build -p lf-ask --example bench_search
+          build -p lf --bin lf-rs
+          exit 0
+
+      - name: Run deep suites
+        shell: bash
+        run: |
+          set -uo pipefail
+          for rt in $PERF_RUNTIMES; do
+            python -m evals.perf run --tier deep --runtime "$rt" --suite "$PERF_SUITES" \
+              --runner-label "$PERF_RUNNER" --output "perf-results/deep-$PERF_RUNNER-$rt.json" \
+              || echo "::warning::deep $rt run exited $?"
+          done
+
+      - name: Step summary
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          args=()
+          for f in perf-results/deep-*.json; do
+            if [ -f "$f" ]; then args+=(--append "$f"); fi
+          done
+          if [ ${#args[@]} -eq 0 ]; then
+            echo "## ❌ Perf deep ($PERF_RUNNER): no results" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python -m evals.perf trend --store .perf-summary-store "${args[@]}" \
+            --output perf-results/summary.md
+          { echo "## Perf deep ($PERF_RUNNER)"; head -c 900000 perf-results/summary.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-deep-${{ runner.os }}-${{ runner.arch }}
+          path: perf-results/
+          if-no-files-found: warn
