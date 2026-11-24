@@ -42,7 +42,8 @@ fn replace_with(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()
 /// First pause before retrying a replace that a holder of `path` blocked.
 #[cfg(windows)]
 const REPLACE_FIRST_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
-/// Total time a blocked replace waits before giving up.
+/// Wall-clock bound on retrying a blocked replace (it runs under the
+/// reporter lock).
 #[cfg(windows)]
 const REPLACE_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -54,17 +55,16 @@ const REPLACE_BUDGET: std::time::Duration = std::time::Duration::from_millis(250
 fn replace_with(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
     let (file, staged) = tmp.keep().map_err(|e| e.error)?;
     drop(file);
-    let mut waited = std::time::Duration::ZERO;
+    let deadline = std::time::Instant::now() + REPLACE_BUDGET;
     let mut pause = REPLACE_FIRST_PAUSE;
     let result = loop {
         match std::fs::rename(&staged, path) {
-            Err(error)
-                if error.kind() == std::io::ErrorKind::PermissionDenied
-                    && waited < REPLACE_BUDGET =>
-            {
-                let step = pause.min(REPLACE_BUDGET - waited);
-                std::thread::sleep(step);
-                waited += step;
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break Err(error);
+                }
+                std::thread::sleep(pause.min(deadline - now));
                 pause *= 2;
             }
             other => break other,
@@ -647,12 +647,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("status.json");
         write_atomic(&path, "old").unwrap();
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".status.json.")
+            .tempfile_in(dir.path())
+            .unwrap();
+        tmp.write_all(b"new").unwrap();
+        tmp.as_file().sync_all().unwrap();
         let holder = open_without_delete_sharing(&path);
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            drop(holder);
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = std::thread::spawn({
+            let released = released.clone();
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                released.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(holder);
+            }
         });
-        write_atomic(&path, "new").unwrap();
+        replace_with(tmp, &path).unwrap();
+        assert!(
+            released.load(std::sync::atomic::Ordering::SeqCst),
+            "the replace finished only after the holder was released"
+        );
         release.join().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         assert_eq!(dir_names(dir.path()), vec!["status.json".to_string()]);
