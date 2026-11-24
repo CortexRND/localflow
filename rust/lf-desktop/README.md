@@ -842,8 +842,10 @@ These are tracked in `docs/gpui-migration.md`:
 
 - GPUI 0.2.2 doesn't publish an accessibility tree, so screen readers can't read
   the app. Keyboard and visual focus work.
-- The scope-2 UI was reviewed interactively on Linux and Windows for gate 1
-  (see [`docs/gpui-migration.md`](../../docs/gpui-migration.md)), not on macOS.
+- The scope-2 UI was reviewed interactively for gate 1 (see
+  [`docs/gpui-migration.md`](../../docs/gpui-migration.md)): all of it on Linux
+  with the `v0.2.3` package, and setup, model storage and History Retry on
+  Windows with pre-release builds. None of it was reviewed on macOS.
   macOS runtime behaviour (tap readiness, engine, Metal whisper) is
   type-checked in CI only.
 - The engine runs only on LocalFlow's own data folders and only in builds made
