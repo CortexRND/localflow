@@ -90,3 +90,71 @@ def test_capture_requires_unit_gpui_scale(gates):
             screenshots.require_unit_scale({"GPUI_X11_SCALE_FACTOR": bad})
     with pytest.raises(RuntimeError):
         screenshots.require_unit_scale({})
+
+
+def test_unknown_page_notice_is_detected_in_stderr(gates):
+    _, screenshots = gates
+    log = (
+        "[2026-11-24T10:00:00Z INFO  blade_graphics::hal::init] Adapter: llvmpipe\n"
+        "lf-desktop: There's no page called “nowhere”, so Home is shown.\n"
+        "[2026-11-24T10:00:01Z INFO  blade_graphics::hal::surface] Surface 1280x850\n"
+    )
+    assert screenshots.rejected_page(log) == "nowhere"
+    ordinary = "[2026-11-24T10:00:00Z INFO  blade_graphics::hal::init] Adapter: llvmpipe\n"
+    assert screenshots.rejected_page(ordinary) is None
+    assert screenshots.rejected_page("") is None
+    quoted = "note: lf-desktop: There's no page called “nowhere”, so Home is shown.\n"
+    assert screenshots.rejected_page(quoted) is None
+    unprefixed = "There's no page called “nowhere”, so Home is shown.\n"
+    assert screenshots.rejected_page(unprefixed) is None
+
+
+def capture_digests(screenshots):
+    return {
+        f"{page}-{theme}-{width}x{height}.png": f"{page}/{theme}/{width}"
+        for page in screenshots.PAGES
+        for theme in ("light", "dark")
+        for width, height in screenshots.SIZES
+    }
+
+
+def test_distinct_captures_have_no_duplicates(gates):
+    _, screenshots = gates
+    digests = capture_digests(screenshots)
+    assert len(digests) == 44
+    assert screenshots.duplicate_captures(digests) == []
+
+
+def test_page_rendering_home_is_a_duplicate(gates):
+    _, screenshots = gates
+    digests = capture_digests(screenshots)
+    digests["ask-dark-960x640.png"] = digests["home-dark-960x640.png"]
+    assert screenshots.duplicate_captures(digests) == [
+        ("ask-dark-960x640.png", "home-dark-960x640.png"),
+    ]
+
+
+def test_unswitched_theme_is_a_duplicate_and_groups_are_sorted(gates):
+    _, screenshots = gates
+    digests = capture_digests(screenshots)
+    digests["style-dark-1280x850.png"] = digests["style-light-1280x850.png"]
+    digests["setup-light-960x640.png"] = "same"
+    digests["models-light-960x640.png"] = "same"
+    digests["meetings-dark-960x640.png"] = "same"
+    assert screenshots.duplicate_captures(digests) == [
+        ("meetings-dark-960x640.png", "models-light-960x640.png", "setup-light-960x640.png"),
+        ("style-dark-1280x850.png", "style-light-1280x850.png"),
+    ]
+
+
+def test_manifest_parses_names_in_sorted_order(gates):
+    _, screenshots = gates
+    digests = {"setup-dark-960x640.png": "b", "home-light-1280x850.png": "a"}
+    assert screenshots.manifest(digests) == {"captures": [
+        {"file": "home-light-1280x850.png", "page": "home", "theme": "light",
+         "width": 1280, "height": 850, "signature": "a"},
+        {"file": "setup-dark-960x640.png", "page": "setup", "theme": "dark",
+         "width": 960, "height": 640, "signature": "b"},
+    ]}
+    names = [entry["file"] for entry in screenshots.manifest(capture_digests(screenshots))["captures"]]
+    assert names == sorted(names) and len(names) == 44

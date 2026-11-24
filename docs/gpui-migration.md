@@ -180,7 +180,10 @@ compare them only within the same run. Other keyring backends are not supported 
 this script. Gate 8 writes 44 PNGs (10 pages and Setup × two themes × two sizes).
 It launches `lf-desktop` with `GPUI_X11_SCALE_FACTOR=1` (which GPUI reads before
 `Xft.dpi` and RandR) and fails if the process did not get it, so host HiDPI
-settings cannot change the captured layout.
+settings cannot change the captured layout. It also fails if `lf-desktop`
+reports a page name it does not know (it would show Home instead) or if two
+captures have identical pixels, and it writes `manifest.json` with each PNG's
+page, theme, size and ImageMagick pixel signature.
 Review the PNGs for legibility and layout at both sizes; capture success alone
 does not complete the review.
 
