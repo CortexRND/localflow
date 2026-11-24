@@ -2096,6 +2096,22 @@ mod tests {
             assert_eq!(NO_NATIVE_SIZE, lf_stt::engines::UNSUPPORTED_WHISPER_SIZE);
         }
 
+        /// The real cache-only factory, not an injected error: it refuses a
+        /// faster-whisper-only size before looking for weights.
+        #[cfg(feature = "runtime")]
+        #[test]
+        fn the_native_backend_reports_a_python_only_size_as_no_native_size() {
+            let native = NativeRetry {
+                secrets: Arc::new(crate::data::MemorySecrets::default()),
+                python: PythonRetry::system(),
+            };
+            let mut config = config();
+            config.set_field("model_size", serde_json::json!("distil-large-v3"));
+            let why = native.open(&config).err().expect("no native distil model");
+            assert!(why.contains(NO_NATIVE_SIZE), "{why}");
+            assert!(!why.contains(NOT_DOWNLOADED), "{why}");
+        }
+
         #[test]
         fn a_size_only_python_has_retries_with_the_python_app() {
             let _serial = serial();
