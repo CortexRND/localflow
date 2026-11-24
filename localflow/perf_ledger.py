@@ -305,7 +305,8 @@ class PerfLedger:
         self._rotate_if_full()
         data = line.encode("utf-8")
         # One O_APPEND write per line, so concurrent writers never interleave.
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        fd = os.open(self.path, flags, 0o600)
         try:
             if os.name != "nt":
                 try:
