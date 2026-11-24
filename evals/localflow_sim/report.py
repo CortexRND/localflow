@@ -54,8 +54,9 @@ def table(headers: list[str], rows: list[list]) -> str:
 # ------------------------------------------------------------------ gates ---
 
 def real_failures(gate_data: dict, key: str) -> list[tuple[str, str]]:
-    """(repeat, failed item) pairs that are product failures, not unexercised cells."""
+    """(repeat, failed item) pairs in failing repeats that are product failures, not unexercised cells."""
     return [(repeat, item) for repeat, per in gate_data["per_repeat"].items()
+            if per[key]["pass"] is False
             for item in per[key]["fail"] if NOT_EXERCISED_TAG not in item]
 
 
