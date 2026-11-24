@@ -106,12 +106,14 @@ fn main() -> ExitCode {
         eprintln!("lf-desktop: {n}");
     }
     // First run (no setup marker, no explicit page) opens the wizard too,
-    // with the same policy as the Hub (`hub_route::plan_initial_route`).
+    // with the same policy as the Hub (`hub_route::plan_initial_route`),
+    // except an unknown `--page`: it shows Home with its notice.
     let configured = lf_desktop::controllers::setup::configured(&services.root);
-    let first_run = matches!(
-        lf_ui::hub_route::plan_initial_route(configured, args.page.map(|p| p.route())),
-        Ok(lf_ui::hub_route::InitialRoute::Setup { .. })
-    );
+    let first_run = !request.is_unknown_home()
+        && matches!(
+            lf_ui::hub_route::plan_initial_route(configured, args.page.map(|p| p.route())),
+            Ok(lf_ui::hub_route::InitialRoute::Setup { .. })
+        );
     let status = app::run(Launch {
         services,
         page: args.page.unwrap_or(Page::Home),

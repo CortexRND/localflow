@@ -452,7 +452,8 @@ impl Shell {
 
     /// Requests from a second launch: raise, then go there (queued while the
     /// overlay or a dialog is open). A routed Setup shows no unknown-page
-    /// notice: it opens no page, so Home isn't shown.
+    /// notice: it opens no page, so Home isn't shown. An unknown page's Home
+    /// fallback closes the overlay instead (see [`Shell::apply_queued`]).
     fn poll_instance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.stopping {
             // Leave the request in place (TTL-bounded): it is routed if the
@@ -467,14 +468,24 @@ impl Shell {
             Route::Setup if self.confirm.is_none() => self.show_setup(cx),
             _ if self.setup_visible || self.confirm.is_some() => {
                 self.queued = Some(request);
+                self.apply_queued(cx);
             }
             Route::Page(page) => self.open_routed(page, request.notice(), cx),
             Route::Setup => self.queued = Some(request),
         }
     }
 
+    /// Route the newest queued request once nothing covers the page. Behind
+    /// setup only an unknown page's Home fallback goes ahead: it hides the
+    /// overlay (draft kept, audio released), which routes it.
     fn apply_queued(&mut self, cx: &mut Context<Self>) {
-        if self.setup_visible || self.confirm.is_some() {
+        if self.confirm.is_some() {
+            return;
+        }
+        if self.setup_visible {
+            if !self.stopping && self.queued.as_ref().is_some_and(Request::is_unknown_home) {
+                self.hide_setup(cx);
+            }
             return;
         }
         let Some(request) = self.queued.take() else {
@@ -2381,14 +2392,48 @@ mod focus_tests {
         (shell, cx, dir)
     }
 
+    fn setup_visible(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, _| shell.setup_visible)
+    }
+
     #[gpui::test]
-    fn a_queued_unknown_page_is_noticed_only_once_home_opens(cx: &mut TestAppContext) {
+    fn an_unknown_page_over_setup_shows_home_and_replaces_a_queued_page(cx: &mut TestAppContext) {
         let (shell, cx, dir) = open(Page::History, cx);
         set_setup(&shell, true, cx);
-        hand_off(&shell, &dir, unknown(Route::Page(Page::Home)), cx);
+        // A known page still waits behind the overlay.
+        hand_off(&shell, &dir, Route::Page(Page::Models).into(), cx);
+        assert!(setup_visible(&shell, cx));
         assert_eq!(page(&shell, cx), Page::History);
-        assert_eq!(toast(&shell, cx), None, "Home isn't shown yet");
-        set_setup(&shell, false, cx);
+        // The newer unknown page hides setup (draft kept) and goes Home.
+        hand_off(&shell, &dir, unknown(Route::Page(Page::Home)), cx);
+        assert!(!setup_visible(&shell, cx));
+        assert!(shell.read_with(cx, |shell, _| shell.setup_view.is_some()));
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert_eq!(toast(&shell, cx).as_deref(), Some(NOTICE));
+        assert!(shell.read_with(cx, |shell, _| shell.queued.is_none()));
+    }
+
+    #[gpui::test]
+    fn an_unknown_page_over_setup_waits_for_an_open_dialog(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::History, cx);
+        set_setup(&shell, true, cx);
+        shell.update(cx, |shell, cx| {
+            shell.confirm = Some(Confirm {
+                title: "Discard?".into(),
+                body: "Test dialog".into(),
+                verb: "Discard".into(),
+                destructive: true,
+                on_confirm: Rc::new(|_, _| panic!("the dialog was cancelled")),
+            });
+            cx.notify();
+        });
+        hand_off(&shell, &dir, unknown(Route::Page(Page::Home)), cx);
+        assert!(setup_visible(&shell, cx), "the dialog protects setup");
+        assert_eq!(page(&shell, cx), Page::History);
+        assert_eq!(toast(&shell, cx), None);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.close_dialog(false, window, cx)));
+        cx.run_until_parked();
+        assert!(!setup_visible(&shell, cx));
         assert_eq!(page(&shell, cx), Page::Home);
         assert_eq!(toast(&shell, cx).as_deref(), Some(NOTICE));
     }
