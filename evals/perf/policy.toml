@@ -445,6 +445,27 @@ block_factor = 2.0
 on_pr = "warn"
 
 # --------------------------------------------------------------------------
+# Recall suite (evals/perf/suites/recall.py)
+# --------------------------------------------------------------------------
+
+# search_ms (noisy latency) is defined above with the other latency rules.
+
+# Share of queries whose normalized citations equal the other runtime's (or
+# the supplied reference's) on the same seeded corpus. Must be 1.0.
+[metrics.citation_parity]
+class = "exact"
+better = "higher"
+on_pr = "block"
+
+[metrics.peak_rss_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# --------------------------------------------------------------------------
 # Absolute caps, checked on the candidate regardless of baseline.
 # --------------------------------------------------------------------------
 
