@@ -26,7 +26,8 @@ OPTIONS:
                        (refused while that sandbox is open in another window)
     --sandbox-exercise Write once to each sandbox store (Settings, a provider key,
                        Hot Phrases, History, Prompts), print what was written and
-                       exit without a window (only with --sandbox)
+                       exit without a window (only with --sandbox; refused while
+                       that sandbox is open in another window)
     -h, --help         Print this help
     -V, --version      Print the version
 

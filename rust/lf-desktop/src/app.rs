@@ -1977,7 +1977,8 @@ mod focus_tests {
     ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let launched =
-            crate::launch::sandbox(&dir.path().join("sandbox"), false, Route::Page(page)).unwrap();
+            crate::launch::sandbox(&dir.path().join("sandbox"), false, Some(Route::Page(page)))
+                .unwrap();
         let crate::launch::Launched::Window(root, instance) = launched else {
             panic!("expected to own the sandbox window");
         };

@@ -167,7 +167,8 @@ writers to the monitored stores stopped. It adds a word to the **sandbox**
 Dictionary with the keyboard in the window, then runs `lf-desktop --sandbox
 --sandbox-exercise`. That makes one write through the page controllers to each other
 sandbox store (a Settings change, a provider key saved to the in-memory keyring, a Hot
-Phrase, a History delete and a Prompt approval) and reads each one back. The script
+Phrase, a History delete and approving a pending Prompt) and reads each one back. It is
+refused while that sandbox is open in a window. The script
 also checks the file-backed sandbox stores itself, and fails if any write is missing.
 It then checks that the whole real config directory (`config.toml`, `api-token`,
 `launch/` and any other file), `LOCALFLOW_CONFIG` and the legacy config,

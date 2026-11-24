@@ -43,7 +43,11 @@ fn main() -> ExitCode {
     };
     let launched = if args.sandbox {
         let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
-        launch::sandbox(&dir, args.sandbox_reset, route)
+        launch::sandbox(
+            &dir,
+            args.sandbox_reset,
+            (!args.sandbox_exercise).then_some(route),
+        )
     } else {
         match DataRoot::real() {
             Ok(root) => launch::real(root, route),
