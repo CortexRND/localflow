@@ -1309,8 +1309,9 @@ def test_spawn_uses_its_own_session_on_posix_and_process_group_on_windows(monkey
         Popen=lambda argv, **kw: seen.append(kw) or Proc(), DEVNULL=real.DEVNULL,
         TimeoutExpired=real.TimeoutExpired, CREATE_NEW_PROCESS_GROUP=0x200)
     monkeypatch.setattr(desktop_launch, "subprocess", fake_subprocess)
+    environ = desktop_launch.os.environ
     for name in ("posix", "nt"):
-        monkeypatch.setattr(desktop_launch, "os", types.SimpleNamespace(name=name))
+        monkeypatch.setattr(desktop_launch, "os", types.SimpleNamespace(name=name, environ=environ))
         assert desktop_launch.spawn(["lf-desktop"], wait=0) == (True, None)
     assert seen[0]["start_new_session"] is True and "creationflags" not in seen[0]
     assert seen[1]["creationflags"] == 0x200 and "start_new_session" not in seen[1]
