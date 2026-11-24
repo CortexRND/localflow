@@ -2052,7 +2052,7 @@ mod focus_tests {
     }
 
     /// [`open`], after `prepare` adjusts the seeded sandbox data.
-    fn open_with(
+    pub(super) fn open_with(
         page: Page,
         prepare: impl FnOnce(&crate::data::DataRoot),
         cx: &mut TestAppContext,
@@ -2358,5 +2358,248 @@ mod focus_tests {
         cx.run_until_parked();
         assert_eq!(rows(cx).len(), 1);
         assert_eq!(count(cx), one);
+    }
+}
+
+/// History's Retry failure banner, laid out in a headless window: the
+/// message wraps inside the detail column instead of pushing "Try again"
+/// past the window edge.
+#[cfg(test)]
+mod history_layout_tests {
+    use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+
+    use super::focus_tests::open_with;
+    use super::*;
+    use crate::controllers::retry::{RetryError, RetryKey};
+
+    /// A real-world failure: a long sentence with an unspaced Windows path.
+    fn long_error() -> RetryError {
+        RetryError::Unavailable(
+            "The Whisper model file at \
+             C:\\Users\\someone\\AppData\\Local\\LocalFlow\\models\\whisper\\ggml-tiny.bin \
+             couldn't be opened because it is missing, incomplete or was moved while \
+             LocalFlow was running. Download the model again from Models, or pick another \
+             speech model in Settings, then try again."
+                .into(),
+        )
+    }
+
+    /// The failure from the bug report screenshot, verbatim.
+    const REPORTED_ERROR: &str = "the Whisper tiny model isn't downloaded \
+        (ggerganov/whisper.cpp/ggml-tiny.bin), and the 'lf' found isn't a Python LocalFlow \
+        app that can retry. Download a Whisper model in Models & keys or install the Python \
+        LocalFlow app, then try again.";
+
+    /// The short transcript of the row in the bug report screenshot.
+    const SHORT_TEXT: &str = "fixture final before retry";
+
+    /// Adds a retryable dictation that reads [`SHORT_TEXT`].
+    fn add_short_retryable(root: &crate::data::DataRoot) {
+        let history = crate::data::open_history(root).unwrap();
+        let clip = history.write_clip(&[0.1; 16_000], 16_000).unwrap();
+        let mut entry = lf_core::history::NewEntry::new("dictate");
+        entry.raw_text = SHORT_TEXT.into();
+        entry.final_text = SHORT_TEXT.into();
+        entry.duration_s = 1.0;
+        entry.audio_path = Some(clip.to_string_lossy().into());
+        history.add(&entry).unwrap();
+    }
+
+    /// Opens History at `width`×`height` with `error` as the last retry
+    /// failure of a retryable row (the sandbox's failed one), and selects it.
+    fn show_retry_error(
+        width: f32,
+        height: f32,
+        error: RetryError,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        show_retry_error_on(width, height, error, false, cx)
+    }
+
+    /// [`show_retry_error`]; `short` uses a row reading [`SHORT_TEXT`].
+    fn show_retry_error_on(
+        width: f32,
+        height: f32,
+        error: RetryError,
+        short: bool,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        let (shell, cx, dir) = open_with(
+            Page::History,
+            |root| {
+                if short {
+                    add_short_retryable(root)
+                }
+            },
+            cx,
+        );
+        cx.simulate_resize(size(px(width), px(height)));
+        let (entry, jobs) = shell.read_with(cx, |shell, _| {
+            let services = &shell.cx.services;
+            let entry = services
+                .history()
+                .unwrap()
+                .recent(100, None, 0)
+                .unwrap()
+                .into_iter()
+                .find(|e| {
+                    e.kind == "dictate"
+                        && e.audio_path.as_deref().is_some_and(|p| !p.is_empty())
+                        && (!short || e.final_text == SHORT_TEXT)
+                })
+                .expect("the sandbox has a retryable dictation");
+            (entry, services.retry_jobs.clone())
+        });
+        jobs.fail_for_test(RetryKey::of(&entry), error);
+        let history = shell.read_with(cx, |shell, _| match shell.find(Page::History) {
+            Some(View::History(view)) => view.clone(),
+            _ => panic!("History isn't open"),
+        });
+        history.update(cx, |page, cx| page.select_id(entry.id, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        (shell, cx, dir)
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} isn't on screen"))
+    }
+
+    fn assert_inside(inner: Bounds<Pixels>, outer: Bounds<Pixels>, what: &str) {
+        assert!(
+            inner.left() >= outer.left()
+                && inner.top() >= outer.top()
+                && inner.right() <= outer.right()
+                && inner.bottom() <= outer.bottom(),
+            "{what}: {inner:?} isn't inside {outer:?}"
+        );
+    }
+
+    fn viewport(cx: &mut VisualTestContext) -> Bounds<Pixels> {
+        let size = cx.update(|window, _| window.viewport_size());
+        Bounds::new(gpui::point(px(0.), px(0.)), size)
+    }
+
+    /// The wrapped banner and its action stay inside the banner, column and
+    /// window; the actions row below is one row of buttons.
+    fn assert_wraps_inside(cx: &mut VisualTestContext, right_edge: Pixels) {
+        let column = bounds(cx, "history-detail-column");
+        let banner = bounds(cx, "history-retry-banner");
+        let again = bounds(cx, "button:Try again");
+        let window = viewport(cx);
+        assert!(
+            banner.right() <= column.right(),
+            "banner {banner:?} overflows column {column:?}"
+        );
+        assert!(
+            banner.right() <= right_edge,
+            "banner {banner:?} is past the edge"
+        );
+        assert!(banner.size.width <= px(640.), "banner {banner:?} too wide");
+        assert!(
+            banner.size.height > tsize::row(),
+            "the message wraps: {banner:?}"
+        );
+        assert_inside(again, banner, "Try again in the banner");
+        assert_inside(again, window, "Try again in the window");
+        let message = bounds(cx, "banner-message");
+        assert_inside(message, banner, "the message in the banner");
+        assert!(
+            message.right() <= again.left(),
+            "the message {message:?} runs under Try again {again:?}"
+        );
+
+        let actions = bounds(cx, "history-actions");
+        let note = bounds(cx, "history-retry-note");
+        assert!(
+            actions.size.height <= tsize::control_md() + px(0.5),
+            "the actions are one row: {actions:?}"
+        );
+        assert!(
+            (note.top() - actions.bottom() - space::s6()).abs() <= px(0.5),
+            "no gap above the note: actions {actions:?}, note {note:?}"
+        );
+    }
+
+    /// The detail pane is narrower than the column's `max_w` cap.
+    #[gpui::test]
+    fn long_retry_error_wraps_inside_the_detail_pane_wide_uncapped(cx: &mut TestAppContext) {
+        let (_shell, cx, _dir) = show_retry_error(1280., 850., long_error(), cx);
+        assert!(
+            cx.debug_bounds("button:Back to list").is_none(),
+            "wide layout"
+        );
+        assert!(
+            bounds(cx, "history-detail").size.width < px(tsize::READING + 64.),
+            "the column cap is inert"
+        );
+        assert_wraps_inside(cx, px(1280.));
+    }
+
+    /// The bug report: a wide pane (the column cap applies), a four-word
+    /// transcript, and the reported message.
+    #[gpui::test]
+    fn long_retry_error_wraps_inside_the_detail_pane_wide_capped(cx: &mut TestAppContext) {
+        let (_shell, cx, _dir) = show_retry_error_on(
+            1600.,
+            1200.,
+            RetryError::Unavailable(REPORTED_ERROR.into()),
+            true,
+            cx,
+        );
+        assert!(
+            cx.debug_bounds("button:Back to list").is_none(),
+            "wide layout"
+        );
+        assert!(
+            bounds(cx, "history-detail").size.width > px(tsize::READING + 64.),
+            "the column cap applies"
+        );
+        assert_wraps_inside(cx, px(1600.));
+    }
+
+    #[gpui::test]
+    fn long_retry_error_wraps_inside_the_detail_pane_narrow(cx: &mut TestAppContext) {
+        let (_shell, cx, _dir) = show_retry_error(960., 640., long_error(), cx);
+        assert!(
+            cx.debug_bounds("button:Back to list").is_some(),
+            "narrow layout"
+        );
+        assert_wraps_inside(cx, px(960.));
+    }
+
+    #[gpui::test]
+    fn try_again_is_clickable_when_the_error_wraps(cx: &mut TestAppContext) {
+        // Narrow: where an unconstrained banner pushed the button off-screen.
+        let (shell, cx, _dir) = show_retry_error(960., 640., long_error(), cx);
+        let jobs = shell.read_with(cx, |shell, _| shell.cx.services.retry_jobs.clone());
+        let before = jobs.seq();
+        assert!(jobs.running().is_none());
+        let again = bounds(cx, "button:Try again");
+        assert_inside(again, viewport(cx), "Try again in the window");
+        cx.simulate_click(again.center(), Modifiers::none());
+        // A refused start leaves the slot idle and the sequence unchanged.
+        assert!(jobs.wait_idle(Duration::from_secs(10)));
+        assert_eq!(jobs.seq(), before + 1, "Try again ran one retry");
+        let last = jobs.last().expect("the retry finished");
+        assert!(last.outcome.is_ok(), "the retry succeeded: {last:?}");
+    }
+
+    #[gpui::test]
+    fn single_line_banner_stays_balanced(cx: &mut TestAppContext) {
+        let (_shell, cx, _dir) =
+            show_retry_error(1280., 850., RetryError::Failed("timed out".into()), cx);
+        let banner = bounds(cx, "history-retry-banner");
+        assert_eq!(banner.size.height, tsize::row(), "one line: {banner:?}");
+        let mid = banner.center().y;
+        for selector in ["banner-icon", "banner-message", "button:Try again"] {
+            let part = bounds(cx, selector);
+            assert!(
+                (part.center().y - mid).abs() <= px(1.),
+                "{selector} {part:?} is centred in {banner:?}"
+            );
+        }
     }
 }
