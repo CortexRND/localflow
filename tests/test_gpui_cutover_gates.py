@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 from pathlib import Path
 
@@ -145,6 +146,38 @@ def test_unswitched_theme_is_a_duplicate_and_groups_are_sorted(gates):
         ("meetings-dark-960x640.png", "models-light-960x640.png", "setup-light-960x640.png"),
         ("style-dark-1280x850.png", "style-light-1280x850.png"),
     ]
+
+
+def fake_signatures(monkeypatch, screenshots, signatures):
+    def run(*command):
+        assert command[:3] == ("identify", "-format", "%#")
+        return signatures[Path(command[-1]).name]
+
+    monkeypatch.setattr(screenshots, "run", run)
+
+
+def test_record_writes_manifest_before_rejecting_identical_pixels(gates, monkeypatch, tmp_path):
+    _, screenshots = gates
+    names = ("home-dark-960x640.png", "ask-dark-960x640.png")
+    fake_signatures(monkeypatch, screenshots, dict.fromkeys(names, "shared"))
+    with pytest.raises(RuntimeError, match=r"ask-dark-960x640\.png, home-dark-960x640\.png"):
+        screenshots.record(tmp_path, [tmp_path / name for name in names])
+    captures = json.loads((tmp_path / "manifest.json").read_text())["captures"]
+    assert [entry["file"] for entry in captures] == sorted(names)
+    assert {entry["signature"] for entry in captures} == {"shared"}
+
+
+def test_record_writes_sorted_manifest_for_distinct_pixels(gates, monkeypatch, tmp_path):
+    _, screenshots = gates
+    signatures = {"style-light-1280x850.png": "c", "home-light-1280x850.png": "a",
+                  "home-dark-1280x850.png": "b"}
+    fake_signatures(monkeypatch, screenshots, signatures)
+    screenshots.record(tmp_path, [tmp_path / name for name in signatures])
+    text = (tmp_path / "manifest.json").read_text()
+    assert text.endswith("}\n")
+    captures = json.loads(text)["captures"]
+    assert [entry["file"] for entry in captures] == sorted(signatures)
+    assert [entry["signature"] for entry in captures] == ["b", "a", "c"]
 
 
 def test_manifest_parses_names_in_sorted_order(gates):
