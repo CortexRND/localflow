@@ -146,7 +146,26 @@ def isolated_env(root: Path, *, repo_root: Path | None = None, config: Path | No
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     if repo_root is not None:  # Python children import localflow from this checkout
-        env["PYTHONPATH"] = os.pathsep.join(p for p in (str(repo_root), os.environ.get("PYTHONPATH")) if p)
+        # On Windows, platformdirs.user_config_dir uses SHGetFolderPathW and ignores
+        # APPDATA/LOCALAPPDATA, so a child `lf serve` would overwrite the live api-token.
+        # Inject a tiny sitecustomize.py ahead on PYTHONPATH to pin user_config_dir under root.
+        iso_py = root / "py_isolate"
+        iso_py.mkdir(parents=True, exist_ok=True)
+        (iso_py / "sitecustomize.py").write_text(
+            "import os, pathlib\n"
+            "_cfg = os.environ.get('LOCALFLOW_CONFIG')\n"
+            "if _cfg:\n"
+            "    _dir = str(pathlib.Path(_cfg).parent)\n"
+            "    try:\n"
+            "        import platformdirs\n"
+            "        platformdirs.user_config_dir = lambda *a, **kw: _dir\n"
+            "    except Exception:\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (str(iso_py), str(repo_root), os.environ.get("PYTHONPATH")) if p
+        )
     return env
 
 
