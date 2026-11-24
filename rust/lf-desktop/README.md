@@ -717,12 +717,19 @@ the last three answered turns as context.
   The tools check when the page opens keeps its own 5 s caps. At most 6 model
   completions per question (the last
   one may only answer, and no extra completion is made after it) and 8 tool
-  calls. Replies are capped at 800 tokens (OpenAI o-series models, also as
-  `openai/o4-mini` and the like, get 4,096 in total, since their cap also
-  counts hidden reasoning), a JSON-RPC line at
-  1 MiB, and the
-  result text sent to the model at 6,000 characters per call. Ollama
-  `num_ctx` is 8192.
+  calls. Replies are capped at 800 tokens (OpenAI o-series and GPT-5 models,
+  also as `openai/o4-mini`, `openai/gpt-5-mini` and the like, get 4,096 in
+  total, since their cap also counts hidden reasoning), a JSON-RPC line at
+  1 MiB, and the result text of one call at 6,000 characters. Each model
+  request also caps all tool result text it resends together at 8,000 UTF-8
+  bytes (after `<` and `>` are neutralised, cut markers included), filled
+  newest first: the latest result gets all of it except the space the earlier
+  results' excerpts take (at most 500 bytes each and 2,000 together), so a
+  short latest result is sent whole; the call tags, arguments and
+  statuses are always sent in full and in order. This bounds the results,
+  not the whole prompt: the instructions, question, earlier turns and call
+  metadata come on top, so it is not a token ceiling. Ollama `num_ctx` is
+  8192.
 - **Fallback.** If the server is missing, turned off or fails to start, or
   stops responding during a question, Ask answers with basic recall
   (`/api/recall`, as before) and says so under the answer. The indicator next

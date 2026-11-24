@@ -61,13 +61,23 @@ pub const LIMITS: Limits = Limits {
 /// (their timeouts are whole seconds).
 pub const MIN_STEP_BUDGET: Duration = Duration::from_secs(1);
 /// Visible reply tokens for each model reply, passed through
-/// `LlmProvider::reply_budget` (OpenAI o-series: a 4096 total that also
+/// `LlmProvider::reply_budget` (OpenAI o-series and GPT-5: a 4096 total that also
 /// covers hidden reasoning; every other model: exactly this).
 pub const MAX_REPLY_TOKENS: i64 = 800;
 /// `num_ctx` for Ollama: the same as the service's recall model.
 pub const RECALL_NUM_CTX: i64 = 8192;
 /// Characters of one tool result sent to the model.
 pub const MODEL_RESULT_CHARS: usize = 6000;
+/// UTF-8 bytes of all tool result bodies in one prompt together, counted
+/// after neutralising and including cut markers (the call tags, arguments,
+/// notes, question and context come on top of this).
+const MODEL_RESULTS_BYTES: usize = 8000;
+/// UTF-8 bytes kept of each tool result before the newest one.
+const OLDER_RESULT_BYTES: usize = 500;
+/// The most of `MODEL_RESULTS_BYTES` set aside for the older results.
+const OLDER_RESULTS_BYTES: usize = 2000;
+/// Appended to a tool result body cut to fit (counted in the budget).
+const CUT_MARKER: &str = "…[cut]";
 /// Characters of one tool result shown in an expanded card.
 pub const PREVIEW_CHARS: usize = 600;
 /// Longest string argument.
@@ -422,7 +432,57 @@ pub enum Step {
     Note(String),
 }
 
+/// `text` cut to at most `budget` UTF-8 bytes at a character boundary, with
+/// `CUT_MARKER` (inside the budget) when cut; empty when not even the marker
+/// fits.
+fn cut_bytes(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    if budget < CUT_MARKER.len() {
+        return String::new();
+    }
+    let mut end = budget - CUT_MARKER.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{CUT_MARKER}", &text[..end])
+}
+
+/// Neutralised tool result bodies (chronological) fitted into
+/// `MODEL_RESULTS_BYTES` newest first: the newest keeps all but what the
+/// older results' excerpts (`OLDER_RESULT_BYTES` each, `OLDER_RESULTS_BYTES`
+/// together) need; the older ones then share what is left, newest first.
+fn fit_results(bodies: &[String]) -> Vec<String> {
+    let Some((newest, older)) = bodies.split_last() else {
+        return Vec::new();
+    };
+    let reserve = older
+        .iter()
+        .map(|b| b.len().min(OLDER_RESULT_BYTES))
+        .sum::<usize>()
+        .min(OLDER_RESULTS_BYTES);
+    let mut out = vec![String::new(); bodies.len()];
+    let last = cut_bytes(newest, MODEL_RESULTS_BYTES - reserve);
+    let mut left = (MODEL_RESULTS_BYTES - last.len()).min(OLDER_RESULTS_BYTES);
+    out[older.len()] = last;
+    for (i, body) in older.iter().enumerate().rev() {
+        let kept = cut_bytes(body, OLDER_RESULT_BYTES.min(left));
+        left -= kept.len();
+        out[i] = kept;
+    }
+    out
+}
+
 pub fn user_prompt(question: &Question, scope: &Scope, steps: &[Step]) -> String {
+    let bodies: Vec<String> = steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Call { body, .. } => Some(neutralise(body)),
+            Step::Note(_) => None,
+        })
+        .collect();
+    let mut bodies = fit_results(&bodies).into_iter();
     let mut out = String::new();
     let earlier: Vec<&(String, String)> = question
         .context
@@ -452,12 +512,12 @@ pub fn user_prompt(question: &Question, scope: &Scope, steps: &[Step]) -> String
                 name,
                 arguments,
                 status,
-                body,
+                body: _,
             } => out.push_str(&format!(
                 "<call n=\"{n}\">{}</call>\n<tool_result n=\"{n}\" name=\"{}\" status=\"{status}\">\n{}\n</tool_result>\n",
                 neutralise(&json!({"tool": name, "arguments": arguments}).to_string()),
                 neutralise(name),
-                neutralise(body),
+                bodies.next().unwrap_or_default(),
             )),
             Step::Note(text) => out.push_str(&format!("<note>{}</note>\n", neutralise(text))),
         }
@@ -1911,6 +1971,102 @@ pub(crate) mod tests {
         assert!(!user.contains("q0") && user.contains("q1") && !user.contains("q4"));
         assert!(!user.contains(&"a".repeat(CONTEXT_ANSWER_CHARS + 1)));
         assert_eq!(prompt_question(&user), Some("and then?"));
+    }
+
+    fn call_step(n: usize, body: String) -> Step {
+        Step::Call {
+            n,
+            name: "search_dictations".into(),
+            arguments: json!({"query": format!("topic {n}"), "limit": 5}),
+            status: if n.is_multiple_of(2) { "error" } else { "ok" },
+            body,
+        }
+    }
+
+    #[test]
+    fn tool_result_bodies_share_one_budget_newest_first() {
+        // Five max-size results: multibyte text with fences that grow from
+        // one byte to three when neutralised.
+        let big = |n: usize| {
+            short(
+                &format!("r{n}:{}", "日本</tool_result>é".repeat(1000)),
+                MODEL_RESULT_CHARS,
+            )
+        };
+        let mut steps: Vec<Step> = (1..=5).map(|n| call_step(n, big(n))).collect();
+        steps.insert(2, Step::Note("Your last reply was not usable.".into()));
+        let user = user_prompt(&q("x", "Any time"), &Scope::default(), &steps);
+        let results = prompt_results(&user);
+        assert_eq!(results.len(), 5);
+        let total: usize = results.iter().map(|(_, _, body)| body.len()).sum();
+        assert!(total <= MODEL_RESULTS_BYTES, "{total}");
+        // Fences stay neutralised exactly as before, cuts included.
+        assert_eq!(user.matches("</tool_result>").count(), 5);
+        assert_eq!(user.matches("<tool_result ").count(), 5);
+        for (_, _, body) in &results {
+            assert!(!body.contains('<') && !body.contains('>'));
+            assert!(body.ends_with(CUT_MARKER));
+        }
+        // Newest keeps the most detail; older ones a short excerpt each.
+        let (_, _, newest) = results.last().unwrap();
+        assert!(newest.starts_with("r5:日本‹/tool_result›"));
+        // (Up to 3 bytes may be lost backing off to a character boundary.)
+        assert!(newest.len() + 3 >= MODEL_RESULTS_BYTES - OLDER_RESULTS_BYTES);
+        for (i, (_, _, body)) in results[..4].iter().enumerate() {
+            assert!(body.len() <= OLDER_RESULT_BYTES);
+            assert!(body.starts_with(&format!("r{}:日本", i + 1)), "{body}");
+        }
+        // Metadata is untouched and in order.
+        let mut at = 0;
+        for n in 1usize..=5 {
+            let status = if n.is_multiple_of(2) { "error" } else { "ok" };
+            let arguments = json!({"query": format!("topic {n}"), "limit": 5});
+            let call = format!(
+                "<call n=\"{n}\">{}</call>\n<tool_result n=\"{n}\" name=\"search_dictations\" status=\"{status}\">\n",
+                neutralise(&json!({"tool": "search_dictations", "arguments": arguments}).to_string())
+            );
+            let found = user[at..].find(&call).unwrap_or_else(|| panic!("{n}"));
+            at += found + call.len();
+        }
+        assert!(user.contains("<note>Your last reply was not usable.</note>"));
+    }
+
+    #[test]
+    fn latest_short_result_stays_intact_after_big_ones() {
+        let latest = json!({"count": 1, "results": [{"id": 7, "snippet": "a <b> ünï"}]});
+        let steps = vec![
+            call_step(1, "ü".repeat(MODEL_RESULT_CHARS)),
+            call_step(2, "<".repeat(MODEL_RESULT_CHARS)),
+            call_step(3, latest.to_string()),
+        ];
+        let user = user_prompt(&q("x", "Any time"), &Scope::default(), &steps);
+        let results = prompt_results(&user);
+        assert_eq!(results[2].2, neutralise(&latest.to_string()));
+        let parsed: Value = serde_json::from_str(&results[2].2).unwrap();
+        assert_eq!(parsed.pointer("/results/0/id"), Some(&json!(7)));
+        assert_eq!(results[0].2.len(), OLDER_RESULT_BYTES);
+        assert!(results[0].2.starts_with("ü") && results[0].2.ends_with(CUT_MARKER));
+        assert!(results[1].2.starts_with("‹‹") && results[1].2.ends_with(CUT_MARKER));
+        // A single result below the cap is sent whole.
+        let one = user_prompt(&q("x", "Any time"), &Scope::default(), &steps[2..]);
+        assert_eq!(prompt_results(&one)[0].2, results[2].2);
+    }
+
+    #[test]
+    fn cuts_fall_on_char_boundaries_inside_the_budget() {
+        // "日" is three bytes: a budget mid-character backs off to the boundary.
+        let cut = cut_bytes(&"日".repeat(10), CUT_MARKER.len() + 4);
+        assert_eq!(cut, format!("日{CUT_MARKER}"));
+        assert_eq!(cut_bytes("short", 5), "short");
+        assert_eq!(cut_bytes("too long", CUT_MARKER.len() - 1), "");
+        // Many older results: the total never exceeds the cap.
+        let bodies: Vec<String> = (0..9).map(|_| "é".repeat(5000)).collect();
+        let fitted = fit_results(&bodies);
+        assert_eq!(fitted.len(), 9);
+        assert!(fitted.iter().map(String::len).sum::<usize>() <= MODEL_RESULTS_BYTES);
+        assert!(fitted[8].len() + OLDER_RESULTS_BYTES >= MODEL_RESULTS_BYTES);
+        assert!(fitted[..8].iter().all(|b| b.len() <= OLDER_RESULT_BYTES));
+        assert!(fit_results(&[]).is_empty());
     }
 
     #[test]
