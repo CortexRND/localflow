@@ -266,11 +266,11 @@ The native wizard writes the native app's speech-model choices, which the
 Python runtime that handles dictation may not be able to run (for example
 Parakeet on a source macOS install without the `parakeet-mlx` extra), and its
 downloads and trial prepare the native engine's model files, not Python's. So
-it opens only when asked: `lf setup --gpui` or `LOCALFLOW_UI=gpui`.
+it opens only when asked: `lf setup --gpui` (or `lf setup` with `LOCALFLOW_UI=gpui`).
 
 ```bash
 lf hub                        # the installed preview once set up, else the legacy window
-lf hub --gpui                 # ask for the preview; reports why if it can't open it
+lf hub --gpui                 # ask for the preview; sends no page; only once LocalFlow is set up (below)
 lf hub --gpui --page history  # sends --page History
 lf phrases                    # sends --page "Hot Phrases" (to the installed preview, once set up)
 lf setup                      # always the legacy wizard by default
@@ -319,8 +319,8 @@ export LOCALFLOW_UI=legacy    # the same for every one of these commands (rollba
   `~/.local/bin/localflow-preview` link are never searched, and nothing is
   downloaded or built. Since 4b, setting `LOCALFLOW_DESKTOP_BIN` alone is used
   by default on Linux and macOS for a set-up Hub / phrases window (an invalid
-  one prints a notice, then legacy); setup and first run ignore it unless
-  `--gpui` is given.
+  one prints a notice, then legacy); setup ignores it unless `--gpui` is
+  given; on first run the default ignores it.
   Prebuilt packages exist for Linux x86_64 and macOS arm64/x86_64 only (no ARM
   Linux); Windows and other platforms always use legacy.
 - **Probe:** the candidate must answer `--help` within 5 s as `lf-desktop` with
@@ -344,6 +344,16 @@ export LOCALFLOW_UI=legacy    # the same for every one of these commands (rollba
   an already open preview window (no second window); a non-zero exit, a failed
   start, a missing/unrecognised install or a failed probe prints one short notice
   and opens the legacy window once. A crash after those 1.5 s isn't detected.
+- **Not set up yet:** `lf hub` and `lf phrases` open the preview only when the
+  active config (`LOCALFLOW_CONFIG` or the default path) has the setup marker
+  (`[setup] version > 0` or an explicit `[stt] provider`/`model`). Only the
+  active config is read: an unmigrated legacy `~/.localflow.toml` stays on the
+  legacy window (which migrates it) and counts from the next launch. Otherwise,
+  after the probe, they print `lf: LocalFlow isn't set up yet (run lf setup);
+  opening the legacy window.` and open the legacy window once, so they never
+  land in the preview's own first-run wizard. `lf setup --gpui` is the only `lf` command
+  that opens that wizard. Under the default this case is quiet (above); the
+  notice appears only for an explicit selection.
   With the preview, `lf phrases` and `lf setup` return once the window has
   started instead of when it closes. Since 4b this is the default for
   `lf phrases` for anyone set up with the preview installed, so scripts that
@@ -752,8 +762,9 @@ These are tracked in `docs/gpui-migration.md`:
   cutover (separate lock namespaces on purpose).
 - The preview package is opt-in and separate, and no default installer ships
   it. `lf hub` / `lf phrases` prefer it only once it is installed and
-  LocalFlow is set up (step 4b, Linux and macOS); `lf setup` and first run
-  stay legacy unless `--gpui` is given. The native wizard's model choices,
+  LocalFlow is set up (step 4b, Linux and macOS); `lf setup` stays legacy
+  unless `--gpui` is given, and first run stays legacy (an explicit `--gpui`
+  there gets the not-set-up notice). The native wizard's model choices,
   downloads and trial target the native engine, not the Python runtime that
   handles dictation. Default-installer integration and legacy retirement are
   later steps.

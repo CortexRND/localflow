@@ -1345,6 +1345,113 @@ def test_cli_stt_python_plugin(rust_build, sandbox):
     )
 
 
+def _stt_plugin(packages, name):
+    metadata = packages / f"{name}_plugin-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        f"[localflow.stt_providers]\n{name} = {name}_plugin:Plugin\n", encoding="utf-8",
+    )
+    (packages / f"{name}_plugin.py").write_text(
+        "class Plugin:\n    offline = False\n    def list_models(self):\n        return []\n", encoding="utf-8",
+    )
+    return packages
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the stand-in interpreters are shell scripts")
+def test_cli_stt_plugins_come_from_the_localflow_python(rust_build, sandbox):
+    """An earlier candidate without LocalFlow answers alone, but not ahead of the LocalFlow interpreter."""
+    packages = _stt_plugin(sandbox["root"] / "site-packages", "demo")
+    elsewhere = _stt_plugin(sandbox["root"] / "unrelated-packages", "elsewhere")
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    python = shlex.quote(sys.executable)
+    unrelated, installed = sandbox["root"] / "unrelated-python", sandbox["root"] / "localflow-python"
+    for root, run in (
+        (unrelated / "bin", f"PYTHONPATH={shlex.quote(str(elsewhere))} exec {python} -S"),
+        (installed, f"exec {python}"),
+    ):
+        root.mkdir(parents=True)
+        (root / "python3").write_text(f"#!/bin/sh\n{run} \"$@\"\n", encoding="utf-8")
+        (root / "python3").chmod(0o755)
+    rust_env = {**env, "PATH": str(installed), "VIRTUAL_ENV": str(unrelated)}
+    alone = lf(rust_build, sandbox, "stt", "list", env={**rust_env, "PATH": ""})
+    assert alone.returncode == 0 and "elsewhere" in alone.stdout and "demo" not in alone.stdout
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "demo")):
+        expected = _python_cli(sandbox, *args, env=env)
+        assert expected.returncode == 0 and "elsewhere" not in expected.stdout, expected.stderr
+        saved = sandbox["config"].read_bytes() if sandbox["config"].exists() else None
+        sandbox["config"].unlink(missing_ok=True)
+        assert _cli_output(lf(rust_build, sandbox, *args, env=rust_env)) == _cli_output(expected)
+        assert (sandbox["config"].read_bytes() if sandbox["config"].exists() else None) == saved
+    assert b"demo" in saved and "demo" in _python_cli(sandbox, "stt", "list", env=env).stdout
+
+
+def _behind_healthy_python(rust_build, sandbox, env):
+    """Rust's env with a later candidate that sees no plug-ins and answers healthily (POSIX only)."""
+    if os.name != "posix":
+        return env
+    shim = sandbox["root"] / "healthy-python"
+    shim.mkdir()
+    (shim / "python3").write_text(
+        f"#!/bin/sh\nunset PYTHONPATH\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8",
+    )
+    (shim / "python3").chmod(0o755)
+    rust_env = {**env, "PATH": str(shim)}
+    healthy = lf(rust_build, sandbox, "stt", "list", env={**rust_env, "VIRTUAL_ENV": str(shim)})
+    assert healthy.returncode == 0, healthy.stderr
+    assert "faster-whisper: " in healthy.stdout and "broken" not in healthy.stdout
+    return rust_env
+
+
+def _assert_same_stt_crash(rust_build, sandbox, args, env, rust_env):
+    header = "Traceback (most recent call last):\n"
+    python = _python_cli(sandbox, *args, env=env)
+    rust = lf(rust_build, sandbox, *args, env=rust_env)
+    assert (rust.returncode, rust.stdout) == (python.returncode, python.stdout) == (1, "")
+    assert python.stderr.startswith(header) and rust.stderr.startswith(header)
+    assert python.stderr.endswith(rust.stderr[len(header):])
+    assert not sandbox["config"].exists()
+    return rust
+
+
+def test_cli_stt_malformed_plugin_metadata(rust_build, sandbox):
+    packages = sandbox["root"] / "site-packages"
+    metadata = packages / "speech_plugins-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text("[localflow.stt_providers]\nbroken\n", encoding="utf-8")
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    rust_env = _behind_healthy_python(rust_build, sandbox, env)
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "broken")):
+        rust = _assert_same_stt_crash(rust_build, sandbox, args, env, rust_env)
+        assert "importlib" in rust.stderr and rust.stderr.splitlines()[-1].startswith("TypeError: ")
+
+
+def test_cli_stt_broken_python_plugin(rust_build, sandbox):
+    packages = sandbox["root"] / "site-packages"
+    metadata = packages / "speech_plugins-0.1.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "entry_points.txt").write_text(
+        "[localflow.stt_providers]\nbroken = broken_plugin:Broken\ndemo = speech_plugin:Demo\n",
+        encoding="utf-8",
+    )
+    (packages / "broken_plugin.py").write_text("raise RuntimeError('plugin import failed')\n", encoding="utf-8")
+    (packages / "speech_plugin.py").write_text(
+        "class Demo:\n    offline = False\n    def list_models(self):\n        return []\n", encoding="utf-8",
+    )
+    env = {**_stt_probes_same_python(sandbox), "PYTHONPATH": os.pathsep.join(map(str, (packages, ROOT)))}
+    rust_env = _behind_healthy_python(rust_build, sandbox, env)
+    for args in (("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "broken")):
+        rust = _assert_same_stt_crash(rust_build, sandbox, args, env, rust_env)
+        assert "broken_plugin.py" in rust.stderr
+        assert rust.stderr.endswith("RuntimeError: plugin import failed\n")
+    args = ("stt", "use", "demo")
+    python = _python_cli(sandbox, *args, env=env)
+    assert python.returncode == 0, python.stderr
+    expected = sandbox["config"].read_bytes()
+    sandbox["config"].unlink()
+    assert _cli_output(lf(rust_build, sandbox, *args, env=env)) == _cli_output(python)
+    assert sandbox["config"].read_bytes() == expected
+
+
 @pytest.mark.parametrize("args", [
     ("stt", "list"), ("stt", "list", "--json"), ("stt", "use", "not-a-provider"),
     ("stt", "download", "mlx-tiny"),
@@ -2362,7 +2469,9 @@ elif args[:2] == ["worktree", "create"]:
 """
 
 
-def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+def _dispatch_without_orca(rust_build, sandbox, tmp_path):
+    """Dispatch refusals and dry runs, which need no orca; returns what the
+    orca checks continue from, with orca configured and `approved` approved."""
     paths = _require_isolated(rust_build, sandbox, "history_path")
     home = Path(paths["history_path"]).parent.parent
     queue_path = _seed_prompt_queue(home)
@@ -2396,9 +2505,18 @@ def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
     no_approved.set_status(approved, "rejected")
     check("prompts", "dispatch", "--all", code=0)
     no_approved.set_status(approved, "approved", expect=("rejected",))
-    if os.name == "nt":
-        return  # subprocess needs a real orca.exe; the rest is covered on POSIX
+    return queue_path, check, (pending, approved, failed)
 
+
+def test_cli_prompts_dispatch(rust_build, sandbox, tmp_path):
+    _dispatch_without_orca(rust_build, sandbox, tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake orca is a POSIX shell script")
+def test_cli_prompts_dispatch_through_orca(rust_build, sandbox, tmp_path):
+    from localflow import dispatch as py_dispatch
+
+    queue_path, check, (pending, approved, failed) = _dispatch_without_orca(rust_build, sandbox, tmp_path)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     (bin_dir / "fake_orca.py").write_text(_FAKE_ORCA, encoding="utf-8")
@@ -2767,8 +2885,28 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
     old = fake("old", help_text=_DESKTOP_HELP.replace("    --setup ", "    --set "))
     staying = fake("stay", code=1, stay=2.5)
     probe, launch = ["--help"], ["--page", "Hot Phrases"]
-    # The default covers a set-up LocalFlow only; explicit rows run on a first
-    # run (no config at all), which never changes an explicit choice.
+    # Not set up yet (no active config, then one without the setup marker): the
+    # preview would open its own first-run wizard, so neither side spawns it.
+    not_set_up = [
+        (("hub", "--gpui"), {}, dl.NOTICE_NOT_INSTALLED, "Home", []),
+        (("hub", "--gpui"), good, dl.NOTICE_NOT_SET_UP, "Home", [probe]),
+        (("hub", "--gpui", "--page", "Home"), good, dl.NOTICE_NOT_SET_UP, "Home", [probe]),
+        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": "gpui"}, dl.NOTICE_NOT_SET_UP,
+         "Hot Phrases", [probe]),
+        (("hub", "--gpui", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
+    ]
+    assert not sandbox["config"].exists()
+    for unmarked in (False, True):
+        if unmarked:
+            sandbox["config"].parent.mkdir(parents=True, exist_ok=True)
+            sandbox["config"].write_text("config_version = 2\n\n[setup]\nversion = 0\n")
+        for args, env, stderr, page, launches in not_set_up:
+            python, legacy, desktop = _same_hub(hub(*args, env=env))
+            assert (python.returncode, python.stdout, python.stderr) == (0, "", stderr + "\n"), args
+            assert (legacy, desktop) == (_legacy(page), launches), args
+
+    sandbox["config"].unlink()  # back to no config: first run for the default rows below
+    # The default covers a set-up LocalFlow only; rows that reach a launch carry `set_up`.
     set_up = _hub_config(tmp_path, "set-up.toml", "config_version = 2\n\n[setup]\nversion = 1\n")
     cases = [
         (("hub", "--gpui"), {}, dl.NOTICE_NOT_INSTALLED, "Home", []),
@@ -2776,12 +2914,14 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
         (("hub", "--gpui", "--page", "ask"), {"LOCALFLOW_DESKTOP_BIN": str(tmp_path / "missing")},
          dl.NOTICE_BAD_OVERRIDE, "Ask", []),
         (("hub", "--gpui", "--page", "History"), old, dl.NOTICE_PROBE, "History", [probe]),
-        (("hub", "--gpui", "--page", "hot phrases"), early, "native-stderr\n" + dl.NOTICE_EARLY_EXIT.format(code=2),
-         "Hot Phrases", [probe, launch]),
-        (("hub", "--gpui"), good, "native-stderr", None, [probe, []]),
-        (("hub", "--gpui", "--page", "Home"), good, "native-stderr", None, [probe, ["--page", "Home"]]),
-        (("hub", "--page", "hot phrases"), {**good, "LOCALFLOW_UI": "GPUI"}, "native-stderr", None, [probe, launch]),
-        (("hub", "--gpui"), staying, "native-stderr", None, [probe, []]),
+        (("hub", "--gpui", "--page", "hot phrases"), {**early, **set_up},
+         "native-stderr\n" + dl.NOTICE_EARLY_EXIT.format(code=2), "Hot Phrases", [probe, launch]),
+        (("hub", "--gpui"), {**good, **set_up}, "native-stderr", None, [probe, []]),
+        (("hub", "--gpui", "--page", "Home"), {**good, **set_up}, "native-stderr", None,
+         [probe, ["--page", "Home"]]),
+        (("hub", "--page", "hot phrases"), {**good, **set_up, "LOCALFLOW_UI": "GPUI"}, "native-stderr", None,
+         [probe, launch]),
+        (("hub", "--gpui"), {**staying, **set_up}, "native-stderr", None, [probe, []]),
         # The GPUI default: no candidate is quiet; an override alone is used,
         # and every candidate problem is noticed once, then legacy once.
         (("hub",), {}, "", "Home", []),
@@ -2790,6 +2930,11 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
          [probe, launch]),
         (("hub", "--page", "ask"), {**good, **set_up}, "native-stderr", None, [probe, ["--page", "Ask"]]),
         (("hub",), {**good, **set_up, "LOCALFLOW_UI": " \t"}, "native-stderr", None, [probe, []]),
+        # Set up without config_version and with an invalid scalar: the default
+        # stays free of config warnings through both of its set-up checks.
+        (("hub",), {**good, **_hub_config(tmp_path, "unversioned.toml",
+                                          '[setup]\nversion = 1\n\n[cleanup]\nlevel = "loud"\n')},
+         "native-stderr", None, [probe, []]),
         (("hub",), {"LOCALFLOW_DESKTOP_BIN": "lf-desktop", **set_up}, dl.NOTICE_BAD_OVERRIDE, "Home", []),
         (("hub", "--page", "History"), {**old, **set_up}, dl.NOTICE_PROBE, "History", [probe]),
         (("hub", "--page", "hot phrases"), {**early, **set_up},
@@ -2863,11 +3008,11 @@ def test_cli_hub_gpui_notices_and_launches(hub, sandbox, tmp_path):
         assert (python.returncode, python.stdout, python.stderr) == (0, "", "native-stderr\n"), args
         assert (legacy, desktop) == ([], launches), args
     # The same package on first run: the legacy window, unprobed; an explicit
-    # choice still opens it there.
+    # choice is probed, then reports not set up.
     python, legacy, desktop = _same_hub(hub("hub", "--page", "settings"))
     assert (python.stderr, legacy, desktop) == ("", _legacy("Settings"), [])
     python, legacy, desktop = _same_hub(hub("hub", env={"LOCALFLOW_UI": "gpui"}))
-    assert (python.stderr, legacy, desktop) == ("native-stderr\n", [], [probe, []])
+    assert (python.stderr, legacy, desktop) == (dl.NOTICE_NOT_SET_UP + "\n", _legacy("Home"), [probe])
     # An explicit rollback bypasses it, and an old package is noticed once.
     python, legacy, desktop = _same_hub(hub("hub", "--legacy", env={"LOCALFLOW_SANDBOX": "1", **set_up}))
     assert (python.stderr, legacy, desktop) == ("", _legacy("Home"), [])
@@ -3640,11 +3785,66 @@ _NO_INSTALL = "no Python LocalFlow install found; activate its virtualenv or put
 def _install_or_skip(python: Path) -> Path:
     """The `localflow` script lf-rs finds for `python`: next to it, or in
     Scripts\\ for a non-venv Windows Python. Without one `agent install` refuses."""
+    script = _script_of(python)
+    if script is None:
+        _missing_install(f"no localflow script for {python}; lf-rs refuses to install")
+    return script
+
+
+def _script_of(python: Path) -> Path | None:
     names = [Path("localflow.exe"), Path("Scripts", "localflow.exe")] if os.name == "nt" else [Path("localflow")]
-    for name in names:
-        if (python.parent / name).exists():
-            return python.parent / name
-    pytest.skip(f"no localflow script for {python}; lf-rs refuses to install")
+    return next((python.parent / name for name in names if (python.parent / name).is_file()), None)
+
+
+def _missing_install(reason: str) -> None:
+    if REQUIRED:
+        pytest.fail(f"LF_RUST_PARITY_REQUIRED=1 but {reason} (pip install -e . for this interpreter)")
+    pytest.skip(reason)
+
+
+# python.rs `probe` + `IMPORT_PROBE`: the working directory is not an install.
+_IMPORT_PROBE = (
+    "import sys\nsys.path[:] = [entry for entry in sys.path if entry]\n"
+    "import importlib.util\nsys.exit(importlib.util.find_spec('localflow') is None)"
+)
+
+
+def _interpreter_or_skip(python: Path, env: dict) -> None:
+    """lf-rs's `find_interpreter` test for `python` (its `localflow` script, or
+    an installed localflow), probed with the env and cwd `_run_cli` gives lf-rs."""
+    if _script_of(python) is None and _run_cli([str(python), "-c", _IMPORT_PROBE], env).returncode != 0:
+        _missing_install(f"{python} has no localflow script and no installed localflow; lf-rs refuses install-app")
+
+
+def test_missing_install_fails_when_parity_is_required(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules[__name__], "REQUIRED", False)
+    with pytest.raises(pytest.skip.Exception):
+        _install_or_skip(tmp_path / "python3")
+    monkeypatch.setattr(sys.modules[__name__], "REQUIRED", True)
+    with pytest.raises((pytest.skip.Exception, pytest.fail.Exception)) as outcome:
+        _install_or_skip(tmp_path / "python3")
+    assert outcome.type is pytest.fail.Exception
+    assert "LF_RUST_PARITY_REQUIRED=1" in str(outcome.value)
+
+
+def test_interpreter_without_an_install_skips_or_fails(monkeypatch, tmp_path):
+    probes, codes = [], iter([1, 0, 1])  # import fails, succeeds, fails
+
+    def fake_run_cli(command, env):
+        probes.append(command)
+        return types.SimpleNamespace(returncode=next(codes))
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_run_cli", fake_run_cli)
+    monkeypatch.setattr(module, "REQUIRED", False)
+    with pytest.raises(pytest.skip.Exception):
+        _interpreter_or_skip(tmp_path / "python3", {})
+    _interpreter_or_skip(tmp_path / "python3", {})
+    monkeypatch.setattr(module, "REQUIRED", True)
+    with pytest.raises((pytest.skip.Exception, pytest.fail.Exception)) as outcome:
+        _interpreter_or_skip(tmp_path / "python3", {})
+    assert outcome.type is pytest.fail.Exception
+    assert probes == [[str(tmp_path / "python3"), "-c", _IMPORT_PROBE]] * 3
 
 
 def _stub_python(directory: Path, body: str) -> Path:
@@ -3947,7 +4147,7 @@ def test_cli_agent_platform_errors(rust_build, sandbox):
 
 def test_cli_setup_install_app(rust_build, sandbox):
     python, env = _same_python(sandbox)
-    _install_or_skip(python)
+    _interpreter_or_skip(python, env)
     apps = sandbox["home"] / "Applications"
     for _ in range(2):  # the second run rewrites the existing bundles
         rust, _ = _both_clis(rust_build, [apps], python, env, "setup", "install-app")

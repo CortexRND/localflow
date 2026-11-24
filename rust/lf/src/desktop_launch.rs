@@ -2,7 +2,10 @@
 //! `lf-rs hub`. Selection: `--gpui`/`--legacy`, then `LOCALFLOW_UI`, then
 //! [`DEFAULT_UI`] (GPUI). A GPUI selection opens only an absolute
 //! `LOCALFLOW_DESKTOP_BIN` or the package `scripts/install_gpui_preview.sh`
-//! owns, after a bounded `--help` probe; anything wrong prints one notice and
+//! owns, after a bounded `--help` probe, and only once LocalFlow is set up
+//! (the active config has `lf_core::config::configuration_marker`), so the
+//! preview never opens its own first-run wizard from `hub`; anything wrong
+//! prints one notice and
 //! opens the legacy window once. When GPUI comes only from the default, an
 //! unsupported platform, no candidate at all (no override, nothing at the
 //! package root), the Setup page or no active config with the setup marker
@@ -52,6 +55,8 @@ pub const NOTICE_BAD_OVERRIDE: &str = "lf: LOCALFLOW_DESKTOP_BIN must be an abso
 pub const NOTICE_PROBE: &str = "lf: that lf-desktop is too old (update LocalFlow Preview) \
      or isn't LocalFlow Preview; opening the legacy window.";
 pub const NOTICE_SPAWN: &str = "lf: couldn't start LocalFlow Preview; opening the legacy window.";
+pub const NOTICE_NOT_SET_UP: &str =
+    "lf: LocalFlow isn't set up yet (run lf setup); opening the legacy window.";
 pub const SANDBOX_REFUSAL: &str = "LOCALFLOW_SANDBOX is set, and `lf` opens LocalFlow Preview \
      only on your real data. Run the preview directly instead: lf-desktop --sandbox \
      (Linux: localflow-preview --sandbox; macOS: open -a \"LocalFlow Preview\" --args \
@@ -101,6 +106,8 @@ pub struct Launcher<'a> {
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
     pub platform: Option<Platform>,
     pub home: Option<PathBuf>,
+    /// Whether the active config is set up; asked only right before a spawn.
+    pub set_up: &'a dyn Fn() -> bool,
     pub probe_timeout: Duration,
     pub startup_wait: Duration,
     /// [`is_configured`] in production; read only for an implicit default.
@@ -118,7 +125,8 @@ pub fn setup_page(page: Option<&str>) -> bool {
 }
 
 /// Python `desktop_launch.configured`, read-only: the active config file must
-/// exist, load, pass `config_from_v2` and carry [`configuration_marker`].
+/// exist, load, pass `config_from_v2` and carry
+/// [`lf_core::config::configuration_marker`] ([`lf_core::config::active_config_set_up`]).
 /// There is deliberately no legacy flat fallback (native checks only the
 /// active file). The launcher never migrates or writes: a flat file already
 /// migrated elsewhere (for example by the Python CLI's own config load) is an
@@ -129,41 +137,7 @@ pub fn setup_page(page: Option<&str>) -> bool {
 /// warnings are dropped on this thread only ([`crate::quiet_config_log`]),
 /// as Python silences that logger; other output is unchanged.
 pub fn is_configured() -> bool {
-    use lf_core::config::{config_from_v2, parse_toml_file, try_config_path};
-
-    crate::quiet_config_log(|| {
-        let Ok(path) = try_config_path() else {
-            return false;
-        };
-        path.exists()
-            && parse_toml_file(&path).is_ok_and(|data| {
-                config_from_v2(&data, cfg!(target_os = "macos")).is_ok()
-                    && configuration_marker(&data)
-            })
-    })
-}
-
-/// `lf_ui::hub_route::configuration_marker`: `[setup] version > 0`, or an
-/// explicit non-blank `stt.provider` / `stt.model` in the raw file.
-pub fn configuration_marker(data: &serde_json::Map<String, serde_json::Value>) -> bool {
-    use serde_json::Value;
-    let setup_done = data
-        .get("setup")
-        .and_then(Value::as_object)
-        .and_then(|setup| setup.get("version"))
-        .and_then(Value::as_i64)
-        .is_some_and(|version| version > 0);
-    setup_done
-        || data
-            .get("stt")
-            .and_then(Value::as_object)
-            .is_some_and(|stt| {
-                ["provider", "model"].into_iter().any(|key| {
-                    stt.get(key)
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| !crate::pyfmt::py_strip(value).is_empty())
-                })
-            })
+    crate::quiet_config_log(lf_core::config::active_config_set_up)
 }
 
 impl Launcher<'static> {
@@ -172,6 +146,7 @@ impl Launcher<'static> {
             env: &process_env,
             platform: platform_key(),
             home: lf_core::home::python_home().ok(),
+            set_up: &lf_core::config::active_config_set_up,
             probe_timeout: PROBE_TIMEOUT,
             startup_wait: STARTUP_WAIT,
             configured: &is_configured,
@@ -272,9 +247,8 @@ impl Launcher<'_> {
         // The conditional default covers configured Hub windows only: the
         // Setup page and first run stay on the legacy wizard, and nothing
         // installed stays legacy. Cheapest first, as in Python.
-        if self.implicit_choice(flag)
-            && (setup_page(page) || self.candidate_absent() || !(self.configured)())
-        {
+        let implicit = self.implicit_choice(flag);
+        if implicit && (setup_page(page) || self.candidate_absent() || !(self.configured)()) {
             return legacy(io);
         }
         if self.sandbox_requested() {
@@ -286,6 +260,16 @@ impl Launcher<'_> {
             } else {
                 Err(NOTICE_PROBE)
             }
+        });
+        // The preview must never open its own first-run wizard from a Hub route.
+        // The implicit default keeps this re-check quiet, as its early one is.
+        let found = found.and_then(|exe| {
+            let set_up = if implicit {
+                crate::quiet_config_log(|| (self.set_up)())
+            } else {
+                (self.set_up)()
+            };
+            set_up.then_some(exe).ok_or(NOTICE_NOT_SET_UP)
         });
         let notice = match found {
             Ok(exe) => match spawn(&desktop_argv(&exe, page), self.startup_wait) {
@@ -543,6 +527,7 @@ mod tests {
             env: &**env,
             platform,
             home: home.map(Path::to_path_buf),
+            set_up: &set_up_yes,
             probe_timeout: PROBE_TIMEOUT,
             startup_wait: STARTUP_WAIT,
             configured: &configured_yes,
@@ -571,6 +556,15 @@ mod tests {
             configured: &configured_no,
             ..launcher(env, platform, home)
         }
+    }
+
+    fn set_up_yes() -> bool {
+        true
+    }
+
+    #[cfg(unix)]
+    fn set_up_no() -> bool {
+        false
     }
 
     fn env_of(pairs: &[(&str, &str)]) -> Env {
@@ -861,6 +855,20 @@ mod tests {
 
         let run = run_launch(&launcher(&none, None, None), Some(Ui::Gpui), None);
         assert_eq!((run.err, run.legacy), (format!("{NOTICE_PLATFORM}\n"), 1));
+
+        // The set-up check comes after the refusals and a missing preview.
+        fn set_up_unused() -> bool {
+            panic!("asked whether LocalFlow is set up without a preview to open")
+        }
+        for (env, flag) in [(&none, None), (&bogus, None), (&sandbox, Some(Ui::Gpui))] {
+            let mut l = launcher(env, Some(Platform::Linux), None);
+            l.set_up = &set_up_unused;
+            run_launch(&l, flag, None);
+        }
+        let mut l = launcher(&none, None, None);
+        l.set_up = &set_up_unused;
+        let run = run_launch(&l, Some(Ui::Gpui), None);
+        assert_eq!((run.err, run.legacy), (format!("{NOTICE_PLATFORM}\n"), 1));
     }
 
     fn quiet_legacy(run: Run) {
@@ -986,8 +994,9 @@ mod tests {
 
     #[test]
     fn configuration_marker_matches_python_is_configured() {
-        let marker =
-            |text: &str| configuration_marker(&lf_core::config::parse_toml_str(text).unwrap());
+        let marker = |text: &str| {
+            lf_core::config::configuration_marker(&lf_core::config::parse_toml_str(text).unwrap())
+        };
         for configured in [
             "[setup]\nversion = 1\n",
             "[setup]\nversion = 3\n",
@@ -1009,17 +1018,6 @@ mod tests {
             "stt = \"faster-whisper\"\n",
         ] {
             assert!(!marker(not_configured), "{not_configured:?}");
-        }
-        // The copy must keep lf-ui's rule (lf-rs doesn't depend on lf-ui).
-        let ui = include_str!("../../lf-ui/src/hub_route.rs").replace("\r\n", "\n");
-        for needle in [
-            "pub fn configuration_marker(data: &Map<String, Value>) -> bool {",
-            ".and_then(|setup| setup.get(\"version\"))\n        .and_then(Value::as_i64)\n        \
-             .is_some_and(|version| version > 0);",
-            "[\"provider\", \"model\"].into_iter().any(|key| {",
-            ".is_some_and(|value| !value.py_strip().is_empty())",
-        ] {
-            assert!(ui.contains(needle), "{needle}");
         }
     }
 
@@ -1081,7 +1079,8 @@ mod tests {
             };
             run_launch(&selected, flag, page)
         };
-        // Explicit GPUI keeps the 4a path, Setup page and first run included.
+        // Explicit GPUI never reads the early (implicit) marker; the late
+        // set-up guard is covered by `not_set_up_never_spawns_the_preview`.
         for page in [None, Some("Setup"), Some("Home")] {
             let run = explicit(&bad, Some(Ui::Gpui), page);
             assert_eq!(
@@ -1251,7 +1250,8 @@ mod tests {
             assert!(wait_lines(&record, 0).is_empty());
 
             // A good owned package on first run, or for the Setup page, is
-            // never probed or launched by the default; explicit GPUI opens it.
+            // never probed by the default; explicit GPUI probes it, then
+            // reports not set up.
             let (home, record) = install(GOOD_HELP, 0);
             for (selected, page) in [
                 (unconfigured(&none, linux, Some(home.path())), None),
@@ -1264,13 +1264,11 @@ mod tests {
                 quiet_legacy(run_launch(&selected, None, page));
             }
             assert!(wait_lines(&record, 0).is_empty());
-            let run = run_launch(
-                &unconfigured(&none, linux, Some(home.path())),
-                Some(Ui::Gpui),
-                None,
-            );
-            assert!(run.result.is_ok() && run.err.is_empty() && run.legacy == 0);
-            assert_eq!(wait_lines(&record, 2), ["--help", ""]);
+            let mut first_run = unconfigured(&none, linux, Some(home.path()));
+            first_run.set_up = &set_up_no;
+            let run = run_launch(&first_run, Some(Ui::Gpui), None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_SET_UP}\n"), 1));
+            assert_eq!(wait_lines(&record, 1), ["--help"]);
         }
 
         #[test]
@@ -1303,6 +1301,64 @@ mod tests {
                 Some(Ui::Gpui),
                 None,
             );
+            assert_eq!(
+                (run.err, run.legacy),
+                (format!("{NOTICE_NOT_INSTALLED}\n"), 1)
+            );
+        }
+
+        #[test]
+        fn not_set_up_never_spawns_the_preview() {
+            let _serial = serial();
+            let linux = Some(Platform::Linux);
+            let dir = tempfile::tempdir().unwrap();
+            let (exe, record) = fake(dir.path(), GOOD_HELP, 0);
+            let env = env_path(BIN_ENV, &exe);
+            let mut not_set_up = launcher(&env, linux, None);
+            not_set_up.set_up = &set_up_no;
+            for page in [None, Some("Home"), Some("Hot Phrases")] {
+                let run = run_launch(&not_set_up, Some(Ui::Gpui), page);
+                assert!(run.result.is_ok(), "{:?}", run.result);
+                assert_eq!(
+                    (run.err, run.legacy),
+                    (format!("{NOTICE_NOT_SET_UP}\n"), 1),
+                    "{page:?}"
+                );
+            }
+            // The probe is waited for; nothing else ever ran.
+            assert_eq!(
+                std::fs::read_to_string(&record).unwrap(),
+                "--help\n--help\n--help\n"
+            );
+
+            // LOCALFLOW_UI=gpui is the same selection.
+            let gpui_env: Env = {
+                let exe = exe.clone().into_os_string();
+                Box::new(move |name| match name {
+                    BIN_ENV => Some(exe.clone()),
+                    UI_ENV => Some("gpui".into()),
+                    _ => None,
+                })
+            };
+            let mut by_env = launcher(&gpui_env, linux, None);
+            by_env.set_up = &set_up_no;
+            let run = run_launch(&by_env, None, None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_NOT_SET_UP}\n"), 1));
+
+            // Earlier notices keep their precedence.
+            let old = tempfile::tempdir().unwrap();
+            let (old_exe, _) = fake(old.path(), &GOOD_HELP.replace("    --setup", ""), 0);
+            let old_env = env_path(BIN_ENV, &old_exe);
+            let mut too_old = launcher(&old_env, linux, None);
+            too_old.set_up = &set_up_no;
+            let run = run_launch(&too_old, Some(Ui::Gpui), None);
+            assert_eq!((run.err, run.legacy), (format!("{NOTICE_PROBE}\n"), 1));
+
+            let none = env_of(&[]);
+            let home = tempfile::tempdir().unwrap();
+            let mut missing = launcher(&none, linux, Some(home.path()));
+            missing.set_up = &set_up_no;
+            let run = run_launch(&missing, Some(Ui::Gpui), None);
             assert_eq!(
                 (run.err, run.legacy),
                 (format!("{NOTICE_NOT_INSTALLED}\n"), 1)

@@ -813,6 +813,34 @@ mod hub_unix {
         );
         let mut gpui = env.to_vec();
         gpui.push(("LOCALFLOW_DESKTOP_BIN", desktop.to_str().unwrap()));
+        // Not set up yet: probed, never started (no preview first-run wizard).
+        for args in [&["hub", "--gpui"][..], &["hub", "--gpui", "--page", "home"]] {
+            let run = sandbox.run_with(args, &gpui, "");
+            assert_eq!(
+                (code(&run), stderr(&run)),
+                (
+                    0,
+                    "lf: LocalFlow isn't set up yet (run lf setup); opening the legacy window.\n"
+                        .into()
+                ),
+                "{args:?}"
+            );
+        }
+        assert_eq!(lines(&launched, 2), ["--help", "--help"]);
+        assert_eq!(
+            lines(&record, 4)[2..],
+            [
+                "-m localflow.hub_window --page Home",
+                "-m localflow.hub_window --page Home"
+            ]
+        );
+        std::fs::remove_file(&launched).unwrap();
+        std::fs::create_dir_all(sandbox.config().parent().unwrap()).unwrap();
+        std::fs::write(
+            sandbox.config(),
+            "config_version = 2\n\n[setup]\nversion = 1\n",
+        )
+        .unwrap();
         for args in [&["hub", "--gpui"][..], &["hub", "--gpui", "--page", "home"]] {
             let run = sandbox.run_with(args, &gpui, "");
             assert_eq!((code(&run), stderr(&run)), (0, String::new()), "{args:?}");
@@ -831,7 +859,7 @@ mod hub_unix {
                     .into()
             )
         );
-        assert_eq!(lines(&record, 3)[2], "-m localflow.hub_window --page Ask");
+        assert_eq!(lines(&record, 5)[4], "-m localflow.hub_window --page Ask");
     }
 
     /// Where `scripts/install_gpui_preview.sh` puts the package, with its
@@ -879,7 +907,7 @@ mod hub_unix {
     }
 
     #[test]
-    fn first_run_keeps_the_legacy_window_and_explicit_gpui_still_opens_the_preview() {
+    fn first_run_keeps_the_legacy_window_and_explicit_gpui_reports_not_set_up() {
         let sandbox = Sandbox::new();
         let venv = sandbox.root().join("venv");
         let other = sandbox.root().join("other");
@@ -954,14 +982,30 @@ mod hub_unix {
         assert_eq!(lines(&record, runs).len(), runs);
         assert!(lines(&launched, 0).is_empty());
 
-        // An explicit choice of the preview still opens it on first run.
+        // An explicit choice of the preview probes it, then reports that
+        // LocalFlow isn't set up and opens the legacy window.
         let _ = std::fs::remove_file(&legacy_file);
         let _ = std::fs::remove_file(sandbox.config());
         let mut gpui = env.to_vec();
         gpui.push(("LOCALFLOW_UI", "gpui"));
-        quiet(&sandbox.run_with(&["hub"], &gpui, ""));
-        quiet(&sandbox.run_with(&["hub", "--gpui", "--page", "home"], &env, ""));
-        assert_eq!(lines(&launched, 4), ["--help", "", "--help", "--page Home"]);
+        for (args, env) in [
+            (&["hub"][..], &gpui[..]),
+            (&["hub", "--gpui", "--page", "home"][..], &env[..]),
+        ] {
+            let run = sandbox.run_with(args, env, "");
+            assert_eq!(
+                (code(&run), stdout(&run), stderr(&run)),
+                (
+                    0,
+                    String::new(),
+                    "lf: LocalFlow isn't set up yet (run lf setup); opening the legacy window.\n"
+                        .to_string()
+                ),
+                "{args:?}"
+            );
+            runs += 1;
+        }
+        assert_eq!(lines(&launched, 2), ["--help", "--help"]);
         assert_eq!(lines(&record, runs).len(), runs);
 
         // Set up without config_version and with an invalid scalar: the
@@ -970,7 +1014,7 @@ mod hub_unix {
         let unversioned = "[setup]\nversion = 1\n\n[cleanup]\nlevel = \"loud\"\n";
         write_config(&sandbox, unversioned);
         quiet(&sandbox.run_with(&["hub"], &env, ""));
-        assert_eq!(lines(&launched, 6)[4..], ["--help", ""]);
+        assert_eq!(lines(&launched, 4)[2..], ["--help", ""]);
         assert_eq!(lines(&record, runs).len(), runs);
         assert_eq!(
             std::fs::read_to_string(sandbox.config()).unwrap(),

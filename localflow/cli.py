@@ -408,8 +408,9 @@ def hub_command(ctx, page: str, ui_gpui: bool, ui_legacy: bool) -> None:
     """Open the native history and settings hub."""
     flag = desktop_launch.flag_choice(ui_gpui, ui_legacy)
     page = canonical_page(page) or DEFAULT_PAGE
-    # Bare `lf hub` sends no page to LocalFlow Preview, so its first-run
-    # wizard still opens; the legacy Hub always gets the canonical page.
+    # Bare `lf hub` sends no page to LocalFlow Preview (opened only once
+    # LocalFlow is set up, so never its first-run wizard); the legacy Hub
+    # always gets the canonical page.
     explicit = ctx.get_parameter_source("page") is not click.core.ParameterSource.DEFAULT
     desktop_launch.launch(
         flag,

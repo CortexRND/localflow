@@ -540,8 +540,8 @@ window. `lf setup`, and any window on a machine that hasn't been set up yet,
 keep the usual setup wizard and windows even with the preview installed.
 Without the preview (it isn't part of the standard install) and on Windows,
 nothing changes. `--legacy` or `LOCALFLOW_UI=legacy` always opens the usual
-window. `--gpui` asks for the preview explicitly, including its own setup
-wizard; that wizard offers the native app's speech models, which the Python
+window. `--gpui` asks for the preview explicitly. `lf setup --gpui` opens the
+preview's own setup wizard; that wizard offers the native app's speech models, which the Python
 runtime that handles dictation may not be able to run. This needs an `lf` built after v0.2.2
 (for example a source install); the released v0.2.2 CLI doesn't have this
 selector yet and always opens the usual window. The CLI can search and manage
