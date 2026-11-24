@@ -329,11 +329,19 @@ export LOCALFLOW_UI=legacy    # the same for every one of these commands (rollba
   session; neither looks at the preview at all. In the source, setting
   `DEFAULT_UI` back to legacy in `localflow/desktop_launch.py` and
   `rust/lf/src/desktop_launch.rs` restores the 4a behaviour exactly.
-- **Installers:** unchanged. `install.sh` on Linux ends by opening `lf setup`;
-  it installs the v0.2.2 release, whose default is still legacy. The first
-  release that ships this default must also pin that line to
-  `lf setup --legacy` (a test guards this), because the installer's own bytes
-  are pinned by the README checksum.
+- **Installers:** their bytes, package and bundle identities are unchanged,
+  and none ships the preview. The pinned one-liner installs the v0.2.2 release,
+  whose `lf` has no selector and always opens the legacy window. Source installs
+  run this updated CLI, though: `install.sh` run from a checkout or with
+  `LOCALFLOW_REF`, and the macOS `setup.sh` editable install. Their final bare
+  `lf setup` follows the conditional choice above (the preview for preview
+  owners, else the legacy window). So does the Linux **LocalFlow Setup** menu
+  entry that `install.sh` writes (`Exec=… setup`, `Terminal=false`), where any
+  fallback notice isn't visible. That is the intended routing for `lf setup`.
+  The installer's bytes are pinned by the README checksum, so the first release
+  that ships this default must pin `install.sh`'s final `exec … lf setup` to
+  `--legacy` (a test guards only that line) and state explicitly what the menu
+  entry should do.
 - **`lf-hub` on Linux** (previously always an error) opens the preview through
   the same discovery, ownership and probe rules and `exec`s it with `--page` /
   `--setup` from its own arguments. If nothing usable is found it prints an

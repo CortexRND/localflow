@@ -535,8 +535,10 @@ LocalFlow Preview (native GPUI app, [`rust/lf-desktop`](rust/lf-desktop/README.m
 something is wrong with it, they say so once and open the usual window. Without
 the preview (it isn't part of the standard install) and on Windows, nothing
 changes. `--legacy` or `LOCALFLOW_UI=legacy` always opens the usual window, and
-`--gpui` asks for the preview explicitly. The CLI can search and manage history
-without opening the hub:
+`--gpui` asks for the preview explicitly. This needs an `lf` built after v0.2.2
+(for example a source install); the released v0.2.2 CLI doesn't have this
+selector yet and always opens the usual window. The CLI can search and manage
+history without opening the hub:
 
 ```bash
 lf history list

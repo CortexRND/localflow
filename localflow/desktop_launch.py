@@ -240,7 +240,11 @@ def candidate_absent(
         return True
     if env.get(BIN_ENV, ""):
         return False
-    home = home if home is not None else Path.home()
+    if home is None:
+        try:
+            home = Path.home()
+        except RuntimeError:  # no HOME and no passwd entry: nothing to find (as in lf-rs)
+            return True
     if not home.is_absolute():
         return True
     return not os.path.lexists(home.joinpath(*(LINUX_ROOT if key == "linux" else MAC_APP)))

@@ -548,6 +548,22 @@ def test_default_with_a_relative_home_is_quiet(command, legacy, monkeypatch, tmp
     assert legacy.calls == [LEGACY_FOR[command]]
 
 
+@pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
+def test_default_with_an_unresolvable_home_is_quiet(command, legacy, monkeypatch):
+    # No HOME and no passwd entry: Path.home() raises, as lf-rs's home lookup
+    # fails; the implicit default has nothing to find, so legacy opens quietly.
+    def no_home(cls):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(desktop_launch.Path, "home", classmethod(no_home))
+    for platform in ("linux", "darwin"):
+        assert desktop_launch.candidate_absent({}, platform)
+    _never_discovered(monkeypatch)
+    result = _invoke([command])
+    assert result.exit_code == 0 and result.output == ""
+    assert legacy.calls == [LEGACY_FOR[command]]
+
+
 @posix_only
 @pytest.mark.parametrize("command", ["hub", "phrases", "setup"])
 def test_default_opens_the_owned_package_with_a_closed_argv(command, home, fake, legacy):

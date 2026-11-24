@@ -344,7 +344,8 @@ lf-rs setup install-app
   LocalFlow Preview by default (or with `--gpui`/`LOCALFLOW_UI=gpui`) under the
   same discovery, probe and notice rules, and quietly opens the legacy window
   when the preview isn't installed; `--legacy`/`LOCALFLOW_UI=legacy` always
-  opens the legacy window. The legacy window is
+  opens the legacy window (builds after v0.2.2; the released v0.2.2 CLIs
+  don't have this selector). The legacy window is
   `python -m localflow.hub_window --page PAGE` from the Python install
   (the one `setup install-app` uses).
 * `tweak` asks the loopback Ollama (the saved `llm.base_url` when the
