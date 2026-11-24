@@ -763,8 +763,8 @@ These are tracked in `docs/gpui-migration.md`:
 - The preview package is opt-in and separate, and no default installer ships
   it. `lf hub` / `lf phrases` prefer it only once it is installed and
   LocalFlow is set up (step 4b, Linux and macOS); `lf setup` stays legacy
-  unless `--gpui` is given, and first run stays legacy (an explicit `--gpui`
-  there gets the not-set-up notice). The native wizard's model choices,
+  unless `--gpui` or `LOCALFLOW_UI=gpui` is given, and first run stays legacy
+  (an explicit `--gpui` there gets the not-set-up notice). The native wizard's model choices,
   downloads and trial target the native engine, not the Python runtime that
   handles dictation. Default-installer integration and legacy retirement are
   later steps.
