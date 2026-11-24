@@ -178,7 +178,7 @@ pub(crate) fn run_hook(
                     registered = true;
                     ready();
                 }
-                Event::Key(event) => translator.feed(event, hub),
+                Event::Key(event) => translator.feed(event, hub, &physically_down),
             }
         }
         drop(cleanup);
@@ -194,13 +194,24 @@ pub(crate) fn run_hook(
     })
 }
 
+fn physically_down(vk: u16) -> bool {
+    // SAFETY: GetAsyncKeyState only reads the system key state.
+    let state = unsafe { GetAsyncKeyState(i32::from(vk)) };
+    state as u16 & 0x8000 != 0
+}
+
+struct Pressed {
+    vk: u16,
+    keys: Vec<Key>,
+}
+
 #[derive(Default)]
 struct Translator {
-    pressed: HashMap<(u32, bool), Vec<Key>>,
+    pressed: HashMap<(u32, bool), Pressed>,
 }
 
 impl Translator {
-    fn feed(&mut self, event: KeyEvent, hub: &KeyboardHub) {
+    fn feed(&mut self, event: KeyEvent, hub: &KeyboardHub, physically_down: &dyn Fn(u16) -> bool) {
         // Use the scan code when present: the same physical keypad key can
         // report different virtual keys if Num Lock changes mid-press.
         let code = if event.scan == 0 {
@@ -210,6 +221,19 @@ impl Translator {
         };
         let id = (code, event.extended);
         if event.down {
+            // Key-ups on the secure desktop (Ctrl+Alt+Del, Win+L, UAC) never
+            // reach the hook. The event being handled may not be reflected in
+            // the async state yet, so only the other keys are checked.
+            let mut missed: Vec<_> = self
+                .pressed
+                .iter()
+                .filter(|(other, pressed)| **other != id && !physically_down(pressed.vk))
+                .map(|(other, _)| *other)
+                .collect();
+            missed.sort_unstable();
+            for other in missed {
+                self.release(other, hub);
+            }
             if self.pressed.contains_key(&id) {
                 return; // auto-repeat
             }
@@ -225,20 +249,29 @@ impl Translator {
                         hub.press(key.clone());
                     }
                 }
-                self.pressed.insert(id, keys);
+                self.pressed.insert(id, Pressed { vk: event.vk, keys });
             }
-        } else if let Some(keys) = self.pressed.remove(&id) {
-            // Release exactly what key-down reported, even if Shift came up first.
-            for key in keys.into_iter().rev() {
-                if !self.is_pressed(&key) {
-                    hub.release(key);
-                }
+        } else {
+            self.release(id, hub);
+        }
+    }
+
+    fn release(&mut self, id: (u32, bool), hub: &KeyboardHub) {
+        let Some(pressed) = self.pressed.remove(&id) else {
+            return;
+        };
+        // Release exactly what key-down reported, even if Shift came up first.
+        for key in pressed.keys.into_iter().rev() {
+            if !self.is_pressed(&key) {
+                hub.release(key);
             }
         }
     }
 
     fn is_pressed(&self, key: &Key) -> bool {
-        self.pressed.values().any(|keys| keys.contains(key))
+        self.pressed
+            .values()
+            .any(|pressed| pressed.keys.contains(key))
     }
 }
 
@@ -355,6 +388,7 @@ mod tests {
                     down,
                 },
                 &hub,
+                &|_| true,
             );
         };
         feed(VK_LCONTROL, true);
@@ -367,5 +401,56 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(()));
             assert!(rx.try_recv().is_err());
         }
+    }
+
+    #[test]
+    fn a_key_up_missed_on_the_secure_desktop_is_released_on_the_next_key_down() {
+        let (tx, rx) = mpsc::channel();
+        let (down, up) = (tx.clone(), tx);
+        let (hub, warnings) = KeyboardHub::new(
+            &Shortcuts {
+                hold_key: "alt_l".into(),
+                ..Default::default()
+            },
+            HubActions {
+                on_down: Arc::new(move || down.send("down").unwrap()),
+                on_up: Arc::new(move || up.send("up").unwrap()),
+                ..HubActions::noop()
+            },
+        );
+        assert!(warnings.is_empty());
+        let mut translator = Translator::default();
+        let held = RefCell::new(Vec::new());
+        let mut feed = |vk, down| {
+            if down {
+                held.borrow_mut().push(vk);
+            }
+            translator.feed(
+                KeyEvent {
+                    vk,
+                    scan: 0,
+                    extended: false,
+                    down,
+                },
+                &hub,
+                &|vk| held.borrow().contains(&vk),
+            );
+        };
+        feed(VK_LCONTROL, true);
+        feed(VK_LMENU, true);
+        feed(VK_DELETE, true);
+        assert_eq!(rx.try_recv(), Ok("down"));
+        feed(VK_LMENU, true); // auto-repeat while all three are still down
+        assert!(rx.try_recv().is_err());
+        held.borrow_mut().clear(); // the ups go to the secure desktop
+        feed(VK_A, true);
+        assert_eq!(rx.try_recv(), Ok("up"));
+        held.borrow_mut().clear();
+        feed(VK_A, false);
+        feed(VK_LMENU, true);
+        assert_eq!(rx.try_recv(), Ok("down"));
+        feed(VK_LMENU, false);
+        assert_eq!(rx.try_recv(), Ok("up"));
+        assert!(rx.try_recv().is_err());
     }
 }

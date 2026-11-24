@@ -64,7 +64,7 @@ tray-icon = { version = "0.21.2", default-features = false }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 # Runtime-status probe: signal-0 liveness check of the PID a status file names.
 [target.'cfg(unix)'.dependencies]
