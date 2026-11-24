@@ -926,6 +926,33 @@ pub fn load_config() -> Result<Config> {
     load_config_at(&target, &legacy, is_darwin(), &mut warnings)
 }
 
+/// `load_config()` for a running server: values forced on load keep `current`'s
+/// value, as Python's long-lived `_config` does until restart.
+/// Read-only: without a v2 file it returns `current` (no legacy migration).
+pub fn reload_config(current: &Config) -> Result<Config> {
+    let target = try_config_path()?;
+    let mut warnings = Vec::new();
+    reload_config_at(current, &target, is_darwin(), &mut warnings)
+}
+
+fn reload_config_at(
+    current: &Config,
+    target: &Path,
+    darwin: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Config> {
+    if !py_exists(target)? {
+        return Ok(current.clone());
+    }
+    let mut config = config_from_v2_inner(&parse_toml_file(target)?, darwin, warnings)?;
+    if !darwin {
+        if let Some(value) = current.field("meetings_enabled") {
+            config.set_field("meetings_enabled", value.clone());
+        }
+    }
+    Ok(config)
+}
+
 fn load_config_at(
     target: &Path,
     legacy: &Path,
@@ -2226,6 +2253,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated.field_bool("meetings_enabled"), Some(true));
+    }
+
+    #[test]
+    fn reload_reads_file_edits_but_keeps_forced_meetings_off_macos() {
+        let iso = Isolated::new();
+        let current = with(
+            &Config::defaults_for(false),
+            &[("meetings_enabled", json!(true))],
+        );
+        save_config(
+            &with(
+                &current,
+                &[
+                    ("meetings_enabled", json!(false)),
+                    ("llm_model", json!("edited")),
+                ],
+            ),
+            Some(&iso.target),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let reloaded = reload_config_at(&current, &iso.target, false, &mut warnings).unwrap();
+        assert_eq!(reloaded.field_str("llm_model"), Some("edited"));
+        assert_eq!(reloaded.field_bool("meetings_enabled"), Some(true));
+        let reloaded = reload_config_at(&current, &iso.target, true, &mut warnings).unwrap();
+        assert_eq!(reloaded.field_str("llm_model"), Some("edited"));
+        assert_eq!(reloaded.field_bool("meetings_enabled"), Some(false));
+    }
+
+    #[test]
+    fn reload_without_v2_file_keeps_current_and_skips_legacy_migration() {
+        let iso = Isolated::new();
+        fs::write(&iso.legacy, "model_size = \"tiny\"\n").unwrap();
+        let before = fs::read(&iso.legacy).unwrap();
+        let current = with(
+            &Config::defaults_for(false),
+            &[("llm_model", json!("live"))],
+        );
+        for darwin in [false, true] {
+            let mut warnings = Vec::new();
+            let reloaded = reload_config_at(&current, &iso.target, darwin, &mut warnings).unwrap();
+            assert_eq!(reloaded.fields, current.fields);
+        }
+        assert!(!iso.target.exists());
+        assert_eq!(fs::read(&iso.legacy).unwrap(), before);
     }
 
     #[test]

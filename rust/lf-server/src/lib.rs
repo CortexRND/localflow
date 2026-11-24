@@ -39,6 +39,7 @@ pub struct ServerState {
     backend: Arc<dyn Backend>,
     config_updater: Option<Arc<ConfigUpdater>>,
     config_reader: Option<Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>>,
+    reload_before_put: bool,
 }
 
 impl ServerState {
@@ -69,6 +70,7 @@ impl ServerState {
             backend,
             config_updater: None,
             config_reader: None,
+            reload_before_put: false,
         }
     }
 
@@ -78,6 +80,7 @@ impl ServerState {
 
     /// Reads the existing token (no startup rotation) and attaches replay
     /// recovery to that exact file, independent of future environment changes.
+    /// `PUT /api/config` applies to the saved file, keeping edits made since startup.
     pub fn load_with_backend(backend: Arc<dyn Backend>) -> anyhow::Result<Self> {
         Ok(Self {
             config: Mutex::new(config::load_config()?),
@@ -85,6 +88,7 @@ impl ServerState {
             backend,
             config_updater: None,
             config_reader: None,
+            reload_before_put: true,
         })
     }
 
@@ -394,7 +398,15 @@ fn dispatch(
             Err(r) => return *r,
         };
         let mut config = state.config.lock().unwrap();
-        let updated = match config::apply_config_update(&config, &update) {
+        let base = if state.reload_before_put && state.config_updater.is_none() {
+            match config::reload_config(&config) {
+                Ok(base) => base,
+                Err(_) => return error(503, "could not load config"),
+            }
+        } else {
+            config.clone()
+        };
+        let updated = match config::apply_config_update(&base, &update) {
             Ok(updated) => updated,
             Err(err) => return error(400, err.to_string()),
         };
