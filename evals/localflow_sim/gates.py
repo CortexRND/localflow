@@ -495,7 +495,15 @@ def gate_recall(res: dict, cell: dict, tally) -> None:
         elif kind == "unanswerable":
             tally("R5", abstained, row["item"], row["error"] or answer[:120])
         elif kind == "time_filter":
-            ok = (abstained and turn["stale_retrieved"] == 0) if row["expect"] == "abstain" else hit
+            if row["expect"] == "abstain":
+                if row["path"] == "api":
+                    api_search = turn.get("api_search") or {}
+                    no_stale = api_search.get("status") == 200 and api_search.get("citations") == []
+                else:
+                    no_stale = turn["stale_retrieved"] == 0
+                ok = abstained and no_stale
+            else:
+                ok = hit
             tally("R2", ok, row["item"], row["error"] or answer[:120])
         elif kind == "source_filter":
             ok = (abstained if row["expect"] == "abstain" else hit) and in_scope
