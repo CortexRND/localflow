@@ -47,6 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0 # merge-base + baseline worktree for the same-runner A/B
 
       # ffmpeg decodes the FLAC corpus; the rest is what rust.yml installs to
@@ -111,6 +112,18 @@ jobs:
         if: contains(env.PERF_RUNTIMES, 'rust')
         run: cargo build --manifest-path rust/Cargo.toml --locked --release -p lf-stt --example stt_bench
 
+      - name: Warm model cache on cold miss
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ ! -d "$HF_HUB_CACHE" ] || [ -z "$(ls -A "$HF_HUB_CACHE" 2>/dev/null)" ]; then
+            echo "Cold HF cache detected; warming smoke models before timed A/B runs"
+            for rt in $PERF_RUNTIMES; do
+              python -m evals.perf run --tier smoke --runtime "$rt" --suite "$PERF_SUITES" \
+                --runner-label ubuntu-latest --output /dev/null || true
+            done
+          fi
+
       - name: Run candidate smoke suites
         shell: bash
         run: |
@@ -129,7 +142,7 @@ jobs:
         run: |
           set -uo pipefail
           results="$GITHUB_WORKSPACE/perf-results"
-          baseline="$GITHUB_WORKSPACE/../perf-baseline"
+          baseline="$(cd "$GITHUB_WORKSPACE/.." && pwd)/perf-baseline"
           base_sha="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)" || {
             for rt in $PERF_RUNTIMES; do
               echo "Could not compute merge-base with origin/${GITHUB_BASE_REF}; candidate-only." > "$results/note-$rt.txt"
@@ -197,7 +210,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          HEAD_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -uo pipefail
           mkdir -p perf-results
@@ -205,10 +218,11 @@ jobs:
           for rt in ${PERF_RUNTIMES:-python rust}; do
             entry="runtime=$rt,candidate=perf-results/candidate-$rt.json"
             if [ -f "perf-results/baseline-$rt.json" ] && [ -f "perf-results/candidate-$rt.json" ]; then
+              rc=0
               python -m evals.perf compare \
                 --baseline "perf-results/baseline-$rt.json" --candidate "perf-results/candidate-$rt.json" \
-                --output "perf-results/report-$rt.md" --json "perf-results/compare-$rt.json" > /dev/null
-              echo "compare $rt exit code: $?"
+                --output "perf-results/report-$rt.md" --json "perf-results/compare-$rt.json" > /dev/null || rc=$?
+              echo "compare $rt exit code: $rc"
               entry="$entry,compare=perf-results/compare-$rt.json,report=perf-results/report-$rt.md"
             elif [ ! -f "perf-results/note-$rt.txt" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
               echo "$GITHUB_EVENT_NAME run: no merge-base baseline; candidate-only." > "perf-results/note-$rt.txt"
