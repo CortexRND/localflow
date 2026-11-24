@@ -81,7 +81,7 @@ def classify(gate_data: dict, has_jev: bool) -> tuple[str, list[str]]:
     if not gate_data["commit_ok"]:
         reasons.append(f"commit invariant broken: saw {gate_data['commits_seen']}")
     if not has_jev:
-        reasons.append("Jev second judge not run (jev_out.json missing)")
+        reasons.append("Jev second judge produced no valid rows (missing or all errored)")
     if red:
         return "RED", reasons
     if flaky:
@@ -299,8 +299,10 @@ def main() -> int:
         gate_data = gates.compute(run)
         (run / "gates.json").write_text(json.dumps(gate_data, indent=1), encoding="utf-8")
     jev = load(run / "jev_out.json")
-    verdict, reasons = classify(gate_data, jev is not None)
     tables = jev_tables(jev or {}, gate_data)
+    jev_rows = (jev or {}).get("rows", [])
+    has_jev = bool(jev and jev_rows and len(tables["judge_errors"]) < len(jev_rows))
+    verdict, reasons = classify(gate_data, has_jev)
     counts = defaultdict(int)
     for row in gate_data["summary"].values():
         counts[row["status"]] += 1
