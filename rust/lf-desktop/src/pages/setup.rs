@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{div, prelude::*, px, Context, Entity, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, ClipboardItem, Context, Entity, FontWeight, SharedString, Window};
 
 use crate::app::PageCx;
 use crate::controllers::jobs::{self, JobState};
@@ -281,6 +281,25 @@ impl SetupView {
             }
         }
         cx.notify();
+    }
+
+    /// A checkup row's fix button. The sandbox opens no external URL and
+    /// says what it would have opened; step navigation and copy still work.
+    fn apply_fix(&mut self, action: ctl::CheckAction, cx: &mut Context<Self>) {
+        match ctl::fix_effect(action, self.pcx.services.setup.simulated) {
+            ctl::FixEffect::Open(url) => cx.open_url(&url),
+            ctl::FixEffect::GoTo(step) => self.go(step, cx),
+            ctl::FixEffect::Copy(cmd) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(cmd.to_string()));
+                // Name the command: the toast is the only confirmation of
+                // what's on the clipboard.
+                self.pcx.toast(
+                    format!("Copied “{cmd}” — run it in a terminal, then Check again."),
+                    cx,
+                );
+            }
+            ctl::FixEffect::Notice(message) => self.pcx.toast(message, cx),
+        }
     }
 
     fn next(&mut self, cx: &mut Context<Self>) {
@@ -626,7 +645,7 @@ impl SetupView {
             ))
     }
 
-    fn check_rows(&self, t: &Theme, flow: &SetupFlow) -> gpui::Div {
+    fn check_rows(&self, t: &Theme, flow: &SetupFlow, cx: &mut Context<Self>) -> gpui::Div {
         let mut list = ui::list(t);
         match &flow.checks {
             Loadable::Ready(checks) => {
@@ -659,7 +678,22 @@ impl SetupView {
                                     .min_w_0()
                                     .child(ui::label(t, check.label.clone()))
                                     .child(ui::supporting(t, check.detail.clone())),
-                            ),
+                            )
+                            .when_some(ctl::check_fix(check), |row, fix| {
+                                let tooltip = ctl::fix_tooltip(&fix.action);
+                                let action = fix.action;
+                                row.child(
+                                    Button::new(
+                                        SharedString::from(format!("setup-fix-{}", check.key)),
+                                        fix.label,
+                                    )
+                                    .small()
+                                    .tooltip(tooltip)
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.apply_fix(action.clone(), cx),
+                                    )),
+                                )
+                            }),
                     );
                 }
             }
@@ -681,7 +715,7 @@ impl SetupView {
         let mut body = div().flex().flex_col().gap(space::s6());
         match flow.step {
             Step::Checkup => {
-                body = body.child(self.check_rows(t, flow));
+                body = body.child(self.check_rows(t, flow, cx));
                 if flow.failed_checks() > 0 {
                     body = body.child(ui::banner(
                         t,

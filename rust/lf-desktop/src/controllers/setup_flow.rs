@@ -997,13 +997,40 @@ pub fn provider_label(id: &str) -> String {
 /// and the paste helper (both from what this machine reports).
 pub fn checks(config: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
     let mut rows = flow::run_checks(config, platform);
-    if platform.system() == "Linux" {
+    let system = platform.system();
+    let ffmpeg_fix = match system.as_str() {
+        "Linux" => Some((
+            "Not found — install ffmpeg with your package manager",
+            "https://ffmpeg.org/download.html#build-linux",
+        )),
+        "Windows" => Some((
+            "Not found — install ffmpeg and add it to PATH",
+            "https://ffmpeg.org/download.html#build-windows",
+        )),
+        _ => None,
+    };
+    if let Some((detail, url)) = ffmpeg_fix {
         for row in rows.iter_mut().filter(|r| r.key == "ffmpeg") {
             if row.ok == Some(false) {
-                row.detail = "Not found — install ffmpeg with your package manager".into();
-                row.fix_url = String::new();
+                row.detail = detail.into();
+                row.fix_url = url.into();
             }
         }
+    }
+    // Starting Ollama here only makes sense once it's installed (until then
+    // the one fix offered is Get Ollama), and only for a server on this
+    // computer: `ollama serve` can't start a remote one.
+    let ollama_missing = rows
+        .iter()
+        .any(|r| r.key == "ollama-installed" && r.ok == Some(false));
+    let base_url = config.field_str("llm_base_url").unwrap_or("").trim();
+    let remote = !base_url.is_empty() && !is_loopback(base_url);
+    if ollama_missing || remote {
+        for row in rows.iter_mut().filter(|r| r.key == "ollama-running") {
+            row.fix_label.clear();
+        }
+    }
+    if system == "Linux" {
         let session = lf_input::linux::session();
         let (ok, detail) = match session {
             lf_input::linux::Session::X11 => (
@@ -1047,6 +1074,119 @@ pub fn checks(config: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
         ));
     }
     rows
+}
+
+// ------------------------------------------------------- checkup fixes ---
+
+/// What a checkup row's fix button does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckAction {
+    /// An `https://` page or a macOS System Settings pane.
+    OpenUrl(String),
+    GoTo(Step),
+    /// Copy a terminal command.
+    Copy(&'static str),
+}
+
+/// A row's fix button: its label and what it does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckFix {
+    pub label: &'static str,
+    pub action: CheckAction,
+}
+
+/// What the view does for a fix. In the sandbox an external open becomes a
+/// [`Notice`](FixEffect::Notice) saying what would have opened; going to a
+/// step and copying a command work normally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixEffect {
+    Open(String),
+    GoTo(Step),
+    Copy(&'static str),
+    Notice(String),
+}
+
+const SETTINGS_SCHEME: &str = "x-apple.systempreferences:";
+
+/// Only web pages and System Settings panes are ever opened.
+fn openable(url: &str) -> Option<CheckAction> {
+    let web = url.starts_with("https://") && !url_host(url).is_empty();
+    let settings = url
+        .strip_prefix(SETTINGS_SCHEME)
+        .is_some_and(|pane| !pane.trim().is_empty());
+    (web || settings).then(|| CheckAction::OpenUrl(url.to_string()))
+}
+
+/// The host of `scheme://userinfo@host:port/path?query#fragment` (any part
+/// but the host optional; IPv6 hosts without their brackets).
+fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '#', '?']).next().unwrap_or(rest);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None => host.split(':').next().unwrap_or(host),
+    }
+}
+
+/// `localhost`, `127.0.0.1` or `::1`.
+fn is_loopback(url: &str) -> bool {
+    let host = url_host(url);
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+/// The fix button for a checkup row, or `None` when it's ready or there's
+/// nothing concrete LocalFlow can take you to.
+pub fn check_fix(check: &Check) -> Option<CheckFix> {
+    if check.ok == Some(true) || check.fix_label.is_empty() {
+        return None;
+    }
+    let (label, action) = match check.key.as_str() {
+        "ffmpeg" => ("Install ffmpeg", openable(&check.fix_url)?),
+        "ollama-installed" => ("Get Ollama", openable(&check.fix_url)?),
+        "ollama-running" => ("Copy command", CheckAction::Copy("ollama serve")),
+        "microphone-device" => ("Check microphone", CheckAction::GoTo(Step::Microphone)),
+        "microphone" | "accessibility" | "input-monitoring" => {
+            ("Open Settings", openable(&check.fix_url)?)
+        }
+        _ => return None,
+    };
+    Some(CheckFix { label, action })
+}
+
+/// What pressing a fix does. `simulated` (the sandbox) suppresses only
+/// external URL opens, replacing them with an honest notice; in-app
+/// navigation and clipboard copy are unaffected.
+pub fn fix_effect(action: CheckAction, simulated: bool) -> FixEffect {
+    match action {
+        CheckAction::OpenUrl(url) if simulated => {
+            FixEffect::Notice(if url.starts_with(SETTINGS_SCHEME) {
+                "Sandbox — nothing was opened. This would open System Settings.".into()
+            } else {
+                format!(
+                    "Sandbox — nothing was opened. This would open {}.",
+                    url_host(&url)
+                )
+            })
+        }
+        CheckAction::OpenUrl(url) => FixEffect::Open(url),
+        CheckAction::GoTo(step) => FixEffect::GoTo(step),
+        CheckAction::Copy(cmd) => FixEffect::Copy(cmd),
+    }
+}
+
+/// The fix button's tooltip: where it goes.
+pub fn fix_tooltip(action: &CheckAction) -> String {
+    match action {
+        CheckAction::OpenUrl(url) if url.starts_with(SETTINGS_SCHEME) => {
+            "Opens System Settings".into()
+        }
+        CheckAction::OpenUrl(url) => format!("Opens {}", url_host(url)),
+        CheckAction::GoTo(step) => format!("Go to {} step", step.label()),
+        CheckAction::Copy(cmd) => format!("Copies “{cmd}”"),
+    }
 }
 
 /// Why Apply didn't save.
@@ -2192,5 +2332,359 @@ mod tests {
             .any(|r| r.key == "paste-tool" && r.ok == Some(false)));
         let ffmpeg = rows.iter().find(|r| r.key == "ffmpeg").unwrap();
         assert!(!ffmpeg.detail.contains("brew"));
+        for key in ["global-shortcuts", "paste-tool"] {
+            let row = rows.iter().find(|r| r.key == key).unwrap();
+            assert_eq!(check_fix(row), None, "{key}");
+        }
+    }
+
+    // ------------------------------------------------------ checkup fixes ---
+
+    const FIX_KEYS: [&str; 7] = [
+        "ffmpeg",
+        "ollama-installed",
+        "ollama-running",
+        "microphone-device",
+        "microphone",
+        "accessibility",
+        "input-monitoring",
+    ];
+
+    fn row(key: &str, ok: Option<bool>, url: &str) -> Check {
+        Check::new(key, key, ok, "detail", "Fix it", url)
+    }
+
+    fn platform(system: &str) -> FakeSetupPlatform {
+        FakeSetupPlatform {
+            system: system.into(),
+            ..FakeSetupPlatform::default()
+        }
+    }
+
+    /// Everything missing: every fix this system can offer.
+    fn broken(system: &str) -> Vec<Check> {
+        let platform = FakeSetupPlatform {
+            mic: Some(flow::MicAuthorization::Denied),
+            accessibility: Some(false),
+            input_monitoring: Some(false),
+            ..platform(system)
+        };
+        let mut rows = checks(&Config::defaults_for(system == "Darwin"), &platform);
+        let running = FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform
+        };
+        rows.extend(checks(&Config::defaults_for(system == "Darwin"), &running));
+        rows
+    }
+
+    #[test]
+    fn ready_checks_never_offer_a_fix() {
+        for key in FIX_KEYS.into_iter().chain(["llm-provider", "other"]) {
+            let check = row(key, Some(true), "https://example.com/fix");
+            assert_eq!(check_fix(&check), None, "{key}");
+        }
+    }
+
+    #[test]
+    fn fixes_have_exact_labels_and_targets() {
+        let settings = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
+        let cases: [(&str, &str, &str, CheckAction); 7] = [
+            (
+                "ffmpeg",
+                "https://formulae.brew.sh/formula/ffmpeg",
+                "Install ffmpeg",
+                CheckAction::OpenUrl("https://formulae.brew.sh/formula/ffmpeg".into()),
+            ),
+            (
+                "ollama-installed",
+                "https://ollama.com/download",
+                "Get Ollama",
+                CheckAction::OpenUrl("https://ollama.com/download".into()),
+            ),
+            (
+                "ollama-running",
+                "https://ollama.com/download",
+                "Copy command",
+                CheckAction::Copy("ollama serve"),
+            ),
+            (
+                "microphone-device",
+                "",
+                "Check microphone",
+                CheckAction::GoTo(Step::Microphone),
+            ),
+            (
+                "microphone",
+                settings,
+                "Open Settings",
+                CheckAction::OpenUrl(settings.into()),
+            ),
+            (
+                "accessibility",
+                settings,
+                "Open Settings",
+                CheckAction::OpenUrl(settings.into()),
+            ),
+            (
+                "input-monitoring",
+                settings,
+                "Open Settings",
+                CheckAction::OpenUrl(settings.into()),
+            ),
+        ];
+        for (key, url, label, action) in cases {
+            for ok in [Some(false), None] {
+                assert_eq!(
+                    check_fix(&row(key, ok, url)),
+                    Some(CheckFix {
+                        label,
+                        action: action.clone()
+                    }),
+                    "{key} {ok:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rows_without_a_target_have_no_button() {
+        for key in ["llm-provider", "global-shortcuts", "paste-tool", "unknown"] {
+            assert_eq!(
+                check_fix(&row(key, Some(false), "https://example.com")),
+                None,
+                "{key}"
+            );
+        }
+        for key in [
+            "ffmpeg",
+            "ollama-installed",
+            "microphone",
+            "accessibility",
+            "input-monitoring",
+        ] {
+            for url in ["", "file:///etc/passwd", "http://example.com", "https://"] {
+                assert_eq!(check_fix(&row(key, Some(false), url)), None, "{key} {url}");
+            }
+        }
+        // No label: nothing to offer even with a known key.
+        let mut unlabeled = row("ffmpeg", Some(false), "https://ffmpeg.org");
+        unlabeled.fix_label.clear();
+        assert_eq!(check_fix(&unlabeled), None);
+    }
+
+    #[test]
+    fn ffmpeg_fix_is_platform_correct() {
+        for (system, url) in [
+            ("Darwin", "https://formulae.brew.sh/formula/ffmpeg"),
+            ("Linux", "https://ffmpeg.org/download.html#build-linux"),
+            ("Windows", "https://ffmpeg.org/download.html#build-windows"),
+        ] {
+            let rows = checks(&Config::defaults_for(system == "Darwin"), &platform(system));
+            let ffmpeg = rows.iter().find(|r| r.key == "ffmpeg").unwrap();
+            assert_eq!(ffmpeg.ok, Some(false));
+            assert_eq!(
+                check_fix(ffmpeg).map(|f| f.action),
+                Some(CheckAction::OpenUrl(url.into())),
+                "{system}"
+            );
+            if system != "Darwin" {
+                assert!(!ffmpeg.detail.contains("brew"), "{system}");
+            }
+        }
+        // Installed: no fix on any system.
+        let found = FakeSetupPlatform {
+            commands: vec!["ffmpeg".into()],
+            ..platform("Windows")
+        };
+        let rows = checks(&Config::defaults_for(false), &found);
+        let ffmpeg = rows.iter().find(|r| r.key == "ffmpeg").unwrap();
+        assert_eq!(ffmpeg.detail, "Installed");
+        assert_eq!(check_fix(ffmpeg), None);
+    }
+
+    #[test]
+    fn start_ollama_is_offered_only_when_installed() {
+        let config = Config::defaults_for(false);
+        let fix = |rows: &[Check], key: &str| {
+            check_fix(rows.iter().find(|r| r.key == key).unwrap()).map(|f| f.action)
+        };
+        let rows = checks(&config, &platform("Linux"));
+        assert_eq!(
+            fix(&rows, "ollama-installed"),
+            Some(CheckAction::OpenUrl("https://ollama.com/download".into()))
+        );
+        assert_eq!(fix(&rows, "ollama-running"), None);
+        let stopped = FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform("Linux")
+        };
+        let rows = checks(&config, &stopped);
+        assert_eq!(fix(&rows, "ollama-installed"), None);
+        assert_eq!(
+            fix(&rows, "ollama-running"),
+            Some(CheckAction::Copy("ollama serve"))
+        );
+    }
+
+    #[test]
+    fn start_ollama_is_offered_only_for_a_local_server() {
+        let stopped = FakeSetupPlatform {
+            ollama_installed: true,
+            ..platform("Linux")
+        };
+        let fix_for = |base_url: &str| {
+            let mut config = Config::defaults_for(false);
+            config.set_field("llm_base_url", serde_json::json!(base_url));
+            let rows = checks(&config, &stopped);
+            check_fix(rows.iter().find(|r| r.key == "ollama-running").unwrap()).map(|f| f.action)
+        };
+        for local in [
+            "",
+            "http://localhost:11434",
+            "http://LOCALHOST:11434/",
+            "http://127.0.0.1:11434",
+            "http://[::1]:11434",
+            "localhost:11434",
+        ] {
+            assert_eq!(
+                fix_for(local),
+                Some(CheckAction::Copy("ollama serve")),
+                "{local:?}"
+            );
+        }
+        for remote in [
+            "http://192.168.1.20:11434",
+            "https://ollama.example.com",
+            "http://localhost.example.com:11434",
+            "http://localhost@evil.example:11434",
+            "http://[2001:db8::1]:11434",
+        ] {
+            assert_eq!(fix_for(remote), None, "{remote:?}");
+        }
+    }
+
+    #[test]
+    fn url_hosts_drop_userinfo_and_port() {
+        for (url, host) in [
+            ("https://ollama.com/download", "ollama.com"),
+            ("https://user:pw@ollama.com:8443/x?y#z", "ollama.com"),
+            ("https://ffmpeg.org#build-linux", "ffmpeg.org"),
+            ("http://[::1]:11434", "::1"),
+            ("localhost:11434", "localhost"),
+        ] {
+            assert_eq!(url_host(url), host, "{url}");
+        }
+        assert_eq!(
+            fix_tooltip(&CheckAction::OpenUrl("https://me@ollama.com:443/".into())),
+            "Opens ollama.com"
+        );
+        for bad in [
+            "x-apple.systempreferences:",
+            "x-apple.systempreferences:  ",
+            "https://user@",
+            "https://:443/path",
+        ] {
+            assert_eq!(openable(bad), None, "{bad:?}");
+        }
+        assert!(openable("x-apple.systempreferences:com.apple.preference.security").is_some());
+    }
+
+    #[test]
+    fn microphone_fix_step_is_reachable_from_checkup() {
+        let mut flow = new_flow(&Config::defaults_for(false));
+        assert_eq!(flow.step, Step::Checkup);
+        assert!(flow.go_to(Step::Microphone));
+        assert_eq!(flow.step, Step::Microphone);
+    }
+
+    #[test]
+    fn sandbox_never_opens_anything() {
+        // Every system offers some links (ffmpeg on both runs, Get Ollama on
+        // the first); only macOS adds its three Settings panes per run.
+        for (system, expected) in [("Darwin", 9), ("Linux", 3), ("Windows", 3)] {
+            let mut opened = 0;
+            for check in broken(system) {
+                let Some(fix) = check_fix(&check) else {
+                    continue;
+                };
+                let simulated = fix_effect(fix.action.clone(), true);
+                assert!(
+                    !matches!(simulated, FixEffect::Open(_)),
+                    "{system} {}",
+                    check.key
+                );
+                if let FixEffect::Notice(notice) = &simulated {
+                    assert!(notice.starts_with("Sandbox — nothing was opened."));
+                }
+                if let CheckAction::OpenUrl(url) = &fix.action {
+                    opened += 1;
+                    assert!(matches!(simulated, FixEffect::Notice(_)));
+                    assert_eq!(
+                        fix_effect(fix.action.clone(), false),
+                        FixEffect::Open(url.clone())
+                    );
+                }
+            }
+            assert_eq!(opened, expected, "openable fixes on {system}");
+        }
+        assert_eq!(
+            fix_effect(
+                CheckAction::OpenUrl("https://ollama.com/download".into()),
+                true
+            ),
+            FixEffect::Notice("Sandbox — nothing was opened. This would open ollama.com.".into())
+        );
+        assert_eq!(
+            fix_effect(
+                CheckAction::OpenUrl("https://ffmpeg.org/download.html#build-linux".into()),
+                true
+            ),
+            FixEffect::Notice("Sandbox — nothing was opened. This would open ffmpeg.org.".into())
+        );
+        assert_eq!(
+            fix_effect(
+                CheckAction::OpenUrl(
+                    "x-apple.systempreferences:com.apple.preference.security".into()
+                ),
+                true
+            ),
+            FixEffect::Notice(
+                "Sandbox — nothing was opened. This would open System Settings.".into()
+            )
+        );
+        // Non-URL actions behave the same in the sandbox.
+        for simulated in [true, false] {
+            assert_eq!(
+                fix_effect(CheckAction::GoTo(Step::Microphone), simulated),
+                FixEffect::GoTo(Step::Microphone)
+            );
+            assert_eq!(
+                fix_effect(CheckAction::Copy("ollama serve"), simulated),
+                FixEffect::Copy("ollama serve")
+            );
+        }
+    }
+
+    #[test]
+    fn fix_tooltips_say_where_they_go() {
+        assert_eq!(
+            fix_tooltip(&CheckAction::OpenUrl("https://ollama.com/download".into())),
+            "Opens ollama.com"
+        );
+        assert_eq!(
+            fix_tooltip(&CheckAction::OpenUrl(
+                "x-apple.systempreferences:com.apple.preference.security".into()
+            )),
+            "Opens System Settings"
+        );
+        assert_eq!(
+            fix_tooltip(&CheckAction::GoTo(Step::Microphone)),
+            "Go to Microphone step"
+        );
+        assert_eq!(
+            fix_tooltip(&CheckAction::Copy("ollama serve")),
+            "Copies “ollama serve”"
+        );
     }
 }
