@@ -145,14 +145,15 @@ def gates_import_error(python: str, sut: Path) -> str | None:
 
 
 def rust_sim_binary(ctx: RunContext) -> Path | None:
-    """The ``meeting_sim`` example binary (option, env, then release/debug build), or ``None``."""
+    """The ``meeting_sim`` example binary (option, env, then SUT release/debug build), or ``None``."""
     chosen = ctx.options.get("meeting_sim_bin") or os.environ.get(RUST_BIN_ENV)
     if chosen:
         path = Path(chosen).expanduser()
         return path.resolve() if path.is_file() else None
     exe = "meeting_sim.exe" if sys.platform == "win32" else "meeting_sim"
+    sut = _sut(ctx)
     for profile in ("release", "debug"):
-        path = Path(ctx.repo_root) / "rust" / "target" / profile / "examples" / exe
+        path = sut / "rust" / "target" / profile / "examples" / exe
         if path.is_file():
             return path.resolve()
     return None
