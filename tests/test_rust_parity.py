@@ -3830,7 +3830,6 @@ def test_cli_agent_platform_errors(rust_build, sandbox):
 
 def test_cli_setup_install_app(rust_build, sandbox):
     python, env = _same_python(sandbox)
-    _install_or_skip(python)
     apps = sandbox["home"] / "Applications"
     for _ in range(2):  # the second run rewrites the existing bundles
         rust, _ = _both_clis(rust_build, [apps], python, env, "setup", "install-app")
