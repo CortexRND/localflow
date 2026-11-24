@@ -641,4 +641,41 @@ mod tests {
             assert!(path.starts_with(dir.path()));
         }
     }
+
+    #[test]
+    fn apply_and_undo_keep_the_files_meetings_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::data::DataRoot::sandbox(dir.path());
+        let mut seeded = lf_core::config::Config::defaults_for(false);
+        seeded.set_field("meetings_enabled", json!(true));
+        lf_core::config::save_config(&seeded, Some(&root.config_path)).unwrap();
+        let meetings_on = || {
+            lf_core::config::parse_toml_file(&root.config_path).unwrap()["features"]["meetings"]
+                == json!(true)
+        };
+        let agent = sandbox_agent(
+            root.config_path.clone(),
+            root.dictionary_path.clone(),
+            root.localflow_dir.join("settings-undo.json"),
+        );
+        let mut assistant = Assistant::new(agent);
+        preview(&mut assistant, "make work messages casual");
+        assert_eq!(assistant.state.status, Status::Preview);
+        assert_eq!(
+            assistant.state.lines.len(),
+            1,
+            "{:?}",
+            assistant.state.lines
+        );
+        let request = assistant.begin_apply().unwrap();
+        assert!(run(&mut assistant, request));
+        let saved = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(saved.field_str("style_work"), Some("casual"));
+        assert!(meetings_on(), "Apply rewrote features.meetings");
+        let undo = assistant.begin_undo().unwrap();
+        assert!(run(&mut assistant, undo));
+        let restored = lf_core::config::load_from(&root.config_path).unwrap();
+        assert_eq!(restored.field_str("style_work"), Some("formal"));
+        assert!(meetings_on(), "Undo rewrote features.meetings");
+    }
 }
