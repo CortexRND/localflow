@@ -10,7 +10,7 @@ use lf_ui::hub_model::{self, DictionaryRow, EntryKind};
 use crate::app::PageCx;
 use crate::controllers::dictionary as ctl;
 use crate::pages::{column, header, page};
-use crate::theme::{space, theme, Tone};
+use crate::theme::{size, space, theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::{self, Button, IconButton};
 
@@ -95,8 +95,29 @@ impl DictionaryPage {
         cx.notify();
     }
 
+    /// Words plus replacements.
+    fn total(&self) -> usize {
+        let store = &self.pcx.services.dictionary;
+        store.words().len() + store.replacements().len()
+    }
+
+    /// The filter is only shown once the list is long enough to need it.
+    fn shows_filter(total: usize) -> bool {
+        total > 12
+    }
+
+    /// Find: focus the filter when it is shown; otherwise keep focus where
+    /// it is (focusing a hidden input would leave nothing focused).
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.filter.read(cx).focus(window);
+        if Self::shows_filter(self.total()) {
+            self.filter.read(cx).focus(window);
+        }
+    }
+
+    /// The filter's focus handle, for shell tests.
+    #[cfg(test)]
+    pub(crate) fn filter_focus(&self, cx: &gpui::App) -> gpui::FocusHandle {
+        gpui::Focusable::focus_handle(self.filter.read(cx), cx)
     }
 
     pub fn focus_new_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -271,14 +292,18 @@ impl DictionaryPage {
                 EntryKind::Word => row.key.clone().into(),
                 EntryKind::Replacement => format!("{}  →  {}", row.key, row.target).into(),
             };
+            if i > 0 {
+                list = list.child(ui::separator(&t, ui::row_inset()));
+            }
             list = list.child(
                 div()
                     .flex()
                     .items_center()
                     .gap(space::s4())
-                    .px(space::s4())
+                    .pl(ui::row_inset())
+                    .pr(space::s4())
                     .py(space::s3())
-                    .when(i > 0, |d| d.border_t_1().border_color(t.border))
+                    .rounded(size::radius_inner())
                     .when(editing, |d| d.bg(t.selected))
                     .child(div().flex_1().min_w_0().child(ui::body(&t, label)))
                     .when(editing, |d| d.child(ui::token(&t, Tone::Accent, "Editing")))
@@ -314,8 +339,8 @@ impl Render for DictionaryPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let store = &self.pcx.services.dictionary;
-        let total = store.words().len() + store.replacements().len();
-        let filter_text = if total > 12 {
+        let total = self.total();
+        let filter_text = if Self::shows_filter(total) {
             self.filter.read(cx).text().to_string()
         } else {
             String::new()
@@ -372,7 +397,7 @@ impl Render for DictionaryPage {
                 .when_some(self.import_notice.clone(), |d, (tone, msg)| d.child(ui::banner(&t, tone, msg, None))),
             );
         }
-        if total > 12 {
+        if Self::shows_filter(total) {
             body = body.child(
                 div()
                     .flex()

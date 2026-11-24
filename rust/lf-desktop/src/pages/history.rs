@@ -12,6 +12,7 @@ use lf_ui::hub_model;
 
 use crate::app::{Confirm, PageCx};
 use crate::controllers::history::{self, Loaded};
+use crate::controllers::retry::{self, RetryKey};
 use crate::page::Page;
 use crate::pages::{header, page, split};
 use crate::theme::{size, space, theme, Tone};
@@ -24,6 +25,10 @@ pub struct HistoryPage {
     /// Backend pages and the detail-only cited entry.
     list: history::Listing,
     loading: bool,
+    /// The last dispatched read (in flight while `loading`).
+    reading: history::Read,
+    /// The query `list` holds results for (the search box may be ahead).
+    listed_query: String,
     error: Option<String>,
     selected: Option<i64>,
     pending_select: Option<i64>,
@@ -33,6 +38,10 @@ pub struct HistoryPage {
     list_focus: FocusHandle,
     scroll: ScrollHandle,
     total: Option<i64>,
+    /// The last retry result this page has applied (`Finished::seq`).
+    retry_seen: u64,
+    /// A poll of the shared retry slot is scheduled.
+    retry_watch: bool,
 }
 
 impl HistoryPage {
@@ -49,6 +58,8 @@ impl HistoryPage {
             search,
             list: history::Listing::default(),
             loading: true,
+            reading: history::Read::page(0),
+            listed_query: String::new(),
             error: None,
             selected: None,
             pending_select: None,
@@ -58,9 +69,96 @@ impl HistoryPage {
             list_focus: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
             total: None,
+            retry_seen: 0,
+            retry_watch: false,
         };
+        // A result that finished while no History page existed is already in
+        // the store (this load reads it); only later results are applied.
+        let jobs = page.pcx.services.retry_jobs.clone();
+        page.retry_seen = jobs.last().map_or(0, |f| f.seq);
+        if jobs.running().is_some() {
+            page.watch_retry(cx);
+        }
         page.load(0, cx);
         page
+    }
+
+    /// Retry `key` (no-op while any retry runs, including this one).
+    fn start_retry(&mut self, key: RetryKey, cx: &mut Context<Self>) {
+        let services = &self.pcx.services;
+        if services.retry_jobs.start(
+            services.root.clone(),
+            services.config(),
+            key,
+            services.retry.clone(),
+        ) {
+            self.watch_retry(cx);
+        }
+        cx.notify();
+    }
+
+    /// Poll the shared slot until the running job finishes. The worker
+    /// commits on its own; this only shows the result.
+    fn watch_retry(&mut self, cx: &mut Context<Self>) {
+        if self.retry_watch {
+            return;
+        }
+        self.retry_watch = true;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let again = this
+                .update(cx, |this, cx| this.poll_retry(cx))
+                .unwrap_or(false);
+            if !again {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// Apply a newly finished retry; `true` while one is still running.
+    fn poll_retry(&mut self, cx: &mut Context<Self>) -> bool {
+        let jobs = self.pcx.services.retry_jobs.clone();
+        let before = self.retry_seen;
+        let observed = jobs.observe(&mut self.retry_seen);
+        if observed.missed {
+            self.load(0, cx);
+        }
+        if !observed.updated.is_empty() {
+            for entry in observed.updated {
+                // In place: same position, cursor, selection and citation.
+                self.list.replace(entry);
+            }
+            // A search may have gained or lost the row: refresh the loaded
+            // prefix from the store, keeping progress and the selection.
+            let in_flight = self.loading.then_some(self.reading);
+            if let Some(read) =
+                history::after_retry(&self.listed_query, self.list.next_offset(), in_flight)
+            {
+                let query = self.listed_query.clone();
+                self.dispatch(read, query, cx);
+            }
+            self.pcx.toast(
+                if self.pcx.services.retry.simulated() {
+                    "Simulated transcription saved (no speech model ran)"
+                } else {
+                    "Transcription updated"
+                },
+                cx,
+            );
+        }
+        if self.retry_seen != before {
+            cx.notify();
+        }
+        // From the same snapshot as the results: a job that finishes right
+        // after this observation is still seen as running, so we poll again.
+        let running = observed.running;
+        if !running {
+            self.retry_watch = false;
+        }
+        running
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -89,23 +187,53 @@ impl HistoryPage {
 
     /// Load from `offset` (0 replaces the list; otherwise appends).
     fn load(&mut self, offset: i64, cx: &mut Context<Self>) {
-        self.generation += 1;
-        let generation = self.generation;
         let query = self.query(cx);
+        self.dispatch(history::Read::page(offset), query, cx);
+    }
+
+    /// One fenced read of `query` (see [`history::ReadTicket`]).
+    fn dispatch(&mut self, read: history::Read, query: String, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let ticket = history::ReadTicket {
+            generation: self.generation,
+            retry_seq: self.pcx.services.retry_jobs.seq(),
+        };
         let root = self.pcx.services.root.clone();
         self.loading = true;
+        self.reading = read;
         cx.spawn(async move |this, cx| {
+            let q = query.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { history::load(&root, generation, &query, offset, offset == 0) })
+                .spawn(async move {
+                    history::read(&root, ticket.generation, &q, read, read.offset == 0)
+                })
                 .await;
-            let _ = this.update(cx, |this, cx| this.loaded(result, cx));
+            let _ = this.update(cx, |this, cx| this.loaded(ticket, read, query, result, cx));
         })
         .detach();
         cx.notify();
     }
 
-    fn loaded(&mut self, result: anyhow::Result<Loaded>, cx: &mut Context<Self>) {
+    fn loaded(
+        &mut self,
+        ticket: history::ReadTicket,
+        read: history::Read,
+        query: String,
+        result: anyhow::Result<Loaded>,
+        cx: &mut Context<Self>,
+    ) {
+        // Judged before the result is looked at, so an obsolete request's
+        // error is dropped too, and a read that crossed a retry commit is
+        // repeated (same query and intent; see `Read::again`).
+        match ticket.judge(self.generation, self.pcx.services.retry_jobs.seq()) {
+            history::Delivery::Obsolete => return,
+            history::Delivery::Reread => {
+                let again = read.again(&query);
+                return self.dispatch(again, query, cx);
+            }
+            history::Delivery::Apply => {}
+        }
         let Ok(loaded) = result else {
             if let Err(err) = result {
                 self.error = Some(format!("Couldn't read your history: {err:#}"));
@@ -122,7 +250,13 @@ impl HistoryPage {
         if let Some(stats) = &loaded.stats {
             self.total = Some(stats.total_dictations);
         }
-        self.list.apply(loaded);
+        self.listed_query = loaded.query.clone();
+        if read.keep_selection {
+            // The selection as of now (it may have changed during the read).
+            self.list.refresh(loaded, self.selected);
+        } else {
+            self.list.apply(loaded);
+        }
         if let Some(id) = self.pending_select.take() {
             if self.list.in_pages(id) {
                 self.selected = Some(id);
@@ -149,6 +283,12 @@ impl HistoryPage {
         }
     }
 
+    /// The list's focus handle (what a row click focuses), for shell tests.
+    #[cfg(test)]
+    pub(crate) fn list_focus(&self) -> FocusHandle {
+        self.list_focus.clone()
+    }
+
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.read(cx).focus(window);
     }
@@ -158,6 +298,11 @@ impl HistoryPage {
             self.search.update(cx, |s, cx| s.set_text("", cx));
             self.load(0, cx);
         }
+    }
+
+    fn retry_view(&self, entry: &HistoryEntry) -> retry::RetryView {
+        let services = &self.pcx.services;
+        retry::view(entry, services.retry.as_ref(), &services.retry_jobs)
     }
 
     fn selected_entry(&self) -> Option<&HistoryEntry> {
@@ -421,6 +566,7 @@ impl HistoryPage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .bg(t.bg_surface)
                     .when(focused, move |d| d.shadow(ring.clone()))
                     .child(rows),
             )
@@ -469,13 +615,26 @@ impl HistoryPage {
                     ),
             );
         }
-        if can_retry {
-            actions = actions.child(
-                Button::new("retry", "Retry")
-                    .icon("rotate-ccw")
-                    .disabled(true)
-                    .tooltip(hub_model::HISTORY_RETRY_UNAVAILABLE),
-            );
+        let retry_view = can_retry.then(|| self.retry_view(&entry));
+        if let Some(view) = &retry_view {
+            let key = RetryKey::of(&entry);
+            // Secondary to Copy. While this row is retrying the button stays
+            // enabled and focusable (Button::busy would drop focus); a repeat
+            // activation is refused by the shared slot.
+            let mut button = Button::new("retry", if view.mine { "Retrying…" } else { "Retry" })
+                .icon(if view.mine {
+                    "loader-circle"
+                } else {
+                    "rotate-ccw"
+                });
+            button = match (&view.blocked, view.mine) {
+                (Some(reason), _) => button.disabled(true).tooltip(reason.clone()),
+                (None, true) => button.tooltip("Transcribing the saved audio again…"),
+                (None, false) => {
+                    button.on_click(cx.listener(move |this, _, _, cx| this.start_retry(key, cx)))
+                }
+            };
+            actions = actions.child(button);
         }
         actions = actions.child(
             Button::new("delete-entry", "Delete")
@@ -543,9 +702,28 @@ impl HistoryPage {
                             )),
                     )
                     .child(text_body)
+                    .when_some(
+                        retry_view.as_ref().and_then(|v| v.error.clone()),
+                        |d, message| {
+                            let key = RetryKey::of(&entry);
+                            d.child(ui::banner(
+                                &t,
+                                Tone::Error,
+                                format!("Retry failed. {message}"),
+                                Some(
+                                    Button::new("retry-again", "Try again")
+                                        .small()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.start_retry(key, cx)
+                                        }))
+                                        .into_any_element(),
+                                ),
+                            ))
+                        },
+                    )
                     .child(actions)
-                    .when(can_retry, |d| {
-                        d.child(ui::supporting(&t, hub_model::HISTORY_RETRY_UNAVAILABLE))
+                    .when_some(retry_view.map(|v| v.note), |d, note| {
+                        d.child(ui::supporting(&t, note))
                     })
                     .when(distinct, |d| {
                         let open = self.show_original;

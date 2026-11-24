@@ -7,15 +7,17 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod app;
+pub mod appearance;
 pub mod args;
 pub mod controllers;
 pub mod data;
 pub mod launch;
+mod native_appearance;
 pub mod page;
 pub mod pages;
 pub mod remote;
 pub mod sandbox;
 pub mod theme;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 mod tray;
 pub mod ui;

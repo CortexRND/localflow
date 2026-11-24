@@ -18,7 +18,8 @@ use crate::remote::Health;
 use crate::theme::{size, space, Theme, Tone};
 use crate::ui::{self, Button};
 
-/// 72 px page header: title, supporting line, right-aligned actions.
+/// 60 px page header: title, supporting line, right-aligned actions, with a
+/// hairline under it.
 pub fn header(
     t: &Theme,
     title: &str,
@@ -31,18 +32,20 @@ pub fn header(
         .items_center()
         .justify_between()
         .gap(space::s6())
-        .min_h(px(72.))
+        .min_h(px(60.))
         .px(space::s10())
-        .py(space::s5())
+        .py(space::s4())
+        .bg(t.bg_surface)
         .border_b_1()
         .border_color(t.border)
         .child(
             div()
                 .flex()
                 .flex_col()
+                .gap(space::s1())
                 .min_w_0()
                 .child(ui::title(t, title.to_string()))
-                .when_some(support, |d, s| d.child(ui::secondary(t, s))),
+                .when_some(support, |d, s| d.child(ui::supporting(t, s))),
         )
         .child(
             div()
@@ -54,7 +57,8 @@ pub fn header(
         )
 }
 
-/// Scrolling column frame: a centred column capped at 760 px.
+/// Scrolling column frame: a centred column capped at 760 px. Sections are
+/// spaced generously; rows inside a group stay tight.
 pub fn column(id: impl Into<ElementId>, content: Div) -> Stateful<Div> {
     div().id(id).flex_1().min_h_0().overflow_y_scroll().child(
         div()
@@ -67,7 +71,7 @@ pub fn column(id: impl Into<ElementId>, content: Div) -> Stateful<Div> {
                 content
                     .flex()
                     .flex_col()
-                    .gap(space::s10())
+                    .gap(space::s8())
                     .w_full()
                     .max_w(px(size::COLUMN)),
             ),
@@ -84,7 +88,7 @@ pub fn page(header: Div, body: impl IntoElement) -> Div {
         .child(div().flex().flex_col().flex_1().min_h_0().child(body))
 }
 
-/// Split frame: fixed list pane, divider, detail pane; each scrolls alone.
+/// Split frame: list pane, hairline, detail pane; each scrolls alone.
 pub fn split(t: &Theme, list: impl IntoElement, detail: impl IntoElement) -> Div {
     div()
         .flex()

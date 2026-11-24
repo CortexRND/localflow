@@ -31,11 +31,11 @@ pub enum Started {
 pub trait EngineBackend: Send + 'static {
     fn start(&mut self) -> Result<Started, String>;
     fn stop(&mut self);
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn menu_command(&mut self, _command: MenuCommand) {}
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuCommand {
     ToggleDictation,
@@ -46,7 +46,7 @@ enum Command {
     Start,
     Stop,
     Shutdown,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     Menu(MenuCommand),
 }
 
@@ -125,9 +125,17 @@ impl Engine {
                             set(OwnEngine::None);
                         }
                         Command::Shutdown => break,
-                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        #[cfg(any(
+                            target_os = "linux",
+                            target_os = "windows",
+                            target_os = "macos"
+                        ))]
                         Command::Menu(command) if running => backend.menu_command(command),
-                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        #[cfg(any(
+                            target_os = "linux",
+                            target_os = "windows",
+                            target_os = "macos"
+                        ))]
                         Command::Menu(_) => {}
                     }
                 }
@@ -174,7 +182,7 @@ impl Engine {
         let _ = self.commands.send(Command::Stop);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub(crate) fn menu_command(&self, command: MenuCommand) {
         if self.state() == OwnEngine::Running {
             let _ = self.commands.send(Command::Menu(command));
@@ -322,7 +330,7 @@ impl EngineBackend for EmbeddedBackend {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn menu_command(&mut self, command: MenuCommand) {
         if let Some(runtime) = self.runtime.as_ref().and_then(|r| r.runtime.as_ref()) {
             match command {
@@ -421,7 +429,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     #[test]
     fn tray_commands_run_only_while_the_owned_engine_is_running() {
         struct MenuBackend(Sender<MenuCommand>);

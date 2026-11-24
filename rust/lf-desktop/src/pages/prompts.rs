@@ -238,14 +238,17 @@ impl Render for PromptsPage {
                     };
                     let busy = self.busy.as_deref() == Some(row.id.as_str());
                     let (a, r) = (row.id.clone(), row.id.clone());
+                    if i > 0 {
+                        list = list.child(ui::separator(&t, ui::row_inset()));
+                    }
                     list = list.child(
                         div()
                             .flex()
                             .items_center()
                             .gap(space::s5())
-                            .px(space::s4())
+                            .pl(ui::row_inset())
+                            .pr(space::s4())
                             .py(space::s5())
-                            .when(i > 0, |d| d.border_t_1().border_color(t.border))
                             .child(
                                 div()
                                     .flex()

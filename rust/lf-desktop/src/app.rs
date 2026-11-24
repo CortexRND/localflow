@@ -17,8 +17,8 @@ use crate::data::Services;
 use crate::page::{Page, NAV_FOOTER, NAV_GROUPS};
 use crate::pages;
 use crate::remote::Health;
-use crate::theme::{size as tsize, space, text, theme, Theme, Tone};
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::theme::{elevation, size as tsize, space, text, theme, Theme, Tone};
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use crate::tray;
 use crate::ui::{self, assets::Assets, Button};
 
@@ -255,9 +255,9 @@ pub struct Shell {
     pub engine: Option<Engine>,
     /// A background stop (close/quit) is running.
     stopping: bool,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     tray: Option<(tray::Tray, tray::View)>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     tray_task: Option<gpui::Task<()>>,
 }
 
@@ -388,9 +388,9 @@ impl Shell {
             probing: false,
             engine,
             stopping: false,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             tray: None,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             tray_task: None,
         };
         if let Some(notice) = launch.notice {
@@ -531,11 +531,11 @@ impl Shell {
             }
             cx.notify();
         }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         self.update_tray();
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn tray_view(&self) -> tray::View {
         tray::View::new(
             &self.runtime,
@@ -544,7 +544,7 @@ impl Shell {
         )
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn update_tray(&mut self) {
         if self.tray.is_none() {
             return;
@@ -558,8 +558,13 @@ impl Shell {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn start_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Sandbox automation starts nothing in the macOS menu bar.
+        #[cfg(target_os = "macos")]
+        if self.cx.services.is_sandbox() {
+            return;
+        }
         let view = self.tray_view();
         let initial = view.clone();
         let (actions, events) = async_channel::unbounded();
@@ -569,7 +574,8 @@ impl Shell {
                 .background_executor()
                 .spawn(async move { tray::Tray::new(initial, actions) })
                 .await;
-            #[cfg(target_os = "windows")]
+            // AppKit and Win32 objects live on GPUI's main thread.
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             let result = tray::Tray::new(initial, actions);
             let icon = match result {
                 Ok(icon) => icon,
@@ -600,16 +606,33 @@ impl Shell {
         }));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     fn tray_action(&mut self, action: tray::Action, window: &mut Window, cx: &mut Context<Self>) {
         use crate::controllers::engine::MenuCommand;
 
+        // Every receipt consumes the pending macOS paste request, including
+        // ones refused below, so the menu can always take a new one.
+        #[cfg(target_os = "macos")]
+        let paste_target_ok = action == tray::Action::PasteLast
+            && self
+                .tray
+                .as_ref()
+                .is_some_and(|(icon, _)| icon.restore_paste_target());
         if self.stopping {
             return;
         }
+        // On macOS a menu bar item doesn't activate LocalFlow, and GPUI's
+        // `activate_window` only orders the window front within the app, so
+        // anything that should surface the window activates the app too.
         match action {
-            tray::Action::Open => window.activate_window(),
+            tray::Action::Open => {
+                #[cfg(target_os = "macos")]
+                cx.activate(true);
+                window.activate_window();
+            }
             tray::Action::Quit => {
+                #[cfg(target_os = "macos")]
+                cx.activate(true);
                 window.activate_window();
                 self.request_close(true, window, cx);
             }
@@ -627,6 +650,8 @@ impl Shell {
                         updated.set_field("dictation_enabled", serde_json::json!(!enabled));
                         Ok(updated)
                     }) {
+                        #[cfg(target_os = "macos")]
+                        cx.activate(true);
                         window.activate_window();
                         self.toast(
                             format!("Couldn't switch dictation: {error}").into(),
@@ -653,6 +678,19 @@ impl Shell {
                     {
                         self.toast(
                             "Couldn't restore the window to paste into.".into(),
+                            None,
+                            cx,
+                        );
+                        return;
+                    }
+                    // Never activates anything: on refusal the user re-picks
+                    // their app, and the clipboard is untouched.
+                    #[cfg(target_os = "macos")]
+                    if !paste_target_ok {
+                        self.toast(
+                            "Switch to the app you want to paste into, then choose \
+                             Paste last transcript again."
+                                .into(),
                             None,
                             cx,
                         );
@@ -702,6 +740,30 @@ impl Shell {
             else {
                 break;
             };
+        })
+        .detach();
+    }
+
+    /// When the focused element leaves the frame (a cached page that was
+    /// navigated away from, or a button replaced by another), GPUI dispatches
+    /// keys from the window root, above the shell's action listeners, so
+    /// shortcuts stop working until something is clicked. Move focus back to
+    /// the shell, or to Cancel while a dialog is open. GPUI calls this in the
+    /// draw that lost focus, after the new frame is in place; it never runs
+    /// while focus is on a rendered element.
+    fn install_focus_recovery(window: &mut Window, cx: &mut Context<Self>) {
+        cx.on_focus_lost(window, |shell, window, cx| {
+            let target = if shell.confirm.is_some() && shell.dialog_armed {
+                &shell.cancel_focus
+            } else {
+                &shell.focus
+            };
+            // Now, so a key handled in this same dispatch reaches the shell.
+            window.focus(target);
+            // A refresh inside the draw is ignored: repaint once it is over,
+            // so the frame shows the target as focused (Cancel's ring) and a
+            // later loss is seen as one again.
+            cx.defer_in(window, |_, window, _| window.refresh());
         })
         .detach();
     }
@@ -993,29 +1055,21 @@ impl Shell {
             let (sz, lh) = text::body();
             let badge = (page == Page::Prompts && self.pending_prompts > 0)
                 .then(|| ui::badge(t, self.pending_prompts));
+            // Selected: a soft rounded fill, heavier label, accent icon.
             ui::row_button(t, ("nav", page as u64), selected)
-                .h(tsize::control_md())
+                .h(tsize::nav_row())
                 .items_center()
-                .gap(space::s5())
-                .px(space::s5())
-                .rounded(tsize::radius_element())
+                .gap(space::s4())
+                .px(space::s4())
+                .rounded(tsize::radius_inner())
                 .text_size(sz)
                 .line_height(lh)
-                .text_color(if selected { t.text } else { t.text_secondary })
-                .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
-                .on_click(cx.listener(move |this, _, _, cx| this.navigate(page, None, cx)))
+                .text_color(t.text)
                 .when(selected, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .top(px(8.))
-                            .w(px(2.))
-                            .h(px(16.))
-                            .rounded_full()
-                            .bg(t.accent),
-                    )
+                    d.bg(t.bg_sidebar_selected)
+                        .font_weight(FontWeight::SEMIBOLD)
                 })
+                .on_click(cx.listener(move |this, _, _, cx| this.navigate(page, None, cx)))
                 .child(ui::icon(
                     page.icon(),
                     if selected {
@@ -1024,16 +1078,29 @@ impl Shell {
                         t.icon_secondary
                     },
                 ))
-                .child(div().flex_1().child(page.label()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(page.label()),
+                )
                 .children(badge)
         };
-        let mut groups = div().flex().flex_col().gap(space::s1()).px(space::s4());
+        let mut groups = div()
+            .flex()
+            .flex_col()
+            .gap(space::s1())
+            .px(space::s4())
+            .pb(space::s4());
         for (label, pages) in NAV_GROUPS {
             if let Some(label) = label {
                 groups = groups.child(
                     ui::supporting(t, label)
-                        .font_weight(FontWeight::MEDIUM)
-                        .px(space::s5())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .px(space::s4())
                         .pt(space::s6())
                         .pb(space::s2()),
                 );
@@ -1047,24 +1114,34 @@ impl Shell {
             .flex_col()
             .gap(space::s1())
             .px(space::s4())
-            .pb(space::s4());
+            .py(space::s4());
         for page in NAV_FOOTER {
             footer = footer.child(nav_item(page, cx));
         }
         // Status row: what a runtime itself reports (status file, lock,
-        // this window's engine). HTTP reachability never changes it.
+        // this window's engine). HTTP reachability never changes it. A
+        // quiet footer: dot, line 1, line 2; clicking opens Home.
         let (signal, line1, line2) = self.runtime.sidebar.clone();
         let tone = signal_tone(signal);
-        let status = ui::row_button(t, "status-row", false)
-            .flex_col()
-            .gap(space::s1())
-            .px(space::s6())
-            .py(space::s5())
-            .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Home, None, cx)))
-            .child(ui::status_dot(t, tone, line1).font_weight(FontWeight::MEDIUM))
-            .when(!line2.is_empty(), |d| {
-                d.child(ui::supporting(t, line2).pl(px(20.)))
-            });
+        let (sz, lh) = text::supporting();
+        let status = div().px(space::s4()).py(space::s4()).child(
+            ui::row_button(t, "status-row", false)
+                .flex_col()
+                .gap(space::s1())
+                .px(space::s4())
+                .py(space::s3())
+                .rounded(tsize::radius_element())
+                .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Home, None, cx)))
+                .child(
+                    ui::status_dot(t, tone, line1)
+                        .text_size(sz)
+                        .line_height(lh)
+                        .font_weight(FontWeight::MEDIUM),
+                )
+                .when(!line2.is_empty(), |d| {
+                    d.child(ui::supporting(t, line2).pl(px(14.)))
+                }),
+        );
 
         div()
             .id("sidebar")
@@ -1081,8 +1158,9 @@ impl Shell {
                 div()
                     .flex()
                     .items_center()
-                    .gap(space::s5())
-                    .h(px(56.))
+                    .flex_none()
+                    .gap(space::s4())
+                    .h(px(52.))
                     .px(space::s6())
                     .child(ui::brand(t))
                     .child(ui::label(t, "LocalFlow").font_weight(FontWeight::SEMIBOLD)),
@@ -1095,6 +1173,7 @@ impl Shell {
                     .overflow_y_scroll()
                     .child(groups),
             )
+            .child(ui::divider(t))
             .child(footer)
             .child(ui::divider(t))
             .child(status)
@@ -1118,26 +1197,32 @@ impl Shell {
                         .occlude()
                         .flex()
                         .items_center()
-                        .gap(space::s6())
-                        .px(space::s6())
-                        .py(space::s4())
-                        .rounded(tsize::radius_element())
-                        .bg(t.bg_inverted)
-                        .text_color(t.text_inverted)
+                        .gap(space::s5())
+                        .pl(space::s6())
+                        .pr(space::s2())
+                        .py(space::s2())
+                        .min_h(px(40.))
+                        .rounded(tsize::radius_group())
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(t.bg_popover)
+                        .text_color(t.text)
                         .text_size(sz)
                         .line_height(lh)
-                        .shadow_lg()
+                        .shadow(elevation::popover(t))
                         .max_w(px(560.))
                         .child(toast.message.clone())
                         .when_some(action, |d, (label, f)| {
-                            let ring = ui::ring(t);
+                            let ring = ui::ring_over(t, t.bg_popover);
                             d.child(
                                 div()
                                     .id("toast-action")
                                     .tab_index(0)
                                     .cursor_pointer()
+                                    .px(space::s2())
+                                    .rounded(tsize::radius_inner())
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(t.accent_muted)
+                                    .text_color(t.text_accent)
                                     .focus(move |s| s.shadow(ring.clone()))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.toast = None;
@@ -1262,9 +1347,17 @@ impl Shell {
         if self.cx.services.downloads.deleting() {
             out.push("A speech model is being deleted; closing waits for it.".into());
         }
+        // A History retry is a registered write too, but it isn't a setting.
+        let retrying = self.cx.services.retry_jobs.running().is_some();
+        if retrying {
+            out.push(
+                "A dictation is being retried; closing waits briefly for it, and speech recognition can't be interrupted."
+                    .into(),
+            );
+        }
         // Key, provider, setup or settings writes on workers (registered as
         // pending writes); a zero-length check, no waiting here.
-        if !lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO) {
+        if !retrying && !lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO) {
             out.push("A settings or key change is still being saved; closing waits for it.".into());
         }
         if self.setup_dirty(cx) {
@@ -1325,6 +1418,7 @@ impl Shell {
                 // the window open (never an obsolete snapshot).
                 let late = crate::controllers::shutdown::remaining_work(
                     &shell.cx.services.downloads,
+                    &shell.cx.services.retry_jobs,
                     lf_ui::shutdown::wait_for_pending_writes(Duration::ZERO),
                 );
                 if jobs_stopped && engine_outcome == Stopped::Done && !late.is_empty() {
@@ -1349,6 +1443,9 @@ impl Shell {
                 }
                 let mut problems = Vec::new();
                 if !jobs_stopped {
+                    if shell.cx.services.retry_jobs.running().is_some() {
+                        problems.push(crate::controllers::shutdown::RETRY_RUNNING);
+                    }
                     problems.push(
                         "A model download, model deletion or settings/key write hasn't finished.",
                     );
@@ -1470,12 +1567,14 @@ impl Shell {
                         .occlude()
                         .flex()
                         .flex_col()
-                        .gap(space::s5())
-                        .w(px(440.))
-                        .p(space::s8())
+                        .gap(space::s3())
+                        .w(px(420.))
+                        .p(space::s7())
                         .rounded(tsize::radius_container())
+                        .border_1()
+                        .border_color(t.border)
                         .bg(t.bg_popover)
-                        .shadow_lg()
+                        .shadow(elevation::popover(t))
                         .child(ui::heading(t, confirm.title.clone()))
                         .child(ui::secondary(t, confirm.body.clone()))
                         .child(
@@ -1483,7 +1582,7 @@ impl Shell {
                                 .flex()
                                 .justify_end()
                                 .gap(space::s4())
-                                .pt(space::s4())
+                                .pt(space::s6())
                                 .child(
                                     Button::new("confirm-cancel", "Cancel")
                                         .track_focus(&self.cancel_focus)
@@ -1601,8 +1700,11 @@ impl Render for Shell {
                         .h(px(28.))
                         .px(space::s6())
                         .bg(t.sandbox_bg)
+                        .border_b_1()
+                        .border_color(t.border)
                         .text_color(t.sandbox_text)
                         .text_size(text::supporting().0)
+                        .line_height(text::supporting().1)
                         .child(ui::icon("triangle-alert", t.sandbox_text).size(px(14.)))
                         .child(
                             div()
@@ -1631,10 +1733,17 @@ impl Render for Shell {
                         .bg(t.scrim)
                         .child(
                             div()
-                                .px(space::s8())
-                                .py(space::s6())
+                                .flex()
+                                .items_center()
+                                .gap(space::s4())
+                                .px(space::s7())
+                                .py(space::s5())
                                 .rounded(tsize::radius_container())
+                                .border_1()
+                                .border_color(t.border)
                                 .bg(t.bg_popover)
+                                .shadow(elevation::popover(&t))
+                                .child(ui::icon("loader-circle", t.icon_secondary))
                                 .child(ui::label(&t, "Stopping LocalFlow…")),
                         ),
                 )
@@ -1734,7 +1843,13 @@ pub fn run(launch: Launch) -> RunStatus {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            let mut base = Theme::for_appearance(cx.window_appearance());
+            // The stored appearance choice decides the very first frame:
+            // native chrome first (no window exists yet, so no appearance
+            // handler can re-enter), then the palette, so System resolves
+            // against what the chrome will show.
+            let mode = crate::appearance::load(&launch.services.root);
+            crate::native_appearance::set(mode);
+            let mut base = Theme::for_mode(mode, cx.window_appearance());
             base.font_family = pick_font(cx);
             cx.set_global(base);
             bind_keys(cx);
@@ -1779,6 +1894,7 @@ pub fn run(launch: Launch) -> RunStatus {
                 Ok(window) => {
                     let _ = window.update(cx, |shell, window, cx| {
                         window.focus(&shell.focus_handle(cx));
+                        Shell::install_focus_recovery(window, cx);
                         cx.activate(true);
                         // Titlebar close: flush first; keep the window open
                         // (with an explanation) when something wasn't saved.
@@ -1788,7 +1904,11 @@ pub fn run(launch: Launch) -> RunStatus {
                                 .unwrap_or(true)
                         });
                         Shell::start_instance_poll(window, cx);
-                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        #[cfg(any(
+                            target_os = "linux",
+                            target_os = "windows",
+                            target_os = "macos"
+                        ))]
                         shell.start_tray(window, cx);
                         // Losing the window releases a setup microphone test
                         // (also one still opening) and cancels a trial;
@@ -1802,15 +1922,12 @@ pub fn run(launch: Launch) -> RunStatus {
                             }
                         })
                         .detach();
-                        // Follow the system light/dark setting live.
+                        // Follow the system light/dark setting live, in
+                        // System mode only (Light/Dark ignore the OS).
                         cx.observe_window_appearance(window, |_, window, cx| {
-                            let want = Theme::for_appearance(window.appearance());
-                            if want.dark != theme(cx).dark {
-                                let font_family = theme(cx).font_family.clone();
-                                cx.set_global(Theme {
-                                    font_family,
-                                    ..want
-                                });
+                            if let Some(next) = theme(cx).after_system_change(window.appearance()) {
+                                cx.set_global(next);
+                                cx.refresh_windows();
                                 cx.notify();
                             }
                         })
@@ -1878,5 +1995,263 @@ mod tests {
         assert_eq!(trap_step(Some(1), 2, true), 0, "wraps instead of leaving");
         assert_eq!(trap_step(Some(0), 2, false), 1);
         assert_eq!(trap_step(Some(1), 2, false), 0);
+    }
+}
+
+/// Keyboard focus in a headless GPUI window (no display, no app): the real
+/// `Shell` over a seeded temporary sandbox, so secrets stay in memory, health
+/// and runtime are simulated, and no engine, tray, hotkey, model or network
+/// is touched. Shortcuts go through the real keymap and dispatch tree.
+#[cfg(test)]
+mod focus_tests {
+    use std::rc::Rc;
+
+    use gpui::{Entity, FocusHandle, TestAppContext, VisualTestContext};
+
+    use super::*;
+
+    /// Opens the shell on `page` the way [`run`] does. Keep the returned
+    /// directory alive for the whole test.
+    fn open(
+        page: Page,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        open_with(page, |_| {}, cx)
+    }
+
+    /// [`open`], after `prepare` adjusts the seeded sandbox data.
+    fn open_with(
+        page: Page,
+        prepare: impl FnOnce(&crate::data::DataRoot),
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let launched =
+            crate::launch::sandbox(&dir.path().join("sandbox"), false, Route::Page(page)).unwrap();
+        let crate::launch::Launched::Window(root, instance) = launched else {
+            panic!("expected to own the sandbox window");
+        };
+        prepare(&root);
+        let services = Services::open(*root).unwrap();
+        assert!(services.is_sandbox());
+        cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(cx.window_appearance()));
+            bind_keys(cx);
+        });
+        let launch = Launch {
+            services,
+            page,
+            setup: false,
+            notice: None,
+            instance,
+        };
+        let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(launch, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                window.focus(&shell.focus);
+                Shell::install_focus_recovery(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        (shell, cx, dir)
+    }
+
+    fn page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Page {
+        shell.read_with(cx, |shell, _| shell.page)
+    }
+
+    /// Focus is on a rendered element inside the shell, where its shortcut
+    /// listeners are.
+    fn in_shell(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        let root = shell.read_with(cx, |shell, _| shell.focus.clone());
+        cx.update(|window, cx| root.contains_focused(window, cx))
+    }
+
+    fn focused(handle: &FocusHandle, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, _| handle.is_focused(window))
+    }
+
+    #[gpui::test]
+    fn shortcuts_keep_working_after_leaving_a_focused_history_list(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::History, cx);
+        let list = shell.read_with(cx, |shell, cx| match shell.find(Page::History) {
+            Some(View::History(view)) => view.read(cx).list_focus(),
+            _ => panic!("History isn't open"),
+        });
+        // What a row click does.
+        cx.update(|window, _| window.focus(&list));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(focused(&list, cx), "a repaint leaves valid focus alone");
+        assert!(in_shell(&shell, cx));
+
+        cx.simulate_keystrokes("secondary-1");
+        assert_eq!(page(&shell, cx), Page::Home);
+
+        // History (and its list handle) is cached but no longer on screen.
+        let third = Page::sidebar_order()[2];
+        cx.simulate_keystrokes("secondary-3");
+        assert_eq!(page(&shell, cx), third, "shortcuts still reach the shell");
+        assert!(in_shell(&shell, cx), "focus came back to the shell");
+        cx.simulate_keystrokes("secondary-3");
+        assert_eq!(page(&shell, cx), third, "the same shortcut again stays");
+        cx.simulate_keystrokes("secondary-2");
+        assert_eq!(page(&shell, cx), Page::History);
+    }
+
+    #[gpui::test]
+    fn shortcuts_keep_working_after_the_focused_element_is_removed(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Models, cx);
+        assert_eq!(page(&shell, cx), Page::Models);
+        let root = shell.read_with(cx, |shell, _| shell.focus.clone());
+        let action: ui::Action = Rc::new(|_, _| panic!("the toast action ran"));
+        shell.update(cx, |shell, cx| {
+            shell.toast("Model removed".into(), Some(("Undo".into(), action)), cx)
+        });
+        cx.run_until_parked();
+
+        // The toast is painted last, so Shift-Tab from the shell reaches its
+        // Dismiss button, then its action (both keep their focus handles in
+        // element state only).
+        let mounted = |handle: &FocusHandle, cx: &mut VisualTestContext| {
+            cx.update(|window, _| root.contains(handle, window))
+        };
+        cx.simulate_keystrokes("shift-tab");
+        let dismiss = cx.update(|window, cx| window.focused(cx)).unwrap();
+        cx.simulate_keystrokes("shift-tab");
+        let toast_action = cx.update(|window, cx| window.focused(cx)).unwrap();
+        assert!(toast_action != dismiss && toast_action != root);
+        assert!(mounted(&dismiss, cx) && mounted(&toast_action, cx));
+        assert!(in_shell(&shell, cx), "valid focus inside the shell");
+        let (dismiss, toast_action) = (dismiss.downgrade(), toast_action.downgrade());
+
+        cx.simulate_keystrokes("escape");
+        assert!(shell.read_with(cx, |shell, _| shell.toast.is_none()));
+        // Both stops belonged to the toast: they went with it, so the
+        // focused element is gone rather than merely unfocused.
+        for (name, gone) in [("action", &toast_action), ("Dismiss", &dismiss)] {
+            assert!(
+                gone.upgrade().is_none_or(|h| !mounted(&h, cx)),
+                "the toast {name} is no longer on screen"
+            );
+        }
+
+        cx.simulate_keystrokes("secondary-1");
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert!(in_shell(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn an_open_dialog_takes_lost_focus_on_cancel_and_keeps_its_trap(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Models, cx);
+        shell.update(cx, |shell, cx| {
+            shell.confirm = Some(Confirm {
+                title: "Delete?".into(),
+                body: "Test dialog".into(),
+                verb: "Delete".into(),
+                destructive: true,
+                on_confirm: Rc::new(|_, _| panic!("the dialog was cancelled")),
+            });
+            shell.dialog_armed = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (cancel, ok) = shell.read_with(cx, |shell, _| {
+            (shell.cancel_focus.clone(), shell.ok_focus.clone())
+        });
+        // The test window runs no next-frame callbacks, so the dialog's own
+        // move to Cancel hasn't happened; lose focus instead.
+        cx.update(|window, cx| window.focus(&cx.focus_handle()));
+        cx.run_until_parked();
+        assert!(focused(&cancel, cx), "lost focus lands on Cancel");
+
+        cx.dispatch_action(FocusNext);
+        assert!(focused(&ok, cx));
+        cx.dispatch_action(FocusNext);
+        assert!(focused(&cancel, cx), "Tab stays inside the dialog");
+        cx.dispatch_action(Go1);
+        assert_eq!(page(&shell, cx), Page::Models, "no navigation behind it");
+
+        cx.dispatch_action(Escape);
+        assert!(shell.read_with(cx, |shell, _| shell.confirm.is_none()));
+        assert!(in_shell(&shell, cx));
+        cx.dispatch_action(Go1);
+        assert_eq!(page(&shell, cx), Page::Home);
+    }
+
+    /// Focus on a handle that has just been dropped (a removed button).
+    fn lose_focus(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.focus(&cx.focus_handle()));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn focus_is_recovered_again_after_a_second_loss(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Models, cx);
+        lose_focus(cx);
+        assert!(in_shell(&shell, cx), "first loss recovered");
+        // Nothing else repaints in between (a keyboard-only user).
+        lose_focus(cx);
+        assert!(in_shell(&shell, cx), "second loss recovered");
+        cx.dispatch_action(Go1);
+        assert_eq!(page(&shell, cx), Page::Home);
+    }
+
+    fn dictionary_filter(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> FocusHandle {
+        shell.read_with(cx, |shell, cx| match shell.find(Page::Dictionary) {
+            Some(View::Dictionary(view)) => view.read(cx).filter_focus(cx),
+            _ => panic!("Dictionary isn't open"),
+        })
+    }
+
+    #[gpui::test]
+    fn find_on_a_short_dictionary_leaves_focus_where_it_is(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open(Page::Dictionary, cx);
+        let (words, replacements) = shell.read_with(cx, |shell, _| {
+            let store = &shell.cx.services.dictionary;
+            (store.words().len(), store.replacements().len())
+        });
+        assert!(words + replacements <= 12, "the seeded list is short");
+        let filter = dictionary_filter(&shell, cx);
+        let root = shell.read_with(cx, |shell, _| shell.focus.clone());
+        assert!(
+            !cx.update(|window, _| root.contains(&filter, window)),
+            "a short list shows no filter"
+        );
+        // Tab onto a real control.
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        let control = cx
+            .update(|window, cx| window.focused(cx))
+            .expect("Tab focused a control");
+        assert!(control != root && in_shell(&shell, cx));
+
+        cx.simulate_keystrokes("secondary-k");
+        assert!(focused(&control, cx), "Find with no filter keeps focus");
+        cx.simulate_keystrokes("secondary-k");
+        assert!(focused(&control, cx), "and again");
+        assert!(in_shell(&shell, cx));
+        cx.simulate_keystrokes("secondary-1");
+        assert_eq!(page(&shell, cx), Page::Home);
+    }
+
+    #[gpui::test]
+    fn find_on_a_long_dictionary_focuses_its_filter(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(
+            Page::Dictionary,
+            |root| {
+                let store =
+                    lf_core::dictionary::DictionaryStore::new(Some(root.dictionary_path.clone()));
+                for word in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"] {
+                    store.add_word(word).unwrap();
+                }
+            },
+            cx,
+        );
+        let filter = dictionary_filter(&shell, cx);
+        cx.simulate_keystrokes("secondary-k");
+        assert!(focused(&filter, cx), "Find focuses the filter");
+        assert!(in_shell(&shell, cx), "which is on screen");
     }
 }
