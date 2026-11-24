@@ -164,7 +164,7 @@ def isolated_env(root: Path, *, repo_root: Path | None = None, config: Path | No
             encoding="utf-8",
         )
         env["PYTHONPATH"] = os.pathsep.join(
-            p for p in (str(iso_py), str(repo_root), os.environ.get("PYTHONPATH")) if p
+            p for p in (str(repo_root), str(iso_py), os.environ.get("PYTHONPATH")) if p
         )
     return env
 
