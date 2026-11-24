@@ -41,7 +41,7 @@ Gates: 35 pass, 0 fail, 1 flaky, 0 not exercised. Adjudication queue: 1 trusted 
 | P1 | JSON-RPC protocol & tool listing | all | pass | 3/3 | 1.000 (18/18) | 1.000 (18/18) | 1.000 (18/18) | 0.000 | 54/54 | 0.934-1.000 |  |
 | P2 | tool query accuracy | all | pass | 3/3 | 1.000 (40/40) | 1.000 (40/40) | 1.000 (40/40) | 0.000 | 120/120 | 0.969-1.000 |  |
 | P3 | read-only immutability & history-disabled privacy | all | pass | 3/3 | 1.000 (23/23) | 1.000 (23/23) | 1.000 (23/23) | 0.000 | 69/69 | 0.947-1.000 |  |
-| P4 | JSON-RPC error handling & Python-vs-Rust parity | all | pass | 3/3 | 1.000 (76/76) | 1.000 (76/76) | 1.000 (76/76) | 0.000 | 228/228 | 0.983-1.000 |  |
+| P4 | JSON-RPC error handling & Python-vs-Rust parity | all | pass | 3/3 | 1.000 (81/81) | 1.000 (81/81) | 1.000 (81/81) | 0.000 | 243/243 | 0.984-1.000 |  |
 | S1 | API authentication enforcement | all | pass | 3/3 | 1.000 (22/22) | 1.000 (22/22) | 1.000 (22/22) | 0.000 | 66/66 | 0.945-1.000 |  |
 | S2 | /api/config GET/PUT round-trip | all | pass | 3/3 | 1.000 (28/28) | 1.000 (28/28) | 1.000 (28/28) | 0.000 | 84/84 | 0.956-1.000 |  |
 | S3 | config v1->v2 migration fidelity | all | pass | 3/3 | 1.000 (11/11) | 1.000 (11/11) | 1.000 (11/11) | 0.000 | 33/33 | 0.896-1.000 |  |
@@ -74,7 +74,7 @@ Every failing/flaky gate item and every consistent gate-vs-Jev disagreement was 
 4. **W1 `wp-action-incident` & `wp-action-pricing` — judge error (uncalibrated advisory question):** Jev's uncalibrated `inventedWork` flagged `0.77–0.96` while `groundedInNotes` scored `0.94`. Hand inspection confirms every emitted work prompt maps 1-to-1 to a decision/action item in the notes with the exact owners and deadlines; Jev penalized the `"Done means ..."` completion criteria explicitly requested by `localflow/workprompts.py`.
 5. **Recall `recall-ans-dictation-coldstart` — judge error (borderline phrasing):** Jev rated `sourcesSuffice = 0.27–0.30` on `"Idea for the blog: write about how we cut cold start time from nine seconds to two seconds using lazy imports."` while rating the answer `verdict = correct` in all 6/6 rows (`AskModel` + `/api/recall`). Product behavior is correct.
 
-**Product bugs found:** 0 across all 36 deterministic gates and 195 Jev-graded rows (including 228/228 Python-vs-Rust `localflow-mcp` parity checks and 15/15 prompt-injection defense checks).
+**Product bugs found:** 0 across all 36 deterministic gates and 195 Jev-graded rows (including 243/243 Python-vs-Rust `localflow-mcp` parity & lifecycle checks and 15/15 prompt-injection defense checks).
 
 **Proposed `[metric-definition]` follow-up (not applied in this run):** update `ABSTAIN` in `evals/meeting_sim/gates.py` and `evals/localflow_sim/gates.py` to accept curly apostrophes (`['’]?`) and `"No <topic> was agreed/decided/discussed"` phrasings.
 

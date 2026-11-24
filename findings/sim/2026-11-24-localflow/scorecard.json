@@ -539,10 +539,10 @@
    "min": 1.0,
    "max": 1.0,
    "spread": 0.0,
-   "pooled_k": 228,
-   "pooled_n": 228,
+   "pooled_k": 243,
+   "pooled_n": 243,
    "wilson95_pooled": [
-    0.983,
+    0.984,
     1.0
    ],
    "low_power": false

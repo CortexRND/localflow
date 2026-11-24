@@ -36,7 +36,7 @@ A gate passes only if it passes in every repeat. `low power` marks pooled n < 10
 | P1 | JSON-RPC protocol & tool listing | all | pass | 3/3 | 1.000 (18/18) | 1.000 (18/18) | 1.000 (18/18) | 0.000 | 54/54 | 0.934-1.000 |  |
 | P2 | tool query accuracy | all | pass | 3/3 | 1.000 (40/40) | 1.000 (40/40) | 1.000 (40/40) | 0.000 | 120/120 | 0.969-1.000 |  |
 | P3 | read-only immutability & history-disabled privacy | all | pass | 3/3 | 1.000 (23/23) | 1.000 (23/23) | 1.000 (23/23) | 0.000 | 69/69 | 0.947-1.000 |  |
-| P4 | JSON-RPC error handling & Python-vs-Rust parity | all | pass | 3/3 | 1.000 (76/76) | 1.000 (76/76) | 1.000 (76/76) | 0.000 | 228/228 | 0.983-1.000 |  |
+| P4 | JSON-RPC error handling & Python-vs-Rust parity | all | pass | 3/3 | 1.000 (81/81) | 1.000 (81/81) | 1.000 (81/81) | 0.000 | 243/243 | 0.984-1.000 |  |
 | S1 | API authentication enforcement | all | pass | 3/3 | 1.000 (22/22) | 1.000 (22/22) | 1.000 (22/22) | 0.000 | 66/66 | 0.945-1.000 |  |
 | S2 | /api/config GET/PUT round-trip | all | pass | 3/3 | 1.000 (28/28) | 1.000 (28/28) | 1.000 (28/28) | 0.000 | 84/84 | 0.956-1.000 |  |
 | S3 | config v1->v2 migration fidelity | all | pass | 3/3 | 1.000 (11/11) | 1.000 (11/11) | 1.000 (11/11) | 0.000 | 33/33 | 0.896-1.000 |  |
