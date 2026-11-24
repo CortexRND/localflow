@@ -131,7 +131,12 @@ impl PythonRetry {
             .args(&prefix[1..])
             .args(["history", "retry", &id.to_string(), "--json", "--data-dir"])
             .arg(&root.localflow_dir)
-            .env("LOCALFLOW_CONFIG", &root.config_path)
+            // The child runs in the data dir: a relative path would
+            // resolve there, not where this process found it.
+            .env(
+                "LOCALFLOW_CONFIG",
+                std::path::absolute(&root.config_path).unwrap_or_else(|_| root.config_path.clone()),
+            )
             .env("HF_HUB_OFFLINE", "1")
             .env("TRANSFORMERS_OFFLINE", "1")
             .env("PYTHONUTF8", "1")
