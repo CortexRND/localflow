@@ -211,7 +211,7 @@ fn scripted_meeting_drives_the_backend_end_to_end() {
     assert_eq!(res["start"][1]["system_audio"], "on");
 
     // One transcript line per scripted line, in order, with speakers.
-    let log = res["log_text"].as_str().unwrap();
+    let log = res["log_text"].as_str().unwrap().replace("\r\n", "\n");
     let mut at = 0;
     for (i, line) in sc["lines"].as_array().unwrap().iter().enumerate() {
         let who = if line[0] == "me" { "Me" } else { "Others" };
