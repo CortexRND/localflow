@@ -441,6 +441,7 @@ fn real_storage(caps: &Capabilities) -> Arc<dyn SpeechStorage> {
 fn real_retry(secrets: &Arc<dyn SecretStore + Send + Sync>) -> Arc<dyn RetryBackend> {
     Arc::new(crate::controllers::retry::NativeRetry {
         secrets: secrets.clone(),
+        python: crate::controllers::retry_python::PythonRetry::system(),
     })
 }
 
