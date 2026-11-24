@@ -30,8 +30,50 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
         .tempfile_in(parent)?;
     tmp.write_all(content.as_bytes())?;
     tmp.as_file().sync_all()?;
+    replace_with(tmp, path)
+}
+
+#[cfg(not(windows))]
+fn replace_with(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// First pause before retrying a replace that a holder of `path` blocked.
+#[cfg(windows)]
+const REPLACE_FIRST_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
+/// Total time a blocked replace waits before giving up.
+#[cfg(windows)]
+const REPLACE_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// `persist` is `MoveFileExW`, which cannot replace a target any reader has
+/// open; std's rename uses POSIX semantics and can, as long as the holder
+/// shares delete. The bounded retry covers holders that do not (they keep
+/// it open briefly). The staged file never outlives a failed replace.
+#[cfg(windows)]
+fn replace_with(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    let (file, staged) = tmp.keep().map_err(|e| e.error)?;
+    drop(file);
+    let mut waited = std::time::Duration::ZERO;
+    let mut pause = REPLACE_FIRST_PAUSE;
+    let result = loop {
+        match std::fs::rename(&staged, path) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && waited < REPLACE_BUDGET =>
+            {
+                let step = pause.min(REPLACE_BUDGET - waited);
+                std::thread::sleep(step);
+                waited += step;
+                pause *= 2;
+            }
+            other => break other,
+        }
+    };
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
 }
 
 pub fn write_state(state: &str, path: &Path) -> std::io::Result<()> {
@@ -147,7 +189,9 @@ pub struct StatusReporter {
     started: f64,
     session: &'static str,
     facts: std::sync::Mutex<Facts>,
-    last_beat: std::sync::Mutex<std::time::Instant>,
+    /// When the file last took a write; `None` after a failed write, so the
+    /// next [`StatusReporter::beat`] republishes at once.
+    last_beat: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl StatusReporter {
@@ -168,7 +212,7 @@ impl StatusReporter {
                 mic_configured: mic_configured.to_string(),
                 warnings: Vec::new(),
             }),
-            last_beat: std::sync::Mutex::new(std::time::Instant::now()),
+            last_beat: std::sync::Mutex::new(Some(std::time::Instant::now())),
         }
     }
 
@@ -193,10 +237,14 @@ impl StatusReporter {
     fn change(&self, f: impl FnOnce(&mut Facts)) {
         let mut facts = self.facts.lock().unwrap_or_else(|p| p.into_inner());
         f(&mut facts);
-        if let Err(error) = write_atomic(&self.path, &self.body(&facts).to_string()) {
-            log::warn!("could not write {}: {error}", self.path.display());
-        }
-        *self.last_beat.lock().unwrap_or_else(|p| p.into_inner()) = std::time::Instant::now();
+        let written = match write_atomic(&self.path, &self.body(&facts).to_string()) {
+            Ok(()) => Some(std::time::Instant::now()),
+            Err(error) => {
+                log::warn!("could not write {}: {error}", self.path.display());
+                None
+            }
+        };
+        *self.last_beat.lock().unwrap_or_else(|p| p.into_inner()) = written;
     }
 
     fn body(&self, facts: &Facts) -> serde_json::Value {
@@ -271,14 +319,12 @@ impl StatusReporter {
     }
 
     /// Rewrite the heartbeat when [`HEARTBEAT`] has passed since the last
-    /// write. Cheap to call often.
+    /// write, or at once when the last write failed. Cheap to call often.
     pub fn beat(&self) {
-        let due = self
-            .last_beat
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .elapsed()
-            >= HEARTBEAT;
+        let due = match *self.last_beat.lock().unwrap_or_else(|p| p.into_inner()) {
+            Some(at) => at.elapsed() >= HEARTBEAT,
+            None => true,
+        };
         if due {
             self.publish();
         }
@@ -541,5 +587,88 @@ mod tests {
             !forged.fresh(now_seconds()),
             "a heartbeat from the future is not fresh"
         );
+    }
+
+    fn dir_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_change_lands_while_a_reader_holds_the_status_file_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let reporter = StatusReporter::new(&path, "");
+        reporter.publish();
+        let reader = std::fs::File::open(&path).unwrap();
+        reporter.set_listener(ListenerFact::Ok, "");
+        let file = StatusFile::read(&path).unwrap().unwrap();
+        assert_eq!(file.listener, Some(ListenerFact::Ok));
+        drop(reader);
+        assert_eq!(dir_names(dir.path()), vec!["status.json".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_write_is_republished_by_the_next_beat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let reporter = StatusReporter::new(&path, "");
+        std::fs::create_dir(&path).unwrap();
+        reporter.publish();
+        reporter.set_listener(ListenerFact::Ok, "");
+        std::fs::remove_dir(&path).unwrap();
+        reporter.beat();
+        let file = StatusFile::read(&path).unwrap().expect("beat republished");
+        assert_eq!(file.listener, Some(ListenerFact::Ok));
+
+        // After a successful write the next beat waits for HEARTBEAT.
+        std::fs::remove_file(&path).unwrap();
+        reporter.beat();
+        assert!(!path.exists(), "a beat right after a good write is a no-op");
+    }
+
+    #[cfg(windows)]
+    fn open_without_delete_sharing(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_replace_waits_for_a_holder_that_does_not_share_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        write_atomic(&path, "old").unwrap();
+        let holder = open_without_delete_sharing(&path);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(holder);
+        });
+        write_atomic(&path, "new").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(dir_names(dir.path()), vec!["status.json".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_replace_blocked_past_its_budget_fails_and_leaves_no_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        write_atomic(&path, "old").unwrap();
+        let holder = open_without_delete_sharing(&path);
+        let error = write_atomic(&path, "new").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(dir_names(dir.path()), vec!["status.json".to_string()]);
+        drop(holder);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
     }
 }
