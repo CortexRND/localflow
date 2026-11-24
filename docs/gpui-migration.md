@@ -145,7 +145,9 @@ cloud storage) have no placeholders in the UI. See `docs/wispr-parity.md`.
      `v0.2.2`, so the installer's default (`PREVIEW_RELEASE="v0.2.2"`) fails
      with "Release v0.2.2 has no SHA256SUMS-gpui-preview". It installs only from
      `--archive` until the next tag publishes the assets (see "Before tagging"
-     in [releasing.md](releasing.md)). For the same reason a real
+     in [releasing.md](releasing.md)). That tag's installer defaults to the new
+     release; a copy of the installer from before it stays pinned to `v0.2.2`
+     and needs `--release <tag>`. For the same reason a real
      version-to-version upgrade wasn't checked; only a reinstall of 0.2.2 over
      0.2.2 was.
    - Windows: the zip has no installer. `gpui-package.yml` checks its PE imports
