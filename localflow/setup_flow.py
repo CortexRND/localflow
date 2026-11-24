@@ -126,13 +126,26 @@ def _mac_permission_checks() -> list[Check]:
     return checks
 
 
+def _ffmpeg_install_hint() -> tuple[str, str]:
+    """(detail when missing, install URL) for this platform's ffmpeg install."""
+    if sys.platform == "darwin":
+        return "Not found — run: brew install ffmpeg", "https://formulae.brew.sh/formula/ffmpeg"
+    if sys.platform == "win32":
+        return "Not found — run: winget install Gyan.FFmpeg", "https://ffmpeg.org/download.html"
+    return (
+        "Not found — install it with your package manager (e.g. sudo apt install ffmpeg)",
+        "https://ffmpeg.org/download.html",
+    )
+
+
 def run_checks(cfg: Config) -> list[Check]:
     ffmpeg_installed = shutil.which("ffmpeg") is not None
+    missing_detail, install_url = _ffmpeg_install_hint()
     checks = [
         Check(
             "ffmpeg", "ffmpeg", ffmpeg_installed,
-            "Installed" if ffmpeg_installed else "Not found — run: brew install ffmpeg",
-            "Install ffmpeg", "https://formulae.brew.sh/formula/ffmpeg",
+            "Installed" if ffmpeg_installed else missing_detail,
+            "Install ffmpeg", install_url,
         ),
     ]
     if cfg.llm_provider == "ollama":

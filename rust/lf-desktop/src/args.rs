@@ -41,9 +41,12 @@ EXIT STATUS (launch-status: 1):
     2   Invalid arguments
 
 One window runs per data folder: a second launch sends its page to it.
-This app runs beside the existing LocalFlow windows. `lf hub`, `lf phrases`
-and `lf setup` open it only when asked (`--gpui` or LOCALFLOW_UI=gpui); on
-Linux, `lf-hub` opens it. It does not replace the Python runtime.";
+This app runs beside the existing LocalFlow windows. On Linux and macOS,
+`lf hub` and `lf phrases` open it by default once it is installed and
+LocalFlow is set up; `lf setup` opens it only with `--gpui` or
+LOCALFLOW_UI=gpui, and nothing opens it from `lf hub` / `lf phrases` before
+LocalFlow is set up (`--legacy` or LOCALFLOW_UI=legacy opens the legacy window).
+On Linux, `lf-hub` opens it. It does not replace the Python runtime.";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Args {

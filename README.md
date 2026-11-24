@@ -467,13 +467,16 @@ re-reads the file when it changes, so edits apply without a restart.
 Manage them on the Hot Phrases page of the LocalFlow Hub:
 
 ```bash
-lf phrases                  # open the Hub on Hot Phrases (also the menu bar's "Hot Phrases…")
+lf phrases                  # open the Hub on Hot Phrases
 lf hub --page "Hot Phrases" # the same, through the Hub command
 ```
 
-On macOS the Hub is one native window owned by the main LocalFlow app, so
-all of these reach the same window (and bring it forward if it is already
-open). The Hot Phrases page has a searchable list on the left (one row per
+On macOS the Hub is one native window owned by the main LocalFlow app. The
+menu bar's "Hot Phrases…" always opens that window. `lf phrases` and `lf hub`
+reach it too (bringing it forward if it is already open), unless the separate
+LocalFlow Preview is installed and LocalFlow is set up; then they open the
+preview instead, and `--legacy` opens the Hub window (see
+[History & insights](#history--insights)). The Hot Phrases page has a searchable list on the left (one row per
 phrase with an on/off dot) and an editor on the right: "When I say", "Type
 this", an Enabled switch, Delete with Undo, and a "Try it" preview that shows
 what dictation would paste and which triggers matched. Edits autosave as you
@@ -531,10 +534,18 @@ search it read-only through the [MCP server](#mcp-server-for-agents).
 Open the native hub with `lf hub` to browse history, edit the dictionary and
 cleanup styles, or review the selected models. If you installed the separate
 LocalFlow Preview (native GPUI app, [`rust/lf-desktop`](rust/lf-desktop/README.md)),
-`lf hub --gpui`, `lf phrases --gpui` and `lf setup --gpui` open it instead, or set
-`LOCALFLOW_UI=gpui`; anything missing or wrong falls back to the usual window.
-The default is unchanged, and `--legacy` always opens the usual window. The
-CLI can search and manage history without opening the hub:
+`lf hub` and `lf phrases` open it instead on Linux and macOS once LocalFlow is
+set up; if something is wrong with it, they say so once and open the usual
+window. `lf setup`, and any window on a machine that hasn't been set up yet,
+keep the usual setup wizard and windows even with the preview installed.
+Without the preview (it isn't part of the standard install) and on Windows,
+nothing changes. `--legacy` or `LOCALFLOW_UI=legacy` always opens the usual
+window. `--gpui` asks for the preview explicitly. `lf setup --gpui` opens the
+preview's own setup wizard; that wizard offers the native app's speech models, which the Python
+runtime that handles dictation may not be able to run. This needs an `lf` built after v0.2.2
+(for example a source install); the released v0.2.2 CLI doesn't have this
+selector yet and always opens the usual window. The CLI can search and manage
+history without opening the hub:
 
 ```bash
 lf history list

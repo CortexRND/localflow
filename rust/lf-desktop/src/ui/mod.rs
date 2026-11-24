@@ -358,8 +358,10 @@ impl RenderOnce for Button {
                 ring(&t)
             }
         });
+        let selector = self.label.clone();
         let mut el = div()
             .id(self.id)
+            .debug_selector(move || format!("button:{selector}"))
             .flex()
             .flex_none()
             .items_center()
@@ -859,6 +861,7 @@ pub fn banner(
         .items_center()
         .gap(space::s5())
         .w_full()
+        .min_w_0()
         .min_h(size::row())
         .px(space::s6())
         .py(space::s4())
@@ -867,9 +870,32 @@ pub fn banner(
         .text_color(t.text)
         .text_size(sz)
         .line_height(lh)
-        .child(icon(name, fg))
-        .child(div().flex_1().min_w_0().child(message.into()))
-        .when_some(action, |d, a| d.child(a))
+        // A wrapped message keeps its icon on the first line; the action
+        // stays centred and full size.
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(space::s5())
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .h(lh)
+                        .child(icon(name, fg).debug_selector(|| "banner-icon".into())),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "banner-message".into())
+                        .flex_1()
+                        .min_w_0()
+                        .child(message.into()),
+                ),
+        )
+        .when_some(action, |d, a| d.child(div().flex_none().child(a)))
 }
 
 pub fn empty_state(
@@ -982,6 +1008,23 @@ pub fn setting_row(
     control: AnyElement,
     note: Option<(Tone, SharedString)>,
 ) -> Div {
+    let description = supporting(t, description);
+    #[cfg(test)]
+    let description = description.debug_selector(|| "setting-desc".into());
+    let text_column = div()
+        .flex()
+        .flex_col()
+        .gap(space::s1())
+        .child(label(t, label_text))
+        .child(description)
+        .when_some(note, |d, (tone, text)| {
+            d.child(match tone {
+                Tone::Error => error_line(t, text),
+                _ => supporting(t, text).text_color(t.tone(tone).0),
+            })
+        });
+    #[cfg(test)]
+    let text_column = text_column.debug_selector(|| "setting-text".into());
     div()
         .flex()
         .items_center()
@@ -992,21 +1035,13 @@ pub fn setting_row(
         .px(row_inset())
         .py(space::s5())
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::s1())
-                .flex_1()
-                .min_w_0()
-                .max_w(px(440.))
-                .child(label(t, label_text))
-                .child(supporting(t, description))
-                .when_some(note, |d, (tone, text)| {
-                    d.child(match tone {
-                        Tone::Error => error_line(t, text),
-                        _ => supporting(t, text).text_color(t.tone(tone).0),
-                    })
-                }),
+            // A 440 px flex basis that never grows and shrinks (down to
+            // nothing) when a wide control leaves less room. The width stays
+            // `auto`, so text wraps at the resolved size: 440 px when it fits,
+            // the remaining room otherwise. A fixed `w(440)` ran under wide
+            // controls; `flex_1()` + `max_w(440)` (or a nested slot) let the
+            // row's height be measured at a wider, unclamped width.
+            text_column.flex_basis(px(440.)).flex_shrink().min_w_0(),
         )
         .child(
             div()
@@ -1100,6 +1135,9 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
                 .child(*name)
         }))
 }
+
+#[cfg(test)]
+mod layout_tests;
 
 #[cfg(test)]
 mod tests {
