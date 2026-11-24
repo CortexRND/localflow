@@ -72,6 +72,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Headless GPUI windows (`TestAppContext`) for shell keyboard tests. Dev-only:
+# the binary's gpui features are unchanged.
+gpui = { version = "=0.2.2", features = ["test-support"] }
 
 # GPUI 0.2.2 -> zed-async-tar -> xattr 0.2.3 does not build against the libc
 # that lf-core's keyring backend requires. See vendor/xattr-shim/src/lib.rs.
