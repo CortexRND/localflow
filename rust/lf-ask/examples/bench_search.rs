@@ -176,11 +176,13 @@ fn parse_queries(text: &str) -> Result<Vec<Query>> {
 
 /// Vault-relative `/`-separated path for refs inside `vault` (mirrors py_recall.normalize_ref).
 fn normalize_ref(reference: &str, vault: &str) -> String {
-    let prefix = vault.trim_end_matches(['/', '\\']);
+    let norm_ref = reference.replace('\\', "/");
+    let norm_vault = vault.replace('\\', "/");
+    let prefix = norm_vault.trim_end_matches('/');
     if !prefix.is_empty() {
-        if let Some(rest) = reference.strip_prefix(prefix) {
-            if let Some(rel) = rest.strip_prefix(['/', '\\']) {
-                return rel.replace('\\', "/");
+        if let Some(rest) = norm_ref.strip_prefix(prefix) {
+            if let Some(rel) = rest.strip_prefix('/') {
+                return rel.to_owned();
             }
         }
     }
