@@ -221,6 +221,14 @@ def person_rows(payload) -> list[dict]:
             "meta": _person_meta(entry),
             "stale": needs_reenroll(entry, embedder),
         })
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = row["name"].casefold()
+        counts[key] = counts.get(key, 0) + 1
+    for row in rows:
+        if counts[row["name"].casefold()] > 1:
+            short_id = row["id"][:6]
+            row["meta"] = f"{row['meta']} · {short_id}" if row["meta"] else short_id
     return rows
 
 
