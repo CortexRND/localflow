@@ -57,6 +57,8 @@ from localflow.hub_model import (
     dictionary_entries,
     home_decoration_frame,
     meeting_capture_status,
+    meeting_diarization_height,
+    meeting_diarization_status,
     meeting_form_layout,
     meeting_notes_height,
     prompt_row_layout,
@@ -1593,6 +1595,13 @@ class HubWindowController(NSObject):
             "", 0, 0, width, 12, "muted", palette=self.tokens, height=20,
         )
         self.body.addSubview_(self.meeting_watch)
+        # Speaker labels get their own wrapping line under the watch row; it
+        # stays hidden (and takes no room) while there is nothing to say.
+        self.meeting_diarization = _label(
+            "", 0, 0, width, 12, "muted", palette=self.tokens, height=18, wrap=True,
+        )
+        self.meeting_diarization.setHidden_(True)
+        self.body.addSubview_(self.meeting_diarization)
         self.meeting_title_label = _label(
             "Meeting title", *frames["title_label"][:3], 11,
             "ink", palette=self.tokens, height=frames["title_label"][3],
@@ -2072,7 +2081,8 @@ class HubWindowController(NSObject):
     def _meeting_page_controls(self):
         return (
             self.meeting_subtitle,
-            self.meeting_watch, self.meeting_title_label, self.meeting_title_box,
+            self.meeting_watch, self.meeting_diarization,
+            self.meeting_title_label, self.meeting_title_box,
             self.meeting_template_label, self.meeting_template_box,
             self.meeting_notes_card, self.meeting_notes_status,
             self.meeting_error_label, self.meeting_action, self.meeting_live_card,
@@ -2162,7 +2172,18 @@ class HubWindowController(NSObject):
         self.meeting_watch.setFrame_(
             NSMakeRect(action_frame.origin.x, watch_y, width, 20)
         )
-        live_y = watch_y + (26 if watch_visible else 0)
+        # The speaker-label line wraps under the 20pt watch row and pushes
+        # the rest down by its height; empty, it is hidden and takes no room.
+        diarization = self.meeting_diarization.stringValue()
+        diarization_font = _font(12)
+        diarization_h = meeting_diarization_height(
+            diarization, width, lambda text: measure_text(text, diarization_font),
+        )
+        self.meeting_diarization.setHidden_(not diarization_h)
+        self.meeting_diarization.setFrame_(
+            NSMakeRect(action_frame.origin.x, watch_y + 20, width, diarization_h)
+        )
+        live_y = watch_y + (26 if watch_visible else 0) + diarization_h
         self.meeting_live_card.setFrame_(NSMakeRect(0, live_y, width, 98))
         self.meeting_live_label.setFrame_(NSMakeRect(8, 8, width - 16, 82))
         self.meeting_live_card.setHidden_(not bool(session))
@@ -2212,6 +2233,7 @@ class HubWindowController(NSObject):
             # One plain sentence: mic vs system audio, with the raw error only
             # choosing between "allow it" (permission) and "not available".
             self.meeting_watch.setStringValue_(meeting_capture_status(session))
+            self.meeting_diarization.setStringValue_(meeting_diarization_status(session))
             self.meeting_template.setEnabled_(False)
             self._meeting_set_action_title(
                 f"Stop & save notes — {int(session.get('seconds', 0)) // 60}m"
@@ -2236,6 +2258,7 @@ class HubWindowController(NSObject):
                 else ""
             )
             self.meeting_watch.setStringValue_(watch)
+            self.meeting_diarization.setStringValue_("")
             self.meeting_template.setEnabled_(True)
             self._meeting_set_action_title("Start meeting transcription")
             self.meeting_live_label.setStringValue_("")

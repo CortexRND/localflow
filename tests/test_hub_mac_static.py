@@ -119,6 +119,39 @@ def test_appkit_meeting_status_and_transcript_follow_the_action():
     assert "not session" in render
 
 
+def test_appkit_speaker_label_line_sits_under_the_watch_row():
+    source = SOURCE.read_text(encoding="utf-8")
+    methods = {
+        method.name: ast.get_source_segment(source, method)
+        for method in _controller_methods()
+    }
+    render = methods["_meeting_render"]
+    layout = methods["_meeting_layout"]
+    page = methods["_page_meetings"]
+    controls = methods["_meeting_page_controls"]
+
+    assert "meeting_capture_status(session)" in render
+    assert "meeting_diarization_status(session)" in render
+    idle = render.split("else:", 1)[1]
+    assert 'self.meeting_diarization.setStringValue_("")' in idle
+    assert "'Me' if segment.get('source') == 'me' else 'Others'" in render
+
+    assert "meeting_diarization_height(" in layout
+    assert "self.meeting_diarization.setHidden_(not diarization_h)" in layout
+    assert (
+        "live_y = watch_y + (26 if watch_visible else 0) + diarization_h" in layout
+    )
+    assert "saved_y = live_y + (108 if session else 8)" in layout
+
+    built = page.split("self.meeting_diarization = _label(", 1)[1].split(")", 1)[0]
+    assert "wrap=True" in built
+    assert "self.meeting_diarization.setHidden_(True)" in page
+    assert "self.meeting_diarization" in controls
+
+    # The view only shows the sanitized sentence, never the raw error.
+    assert "diarization_error" not in source
+
+
 def test_hub_snapshot_workflow_covers_each_page_and_error_state():
     snapshots = (ROOT / "scripts" / "mac_ui_snapshots.py").read_text()
     workflow = (ROOT / ".github" / "workflows" / "macos-ui.yml").read_text()

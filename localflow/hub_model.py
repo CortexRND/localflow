@@ -17,6 +17,7 @@ from localflow.dispatch import (
     approve_prompt,
     reject_prompt,
 )
+from localflow.settings_agent import safe_text
 from localflow.text_wrap import wrap_lines
 from localflow.ui_tokens import HUB_HEADER_OFFSET
 
@@ -186,6 +187,41 @@ def meeting_capture_status(session: dict) -> str:
             return SYSTEM_AUDIO_PERMISSION
         return SYSTEM_AUDIO_UNAVAILABLE
     return "Recording your mic only."
+
+
+MEETING_DIARIZATION_REASON_MAX = 160
+MEETING_DIARIZATION_LINE_H = 16  # same 12pt line as the meeting error
+
+
+def meeting_diarization_status(session: dict) -> str:
+    """Live speaker-label line for a running meeting, "" when there is none.
+
+    "off", a missing key or anything unknown shows nothing, so a meeting
+    without diarization looks exactly as before. The failure reason is
+    untrusted text: whitespace is collapsed to one line, the trailing period
+    dropped, and what is left is escaped and bounded by `safe_text`.
+    """
+    if not isinstance(session, dict):
+        return ""
+    state = session.get("diarization")
+    if state == "collecting":
+        return "Speaker labels: collecting"
+    if state != "unavailable":
+        return ""
+    error = session.get("diarization_error")
+    reason = " ".join(error.split()).rstrip(". ") if isinstance(error, str) else ""
+    reason = safe_text(reason, MEETING_DIARIZATION_REASON_MAX)
+    if not reason:
+        return "Speaker labels: unavailable"
+    return f"Speaker labels: unavailable ({reason})"
+
+
+def meeting_diarization_height(text: str, width: float, measure) -> int:
+    """Wrapped height of the speaker-label line, 0 when there is none."""
+    if not text:
+        return 0
+    lines = wrap_lines(text, max(width - 8, 40), measure)
+    return max(1, len(lines)) * MEETING_DIARIZATION_LINE_H + 2
 
 
 _STAMP_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} \d{4}\s+")

@@ -13,7 +13,7 @@ from tkinter import font as tkfont
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
-from localflow.hub_model import dictation_state
+from localflow.hub_model import dictation_state, meeting_diarization_status
 from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, vault_notes_path
 from localflow.ui_tokens import (
@@ -933,6 +933,15 @@ class HubWindow:
             anchor="w", justify="left", wraplength=720,
         )
         self.meeting_watch.pack(fill="x", pady=(0, 12))
+        # Speaker labels: packed right under the watch line only while there
+        # is something to say, and wrapped to the page width (the window can
+        # be narrower than 720 + sidebar, which would clip a long reason).
+        self.meeting_diarization = tk.Label(
+            self.meeting_content, text="", bg=self.tokens["paper"],
+            fg=self.tokens["muted"], font=(self.font_family, 11),
+            anchor="w", justify="left", wraplength=720,
+        )
+        self.meeting_content.bind("<Configure>", self._meeting_wrap, add="+")
         self.meeting_error = tk.Label(
             self.meeting_content, text="", bg=self.tokens["paper"],
             fg=self.tokens["red"], font=(self.font_family, 12),
@@ -1146,6 +1155,13 @@ class HubWindow:
         self._meeting_after = None
         self._meeting_poll()
 
+    def _meeting_wrap(self, event):
+        """Wrap the speaker-label line to the meeting page's current width."""
+        if event.width > 1:
+            self.meeting_diarization.configure(
+                wraplength=max(200, min(720, event.width)),
+            )
+
     def _meeting_render(self):
         status = self._meeting_status_data
         session = status.get("session")
@@ -1161,8 +1177,16 @@ class HubWindow:
                 watch = "mic only"
             if session.get("title"):
                 watch = f"{session['title']} · {watch}"
+            diarization = meeting_diarization_status(session)
             self.meeting_watch.configure(text=watch)
-            self.meeting_watch.pack(fill="x", pady=(0, 12))
+            self.meeting_watch.pack(fill="x", pady=(0, 2 if diarization else 12))
+            if diarization:
+                self.meeting_diarization.configure(text=diarization)
+                self.meeting_diarization.pack(
+                    fill="x", pady=(0, 12), after=self.meeting_watch,
+                )
+            else:
+                self.meeting_diarization.pack_forget()
             self.meeting_setup.pack_forget()
             self.meeting_action.configure(
                 text=(
@@ -1196,6 +1220,7 @@ class HubWindow:
                 self.meeting_watch.pack(fill="x", pady=(0, 12))
             else:
                 self.meeting_watch.pack_forget()
+            self.meeting_diarization.pack_forget()
             self.meeting_setup.pack(fill="x")
             self.meeting_action.configure(
                 text="Start meeting transcription",
