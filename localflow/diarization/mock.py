@@ -17,11 +17,13 @@ SpeakerOf = Mapping[int, int] | Callable[[int], int] | None
 
 
 def tone_index(frame: np.ndarray) -> int | None:
-    """Line index of a constant tone ``0.1 + i*0.001``; ``None`` for silence or empty frames."""
+    """Line index of a constant tone ``0.1 + i*0.001`` from the median of the voiced samples
+    (``abs >= 0.01``); ``None`` when no sample is voiced (silence or an empty frame)."""
     frame = np.asarray(frame)
-    if frame.size == 0 or float(np.max(np.abs(frame))) < _SILENCE_PEAK:
+    voiced = frame[np.abs(frame) >= _SILENCE_PEAK]
+    if voiced.size == 0:
         return None
-    return round((float(np.median(frame)) - 0.1) / 0.001)
+    return round((float(np.median(voiced)) - 0.1) / 0.001)
 
 
 def _speaker_key(index: int, speaker_of: SpeakerOf) -> int:

@@ -47,6 +47,12 @@ def test_diarize_three_lines_with_silence():
     assert MockDiarizer().diarize(np.zeros(0, np.float32), RATE) == []
 
 
+def test_tone_with_silence_padding_decodes_voiced_samples_only():
+    audio = np.concatenate([silence(0.3), tone(0, 2.0), silence(0.7)])
+    assert MockDiarizer().diarize(audio, RATE) == [SpeakerTurn(0.0, 2.5, 0)]
+    assert tone_index(audio[: RATE // 2]) == 0
+
+
 def test_embed_multi_tone_uses_most_common_key():
     emb = MockEmbedder(speaker_of={0: 0, 4: 0})
     mixed = emb.embed(np.concatenate([tone(0, 1), tone(4, 1)]), RATE)
