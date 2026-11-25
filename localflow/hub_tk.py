@@ -976,6 +976,12 @@ class HubWindow:
             self.meeting_setup, text="Speakers", bg=self.tokens["paper"],
             fg=self.tokens["ink"], font=(self.font_family, 11, "bold"),
         ).pack(anchor="w", pady=(0, 5))
+        live = self._live_config.get()
+        self.config = replace(
+            self.config,
+            speaker_diarization=live.speaker_diarization,
+            diarize_mic=live.diarize_mic,
+        )
         self.meeting_speaker_vars = {}
         self.meeting_speaker_checks = {}
         for key, label in SPEAKER_TOGGLES:
