@@ -64,7 +64,10 @@ def _samples(audio: np.ndarray, sample_rate: int) -> np.ndarray:
         raise ValueError(f"audio must be 1-D, got shape {audio.shape}")
     if sample_rate <= 0:
         raise ValueError(f"sample_rate must be positive, got {sample_rate}")
-    return np.ascontiguousarray(audio, dtype=np.float32)
+    samples = np.ascontiguousarray(audio, dtype=np.float32)
+    if not np.isfinite(samples).all():
+        samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+    return samples
 
 
 def _at_rate(samples: np.ndarray, sample_rate: int, target: int) -> np.ndarray:
@@ -76,11 +79,10 @@ def _at_rate(samples: np.ndarray, sample_rate: int, target: int) -> np.ndarray:
 
 
 class SherpaDiarizer:
-    """pyannote segmentation + embedding clustering; turns are chunk-local.
+    """pyannote segmentation + embedding clustering by ``threshold``; turns are chunk-local.
 
-    ``max_speakers`` caps the count: clustering runs by ``threshold`` and, if it finds more
-    speakers than the cap, runs once more with exactly ``max_speakers`` clusters.
-    ``diarize`` raises DiarizationUnavailable before ``load()``.
+    Turns are clamped to the input duration. ``diarize`` raises DiarizationUnavailable
+    before ``load()``.
     """
 
     id: ClassVar[str] = SEGMENTATION_MODEL_ID
@@ -91,52 +93,35 @@ class SherpaDiarizer:
         cache: Path | None = None,
         num_threads: int = 1,
         threshold: float = DEFAULT_THRESHOLD,
-        max_speakers: int | None = None,
     ) -> None:
-        if max_speakers is not None and max_speakers < 1:
-            raise ValueError(f"max_speakers must be None or >= 1, got {max_speakers}")
         self.cache = cache
         self.num_threads = num_threads
         self.threshold = threshold
-        self.max_speakers = max_speakers
         self._engine = None
-        self._config = None
 
     def load(self) -> None:
         if self._engine is not None:
             return
         sherpa_onnx, paths = _runtime(self.cache)
-
-        def config(num_clusters: int):
-            return sherpa_onnx.OfflineSpeakerDiarizationConfig(
-                segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
-                    pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
-                        model=paths[SEGMENTATION_MODEL_ID]
-                    ),
-                    num_threads=self.num_threads,
-                    provider=PROVIDER,
+        config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+            segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
+                    model=paths[SEGMENTATION_MODEL_ID]
                 ),
-                embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
-                    model=paths[EMBEDDING_MODEL_ID],
-                    num_threads=self.num_threads,
-                    provider=PROVIDER,
-                ),
-                clustering=sherpa_onnx.FastClusteringConfig(
-                    num_clusters=num_clusters, threshold=self.threshold
-                ),
-                min_duration_on=MIN_DURATION_ON,
-                min_duration_off=MIN_DURATION_OFF,
-            )
-
-        default = config(1 if self.max_speakers == 1 else -1)
-        self._engine = _build("diarization", default, sherpa_onnx.OfflineSpeakerDiarization)
-        self._config = config
+                num_threads=self.num_threads,
+                provider=PROVIDER,
+            ),
+            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=paths[EMBEDDING_MODEL_ID],
+                num_threads=self.num_threads,
+                provider=PROVIDER,
+            ),
+            clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=self.threshold),
+            min_duration_on=MIN_DURATION_ON,
+            min_duration_off=MIN_DURATION_OFF,
+        )
+        self._engine = _build("diarization", config, sherpa_onnx.OfflineSpeakerDiarization)
         log.info("sherpa diarizer loaded (%d threads)", self.num_threads)
-
-    def _run(self, samples: np.ndarray) -> list[tuple[float, float, int]]:
-        result = self._engine.process(samples).sort_by_start_time()
-        segments = [(float(s.start), float(s.end), int(s.speaker)) for s in result]
-        return [s for s in segments if s[1] > s[0]]
 
     def diarize(self, audio: np.ndarray, sample_rate: int) -> list[SpeakerTurn]:
         samples = _samples(audio, sample_rate)
@@ -147,14 +132,13 @@ class SherpaDiarizer:
         if samples.size < MIN_AUDIO_S * rate:
             return []
         started = time.monotonic()
-        segments = self._run(samples)
-        cap = self.max_speakers
-        if cap is not None and cap > 1 and len({s[2] for s in segments}) > cap:
-            self._engine.set_config(self._config(cap))
-            try:
-                segments = self._run(samples)
-            finally:
-                self._engine.set_config(self._config(-1))
+        duration = samples.size / rate
+        segments = []
+        for segment in self._engine.process(samples).sort_by_start_time():
+            start = max(0.0, float(segment.start))
+            end = min(float(segment.end), duration)
+            if end > start:
+                segments.append((start, end, int(segment.speaker)))
         local: dict[int, int] = {}
         turns = [
             SpeakerTurn(start, end, local.setdefault(speaker, len(local)))
@@ -162,7 +146,7 @@ class SherpaDiarizer:
         ]
         log.debug(
             "diarized %.1fs of audio: %d turns, %d speakers in %.2fs",
-            samples.size / rate, len(turns), len(local), time.monotonic() - started,
+            duration, len(turns), len(local), time.monotonic() - started,
         )
         return turns
 
@@ -215,13 +199,11 @@ class SherpaEmbedder:
 
 
 def load_sherpa_backends(
-    *, cache: Path | None = None, num_threads: int = 1, max_speakers: int | None = None
+    *, cache: Path | None = None, num_threads: int = 1
 ) -> tuple[SherpaDiarizer, SherpaEmbedder]:
     """Construct and load both backends; raises only DiarizationUnavailable."""
     try:
-        diarizer = SherpaDiarizer(
-            cache=cache, num_threads=num_threads, max_speakers=max_speakers
-        )
+        diarizer = SherpaDiarizer(cache=cache, num_threads=num_threads)
         embedder = SherpaEmbedder(cache=cache, num_threads=num_threads)
         diarizer.load()
         embedder.load()

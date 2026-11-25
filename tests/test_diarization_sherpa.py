@@ -45,7 +45,7 @@ def _seg(start, end, speaker):
 def fake_module(monkeypatch):
     """A recording stand-in for ``sherpa_onnx``; returns its mutable state."""
     state = SimpleNamespace(
-        valid=True, boom=None, engines=[], extractors=[], processed=[], set_configs=[],
+        valid=True, boom=None, engines=[], extractors=[], processed=[],
         accepted=[], ready=True, vector=[3.0, 4.0, 0.0],
         segments=[_seg(2.0, 3.0, 7), _seg(0.0, 1.0, 4), _seg(1.0, 2.0, 7),
                   _seg(3.0, 3.0, 1), _seg(3.5, 4.0, 9)],
@@ -69,15 +69,8 @@ def fake_module(monkeypatch):
 
         def process(self, samples):
             state.processed.append(samples)
-            clusters = self.config.kw["clustering"].kw["num_clusters"]
-            segments = state.segments
-            if clusters > 0:
-                segments = [_seg(s.start, s.end, s.speaker % clusters) for s in segments]
-            return SimpleNamespace(sort_by_start_time=lambda: sorted(segments, key=lambda s: s.start))
-
-        def set_config(self, config):
-            state.set_configs.append(config.kw["clustering"].kw["num_clusters"])
-            self.config = config
+            segments = sorted(state.segments, key=lambda s: s.start)
+            return SimpleNamespace(sort_by_start_time=lambda: segments)
 
     class Stream:
         finished = False
@@ -196,25 +189,25 @@ def test_empty_or_short_audio_skips_process(fake, size):
     assert fake.processed == []
 
 
-@pytest.mark.parametrize(
-    "max_speakers, runs, set_configs, clusters, speakers",
-    [(None, 1, [], -1, 3), (3, 1, [], -1, 3), (2, 2, [2, -1], -1, 2), (1, 1, [], 1, 1)],
-)
-def test_max_speakers_caps_the_count(fake, max_speakers, runs, set_configs, clusters, speakers):
-    diarizer = SherpaDiarizer(max_speakers=max_speakers)
+def test_turns_are_clamped_to_the_input(fake):
+    fake.segments = [_seg(1.5, 2.04, 3), _seg(-0.1, 0.5, 5), _seg(-1.0, -0.2, 8),
+                     _seg(2.5, 3.0, 6), _seg(0.6, 1.0, 3)]
+    diarizer = SherpaDiarizer()
     diarizer.load()
-    turns = diarizer.diarize(np.zeros(16000 * 4, dtype=np.float32), 16000)
-    assert len(fake.processed) == runs and fake.set_configs == set_configs
-    assert fake.engines[0].config.kw["clustering"].kw["num_clusters"] == clusters
-    assert sorted({t.local_speaker for t in turns}) == list(range(speakers))
+    turns = diarizer.diarize(np.zeros(16000 * 2, dtype=np.float32), 16000)
+    assert turns == [SpeakerTurn(0.0, 0.5, 0), SpeakerTurn(0.6, 1.0, 1),
+                     SpeakerTurn(1.5, 2.0, 1)]
 
 
-def test_max_speakers_must_be_positive():
-    with pytest.raises(ValueError, match="max_speakers"):
-        SherpaDiarizer(max_speakers=0)
-    with pytest.raises(DiarizationUnavailable) as info:
-        load_sherpa_backends(max_speakers=0)
-    assert isinstance(info.value.__cause__, ValueError)
+def test_non_finite_samples_become_zero(fake):
+    audio = np.ones(16000, dtype=np.float64)
+    audio[[10, 20, 30]] = [np.nan, np.inf, -np.inf]
+    diarizer, embedder = load_sherpa_backends()
+    diarizer.diarize(audio, 16000)
+    embedder.embed(audio, 16000)
+    for samples in (fake.processed[0], fake.accepted[0][1]):
+        assert samples.dtype == np.float32 and np.isfinite(samples).all()
+        assert not samples[[10, 20, 30]].any() and samples[0] == 1.0
 
 
 @pytest.mark.parametrize(
