@@ -1,3 +1,4 @@
+import inspect
 import json
 import subprocess
 import sys
@@ -63,13 +64,71 @@ def test_merge_golden(case):
         assert (g["speaker"] is None) == (e["speaker"] is None)
 
 
-def test_import_is_isolated():
-    code = (
-        "import sys, localflow.diarization; "
-        "bad = [m for m in ('localflow.meetings', 'localflow.server', 'sherpa_onnx') "
-        "if m in sys.modules]; print(bad); sys.exit(1 if bad else 0)"
-    )
+def _run(code):
     proc = subprocess.run(
-        [sys.executable, "-c", code], check=False, capture_output=True, text=True
+        [sys.executable, "-W", "error", "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+_LAZY_MODS = tuple(f"localflow.diarization.{m}" for m in ("align", "cluster", "mock"))
+
+
+@pytest.mark.parametrize(
+    ("stmt", "forbidden"),
+    [
+        (
+            "import localflow.diarization",
+            ("localflow.meetings", "localflow.server", "sherpa_onnx", *_LAZY_MODS),
+        ),
+        ("import localflow.diarization.types", _LAZY_MODS),
+        ("import localflow.stt", _LAZY_MODS),
+    ],
+    ids=["package", "types", "stt"],
+)
+def test_import_is_isolated(stmt, forbidden):
+    check = f"bad = [m for m in {forbidden!r} if m in sys.modules]"
+    _run(f"import sys\n{stmt}\n{check}\nassert not bad, bad")
+
+
+_PKG_ATTR = "cluster = localflow.diarization.cluster"
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        [
+            "import localflow.diarization.cluster",
+            "from localflow.diarization import cluster",
+        ],
+        [
+            "from localflow.diarization import cluster",
+            "import localflow.diarization.cluster",
+            _PKG_ATTR,
+        ],
+        [
+            "from localflow.diarization.cluster import cluster",
+            "import localflow.diarization",
+            _PKG_ATTR,
+        ],
+    ],
+    ids=["submodule_first", "name_first", "from_submodule"],
+)
+def test_cluster_attribute_is_function(steps):
+    checks = [
+        "assert inspect.isfunction(cluster), cluster",
+        "assert cluster([], threshold=0.5) == []",
+    ]
+    _run("\n".join(["import inspect", *steps, *checks]))
+
+
+def test_all_names_resolve():
+    import localflow.diarization as pkg
+
+    for name in pkg.__all__:
+        assert getattr(pkg, name) is not None
+    assert set(pkg.__all__) <= set(dir(pkg))
+    assert inspect.isfunction(pkg.cluster)
