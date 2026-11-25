@@ -33,6 +33,7 @@ from localflow.config import (
     config_path,
     config_to_dict,
     load_config,
+    read_config_file,
     save_config,
 )
 from localflow.context import category_for
@@ -1004,8 +1005,10 @@ def _refresh_speaker_flags() -> Config:
     global _config
     with _config_lock:
         try:
-            path = config_path()
-            fresh = load_config() if path.exists() else None
+            # Read-only: only the active v2 file, never defaults or legacy migration.
+            fresh = read_config_file(config_path())
+        except FileNotFoundError:
+            fresh = None
         # TypeError: valid TOML with a wrongly typed value, e.g. config_version = "2".
         except (ConfigError, OSError, ValueError, TypeError) as exc:
             log.warning("config reload skipped: %s", exc)

@@ -1663,8 +1663,8 @@ def test_recognition_opt_in_on_disk_just_before_start_is_used(diar, voices, monk
 
 @pytest.mark.parametrize("text", [
     "[speakers\nnot toml",
-    'config_version = "2"\n[meetings]\nspeaker_diarization = false\n'
-    "speaker_recognition = false\n",
+    ('config_version = "2"\n[meetings]\nspeaker_diarization = false\n'
+     "speaker_recognition = false\n"),
 ])
 def test_invalid_config_file_keeps_the_running_speaker_flags(rec, caplog, text):
     Path(os.environ["LOCALFLOW_CONFIG"]).write_text(text, encoding="utf-8")
@@ -1674,6 +1674,32 @@ def test_invalid_config_file_keeps_the_running_speaker_flags(rec, caplog, text):
     assert server._config.speaker_diarization is True
     assert server._config.speaker_recognition is True
     assert any("config reload skipped" in r.getMessage() for r in caplog.records)
+
+
+def test_missing_config_with_a_legacy_file_starts_without_migrating(rec, monkeypatch, tmp_path):
+    from localflow import config as config_module
+
+    legacy = tmp_path / ".localflow.toml"
+    legacy.write_text('model_size = "tiny"\n', encoding="utf-8")  # no credentials
+    monkeypatch.setattr(config_module, "legacy_config_path", lambda: legacy)
+    active = Path(os.environ["LOCALFLOW_CONFIG"])
+    real_exists = Path.exists
+    assert not real_exists(active)
+    probes = []
+
+    def exists(self, *args, **kwargs):
+        # The active file is there for the first probe, then gone (deleted meanwhile).
+        if self == active and not probes:
+            probes.append(1)
+            return True
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    start, collector, _ = _start_and_stop(rec)  # asserts the start returned 200
+    assert start["diarization"] == "collecting" and collector.registry is not None
+    assert server._config.speaker_diarization and server._config.speaker_recognition
+    assert not real_exists(active)  # never migrated into a new v2 file
+    assert legacy.read_text(encoding="utf-8") == 'model_size = "tiny"\n'
 
 
 def _closing_during_body_read(monkeypatch):
