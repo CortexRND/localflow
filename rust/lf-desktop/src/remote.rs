@@ -496,6 +496,10 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(people.len(), 1);
         assert_eq!(people[0].name, "Priya");
+        assert_eq!(
+            people[0].voice,
+            crate::controllers::people::VoiceModel::Current
+        );
     }
 
     #[test]

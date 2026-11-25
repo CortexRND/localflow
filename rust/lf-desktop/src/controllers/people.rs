@@ -6,9 +6,10 @@
 //! for the sidebar entry, routing, the page and the request. Nothing here
 //! writes: no toggle, consent, enrollment, rename or forget, and the export
 //! route (the only one with voice vectors) is never called. The reply is
-//! read through an allow-list: only a name, the date added and the sample
-//! count are kept. Ids, model ids, the server's embedder and anything else
-//! (voice-data health, any vector-like field) are dropped at parse time.
+//! read through an allow-list: only a name, the date added, the sample count
+//! and a derived [`VoiceModel`] status are kept. Ids, model ids, the server's
+//! embedder and anything else (voice-data health, any vector-like field) are
+//! dropped at parse time; the two model ids are only compared, never stored.
 
 use lf_core::config::Config;
 use serde_json::Value;
@@ -26,6 +27,57 @@ pub struct Person {
     /// `YYYY-MM-DD`, or empty when the server sent no usable date.
     pub added: String,
     pub samples: u64,
+    pub voice: VoiceModel,
+}
+
+/// How a remembered voice's model compares with the server's active one,
+/// the same comparison `lf speakers list` makes (row `model_id` against the
+/// reply's `embedder`). Only this status is kept, never either id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VoiceModel {
+    /// Same model as the server's active embedder.
+    Current,
+    /// Saved with a different model than the active one: inert until
+    /// re-enrolled.
+    Different,
+    /// The server said no voice model is active (`"embedder": null`), so no
+    /// remembered voice can match right now.
+    NoneActive,
+    /// The reply had no usable `embedder` or `model_id`: nothing is claimed.
+    #[default]
+    Unknown,
+}
+
+impl VoiceModel {
+    /// Compare without keeping either id. Both servers always send
+    /// `embedder` (a string, or null when the configured backend has no
+    /// embedder) and a string `model_id` per row; anything else is unknown.
+    fn of(embedder: Option<&Value>, model_id: Option<&Value>) -> Self {
+        let Some(model_id) = model_id.and_then(Value::as_str).filter(|id| !id.is_empty()) else {
+            return VoiceModel::Unknown;
+        };
+        match embedder {
+            Some(Value::Null) => VoiceModel::NoneActive,
+            Some(Value::String(active)) if !active.is_empty() => {
+                if active == model_id {
+                    VoiceModel::Current
+                } else {
+                    VoiceModel::Different
+                }
+            }
+            _ => VoiceModel::Unknown,
+        }
+    }
+
+    /// Neutral wording for the row (as `lf speakers list` says it), or
+    /// empty when there is nothing to note.
+    pub fn note(self) -> &'static str {
+        match self {
+            VoiceModel::Different => "Needs re-enrollment (different voice model)",
+            VoiceModel::NoneActive => "Not recognised now (no voice model active on the service)",
+            VoiceModel::Current | VoiceModel::Unknown => "",
+        }
+    }
 }
 
 /// What `GET /api/speakers` answered.
@@ -44,6 +96,7 @@ const NAME_CHARS: usize = 60;
 
 /// The allow-listed people of a reply, in server order.
 pub fn parse(reply: &Value) -> Vec<Person> {
+    let embedder = reply.get("embedder");
     reply
         .get("speakers")
         .and_then(Value::as_array)
@@ -74,6 +127,7 @@ pub fn parse(reply: &Value) -> Vec<Person> {
                 name,
                 added,
                 samples,
+                voice: VoiceModel::of(embedder, item.get("model_id")),
             })
         })
         .collect()
@@ -171,12 +225,14 @@ mod tests {
                 Person {
                     name: "Priya Raman".into(),
                     added: "2026-11-20".into(),
-                    samples: 3
+                    samples: 3,
+                    voice: VoiceModel::Current,
                 },
                 Person {
                     name: "Sam".into(),
                     added: String::new(),
-                    samples: 1
+                    samples: 1,
+                    voice: VoiceModel::Different,
                 },
             ]
         );
@@ -188,6 +244,51 @@ mod tests {
         assert_eq!(detail(&people[0]), "Added 2026-11-20 · 3 samples");
         assert_eq!(detail(&people[1]), "1 sample");
         assert!(parse(&json!({"speakers": "nope"})).is_empty());
+    }
+
+    #[test]
+    fn voice_model_status_matches_the_cli_comparison() {
+        let voices =
+            |reply: Value| -> Vec<VoiceModel> { parse(&reply).iter().map(|p| p.voice).collect() };
+        // Explicit null: the server has no active embedder, so every saved
+        // voice is inert (the CLI flags them all too).
+        assert_eq!(
+            voices(json!({"embedder": null,
+                          "speakers": [{"name": "A", "model_id": "m"}]})),
+            vec![VoiceModel::NoneActive]
+        );
+        // Missing or malformed metadata claims nothing.
+        assert_eq!(
+            voices(json!({"speakers": [{"name": "A", "model_id": "m"}]})),
+            vec![VoiceModel::Unknown],
+            "no embedder key"
+        );
+        assert_eq!(
+            voices(json!({"embedder": 7, "speakers": [
+                {"name": "A", "model_id": "m"},
+            ]})),
+            vec![VoiceModel::Unknown],
+            "non-string embedder"
+        );
+        assert_eq!(
+            voices(json!({"embedder": "m", "speakers": [
+                {"name": "A"}, {"name": "B", "model_id": null}, {"name": "C", "model_id": ""},
+            ]})),
+            vec![VoiceModel::Unknown; 3],
+            "missing or invalid model_id"
+        );
+        assert_eq!(
+            voices(json!({"embedder": null, "speakers": [{"name": "A"}]})),
+            vec![VoiceModel::Unknown]
+        );
+        // Wording: neutral, and only for the two known cases.
+        assert_eq!(
+            VoiceModel::Different.note(),
+            "Needs re-enrollment (different voice model)"
+        );
+        assert!(!VoiceModel::NoneActive.note().is_empty());
+        assert!(VoiceModel::Current.note().is_empty());
+        assert!(VoiceModel::Unknown.note().is_empty());
     }
 
     #[test]

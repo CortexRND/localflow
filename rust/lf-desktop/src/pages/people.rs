@@ -4,7 +4,8 @@
 //! the shell hides the sidebar entry and refuses the route otherwise. The
 //! page reads `GET /api/speakers` and nothing else: there is no toggle,
 //! consent text, enrollment, rename or forget here, and only a name, the
-//! date added and a sample count ever reach it (see `controllers::people`).
+//! date added, a sample count and a voice-model status ever reach it (see
+//! `controllers::people`).
 
 use gpui::{div, prelude::*, Context, SharedString, Window};
 
@@ -16,7 +17,7 @@ use crate::remote::Health;
 use crate::theme::{size, space, theme, Tone};
 use crate::ui::{self, Button};
 
-pub const SUBTITLE: &str = "Voices LocalFlow recognises in meetings. This list is read-only.";
+pub const SUBTITLE: &str = "Voices LocalFlow remembers for meetings. This list is read-only.";
 
 pub struct PeoplePage {
     pcx: PageCx,
@@ -97,12 +98,13 @@ impl PeoplePage {
                 &t,
                 "user-round",
                 "No one is remembered yet",
-                "People LocalFlow recognises in meetings are listed here.",
+                "Voices LocalFlow remembers for meetings are listed here.",
                 None,
             )),
             Some(People::List(people)) => {
                 let rows = people.iter().map(|person| {
                     let detail = ctl::detail(person);
+                    let note = person.voice.note();
                     div()
                         .flex()
                         .items_center()
@@ -118,7 +120,8 @@ impl PeoplePage {
                                 .gap(space::s1())
                                 .min_w_0()
                                 .child(ui::label(&t, person.name.clone()))
-                                .when(!detail.is_empty(), |d| d.child(ui::supporting(&t, detail))),
+                                .when(!detail.is_empty(), |d| d.child(ui::supporting(&t, detail)))
+                                .when(!note.is_empty(), |d| d.child(ui::supporting(&t, note))),
                         )
                         .into_any_element()
                 });
