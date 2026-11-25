@@ -158,12 +158,10 @@ def test_start_hides_speakers():
 def test_poll_resets_speakers_when_live():
     poll = HTML[HTML.index("async function pollMeeting()"):]
     poll = poll[: poll.index("\n  }\n")]
-    m = re.search(
-        r"if \(live\) \{\s*(?://[^\n]*\s*)*"
-        r"if \(meetingSpeakers\.style\.display === 'block'\) resetSpeakers\(\);",
-        poll,
+    live_branch = poll[poll.index("if (live) {"):]
+    assert "if (meetingSpeakers.style.display === 'block') resetSpeakers();" in live_branch, (
+        "pollMeeting must reset the speakers block while a meeting is live"
     )
-    assert m, "pollMeeting must reset the speakers block while a meeting is live"
 
 
 def test_sync_checks_freshness_before_empty_list():
