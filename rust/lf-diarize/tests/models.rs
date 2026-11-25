@@ -25,7 +25,7 @@ fn catalog_matches_the_python_pins() {
 #[cfg(feature = "sherpa")]
 mod verify {
     use super::*;
-    use lf_diarize::models::{repo_folder, verified_path, DiarModel, EMBEDDING};
+    use lf_diarize::models::{verified_path, DiarModel, EMBEDDING};
     use std::fs;
 
     /// A model pinned to `bytes`, so the real hash check runs on a tiny file.
@@ -68,6 +68,7 @@ mod verify {
     #[cfg(unix)]
     #[test]
     fn hub_symlink_must_resolve_to_its_pinned_blob() {
+        use lf_diarize::models::repo_folder;
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let model = pinned(b"weights");
