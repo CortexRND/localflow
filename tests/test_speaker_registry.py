@@ -8,12 +8,13 @@ import pickle
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from localflow.diarization import registry as reg
-from localflow.diarization import sherpa
+from localflow.diarization import sherpa, staging
 from localflow.diarization import store as store_module
 from localflow.diarization.models import DIAR_MODELS
 from localflow.diarization.registry import (
@@ -504,3 +505,252 @@ def test_undeletable_staging_file_is_not_reported_as_erased(rooms, monkeypatch):
         registry.forget()
     assert info.value.failed == 1 and orphan.exists()
     assert all(sp["centroid"] is None for sp in meetings.load(MID1)["speakers"])
+
+
+# ------------------------------- staged enrollment audio (BUG b35d2d60_0001) ---
+
+STAGED = ".enroll-" + "c" * 32 + ".audio"
+
+
+def test_staged_audio_is_private_owned_and_deleted(registry):
+    with registry.staged_audio(b"raw voice audio") as source:
+        path = Path(source)
+        assert path.parent == registry.root and staging.is_staged_name(path.name)
+        assert path.read_bytes() == b"raw voice audio"
+        if POSIX:
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert registry.root.stat().st_mode & 0o777 == 0o700
+    assert list(registry.root.iterdir()) == []
+
+
+def test_staged_audio_is_deleted_when_decoding_raises(registry):
+    with pytest.raises(RuntimeError), registry.staged_audio(b"x"):
+        raise RuntimeError("ffmpeg crashed")
+    assert list(registry.root.iterdir()) == []
+
+
+def test_staging_after_a_forget_is_refused_and_writes_nothing(registry):
+    epoch = reg.forget_epoch()
+    registry.forget()
+    with pytest.raises(EnrollmentInterrupted), registry.staged_audio(
+            b"x", expected_epoch=epoch):
+        pytest.fail("staged after a forget")
+    assert not registry.root.exists()
+
+
+def test_staged_copy_that_cannot_be_deleted_is_an_error_not_silence(registry, monkeypatch,
+                                                                   caplog):
+    real_unlink = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if staging.is_staged_name(self.name):
+            raise PermissionError("in use")
+        return real_unlink(self, *args, **kwargs)
+
+    staged = registry.staged_audio(b"x")
+    source = staged.__enter__()
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with caplog.at_level(logging.DEBUG), pytest.raises(RegistryError) as info:
+        staged.__exit__(None, None, None)
+    assert str(info.value) == "temporary audio could not be deleted"
+    assert caplog.records
+    assert all(Path(source).name not in r.getMessage() for r in caplog.records)
+    monkeypatch.undo()
+    Path(source).unlink()
+
+
+def test_staging_write_failure_is_a_fixed_error(registry, monkeypatch):
+    def full(*args, **kwargs):
+        raise OSError(28, "No space left on /secret")
+
+    monkeypatch.setattr(reg.os, "open", full)
+    with pytest.raises(RegistryError) as info, registry.staged_audio(b"x"):
+        pytest.fail("staged")
+    assert str(info.value) == "could not prepare the audio"
+
+
+def test_forget_all_sweeps_abandoned_staged_audio_only(rooms):
+    registry, _ = rooms
+    registry.enroll("Dana", [onehot(0)], "mock")
+    (registry.root / STAGED).write_bytes(b"raw voice audio")
+    (registry.root / ".enroll-short.audio").write_bytes(b"keep")
+    (registry.root / ("." + "c" * 32 + ".audio")).write_bytes(b"keep")
+    assert registry.forget() == 1
+    assert sorted(p.name for p in registry.root.iterdir()) == sorted(
+        [".enroll-short.audio", "." + "c" * 32 + ".audio"])
+
+
+def test_forget_one_leaves_staged_audio_to_its_enrollment(rooms):
+    registry, _ = rooms
+    vp = registry.enroll("Dana", [onehot(0)], "mock")
+    (registry.root / STAGED).write_bytes(b"in flight")
+    registry.forget(vp.id)
+    assert (registry.root / STAGED).exists()
+
+
+def test_sweep_never_creates_follows_links_or_removes_directories(tmp_path):
+    missing = tmp_path / "none" / "speakers"
+    assert staging.sweep(missing) == (0, 0) and not missing.parent.exists()
+    root = tmp_path / "speakers"
+    root.mkdir()
+    (root / STAGED).write_bytes(b"orphan")
+    (root / (".enroll-" + "d" * 32 + ".audio")).mkdir()
+    (root / (".enroll-" + "d" * 32 + ".audio") / "inner").write_bytes(b"keep")
+    target = tmp_path / "target"
+    target.write_bytes(b"not ours")
+    link = root / (".enroll-" + "e" * 32 + ".audio")
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        link = None
+    assert staging.sweep(root) == (1, 0)
+    assert not (root / STAGED).exists()
+    assert (root / (".enroll-" + "d" * 32 + ".audio") / "inner").read_bytes() == b"keep"
+    assert target.read_bytes() == b"not ours"
+    if link is not None:
+        assert link.is_symlink()
+
+
+def _unexaminable(monkeypatch, root):
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if Path(path) == Path(root):
+            raise PermissionError("denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(staging.os, "lstat", lstat)
+
+
+def test_unexaminable_root_is_a_failure_not_a_clean_sweep(rooms, monkeypatch):
+    registry, _ = rooms
+    registry.enroll("Dana", [onehot(0)], "mock")
+    (registry.root / STAGED).write_bytes(b"raw voice audio")
+    _unexaminable(monkeypatch, registry.root)
+    assert staging.sweep(registry.root) == (0, 1)
+    with pytest.raises(ErasureIncomplete) as info:
+        registry.forget()
+    assert (info.value.failed, info.value.audio_failed) == (0, 1)
+
+
+def test_unexaminable_root_refuses_staging_with_the_fixed_error(registry, monkeypatch):
+    _unexaminable(monkeypatch, registry.root)
+    with pytest.raises(RegistryError) as info, registry.staged_audio(b"raw voice audio"):
+        pytest.fail("staged")
+    assert str(info.value) == "could not prepare the audio"
+    assert not registry.root.exists()
+
+
+def test_name_collision_never_deletes_the_existing_file(registry, monkeypatch):
+    registry.root.mkdir(parents=True)
+    (registry.root / STAGED).write_bytes(b"someone else's")
+    monkeypatch.setattr(staging, "staged_name", lambda: STAGED)  # deterministic collision
+    with pytest.raises(RegistryError) as info, registry.staged_audio(b"mine"):
+        pytest.fail("staged over an existing file")
+    assert str(info.value) == "could not prepare the audio"
+    assert (registry.root / STAGED).read_bytes() == b"someone else's"
+
+
+def _symlinked_root(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / STAGED).write_bytes(b"not ours")
+    root = tmp_path / "speakers"
+    try:
+        root.symlink_to(elsewhere, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    return root, elsewhere
+
+
+def test_sweep_skips_a_symlinked_or_non_directory_root(tmp_path):
+    root, elsewhere = _symlinked_root(tmp_path)
+    assert staging.sweep(root) == (0, 0)
+    assert (elsewhere / STAGED).read_bytes() == b"not ours"
+    plain_file = tmp_path / "file-root"
+    plain_file.write_bytes(b"x")
+    assert staging.sweep(plain_file) == (0, 0)
+    assert plain_file.read_bytes() == b"x"
+
+
+def test_no_audio_is_staged_in_a_symlinked_root(tmp_path):
+    root, elsewhere = _symlinked_root(tmp_path)
+    registry = FileSpeakerRegistry(root, meetings=MeetingSpeakerStore(tmp_path / "meetings"))
+    with pytest.raises(RegistryError) as info, registry.staged_audio(b"raw voice audio"):
+        pytest.fail("staged through a symlink")
+    assert str(info.value) == "could not prepare the audio"
+    assert sorted(p.name for p in elsewhere.iterdir()) == [STAGED]
+    if POSIX:
+        os.chmod(elsewhere, 0o755)
+        with pytest.raises(RegistryError), registry.staged_audio(b"x"):
+            pytest.fail("staged through a symlink")
+        assert elsewhere.stat().st_mode & 0o777 == 0o755  # the target's mode is not touched
+
+
+def test_staged_audio_is_swept_before_registry_files_and_counted_separately(rooms,
+                                                                            monkeypatch):
+    registry, _ = rooms
+    registry.enroll("Dana", [onehot(0)], "mock")
+    (registry.root / STAGED).write_bytes(b"raw voice audio")
+    order = []
+    real_sweep = staging.sweep
+
+    def sweep(root):
+        order.append("sweep")
+        return real_sweep(root)
+
+    def broken_owned(self):
+        order.append("owned")
+        raise PermissionError("registry.json is locked")
+
+    monkeypatch.setattr(staging, "sweep", sweep)
+    monkeypatch.setattr(FileSpeakerRegistry, "_remove_owned_files", broken_owned)
+    with pytest.raises(PermissionError):
+        registry.forget()
+    assert order == ["sweep", "owned"]
+    assert not (registry.root / STAGED).exists()  # erased despite the later failure
+
+
+def test_erasure_incomplete_wording_keeps_meeting_counts_separate():
+    assert str(ErasureIncomplete(1, 2)) == "2 meeting speaker file(s) could not be erased"
+    assert str(ErasureIncomplete(0, 0, 1)) == "1 voice-data file(s) could not be erased"
+    both = ErasureIncomplete(1, 2, 3)
+    assert str(both) == "2 meeting speaker file(s) and 3 voice-data file(s) could not be erased"
+    assert (both.failed, both.audio_failed) == (2, 3)
+
+
+def test_undeletable_staged_audio_is_reported_as_voice_data(rooms, monkeypatch):
+    registry, _ = rooms
+    registry.enroll("Dana", [onehot(0)], "mock")
+    orphan = registry.root / STAGED
+    orphan.write_bytes(b"raw voice audio")
+    real_unlink = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self == orphan:
+            raise PermissionError("in use")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with pytest.raises(ErasureIncomplete) as info:
+        registry.forget()
+    assert (info.value.failed, info.value.audio_failed) == (0, 1)
+    assert str(info.value) == "1 voice-data file(s) could not be erased"
+    assert registry.list() == []  # the registry files were still removed
+
+
+def test_staging_module_is_light_and_shares_the_voiceprint_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert reg.default_root is staging.default_root
+    assert staging.default_root() == tmp_path / ".localflow" / "speakers"
+    code = (
+        "import sys\n"
+        "import localflow.diarization.staging\n"
+        "bad = {'localflow.diarization.registry', 'localflow.meetings', 'localflow.server',"
+        " 'sounddevice', 'sherpa_onnx'}\n"
+        "assert not bad & set(sys.modules), bad & set(sys.modules)\n"
+    )
+    proc = subprocess.run([sys.executable, "-W", "error", "-c", code], check=False,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr

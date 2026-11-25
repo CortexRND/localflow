@@ -26,13 +26,16 @@ import tempfile
 import threading
 import uuid
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 
-from . import models
+from . import models, staging
 from .collector import _unit_vector
+from .staging import default_root
 from .store import MeetingSpeakerStore
 from .types import Voiceprint
 
@@ -99,19 +102,20 @@ class EnrollmentInterrupted(RegistryError):
 
 
 class ErasureIncomplete(RegistryError):
-    """Forget removed what it could, but some meeting files still hold voice data."""
+    """Forget removed what it could, but some files still hold voice data: ``failed``
+    meeting speaker files and ``audio_failed`` staged enrollment audio (voice-data) files."""
 
-    def __init__(self, forgotten: int, failed: int) -> None:
-        super().__init__(f"{failed} meeting speaker file(s) could not be erased")
+    def __init__(self, forgotten: int, failed: int, audio_failed: int = 0) -> None:
+        parts = [f"{failed} meeting speaker file(s)"] if failed else []
+        if audio_failed:
+            parts.append(f"{audio_failed} voice-data file(s)")
+        super().__init__(f"{' and '.join(parts)} could not be erased")
         self.forgotten = forgotten
         self.failed = failed
+        self.audio_failed = audio_failed
 
 
 # ------------------------------------------------------------- helpers ---
-
-def default_root() -> Path:
-    """``~/.localflow/speakers``, resolved at call time."""
-    return Path.home() / ".localflow" / "speakers"
 
 
 def forget_epoch() -> int:
@@ -437,17 +441,74 @@ class FileSpeakerRegistry:
             else:
                 raw = self._load_raw() or []
             changed, failed = store.strip_voiceprints(voiceprint_id)
+            audio_failed = 0
             if single:
                 self._unlink(f"{voiceprint_id}.npy")
                 self._save_raw(keep)
                 removed = 1
             else:
                 removed = len(raw)
+                # Staged enrollment audio first (copies a killed server left behind and one
+                # in flight now, whose enrollment then fails on the epoch bumped above), so a
+                # failure on the registry files below can't skip it.
+                audio_failed = staging.sweep(self.root)[1]
                 self._remove_owned_files()
         log.info("speakers forgotten: %d voiceprints, %d meeting entries", removed, changed)
-        if failed:
-            raise ErasureIncomplete(removed, failed)
+        if failed or audio_failed:
+            raise ErasureIncomplete(removed, failed, audio_failed)
         return removed
+
+    @contextmanager
+    def staged_audio(self, data: bytes, *,
+                     expected_epoch: int | None = None) -> Iterator[str]:
+        """A private seekable copy of ``data`` (``.enroll-<hex>.audio``, 0600, in this
+        registry's 0700 folder) for the duration of the ``with`` block, then deleted.
+
+        Created under the registry lock, refusing (EnrollmentInterrupted) when a forget ran
+        since ``expected_epoch``: a forget --all either sees and deletes the copy or runs
+        before it exists. The lock is not held while the caller decodes. A copy a crash
+        leaves behind is removed by the next server start or forget --all.
+        """
+        name = staging.staged_name()
+        path = self.root / name
+        with _LOCK:
+            if expected_epoch is not None and expected_epoch != _epoch:
+                raise EnrollmentInterrupted(
+                    "enrolled speakers were forgotten during this enrollment; try again")
+            created = False
+            try:
+                if not staging.plain_dir_or_missing(self.root):  # symlink or not a folder
+                    raise RegistryError("could not prepare the audio")
+                _private_dir(self.root)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                             | getattr(os, "O_BINARY", 0), 0o600)
+                created = True  # from here on the file is ours to delete
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(data)
+                finally:
+                    if os.name != "nt":
+                        os.chmod(path, 0o600)
+            except OSError:
+                if created:
+                    self._discard_staged(path)
+                raise RegistryError("could not prepare the audio") from None
+        try:
+            yield str(path)
+        finally:
+            if not self._discard_staged(path):
+                log.warning("could not delete staged enrollment audio")
+                raise RegistryError("temporary audio could not be deleted")
+
+    @staticmethod
+    def _discard_staged(path: Path) -> bool:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass  # already swept by a forget --all
+        except OSError:
+            return False
+        return True
 
     def _unlink(self, name: str) -> None:
         try:

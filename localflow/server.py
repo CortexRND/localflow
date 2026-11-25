@@ -145,10 +145,27 @@ _diar_thread: threading.Thread | None = None  # the last worker started, under _
 _DIAR_SHUTDOWN_JOIN_SECONDS = 2.0
 
 
+def _enrollment_staging_root() -> Path:
+    """Where enrollment audio is staged (the voiceprint folder); a seam for tests."""
+    from localflow.diarization.staging import default_root
+    return default_root()
+
+
+def _sweep_enrollment_staging() -> None:
+    """Delete staged enrollment audio a killed server left behind, whatever the speaker
+    flags are now. Imports no registry or model code, creates nothing, never raises."""
+    try:
+        from localflow.diarization.staging import sweep
+        sweep(_enrollment_staging_root())
+    except Exception as exc:  # noqa: BLE001 - startup must not fail on this
+        log.warning("checking for abandoned enrollment audio failed (%s)", type(exc).__name__)
+
+
 @app.on_event("startup")
 def _start_watcher() -> None:
     global _api_token
     _api_token = load_or_create()
+    _sweep_enrollment_staging()
     if _config.meetings_enabled and _config.meeting_watch:
         _watcher.start()
 
@@ -1471,10 +1488,13 @@ def _registry_errors():
     except (reg.BadVector, reg.UnsupportedModel) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except reg.ErasureIncomplete as exc:
+        parts = [f"voice data in {exc.failed} meeting file(s)"] if exc.failed else []
+        if getattr(exc, "audio_failed", 0):
+            parts.append(f"{exc.audio_failed} voice-data file(s)")
         raise HTTPException(
             status_code=500,
-            detail=f"forgot {exc.forgotten} speaker(s), but voice data in {exc.failed} "
-                   "meeting file(s) could not be erased",
+            detail=f"forgot {exc.forgotten} speaker(s), but {' and '.join(parts)} "
+                   "could not be erased",
         ) from None
     except (reg.RegistryError, OSError) as exc:
         log.warning("speaker registry error (%s)", type(exc).__name__)
@@ -1574,17 +1594,13 @@ def _enroll_from_meeting(body: dict):
 ENROLL_MAX_SECONDS = 300
 
 
-def _run_ffmpeg_seekable(data: bytes, max_seconds: int) -> subprocess.CompletedProcess:
-    """Decode an ISO BMFF clip from a private (0700 dir, 0600 file) temporary copy that is
-    deleted as soon as ffmpeg exits: an M4A/MP4 with its index after the audio needs seeking."""
-    import os
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="localflow-enroll-") as folder:
-        path = os.path.join(folder, "clip")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
-                     0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
+def _run_ffmpeg_seekable(data: bytes, max_seconds: int,
+                         expected_epoch: int | None = None) -> subprocess.CompletedProcess:
+    """Decode an ISO BMFF clip from a private staged copy in the voiceprint folder (0600 in
+    0700), deleted as soon as ffmpeg exits: an M4A/MP4 with its index after the audio needs
+    seeking. A copy a killed server leaves is swept at startup and by forget --all."""
+    _require_recognition()  # an opt-out during the pipe attempt: never write raw audio
+    with _speaker_registry().staged_audio(data, expected_epoch=expected_epoch) as path:
         return _run_ffmpeg(b"", max_seconds, source=path)
 
 
@@ -1608,18 +1624,19 @@ def _is_iso_bmff(data: bytes) -> bool:
     return False
 
 
-def _decode_enrollment_audio(data: bytes) -> np.ndarray:
+def _decode_enrollment_audio(data: bytes, *, expected_epoch: int | None = None) -> np.ndarray:
     """16 kHz mono float32 of an enrollment clip, at most ENROLL_MAX_SECONDS long.
 
     Tries the stdin pipe first, as /transcribe does. Only an ISO BMFF (M4A/MP4) clip that
     yields no audio there (its index can follow the audio) is retried from a seekable
-    temporary copy; nothing else ever touches disk. Errors are fixed messages.
+    staged copy; nothing else ever touches disk. ``expected_epoch``: the forget epoch read
+    before decoding; a forget since then refuses to stage. Errors are fixed messages.
     """
     limit = ENROLL_MAX_SECONDS + 1  # decode one second past the bound to detect overflow
     try:
         proc = _run_ffmpeg(data, limit)
         if not proc.stdout and _is_iso_bmff(data):
-            proc = _run_ffmpeg_seekable(data, limit)
+            proc = _run_ffmpeg_seekable(data, limit, expected_epoch)
     except FileNotFoundError:
         raise HTTPException(status_code=500,
                             detail="ffmpeg not installed (brew install ffmpeg)") from None
@@ -1642,7 +1659,8 @@ def _enroll_from_audio(name: str, data: bytes):
     from localflow.diarization.registry import forget_epoch
     from localflow.diarization.types import DiarizationUnavailable
     epoch = forget_epoch()  # a forget during the slow work below voids this enrollment
-    audio = _decode_enrollment_audio(data)
+    with _registry_errors():  # staging refusals/failures: fixed 409/500 messages
+        audio = _decode_enrollment_audio(data, expected_epoch=epoch)
     del data
     if audio.size == 0:
         raise HTTPException(status_code=400, detail="decoded audio is empty")

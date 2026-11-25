@@ -103,6 +103,8 @@ def client(monkeypatch, tmp_path, tmp_path_factory):
     monkeypatch.setattr(server, "load_or_create", lambda: "test-token")
     sidecars = tmp_path_factory.mktemp("sidecars") / "meetings"
     monkeypatch.setattr(server, "_meeting_store", lambda: MeetingSpeakerStore(sidecars))
+    staging_root = tmp_path_factory.mktemp("staging") / "speakers"  # never the real home
+    monkeypatch.setattr(server, "_enrollment_staging_root", lambda: staging_root)
     with TestClient(
         server.app, base_url="http://127.0.0.1:8756", client=("127.0.0.1", 1234),
         headers={"X-Localflow-Token": "test-token"},
@@ -1354,7 +1356,7 @@ def test_hostile_name_is_stored_clean_and_cannot_forge_a_line(rec):
 def audio_rec(rec, monkeypatch):
     decoded = []
 
-    def decode(data):
+    def decode(data, **_):
         decoded.append(len(data))
         return np.concatenate([tone(0, 6)])
 
@@ -1395,10 +1397,10 @@ def test_enroll_from_audio_rejections(audio_rec, monkeypatch):
     assert _upload(audio_rec, data=b"x" * 11).status_code == 413
     monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
     monkeypatch.setattr(server, "_decode_enrollment_audio",
-                        lambda data: np.zeros(16000 * 6, np.float32))
+                        lambda data, **_: np.zeros(16000 * 6, np.float32))
     assert _upload(audio_rec).json() == {"detail": "no speech detected"}
     monkeypatch.setattr(server, "_decode_enrollment_audio",
-                        lambda data: np.zeros(0, np.float32))
+                        lambda data, **_: np.zeros(0, np.float32))
     assert _upload(audio_rec).status_code == 400
     assert not audio_rec.voices.exists()
 
@@ -1438,7 +1440,7 @@ def test_forget_during_audio_inference_does_not_recreate_a_voiceprint(audio_rec,
     stop = _saved(audio_rec)
     assert _enroll(audio_rec, stop).status_code == 201
 
-    def decode_while_forgetting(data):
+    def decode_while_forgetting(data, **_):
         assert audio_rec.delete("/api/speakers").json() == {"forgotten": 1}
         return tone(0, 6)
 
@@ -1449,7 +1451,7 @@ def test_forget_during_audio_inference_does_not_recreate_a_voiceprint(audio_rec,
 
 
 def test_recognition_off_during_audio_inference_stores_nothing(audio_rec, monkeypatch):
-    def decode_then_disable(data):
+    def decode_then_disable(data, **_):
         monkeypatch.setattr(server._config, "speaker_recognition", False)
         return tone(0, 6)
 
@@ -1747,7 +1749,17 @@ def _late_moov_m4a(tmp_path, seconds=12):
     return data
 
 
-def test_real_late_moov_m4a_decodes_for_enrollment(tmp_path, monkeypatch):
+@pytest.fixture
+def staging_registry(tmp_path, monkeypatch):
+    """A temp voiceprint folder for direct decoder calls that may stage a seekable copy."""
+    root = tmp_path / "speakers"
+    monkeypatch.setattr(server._config, "speaker_diarization", True)
+    monkeypatch.setattr(server._config, "speaker_recognition", True)
+    monkeypatch.setattr(server, "_speaker_registry", lambda: FileSpeakerRegistry(root))
+    return root
+
+
+def test_real_late_moov_m4a_decodes_for_enrollment(tmp_path, monkeypatch, staging_registry):
     import tempfile
 
     data = _late_moov_m4a(tmp_path)  # whichever path this FFmpeg needs, the clip decodes
@@ -1756,7 +1768,8 @@ def test_real_late_moov_m4a_decodes_for_enrollment(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     audio = _REAL_ENROLL_DECODE(data)
     assert audio.dtype == np.float32 and 11.9 * RATE <= audio.size <= 12.1 * RATE
-    assert list(scratch.iterdir()) == []  # the seekable copy is gone
+    assert list(scratch.iterdir()) == []  # nothing in the system temp folder
+    assert not staging_registry.exists() or list(staging_registry.iterdir()) == []
 
 
 def test_real_late_moov_m4a_enrolls_end_to_end(rec, tmp_path):
@@ -1791,7 +1804,8 @@ _FTYP = b"\x00\x00\x00\x18ftypM4A \x00\x00\x02\x00isomM4A "  # conventional M4A 
 _BMFF_CLIP = _FTYP + b"\x00\x00\x00\x08mdat"
 
 
-def test_enrollment_retries_with_a_private_seekable_copy_only_when_needed(monkeypatch):
+def test_enrollment_retries_with_a_private_seekable_copy_only_when_needed(monkeypatch,
+                                                                         staging_registry):
     calls = _fake_ffmpeg(monkeypatch, [b"", _pcm(6)])
     audio = _REAL_ENROLL_DECODE(_BMFF_CLIP)
     assert audio.size == 6 * RATE
@@ -1800,7 +1814,9 @@ def test_enrollment_retries_with_a_private_seekable_copy_only_when_needed(monkey
     assert content == _BMFF_CLIP
     if os.name != "nt":
         assert (mode, dir_mode) == (0o600, 0o700)
-    assert not os.path.exists(source) and not os.path.exists(os.path.dirname(source))
+    assert Path(source).parent == staging_registry  # app-owned voiceprint folder
+    assert re.fullmatch(r"\.enroll-[0-9a-f]{32}\.audio", Path(source).name)
+    assert not os.path.exists(source) and list(staging_registry.iterdir()) == []
     calls = _fake_ffmpeg(monkeypatch, [_pcm(6)])
     _REAL_ENROLL_DECODE(_BMFF_CLIP)
     assert [s for _, s, _ in calls] == [None]  # pipe worked: no temporary file at all
@@ -1910,3 +1926,169 @@ def test_export_accepts_a_server_bound_to_another_loopback_address(audio_rec):
     assert server._host_header_is_loopback("[::ffff:127.0.0.1]:1") is True
     assert server._host_header_is_loopback("10.0.0.5") is False
     assert server._host_header_is_loopback("127.0.0.1.evil.example") is False
+
+
+# ---- staged enrollment audio left by a killed server (BUG b35d2d60_0001)
+
+_ORPHAN = ".enroll-" + "c" * 32 + ".audio"
+
+
+def _seed_staging(root):
+    """An abandoned staged copy plus neighbours that must all survive a sweep."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / _ORPHAN).write_bytes(b"raw voice audio")
+    keep = {"registry.json": b"{}", "e" * 32 + ".npy": b"npy", "notes.txt": b"mine",
+            ".enroll-short.audio": b"x", ".enroll-" + "C" * 32 + ".audio": b"x",
+            ".enroll-" + "c" * 32 + ".audio.tmp": b"x"}
+    for name, data in keep.items():
+        (root / name).write_bytes(data)
+    (root / (".enroll-" + "d" * 32 + ".audio")).mkdir()  # a directory with the name
+    target = root.parent / "outside.bin"
+    target.write_bytes(b"not ours")
+    try:
+        (root / (".enroll-" + "f" * 32 + ".audio")).symlink_to(target)
+    except (OSError, NotImplementedError):
+        target = None
+    return keep, target
+
+
+def _restart(client):
+    with TestClient(server.app, base_url="http://127.0.0.1:8756", client=("127.0.0.1", 1),
+                    headers={"X-Localflow-Token": "test-token"}) as again:
+        assert again.get("/healthz").status_code == 200
+
+
+def test_startup_deletes_abandoned_enrollment_audio_even_with_recognition_off(client):
+    assert not (server._config.speaker_diarization or server._config.speaker_recognition)
+    root = server._enrollment_staging_root()
+    keep, target = _seed_staging(root)
+    _restart(client)
+    assert not (root / _ORPHAN).exists()
+    assert {n: (root / n).read_bytes() for n in keep} == keep
+    assert (root / (".enroll-" + "d" * 32 + ".audio")).is_dir()
+    if target is not None:  # the link is not followed: its target and the link stay
+        assert target.read_bytes() == b"not ours"
+        assert (root / (".enroll-" + "f" * 32 + ".audio")).is_symlink()
+
+
+def test_clean_startup_creates_no_staging_state(client):
+    root = server._enrollment_staging_root()
+    _restart(client)
+    assert not root.exists()
+
+
+def test_startup_sweep_imports_no_registry_and_logs_no_path(tmp_path):
+    home = tmp_path / "home"
+    root = home / ".localflow" / "speakers"
+    root.mkdir(parents=True)
+    (root / _ORPHAN).write_bytes(b"raw voice audio")
+    code = (
+        "import logging, sys\n"
+        "records = []\n"
+        "class H(logging.Handler):\n"
+        "    def emit(self, r): records.append(r.getMessage())\n"
+        "logging.getLogger().addHandler(H()); logging.getLogger().setLevel(logging.DEBUG)\n"
+        "from localflow import server\n"
+        "server.load_or_create = lambda: 't'\n"
+        "server._start_watcher()\n"
+        "assert 'localflow.diarization.registry' not in sys.modules\n"
+        "assert not any('.enroll-' in m for m in records), records\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                          check=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert list(root.iterdir()) == []
+
+
+def test_startup_sweep_failure_never_fails_startup(client, monkeypatch, caplog):
+    from localflow.diarization import staging
+
+    def boom(root):
+        raise RuntimeError("/secret/path")
+
+    monkeypatch.setattr(staging, "sweep", boom)
+    with caplog.at_level(logging.WARNING):
+        _restart(client)
+    assert any("abandoned enrollment audio" in r.getMessage() for r in caplog.records)
+    assert not any("secret" in r.getMessage() for r in caplog.records)
+
+
+def test_forget_all_deletes_abandoned_enrollment_audio(rec):
+    assert _enroll(rec, _saved(rec)).status_code == 201
+    (rec.voices / _ORPHAN).write_bytes(b"raw voice audio")
+    (rec.voices / "notes.txt").write_bytes(b"mine")
+    assert rec.delete("/api/speakers").json() == {"forgotten": 1}
+    assert sorted(p.name for p in rec.voices.iterdir()) == ["notes.txt"]
+
+
+def test_undeletable_abandoned_audio_makes_forget_all_report_incomplete(rec, monkeypatch):
+    rec.voices.mkdir(parents=True, exist_ok=True)
+    orphan = rec.voices / _ORPHAN
+    orphan.write_bytes(b"raw voice audio")
+    real_unlink = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self == orphan:
+            raise PermissionError("in use")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    resp = rec.delete("/api/speakers")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == (
+        "forgot 0 speaker(s), but 1 voice-data file(s) could not be erased")
+    assert _ORPHAN not in resp.text
+
+
+def test_forget_all_during_seekable_decode_leaves_no_staged_copy(audio_rec, monkeypatch):
+    monkeypatch.setattr(server, "_decode_enrollment_audio", _REAL_ENROLL_DECODE)
+    seen = {}
+
+    def run(data, max_seconds=1200, *, source=None):
+        if source is None:
+            return subprocess.CompletedProcess([], 0, b"", b"")  # pipe can't seek
+        seen["staged"] = Path(source).exists()
+        assert audio_rec.delete("/api/speakers").json() == {"forgotten": 0}
+        seen["after_forget"] = Path(source).exists()
+        return subprocess.CompletedProcess([], 0, tone(0, 6).tobytes(), b"")
+
+    monkeypatch.setattr(server, "_run_ffmpeg", run)
+    resp = _upload(audio_rec, data=_BMFF_CLIP)
+    assert resp.status_code == 409 and "forgotten" in resp.json()["detail"]
+    assert seen == {"staged": True, "after_forget": False}
+    assert list(audio_rec.voices.iterdir()) == []
+
+
+def test_opt_out_during_the_pipe_attempt_stages_nothing(audio_rec, monkeypatch):
+    monkeypatch.setattr(server, "_decode_enrollment_audio", _REAL_ENROLL_DECODE)
+    calls = []
+
+    def run(data, max_seconds=1200, *, source=None):
+        calls.append(source)
+        if source is None:  # the opt-out lands while the pipe attempt runs
+            _file_says(speaker_recognition=False)
+        return subprocess.CompletedProcess([], 0, b"", b"")
+
+    monkeypatch.setattr(server, "_run_ffmpeg", run)
+    resp = _upload(audio_rec, data=_BMFF_CLIP)
+    assert resp.status_code == 403
+    assert calls == [None]  # no seekable attempt
+    assert not audio_rec.voices.exists()  # nothing staged
+
+
+def test_forget_before_staging_refuses_to_stage(audio_rec, monkeypatch):
+    monkeypatch.setattr(server, "_decode_enrollment_audio", _REAL_ENROLL_DECODE)
+    calls = []
+
+    def run(data, max_seconds=1200, *, source=None):
+        calls.append(source)
+        if source is None:  # the forget lands after the pipe attempt, before staging
+            assert audio_rec.delete("/api/speakers").json() == {"forgotten": 0}
+        return subprocess.CompletedProcess([], 0, b"", b"")
+
+    monkeypatch.setattr(server, "_run_ffmpeg", run)
+    resp = _upload(audio_rec, data=_BMFF_CLIP)
+    assert resp.status_code == 409 and "forgotten" in resp.json()["detail"]
+    assert calls == [None]  # no staged decode was attempted
+    assert not audio_rec.voices.exists() or list(audio_rec.voices.iterdir()) == []
