@@ -90,7 +90,6 @@ from localflow.hub_model import (
 )
 from localflow.live_config import LazyConfig
 from localflow.mac_style import (
-    CobaltSwitch,
     FlippedView,
     HalftoneView,
     PlaceholderTextView,
@@ -3154,9 +3153,9 @@ class HubWindowController(NSObject):
         card.addSubview_(
             _label(people.toggle_detail, x, y, w, 11, "muted", palette=self.tokens, height=h)
         )
-        switch = CobaltSwitch.alloc().initWithFrame_(NSMakeRect(*frames["switch"])).configure(
-            self.tokens, people.recognition, TOGGLE_TITLE,
-        )
+        switch = NSSwitch.alloc().initWithFrame_(NSMakeRect(*frames["switch"]))
+        switch.setState_(1 if people.recognition else 0)
+        switch.setAccessibilityLabel_(TOGGLE_TITLE)
         switch.setTarget_(self)
         switch.setAction_("peopleToggle:")
         switch.setEnabled_(people.toggle_enabled)
@@ -3568,7 +3567,8 @@ class HubWindowController(NSObject):
             except queue.Empty:
                 break
             self._meeting_event(operation, result, error)
-        self._people_tick()
+        if hasattr(self, "_people_tick"):
+            self._people_tick()
         if (
             self.meeting_notes_due is not None
             and time.monotonic() >= self.meeting_notes_due
