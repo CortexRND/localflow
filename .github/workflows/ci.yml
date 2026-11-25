@@ -77,5 +77,6 @@ jobs:
           tests/test_diarization_align.py
           tests/test_diarization_cluster.py
           tests/test_diarization_mock.py
+          tests/test_diarization_sherpa.py
       - name: Test
         run: pytest -q
