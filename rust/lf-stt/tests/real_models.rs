@@ -11,12 +11,19 @@ fn exercise(mut engine: impl lf_stt::SpeechEngine, model: &str) {
     engine.load().unwrap();
     assert!(engine.loaded());
     assert!(engine.transcribe(&[], None).unwrap().text.is_empty());
-    assert!(!engine
+    let transcript = engine
         .transcribe(&clip.pcm, Some("Speech recognition."))
-        .unwrap()
-        .text
-        .trim()
-        .is_empty());
+        .unwrap();
+    assert!(!transcript.text.trim().is_empty());
+    let audio_seconds = clip.pcm.len() as f64 / 16000.0;
+    assert!(!transcript.segments.is_empty());
+    for span in &transcript.segments {
+        assert!(0.0 <= span.start && span.start <= span.end && span.end <= audio_seconds);
+        assert!(!span.text.trim().is_empty());
+    }
+    for pair in transcript.segments.windows(2) {
+        assert!(pair[0].start <= pair[1].start);
+    }
     assert!(engine.transcribe(&[f32::NAN; 512], None).is_err());
     engine.unload();
     assert!(!engine.loaded());
