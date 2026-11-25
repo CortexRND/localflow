@@ -1553,7 +1553,14 @@ class HubWindow:
         diarization = bool(getattr(config, "speaker_diarization", False))
         recognition = bool(getattr(config, "speaker_recognition", False))
         people = self._people
+        was_rec = bool(people.rec)
         request = people.set_flags(diarization, recognition)
+        if was_rec and not people.rec:
+            capture, self._people_capture = self._people_capture, None
+            if capture is not None:
+                threading.Thread(
+                    target=capture.discard, name="localflow-people-discard", daemon=True,
+                ).start()
         if request is None and refresh:
             request = people.refresh()
         self._meeting_speakers.set_remember(can_remember(diarization, recognition))
