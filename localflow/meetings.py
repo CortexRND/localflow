@@ -960,6 +960,119 @@ def latest_transcript_log(logs_root: Path) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime, default=None)
 
 
+class TranscriptChanged(RuntimeError):
+    """The transcript is not the file this edit was computed for; nothing was written."""
+
+
+_FRONT_END = re.compile(r"^---\r?$", re.MULTILINE)
+_RAW_NOTES_LINE = re.compile(r"^## My raw notes\r?$", re.MULTILINE)
+# Flow style (`speakers: [...]`) or block style (`speakers:` + `  - item` lines),
+# as Obsidian's Properties editor may rewrite it; blank and comment lines
+# between items belong to the list.
+_SPEAKERS_LINE = re.compile(
+    r"^speakers:(?:[ \t][^\r\n]*)?"
+    r"(?:(?:\r?\n[ \t]*(?:#[^\r\n]*)?)*\r?\n[ \t]*-(?:[ \t][^\r\n]*)?(?=\r?\n|$))*",
+    re.MULTILINE,
+)
+
+
+def _relabel_text(text: str, lines, old: str, new: str,
+                  speakers: list[str] | None = None,
+                  meeting_id: str | None = None) -> tuple[str, int]:
+    """Relabel ``**MM:SS** **old:** `` transcript lines to ``new`` and replace
+    the frontmatter ``speakers:`` entry; returns (text, lines changed).
+
+    ``lines`` maps a stamp to one flag per ``old``-labelled line at that stamp,
+    in body order; the i-th such line is rewritten iff its flag is True. A
+    stamp whose line count differs raises TranscriptChanged.
+    """
+    head, rest = "", text
+    if text.startswith(("---\n", "---\r\n")):
+        m = _FRONT_END.search(text, 4)
+        if m:
+            head, rest = text[:m.end()], text[m.end():]
+    m2 = _RAW_NOTES_LINE.search(rest)
+    body, tail = (rest[:m2.start()], rest[m2.start():]) if m2 else (rest, "")
+    if meeting_id is not None:
+        wanted = re.compile(
+            r"meeting_id:[ \t]*(?:\"{0}\"|'{0}'|{0})\s*".format(re.escape(meeting_id)))
+        if not any(wanted.fullmatch(line.rstrip("\r")) for line in head.split("\n")):
+            raise TranscriptChanged("transcript does not belong to this meeting")
+    count = 0
+    if old != new and lines:
+        pattern = re.compile(
+            r"^\*\*(\d{2,}:\d{2})\*\* \*\*" + re.escape(old) + r":\*\* ", re.MULTILINE)
+        seen: dict[str, int] = {}
+
+        def repl(m: re.Match) -> str:
+            nonlocal count
+            key = m.group(1)
+            index = seen.get(key, 0)
+            seen[key] = index + 1
+            flags = lines.get(key)
+            if flags is not None and index < len(flags) and flags[index]:
+                count += 1
+                return f"**{key}** **{new}:** "
+            return m.group(0)
+
+        body = pattern.sub(repl, body)
+        if any(seen.get(key, 0) != len(flags) for key, flags in lines.items()):
+            raise TranscriptChanged("transcript lines do not match the speaker data")
+    if speakers is not None and head:
+        line = "speakers: " + json.dumps(speakers, ensure_ascii=False)
+        head = _SPEAKERS_LINE.sub(lambda _m: line, head, count=1)
+    return head + body + tail, count
+
+
+def relabel_transcript(path: Path, lines, old: str, new: str, *,
+                       speakers: list[str] | None = None,
+                       meeting_id: str | None = None) -> int:
+    """Rewrite a saved transcript's speaker labels in place (atomic, mode kept,
+    mtime moved by 2 s, alternating up and down so repeated edits stay
+    within 2 s of the original: whole-second sync tools see every change,
+    and the file never overtakes a newer transcript).
+
+    ``lines``: see ``_relabel_text``. Raises TranscriptChanged when the file
+    is not this meeting's, its lines no longer match, or it changed while
+    being rewritten. The notes file is never touched.
+    """
+    import os
+    import tempfile
+
+    path = Path(path)
+    before = os.stat(path)
+    raw = path.read_bytes()
+    text = raw.decode("utf-8")
+    new_text, count = _relabel_text(text, lines, old, new, speakers, meeting_id)
+    data = new_text.encode("utf-8")
+    if data == raw:
+        return 0
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, before.st_mode & 0o7777)
+        except OSError:
+            pass
+        step = 2_000_000_000
+        sign = 1 if (before.st_mtime_ns // step) % 2 == 0 else -1
+        os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns + sign * step))
+        now = os.stat(path)
+        if (now.st_size, now.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            raise TranscriptChanged("transcript changed while it was being rewritten")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+    return count
+
+
 # ----------------------------------------------------------- meeting titles ---
 #
 # A meeting saved with the default title ("Meeting", empty, or the watcher's

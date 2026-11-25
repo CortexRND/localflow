@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import click
 import requests
@@ -102,6 +103,25 @@ def _post(path: str, json: dict | None = None) -> dict:
         except Exception:  # noqa: BLE001 - non-JSON error body; fall back to the reason
             detail = resp.reason
         console.print(f"[red]error:[/red] {detail}")
+        sys.exit(1)
+    return resp.json()
+
+
+def _error_detail(resp) -> str:
+    try:
+        return resp.json().get("detail", resp.reason)
+    except Exception:  # noqa: BLE001 - non-JSON error body; fall back to the reason
+        return resp.reason
+
+
+def _put(path: str, json: dict | None = None) -> dict:
+    try:
+        resp = requests.put(BASE + path, json=json, headers=_auth_headers(), timeout=30)
+    except requests.ConnectionError:
+        console.print(f"[red]server not running[/red] — {_START_SERVER_HINT}")
+        sys.exit(1)
+    if not resp.ok:
+        console.print(f"[red]error:[/red] {_error_detail(resp)}")
         sys.exit(1)
     return resp.json()
 
@@ -877,6 +897,69 @@ def meeting_dismiss() -> None:
     """Dismiss the current meeting-detected banner."""
     _post("/meeting/dismiss")
     console.print("dismissed")
+
+
+def _meeting_id_or_last(meeting_id: str | None) -> str:
+    if meeting_id:
+        return meeting_id
+    try:
+        last = _get("/meeting/status").get("last_saved") or {}
+    except requests.HTTPError as exc:
+        click.echo(f"error: {_error_detail(exc.response)}", err=True)
+        sys.exit(1)
+    if not last.get("meeting_id"):
+        click.echo("error: no saved meeting with speaker labels — pass a meeting ID", err=True)
+        sys.exit(1)
+    return last["meeting_id"]
+
+
+def _echo_speakers(out: dict) -> None:
+    click.echo(f"meeting {out['meeting_id']}")
+    for s in out["speakers"]:
+        click.echo(f"{s['id']}\t{s['label']}\t{float(s['seconds']):.1f}s\t{s['source']}")
+
+
+def _id_and_pair(args: tuple[str, ...], usage: str) -> tuple[str | None, str, str]:
+    if len(args) == 2:
+        return None, args[0], args[1]
+    if len(args) == 3:
+        return args[0], args[1], args[2]
+    raise click.UsageError(f"expected {usage}")
+
+
+@meeting.command("speakers", hidden=True)
+@click.argument("meeting_id", required=False)
+def meeting_speakers(meeting_id: str | None) -> None:
+    """Show a saved meeting's speakers (default: the last saved meeting)."""
+    mid = _meeting_id_or_last(meeting_id)
+    try:
+        out = _get(f"/api/meetings/{quote(mid, safe='')}/speakers")
+    except requests.HTTPError as exc:
+        click.echo(f"error: {_error_detail(exc.response)}", err=True)
+        sys.exit(1)
+    _echo_speakers(out)
+
+
+@meeting.command("rename-speaker", hidden=True)
+@click.argument("args", nargs=-1, required=True, metavar="[ID] SPEAKER NAME")
+def meeting_rename_speaker(args: tuple[str, ...]) -> None:
+    """Rename a speaker in a saved meeting's transcript."""
+    mid, sid, name = _id_and_pair(args, "[ID] SPEAKER NAME")
+    mid = _meeting_id_or_last(mid)
+    out = _put(f"/api/meetings/{quote(mid, safe='')}/speakers/{quote(sid, safe='')}",
+               {"name": name})
+    _echo_speakers(out)
+
+
+@meeting.command("merge-speakers", hidden=True)
+@click.argument("args", nargs=-1, required=True, metavar="[ID] FROM INTO")
+def meeting_merge_speakers(args: tuple[str, ...]) -> None:
+    """Merge one speaker of a saved meeting into another."""
+    mid, frm, into = _id_and_pair(args, "[ID] FROM INTO")
+    mid = _meeting_id_or_last(mid)
+    out = _post(f"/api/meetings/{quote(mid, safe='')}/speakers/merge",
+                {"from": frm, "into": into})
+    _echo_speakers(out)
 
 
 def _render(st: dict) -> Panel:

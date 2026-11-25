@@ -56,18 +56,22 @@ from localflow.live_config import (
 )
 from localflow.log import SERVER_LOG_PATH, setup_logging
 from localflow.logfiles import prepare_process_logs
+from localflow.meeting_client import vault_notes_path
 from localflow.meeting_templates import load_templates, resolve_template
 from localflow.meetings import (
     MeetingSession,
     MeetingSummarizer,
     MeetingWatcher,
     ObsidianWriter,
+    TranscriptChanged,
     answer_question,
+    clean_speaker_name,
     format_transcript,
     generate_title,
     is_default_title,
     latest_transcript_log,
     read_transcript_log,
+    relabel_transcript,
     title_client,
 )
 from localflow.platform import current
@@ -870,6 +874,37 @@ def _finalize_diarization(session, segments) -> tuple[list, str, list[dict]]:
     return segments, status, []
 
 
+def _meeting_store():
+    """The meeting speaker sidecar store; imported on first use only."""
+    from localflow.diarization.store import MeetingSpeakerStore
+    return MeetingSpeakerStore()
+
+
+def _write_speaker_sidecar(saved, session, segments, status: str, speakers: list[dict]) -> None:
+    """Persist the saved meeting's speaker record. Never raises; the save already succeeded."""
+    try:
+        from localflow.diarization.store import build_record
+        rendered = {s.speaker_id: s.speaker for s in reversed(segments) if s.speaker_id is not None}
+        speakers = [{**sp, "label": rendered.get(sp["id"], sp["label"])} for sp in speakers]
+        embedder = getattr(getattr(getattr(session, "diarization", None), "embedder", None),
+                           "id", None)
+        if not isinstance(embedder, str):
+            embedder = None
+        record = build_record(
+            meeting_id=saved.meeting_id,
+            log_path=str(saved.log_path),
+            notes_path=str(saved.notes_path),
+            started_at=session.started_at.isoformat(timespec="seconds"),
+            embedder=embedder,
+            status=status,
+            speakers=speakers,
+            segments=segments,
+        )
+        _meeting_store().save(record)
+    except Exception:
+        log.exception("writing meeting speaker data failed; notes still saved")
+
+
 def _start_session(title: str, category: str, template: str = "",
                    user_notes: str = "", *, auto_title: bool | None = None) -> dict:
     """Claim the session slot, then open the mic. Shared by HTTP and the watcher.
@@ -1148,6 +1183,8 @@ async def meeting_stop() -> dict:
             template=template.id,
             generated_title=auto_title,
         )
+        if getattr(saved, "meeting_id", None) and speakers:
+            _write_speaker_sidecar(saved, session, segments, diarization_status, speakers)
         payload = {
             "title": saved.title,
             "title_generated": title_from_model,
@@ -1177,6 +1214,127 @@ async def meeting_stop() -> dict:
 def meeting_dismiss() -> dict:
     _watcher.dismiss()
     return {"ok": True}
+
+
+# ---- meeting speakers: rename/merge on a saved meeting's sidecar + transcript.
+# Under /api/ so the token always applies; the notes file is never touched.
+
+def _speakers_response(meeting_id: str, record: dict) -> dict:
+    from localflow.diarization.store import public_speakers
+    return {"meeting_id": meeting_id, "speakers": public_speakers(record)}
+
+
+def _speaker_record(store, meeting_id: str) -> dict:
+    record = store.load(meeting_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="no speaker data for this meeting")
+    return record
+
+
+def _sidecar_transcript(record: dict) -> Path:
+    log_path = record.get("log_path")
+    resolved = vault_notes_path(log_path, _config.vault_path)
+    if resolved:
+        notes_path = record.get("notes_path")
+        try:
+            is_notes = isinstance(notes_path, str) and (
+                Path(notes_path).expanduser().resolve() == Path(resolved))
+        except (OSError, RuntimeError, ValueError):
+            is_notes = False
+        if is_notes:
+            raise HTTPException(status_code=409, detail="transcript is the meeting notes file")
+        return Path(resolved)
+    try:
+        exists = isinstance(log_path, str) and Path(log_path).expanduser().is_file()
+    except (OSError, ValueError):
+        exists = False
+    if not exists:
+        raise HTTPException(status_code=404, detail="transcript file not found")
+    raise HTTPException(status_code=409, detail="transcript is outside the meeting vault")
+
+
+def _apply_speaker_edit(store, meeting_id: str, record: dict, updated: dict,
+                        lines, old: str, new: str) -> dict:
+    """Rewrite the transcript, then save the sidecar. Caller holds ``store.lock``."""
+    global _last_saved
+    from localflow.diarization.store import frontmatter_speakers, public_speakers
+    path = _sidecar_transcript(record)
+    try:
+        changed = relabel_transcript(path, lines, old, new,
+                                     speakers=frontmatter_speakers(updated),
+                                     meeting_id=meeting_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="transcript file not found") from None
+    except TranscriptChanged as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except UnicodeError:
+        raise HTTPException(status_code=409, detail="transcript is not readable") from None
+    except OSError:
+        log.exception("rewriting transcript failed")
+        raise HTTPException(status_code=500, detail="could not rewrite the transcript") from None
+    try:
+        store.save(updated)
+    except Exception:
+        log.exception("saving meeting speaker data failed")
+        raise HTTPException(
+            status_code=500, detail="transcript updated but speaker data could not be saved",
+        ) from None
+    log.info("meeting speakers updated: %d transcript lines, %d speakers",
+             changed, len(updated["speakers"]))
+    with _session_lock:
+        if _last_saved and _last_saved.get("meeting_id") == meeting_id:
+            _last_saved = {**_last_saved, "speakers": public_speakers(updated)}
+    return _speakers_response(meeting_id, updated)
+
+
+@app.get("/api/meetings/{meeting_id}/speakers")
+def api_meeting_speakers(meeting_id: str) -> dict:
+    """A saved meeting's speakers (no voiceprint data). Under /api/ so the token always applies."""
+    store = _meeting_store()
+    return _speakers_response(meeting_id, _speaker_record(store, meeting_id))
+
+
+@app.put("/api/meetings/{meeting_id}/speakers/{speaker_id}")
+def api_meeting_speaker_rename(meeting_id: str, speaker_id: str, body: dict) -> dict:
+    """Rename one speaker in a saved meeting's transcript and sidecar."""
+    from localflow.diarization.store import find_speaker, rename_speaker, speaker_lines
+    name = clean_speaker_name(body.get("name"))
+    if name is None:
+        raise HTTPException(status_code=400, detail="invalid speaker name")
+    store = _meeting_store()
+    with store.lock:
+        record = _speaker_record(store, meeting_id)
+        speaker = find_speaker(record, speaker_id)
+        if speaker is None:
+            raise HTTPException(status_code=404, detail="unknown speaker")
+        if speaker["label"] == name:
+            return _speakers_response(meeting_id, record)
+        return _apply_speaker_edit(store, meeting_id, record,
+                                   rename_speaker(record, speaker_id, name),
+                                   speaker_lines(record, speaker_id), speaker["label"], name)
+
+
+@app.post("/api/meetings/{meeting_id}/speakers/merge")
+def api_meeting_speakers_merge(meeting_id: str, body: dict) -> dict:
+    """Merge one speaker of a saved meeting into another."""
+    from localflow.diarization.store import find_speaker, merge_speakers, speaker_lines
+    from_id, into_id = body.get("from"), body.get("into")
+    if not (isinstance(from_id, str) and isinstance(into_id, str) and from_id and into_id) \
+            or from_id == into_id:
+        raise HTTPException(status_code=400,
+                            detail="from and into must be two different speaker ids")
+    store = _meeting_store()
+    with store.lock:
+        record = _speaker_record(store, meeting_id)
+        source, target = find_speaker(record, from_id), find_speaker(record, into_id)
+        if source is None or target is None:
+            raise HTTPException(status_code=404, detail="unknown speaker")
+        new = clean_speaker_name(target["label"])
+        if new is None:
+            raise HTTPException(status_code=409, detail="speaker data is not usable")
+        return _apply_speaker_edit(store, meeting_id, record,
+                                   merge_speakers(record, from_id, into_id),
+                                   speaker_lines(record, from_id), source["label"], new)
 
 
 # Prompts are reviewed here but dispatched from the CLI only — no run endpoint.
