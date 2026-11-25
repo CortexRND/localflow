@@ -268,3 +268,82 @@ async fn runtime_routes_forward_to_injected_backend() {
         assert_eq!(body["query"]["clean"], "1");
     }
 }
+
+/// Echoes the speaker flags of the config each request was handed.
+struct Flags;
+impl Backend for Flags {
+    fn handle(&self, request: BackendRequest) -> BackendResponse {
+        BackendResponse {
+            status: 200,
+            body: json!({
+                "path": request.path,
+                "recognition": request.config.field_bool("speaker_recognition"),
+            }),
+        }
+    }
+}
+
+#[tokio::test]
+async fn speaker_routes_follow_the_saved_config_while_other_routes_keep_the_loaded_one() {
+    // The "saved file": edited while the server runs.
+    let saved = Arc::new(std::sync::Mutex::new(Config::default()));
+    let file = saved.clone();
+    let state = Arc::new(
+        ServerState::new(Config::default(), "test-token".into(), Arc::new(Flags))
+            .with_speaker_config_reader(Arc::new(move || Ok(file.lock().unwrap().clone()))),
+    );
+    let app = || router(state.clone());
+    let send = |method: &str, path: &str, body: Vec<u8>| {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Host", "127.0.0.1")
+            .header("X-Localflow-Token", "test-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let app = app();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status().as_u16();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let off = (403, json!({"detail": "speaker recognition is off"}));
+    // Default off.
+    assert_eq!(send("GET", "/api/speakers", vec![]).await, off);
+    assert_eq!(send("POST", "/api/speakers", vec![b' '; 70_000]).await, off);
+    // Opt in by editing the saved file: no restart, no PUT /api/config.
+    {
+        let mut config = saved.lock().unwrap();
+        config.set_field("speaker_diarization", json!(true));
+        config.set_field("speaker_recognition", json!(true));
+    }
+    assert_eq!(
+        send("GET", "/api/speakers", vec![]).await,
+        (200, json!({"path": "/api/speakers", "recognition": true}))
+    );
+    let meeting = format!("/api/meetings/{}/speakers", "a".repeat(32));
+    assert_eq!(send("GET", &meeting, vec![]).await.1["recognition"], true);
+    // The pre-body contract is intact: gate first, then the size cap.
+    assert_eq!(
+        send("POST", "/api/speakers", vec![b' '; 70_000]).await,
+        (413, json!({"detail": "upload too large"}))
+    );
+    // Legacy routes keep the server's loaded config.
+    assert_eq!(
+        send("GET", "/meeting/status", vec![]).await.1["recognition"],
+        false
+    );
+    // Opt out again: refused before any body is read.
+    saved
+        .lock()
+        .unwrap()
+        .set_field("speaker_recognition", json!(false));
+    assert_eq!(send("POST", "/api/speakers", vec![b' '; 70_000]).await, off);
+    assert_eq!(send("GET", &meeting, vec![]).await.1["recognition"], false);
+}

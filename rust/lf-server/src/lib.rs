@@ -41,6 +41,7 @@ pub struct ServerState {
     backend: Arc<dyn Backend>,
     config_updater: Option<Arc<ConfigUpdater>>,
     config_reader: Option<Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>>,
+    speaker_config_reader: Option<Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>>,
     reload_before_put: bool,
 }
 
@@ -72,6 +73,7 @@ impl ServerState {
             backend,
             config_updater: None,
             config_reader: None,
+            speaker_config_reader: None,
             reload_before_put: false,
         }
     }
@@ -90,6 +92,7 @@ impl ServerState {
             backend,
             config_updater: None,
             config_reader: None,
+            speaker_config_reader: None,
             reload_before_put: true,
         })
     }
@@ -107,13 +110,37 @@ impl ServerState {
         self
     }
 
-    /// The live config, re-read when a reader is attached (as `dispatch` does).
-    fn current_config(&self) -> anyhow::Result<Config> {
-        match self.config_reader.as_ref() {
+    /// Re-read config only for the speaker-data routes (`/api/speakers*`, a
+    /// meeting's speakers, `/api/diarization/status`), so the voiceprint gate
+    /// follows edits to the saved file while every other route keeps the
+    /// server's config. A general `with_config_reader` already covers them.
+    pub fn with_speaker_config_reader(
+        mut self,
+        reader: Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>,
+    ) -> Self {
+        self.speaker_config_reader = Some(reader);
+        self
+    }
+
+    /// The config a speaker-data request is judged by: freshly read when a
+    /// reader is attached, else the server's config.
+    fn speaker_config(&self) -> anyhow::Result<Config> {
+        match self
+            .config_reader
+            .as_ref()
+            .or(self.speaker_config_reader.as_ref())
+        {
             Some(reader) => reader(),
             None => Ok(self.config.lock().unwrap().clone()),
         }
     }
+}
+
+/// Routes whose config must be live for the speaker-recognition gate.
+fn is_speaker_data_path(path: &str) -> bool {
+    local::is_speakers_path(path)
+        || path == "/api/diarization/status"
+        || meeting_speakers_route(path).is_some()
 }
 
 pub fn router(state: Arc<ServerState>) -> Router {
@@ -382,7 +409,7 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
         // Voiceprint routes: the recognition gate, then locality, before any
         // body byte is read (the backend re-checks the gate itself).
         let reader = state.clone();
-        let Ok(Ok(config)) = tokio::task::spawn_blocking(move || reader.current_config()).await
+        let Ok(Ok(config)) = tokio::task::spawn_blocking(move || reader.speaker_config()).await
         else {
             return error(503, "could not load config");
         };
@@ -500,7 +527,14 @@ fn dispatch(
         result["restart_required"] = json!(api::restart_required(&update));
         return Json(result).into_response();
     }
-    let config = state.config.lock().unwrap().clone();
+    let config = if is_speaker_data_path(path) && state.config_reader.is_none() {
+        match state.speaker_config() {
+            Ok(config) => config,
+            Err(_) => return error(503, "could not load config"),
+        }
+    } else {
+        state.config.lock().unwrap().clone()
+    };
     match path {
         "/openapi.json" => (
             [(header::CONTENT_TYPE, "application/json")],

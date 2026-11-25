@@ -99,7 +99,11 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
                 speech,
             ))),
     );
-    let state = Arc::new(ServerState::load_with_backend(meetings.clone())?);
+    // Speaker routes follow the saved file (other routes keep the loaded config).
+    let state = Arc::new(
+        ServerState::load_with_backend(meetings.clone())?
+            .with_speaker_config_reader(Arc::new(load_config)),
+    );
     let server = runtime.block_on(Server::bind_with_state(host, port, state.clone()))?;
     outln!(
         io.out,
