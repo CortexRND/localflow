@@ -29,7 +29,8 @@ MIN_AUDIO_S = MIN_DURATION_ON
 PROVIDER = "cpu"
 
 _INSTALL_HINT = (
-    "Speaker labels need the diarization extra: pip install 'localflow[diarization]'."
+    "Speaker labels need the sherpa-onnx diarization extra: "
+    "pip install 'localflow[diarization]'."
 )
 
 

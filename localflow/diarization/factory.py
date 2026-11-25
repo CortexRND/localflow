@@ -16,11 +16,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("localflow.diarization")
 
-SHERPA_UNAVAILABLE_REASON = (
-    "the sherpa-onnx speaker diarization backend is not available in this build yet; "
-    'set meetings.diarization_backend = "mock" to test speaker labels'
-)
-
 
 def _max_speakers(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 10:
@@ -34,16 +29,20 @@ def build_diarization(config: Config) -> tuple[DiarizationCollector | None, str]
         if not getattr(config, "speaker_diarization", False):
             return None, ""
         backend = getattr(config, "diarization_backend", "sherpa-onnx")
-        if backend == "sherpa-onnx":
-            return None, SHERPA_UNAVAILABLE_REASON
-        if backend != "mock":
+        if backend not in ("sherpa-onnx", "mock"):
             return None, f"unknown diarization backend {backend!r}"
         from .collector import DiarizationCollector
-        from .mock import MockDiarizer, MockEmbedder
 
-        diarizer, embedder = MockDiarizer(), MockEmbedder()
-        diarizer.load()
-        embedder.load()
+        if backend == "sherpa-onnx":
+            from .sherpa import load_sherpa_backends
+
+            diarizer, embedder = load_sherpa_backends()
+        else:
+            from .mock import MockDiarizer, MockEmbedder
+
+            diarizer, embedder = MockDiarizer(), MockEmbedder()
+            diarizer.load()
+            embedder.load()
         collector = DiarizationCollector(
             diarizer, embedder,
             sample_rate=config.sample_rate,

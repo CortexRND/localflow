@@ -1,15 +1,15 @@
 import subprocess
 import sys
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from localflow import diarization
 from localflow.config import Config
-from localflow.diarization import factory
+from localflow.diarization import factory, models, sherpa
 from localflow.diarization.collector import HARD_MAX_SPEAKERS, DiarizationCollector
-from localflow.diarization.factory import SHERPA_UNAVAILABLE_REASON, build_diarization
+from localflow.diarization.factory import build_diarization
 from localflow.diarization.mock import MockDiarizer, MockEmbedder
 from localflow.diarization.types import DiarizationUnavailable
 
@@ -39,8 +39,10 @@ def test_flag_off_imports_nothing():
         "from localflow.config import Config\n"
         "import localflow.diarization.factory as f\n"
         "assert f.build_diarization(Config(diarization_backend='mock')) == (None, '')\n"
+        "assert f.build_diarization(Config()) == (None, '')\n"
         "bad = {'localflow.diarization.collector', 'localflow.diarization.mock',\n"
-        "       'localflow.diarization.align'} & set(sys.modules)\n"
+        "       'localflow.diarization.align', 'localflow.diarization.sherpa',\n"
+        "       'sherpa_onnx'} & set(sys.modules)\n"
         "assert not bad, bad\n"
     )
 
@@ -62,18 +64,40 @@ def test_mock_backend_builds_a_collector():
     assert auto.max_speakers == HARD_MAX_SPEAKERS and auto.diarize_mic is False
 
 
-def test_sherpa_backend_is_unavailable_without_importing_it():
+def test_sherpa_extra_missing_is_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)
     collector, reason = build_diarization(Config(speaker_diarization=True))
-    assert collector is None and reason == SHERPA_UNAVAILABLE_REASON
-    assert "sherpa-onnx" in reason
-    _run(
-        "import sys\n"
-        "from localflow.config import Config\n"
-        "from localflow.diarization.factory import build_diarization\n"
-        "c, reason = build_diarization(Config(speaker_diarization=True))\n"
-        "assert c is None and 'sherpa-onnx' in reason\n"
-        "assert 'sherpa_onnx' not in sys.modules\n"
-    )
+    assert collector is None and "localflow[diarization]" in reason
+
+
+def test_sherpa_models_missing_is_unavailable(monkeypatch):
+    def missing(cache=None):
+        raise models.DiarizationModelsUnavailable(models.NOT_DOWNLOADED)
+
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", ModuleType("sherpa_onnx"))
+    monkeypatch.setattr(models, "verified_model_paths", missing)
+    assert build_diarization(Config(speaker_diarization=True)) == (None, models.NOT_DOWNLOADED)
+
+
+def test_sherpa_backend_builds_a_collector(monkeypatch):
+    diarizer, embedder = MockDiarizer(), MockEmbedder()
+    monkeypatch.setattr(sherpa, "load_sherpa_backends", lambda: (diarizer, embedder))
+    collector, reason = build_diarization(Config(
+        speaker_diarization=True, diarization_backend="sherpa-onnx", diarize_mic=True,
+        diarization_max_speakers=4, sample_rate=48000,
+    ))
+    assert reason == ""
+    assert collector.diarizer is diarizer and collector.embedder is embedder
+    assert collector.diarize_mic is True and collector.max_speakers == 4
+    assert collector.sample_rate == 48000
+
+
+def test_sherpa_loader_failure_is_the_reason(monkeypatch):
+    def boom():
+        raise DiarizationUnavailable("x")
+
+    monkeypatch.setattr(sherpa, "load_sherpa_backends", boom)
+    assert build_diarization(Config(speaker_diarization=True)) == (None, "x")
 
 
 def test_unknown_backend_is_named():
