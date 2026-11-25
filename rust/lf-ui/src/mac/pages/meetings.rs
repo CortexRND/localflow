@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAccessibility, NSAutoresizingMaskOptions, NSBorderType, NSPopUpButton, NSScrollView,
-    NSTextAlignment, NSTextField, NSView, NSWorkspace,
+    NSAccessibility, NSAutoresizingMaskOptions, NSBorderType, NSButton, NSPopUpButton,
+    NSScrollView, NSTextAlignment, NSTextField, NSView, NSWorkspace,
 };
 use objc2_foundation::{NSRange, NSSize, NSString, NSURL};
 use serde_json::{json, Value};
@@ -253,9 +253,29 @@ struct Controls {
     question: Retained<NSTextField>,
     /// The speaker rename field, while a rename is open.
     speaker_name: Option<Retained<NSTextField>>,
-    /// The merge target picker and its items (unique title -> speaker id).
-    merge_target: Option<(Retained<NSPopUpButton>, Vec<MergeTarget>)>,
+    /// The open merge's picker, its items and its Merge button.
+    merge_target: Option<MergeControl>,
     palette: Palette,
+}
+
+/// The open merge row as drawn: a pick updates it in place (no rebuild), so
+/// the focused picker keeps keyboard focus.
+struct MergeControl {
+    picker: Retained<NSPopUpButton>,
+    /// The picker's items (unique title -> speaker id).
+    items: Vec<MergeTarget>,
+    button: Retained<NSButton>,
+    /// Every picker item is its own speaker (no title collapsed).
+    complete: bool,
+}
+
+impl MergeControl {
+    fn selected_title(&self) -> String {
+        self.picker
+            .titleOfSelectedItem()
+            .map(|title| title.to_string())
+            .unwrap_or_default()
+    }
 }
 
 struct State {
@@ -485,14 +505,11 @@ impl State {
         if let Some(field) = controls.speaker_name.as_ref() {
             *self.speaker_name_draft.borrow_mut() = field.stringValue().to_string();
         }
-        if let Some((popup, items)) = controls.merge_target.as_ref() {
+        if let Some(merge) = controls.merge_target.as_ref() {
             // Matched by the selected item's own (unique) title, never by a
             // position that a collapsed or reordered menu could shift.
-            let title = popup
-                .titleOfSelectedItem()
-                .map(|title| title.to_string())
-                .unwrap_or_default();
-            *self.merge_choice.borrow_mut() = merge_choice_for_title(items, &title);
+            *self.merge_choice.borrow_mut() =
+                merge_choice_for_title(&merge.items, &merge.selected_title());
         }
     }
 
@@ -1141,9 +1158,46 @@ impl State {
         }
     }
 
-    /// The merge picker's selection changed: read it back and redraw, so
-    /// Merge is enabled exactly when a real speaker is selected.
-    fn pick_merge_target(&self) {
+    /// The merge picker selected `title` (from its drawn `items`; `complete`
+    /// when no title collapsed). Stores the exact id behind it (empty for
+    /// the placeholder; commit still checks it again) and calls
+    /// `set_enabled` so Merge is on exactly for a real speaker. Updated in
+    /// place, never rebuilt, so a keyboard pick keeps focus on the picker.
+    /// Returns `false` when the picker no longer matches the open merge:
+    /// nothing is stored and the caller redraws ([`Self::redraw_merge_pick`]).
+    fn pick_merge_target(
+        &self,
+        items: &[MergeTarget],
+        complete: bool,
+        title: &str,
+        set_enabled: impl FnOnce(bool),
+    ) -> bool {
+        if self.closed.get() {
+            return true;
+        }
+        let (meeting_id, from) = {
+            let editor = self.speaker_editor.borrow();
+            match &editor.mode {
+                SpeakerMode::Merge(from) if !editor.busy => {
+                    (editor.meeting_id.clone(), from.clone())
+                }
+                _ => return false,
+            }
+        };
+        let speakers = self.speakers_of(&meeting_id);
+        if merge_target_items(&speakers, &from) != items {
+            return false;
+        }
+        let choice = merge_choice_for_title(items, title);
+        let chosen = resolve_merge_target(&speakers, &from, &choice).is_some();
+        *self.merge_choice.borrow_mut() = choice;
+        set_enabled(complete && chosen);
+        true
+    }
+
+    /// A pick on a picker that no longer matches the open merge: read it
+    /// back and redraw (the previous behaviour for every pick).
+    fn redraw_merge_pick(&self) {
         if self.closed.get() {
             return;
         }
@@ -1853,10 +1907,7 @@ fn drop_orphaned_edit(
     }
 }
 
-type SpeakerControls = (
-    Option<Retained<NSTextField>>,
-    Option<(Retained<NSPopUpButton>, Vec<MergeTarget>)>,
-);
+type SpeakerControls = (Option<Retained<NSTextField>>, Option<MergeControl>);
 
 /// Draw a saved meeting's speakers at `(x, y)` in `parent` (U3/U4): each row
 /// is the label, talk time, and Rename / Merge… row actions. Rename turns the
@@ -2031,12 +2082,29 @@ fn speaker_panel(
                 );
                 picker.setEnabled(!busy);
                 {
-                    // A pick is captured and redrawn, so Merge enables only
-                    // once the selection is a real speaker.
+                    // A pick updates Merge in place (no rebuild, so focus
+                    // stays here): enabled only for a real speaker.
                     let weak = Rc::downgrade(state);
                     ctx.target.on_action(&picker, move || {
-                        if let Some(state) = weak.upgrade() {
-                            state.pick_merge_target();
+                        let Some(state) = weak.upgrade() else {
+                            return;
+                        };
+                        // The controls borrow ends before any redraw.
+                        let handled = state
+                            .controls
+                            .borrow()
+                            .as_ref()
+                            .and_then(|controls| controls.merge_target.as_ref())
+                            .is_some_and(|merge| {
+                                state.pick_merge_target(
+                                    &merge.items,
+                                    merge.complete,
+                                    &merge.selected_title(),
+                                    |enabled| merge.button.setEnabled(enabled),
+                                )
+                            });
+                        if !handled {
+                            state.redraw_merge_pick();
                         }
                     });
                 }
@@ -2065,7 +2133,12 @@ fn speaker_panel(
                     let cancel = cancel.clone();
                     ctx.target.on_action(&close, move || cancel());
                 }
-                merge_target = Some((picker, targets));
+                merge_target = Some(MergeControl {
+                    picker,
+                    items: targets,
+                    button: merge,
+                    complete,
+                });
             }
             _ => {
                 let merge_x = right - SPEAKER_BUTTON_W;
@@ -3194,7 +3267,7 @@ impl HubPage for MeetingsPage {
 mod tests {
     use super::*;
     use crate::backends::meeting::{FakeMeetingClient, MeetingCall};
-    use crate::hub_model::RECENT_NOTES_LIMIT;
+    use crate::hub_model::{MERGE_PLACEHOLDER, RECENT_NOTES_LIMIT};
     use std::sync::{Condvar, Mutex};
 
     #[test]
@@ -4241,6 +4314,78 @@ mod tests {
         page.state.commit_speaker_edit();
         apply_until(&page, is_edit);
         assert_eq!(merge_calls(&client), [("S0".to_string(), "S2".to_string())]);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn a_merge_pick_updates_in_place_without_a_rebuild_so_the_picker_keeps_focus() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let speaker = |id: &str, label: &str| json!({"id": id, "label": label, "name": null, "source": "others", "seconds": 10.0});
+        let page = stopped_with(
+            &client,
+            vec![
+                speaker("S0", "Ana"),
+                speaker("S1", "Bo"),
+                speaker("S2", "Bo"),
+            ],
+        );
+        let rebuilds = Rc::new(Cell::new(0));
+        {
+            let rebuilds = rebuilds.clone();
+            *page.state.rebuild.borrow_mut() = Some(Rc::new(move || {
+                rebuilds.set(rebuilds.get() + 1);
+            }));
+        }
+        page.state.visible.set(true);
+        page.state.begin_merge(MEETING, "S0", false);
+        let before = rebuilds.get();
+        // Drawn exactly as the panel draws it.
+        let speakers = page.state.speakers_of(MEETING);
+        let targets = merge_target_items(&speakers, "S0");
+        let layout = merge_picker(&targets, &speakers, &page.state.merge_choice.borrow());
+        // The picker's action as the popup callback runs it: whether it was
+        // handled in place, and what Merge was set to (`None`: untouched).
+        let pick = |items: &[MergeTarget], complete: bool, title: &str| {
+            let enabled = Cell::new(None);
+            let set = |on: bool| enabled.set(Some(on));
+            let handled = page.state.pick_merge_target(items, complete, title, set);
+            (handled, enabled.get())
+        };
+
+        // Picking the second "Bo" stores exactly its id and enables Merge,
+        // with no rebuild (a rebuild recreates the picker and drops focus).
+        assert_eq!(pick(&targets, true, "Bo (S2)"), (true, Some(true)));
+        assert_eq!(*page.state.merge_choice.borrow(), "S2");
+        // An unmapped title (a placeholder) picks nothing and disables Merge.
+        assert_eq!(pick(&targets, true, MERGE_PLACEHOLDER), (true, Some(false)));
+        assert_eq!(*page.state.merge_choice.borrow(), "");
+        // A picker whose titles collapsed never enables Merge.
+        assert_eq!(
+            pick(&targets, false, &layout.titles[0]),
+            (true, Some(false))
+        );
+        assert_eq!(rebuilds.get(), before, "a pick must not rebuild the page");
+
+        // A picker drawn for speakers no longer shown is not trusted: nothing
+        // is stored or enabled, and the callback redraws instead.
+        page.state.store_speakers(
+            MEETING,
+            Some(&json!({"speakers": [speaker("S0", "Ana"), speaker("S1", "Bo")]})),
+        );
+        *page.state.merge_choice.borrow_mut() = "S1".into();
+        let before = rebuilds.get();
+        assert_eq!(pick(&targets, true, "Bo (S2)"), (false, None));
+        assert_eq!(*page.state.merge_choice.borrow(), "S1");
+        assert_eq!(rebuilds.get(), before);
+        page.state.redraw_merge_pick();
+        assert_eq!(rebuilds.get(), before + 1);
+
+        // The in-place pick is what commit merges, and commit still re-checks.
+        let fresh = merge_target_items(&page.state.speakers_of(MEETING), "S0");
+        assert_eq!(pick(&fresh, true, "Bo"), (true, Some(true)));
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        assert_eq!(merge_calls(&client), [("S0".to_string(), "S1".to_string())]);
         page.state.shutdown();
     }
 
