@@ -1938,7 +1938,9 @@ def _seed_staging(root):
     root.mkdir(parents=True, exist_ok=True)
     (root / _ORPHAN).write_bytes(b"raw voice audio")
     keep = {"registry.json": b"{}", "e" * 32 + ".npy": b"npy", "notes.txt": b"mine",
-            ".enroll-short.audio": b"x", ".enroll-" + "C" * 32 + ".audio": b"x",
+            # Uppercase near-miss with a digit no other entry uses: a case-only variant of
+            # the orphan would be the same file on NTFS / default APFS.
+            ".enroll-short.audio": b"x", ".enroll-" + "A" * 32 + ".audio": b"x",
             ".enroll-" + "c" * 32 + ".audio.tmp": b"x"}
     for name, data in keep.items():
         (root / name).write_bytes(data)
