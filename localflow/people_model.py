@@ -8,6 +8,7 @@ UI imports and no I/O, so every rule here is unit-tested on any platform.
 import ipaddress
 import math
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -169,7 +170,13 @@ def path_inside_vault(target, vault_path) -> bool:
         vaults = {vault.absolute(), vault.resolve()}
     except (OSError, RuntimeError, ValueError):
         return True
-    return any(t == v or t.is_relative_to(v) for t in targets for v in vaults)
+    if any(t == v or t.is_relative_to(v) for t in targets for v in vaults):
+        return True
+    if sys.platform in ("darwin", "win32"):
+        ci_targets = {Path(str(t).casefold()) for t in targets}
+        ci_vaults = {Path(str(v).casefold()) for v in vaults}
+        return any(t == v or t.is_relative_to(v) for t in ci_targets for v in ci_vaults)
+    return False
 
 
 def needs_reenroll(vp, embedder) -> bool:

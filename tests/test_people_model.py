@@ -131,6 +131,14 @@ def test_path_inside_vault(tmp_path, monkeypatch):
     assert path_inside_vault(outside, vault)  # can't tell: refuse
 
 
+def test_path_inside_vault_case_insensitive_on_darwin(tmp_path, monkeypatch):
+    vault = tmp_path / "ObsidianVault"
+    vault.mkdir()
+    different_case = tmp_path / "obsidianvault" / "exports"
+    monkeypatch.setattr("localflow.people_model.sys.platform", "darwin")
+    assert path_inside_vault(different_case, vault)
+
+
 # ------------------------------------------------------------------- rows ---
 
 def test_needs_reenroll():
