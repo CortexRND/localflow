@@ -660,6 +660,60 @@ fn render_page(template: &str, marker: &str, token: &str) -> String {
 }
 
 #[cfg(test)]
+mod openapi_tests {
+    use super::*;
+
+    /// Every documented operation is routed, and the speaker paths are documented.
+    #[test]
+    fn the_schema_documents_routed_operations_including_speakers() {
+        let spec: Value =
+            serde_json::from_slice(RESOURCES.get_file("openapi.json").unwrap().contents()).unwrap();
+        let paths = spec["paths"].as_object().unwrap();
+        for (path, item) in paths {
+            // A template segment `{x}` becomes a concrete one.
+            let concrete: String = path
+                .split('/')
+                .map(|s| if s.starts_with('{') { "x" } else { s })
+                .collect::<Vec<_>>()
+                .join("/");
+            let routed = route_methods(&concrete).unwrap_or_else(|| panic!("{path} is not routed"));
+            for method in item.as_object().unwrap().keys() {
+                assert!(
+                    routed.contains(&method.to_uppercase().as_str()),
+                    "{method} {path}"
+                );
+            }
+        }
+        let methods = |path: &str| -> Vec<&str> {
+            paths[path]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect()
+        };
+        assert_eq!(methods("/api/diarization/status"), ["get"]);
+        assert_eq!(methods("/api/meetings/{meeting_id}/speakers"), ["get"]);
+        assert_eq!(
+            methods("/api/meetings/{meeting_id}/speakers/{speaker_id}"),
+            ["put"]
+        );
+        assert_eq!(
+            methods("/api/meetings/{meeting_id}/speakers/merge"),
+            ["post"]
+        );
+        assert_eq!(methods("/api/speakers"), ["get", "post", "delete"]);
+        assert_eq!(methods("/api/speakers/export"), ["get"]);
+        assert_eq!(methods("/api/speakers/{ref}"), ["patch", "delete"]);
+        assert!(spec["paths"]["/api/speakers"]["post"]["responses"]["201"].is_object());
+        assert!(
+            !paths.contains_key("/api/diarization/download"),
+            "not served by Rust"
+        );
+    }
+}
+
+#[cfg(test)]
 mod page_tests {
     #[test]
     fn crlf_checkouts_match_python_universal_newlines() {
