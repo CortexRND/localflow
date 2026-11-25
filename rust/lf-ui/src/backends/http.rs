@@ -16,7 +16,10 @@ use super::ask::{
     time_filter_since, AskBackend, Citation, Turn, ERROR_EMPTY_QUESTION, ERROR_GENERIC,
     ERROR_NO_SOURCES, ERROR_UNREACHABLE, NO_ANSWER, SOURCES,
 };
-use super::meeting::{MeetingClient, MeetingClientError, MeetingResult, SERVER_DOWN};
+use super::meeting::{
+    valid_meeting_id, valid_speaker_id, MeetingClient, MeetingClientError, MeetingResult,
+    NO_SPEAKER_DATA, SERVER_DOWN, UNKNOWN_SPEAKER,
+};
 use super::prompts::{PromptEntry, PromptQueue, PromptTransitionError, QueueError, WorkPrompt};
 use crate::pystr::PyStr;
 
@@ -221,6 +224,76 @@ impl MeetingClient for HttpMeetingClient {
     }
     fn dismiss(&self) -> MeetingResult<()> {
         self.request(Method::POST, "dismiss", None, 3).map(|_| ())
+    }
+
+    // The speaker routes live under `/api/` (token always required). Ids are
+    // validated before a URL exists: a meeting id is the sidecar's 32-hex id
+    // and a speaker id is one plain path segment, so nothing a note or a
+    // server reply holds can add, remove or escape a segment. With those
+    // characters the segment encoding equals Python's `quote(id, safe='')`.
+    fn speakers(&self, meeting_id: &str) -> MeetingResult<Option<Value>> {
+        if !valid_meeting_id(meeting_id) {
+            return Ok(None);
+        }
+        match self.0.request(
+            Method::GET,
+            &["api", "meetings", meeting_id, "speakers"],
+            &[],
+            None,
+            3,
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) if e.status == Some(StatusCode::NOT_FOUND) => Ok(None),
+            Err(e) => Err(MeetingClientError(e.message)),
+        }
+    }
+    fn rename_speaker(
+        &self,
+        meeting_id: &str,
+        speaker_id: &str,
+        name: &str,
+    ) -> MeetingResult<Value> {
+        if !valid_meeting_id(meeting_id) {
+            return Err(MeetingClientError(NO_SPEAKER_DATA.into()));
+        }
+        if !valid_speaker_id(speaker_id) {
+            return Err(MeetingClientError(UNKNOWN_SPEAKER.into()));
+        }
+        self.0
+            .request(
+                Method::PUT,
+                &["api", "meetings", meeting_id, "speakers", speaker_id],
+                &[],
+                Some(json!({"name": name})),
+                10,
+            )
+            .map_err(|e| MeetingClientError(e.message))
+    }
+    fn merge_speakers(&self, meeting_id: &str, from: &str, into: &str) -> MeetingResult<Value> {
+        if !valid_meeting_id(meeting_id) {
+            return Err(MeetingClientError(NO_SPEAKER_DATA.into()));
+        }
+        self.0
+            .request(
+                Method::POST,
+                &["api", "meetings", meeting_id, "speakers", "merge"],
+                &[],
+                Some(json!({"from": from, "into": into})),
+                10,
+            )
+            .map_err(|e| MeetingClientError(e.message))
+    }
+    fn diarization_status(&self) -> MeetingResult<Value> {
+        // Hashes the model files on the server: allow longer than a status poll.
+        self.0
+            .request(
+                Method::GET,
+                &["api", "diarization", "status"],
+                &[],
+                None,
+                10,
+            )
+            .map_err(|e| MeetingClientError(e.message))
     }
 }
 
