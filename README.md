@@ -386,9 +386,119 @@ transcribe what the machine plays; segments are then tagged **Me** (mic) or **Ot
 
 If system audio can't be opened the meeting still records the mic and the panel shows
 "mic only — system audio unavailable" (hover for the reason). Wear headphones: on
-speakers the mic also hears the remote side, which then appears twice.
+speakers the mic also hears the remote side, which then appears twice. To tell remote
+participants apart, see [Speaker labels](#speaker-labels-and-recognition-python-runtime)
+below.
 
 The Hub's Meetings page offers the same features (`lf hub` or menu bar → Meeting notes…).
+
+### Speaker labels and recognition (Python runtime)
+
+Off by default. With `[meetings] speaker_diarization = true`, LocalFlow tells the voices
+in a meeting apart and writes **Speaker 1**, **Speaker 2**, … instead of **Others**. This
+runs in the Python runtime (`lf`, `localflow`); for Rust see
+[rust/README.md](rust/README.md#speaker-labels). The default macOS install is the Rust
+app, so use a Python install (`LOCALFLOW_RUNTIME=python bash install.sh`). Then, from the
+LocalFlow source folder with its virtualenv active (`~/.localflow/app` for the installer,
+or your own checkout):
+
+```bash
+cd ~/.localflow/app && source .venv/bin/activate
+pip install -e '.[diarization]'                  # sherpa-onnx runtime; not installed by default
+lf speakers download                             # two ONNX models (~34 MB), checksum-verified
+lf config set meetings.speaker_diarization true
+lf speakers status                               # models, runtime and flags (offline)
+```
+
+- **What gets labelled.** Enable `capture_system_audio = true` to label remote voices
+  on the system-audio stream. Enable `diarize_mic = true` to also label voices on the
+  microphone (several people in one room).
+  A stream where fewer than two voices are found keeps **Me** / **Others**.
+  `max_speakers` caps the count per stream (0 = automatic, at most 10).
+- **When.** Labels are applied when the meeting stops; the live log stays Me/Others.
+  Settings are read when a meeting starts. A running server picks up file edits to
+  `speaker_diarization` and `speaker_recognition` for the next meeting; edits to
+  `diarize_mic`, `max_speakers` and `diarization_backend` need a server restart.
+- **If it can't run.** Models are never downloaded on their own. Without the extra or the
+  models, or if labelling fails or takes longer than 20 s at stop, the meeting is saved
+  with Me/Others as before.
+- **Fixing labels.** With the server running:
+
+  ```bash
+  lf meeting speakers                       # ids, labels and talk time of the last saved meeting
+  lf meeting rename-speaker S2 "Sarah"      # rewrites that label in the transcript log
+  lf meeting merge-speakers S3 S1           # S3 was the same person as S1
+  ```
+
+  Each takes an optional meeting id first (the `meeting_id` in the transcript log's
+  frontmatter). The notes file is not rewritten.
+- **Speaker file.** Each saved meeting with speaker labels gets
+  `~/.localflow/meetings/<meeting_id>.json` with speaker ids, labels, names, talk time,
+  segment timings and file paths, but no transcript text or audio. It is written whether
+  or not recognition is on, is what rename and merge use, and is kept until you delete it.
+
+**Recognising people (opt-in, biometric).** Without recognition no voice embedding is
+persisted: embeddings stay in memory during the meeting and are dropped at stop.
+`speaker_recognition = true` (needs `speaker_diarization`) is a separate switch that keeps
+*voiceprints*. At stop, each relabelled speaker (a **Speaker N**) is compared with the
+enrolled voiceprints and takes the enrolled name only on a confident match; a stream left
+as **Me** / **Others** is never matched. With both switches on and the server running:
+
+```bash
+lf config set meetings.speaker_recognition true
+MEETING_ID=paste-meeting-id-here     # printed by `lf meeting speakers`; saved with recognition on
+lf speakers enroll "Sarah" --from-meeting "$MEETING_ID" --speaker S2
+lf speakers enroll "Alex" --record 30      # or: --file clip.wav (up to 25 MB and 300 s)
+lf speakers list
+lf speakers rename "Sarah" "Sarah K"
+```
+
+- **Where it is stored.** Voiceprints live in `~/.localflow/speakers/` (`registry.json`
+  plus one `.npy` per person). While recognition is on, each labelled meeting's speaker
+  file also keeps one voiceprint per speaker, named or not; that is what `--from-meeting`
+  reads. Files are owner-only (0600 in 0700 folders on macOS and Linux), not encrypted,
+  and never expire on their own. Voiceprints are never written to the vault; speaker labels
+  and names are, as part of the transcript log and notes. Enrollment audio is not kept: it
+  is decoded in memory, except that an M4A/MP4 that needs seeking is copied briefly into
+  `~/.localflow/speakers/` and deleted after decoding. A voiceprint identifies a person;
+  only enroll people who agreed to it.
+- **Turning it off** stops matching and stops voiceprints being stored from that moment,
+  including for a meeting already running. It deletes nothing: earlier voiceprints and
+  speaker files stay on disk.
+- **Forgetting** needs both `speaker_diarization` and `speaker_recognition` on (every voice
+  command is refused otherwise), so forget before switching either off:
+
+  ```bash
+  lf speakers forget "Sarah"            # one person
+  lf speakers forget --all              # everyone
+  ```
+
+  It removes the voiceprint and erases the stored voiceprints from every saved meeting, so
+  earlier meetings can no longer be used with `--from-meeting`. Names already written in
+  transcripts and the speaker files' other details stay.
+- **Export.** `lf speakers export ~/speakers-backup` copies the voiceprints to a new or
+  empty folder outside the vault; there is no import. Enrolling from audio and exporting
+  only work against a server on this computer.
+- **What leaves the machine.** Analysis is local and offline, and voiceprints are never
+  sent to an LLM or exposed over MCP. Speaker labels and names are transcript text, so the
+  configured LLM provider gets them for notes, titles, meeting chat and Recall; that is a
+  cloud service if you chose one. Separately, with `work_prompts = true` (the default) and
+  a Fireworks API key set, the notes, which can contain those names, are sent to Fireworks
+  to generate work prompts, even when the LLM provider is local.
+
+HTTP, all with the API token (`X-Localflow-Token`): `GET /api/diarization/status`,
+`POST /api/diarization/download`; `GET /api/meetings/{meeting_id}/speakers`,
+`PUT /api/meetings/{meeting_id}/speakers/{speaker_id} {"name": ...}`,
+`POST /api/meetings/{meeting_id}/speakers/merge {"from": ..., "into": ...}`. With
+recognition on (`{ref}` is a voiceprint id or an enrolled name):
+
+| Method and path | What it does |
+| --- | --- |
+| `GET /api/speakers` | List enrolled people |
+| `POST /api/speakers {"name": ..., "meeting_id": ..., "speaker_id": ...}` | Enroll from a meeting; or multipart `file` + `name` from audio (this computer only) |
+| `PATCH /api/speakers/{ref} {"name": ...}` | Rename (later meetings only) |
+| `DELETE /api/speakers/{ref}`, `DELETE /api/speakers` | Forget one person, or everyone |
+| `GET /api/speakers/export` | ZIP of the voiceprints (this computer only) |
 
 ### Recall: ask across everything you've said
 
@@ -410,6 +520,11 @@ lf recall "what did I tell Sarah?" --json --k 5
   otherwise. If the LLM is down you still get the matching passages. With a cloud LLM
   provider those passages are sent to it, so use a local one if that matters.
 - With `[history] enabled = false` dictations are skipped; meetings and notes still count.
+- With `[meetings] speaker_diarization = true` (Python runtime only), a citation from a
+  meeting transcript may include `speaker` in `--json` output and the HTTP response: the
+  label on the first line of the passage if that line has a timestamp and a label (Me,
+  Others, Speaker 2 or a name). It is read from the transcript text, independent of
+  recognition and without any voiceprint lookup. Ranking and the text output are unchanged.
 - HTTP: `POST /api/recall {"question": ..., "since"?, "k"?, "llm"?}` returns
   `{answer, citations}`. It requires the API token (`X-Localflow-Token`), even from
   loopback. The web UI has a Recall panel; open the page with `?token=…` to use it.
@@ -693,6 +808,11 @@ capture_system_audio = false       # also transcribe remote participants (see be
 system_audio_device = ""           # loopback input, e.g. "BlackHole 2ch"; empty = auto
 default_template = "general"       # general | standup | one-on-one | your own
 templates_dir = "~/.localflow/meeting_templates"
+speaker_diarization = false        # Speaker 1..N instead of Others (see Speaker labels)
+diarization_backend = "sherpa-onnx"
+diarize_mic = false                # also tell apart voices on the microphone
+max_speakers = 0                   # 0 = automatic; at most 10
+speaker_recognition = false        # opt-in voiceprints; needs speaker_diarization
 ```
 
 All keys are optional; defaults shown above apply.
@@ -821,6 +941,7 @@ token get `401`.
 - **localflow/history.py**: Local SQLite dictation history and retry clips
 - **localflow/recall.py**: BM25 search and recall across history, transcripts and notes
 - **localflow/meetings.py**: Meeting detection, transcription and notes
+- **localflow/diarization/**: Optional meeting speaker labels and the opt-in voiceprint registry
 - **localflow/dispatch.py**: Work-prompt files, review queue and Orca dispatch
 - **localflow/mcp_server.py**: Read-only MCP server over stdio for agents
 - **localflow/server.py**: FastAPI web server for phone access
