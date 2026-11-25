@@ -707,6 +707,31 @@ def _hub_repo(cache, repo, size):
     return repo_dir
 
 
+def _pinned_repo(cache, model, size, *, copy=False):
+    """The pinned file of `model` (stat-only checks: the bytes need not hash)."""
+    repo_dir = cache / ms.repo_folder_name(model.repo)
+    revision_dir = repo_dir / "snapshots" / model.revision
+    revision_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "blobs").mkdir(exist_ok=True)
+    if copy:
+        (revision_dir / model.filename).write_bytes(b"c" * size)
+    else:
+        (repo_dir / "blobs" / model.sha256).write_bytes(b"p" * size)
+        (revision_dir / model.filename).symlink_to(
+            os.path.join("..", "..", "blobs", model.sha256)
+        )
+    return repo_dir
+
+
+def _unrelated(repo_dir, revision, name, blob_name, size):
+    """Another file in a shared repo that LocalFlow never fetched."""
+    (repo_dir / "blobs" / blob_name).write_bytes(b"u" * size)
+    (repo_dir / "snapshots" / revision).mkdir(parents=True, exist_ok=True)
+    link = repo_dir / "snapshots" / revision / name
+    link.symlink_to(os.path.join("..", "..", "blobs", blob_name))
+    return link
+
+
 @pytest.fixture
 def storage(cache, monkeypatch):
     monkeypatch.setattr(dm, "DIAR_MODELS", REAL_MODELS)
@@ -714,9 +739,17 @@ def storage(cache, monkeypatch):
     sizes = {}
     for index, model in enumerate(REAL_MODELS):
         sizes[model.repo] = 1000 * (index + 1)
-        _hub_repo(cache, model.repo, sizes[model.repo])
+        _pinned_repo(cache, model, sizes[model.repo])
     _hub_repo(cache, "Systran/faster-whisper-base", 200)
     return sizes
+
+
+EMB_REAL = REAL_MODELS[1]  # csukuangfj/speaker-embedding-models: a shared repo
+OFF = Config(speaker_diarization=False)
+
+
+def _listed(cache, config=OFF):
+    return {m.repo: m for m in ms.inventory(config, cache, no_mlx, leases=[])}
 
 
 def no_mlx():
@@ -751,7 +784,140 @@ def test_speaker_models_are_deletable_while_the_flag_is_off(cache, storage):
     for model in REAL_MODELS:
         freed = ms.delete_unused(model.repo, config, cache, no_mlx, leases=[])
         assert freed == storage[model.repo]
-        assert not (cache / ms.repo_folder_name(model.repo)).exists()
+        repo_dir = cache / ms.repo_folder_name(model.repo)
+        assert not os.path.lexists(repo_dir / "blobs" / model.sha256)
+        assert not (repo_dir / "snapshots").exists()  # empty snapshot folders go too
+        assert model.repo not in _listed(cache)
+    assert "Systran/faster-whisper-base" in _listed(cache)
+
+
+@posix_only
+def test_shared_repo_counts_and_deletes_only_the_pinned_file(cache, storage):
+    repo_dir = cache / ms.repo_folder_name(EMB_REAL.repo)
+    same_rev = _unrelated(repo_dir, EMB_REAL.revision, "other_embedder.onnx", "1" * 64, 70000)
+    other_rev = _unrelated(repo_dir, "e" * 40, "wespeaker.onnx", "2" * 64, 50000)
+    (repo_dir / "refs").mkdir()
+    (repo_dir / "refs" / "main").write_text("e" * 40)
+    (repo_dir / "README.md").write_text("not ours")
+    assert _listed(cache)[EMB_REAL.repo].size_bytes == storage[EMB_REAL.repo]
+
+    freed = ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[])
+    assert freed == storage[EMB_REAL.repo]
+    assert not os.path.lexists(repo_dir / "snapshots" / EMB_REAL.revision / EMB_REAL.filename)
+    assert not os.path.lexists(repo_dir / "blobs" / EMB_REAL.sha256)
+    assert same_rev.read_bytes() == b"u" * 70000
+    assert other_rev.read_bytes() == b"u" * 50000
+    assert (repo_dir / "refs" / "main").read_text() == "e" * 40
+    assert (repo_dir / "README.md").read_text() == "not ours"
+    assert EMB_REAL.repo not in _listed(cache)  # only unrelated files remain
+
+
+@posix_only
+def test_shared_repo_with_only_unrelated_files_is_not_listed_or_deleted(cache, monkeypatch):
+    monkeypatch.setattr(dm, "DIAR_MODELS", REAL_MODELS)
+    repo_dir = cache / ms.repo_folder_name(EMB_REAL.repo)
+    (repo_dir / "blobs").mkdir(parents=True)
+    link = _unrelated(repo_dir, EMB_REAL.revision, "other_embedder.onnx", "1" * 64, 9000)
+    assert EMB_REAL.repo not in _listed(cache)
+    with pytest.raises(ms.ModelStorageError, match="isn't downloaded"):
+        ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[])
+    assert link.read_bytes() == b"u" * 9000
+
+
+@posix_only
+def test_pinned_blob_shared_with_another_revision_is_kept(cache, storage):
+    repo_dir = cache / ms.repo_folder_name(EMB_REAL.repo)
+    blob_path = repo_dir / "blobs" / EMB_REAL.sha256
+    other = repo_dir / "snapshots" / ("e" * 40) / EMB_REAL.filename
+    other.parent.mkdir(parents=True)
+    other.symlink_to(os.path.join("..", "..", "blobs", EMB_REAL.sha256))
+    assert _listed(cache)[EMB_REAL.repo].size_bytes == storage[EMB_REAL.repo]
+
+    freed = ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[])
+    assert freed == 0
+    assert not os.path.lexists(repo_dir / "snapshots" / EMB_REAL.revision)
+    assert blob_path.read_bytes() == b"p" * storage[EMB_REAL.repo]
+    assert other.read_bytes() == b"p" * storage[EMB_REAL.repo]
+
+
+@posix_only
+def test_pinned_blob_is_kept_when_a_snapshot_folder_cannot_be_inspected(
+    cache, storage, tmp_path
+):
+    repo_dir = cache / ms.repo_folder_name(EMB_REAL.repo)
+    outside = tmp_path / "outside-rev"
+    outside.mkdir()
+    (repo_dir / "snapshots" / ("e" * 40)).symlink_to(outside, target_is_directory=True)
+    ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[])
+    assert (repo_dir / "blobs" / EMB_REAL.sha256).exists()
+    assert not os.path.lexists(repo_dir / "snapshots" / EMB_REAL.revision / EMB_REAL.filename)
+    assert outside.is_dir()
+
+
+@posix_only
+def test_hard_linked_pinned_blob_is_kept(cache, storage, tmp_path):
+    repo_dir = cache / ms.repo_folder_name(EMB_REAL.repo)
+    os.link(repo_dir / "blobs" / EMB_REAL.sha256, tmp_path / "hardlink")
+    assert ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[]) == 0
+    assert (repo_dir / "blobs" / EMB_REAL.sha256).exists()
+
+
+@posix_only
+def test_malformed_pinned_link_is_never_counted_resolved_or_deleted(
+    cache, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(dm, "DIAR_MODELS", REAL_MODELS)
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"o" * 4000)
+    repo_dir = cache / ms.repo_folder_name(EMB_REAL.repo)
+    revision_dir = repo_dir / "snapshots" / EMB_REAL.revision
+    revision_dir.mkdir(parents=True)
+    (repo_dir / "blobs").mkdir()
+    (repo_dir / "blobs" / EMB_REAL.sha256).write_bytes(b"p" * 3000)
+    link = revision_dir / EMB_REAL.filename
+    link.symlink_to(outside)  # an absolute link outside the repo: not ours
+    assert EMB_REAL.repo not in _listed(cache)
+    with pytest.raises(ms.ModelStorageError, match="isn't downloaded"):
+        ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[])
+    assert os.path.islink(link)
+    assert outside.read_bytes() == b"o" * 4000
+    assert (repo_dir / "blobs" / EMB_REAL.sha256).exists()
+
+
+@posix_only
+def test_backslash_link_text_is_not_a_pinned_pointer_on_posix(cache, monkeypatch):
+    monkeypatch.setattr(dm, "DIAR_MODELS", REAL_MODELS)
+    repo_dir = cache / ms.repo_folder_name(EMB_REAL.repo)
+    revision_dir = repo_dir / "snapshots" / EMB_REAL.revision
+    revision_dir.mkdir(parents=True)
+    (repo_dir / "blobs").mkdir()
+    blob_path = repo_dir / "blobs" / EMB_REAL.sha256
+    blob_path.write_bytes(b"p" * 3000)
+    link = revision_dir / EMB_REAL.filename
+    link.symlink_to("..\\..\\blobs\\" + EMB_REAL.sha256)  # one odd file name on POSIX
+    assert not ms._is_pinned_link(link, EMB_REAL.sha256)
+    assert EMB_REAL.repo not in _listed(cache)
+    with pytest.raises(ms.ModelStorageError, match="isn't downloaded"):
+        ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[])
+    assert os.path.islink(link)
+    assert blob_path.read_bytes() == b"p" * 3000
+
+
+def test_plain_copy_layout_counts_and_deletes_only_the_pinned_copy(cache, monkeypatch):
+    monkeypatch.setattr(dm, "DIAR_MODELS", REAL_MODELS)
+    repo_dir = _pinned_repo(cache, EMB_REAL, 6000, copy=True)
+    other_copy = repo_dir / "snapshots" / EMB_REAL.revision / "other_embedder.onnx"
+    other_copy.write_bytes(b"u" * 8000)  # an unrelated Windows-style copy
+    unrelated_blob = repo_dir / "blobs" / ("3" * 64)
+    unrelated_blob.write_bytes(b"u" * 500)
+    assert _listed(cache)[EMB_REAL.repo].size_bytes == 6000
+
+    freed = ms.delete_unused(EMB_REAL.repo, OFF, cache, no_mlx, leases=[])
+    assert freed == 6000
+    assert not os.path.lexists(repo_dir / "snapshots" / EMB_REAL.revision / EMB_REAL.filename)
+    assert other_copy.read_bytes() == b"u" * 8000
+    assert unrelated_blob.read_bytes() == b"u" * 500
+    assert EMB_REAL.repo not in _listed(cache)
 
 
 @posix_only
