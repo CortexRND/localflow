@@ -515,6 +515,13 @@ def _saved_configs(monkeypatch, *, error=None):
     return saved
 
 
+def _destroy_tk(root, window):
+    _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+    window.meeting_speaker_vars.clear()
+    root.destroy()
+    gc.collect()
+
+
 def test_speaker_toggles_are_enabled_and_save_when_ready(tmp_path, monkeypatch):
     saved = _saved_configs(monkeypatch)
     root, window = _speaker_window(tmp_path, DiarizationClient(READY))
@@ -530,7 +537,7 @@ def test_speaker_toggles_are_enabled_and_save_when_ready(tmp_path, monkeypatch):
         assert saved[-1].diarize_mic is False
         assert window.config.speaker_diarization is True
     finally:
-        root.destroy()
+        _destroy_tk(root, window)
 
 
 def test_speaker_toggles_are_disabled_with_a_reason_when_not_ready(tmp_path, monkeypatch):
@@ -544,7 +551,7 @@ def test_speaker_toggles_are_disabled_with_a_reason_when_not_ready(tmp_path, mon
         checks["speaker_diarization"].invoke()  # disabled: does nothing
         assert saved == []
     finally:
-        root.destroy()
+        _destroy_tk(root, window)
 
 
 def test_speaker_toggle_already_on_stays_usable_when_not_ready(tmp_path, monkeypatch):
@@ -568,7 +575,7 @@ def test_speaker_toggle_already_on_stays_usable_when_not_ready(tmp_path, monkeyp
         assert checks["diarize_mic"].cget("state") == "disabled"
         assert window.meeting_speaker_reason.cget("text") == "Install localflow[diarization]"
     finally:
-        root.destroy()
+        _destroy_tk(root, window)
 
 
 def test_speaker_toggles_stay_enabled_when_the_status_is_unavailable(tmp_path):
@@ -580,7 +587,7 @@ def test_speaker_toggles_stay_enabled_when_the_status_is_unavailable(tmp_path):
         assert not window.meeting_speaker_reason.winfo_manager()
         assert window.meeting_error.cget("text") == ""  # no error surfaced
     finally:
-        root.destroy()
+        _destroy_tk(root, window)
 
 
 def test_plain_client_without_diarization_status_is_not_asked(tmp_path):
@@ -593,7 +600,7 @@ def test_plain_client_without_diarization_status_is_not_asked(tmp_path):
         checks = window.meeting_speaker_checks
         assert all(check.cget("state") == "normal" for check in checks.values())
     finally:
-        root.destroy()
+        _destroy_tk(root, window)
 
 
 def test_speaker_toggle_save_failure_reverts_the_switch(tmp_path, monkeypatch):
@@ -604,4 +611,4 @@ def test_speaker_toggle_save_failure_reverts_the_switch(tmp_path, monkeypatch):
         assert window.meeting_speaker_vars["diarize_mic"].get() is False
         assert "disk full" in window._meeting_error_message
     finally:
-        root.destroy()
+        _destroy_tk(root, window)
