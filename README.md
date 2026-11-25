@@ -387,20 +387,21 @@ transcribe what the machine plays; segments are then tagged **Me** (mic) or **Ot
 If system audio can't be opened the meeting still records the mic and the panel shows
 "mic only — system audio unavailable" (hover for the reason). Wear headphones: on
 speakers the mic also hears the remote side, which then appears twice. To tell remote
-participants apart, see [Speaker labels](#speaker-labels-and-recognition-python-runtime)
+participants apart, see [Speaker labels](#speaker-labels-and-recognition)
 below.
 
 The Hub's Meetings page offers the same features (`lf hub` or menu bar → Meeting notes…).
 
-### Speaker labels and recognition (Python runtime)
+### Speaker labels and recognition
 
 Off by default. With `[meetings] speaker_diarization = true`, LocalFlow tells the voices
-in a meeting apart and writes **Speaker 1**, **Speaker 2**, … instead of **Others**. This
-runs in the Python runtime (`lf`, `localflow`); for Rust see
-[rust/README.md](rust/README.md#speaker-labels). The default macOS install is the Rust
-app, so use a Python install (`LOCALFLOW_RUNTIME=python bash install.sh`). Then, from the
-LocalFlow source folder with its virtualenv active (`~/.localflow/app` for the installer,
-or your own checkout):
+in a meeting apart and writes **Speaker 1**, **Speaker 2**, … instead of **Others**. The
+default macOS install is the Rust app: it serves the speaker routes below
+but does not label meetings. Labels come from the Python runtime (`lf`, `localflow`) or
+from an `lf-rs serve` built with `--features diarize`; for Rust see
+[rust/README.md](rust/README.md#speaker-labels). Python setup: use a Python install
+(`LOCALFLOW_RUNTIME=python bash install.sh`), then, from the LocalFlow source folder with
+its virtualenv active (`~/.localflow/app` for the installer, or your own checkout):
 
 ```bash
 cd ~/.localflow/app && source .venv/bin/activate
@@ -416,9 +417,10 @@ lf speakers status                               # models, runtime and flags (of
   A stream where fewer than two voices are found keeps **Me** / **Others**.
   `max_speakers` caps the count per stream (0 = automatic, at most 10).
 - **When.** Labels are applied when the meeting stops; the live log stays Me/Others.
-  Settings are read when a meeting starts. A running server picks up file edits to
+  Settings are read when a meeting starts. A running Python server picks up file edits to
   `speaker_diarization` and `speaker_recognition` for the next meeting; edits to
-  `diarize_mic`, `max_speakers` and `diarization_backend` need a server restart.
+  `diarize_mic`, `max_speakers` and `diarization_backend` need a server restart. A Rust
+  server reads all five keys from the file at each meeting start.
 - **If it can't run.** Models are never downloaded on their own. Without the extra or the
   models, or if labelling fails or takes longer than 20 s at stop, the meeting is saved
   with Me/Others as before.
@@ -486,8 +488,10 @@ lf speakers rename "Sarah" "Sarah K"
   a Fireworks API key set, the notes, which can contain those names, are sent to Fireworks
   to generate work prompts, even when the LLM provider is local.
 
+`lf-rs` has the same `meeting` and `speakers` commands, except `speakers download`.
+
 HTTP, all with the API token (`X-Localflow-Token`): `GET /api/diarization/status`,
-`POST /api/diarization/download`; `GET /api/meetings/{meeting_id}/speakers`,
+`POST /api/diarization/download` (Python only); `GET /api/meetings/{meeting_id}/speakers`,
 `PUT /api/meetings/{meeting_id}/speakers/{speaker_id} {"name": ...}`,
 `POST /api/meetings/{meeting_id}/speakers/merge {"from": ..., "into": ...}`. With
 recognition on (`{ref}` is a voiceprint id or an enrolled name):

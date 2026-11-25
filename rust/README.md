@@ -300,6 +300,9 @@ lf-rs secret set NAME | unset NAME | status
 lf-rs status [--json]
 lf-rs serve [--host HOST] [--port PORT]
 lf-rs meeting start [-t TITLE] [-c CATEGORY] | stop | dismiss
+lf-rs meeting speakers [MEETING_ID] | rename-speaker [ID] SPEAKER NAME | merge-speakers [ID] FROM INTO
+lf-rs speakers status [--json] | list [--json] | rename OLD NEW | forget NAME_OR_ID | forget --all | export DIRECTORY
+lf-rs speakers enroll NAME (--from-meeting ID --speaker SID | --file FILE | --record 1-300)
 lf-rs prompts list [-s STATUS] | show ID | approve ID... | reject ID...
 lf-rs prompts dispatch [ID...] [--all] [--repo R] [--agent A] [--dry-run]
 lf-rs recall QUESTION [--since today|yesterday|7d|YYYY-MM-DD] [--k 1-20] [--no-llm] [--json]
@@ -310,6 +313,9 @@ lf-rs agent install | uninstall | status
 lf-rs setup install-app
 ```
 
+* `meeting speakers`, `rename-speaker`, `merge-speakers` and `speakers` are
+  hidden from `--help`, as in Python. There is no `speakers download`
+  ([Speaker labels](#speaker-labels)).
 * `agent` (hidden, as in Python) manages launch at login for
   `LOCALFLOW_PLATFORM` or the real OS: the freedesktop autostart entry on
   Linux, the launchd LaunchAgent on macOS (via `launchctl`, trimming its
@@ -508,33 +514,63 @@ whole-process wall time and peak RSS, including startup.
 
 ### Speaker labels
 
-Rust has speaker labelling at capture time behind a build feature; the management routes
-and commands of the Python runtime (see the
-[top-level README](../README.md#speaker-labels-and-recognition-python-runtime)) are not
-ported until the R4 slice lands. What the Rust side has:
+Rust ports the speaker labels, routes and commands of the Python runtime (see the
+[top-level README](../README.md#speaker-labels-and-recognition)), with the differences
+below.
 
-* `lf-core` reads, validates and writes the five `[meetings]` keys
-  (`speaker_diarization`, `diarization_backend`, `diarize_mic`, `max_speakers`,
-  `speaker_recognition`), so a shared config file is safe in both runtimes.
-* `lf-meetings` renders speaker labels, the `meeting_id` / `speakers` transcript
-  frontmatter and the diarized prompt note as Python does.
-* `lf-diarize` ports alignment, clustering and the per-meeting collector, with a
-  sherpa-onnx backend behind its `sherpa` feature. `lf-rs serve` uses it only when
-  built with `cargo build -p lf --features diarize` (off by default), with
-  `speaker_diarization = true` and `diarization_backend = "sherpa-onnx"`; such a build
-  writes **Speaker N** labels at stop and honours `diarize_mic` and `max_speakers`. It
-  reads the verified models from the Hugging Face cache and never downloads them; fetch
-  them with the Python `lf speakers download`.
-
-The server embedded in `lf-hub` has no speaker backend, so its
-meetings stay Me/Others whatever the config says. (The `lf-desktop` preview is a front
-end; its meetings get labels only if the local server it talks to adds them.) No Rust
-server serves `/api/diarization/*`, `/api/meetings/{meeting_id}/speakers*` or
-`/api/speakers*`, and `lf-rs` has no `speakers` command and no `meeting speakers`,
-`rename-speaker` or `merge-speakers`. There is no per-meeting speaker file and no
-voiceprint registry, so nothing is renamed, merged, recognised, enrolled, forgotten or
-exported from Rust, and `speaker_recognition` has no effect. Recall citations have no
-`speaker` field.
+* **Build and models.** Capture-time labelling needs
+  `cargo build --release -p lf --features diarize` (off by default), which enables the
+  sherpa-onnx backend of `lf-diarize`. Rust never downloads the models: it reads the two
+  size- and SHA-256-verified files from the Hugging Face hub cache that the Python
+  `lf speakers download` writes.
+* **Routes versus capture.** The speaker routes live in `lf-meetings-backend`, so
+  `lf-rs serve` and the server embedded in `lf-hub` serve them in every build, all with
+  the API token: `GET /api/diarization/status`, `GET /api/meetings/{meeting_id}/speakers`,
+  `PUT /api/meetings/{meeting_id}/speakers/{speaker_id}`,
+  `POST /api/meetings/{meeting_id}/speakers/merge`, `GET|POST|DELETE /api/speakers`,
+  `PATCH|DELETE /api/speakers/{ref}` and `GET /api/speakers/export`.
+  `POST /api/diarization/download` is not routed. Only a `diarize` build of `lf-rs serve`
+  with `speaker_diarization = true` and `diarization_backend = "sherpa-onnx"` labels
+  meetings: it writes **Speaker N** labels at stop and honours `diarize_mic` and
+  `max_speakers`. The shipped `lf-hub` is built without it. There, and in a plain
+  `lf-rs serve`, `speaker_diarization = true` leaves meetings Me/Others, start and status
+  report `diarization: "unavailable"`, no speaker file is written and nothing is
+  recognised. The routes still work on speaker data already on disk (from Python or a
+  `diarize` build), including enrolling from a meeting's stored voiceprint; enrolling
+  from audio returns 503 `voice model unavailable`. (The `lf-desktop` preview is a front
+  end; its meetings get labels only if the local server it talks to adds them.)
+* **CLI.** `lf-rs meeting speakers | rename-speaker | merge-speakers` and
+  `lf-rs speakers status | list | enroll | rename | forget | export` match Python and are
+  hidden from `--help`; there is no `speakers download`. `speakers status` is offline,
+  needs no server, and prints `runtime (sherpa-onnx): not installed` unless built with
+  `diarize`. All other commands go through the running server. `enroll --file` (up to
+  25 MB), `enroll --record` and `export` refuse a non-loopback `server_host`; `export`
+  needs a new or empty folder outside the vault.
+* **Storage** matches Python: the speaker file is
+  `~/.localflow/meetings/<meeting_id>.json`, written only when at least two speakers were
+  found; voiceprints are in `~/.localflow/speakers/` (`registry.json` plus `<id>.npy`),
+  0600 files in 0700 folders on unix. Rename and merge rewrite only the transcript log
+  inside the configured vault, never the notes file. One server process is the single
+  writer per data directory: the runtimes share a format, not concurrent writes, so do
+  not run a Python and a Rust server on the same data at once.
+* **Opt-in and locality** match Python. Voiceprint routes need both
+  `speaker_diarization` and `speaker_recognition`, otherwise 403
+  `speaker recognition is off`. Turn embeddings used for clustering stay in memory and are
+  dropped at stop; per-speaker voiceprints are computed and stored only with recognition
+  on. Audio enrollment and export require a loopback peer, a loopback `Host` and no proxy
+  headers. Enrollment audio is decoded by `ffmpeg` (which must be on the server's `PATH`)
+  through a pipe and not kept; only an M4A/MP4 that needs seeking is staged briefly under
+  `~/.localflow/speakers/` and deleted. The export route returns a ZIP.
+* **Timing.** As in Python, recognition must be on when the meeting starts and still on
+  at stop: opting in mid-meeting does not apply to that meeting, opting out mid-meeting
+  stops matching and storing, and the voiceprint-route gate follows the saved file
+  immediately. Labels apply at stop with the 20 s limit. Unlike Python, which live-reloads
+  only `speaker_diarization` and `speaker_recognition`, Rust reads all five `[meetings]`
+  keys (`speaker_diarization`, `diarization_backend`, `diarize_mic`, `max_speakers`,
+  `speaker_recognition`) from the saved file at each meeting start, so none needs a
+  restart. If the file cannot be read at start, that meeting runs without labels.
+* **Not ported.** Recall citations have no `speaker` field, and there is no Rust UI for
+  speakers.
 
 ## Standalone audio and STT
 
@@ -633,9 +669,9 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   CLI records dictation clips (`serve` captures only meeting audio), `lf-rs`
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
-* speaker labels: only an opt-in `lf-rs serve` build labels speakers; rename, merge,
-  recognition and their routes and commands are Python-only
-  ([Speaker labels](#speaker-labels));
+* speaker labels: capture-time labels need an opt-in `lf-rs serve` build
+  (`--features diarize`) and `lf-hub` never labels; model download is
+  Python-only ([Speaker labels](#speaker-labels));
 * `lf-rs` implements only the commands listed above (no `dictate`,
   `watch`, `notes`, `open`, `models`, bare `setup`,
   `history retry`, …);
