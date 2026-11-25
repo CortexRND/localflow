@@ -282,15 +282,18 @@ impl Render for TabsHarness {
     }
 }
 
-/// Settings' seven tabs at the 960 px minimum. The test font is a 0.6 em
-/// monospace, wider than the real UI font, so a one-line fit is checked
-/// visually; this pins what does not depend on glyphs: the 656 px budget,
-/// the compact capsule (8 px sides, same height) and wrap-not-overflow.
+/// Settings' seven tabs at the 960 px minimum: the 656 px budget, the compact
+/// capsule (6 px sides, same height), wrap-not-overflow, and one line. The
+/// test font is a 0.6 em monospace (7.8 px a glyph at 13 px), wider than the
+/// real UI font: the 69 label glyphs plus gaps take 730 px at `Regular`, which
+/// must wrap Advanced (so the check can fail), and 646 px at Settings' own
+/// density, which must not.
 #[gpui::test]
 fn settings_tabs_are_compact_and_stay_inside_at_960(cx: &mut TestAppContext) {
-    let widths = [TabDensity::Regular, TabDensity::Compact].map(|density| {
+    let settings = crate::pages::settings::TAB_DENSITY;
+    let tabs = [TabDensity::Regular, settings].map(|density| {
         let (_view, cx) = cx.add_window_view(|_, _| TabsHarness { density });
-        cx.simulate_resize(size(px(960.), px(850.)));
+        cx.simulate_resize(size(px(960.), px(640.)));
         cx.run_until_parked();
         let strip = cx.debug_bounds("strip").expect("strip laid out");
         assert_eq!(strip.size.width, px(656.), "{density:?}: strip budget");
@@ -312,15 +315,31 @@ fn settings_tabs_are_compact_and_stay_inside_at_960(cx: &mut TestAppContext) {
                 strip.left() <= tab.left() && tab.right() <= strip.right(),
                 "{density:?}: tab {i} at {tab:?} overflows the strip {strip:?}"
             );
-            tab.size.width
+            tab
         })
         .collect::<Vec<_>>()
     });
-    for (i, (regular, compact)) in widths[0].iter().zip(&widths[1]).enumerate() {
+    let [regular, compact] = &tabs;
+    for (i, (r, c)) in regular.iter().zip(compact).enumerate() {
         assert_eq!(
-            *regular - *compact,
-            (space::s5() - space::s4()) * 2.,
-            "tab {i} should lose 4 px a side"
+            r.size.width - c.size.width,
+            (space::s5() - space::s3()) * 2.,
+            "tab {i} should lose 6 px a side"
+        );
+    }
+    // Negative control: the same harness at `Regular` pushes Advanced to a
+    // second line, so a one-line pass below is not vacuous.
+    assert!(
+        regular[6].top() > regular[0].top(),
+        "Regular: Advanced at {:?} should wrap below General at {:?}",
+        regular[6],
+        regular[0]
+    );
+    for (i, tab) in compact.iter().enumerate() {
+        assert_eq!(
+            tab.top(),
+            compact[0].top(),
+            "{settings:?}: tab {i} at {tab:?} left the first line"
         );
     }
 }

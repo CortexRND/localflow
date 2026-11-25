@@ -1095,7 +1095,7 @@ impl TabDensity {
     fn padding_x(self) -> Pixels {
         match self {
             TabDensity::Regular => space::s5(),
-            TabDensity::Compact => space::s4(),
+            TabDensity::Compact => space::s3(),
         }
     }
 }
