@@ -312,12 +312,13 @@ _FLAG_OFF_NOTES = _FLAG_OFF_FRONT + (
 
 def test_diarization_off_markdown_is_byte_identical(client):
     start, status, stop = _flag_off_meeting(client)
-    notes = Path(stop["notes_path"]).read_bytes()
-    log = Path(stop["log_path"]).read_bytes()
-    assert log == _FLAG_OFF_LOG
-    assert notes == _FLAG_OFF_NOTES
+    # Text with universal newlines: write_text emits CRLF on Windows.
+    notes = Path(stop["notes_path"]).read_text(encoding="utf-8")
+    log = Path(stop["log_path"]).read_text(encoding="utf-8")
+    assert log == _FLAG_OFF_LOG.decode("utf-8")
+    assert notes == _FLAG_OFF_NOTES.decode("utf-8")
     for text in (notes, log):
-        assert b"meeting_id" not in text and b"speakers:" not in text
+        assert "meeting_id" not in text and "speakers:" not in text
     assert all(set(s) == {"stamp", "text", "source"} for s in status["session"]["segments"])
     assert (start["diarization"], start["diarization_error"]) == ("off", "")
     assert status["speaker_diarization"] is False
@@ -555,6 +556,30 @@ class ScriptedCollector:
 
     def finalize(self, segments, *, timeout=None):
         return self._finalize(segments)
+
+
+def test_failed_capture_shutdown_closes_the_collector(real_session, monkeypatch):
+    class ClosingCollector(ScriptedCollector):
+        closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    def no_finalize(segments):
+        raise AssertionError("finalize must not run when stop failed")
+
+    collector = ClosingCollector(no_finalize)
+    _use_collector(monkeypatch, collector)
+    real_session.post("/meeting/start", json={"title": "Launch sync"})
+
+    def broken_stop(self):
+        raise RuntimeError("audio device vanished")
+
+    monkeypatch.setattr(meetings.MeetingSession, "stop", broken_stop)
+    with pytest.raises(RuntimeError, match="audio device vanished"):
+        real_session.post("/meeting/stop")
+    assert collector.closed == 1
+    assert server._session_state == "idle"
 
 
 def test_finalize_raising_is_failed(real_session, monkeypatch):

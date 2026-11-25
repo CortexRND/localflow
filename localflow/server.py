@@ -751,6 +751,17 @@ def _diarization_payload(session) -> dict:
     return {"diarization": status, "diarization_error": error}
 
 
+def _close_diarization(session) -> None:
+    """Stop a session's collector without finalizing. Never raises."""
+    collector = getattr(session, "diarization", None)
+    if collector is None:
+        return
+    try:
+        collector.close()
+    except Exception:
+        log.exception("closing speaker diarization failed")
+
+
 def _finalize_diarization(session, segments) -> tuple[list, str, list[dict]]:
     """(segments, status, speakers). Never raises; any problem keeps the original segments."""
     collector = getattr(session, "diarization", None)
@@ -993,11 +1004,17 @@ async def meeting_stop() -> dict:
 
     def _finish() -> dict:
         global _last_saved
-        segments = session.stop()
-        if _config.sounds_enabled:
-            sounds.play("stop")
-        _watcher.resume()
-        segments, diarization_status, speakers = _finalize_diarization(session, segments)
+        finalized = False
+        try:
+            segments = session.stop()
+            if _config.sounds_enabled:
+                sounds.play("stop")
+            _watcher.resume()
+            segments, diarization_status, speakers = _finalize_diarization(session, segments)
+            finalized = True
+        finally:
+            if not finalized:  # capture shutdown failed: don't leave the worker running
+                _close_diarization(session)
         # Snapshot the summary client and config together before a reload can
         # change the provider or model for the title.
         with _config_lock:
