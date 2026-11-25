@@ -442,6 +442,45 @@
         }
       }
     },
+    "/api/perf": {
+      "get": {
+        "summary": "Api Perf",
+        "description": "Local speed summary from the perf ledger: numbers and labels only.\n\nThe body is `perf_ledger.summary_json`, byte-identical to `lf-rs serve`.",
+        "operationId": "api_perf_api_perf_get",
+        "parameters": [
+          {
+            "name": "window",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "7d",
+              "title": "Window"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/autostart": {
       "get": {
         "summary": "Api Autostart",

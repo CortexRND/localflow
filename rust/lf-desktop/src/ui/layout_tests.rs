@@ -277,6 +277,95 @@ fn setting_rows_fit_at_960(cx: &mut TestAppContext) {
     }
 }
 
+/// The Settings tab strip, as the page builds it, in the same sidebar +
+/// column frame, with the longest label selected.
+struct TabsHarness {
+    density: TabDensity,
+}
+
+impl Render for TabsHarness {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use crate::controllers::settings::Tab;
+        let t = Theme::light();
+        let items: Vec<(Tab, &'static str)> = Tab::ALL.iter().map(|t| (*t, t.label())).collect();
+        let strip = div().debug_selector(|| "strip".into()).child(tabs(
+            &t,
+            "settings-tab",
+            &items,
+            Tab::Dictation,
+            self.density,
+            Rc::new(|_, _, _| {}),
+        ));
+        div()
+            .flex()
+            .size_full()
+            .child(div().flex_none().w(px(size::SIDEBAR)))
+            .child(column("column", div().child(strip)))
+    }
+}
+
+/// Settings' seven tabs at the 960 px minimum: the 656 px budget, the compact
+/// capsule (6 px sides, same height), wrap-not-overflow, and one line. The
+/// test font is a 0.6 em monospace (7.8 px a glyph at 13 px), wider than the
+/// real UI font: the 69 label glyphs plus gaps take 730 px at `Regular`, which
+/// must wrap Advanced (so the check can fail), and 646 px at Settings' own
+/// density, which must not.
+#[gpui::test]
+fn settings_tabs_are_compact_and_stay_inside_at_960(cx: &mut TestAppContext) {
+    let settings = crate::pages::settings::TAB_DENSITY;
+    let tabs = [TabDensity::Regular, settings].map(|density| {
+        let (_view, cx) = cx.add_window_view(|_, _| TabsHarness { density });
+        cx.simulate_resize(size(px(960.), px(640.)));
+        cx.run_until_parked();
+        let strip = cx.debug_bounds("strip").expect("strip laid out");
+        assert_eq!(strip.size.width, px(656.), "{density:?}: strip budget");
+        [
+            "settings-tab-0",
+            "settings-tab-1",
+            "settings-tab-2",
+            "settings-tab-3",
+            "settings-tab-4",
+            "settings-tab-5",
+            "settings-tab-6",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, selector)| {
+            let tab = cx.debug_bounds(selector).expect("tab laid out");
+            assert_eq!(tab.size.height, size::control_sm(), "{density:?}: tab {i}");
+            assert!(
+                strip.left() <= tab.left() && tab.right() <= strip.right(),
+                "{density:?}: tab {i} at {tab:?} overflows the strip {strip:?}"
+            );
+            tab
+        })
+        .collect::<Vec<_>>()
+    });
+    let [regular, compact] = &tabs;
+    for (i, (r, c)) in regular.iter().zip(compact).enumerate() {
+        assert_eq!(
+            r.size.width - c.size.width,
+            (space::s5() - space::s3()) * 2.,
+            "tab {i} should lose 6 px a side"
+        );
+    }
+    // Negative control: the same harness at `Regular` pushes Advanced to a
+    // second line, so a one-line pass below is not vacuous.
+    assert!(
+        regular[6].top() > regular[0].top(),
+        "Regular: Advanced at {:?} should wrap below General at {:?}",
+        regular[6],
+        regular[0]
+    );
+    for (i, tab) in compact.iter().enumerate() {
+        assert_eq!(
+            tab.top(),
+            compact[0].top(),
+            "{settings:?}: tab {i} at {tab:?} left the first line"
+        );
+    }
+}
+
 /// Home's real status row (`pages::home::status_row`) in a card, in the page
 /// column.
 struct HomeStatus {

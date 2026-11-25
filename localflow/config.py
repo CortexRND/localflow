@@ -68,6 +68,7 @@ _SECTIONS: dict[str, dict[str, str]] = {
     "features": {
         "meetings": "meetings_enabled",
         "hot_phrases": "hot_phrases",
+        "perf_metrics": "perf_metrics",
     },
     "history": {
         "enabled": "history_enabled",
@@ -144,6 +145,7 @@ class Config:
     spoken_punctuation: bool = True
     silence_threshold_dbfs: float = -50.0
     hot_phrases: bool = True           # spoken trigger phrases expand into saved prompts
+    perf_metrics: bool = True          # local timings ledger (~/.localflow/perf), numbers only
     # Registered slash-command names: after a dictated "slash", an exact spoken
     # match is snapped to the registered spelling ("slash skill part" ->
     # "/skill_part"). Names listed here plus subdirectory names of skills_dirs.
@@ -364,11 +366,16 @@ def migrate_legacy(path: Path | None = None) -> Config | None:
     return config
 
 
+def read_config_file(path: Path) -> Config:
+    """Read one v2 config file; no defaults, no migration. Raises FileNotFoundError."""
+    return _config_from_v2(_parse(path))
+
+
 def load_config() -> Config:
     """Load v2 config, migrating the legacy flat file when needed."""
     target = config_path()
     if target.exists():
-        return _config_from_v2(_parse(target))
+        return read_config_file(target)
     legacy = legacy_config_path()
     if legacy.exists():
         migrated = migrate_legacy(legacy)
@@ -421,6 +428,7 @@ _FIELD_TYPES = {
     "pause_media_while_dictating": bool,
     "max_recording_seconds": int,
     "history_enabled": bool,
+    "perf_metrics": bool,
     "keep_audio_clips": int,
     "capture_system_audio": bool,
     "system_audio_device": str,

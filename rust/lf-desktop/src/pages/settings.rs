@@ -1028,6 +1028,10 @@ impl SettingsPage {
     }
 }
 
+/// Density of the Settings tab strip; the 960 px layout test renders the same
+/// value, so switching it back to `Regular` fails there.
+pub(crate) const TAB_DENSITY: ui::TabDensity = ui::TabDensity::Compact;
+
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
@@ -1043,6 +1047,7 @@ impl Render for SettingsPage {
             "settings-tab",
             &tab_items,
             self.tab,
+            TAB_DENSITY,
             Rc::new(move |tab, _, cx| {
                 let _ = this.update(cx, |p, cx| p.show_tab(tab, cx));
             }),

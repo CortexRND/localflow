@@ -249,6 +249,8 @@ def api(monkeypatch, tmp_path):
         work_prompts=False, vault_path=str(tmp_path / "vault"),
     )
     llm = TitleLLM()
+    # Meeting starts re-read the speaker flags; never from the developer's own file.
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(tmp_path / "config.toml"))
     monkeypatch.setattr(server, "_config", config)
     monkeypatch.setattr(server, "_summarizer", MeetingSummarizer(llm))
     monkeypatch.setattr(server, "_writer", ObsidianWriter(

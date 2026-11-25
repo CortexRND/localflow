@@ -1087,6 +1087,24 @@ pub fn row_button(t: &Theme, id: impl Into<ElementId>, selected: bool) -> Statef
         .focus(move |s| s.shadow(ring.clone()))
 }
 
+/// Side padding of each [`tabs`] capsule. `Compact` trims it so a long strip
+/// (Settings' seven tabs) stays on one line at the 960 px minimum window;
+/// height, gap and wrapping are the same for both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabDensity {
+    Regular,
+    Compact,
+}
+
+impl TabDensity {
+    fn padding_x(self) -> Pixels {
+        match self {
+            TabDensity::Regular => space::s5(),
+            TabDensity::Compact => space::s3(),
+        }
+    }
+}
+
 /// Page tabs as a quiet wrapping strip of capsules, deliberately unlike the
 /// [`Segmented`] control: no track, the selected tab is a filled capsule in
 /// a heavier weight (not colour alone), the others are plain secondary text.
@@ -1096,6 +1114,7 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
     id: &'static str,
     items: &[(T, &'static str)],
     current: T,
+    density: TabDensity,
     on_select: ValueHandler<T>,
 ) -> Div {
     let (sz, lh) = text::body();
@@ -1114,13 +1133,14 @@ pub fn tabs<T: Copy + PartialEq + 'static>(
             let strong = t.text;
             div()
                 .id(ElementId::NamedInteger(id.into(), i as u64))
+                .debug_selector(move || format!("{id}-{i}"))
                 .tab_index(0)
                 .cursor_pointer()
                 .flex()
                 .flex_none()
                 .items_center()
                 .h(size::control_sm())
-                .px(space::s5())
+                .px(density.padding_x())
                 .rounded_full()
                 .text_size(sz)
                 .line_height(lh)

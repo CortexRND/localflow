@@ -65,6 +65,8 @@ def config(tmp_path):
 def isolated(tmp_path, monkeypatch, config):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    # Meeting starts re-read the speaker flags; never from the developer's own file.
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(tmp_path / "config.toml"))
 
     def no_network(url):
         raise AssertionError(f"network: {url}")
