@@ -115,8 +115,8 @@ struct Chunk {
     source: String,
     offset: f64,
     timed: Vec<TimedText>,
-    /// Embedded turns only, each with its L2-normalised vector.
-    turns: Vec<(SpeakerTurn, Vec<f64>)>,
+    /// Every valid turn; embedded ones carry their L2-normalised vector.
+    turns: Vec<(SpeakerTurn, Option<Vec<f64>>)>,
 }
 #[derive(Clone, Copy, Default)]
 struct Counts {
@@ -284,9 +284,10 @@ fn collect(
             Ok(Ok(turns)) => {
                 failures = 0;
                 log::debug!(
-                    "speaker turns ({}): {} embedded from {seconds:.1}s in {} ms",
+                    "speaker turns ({}): {} ({} embedded) from {seconds:.1}s in {} ms",
                     job.source,
                     turns.len(),
+                    turns.iter().filter(|(_, v)| v.is_some()).count(),
                     started.elapsed().as_millis()
                 );
                 chunks.push(Chunk {
@@ -323,25 +324,38 @@ fn collect(
 fn extract(
     backend: &mut dyn SpeakerBackend,
     audio: &[f32],
-) -> anyhow::Result<Vec<(SpeakerTurn, Vec<f64>)>> {
+) -> anyhow::Result<Vec<(SpeakerTurn, Option<Vec<f64>>)>> {
     let rate = SAMPLE_RATE as f64;
-    let mut embedded = Vec::new();
+    let duration = audio.len() as f64 / rate;
+    let mut turns = Vec::new();
     for turn in backend.diarize(audio)? {
-        // In samples, so NaN or out-of-range turn bounds are skipped too.
-        let from = ((turn.start.max(0.0) * rate) as usize).min(audio.len());
+        // Every finite, non-empty turn inside the audio takes part in alignment.
+        if !turn.start.is_finite() || !turn.end.is_finite() {
+            continue;
+        }
+        let turn = SpeakerTurn {
+            start: turn.start.max(0.0),
+            end: turn.end.min(duration),
+            ..turn
+        };
+        if turn.start >= turn.end {
+            continue;
+        }
+        // Only turns of at least MIN_TURN_SECONDS are embedded (and clustered).
+        let from = ((turn.start * rate) as usize).min(audio.len());
         let to = ((turn.end * rate) as usize).min(audio.len());
         if (to.saturating_sub(from) as f64) < MIN_TURN_SECONDS * rate {
+            turns.push((turn, None));
             continue;
         }
         let vector = backend.embed(&audio[from..to])?;
         let vector: Vec<f64> = vector.iter().map(|&v| v as f64).collect();
         let norm = vector.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if vector.is_empty() || !norm.is_finite() || norm == 0.0 {
-            continue;
-        }
-        embedded.push((turn, vector.iter().map(|v| v / norm).collect()));
+        let vector = (!vector.is_empty() && norm.is_finite() && norm > 0.0)
+            .then(|| vector.iter().map(|v| v / norm).collect());
+        turns.push((turn, vector));
     }
-    Ok(embedded)
+    Ok(turns)
 }
 
 fn finalize(chunks: Vec<Chunk>, counts: &BTreeMap<String, Counts>, options: &Options) -> Finalized {
@@ -355,32 +369,54 @@ fn finalize(chunks: Vec<Chunk>, counts: &BTreeMap<String, Counts>, options: &Opt
         if count.dropped * 2 > count.offered {
             continue;
         }
+        // Turns without a vector are never clustered.
         let vectors: Vec<&[f64]> = chunks
             .iter()
-            .flat_map(|c| c.turns.iter().map(|(_, v)| v.as_slice()))
+            .flat_map(|c| c.turns.iter().filter_map(|(_, v)| v.as_deref()))
             .collect();
         let labels = match cluster(&vectors, options.threshold, Some(options.max_speakers)) {
             Ok(labels) => labels,
             Err(_) => return Finalized::empty(Status::Failed),
         };
         // Q4: a single remote speaker keeps "Others".
-        if labels.iter().max().copied().unwrap_or(0) < 1 {
+        let clusters = labels.iter().max().map_or(0, |top| top + 1);
+        if clusters < 2 {
             continue;
         }
         let mut labels = labels.into_iter();
         for chunk in chunks {
+            if chunk.turns.iter().all(|(_, v)| v.is_none()) {
+                continue; // no embedded turn: a plain channel chunk
+            }
+            // Embedded turns carry their cluster. Unembedded turns get one key
+            // per chunk-local speaker, at or above `clusters`: like align.py,
+            // that speaker's turns sum their overlap, but the key never merges
+            // with a real cluster (no linkage to embedded turns is inferred).
+            let mut untracked: Vec<usize> = Vec::new();
             let turns: Vec<SpeakerTurn> = chunk
                 .turns
                 .iter()
-                .map(|(turn, _)| SpeakerTurn {
-                    local_speaker: labels.next().expect("one label per vector"),
+                .map(|(turn, vector)| SpeakerTurn {
+                    local_speaker: match vector {
+                        Some(_) => labels.next().expect("one label per vector"),
+                        None => {
+                            let at = untracked
+                                .iter()
+                                .position(|&s| s == turn.local_speaker)
+                                .unwrap_or_else(|| {
+                                    untracked.push(turn.local_speaker);
+                                    untracked.len() - 1
+                                });
+                            clusters + at
+                        }
+                    },
                     ..*turn
                 })
                 .collect();
-            if turns.is_empty() {
-                continue; // no usable turns: a plain channel chunk
-            }
-            let assigned = assign_speakers(&chunk.timed, &turns);
+            let assigned: Vec<_> = assign_speakers(&chunk.timed, &turns)
+                .into_iter()
+                .map(|(text, speaker)| (text, speaker.filter(|&s| s < clusters)))
+                .collect();
             labelled.push(LabelledChunk {
                 source: chunk.source.clone(),
                 offset: chunk.offset,

@@ -160,6 +160,149 @@ fn short_turns_are_not_embedded_and_text_falls_back_to_none() {
 }
 
 #[test]
+fn a_short_turn_keeps_its_own_text_instead_of_lending_it_to_a_long_neighbour() {
+    // Turns: [0, 1.5) speaker A, [1.5, 3) speaker B, then a 0.5 s turn [3, 3.5)
+    // that is too short to embed. Its text "c" touches B (gap 0) and fully
+    // overlaps the short turn: overlap wins, so it stays unlabelled rather
+    // than being attributed to B as it was when short turns were discarded.
+    let collector = start(Fake::default());
+    let mut samples = audio(&[0.1, 0.3]);
+    samples.extend(std::iter::repeat_n(0.5, SAMPLE_RATE as usize / 2));
+    let timed = vec![
+        TimedText {
+            start: 0.0,
+            end: 1.5,
+            text: "a".into(),
+        },
+        TimedText {
+            start: 1.5,
+            end: 3.0,
+            text: "b".into(),
+        },
+        TimedText {
+            start: 3.0,
+            end: 3.5,
+            text: "c".into(),
+        },
+    ];
+    collector.feed("others", 0.0, samples, timed);
+    let result = collector.close().unwrap().wait();
+    assert_eq!(result.status, Status::Ok);
+    assert_eq!(
+        result.chunks[0].runs,
+        [
+            run(0.0, 1.5, "a", Some(0)),
+            run(1.5, 3.0, "b", Some(1)),
+            run(3.0, 3.5, "c", None)
+        ]
+    );
+}
+
+#[test]
+fn unembedded_turns_get_keys_apart_from_clusters_and_are_never_clustered() {
+    // Two short turns of the same backend speaker as a long one (bucket 1):
+    // they must not join cluster 0, and text spanning both stays unlabelled.
+    let collector = start(Fake::default());
+    let mut samples = audio(&[0.1, 0.3]);
+    samples.extend(std::iter::repeat_n(0.1, SAMPLE_RATE as usize / 2));
+    let timed = vec![
+        TimedText {
+            start: 0.0,
+            end: 1.5,
+            text: "a".into(),
+        },
+        TimedText {
+            start: 1.5,
+            end: 3.0,
+            text: "b".into(),
+        },
+        TimedText {
+            start: 3.1,
+            end: 3.4,
+            text: "c".into(),
+        },
+    ];
+    collector.feed("others", 0.0, samples, timed);
+    let result = collector.close().unwrap().wait();
+    assert_eq!(
+        result.chunks[0].runs,
+        [
+            run(0.0, 1.5, "a", Some(0)),
+            run(1.5, 3.0, "b", Some(1)),
+            run(3.1, 3.4, "c", None)
+        ]
+    );
+}
+
+/// Returns fixed turns; embeds by amplitude bucket like `Fake`.
+struct Scripted(Vec<SpeakerTurn>);
+impl SpeakerBackend for Scripted {
+    fn load(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn diarize(&mut self, _: &[f32]) -> Result<Vec<SpeakerTurn>> {
+        Ok(self.0.clone())
+    }
+    fn embed(&mut self, audio: &[f32]) -> Result<Vec<f32>> {
+        let mut v = vec![0.0; 8];
+        v[bucket(audio[0])] = 1.0;
+        Ok(v)
+    }
+}
+
+#[test]
+fn short_turns_of_one_local_speaker_sum_their_overlap_like_align_py() {
+    let turn = |start, end, local_speaker| SpeakerTurn {
+        start,
+        end,
+        local_speaker,
+    };
+    // Embedded: A [0, 1.5) and B [5, 6.5). Local speaker 7 has two 0.6 s turns,
+    // each too short to embed. Text "x" [0.9, 3.0] overlaps A by 0.6 and each
+    // short turn by 0.6: separately they only tie A (and A starts first), but
+    // summed (1.2) they win, so "x" goes to the unembedded speaker -> None.
+    let turns = vec![
+        turn(0.0, 1.5, 0),
+        turn(1.5, 2.1, 7),
+        turn(2.4, 3.0, 7),
+        turn(5.0, 6.5, 1),
+    ];
+    let level = |t: f64| if (5.0..6.5).contains(&t) { 0.3 } else { 0.1 };
+    let samples: Vec<f32> = (0..7 * SAMPLE_RATE as usize)
+        .map(|i| level(i as f64 / SAMPLE_RATE as f64))
+        .collect();
+    let timed = vec![
+        TimedText {
+            start: 0.0,
+            end: 0.9,
+            text: "a".into(),
+        },
+        TimedText {
+            start: 0.9,
+            end: 3.0,
+            text: "x".into(),
+        },
+        TimedText {
+            start: 5.0,
+            end: 6.5,
+            text: "z".into(),
+        },
+    ];
+    let collector = Collector::start(Box::new(Scripted(turns)), Options::default()).unwrap();
+    collector.feed("others", 0.0, samples, timed);
+    let result = collector.close().unwrap().wait();
+    assert_eq!(result.status, Status::Ok);
+    assert_eq!(
+        result.chunks[0].runs,
+        [
+            run(0.0, 0.9, "a", Some(0)),
+            run(0.9, 3.0, "x", None),
+            run(5.0, 6.5, "z", Some(1))
+        ]
+    );
+}
+
+#[test]
 fn single_cluster_or_nothing_fed_keeps_channel() {
     let collector = start(Fake::default());
     collector.feed("others", 0.0, audio(&[0.1, 0.1]), texts(2));
