@@ -400,7 +400,8 @@ _SPEAKER_ERRORS = {
         "The transcript file was moved or deleted, so speakers can't be changed."
     ),
     "this meeting has no stored voice data": (
-        "This meeting was saved without speaker recognition, so there is no voice to remember."
+        "This meeting has no stored voice data (recognition was off when saved, "
+        "or voice data was forgotten)."
     ),
     "speaker recognition is off": "Speaker recognition is off.",
 }
