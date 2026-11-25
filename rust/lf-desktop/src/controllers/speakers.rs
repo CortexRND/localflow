@@ -85,6 +85,33 @@ pub struct SpeakerStore {
     seq: u64,
 }
 
+/// What identifies a saved meeting record: its `meeting_id`, else (an
+/// unlabelled save, e.g. a recovery checkpoint) its notes or log path.
+/// `None` when the record names none of them.
+fn record_key(saved: &Value) -> Option<(&'static str, &str)> {
+    ["meeting_id", "notes_path", "log_path"]
+        .into_iter()
+        .find_map(|field| {
+            let value = saved.get(field)?.as_str()?.trim();
+            (!value.is_empty()).then_some((field, value))
+        })
+}
+
+/// Whether two saved records are the same meeting. Records without any
+/// key are only the same when identical, so two unrelated id-less saves
+/// are never confused.
+fn same_record(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => match (record_key(a), record_key(b)) {
+            (Some(ka), Some(kb)) => ka == kb,
+            (None, None) => a == b,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 impl SpeakerStore {
     // ------------------------------------------------------- saved panel ---
 
@@ -147,15 +174,16 @@ impl SpeakerStore {
 
     /// `last_saved` from a status poll. A poll sent before the latest edit
     /// reply may hold the pre-edit speakers of the same meeting: kept local.
-    /// A different meeting (or none) is always adopted.
-    pub fn adopt_polled(&mut self, ticket: SavedTicket, saved: Option<Value>) {
-        let current = self
-            .saved
-            .as_ref()
-            .and_then(|s| s.get("meeting_id"))
-            .cloned();
-        let polled = saved.as_ref().and_then(|s| s.get("meeting_id")).cloned();
-        if ticket.0 != self.seq && current == polled {
+    ///
+    /// `pinned`: this window still shows its own "Notes saved" banner, so
+    /// the record from its Stop stays put; only fresher data of that exact
+    /// record is taken. Unpinned, a different record (or none) is adopted.
+    pub fn adopt_polled(&mut self, ticket: SavedTicket, saved: Option<Value>, pinned: bool) {
+        let same = same_record(self.saved.as_ref(), saved.as_ref());
+        if pinned && !same {
+            return;
+        }
+        if ticket.0 != self.seq && same {
             return;
         }
         self.set_saved(saved);
@@ -633,10 +661,10 @@ mod tests {
         let again = store.next_probe().unwrap();
         assert_eq!(again.ids, vec![A.to_string()]);
         // A status poll sent before the edit with the old speakers: kept local.
-        store.adopt_polled(ticket, Some(saved(A, two())));
+        store.adopt_polled(ticket, Some(saved(A, two())), false);
         assert_eq!(store.speakers_of(A)[0].label, "Ana");
         // ... but a poll naming another meeting is adopted.
-        store.adopt_polled(ticket, Some(saved(B, two())));
+        store.adopt_polled(ticket, Some(saved(B, two())), false);
         assert_eq!(store.saved_id(false).as_deref(), Some(B));
     }
 
@@ -805,7 +833,7 @@ mod tests {
         assert!(store.toggle_recent(B));
         for _ in 0..3 {
             let ticket = store.poll_started();
-            store.adopt_polled(ticket, Some(saved(A, two())));
+            store.adopt_polled(ticket, Some(saved(A, two())), false);
         }
         assert_eq!(
             store.panel(false).as_deref(),
@@ -849,7 +877,7 @@ mod tests {
         assert!(store.merge_picker().1.chosen);
 
         let ticket = store.poll_started();
-        store.adopt_polled(ticket, Some(saved(A, vec![two()[0].clone()])));
+        store.adopt_polled(ticket, Some(saved(A, vec![two()[0].clone()])), false);
         assert_eq!(store.merge_choice, "");
         let (items, picker) = store.merge_picker();
         assert!(items.is_empty() && !picker.chosen);
@@ -862,7 +890,101 @@ mod tests {
 
         // The same id coming back is not a pick either.
         let ticket = store.poll_started();
-        store.adopt_polled(ticket, Some(saved(A, two())));
+        store.adopt_polled(ticket, Some(saved(A, two())), false);
         assert!(!store.merge_picker().1.chosen);
+    }
+
+    /// While this window's "Notes saved" banner is kept, a poll naming
+    /// another meeting (another client's Stop) never replaces the panel.
+    #[test]
+    fn a_pinned_local_save_ignores_another_polled_meeting() {
+        let mut store = SpeakerStore::default();
+        store.present_saved(Some(saved(A, two())));
+        for _ in 0..3 {
+            let ticket = store.poll_started();
+            store.adopt_polled(ticket, Some(saved(B, two())), true);
+        }
+        assert_eq!(store.saved_id(false).as_deref(), Some(A));
+        assert_eq!(store.panel(false).as_deref(), Some(A));
+        // A poll with nothing saved doesn't clear it either.
+        let ticket = store.poll_started();
+        store.adopt_polled(ticket, None, true);
+        assert_eq!(store.panel(false).as_deref(), Some(A));
+        // Once the banner is gone the poll is adopted again.
+        let ticket = store.poll_started();
+        store.adopt_polled(ticket, Some(saved(B, two())), false);
+        assert_eq!(store.panel(false).as_deref(), Some(B));
+    }
+
+    /// An unlabelled local save shows no panel, and a labelled meeting
+    /// saved elsewhere is not attached to its banner.
+    #[test]
+    fn a_pinned_unlabelled_save_never_shows_a_polled_meeting() {
+        let mut store = SpeakerStore::default();
+        store.present_saved(Some(json!({"title": "x", "notes_path": "/local.md"})));
+        let ticket = store.poll_started();
+        store.adopt_polled(ticket, Some(saved(B, two())), true);
+        assert_eq!(store.panel(false), None);
+        assert_eq!(store.saved_id(false), None);
+    }
+
+    /// Id-less records are told apart by their paths (or not at all).
+    #[test]
+    fn id_less_records_are_kept_apart() {
+        let local = json!({"title": "x", "meeting_id": null, "notes_path": "/a.md"});
+        let other = json!({"title": "y", "meeting_id": null, "notes_path": "/b.md"});
+        assert!(!same_record(Some(&local), Some(&other)));
+        assert!(same_record(Some(&local), Some(&local.clone())));
+        let bare = json!({"title": "x"});
+        assert!(!same_record(Some(&bare), Some(&json!({"title": "y"}))));
+        assert!(!same_record(Some(&bare), Some(&local)));
+        assert!(!same_record(Some(&bare), None));
+
+        let mut store = SpeakerStore::default();
+        store.present_saved(Some(local.clone()));
+        let ticket = store.poll_started();
+        store.adopt_polled(ticket, Some(other.clone()), true);
+        assert_eq!(store.saved, Some(local));
+        // Unpinned, a different id-less record is adopted.
+        let ticket = store.poll_started();
+        store.adopt_polled(ticket, Some(other.clone()), false);
+        assert_eq!(store.saved, Some(other));
+    }
+
+    /// Pinned, the same meeting still takes fresh speakers; a poll sent
+    /// before the latest edit does not undo it.
+    #[test]
+    fn a_pinned_save_takes_fresh_data_of_the_same_meeting_only() {
+        let client = FakeMeetingClient::new();
+        client.seed_speakers(A, two());
+        let mut store = SpeakerStore::default();
+        store.present_saved(Some(saved(A, two())));
+        let ticket = store.poll_started();
+        store.adopt_polled(ticket, Some(saved(A, vec![two()[0].clone()])), true);
+        assert_eq!(store.speakers_of(A).len(), 1, "fresh poll applied");
+
+        store.adopt_polled(store.poll_started(), Some(saved(A, two())), true);
+        let stale = store.poll_started();
+        assert!(store.begin_rename(A, "S1"));
+        let request = store.commit("Ana").unwrap();
+        let reply = apply_edit(&client, &request, ());
+        store.edit_finished(&request, reply);
+        store.adopt_polled(stale, Some(saved(A, two())), true);
+        assert_eq!(store.speakers_of(A)[0].label, "Ana", "stale poll ignored");
+    }
+
+    /// A Recent panel opened under a pinned banner survives its polls.
+    #[test]
+    fn a_recent_panel_survives_pinned_polls() {
+        let mut store = SpeakerStore::default();
+        store.store(B, Some(&json!({"speakers": two()})));
+        store.present_saved(Some(saved(A, two())));
+        assert!(store.toggle_recent(B));
+        for id in [A, B] {
+            let ticket = store.poll_started();
+            store.adopt_polled(ticket, Some(saved(id, two())), true);
+        }
+        assert_eq!(store.panel(false).as_deref(), Some(B));
+        assert_eq!(store.saved_id(false).as_deref(), Some(A));
     }
 }

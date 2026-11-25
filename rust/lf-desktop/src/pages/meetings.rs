@@ -191,15 +191,18 @@ impl MeetingsPage {
                 }
                 let was_unreachable = matches!(this.phase, Phase::Offline(_) | Phase::Loading);
                 let reachable = !matches!(snap.phase, Phase::Offline(_));
+                let keep = matches!(this.phase, Phase::Saved { .. } | Phase::Error(_))
+                    && snap.phase == Phase::Idle;
+                // The retained "Notes saved" banner belongs to this window's
+                // Stop: its speaker panel stays on that exact record.
+                let pinned = keep && matches!(this.phase, Phase::Saved { .. });
                 if reachable {
                     let before = this.speakers.merge_picker().1;
                     this.speakers
-                        .adopt_polled(saved_ticket, snap.last_saved.clone());
+                        .adopt_polled(saved_ticket, snap.last_saved.clone(), pinned);
                     // Another client may have renamed or merged speakers.
                     this.resync_merge_select_if_changed(before, cx);
                 }
-                let keep = matches!(this.phase, Phase::Saved { .. } | Phase::Error(_))
-                    && snap.phase == Phase::Idle;
                 if !keep {
                     this.phase = snap.phase;
                 }
@@ -1478,5 +1481,77 @@ mod speaker_tests {
         meetings.update(cx, |p, cx| p.commit_speaker(cx));
         cx.run_until_parked();
         assert_eq!(merges(&shell, cx), before, "nothing is merged by itself");
+    }
+
+    /// Meeting B, saved by another client.
+    const ELSEWHERE_ID: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
+
+    fn elsewhere() -> serde_json::Value {
+        serde_json::json!({
+            "title": "Elsewhere", "notes_path": "/elsewhere.md",
+            "meeting_id": ELSEWHERE_ID, "diarization": "ok",
+            "speakers": [{"id": "S1", "label": "Bo", "seconds": 10.0}],
+        })
+    }
+
+    /// Local Stop of meeting A, then idle polls report B as `last_saved`:
+    /// the kept "Notes saved" banner keeps A's panel and edits go to A.
+    /// "New meeting" drops the banner and the next poll adopts B.
+    #[gpui::test]
+    fn idle_polls_for_another_meeting_keep_the_local_saved_panel(cx: &mut TestAppContext) {
+        let (shell, meetings, cx, _dir) = open_fixture(cx);
+        meetings.update(cx, |p, cx| p.start_and_stop(cx));
+        cx.run_until_parked();
+        fake(&shell, cx).set_last_saved(Some(elsewhere()));
+        for _ in 0..3 {
+            meetings.update(cx, |p, cx| p.poll(false, cx));
+            cx.run_until_parked();
+        }
+        meetings.read_with(cx, |p, _| {
+            assert!(
+                matches!(p.phase, super::Phase::Saved { .. }),
+                "{:?}",
+                p.phase
+            );
+            assert_eq!(p.speaker_panel().as_deref(), Some(FIXTURE_SAVED_ID));
+            assert!(p.speakers.speakers_of(FIXTURE_SAVED_ID).len() > 1);
+        });
+
+        meetings.update(cx, |p, cx| p.new_meeting(cx));
+        meetings.update(cx, |p, cx| p.poll(false, cx));
+        cx.run_until_parked();
+        meetings.read_with(cx, |p, _| {
+            assert_eq!(p.phase, super::Phase::Idle);
+            assert_eq!(p.speaker_panel().as_deref(), Some(ELSEWHERE_ID));
+        });
+    }
+
+    /// A local save without speaker labels shows no panel, even when a
+    /// poll then reports a labelled meeting saved elsewhere.
+    #[gpui::test]
+    fn an_unlabelled_local_save_never_shows_another_meetings_speakers(cx: &mut TestAppContext) {
+        let (shell, meetings, cx, _dir) = open_fixture(cx);
+        meetings.update(cx, |p, cx| p.start_and_stop(cx));
+        cx.run_until_parked();
+        // The fixture labels only its first stop: this one is unlabelled.
+        meetings.update(cx, |p, cx| p.start_and_stop(cx));
+        cx.run_until_parked();
+        meetings.read_with(cx, |p, _| {
+            assert!(
+                matches!(p.phase, super::Phase::Saved { .. }),
+                "{:?}",
+                p.phase
+            );
+            assert_eq!(p.speaker_panel(), None);
+        });
+        fake(&shell, cx).set_last_saved(Some(elsewhere()));
+        for _ in 0..2 {
+            meetings.update(cx, |p, cx| p.poll(false, cx));
+            cx.run_until_parked();
+        }
+        meetings.read_with(cx, |p, _| {
+            assert!(matches!(p.phase, super::Phase::Saved { .. }));
+            assert_eq!(p.speaker_panel(), None);
+        });
     }
 }
