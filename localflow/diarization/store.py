@@ -28,6 +28,9 @@ CHANNEL_LABELS = {"me": "Me", "others": "Others"}
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 _PUBLIC_KEYS = ("id", "label", "name", "source", "seconds")
 MAX_CENTROID_DIM = 4096
+# Staging files of MeetingSpeakerStore._write: mkstemp(prefix=".<meeting id>.", suffix=".tmp")
+# with tempfile's 8-character random token.
+_STAGING_RE = re.compile(r"\.[0-9a-f]{32}\.[a-z0-9_]{8}\.tmp")
 _LOCK = threading.RLock()
 _warned: set[tuple[str, str]] = set()
 
@@ -349,16 +352,29 @@ class MeetingSpeakerStore:
         Returns ``(speakers changed, files that could not be erased)``. Current and newer
         schema versions are scrubbed in place without migration, every other key kept; a file
         that is not JSON, has no readable speaker list or cannot be rewritten is counted as a
-        failure, never as erased. Caller-visible files other than sidecars are not touched.
+        failure, never as erased. Orphaned staging files of ``save`` (a crash between write and
+        replace) may hold voice data and are deleted; one that can't be is a failure. Nothing
+        else in the folder is touched.
         """
         changed = failed = 0
-        with _LOCK:
+        with _LOCK:  # every writer holds it, so no staging file here is in use
             root = self.root
             try:
                 names = sorted(os.listdir(root))
             except FileNotFoundError:
                 return 0, 0
             for name in names:
+                path = root / name
+                if _STAGING_RE.fullmatch(name):
+                    if path.is_symlink() or not path.is_file():
+                        continue  # not something _write creates; leave it alone
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        failed += 1
+                    continue
                 meeting_id = name[:-5] if name.endswith(".json") else ""
                 if not valid_meeting_id(meeting_id):
                     continue

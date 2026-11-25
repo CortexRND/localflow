@@ -457,3 +457,50 @@ def test_registry_import_is_isolated():
 def test_constructing_a_registry_touches_no_files(tmp_path):
     FileSpeakerRegistry(tmp_path / "speakers")
     assert not (tmp_path / "speakers").exists()
+
+
+# ---------------------------------------- orphaned sidecar staging (BUG_0002) ---
+
+def _staging(meetings, token="ab12cd_9"):
+    """A staging copy left by a crash between write and replace in MeetingSpeakerStore."""
+    path = meetings.root / f".{MID1}.{token}.tmp"
+    path.write_text(json.dumps(_sidecar(MID1, [_sp("S1", [1.0, 0.0], "a" * 32)])))
+    return path
+
+
+@pytest.mark.parametrize("single", [True, False])
+def test_forget_deletes_orphaned_sidecar_staging_files(rooms, single):
+    registry, meetings = rooms
+    vp = registry.enroll("Dana", [onehot(0)], "mock")
+    _seed(meetings, vp.id)
+    orphan = _staging(meetings)
+    unrelated = [meetings.root / name for name in (
+        f".{MID1}.short.tmp", f"{MID1}.abcdefgh.tmp", f".{MID1}.abcdefgh.json",
+        "notes.tmp", f".{'X' * 32}.abcdefgh.tmp")]
+    for path in unrelated:
+        path.write_text("keep")
+    lookalike_dir = meetings.root / f".{MID2}.abcdefgh.tmp"
+    lookalike_dir.mkdir()
+    assert registry.forget(vp.id if single else None) == 1  # one voiceprint either way
+    assert not orphan.exists()
+    assert all(p.read_text() == "keep" for p in unrelated)
+    assert lookalike_dir.is_dir()
+
+
+def test_undeletable_staging_file_is_not_reported_as_erased(rooms, monkeypatch):
+    registry, meetings = rooms
+    vp = registry.enroll("Dana", [onehot(0)], "mock")
+    _seed(meetings, vp.id)
+    orphan = _staging(meetings)
+    real_unlink = type(orphan).unlink
+
+    def refuse(self, *args, **kwargs):
+        if self == orphan:
+            raise PermissionError("locked")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(orphan), "unlink", refuse)
+    with pytest.raises(ErasureIncomplete) as info:
+        registry.forget()
+    assert info.value.failed == 1 and orphan.exists()
+    assert all(sp["centroid"] is None for sp in meetings.load(MID1)["speakers"])
