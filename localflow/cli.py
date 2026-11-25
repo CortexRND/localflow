@@ -832,6 +832,7 @@ def recall_cmd(question: str, since: str | None, k: int, no_llm: bool, as_json: 
         "logs_folder": config.logs_folder,
         "k": k,
         "since": since,
+        "cite_speakers": bool(config.speaker_diarization),
     }
     if no_llm:
         result = recall_module.search(question, **kwargs)
