@@ -637,6 +637,14 @@ fn dispatch(
                     return error(400, "enabled must be a boolean");
                 }
             }
+            let mut config = config;
+            if path == "/api/recall" && state.reload_before_put && state.config_reader.is_none() {
+                // Speaker labels follow the saved file like `lf-rs recall`, even
+                // when the startup snapshot differs; an unreadable file omits them.
+                let speakers = config::reload_config(&config)
+                    .is_ok_and(|saved| saved.field_bool("speaker_diarization") == Some(true));
+                config.set_field("speaker_diarization", json!(speakers));
+            }
             let request = BackendRequest {
                 method: method.clone(),
                 path: path.into(),

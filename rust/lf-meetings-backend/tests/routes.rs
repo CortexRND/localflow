@@ -1302,6 +1302,96 @@ async fn recall_reads_history_and_meetings_with_citations_and_no_llm() {
 }
 
 #[tokio::test]
+async fn recall_speaker_follows_live_setting_with_real_cleaner_on_both_llm_paths() {
+    let f = Fixture::new();
+    // One transcript per label so each is its chunk's first line; only labels
+    // the real `clean_speaker_name` leaves byte-identical are cited.
+    let (forty, forty_one) = ("A".repeat(40), "A".repeat(41));
+    let labels: [(&str, Option<&str>); 9] = [
+        ("Me", Some("Me")),
+        ("Dana O'Neil", Some("Dana O'Neil")),
+        ("José", Some("José")),
+        (forty.as_str(), Some(forty.as_str())),
+        (forty_one.as_str(), None), // capped at 40 characters
+        ("Jose\u{301}", None),      // NFKC composes the accent
+        ("\u{ff24}\u{ff41}\u{ff4e}\u{ff41}", None), // fullwidth "Dana"
+        ("Dana  Smith", None),      // whitespace collapsed
+        ("!!!", None),              // no letter or digit
+    ];
+    let logs = f
+        .dir
+        .path()
+        .join("vault")
+        .join(f.config.field_str("logs_folder").unwrap());
+    fs::create_dir_all(&logs).unwrap();
+    for (i, (label, _)) in labels.iter().enumerate() {
+        fs::write(
+            logs.join(format!("2026-11-20 09{i:02} L{i} (transcript).md")),
+            format!("**00:00** **{label}:** launch budget item{i}\n"),
+        )
+        .unwrap();
+    }
+    // One Router whose config reader flips the live setting between requests.
+    let diarize = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (config, diarize) = (f.config.clone(), diarize.clone());
+        move || -> Result<Config> {
+            let mut config = config.clone();
+            config.set_field("speaker_diarization", json!(diarize.load(Ordering::SeqCst)));
+            Ok(config)
+        }
+    };
+    let app = router(Arc::new(
+        ServerState::new(f.config.clone(), "test-token".into(), f.backend.clone())
+            .with_config_reader(Arc::new(reader)),
+    ));
+    let body = json!({"question":"launch budget","k":20});
+    let mut seen = Vec::new();
+    for llm in [false, true] {
+        let mut bodies = Vec::new();
+        for on in [false, true] {
+            diarize.store(on, Ordering::SeqCst);
+            f.models.calls.lock().unwrap().clear();
+            let mut body = body.clone();
+            body["llm"] = json!(llm);
+            let (status, mut response) =
+                request(app.clone(), "POST", "/api/recall", Some(body)).await;
+            assert_eq!(status, 200, "{response}");
+            assert_eq!(response["answer"].is_null(), !llm, "{response}");
+            let citations = response["citations"].as_array_mut().unwrap();
+            assert_eq!(citations.len(), labels.len(), "{citations:?}");
+            for citation in citations.iter_mut() {
+                let title = citation["title"].as_str().unwrap().to_owned();
+                let i: usize = title[1..].parse().unwrap();
+                let expected = labels[i].1.filter(|_| on);
+                let speaker = citation.as_object_mut().unwrap().remove("speaker");
+                // A present `null` must fail too, so compare the raw value.
+                assert_eq!(
+                    speaker,
+                    expected.map(Value::from),
+                    "llm={llm} on={on} {title}"
+                );
+            }
+            let prompts: Vec<_> = f
+                .models
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.2.clone())
+                .collect();
+            assert_eq!(prompts.len(), usize::from(llm));
+            bodies.push((response, prompts));
+        }
+        // Dropping `speaker` from the "on" body gives the "off" body exactly,
+        // and the prompt never changes.
+        assert_eq!(bodies[0], bodies[1], "llm={llm}");
+        seen.push(bodies.swap_remove(0).0["citations"].clone());
+    }
+    assert_eq!(seen[0], seen[1]);
+}
+
+#[tokio::test]
 async fn work_prompts_are_saved_queued_filtered_and_transitioned_atomically() {
     let mut f = Fixture::new();
     assert_eq!(
