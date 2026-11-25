@@ -1888,3 +1888,25 @@ def test_speaker_list_reports_the_servers_embedder_without_loading_it(
     monkeypatch.setattr(server._config, "diarization_backend", backend)
     out = rec.get("/api/speakers").json()
     assert out == {"speakers": [], "embedder": expected}
+
+
+# ---- any loopback IP literal as Host for local-only routes (ANALYSIS_0003)
+
+def test_export_accepts_a_server_bound_to_another_loopback_address(audio_rec):
+    vp = _enroll(audio_rec, _saved(audio_rec)).json()
+    headers = {"X-Localflow-Token": "test-token"}
+    with TestClient(server.app, base_url="http://127.0.0.2:8756", client=("127.0.0.2", 1),
+                    headers=headers) as local:
+        assert local.get("/api/speakers/export").status_code == 200
+        assert local.get("/api/speakers/export",
+                         headers={"X-Forwarded-For": "100.64.0.7"}).status_code == 403
+    with TestClient(server.app, base_url="http://127.0.0.2:8756", client=("10.0.0.5", 1),
+                    headers=headers) as remote:
+        assert remote.get("/api/speakers/export").status_code == 403
+    assert vp["id"]
+    # The shared token-middleware Host check is unchanged.
+    assert server._host_is_loopback("127.0.0.2:8756") is False
+    assert server._host_header_is_loopback("127.0.0.2:8756") is True
+    assert server._host_header_is_loopback("[::ffff:127.0.0.1]:1") is True
+    assert server._host_header_is_loopback("10.0.0.5") is False
+    assert server._host_header_is_loopback("127.0.0.1.evil.example") is False

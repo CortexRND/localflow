@@ -1430,12 +1430,22 @@ def _peer_is_loopback(host: object) -> bool:
     return (mapped or ip).is_loopback
 
 
+def _host_header_is_loopback(host_header: str) -> bool:
+    """``localhost`` or any loopback IP literal (127.0.0.0/8, ::1, IPv4-mapped), judged
+    like the peer; the shared ``_host_is_loopback`` used by the token middleware is unchanged."""
+    try:
+        host = urlparse(f"//{host_header}").hostname
+    except ValueError:
+        return False
+    return (host or "").lower() == "localhost" or _peer_is_loopback(host)
+
+
 def _request_is_local(request: Request) -> bool:
     """True only for a direct request from this computer: loopback peer, loopback Host,
     and no proxy/forwarding headers (a local proxy makes every peer look like loopback)."""
     if not _peer_is_loopback(request.client.host if request.client else None):
         return False
-    if not _host_is_loopback(request.headers.get("Host", "")):
+    if not _host_header_is_loopback(request.headers.get("Host", "")):
         return False
     names = {k.decode("latin-1").lower() for k, _ in request.headers.raw}
     return not any(n in _PROXY_HEADERS or n.startswith(_PROXY_HEADER_PREFIXES) for n in names)
