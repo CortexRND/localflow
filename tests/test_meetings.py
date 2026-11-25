@@ -1147,9 +1147,12 @@ def _relabel_fixture(tmp_path):
     return _write(tmp_path, segments, user_notes="**01:10** **Speaker 2:** mine")
 
 
-def _relabel(saved, stamps=frozenset({"01:10", "02:10"}), old="Speaker 2", new="Dåna",
+_S2_LINES = {"01:10": [True], "02:10": [True]}
+
+
+def _relabel(saved, lines=_S2_LINES, old="Speaker 2", new="Dåna",
              speakers=_RELABEL_SPEAKERS):
-    return relabel_transcript(saved.log_path, stamps, old, new, speakers=speakers,
+    return relabel_transcript(saved.log_path, lines, old, new, speakers=speakers,
                               meeting_id=saved.meeting_id)
 
 
@@ -1220,7 +1223,7 @@ def test_relabel_without_changes_does_not_rewrite(tmp_path):
     saved = _relabel_fixture(tmp_path)
     mtime = saved.log_path.stat().st_mtime_ns
     data = saved.log_path.read_bytes()
-    assert _relabel(saved, stamps={"09:59"}, speakers=None) == 0
+    assert _relabel(saved, lines={}, speakers=None) == 0
     assert saved.log_path.stat().st_mtime_ns == mtime
     assert saved.log_path.read_bytes() == data
 
@@ -1253,7 +1256,7 @@ def test_relabel_refuses_another_meetings_transcript(tmp_path):
     saved = _relabel_fixture(tmp_path)
     original = saved.log_path.read_bytes()
     with pytest.raises(TranscriptChanged):
-        relabel_transcript(saved.log_path, {"01:10"}, "Speaker 2", "Dana",
+        relabel_transcript(saved.log_path, {"01:10": [True]}, "Speaker 2", "Dana",
                            speakers=["x"], meeting_id="f" * 32)
     assert saved.log_path.read_bytes() == original
 
@@ -1278,11 +1281,90 @@ def test_relabel_preserves_mode_and_newlines(tmp_path):
 def test_relabel_handles_long_meeting_stamps(tmp_path):
     saved = _write(tmp_path, [Segment(0, "hi", "me"),
                               Segment(6005, "late", "others", None, "S1", "Speaker 1")])
-    assert relabel_transcript(saved.log_path, {"100:05"}, "Speaker 1", "Dana",
+    assert relabel_transcript(saved.log_path, {"100:05": [True]}, "Speaker 1", "Dana",
                               meeting_id=saved.meeting_id) == 1
     assert "**100:05** **Dana:** late" in _lines(saved.log_path)
 
 
 def test_relabel_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
-        relabel_transcript(tmp_path / "nope.md", {"00:00"}, "a", "b")
+        relabel_transcript(tmp_path / "nope.md", {"00:00": [True]}, "a", "b")
+
+
+def test_relabel_rewrites_only_the_flagged_occurrence_at_a_shared_stamp(tmp_path):
+    saved = _write(tmp_path, [
+        Segment(0, "hello", "me"),
+        Segment(70, "first", "others", 70.4, "S2", "Speaker 2"),
+        Segment(70.4, "second", "others", 72, "S3", "Speaker 2"),
+    ])
+    assert relabel_transcript(saved.log_path, {"01:10": [False, True]}, "Speaker 2", "Bob",
+                              meeting_id=saved.meeting_id) == 1
+    lines = _lines(saved.log_path)
+    assert "**01:10** **Speaker 2:** first" in lines
+    assert "**01:10** **Bob:** second" in lines
+
+
+@pytest.mark.parametrize("lines", [
+    {"01:10": [True, False]},
+    {"01:15": [True, True]},
+    {"05:00": [True]},
+])
+def test_relabel_refuses_when_lines_do_not_match(tmp_path, lines):
+    saved = _relabel_fixture(tmp_path)
+    original = saved.log_path.read_bytes()
+    with pytest.raises(TranscriptChanged):
+        _relabel(saved, lines=lines)
+    assert saved.log_path.read_bytes() == original
+    assert not [p for p in saved.log_path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_relabel_keeps_an_older_transcript_older(tmp_path):
+    import os
+
+    old = _relabel_fixture(tmp_path)
+    newer = _write(tmp_path, [Segment(0, "hi", "me")], title="Later",
+                   started_at=datetime(2026, 11, 14, 11, 0))
+    base = old.log_path.stat().st_mtime_ns
+    os.utime(old.log_path, ns=(base, base))
+    os.utime(newer.log_path, ns=(base + 10_000_000, base + 10_000_000))
+    assert latest_transcript_log(tmp_path / "logs") == newer.log_path
+    assert _relabel(old) == 2
+    assert old.log_path.stat().st_mtime_ns == base + 1000
+    assert latest_transcript_log(tmp_path / "logs") == newer.log_path
+
+
+def _rewrite_front(saved, old_line, new_line):
+    data = saved.log_path.read_text(encoding="utf-8")
+    assert old_line in data
+    saved.log_path.write_text(data.replace(old_line, new_line, 1), encoding="utf-8")
+
+
+@pytest.mark.parametrize("form", ["{id}", "'{id}'", '"{id}"  ', "{id}\t"])
+def test_relabel_accepts_obsidian_meeting_id_forms(tmp_path, form):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, f'meeting_id: "{saved.meeting_id}"',
+                   "meeting_id: " + form.format(id=saved.meeting_id))
+    assert _relabel(saved) == 2
+
+
+@pytest.mark.parametrize("form", ["{id}0", "'{id}\"", "x{id}", "{id} # c"])
+def test_relabel_rejects_other_meeting_id_values(tmp_path, form):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, f'meeting_id: "{saved.meeting_id}"',
+                   "meeting_id: " + form.format(id=saved.meeting_id))
+    original = saved.log_path.read_bytes()
+    with pytest.raises(TranscriptChanged):
+        _relabel(saved)
+    assert saved.log_path.read_bytes() == original
+
+
+def test_relabel_replaces_block_style_speakers(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, 'speakers: ["Me", "Speaker 1", "Speaker 2", "Speaker 2"]\n',
+                   "speakers:\n  - Me\n  - Speaker 1\n  - Speaker 2\n  - Speaker 2\n")
+    assert _relabel(saved) == 2
+    text = saved.log_path.read_text(encoding="utf-8")
+    assert '\nspeakers: ["Me", "Speaker 1", "Dåna", "Speaker 2"]\ntags: [meeting, localflow]\n' \
+        in text
+    assert "  - " not in text
+    assert _front(saved.log_path)["speakers"] == _RELABEL_SPEAKERS

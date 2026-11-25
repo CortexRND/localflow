@@ -914,6 +914,72 @@ def test_wrong_meeting_transcript_is_refused(diar):
     assert _sidecar_path(diar, stop["meeting_id"]).read_bytes() == sidecar
 
 
+def test_notes_file_as_log_path_is_refused(diar):
+    stop = _saved(diar)
+    notes = Path(stop["notes_path"])
+    original = notes.read_bytes()
+    sidecar = _point_sidecar_at(diar, stop["meeting_id"], notes)
+    assert diar.put(_url(stop, "/S2"), json={"name": "Dana"}).status_code == 409
+    assert diar.post(_url(stop, "/merge"), json={"from": "S3", "into": "S1"}).status_code == 409
+    assert notes.read_bytes() == original
+    assert _sidecar_path(diar, stop["meeting_id"]).read_bytes() == sidecar
+
+
+def _same_stamp_meeting(client):
+    """Two speakers labelled "Speaker 1" with lines at the same stamp (00:05)."""
+    from localflow.diarization.store import build_record
+
+    cfg = server._config
+    segments = [
+        Segment(0, "hello", "me"),
+        Segment(5, "from ann", "others", 5.4, "S1", "Speaker 1"),
+        Segment(5.4, "from bob", "others", 7, "S2", "Speaker 1"),
+        Segment(9, "ann again", "others", 11, "S1", "Speaker 1"),
+    ]
+    saved = ObsidianWriter(cfg.vault_path, cfg.notes_folder, cfg.logs_folder).write(
+        title="Same", category="Zoom", started_at=datetime(2026, 11, 14, 9, 0),
+        duration_seconds=60, notes_md="ok", segments=segments,
+    )
+    MeetingSpeakerStore(client.sidecars).save(build_record(
+        meeting_id=saved.meeting_id, log_path=str(saved.log_path),
+        notes_path=str(saved.notes_path), started_at="2026-11-14T09:00:00",
+        embedder="mock", status="ok", segments=segments, speakers=[
+            {"id": "S1", "label": "Speaker 1", "name": None, "source": "others",
+             "seconds": 2.4},
+            {"id": "S2", "label": "Speaker 1", "name": None, "source": "others",
+             "seconds": 1.6},
+        ]))
+    return {"meeting_id": saved.meeting_id}, saved
+
+
+def test_same_label_same_stamp_speakers_are_renamed_separately(client):
+    stop, saved = _same_stamp_meeting(client)
+    assert client.put(_url(stop, "/S2"), json={"name": "Bob"}).status_code == 200
+    lines = _lines(saved.log_path)
+    assert "**00:05** **Speaker 1:** from ann" in lines
+    assert "**00:05** **Bob:** from bob" in lines
+    assert client.put(_url(stop, "/S1"), json={"name": "Ann"}).status_code == 200
+    lines = _lines(saved.log_path)
+    assert "**00:05** **Ann:** from ann" in lines
+    assert "**00:05** **Bob:** from bob" in lines
+    assert "**00:09** **Ann:** ann again" in lines
+    assert _front(saved.log_path)["speakers"] == ["Me", "Ann", "Bob"]
+    labels = {sp["id"]: sp["label"] for sp in _sidecar(client, stop["meeting_id"])["speakers"]}
+    assert labels == {"S1": "Ann", "S2": "Bob"}
+
+
+def test_transcript_with_missing_lines_is_409(client):
+    stop, saved = _same_stamp_meeting(client)
+    text = saved.log_path.read_text(encoding="utf-8")
+    saved.log_path.write_text(text.replace("**00:05** **Speaker 1:** from bob\n\n", ""),
+                              encoding="utf-8")
+    original = saved.log_path.read_bytes()
+    sidecar = _sidecar_path(client, stop["meeting_id"]).read_bytes()
+    assert client.put(_url(stop, "/S2"), json={"name": "Bob"}).status_code == 409
+    assert saved.log_path.read_bytes() == original
+    assert _sidecar_path(client, stop["meeting_id"]).read_bytes() == sidecar
+
+
 def test_missing_transcript_is_404_and_keeps_the_sidecar(diar):
     stop = _saved(diar)
     Path(stop["log_path"]).unlink()

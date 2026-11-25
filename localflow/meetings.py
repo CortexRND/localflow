@@ -966,14 +966,24 @@ class TranscriptChanged(RuntimeError):
 
 _FRONT_END = re.compile(r"^---\r?$", re.MULTILINE)
 _RAW_NOTES_LINE = re.compile(r"^## My raw notes\r?$", re.MULTILINE)
-_SPEAKERS_LINE = re.compile(r"^speakers: [^\r\n]*", re.MULTILINE)
+# Flow style (`speakers: [...]`) or block style (`speakers:` + `  - item` lines),
+# as Obsidian's Properties editor may rewrite it.
+_SPEAKERS_LINE = re.compile(
+    r"^speakers:(?:[ \t][^\r\n]*)?(?:\r?\n[ \t]*-(?:[ \t][^\r\n]*)?(?=\r?\n|$))*",
+    re.MULTILINE,
+)
 
 
-def _relabel_text(text: str, stamps, old: str, new: str,
+def _relabel_text(text: str, lines, old: str, new: str,
                   speakers: list[str] | None = None,
                   meeting_id: str | None = None) -> tuple[str, int]:
-    """Relabel ``**MM:SS** **old:** `` transcript lines at ``stamps`` to ``new``
-    and replace the frontmatter ``speakers:`` line; returns (text, lines changed)."""
+    """Relabel ``**MM:SS** **old:** `` transcript lines to ``new`` and replace
+    the frontmatter ``speakers:`` entry; returns (text, lines changed).
+
+    ``lines`` maps a stamp to one flag per ``old``-labelled line at that stamp,
+    in body order; the i-th such line is rewritten iff its flag is True. A
+    stamp whose line count differs raises TranscriptChanged.
+    """
     head, rest = "", text
     if text.startswith(("---\n", "---\r\n")):
         m = _FRONT_END.search(text, 4)
@@ -982,35 +992,45 @@ def _relabel_text(text: str, stamps, old: str, new: str,
     m2 = _RAW_NOTES_LINE.search(rest)
     body, tail = (rest[:m2.start()], rest[m2.start():]) if m2 else (rest, "")
     if meeting_id is not None:
-        wanted = f"meeting_id: {json.dumps(meeting_id)}"
-        if not any(line.rstrip("\r") == wanted for line in head.split("\n")):
+        wanted = re.compile(
+            r"meeting_id:[ \t]*(?:\"{0}\"|'{0}'|{0})\s*".format(re.escape(meeting_id)))
+        if not any(wanted.fullmatch(line.rstrip("\r")) for line in head.split("\n")):
             raise TranscriptChanged("transcript does not belong to this meeting")
     count = 0
-    if old != new and stamps:
+    if old != new and lines:
         pattern = re.compile(
             r"^\*\*(\d{2,}:\d{2})\*\* \*\*" + re.escape(old) + r":\*\* ", re.MULTILINE)
+        seen: dict[str, int] = {}
 
         def repl(m: re.Match) -> str:
             nonlocal count
-            if m.group(1) in stamps:
+            key = m.group(1)
+            index = seen.get(key, 0)
+            seen[key] = index + 1
+            flags = lines.get(key)
+            if flags is not None and index < len(flags) and flags[index]:
                 count += 1
-                return f"**{m.group(1)}** **{new}:** "
+                return f"**{key}** **{new}:** "
             return m.group(0)
 
         body = pattern.sub(repl, body)
+        if any(seen.get(key, 0) != len(flags) for key, flags in lines.items()):
+            raise TranscriptChanged("transcript lines do not match the speaker data")
     if speakers is not None and head:
         line = "speakers: " + json.dumps(speakers, ensure_ascii=False)
         head = _SPEAKERS_LINE.sub(lambda _m: line, head, count=1)
     return head + body + tail, count
 
 
-def relabel_transcript(path: Path, stamps, old: str, new: str, *,
+def relabel_transcript(path: Path, lines, old: str, new: str, *,
                        speakers: list[str] | None = None,
                        meeting_id: str | None = None) -> int:
-    """Rewrite a saved transcript's speaker labels in place (atomic, mode kept).
+    """Rewrite a saved transcript's speaker labels in place (atomic, mode kept,
+    mtime nudged by 1 µs only so it never jumps ahead of newer transcripts).
 
-    Raises TranscriptChanged when the file is not this meeting's or changed
-    while being rewritten. The notes file is never touched.
+    ``lines``: see ``_relabel_text``. Raises TranscriptChanged when the file
+    is not this meeting's, its lines no longer match, or it changed while
+    being rewritten. The notes file is never touched.
     """
     import os
     import tempfile
@@ -1019,7 +1039,7 @@ def relabel_transcript(path: Path, stamps, old: str, new: str, *,
     before = os.stat(path)
     raw = path.read_bytes()
     text = raw.decode("utf-8")
-    new_text, count = _relabel_text(text, stamps, old, new, speakers, meeting_id)
+    new_text, count = _relabel_text(text, lines, old, new, speakers, meeting_id)
     data = new_text.encode("utf-8")
     if data == raw:
         return 0
@@ -1033,6 +1053,7 @@ def relabel_transcript(path: Path, stamps, old: str, new: str, *,
             os.chmod(tmp, before.st_mode & 0o7777)
         except OSError:
             pass
+        os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns + 1000))
         now = os.stat(path)
         if (now.st_size, now.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
             raise TranscriptChanged("transcript changed while it was being rewritten")

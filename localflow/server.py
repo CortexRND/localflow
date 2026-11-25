@@ -1235,6 +1235,14 @@ def _sidecar_transcript(record: dict) -> Path:
     log_path = record.get("log_path")
     resolved = vault_notes_path(log_path, _config.vault_path)
     if resolved:
+        notes_path = record.get("notes_path")
+        try:
+            is_notes = isinstance(notes_path, str) and (
+                Path(notes_path).expanduser().resolve() == Path(resolved))
+        except (OSError, RuntimeError, ValueError):
+            is_notes = False
+        if is_notes:
+            raise HTTPException(status_code=409, detail="transcript is the meeting notes file")
         return Path(resolved)
     try:
         exists = isinstance(log_path, str) and Path(log_path).expanduser().is_file()
@@ -1246,13 +1254,13 @@ def _sidecar_transcript(record: dict) -> Path:
 
 
 def _apply_speaker_edit(store, meeting_id: str, record: dict, updated: dict,
-                        stamps, old: str, new: str) -> dict:
+                        lines, old: str, new: str) -> dict:
     """Rewrite the transcript, then save the sidecar. Caller holds ``store.lock``."""
     global _last_saved
     from localflow.diarization.store import frontmatter_speakers, public_speakers
     path = _sidecar_transcript(record)
     try:
-        changed = relabel_transcript(path, stamps, old, new,
+        changed = relabel_transcript(path, lines, old, new,
                                      speakers=frontmatter_speakers(updated),
                                      meeting_id=meeting_id)
     except FileNotFoundError:
@@ -1289,7 +1297,7 @@ def api_meeting_speakers(meeting_id: str) -> dict:
 @app.put("/api/meetings/{meeting_id}/speakers/{speaker_id}")
 def api_meeting_speaker_rename(meeting_id: str, speaker_id: str, body: dict) -> dict:
     """Rename one speaker in a saved meeting's transcript and sidecar."""
-    from localflow.diarization.store import find_speaker, rename_speaker, speaker_stamps
+    from localflow.diarization.store import find_speaker, rename_speaker, speaker_lines
     name = clean_speaker_name(body.get("name"))
     if name is None:
         raise HTTPException(status_code=400, detail="invalid speaker name")
@@ -1303,13 +1311,13 @@ def api_meeting_speaker_rename(meeting_id: str, speaker_id: str, body: dict) -> 
             return _speakers_response(meeting_id, record)
         return _apply_speaker_edit(store, meeting_id, record,
                                    rename_speaker(record, speaker_id, name),
-                                   speaker_stamps(record, speaker_id), speaker["label"], name)
+                                   speaker_lines(record, speaker_id), speaker["label"], name)
 
 
 @app.post("/api/meetings/{meeting_id}/speakers/merge")
 def api_meeting_speakers_merge(meeting_id: str, body: dict) -> dict:
     """Merge one speaker of a saved meeting into another."""
-    from localflow.diarization.store import find_speaker, merge_speakers, speaker_stamps
+    from localflow.diarization.store import find_speaker, merge_speakers, speaker_lines
     from_id, into_id = body.get("from"), body.get("into")
     if not (isinstance(from_id, str) and isinstance(into_id, str) and from_id and into_id) \
             or from_id == into_id:
@@ -1326,7 +1334,7 @@ def api_meeting_speakers_merge(meeting_id: str, body: dict) -> dict:
             raise HTTPException(status_code=409, detail="speaker data is not usable")
         return _apply_speaker_edit(store, meeting_id, record,
                                    merge_speakers(record, from_id, into_id),
-                                   speaker_stamps(record, from_id), source["label"], new)
+                                   speaker_lines(record, from_id), source["label"], new)
 
 
 # Prompts are reviewed here but dispatched from the CLI only — no run endpoint.

@@ -122,20 +122,23 @@ def frontmatter_speakers(record: Mapping) -> list[str]:
     return list(labels.values())
 
 
-def speaker_stamps(record: Mapping, speaker_id: str) -> frozenset[str]:
-    """Stamps of this speaker's lines that no same-label identity shares."""
+def speaker_lines(record: Mapping, speaker_id: str) -> dict[str, list[bool]]:
+    """Per stamp, one flag per transcript line rendered with this speaker's
+    current label, in segment order: True where the line is this speaker's.
+
+    Only stamps with at least one line of this speaker are included.
+    """
     speaker = find_speaker(record, speaker_id)
     if speaker is None:
-        return frozenset()
+        return {}
     known = _labels(record)
     label = speaker["label"]
-    own = {stamp(s["start"]) for s in record["segments"] if s.get("speaker_id") == speaker_id}
-    clash = set()
+    flags: dict[str, list[bool]] = {}
     for s in record["segments"]:
         identity = _identity(known, s)
-        if identity is not None and identity[0] != f"id:{speaker_id}" and identity[1] == label:
-            clash.add(stamp(s["start"]))
-    return frozenset(own - clash)
+        if identity is not None and identity[1] == label:
+            flags.setdefault(stamp(s["start"]), []).append(s.get("speaker_id") == speaker_id)
+    return {k: v for k, v in flags.items() if any(v)}
 
 
 def rename_speaker(record: Mapping, speaker_id: str, name: str) -> dict:

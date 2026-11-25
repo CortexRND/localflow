@@ -86,6 +86,31 @@ def test_speakers_http_error_prints_detail(monkeypatch):
     assert isinstance(result.exception, SystemExit)
 
 
+@pytest.mark.parametrize("args", [("speakers",), ("rename-speaker", "S2", "Dana"),
+                                  ("merge-speakers", "S3", "S1")])
+def test_status_http_error_prints_detail(monkeypatch, args):
+    class Resp:
+        reason = "Unauthorized"
+
+        def json(self):
+            return {"detail": "missing or invalid API token"}
+
+    sent = []
+
+    def get(path, timeout=5):
+        sent.append(path)
+        raise requests.HTTPError(response=Resp())
+
+    monkeypatch.setattr(cli_module, "_get", get)
+    monkeypatch.setattr(cli_module, "_put", lambda *a, **k: sent.append("put"))
+    monkeypatch.setattr(cli_module, "_post", lambda *a, **k: sent.append("post"))
+    result = _run(*args)
+    assert result.exit_code == 1
+    assert "error: missing or invalid API token" in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert sent == ["/meeting/status"]
+
+
 def test_rename_speaker_with_and_without_id(calls):
     log, _ = calls
     result = _run("rename-speaker", MID, "S2", "Dana Lee")

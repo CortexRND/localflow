@@ -18,7 +18,7 @@ from localflow.diarization.store import (
     merge_speakers,
     public_speakers,
     rename_speaker,
-    speaker_stamps,
+    speaker_lines,
 )
 
 MID = "0123456789abcdef0123456789abcdef"
@@ -249,17 +249,17 @@ def test_merge_moves_segments_sums_seconds_and_drops_identity():
         merge_speakers(record, "S9", "S1")
 
 
-def test_speaker_stamps_skip_clashing_labels():
+def test_speaker_lines_flag_each_same_label_occurrence():
     segs = [_seg(0, "me"), _seg(0.5, "others", "S1"), _seg(5, "others", "S1"),
             _seg(5.5, "others", "S2"), _seg(9, "others", "S2")]
     record = _record(segments=segs)
-    assert speaker_stamps(record, "S1") == {"00:00", "00:05"}
+    assert speaker_lines(record, "S1") == {"00:00": [True], "00:05": [True]}
     both = rename_speaker(rename_speaker(record, "S1", "Dana"), "S2", "Dana")
-    assert speaker_stamps(both, "S1") == {"00:00"}
-    assert speaker_stamps(both, "S2") == {"00:09"}
+    assert speaker_lines(both, "S1") == {"00:00": [True], "00:05": [True, False]}
+    assert speaker_lines(both, "S2") == {"00:05": [False, True], "00:09": [True]}
     me = rename_speaker(record, "S1", "Me")
-    assert speaker_stamps(me, "S1") == {"00:05"}
-    assert speaker_stamps(record, "S9") == frozenset()
+    assert speaker_lines(me, "S1") == {"00:00": [False, True], "00:05": [True]}
+    assert speaker_lines(record, "S9") == {}
 
 
 def test_update_is_a_locked_read_modify_write(store):

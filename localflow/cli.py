@@ -902,7 +902,11 @@ def meeting_dismiss() -> None:
 def _meeting_id_or_last(meeting_id: str | None) -> str:
     if meeting_id:
         return meeting_id
-    last = _get("/meeting/status").get("last_saved") or {}
+    try:
+        last = _get("/meeting/status").get("last_saved") or {}
+    except requests.HTTPError as exc:
+        click.echo(f"error: {_error_detail(exc.response)}", err=True)
+        sys.exit(1)
     if not last.get("meeting_id"):
         click.echo("error: no saved meeting with speaker labels — pass a meeting ID", err=True)
         sys.exit(1)
