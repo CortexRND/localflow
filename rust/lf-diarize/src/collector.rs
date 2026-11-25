@@ -91,16 +91,32 @@ pub struct LabelledChunk {
     pub runs: Vec<SpeakerRun<Option<usize>>>,
 }
 
+/// One clustered speaker of a source: talk time and, only when asked for
+/// (speaker recognition on), its unit centroid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClusterStat {
+    pub source: String,
+    pub cluster: usize,
+    /// Summed duration of the cluster's embedded turns. (Python also counts
+    /// turns it labels by fallback; R3 leaves those unlabelled.)
+    pub seconds: f64,
+    /// L2-normalised mean of the cluster's unit vectors.
+    pub centroid: Option<Vec<f32>>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Finalized {
     pub status: Status,
     pub chunks: Vec<LabelledChunk>,
+    /// Per clustered speaker of the relabelled sources (empty unless `Ok`).
+    pub speakers: Vec<ClusterStat>,
 }
 impl Finalized {
     fn empty(status: Status) -> Self {
         Self {
             status,
             chunks: Vec::new(),
+            speakers: Vec::new(),
         }
     }
 }
@@ -145,7 +161,7 @@ impl Shared {
 
 pub struct Collector {
     tx: Mutex<Option<SyncSender<Job>>>,
-    done: Mutex<Option<(Sender<()>, Receiver<Finalized>)>>,
+    done: Mutex<Option<(Sender<bool>, Receiver<Finalized>)>>,
     shared: Arc<Shared>,
     timeout: Duration,
 }
@@ -154,16 +170,21 @@ pub struct Collector {
 /// [`wait`](Self::wait) (after the caller's channel checkpoint); dropping the
 /// handle cancels it, and the worker exits without clustering.
 pub struct PendingLabels {
-    go: Sender<()>,
+    go: Sender<bool>,
     done: Receiver<Finalized>,
     timeout: Duration,
 }
 impl PendingLabels {
     /// Starts clustering and blocks at most the finalize timeout.
     pub fn wait(self) -> Finalized {
+        self.wait_with(false)
+    }
+    /// [`wait`](Self::wait), also computing each speaker's centroid when
+    /// `centroids` (speaker recognition on); otherwise none is ever computed.
+    pub fn wait_with(self, centroids: bool) -> Finalized {
         let started = Instant::now();
         // A worker that already exited (it panicked outside extraction) reads as failed below.
-        let _ = self.go.send(());
+        let _ = self.go.send(centroids);
         let result = match self.done.recv_timeout(self.timeout) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => Finalized::empty(Status::Timeout),
@@ -184,7 +205,7 @@ impl Collector {
     pub fn start(backend: Box<dyn SpeakerBackend>, options: Options) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::sync_channel(QUEUE_CHUNKS);
         let (done_tx, done) = mpsc::channel();
-        let (go, go_rx) = mpsc::channel::<()>();
+        let (go, go_rx) = mpsc::channel::<bool>();
         let shared = Arc::<Shared>::default();
         let timeout = options.finalize_timeout;
         let worker_shared = shared.clone();
@@ -193,10 +214,10 @@ impl Collector {
             .spawn(move || {
                 let (chunks, backend) = collect(backend, rx, &worker_shared);
                 // Queued chunks are extracted; clustering waits for `PendingLabels::wait`.
-                if go_rx.recv().is_err() {
+                let Ok(centroids) = go_rx.recv() else {
                     log::debug!("speaker labels cancelled before clustering");
                     return;
-                }
+                };
                 drop(backend);
                 let result = if worker_shared.load_failed.load(Ordering::SeqCst)
                     || worker_shared.panicked.load(Ordering::SeqCst)
@@ -209,8 +230,10 @@ impl Collector {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .clone();
-                    catch_unwind(AssertUnwindSafe(|| finalize(chunks, &counts, &options)))
-                        .unwrap_or_else(|_| Finalized::empty(Status::Failed))
+                    catch_unwind(AssertUnwindSafe(|| {
+                        finalize(chunks, &counts, &options, centroids)
+                    }))
+                    .unwrap_or_else(|_| Finalized::empty(Status::Failed))
                 };
                 let _ = done_tx.send(result);
             })?;
@@ -240,6 +263,12 @@ impl Collector {
             };
         self.shared.count(source, !accepted);
         accepted
+    }
+
+    /// True once the worker recorded that the backend failed to load (never
+    /// blocks; the load itself runs on the worker).
+    pub fn load_failed(&self) -> bool {
+        self.shared.load_failed.load(Ordering::SeqCst)
     }
 
     /// Records a transcribed chunk without real timings; it keeps its channel label.
@@ -358,12 +387,18 @@ fn extract(
     Ok(turns)
 }
 
-fn finalize(chunks: Vec<Chunk>, counts: &BTreeMap<String, Counts>, options: &Options) -> Finalized {
+fn finalize(
+    chunks: Vec<Chunk>,
+    counts: &BTreeMap<String, Counts>,
+    options: &Options,
+    centroids: bool,
+) -> Finalized {
     let mut by_source: BTreeMap<&str, Vec<&Chunk>> = BTreeMap::new();
     for chunk in &chunks {
         by_source.entry(&chunk.source).or_default().push(chunk);
     }
     let mut labelled = Vec::new();
+    let mut speakers = Vec::new();
     for (source, chunks) in by_source {
         let count = counts.get(source).copied().unwrap_or_default();
         if count.dropped * 2 > count.offered {
@@ -382,6 +417,34 @@ fn finalize(chunks: Vec<Chunk>, counts: &BTreeMap<String, Counts>, options: &Opt
         let clusters = labels.iter().max().map_or(0, |top| top + 1);
         if clusters < 2 {
             continue;
+        }
+        // Talk time and (only when asked) the unit mean vector per cluster.
+        let mut seconds = vec![0.0; clusters];
+        let mut sums: Vec<Vec<f64>> = vec![Vec::new(); clusters];
+        let embedded = chunks
+            .iter()
+            .flat_map(|c| c.turns.iter())
+            .filter_map(|(turn, v)| Some((turn, v.as_deref()?)));
+        for ((turn, vector), &label) in embedded.zip(&labels) {
+            seconds[label] += turn.end - turn.start;
+            if centroids {
+                let sum = &mut sums[label];
+                sum.resize(vector.len(), 0.0);
+                for (s, v) in sum.iter_mut().zip(vector) {
+                    *s += *v;
+                }
+            }
+        }
+        for (cluster, (seconds, sum)) in seconds.into_iter().zip(sums).enumerate() {
+            let norm = sum.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let centroid = (centroids && norm.is_finite() && norm > 0.0)
+                .then(|| sum.iter().map(|v| (v / norm) as f32).collect());
+            speakers.push(ClusterStat {
+                source: source.to_string(),
+                cluster,
+                seconds,
+                centroid,
+            });
         }
         let mut labels = labels.into_iter();
         for chunk in chunks {
@@ -424,12 +487,12 @@ fn finalize(chunks: Vec<Chunk>, counts: &BTreeMap<String, Counts>, options: &Opt
             });
         }
     }
+    if labelled.is_empty() {
+        return Finalized::empty(Status::Channel);
+    }
     Finalized {
-        status: if labelled.is_empty() {
-            Status::Channel
-        } else {
-            Status::Ok
-        },
+        status: Status::Ok,
         chunks: labelled,
+        speakers,
     }
 }

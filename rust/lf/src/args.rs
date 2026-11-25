@@ -67,6 +67,9 @@ pub enum Command {
     /// Control meeting transcription sessions.
     #[command(subcommand)]
     Meeting(MeetingCommand),
+    /// Speaker labels for meetings: models, status and enrolled voices.
+    #[command(subcommand, hide = true)]
+    Speakers(SpeakersCommand),
     /// Review work prompts from meetings and dispatch them to Orca.
     #[command(subcommand)]
     Prompts(PromptsCommand),
@@ -147,6 +150,93 @@ pub enum MeetingCommand {
     Stop,
     /// Dismiss the current meeting-detected banner.
     Dismiss,
+    /// Show a saved meeting's speakers (default: the last saved meeting).
+    #[command(hide = true)]
+    Speakers {
+        #[arg(value_name = "MEETING_ID")]
+        meeting_id: Option<String>,
+    },
+    /// Rename a speaker in a saved meeting's transcript.
+    #[command(hide = true)]
+    RenameSpeaker {
+        #[arg(
+            value_name = "[ID] SPEAKER NAME",
+            required = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<String>,
+    },
+    /// Merge one speaker of a saved meeting into another.
+    #[command(hide = true)]
+    MergeSpeakers {
+        #[arg(
+            value_name = "[ID] FROM INTO",
+            required = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<String>,
+    },
+}
+
+/// Speaker labels for meetings: models, status and enrolled voices.
+///
+/// Enrolled voices need [meetings] speaker_diarization and speaker_recognition on.
+#[derive(Debug, Subcommand)]
+pub enum SpeakersCommand {
+    /// Show whether speaker-label models and the runtime are ready (offline).
+    Status {
+        /// Print JSON.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// List enrolled voices: name, samples, enrolled at, voice model.
+    List {
+        /// Print the server JSON (includes ids).
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Remember a voice under NAME, from one source: a meeting speaker, a file or the mic.
+    ///
+    /// Audio is sent only to the local server and is not retained there; some M4A/MP4 files
+    /// need a short-lived private temporary copy while they are decoded.
+    Enroll {
+        #[arg(value_name = "NAME", allow_hyphen_values = true)]
+        name: String,
+        /// Meeting id (see `lf meeting speakers`).
+        #[arg(long = "from-meeting", value_name = "MEETING_ID")]
+        meeting_id: Option<String>,
+        /// Speaker id in that meeting, e.g. S2.
+        #[arg(long = "speaker", value_name = "SPEAKER_ID")]
+        speaker_id: Option<String>,
+        /// An audio clip of only this person speaking.
+        #[arg(long = "file", value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Record this many seconds from the microphone now.
+        #[arg(long = "record", value_name = "INTEGER RANGE", value_parser = clap::value_parser!(u32).range(1..=300))]
+        record: Option<u32>,
+    },
+    /// Rename an enrolled voice (by name or id); applies to later meetings.
+    Rename {
+        #[arg(value_name = "OLD", allow_hyphen_values = true)]
+        old: String,
+        #[arg(value_name = "NEW", allow_hyphen_values = true)]
+        new: String,
+    },
+    /// Forget an enrolled voice (or --all) and erase stored voice data from every saved
+    /// meeting. Names already written into transcripts are not changed.
+    Forget {
+        #[arg(value_name = "NAME_OR_ID")]
+        name_or_id: Option<String>,
+        /// Forget every enrolled voice.
+        #[arg(long = "all")]
+        all: bool,
+    },
+    /// Copy enrolled voices (registry.json + .npy voiceprints) into a new or empty DIRECTORY
+    /// on this computer. Not allowed inside the Obsidian vault (vaults get synced).
+    Export {
+        #[arg(value_name = "DIRECTORY")]
+        directory: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]

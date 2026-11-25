@@ -3,9 +3,11 @@
 This comparison uses the public Granola Help Center (docs.granola.ai) and LocalFlow's
 code. “Have” means there is a working local equivalent, not that the implementation is
 identical. Citations in the notes identify the Granola Help Center article used for each
-comparison. Everything LocalFlow does here stays on the machine: audio is transcribed by
-the local STT provider and every LLM call goes through `localflow/providers/`
-(`build_llm`), so with the default Ollama provider nothing leaves the box.
+comparison. Audio is transcribed by the local STT provider and summaries, titles, chat
+and Recall go through the configured LLM provider (`build_llm` in `localflow/providers/`),
+which with the default Ollama stays on the machine. Work prompts are separate: with
+`[meetings] work_prompts = true` (the default) and a Fireworks API key set, the meeting
+notes are sent to Fireworks (`build_workprompts_llm`) even when the LLM provider is local.
 
 | Granola feature | localflow status (Have / Partial / Not planned) | how to use it (UI / endpoint / config) | notes |
 | --- | --- | --- | --- |
@@ -13,7 +15,7 @@ the local STT provider and every LLM call goes through `localflow/providers/`
 | Real-time transcription | Partial | Meeting panel → Start, or auto-start. | Chunked every `chunk_seconds` (default 30 s) rather than streaming word-by-word; the live log polls `/meeting/status`. `MeetingSession`. Granola source: “How transcription works”. |
 | Transcribe the other side of the call (system audio) | Have | `[meetings] capture_system_audio = true`; macOS: `pip install -e '.[system-audio]'` + Screen Recording permission, or a BlackHole multi-output device via `system_audio_device`. | ScreenCaptureKit (macOS 13+) or any loopback input; mic and system audio are transcribed separately. Falls back to mic-only with a visible reason. `localflow/system_audio.py`. Granola source: “How transcription works” (system audio capture). |
 | “Me” vs “Them” transcript attribution | Have | Automatic once system audio is on. | `Segment.source` is `me` (mic) or `others` (system audio); shown as **Me** / **Others** in the live log, the transcript log and the LLM prompts. Granola source: “How transcription works” (green = your mic, grey = system audio). |
-| Named speaker tags (who among the others spoke) | Not planned | — | Needs diarization or call-app integrations (Granola uses Meet/Zoom/Teams speaker tags). LocalFlow only separates you from everyone else. Granola source: Taking notes → “Speaker tags”. |
+| Named speaker tags (who among the others spoke) | Partial | Enable `[meetings] speaker_diarization = true`. Use Python with `pip install -e '.[diarization]'`, or `lf-rs serve` built with `--features diarize`. Both use models fetched by the Python `lf speakers download`; the shipped macOS app does not label. Use `lf` or `lf-rs` to rename speakers and, with `speaker_recognition = true`, enroll voiceprints. | Voice-based labels (**Speaker 1**, **Speaker 2**, …) applied at stop, not call-app speaker tags (Granola uses Meet/Zoom/Teams tags). Names come from your renames or enrolled voiceprints. The live log stays Me/Others, and any failure falls back to Me/Others. `localflow/diarization/`; see README “Speaker labels and recognition”. Granola source: Taking notes → “Speaker tags”. |
 | Echo handling when on speakers | Partial | Wear headphones. | No echo cancellation: on speakers the mic also hears remote audio, so it can be transcribed twice. Granola source: “How transcription works”. |
 | Live notepad during the meeting | Have | Meeting panel → **Your notes** (autosaves; `POST /meeting/notes`). Notes typed before Start are sent with `/meeting/start`. | Plain Markdown textarea, not a rich-text editor. Stored in session state (`user_notes`) in `localflow/server.py`. Granola source: Taking notes → “Writing your own notes”. |
 | AI-enhanced notes built on your notes | Have | Write notes, then Stop. | `MeetingSummarizer.summarize(transcript, user_notes=..., template=...)` expands the user's notes from the transcript, keeping their structure and emphasis, then adds uncovered template sections. Written to the vault by `ObsidianWriter`; raw notes are kept in the transcript log. Granola source: Taking notes → “AI-enhanced notes”. |
@@ -41,6 +43,12 @@ the local STT provider and every LLM call goes through `localflow/providers/`
 - **Privacy.** `/meeting/*` endpoints, like the rest of the web UI, are served on the
   configured `server_host`; keep it on `127.0.0.1` (or behind Tailscale) since
   `/meeting/chat` can read the last transcript.
+- **Speaker data.** Speaker labelling runs locally and keeps no audio. New voiceprints are
+  stored only while `speaker_recognition = true`, under `~/.localflow/speakers/` and
+  `~/.localflow/meetings/`; turning it off keeps earlier ones until you forget them, and
+  nothing expires on its own. Voiceprints never go into the vault or a prompt. Labels and
+  names are transcript text: they are saved in the vault and sent with the transcript or
+  notes to the LLMs described above.
 - **Not verified on Linux CI.** ScreenCaptureKit capture needs macOS 13+ with Screen
   Recording permission; the tests cover the source-tagging, fallback and API paths with
   fakes.

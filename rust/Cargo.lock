@@ -1929,6 +1929,7 @@ dependencies = [
  "caseless",
  "chrono",
  "cpal 0.16.0",
+ "flate2",
  "lf-agent",
  "lf-ask",
  "lf-core",
@@ -1947,6 +1948,7 @@ dependencies = [
  "tempfile",
  "unicode-general-category",
  "unicode-normalization",
+ "zip",
 ]
 
 [[package]]
@@ -1956,16 +1958,21 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "futures-executor",
+ "futures-util",
  "lf-ask",
  "lf-core",
  "lf-meetings",
  "lf-providers",
  "lf-runtime",
  "lf-server",
+ "log",
+ "multer",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
+ "wait-timeout",
 ]
 
 [[package]]

@@ -3,6 +3,9 @@
 One JSON file per saved diarized meeting under ``~/.localflow/meetings``:
 speaker identities plus segment timings and ids, never transcript text.
 Numpy-free and independent of the meetings/server modules.
+
+``centroid`` / ``voiceprint_id`` are only ever non-null when speaker recognition was on
+(slice B9); ``strip_voiceprints`` erases them for ``lf speakers forget``.
 """
 
 from __future__ import annotations
@@ -24,6 +27,10 @@ SCHEMA_VERSION = 1
 CHANNEL_LABELS = {"me": "Me", "others": "Others"}
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 _PUBLIC_KEYS = ("id", "label", "name", "source", "seconds")
+MAX_CENTROID_DIM = 4096
+# Staging files of MeetingSpeakerStore._write: mkstemp(prefix=".<meeting id>.", suffix=".tmp")
+# with tempfile's 8-character random token.
+_STAGING_RE = re.compile(r"\.[0-9a-f]{32}\.[a-z0-9_]{8}\.tmp")
 _LOCK = threading.RLock()
 _warned: set[tuple[str, str]] = set()
 
@@ -66,7 +73,7 @@ def build_record(*, meeting_id: str, log_path: str, notes_path: str, started_at:
                 "name": sp.get("name"),
                 "voiceprint_id": sp.get("voiceprint_id"),
                 "seconds": float(sp["seconds"]),
-                "centroid": None,
+                "centroid": sp.get("centroid"),
             }
             for sp in speakers
         ],
@@ -175,6 +182,36 @@ def _real(value: object) -> bool:
             and math.isfinite(value))
 
 
+def _centroid_ok(value: object) -> bool:
+    if value is None:
+        return True
+    return (isinstance(value, list) and 0 < len(value) <= MAX_CENTROID_DIM
+            and all(_real(x) for x in value))
+
+
+def _scrub(record: object, voiceprint_id: str | None) -> int | None:
+    """Null every stored centroid, and ``voiceprint_id`` where it equals ``voiceprint_id``
+    (every one when None), in place. Number of speakers changed, or None when the record
+    has no readable speaker list. Keys that are absent stay absent; nothing else changes."""
+    if not isinstance(record, dict):
+        return None
+    speakers = record.get("speakers")
+    if not isinstance(speakers, list) or not all(isinstance(sp, dict) for sp in speakers):
+        return None
+    changed = 0
+    for sp in speakers:
+        hit = False
+        if sp.get("centroid") is not None:
+            sp["centroid"] = None
+            hit = True
+        linked = sp.get("voiceprint_id")
+        if linked is not None and (voiceprint_id is None or linked == voiceprint_id):
+            sp["voiceprint_id"] = None
+            hit = True
+        changed += hit
+    return changed
+
+
 def _problem(record: object, meeting_id: str) -> str | None:
     if not isinstance(record, dict):
         return "shape"
@@ -197,6 +234,10 @@ def _problem(record: object, meeting_id: str) -> str | None:
         if not (sp.get("name") is None or isinstance(sp.get("name"), str)):
             return "shape"
         if not _real(sp.get("seconds")) or sp["id"] in ids:
+            return "shape"
+        if not (sp.get("voiceprint_id") is None or isinstance(sp.get("voiceprint_id"), str)):
+            return "shape"
+        if not _centroid_ok(sp.get("centroid")):
             return "shape"
         ids.add(sp["id"])
     segments = record.get("segments")
@@ -267,13 +308,16 @@ class MeetingSpeakerStore:
         meeting_id = record.get("meeting_id")
         if not valid_meeting_id(meeting_id):
             raise ValueError("invalid meeting id")
+        data = json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        return self._write(meeting_id, data)
+
+    def _write(self, meeting_id: str, data: str) -> Path:
         with _LOCK:
             root = self.root
             target = root / f"{meeting_id}.json"
             root.mkdir(parents=True, exist_ok=True)
             if os.name != "nt":
                 os.chmod(root, 0o700)
-            data = json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
             fd, tmp = tempfile.mkstemp(dir=root, prefix=f".{meeting_id}.", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
@@ -300,3 +344,58 @@ class MeetingSpeakerStore:
             new = change(record)
             self.save(new)
             return new
+
+    def strip_voiceprints(self, voiceprint_id: str | None = None) -> tuple[int, int]:
+        """Erase stored voice data from every sidecar: null every speaker's ``centroid``, and
+        ``voiceprint_id`` where it equals ``voiceprint_id`` (all of them when None).
+
+        Returns ``(speakers changed, files that could not be erased)``. Current and newer
+        schema versions are scrubbed in place without migration, every other key kept; a file
+        that is not JSON, has no readable speaker list or cannot be rewritten is counted as a
+        failure, never as erased. Orphaned staging files of ``save`` (a crash between write and
+        replace) may hold voice data and are deleted; one that can't be is a failure. Nothing
+        else in the folder is touched.
+        """
+        changed = failed = 0
+        with _LOCK:  # every writer holds it, so no staging file here is in use
+            root = self.root
+            try:
+                names = sorted(os.listdir(root))
+            except FileNotFoundError:
+                return 0, 0
+            for name in names:
+                path = root / name
+                if _STAGING_RE.fullmatch(name):
+                    if path.is_symlink() or not path.is_file():
+                        continue  # not something _write creates; leave it alone
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        failed += 1
+                    continue
+                meeting_id = name[:-5] if name.endswith(".json") else ""
+                if not valid_meeting_id(meeting_id):
+                    continue
+                try:
+                    record = json.loads((root / name).read_bytes().decode("utf-8"))
+                except (OSError, ValueError, RecursionError):
+                    failed += 1
+                    continue
+                hits = _scrub(record, voiceprint_id)
+                if hits is None:
+                    failed += 1
+                    continue
+                if hits:
+                    try:
+                        # allow_nan: keep an unknown-version file's other values as they were.
+                        self._write(meeting_id, json.dumps(
+                            record, ensure_ascii=False, indent=2, allow_nan=True) + "\n")
+                    except (OSError, ValueError, RecursionError):
+                        failed += 1
+                        continue
+                    changed += hits
+        if failed:
+            log.warning("could not erase voice data from %d meeting speaker files", failed)
+        return changed, failed

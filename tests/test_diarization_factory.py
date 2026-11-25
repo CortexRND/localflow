@@ -132,3 +132,50 @@ def test_lazy_exports_resolve():
     for name in ("build_diarization", "DiarizationCollector", "DiarizationResult",
                  "DIAR_FINALIZE_TIMEOUT_S"):
         assert name in diarization.__all__ and name in dir(diarization)
+
+
+# ---------------------------------------------------- recognition (slice B9) ---
+
+def test_build_diarization_never_attaches_a_registry():
+    """The server attaches the registry only when both flags are on."""
+    for recognition in (False, True):
+        config = Config(speaker_diarization=True, diarization_backend="mock",
+                        speaker_recognition=recognition)
+        collector, _ = build_diarization(config)
+        assert collector.registry is None
+        collector.close()
+
+
+def test_diarization_without_recognition_never_imports_the_registry():
+    _run(
+        "import sys\n"
+        "from localflow.config import Config\n"
+        "from localflow.diarization.factory import build_diarization\n"
+        "c, _ = build_diarization(Config(speaker_diarization=True,"
+        " diarization_backend='mock', speaker_recognition=True))\n"
+        "c.close()\n"
+        "assert 'localflow.diarization.registry' not in sys.modules\n"
+        "assert 'sherpa_onnx' not in sys.modules\n"
+    )
+
+
+def test_build_embedder_mock_is_loaded():
+    embedder = factory.build_embedder(Config(diarization_backend="mock"))
+    assert isinstance(embedder, MockEmbedder) and embedder.id == "mock"
+
+
+def test_build_embedder_sherpa_without_runtime_is_unavailable(monkeypatch):
+    def missing(cache):
+        raise DiarizationUnavailable("install localflow[diarization]")
+
+    monkeypatch.setattr(sherpa, "_runtime", missing)
+    with pytest.raises(DiarizationUnavailable, match="install"):
+        factory.build_embedder(Config(diarization_backend="sherpa-onnx"))
+
+
+def test_build_embedder_load_errors_are_unavailable_without_detail(monkeypatch):
+    monkeypatch.setattr(MockEmbedder, "load",
+                        lambda self: (_ for _ in ()).throw(OSError("/secret/path")))
+    with pytest.raises(DiarizationUnavailable) as info:
+        factory.build_embedder(Config(diarization_backend="mock"))
+    assert "secret" not in str(info.value)

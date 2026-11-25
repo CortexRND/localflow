@@ -11,6 +11,7 @@ use lf_core::{
 use lf_meetings::{
     diarize::{SpeakerBackend, SpeakerTurn},
     dispatch::{PromptQueue, WorkPrompt},
+    speakers::SpeakerData,
     AudioCallback, AudioSource, SystemAudioUnavailable, TimedText, TimedTranscript, Transcriber,
 };
 use lf_meetings_backend::{
@@ -52,6 +53,10 @@ struct Capture {
     diarizer_fail: AtomicBool,
     diarizer_calls: AtomicUsize,
     speaker_gate: Arc<Mutex<Option<Gate>>>,
+    /// Speaker turns end this many milliseconds early (fractional talk time).
+    turn_trim_ms: Arc<AtomicUsize>,
+    /// The speaker backend's `load` fails (on the collector's worker).
+    speaker_load_fail: Arc<AtomicBool>,
 }
 struct Device {
     _local: Rc<()>,
@@ -64,12 +69,19 @@ struct Device {
 }
 const BLOCK: usize = 24_000;
 /// One turn per 1.5 s block, speaker and one-hot embedding by amplitude.
-struct Speakers(Arc<Mutex<Option<Gate>>>);
+struct Speakers(Arc<Mutex<Option<Gate>>>, Arc<AtomicUsize>, Arc<AtomicBool>);
 fn bucket(sample: f32) -> usize {
     (sample * 10.0).round() as usize
 }
 impl SpeakerBackend for Speakers {
+    fn embedder_id(&self) -> Option<&'static str> {
+        Some("mock")
+    }
     fn load(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.2.load(Ordering::SeqCst),
+            "/private/models/x.onnx missing"
+        );
         Ok(())
     }
     fn diarize(&mut self, audio: &[f32]) -> Result<Vec<SpeakerTurn>> {
@@ -82,7 +94,8 @@ impl SpeakerBackend for Speakers {
             .enumerate()
             .map(|(i, s)| SpeakerTurn {
                 start: i as f64 * 1.5,
-                end: i as f64 * 1.5 + s.len() as f64 / 16000.0,
+                end: i as f64 * 1.5 + s.len() as f64 / 16000.0
+                    - self.1.load(Ordering::SeqCst) as f64 / 1000.0,
                 local_speaker: bucket(s[0]),
             })
             .collect())
@@ -195,10 +208,13 @@ impl CaptureFactory for Capture {
             !self.diarizer_fail.load(Ordering::SeqCst),
             "speaker models missing"
         );
-        Ok(self
-            .speakers
-            .load(Ordering::SeqCst)
-            .then(|| Box::new(Speakers(self.speaker_gate.clone())) as Box<dyn SpeakerBackend>))
+        Ok(self.speakers.load(Ordering::SeqCst).then(|| {
+            Box::new(Speakers(
+                self.speaker_gate.clone(),
+                self.turn_trim_ms.clone(),
+                self.speaker_load_fail.clone(),
+            )) as Box<dyn SpeakerBackend>
+        }))
     }
 }
 #[derive(Default)]
@@ -330,7 +346,13 @@ impl Fixture {
                 .with_capture(capture)
                 .with_providers(Arc::new(Providers(models)))
                 .with_queue(PromptQueue::new(dir.join("queue.json")))
-                .with_history_path(dir.join("history.sqlite")),
+                .with_history_path(dir.join("history.sqlite"))
+                // Never the real ~/.localflow.
+                .with_speaker_data(Arc::new(SpeakerData::with_roots(
+                    dir.join("meetings"),
+                    dir.join("speakers"),
+                )))
+                .with_model_cache(dir.join("hf-hub")),
         )
     }
     fn app(&self) -> Router {
@@ -460,7 +482,7 @@ async fn lifecycle_notes_speakers_files_chat_restart_and_errors() {
     );
     assert_eq!(
         request(f.app(), "GET", "/meeting/status", None).await.1,
-        json!({"watching":false,"watch_error":"","mic_busy":false,"detected":false,"platform":"","auto_start":true,"capture_system_audio":false,"session":null,"last_saved":null,"chat_available":false})
+        json!({"watching":false,"watch_error":"","mic_busy":false,"detected":false,"platform":"","auto_start":true,"capture_system_audio":false,"speaker_diarization":false,"session":null,"last_saved":null,"chat_available":false})
     );
     f.config.set_field("capture_system_audio", json!(true));
     f.capture.system.store(true, Ordering::SeqCst);
@@ -475,7 +497,7 @@ async fn lifecycle_notes_speakers_files_chat_restart_and_errors() {
         start,
         (
             200,
-            json!({"ok":true,"category":"Other","template":"standup","system_audio":"on","system_audio_error":""})
+            json!({"ok":true,"category":"Other","template":"standup","system_audio":"on","system_audio_error":"","diarization":"off","diarization_error":""})
         )
     );
     let notes = "## Launch\n- **date?**\n- blog";
@@ -1280,6 +1302,96 @@ async fn recall_reads_history_and_meetings_with_citations_and_no_llm() {
 }
 
 #[tokio::test]
+async fn recall_speaker_follows_live_setting_with_real_cleaner_on_both_llm_paths() {
+    let f = Fixture::new();
+    // One transcript per label so each is its chunk's first line; only labels
+    // the real `clean_speaker_name` leaves byte-identical are cited.
+    let (forty, forty_one) = ("A".repeat(40), "A".repeat(41));
+    let labels: [(&str, Option<&str>); 9] = [
+        ("Me", Some("Me")),
+        ("Dana O'Neil", Some("Dana O'Neil")),
+        ("José", Some("José")),
+        (forty.as_str(), Some(forty.as_str())),
+        (forty_one.as_str(), None), // capped at 40 characters
+        ("Jose\u{301}", None),      // NFKC composes the accent
+        ("\u{ff24}\u{ff41}\u{ff4e}\u{ff41}", None), // fullwidth "Dana"
+        ("Dana  Smith", None),      // whitespace collapsed
+        ("!!!", None),              // no letter or digit
+    ];
+    let logs = f
+        .dir
+        .path()
+        .join("vault")
+        .join(f.config.field_str("logs_folder").unwrap());
+    fs::create_dir_all(&logs).unwrap();
+    for (i, (label, _)) in labels.iter().enumerate() {
+        fs::write(
+            logs.join(format!("2026-11-20 09{i:02} L{i} (transcript).md")),
+            format!("**00:00** **{label}:** launch budget item{i}\n"),
+        )
+        .unwrap();
+    }
+    // One Router whose config reader flips the live setting between requests.
+    let diarize = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (config, diarize) = (f.config.clone(), diarize.clone());
+        move || -> Result<Config> {
+            let mut config = config.clone();
+            config.set_field("speaker_diarization", json!(diarize.load(Ordering::SeqCst)));
+            Ok(config)
+        }
+    };
+    let app = router(Arc::new(
+        ServerState::new(f.config.clone(), "test-token".into(), f.backend.clone())
+            .with_config_reader(Arc::new(reader)),
+    ));
+    let body = json!({"question":"launch budget","k":20});
+    let mut seen = Vec::new();
+    for llm in [false, true] {
+        let mut bodies = Vec::new();
+        for on in [false, true] {
+            diarize.store(on, Ordering::SeqCst);
+            f.models.calls.lock().unwrap().clear();
+            let mut body = body.clone();
+            body["llm"] = json!(llm);
+            let (status, mut response) =
+                request(app.clone(), "POST", "/api/recall", Some(body)).await;
+            assert_eq!(status, 200, "{response}");
+            assert_eq!(response["answer"].is_null(), !llm, "{response}");
+            let citations = response["citations"].as_array_mut().unwrap();
+            assert_eq!(citations.len(), labels.len(), "{citations:?}");
+            for citation in citations.iter_mut() {
+                let title = citation["title"].as_str().unwrap().to_owned();
+                let i: usize = title[1..].parse().unwrap();
+                let expected = labels[i].1.filter(|_| on);
+                let speaker = citation.as_object_mut().unwrap().remove("speaker");
+                // A present `null` must fail too, so compare the raw value.
+                assert_eq!(
+                    speaker,
+                    expected.map(Value::from),
+                    "llm={llm} on={on} {title}"
+                );
+            }
+            let prompts: Vec<_> = f
+                .models
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.2.clone())
+                .collect();
+            assert_eq!(prompts.len(), usize::from(llm));
+            bodies.push((response, prompts));
+        }
+        // Dropping `speaker` from the "on" body gives the "off" body exactly,
+        // and the prompt never changes.
+        assert_eq!(bodies[0], bodies[1], "llm={llm}");
+        seen.push(bodies.swap_remove(0).0["citations"].clone());
+    }
+    assert_eq!(seen[0], seen[1]);
+}
+
+#[tokio::test]
 async fn work_prompts_are_saved_queued_filtered_and_transitioned_atomically() {
     let mut f = Fixture::new();
     assert_eq!(
@@ -1854,5 +1966,1165 @@ async fn speaker_labels_diarizer_error_still_starts_and_saves_channel_labels() {
     let log = fs::read_to_string(saved.1["log_path"].as_str().unwrap()).unwrap();
     assert!(log.contains("**Others:** sounds good, Dana owns the blog post"));
     assert!(!log.contains("Speaker 1"));
+    assert_eq!(f.capture.diarizer_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(saved.1["diarization"], "off");
+    assert!(!f.dir.path().join("meetings").exists());
+}
+
+// ---------------------------------------------------------------- R4 ---
+
+async fn typed(
+    app: Router,
+    method: &str,
+    path: &str,
+    body: Vec<u8>,
+    content_type: &str,
+) -> (u16, Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Host", "localhost")
+        .header("Content-Type", content_type)
+        .header("X-Localflow-Token", "test-token")
+        .body(Body::from(body))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+fn direct(f: &Fixture, method: &str, path: &str, body: Value, local: bool) -> BackendResponse {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    f.backend.handle_local(
+        BackendRequest {
+            method: method.parse().unwrap(),
+            path: path.into(),
+            query: Default::default(),
+            headers,
+            body: body.to_string().into(),
+            config: f.config.clone(),
+        },
+        local,
+    )
+}
+fn sidecar(f: &Fixture, id: &str) -> Value {
+    let path = f.dir.path().join("meetings").join(format!("{id}.json"));
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+fn write_sidecar(f: &Fixture, id: &str, record: &Value) {
+    let path = f.dir.path().join("meetings").join(format!("{id}.json"));
+    fs::write(path, serde_json::to_vec(record).unwrap()).unwrap();
+}
+fn files(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.insert(path.clone(), fs::read(path).unwrap());
+            }
+        }
+    }
+    out
+}
+async fn stopped_meeting(f: &Fixture) -> Value {
+    start_meeting(f).await;
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await;
+    assert_eq!(saved.0, 200, "{}", saved.1);
+    saved.1
+}
+fn prompts(f: &Fixture) -> String {
+    let calls = f.models.calls.lock().unwrap();
+    calls.iter().map(|c| format!("{}\n{}", c.1, c.2)).collect()
+}
+
+#[tokio::test]
+async fn flag_off_stop_payload_only_adds_the_speaker_keys_and_writes_no_speaker_files() {
+    let f = speaker_fixture(false);
+    let saved = stopped_meeting(&f).await;
+    let keys: Vec<&str> = saved
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "title",
+            "title_generated",
+            "notes_path",
+            "log_path",
+            "segments",
+            "template",
+            "enhanced",
+            "meeting_id",
+            "diarization",
+            "speakers"
+        ]
+    );
+    assert_eq!(saved["meeting_id"], Value::Null);
+    assert_eq!(saved["diarization"], "off");
+    assert_eq!(saved["speakers"], json!([]));
+    let log = fs::read_to_string(saved["log_path"].as_str().unwrap()).unwrap();
+    assert!(!log.contains("meeting_id") && !log.contains("speakers:"));
+    assert!(!f.dir.path().join("meetings").exists());
+    assert!(!f.dir.path().join("speakers").exists());
+}
+
+#[tokio::test]
+async fn diarized_stop_saves_a_sidecar_without_voice_data_and_serves_public_speakers() {
+    let f = speaker_fixture(true);
+    start_meeting(&f).await;
+    let live = request(f.app(), "GET", "/meeting/status", None).await.1;
+    assert_eq!(live["speaker_diarization"], true);
+    assert_eq!(live["session"]["diarization"], "collecting");
+    assert_eq!(live["session"]["diarization_error"], "");
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await.1;
+    let id = saved["meeting_id"].as_str().unwrap().to_string();
+    assert!(lf_meetings::speakers::store::valid_meeting_id(&id));
+    assert_eq!(saved["diarization"], "ok");
+    let public = json!([
+        {"id":"S1","label":"Speaker 1","name":null,"source":"others","seconds":1.5},
+        {"id":"S2","label":"Speaker 2","name":null,"source":"others","seconds":1.5},
+    ]);
+    assert_eq!(saved["speakers"], public);
+    let record = sidecar(&f, &id);
+    assert_eq!(record["schema_version"], 1);
+    assert_eq!(record["embedder"], "mock");
+    assert_eq!(record["status"], "ok");
+    assert_eq!(record["log_path"], saved["log_path"]);
+    assert_eq!(record["notes_path"], saved["notes_path"]);
+    for sp in record["speakers"].as_array().unwrap() {
+        assert!(
+            sp["centroid"].is_null() && sp["voiceprint_id"].is_null(),
+            "{sp}"
+        );
+    }
+    for seg in record["segments"].as_array().unwrap() {
+        assert!(
+            seg.get("text").is_none(),
+            "no transcript text in the sidecar"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meetings = f.dir.path().join("meetings");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&meetings), 0o700);
+        assert_eq!(mode(&meetings.join(format!("{id}.json"))), 0o600);
+    }
+    assert!(
+        !f.dir.path().join("speakers").exists(),
+        "recognition off: no voiceprint folder"
+    );
+    assert_eq!(
+        request(
+            f.app(),
+            "GET",
+            &format!("/api/meetings/{id}/speakers"),
+            None
+        )
+        .await,
+        (200, json!({"meeting_id": id, "speakers": public}))
+    );
+    assert_eq!(
+        request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"],
+        saved
+    );
+    // The meeting id and sidecar never reach a prompt.
+    let prompts = prompts(&f);
+    assert!(!prompts.contains(&id) && !prompts.contains("meetings/"));
+    for path in [
+        "/api/meetings/x/speakers",
+        &format!("/api/meetings/{}/speakers", "0".repeat(32)),
+    ] {
+        assert_eq!(
+            request(f.app(), "GET", path, None).await,
+            (404, json!({"detail":"no speaker data for this meeting"}))
+        );
+    }
+}
+
+#[tokio::test]
+async fn unavailable_speaker_labels_are_reported_live() {
+    let f = speaker_fixture(true);
+    f.capture.diarizer_fail.store(true, Ordering::SeqCst);
+    let start = request(
+        f.app(),
+        "POST",
+        "/meeting/start",
+        Some(json!({"title":"Speakers", "auto_title":false})),
+    )
+    .await
+    .1;
+    assert_eq!(start["diarization"], "unavailable");
+    assert_eq!(start["diarization_error"], "speaker models missing");
+    let live = request(f.app(), "GET", "/meeting/status", None).await.1;
+    assert_eq!(live["session"]["diarization"], "unavailable");
+}
+
+#[tokio::test]
+async fn rename_and_merge_rewrite_only_speaker_prefixes_frontmatter_and_sidecar() {
+    let f = speaker_fixture(true);
+    let saved = stopped_meeting(&f).await;
+    let id = saved["meeting_id"].as_str().unwrap().to_string();
+    let log_path = std::path::PathBuf::from(saved["log_path"].as_str().unwrap());
+    let vault = f.dir.path().join("vault");
+    let before = files(&vault);
+    let base = format!("/api/meetings/{id}/speakers");
+    for (method, path, body, expected) in [
+        (
+            "PUT",
+            format!("{base}/S2"),
+            Some(json!({"name":"!!!"})),
+            (400, json!({"detail":"invalid speaker name"})),
+        ),
+        (
+            "PUT",
+            format!("{base}/S2"),
+            Some(json!({"name":7})),
+            (400, json!({"detail":"invalid speaker name"})),
+        ),
+        (
+            "PUT",
+            format!("{base}/S9"),
+            Some(json!({"name":"Dana"})),
+            (404, json!({"detail":"unknown speaker"})),
+        ),
+        (
+            "PUT",
+            format!("/api/meetings/{}/speakers/S2", "0".repeat(32)),
+            Some(json!({"name":"Dana"})),
+            (404, json!({"detail":"no speaker data for this meeting"})),
+        ),
+        (
+            "POST",
+            format!("{base}/merge"),
+            Some(json!({"from":"S1","into":"S1"})),
+            (
+                400,
+                json!({"detail":"from and into must be two different speaker ids"}),
+            ),
+        ),
+        (
+            "POST",
+            format!("{base}/merge"),
+            Some(json!({"from":"S1"})),
+            (
+                400,
+                json!({"detail":"from and into must be two different speaker ids"}),
+            ),
+        ),
+        (
+            "POST",
+            format!("{base}/merge"),
+            Some(json!({"from":"S1","into":"S7"})),
+            (404, json!({"detail":"unknown speaker"})),
+        ),
+    ] {
+        assert_eq!(
+            request(f.app(), method, &path, body).await,
+            expected,
+            "{method} {path}"
+        );
+    }
+    let missing = request(f.app(), "PUT", &format!("{base}/S2"), None).await;
+    assert_eq!(missing.0, 422);
+    assert_eq!(files(&vault), before, "failed edits write nothing");
+
+    let renamed = request(
+        f.app(),
+        "PUT",
+        &format!("{base}/S2"),
+        Some(json!({"name":"  Dana  O'Neil "})),
+    )
+    .await;
+    assert_eq!(renamed.0, 200, "{}", renamed.1);
+    assert_eq!(renamed.1["speakers"][1]["label"], "Dana O'Neil");
+    assert_eq!(renamed.1["speakers"][1]["name"], "Dana O'Neil");
+    let log = fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("**00:01** **Dana O'Neil:** remote part 2"),
+        "{log}"
+    );
+    assert!(
+        log.contains("**00:00** **Speaker 1:** remote part 1"),
+        "{log}"
+    );
+    assert!(
+        log.contains("speakers: [\"Me\", \"Speaker 1\", \"Dana O'Neil\"]"),
+        "{log}"
+    );
+    assert!(log.contains("**00:00** **Me:** we will launch on March 3"));
+    let mut after = files(&vault);
+    after.remove(&log_path);
+    let mut unchanged = before.clone();
+    unchanged.remove(&log_path);
+    assert_eq!(
+        after, unchanged,
+        "only the transcript changes; the notes file never"
+    );
+    assert_eq!(sidecar(&f, &id)["speakers"][1]["label"], "Dana O'Neil");
+    assert_eq!(
+        request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"]["speakers"],
+        renamed.1["speakers"]
+    );
+    // The same label again: nothing is rewritten.
+    let bytes = fs::read(&log_path).unwrap();
+    assert_eq!(
+        request(
+            f.app(),
+            "PUT",
+            &format!("{base}/S2"),
+            Some(json!({"name":"Dana O'Neil"}))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(fs::read(&log_path).unwrap(), bytes);
+
+    let merged = request(
+        f.app(),
+        "POST",
+        &format!("{base}/merge"),
+        Some(json!({"from":"S1","into":"S2"})),
+    )
+    .await;
+    assert_eq!(
+        merged,
+        (
+            200,
+            json!({"meeting_id": id, "speakers": [
+                {"id":"S2","label":"Dana O'Neil","name":"Dana O'Neil","source":"others","seconds":3.0}
+            ]})
+        )
+    );
+    let log = fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("**00:00** **Dana O'Neil:** remote part 1"),
+        "{log}"
+    );
+    assert!(log.contains("speakers: [\"Me\", \"Dana O'Neil\"]"), "{log}");
+    assert!(!sidecar(&f, &id)["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["speaker_id"] == "S1"));
+
+    // A transcript edited since: refused, nothing written.
+    // Only the line's contents are removed, so the edit works with either
+    // line ending (the transcript is CRLF on Windows).
+    let line = "**00:01** **Dana O'Neil:** remote part 2";
+    assert_eq!(log.matches(line).count(), 1, "{log}");
+    let edited = log.replace(line, "");
+    assert_ne!(edited, log, "the simulated edit removed the line");
+    assert!(!edited.contains(line));
+    fs::write(&log_path, &edited).unwrap();
+    let record = sidecar(&f, &id);
+    assert_eq!(
+        request(
+            f.app(),
+            "PUT",
+            &format!("{base}/S2"),
+            Some(json!({"name":"Dee"}))
+        )
+        .await,
+        (
+            409,
+            json!({"detail":"transcript lines do not match the speaker data"})
+        )
+    );
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), edited);
+    assert_eq!(sidecar(&f, &id), record);
+
+    // Fail closed on the sidecar's transcript path.
+    let mut moved = record.clone();
+    moved["log_path"] = saved["notes_path"].clone();
+    write_sidecar(&f, &id, &moved);
+    assert_eq!(
+        request(
+            f.app(),
+            "PUT",
+            &format!("{base}/S2"),
+            Some(json!({"name":"Dee"}))
+        )
+        .await,
+        (
+            409,
+            json!({"detail":"transcript is the meeting notes file"})
+        )
+    );
+    let outside = f.dir.path().join("outside.md");
+    fs::write(&outside, &edited).unwrap();
+    moved["log_path"] = json!(outside);
+    write_sidecar(&f, &id, &moved);
+    assert_eq!(
+        request(
+            f.app(),
+            "PUT",
+            &format!("{base}/S2"),
+            Some(json!({"name":"Dee"}))
+        )
+        .await,
+        (
+            409,
+            json!({"detail":"transcript is outside the meeting vault"})
+        )
+    );
+    moved["log_path"] = json!(vault.join("gone.md"));
+    write_sidecar(&f, &id, &moved);
+    assert_eq!(
+        request(
+            f.app(),
+            "PUT",
+            &format!("{base}/S2"),
+            Some(json!({"name":"Dee"}))
+        )
+        .await,
+        (404, json!({"detail":"transcript file not found"}))
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), edited);
+}
+
+#[tokio::test]
+async fn new_routes_need_the_token_and_voiceprint_routes_the_recognition_gate() {
+    let f = speaker_fixture(true);
+    let routes = [
+        ("GET", "/api/speakers"),
+        ("POST", "/api/speakers"),
+        ("DELETE", "/api/speakers"),
+        ("GET", "/api/speakers/export"),
+        ("PATCH", "/api/speakers/Dana"),
+        ("DELETE", "/api/speakers/Dana"),
+    ];
+    let meeting = format!("/api/meetings/{}/speakers", "a".repeat(32));
+    for (method, path) in routes.iter().copied().chain([
+        ("GET", meeting.as_str()),
+        ("PUT", &*format!("{meeting}/S1")),
+        ("POST", &*format!("{meeting}/merge")),
+        ("GET", "/api/diarization/status"),
+    ]) {
+        assert_eq!(
+            raw(f.app(), method, path, "{}".into(), false, "localhost").await,
+            (401, json!({"detail":"invalid API token"})),
+            "{method} {path}"
+        );
+    }
+    for (method, path) in routes {
+        assert_eq!(
+            request(f.app(), method, path, Some(json!({}))).await,
+            (403, json!({"detail":"speaker recognition is off"})),
+            "{method} {path}"
+        );
+    }
+    // The gate comes before the body: an oversized upload is still 403.
+    assert_eq!(
+        raw(
+            f.app(),
+            "POST",
+            "/api/speakers",
+            "x".repeat(200_000),
+            true,
+            "localhost"
+        )
+        .await,
+        (403, json!({"detail":"speaker recognition is off"}))
+    );
+    assert_eq!(
+        request(f.app(), "POST", "/api/speakers/x", None).await.0,
+        405
+    );
+    let status = request(f.app(), "GET", "/api/diarization/status", None).await;
+    assert_eq!(status.0, 200);
+    let keys: Vec<&str> = status
+        .1
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "models_ready",
+            "reason",
+            "extra_installed",
+            "models",
+            "speaker_diarization",
+            "diarize_mic",
+            "speaker_recognition",
+            "download"
+        ]
+    );
+    assert_eq!(status.1["models_ready"], false);
+    assert_eq!(status.1["speaker_diarization"], true);
+    assert_eq!(
+        status.1["extra_installed"],
+        lf_meetings::diarize::models::RUNTIME_INSTALLED
+    );
+    assert_eq!(
+        status.1["download"],
+        json!({"state":"idle","done_bytes":0,"total_bytes":0,"error":null})
+    );
+    assert_eq!(
+        status.1["models"][1]["id"],
+        "3dspeaker-campplus-zh-en-16k-advanced"
+    );
+}
+
+#[tokio::test]
+async fn recognition_enrolls_names_the_next_meeting_exports_locally_and_forgets() {
+    let mut f = speaker_fixture(true);
+    f.config.set_field("speaker_recognition", json!(true));
+    f.config.set_field("diarization_backend", json!("mock"));
+    let first = stopped_meeting(&f).await;
+    let id = first["meeting_id"].as_str().unwrap().to_string();
+    let record = sidecar(&f, &id);
+    let centroid = &record["speakers"][1]["centroid"];
+    assert_eq!(centroid.as_array().unwrap().len(), 8);
+    assert_eq!(centroid[4], 1.0);
+    // Public routes and payloads never carry voice data.
+    for body in [
+        first.to_string(),
+        request(
+            f.app(),
+            "GET",
+            &format!("/api/meetings/{id}/speakers"),
+            None,
+        )
+        .await
+        .1
+        .to_string(),
+    ] {
+        assert!(
+            !body.contains("centroid") && !body.contains("voiceprint"),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        request(f.app(), "GET", "/api/speakers", None).await,
+        (200, json!({"speakers":[],"embedder":"mock"}))
+    );
+    let enroll = |body: Value| {
+        let app = f.app();
+        async move { request(app, "POST", "/api/speakers", Some(body)).await }
+    };
+    for (body, expected) in [
+        (
+            json!({"name":"Dana","meeting_id":id}),
+            (
+                400,
+                json!({"detail":"meeting_id and speaker_id are required"}),
+            ),
+        ),
+        (
+            json!({"name":"!","meeting_id":id,"speaker_id":"S2"}),
+            (400, json!({"detail":"invalid speaker name"})),
+        ),
+        (
+            json!({"name":"Dana","meeting_id":"0".repeat(32),"speaker_id":"S2"}),
+            (404, json!({"detail":"no speaker data for this meeting"})),
+        ),
+        (
+            json!({"name":"Dana","meeting_id":id,"speaker_id":"S9"}),
+            (404, json!({"detail":"unknown speaker"})),
+        ),
+        (
+            json!([1]),
+            (400, json!({"detail":"expected a JSON object"})),
+        ),
+    ] {
+        assert_eq!(enroll(body.clone()).await, expected, "{body}");
+    }
+    assert_eq!(
+        typed(
+            f.app(),
+            "POST",
+            "/api/speakers",
+            b"{".to_vec(),
+            "application/json"
+        )
+        .await,
+        (400, json!({"detail":"invalid JSON"}))
+    );
+    assert_eq!(
+        typed(
+            f.app(),
+            "POST",
+            "/api/speakers",
+            b"hi".to_vec(),
+            "text/plain"
+        )
+        .await,
+        (
+            415,
+            json!({"detail":"send JSON or a multipart audio upload"})
+        )
+    );
+    assert_eq!(
+        typed(
+            f.app(),
+            "POST",
+            "/api/speakers",
+            vec![b' '; 70_000],
+            "application/json"
+        )
+        .await,
+        (413, json!({"detail":"upload too large"}))
+    );
+    // Without a known loopback peer (no ConnectInfo) nothing is local.
+    assert_eq!(
+        typed(
+            f.app(),
+            "POST",
+            "/api/speakers",
+            b"--x--\r\n".to_vec(),
+            "multipart/form-data; boundary=x"
+        )
+        .await,
+        (
+            403,
+            json!({"detail":"enrolling from audio is only available on this computer"})
+        )
+    );
+    assert_eq!(
+        request(f.app(), "GET", "/api/speakers/export", None).await,
+        (
+            403,
+            json!({"detail":"export is only available on this computer"})
+        )
+    );
+
+    let created = enroll(json!({"name":"Dana","meeting_id":id,"speaker_id":"S2"})).await;
+    assert_eq!(created.0, 201, "{}", created.1);
+    let vp = created.1["id"].as_str().unwrap().to_string();
+    assert_eq!(created.1["name"], "Dana");
+    assert_eq!(created.1["model_id"], "mock");
+    assert_eq!(created.1["samples"], 1);
+    assert!(created.1["created"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(
+        sidecar(&f, &id)["speakers"][1]["voiceprint_id"],
+        vp.as_str()
+    );
+    let speakers_dir = f.dir.path().join("speakers");
+    let registry = fs::read_to_string(speakers_dir.join("registry.json")).unwrap();
+    assert!(
+        !registry.contains("1.0"),
+        "no vector in registry.json: {registry}"
+    );
+    assert!(speakers_dir.join(format!("{vp}.npy")).is_file());
+
+    // The next meeting names the enrolled voice.
+    let second = stopped_meeting(&f).await;
+    assert_eq!(
+        second["speakers"][1],
+        json!({"id":"S2","label":"Dana","name":"Dana","source":"others","seconds":1.5})
+    );
+    assert_eq!(second["speakers"][0]["name"], Value::Null);
+    let log = fs::read_to_string(second["log_path"].as_str().unwrap()).unwrap();
+    assert!(log.contains("**00:01** **Dana:** remote part 2"), "{log}");
+    let second_id = second["meeting_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        sidecar(&f, &second_id)["speakers"][1]["voiceprint_id"],
+        vp.as_str()
+    );
+    let prompts = prompts(&f);
+    assert!(prompts.contains("Dana: remote part 2"));
+    assert!(!prompts.contains(&vp) && !prompts.contains(&second_id));
+
+    // Export: local only, through the binary seam.
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("host", "127.0.0.1".parse().unwrap());
+    let export = |local| {
+        f.backend.download(
+            BackendRequest {
+                method: "GET".parse().unwrap(),
+                path: "/api/speakers/export".into(),
+                query: Default::default(),
+                headers: headers.clone(),
+                body: Default::default(),
+                config: f.config.clone(),
+            },
+            local,
+        )
+    };
+    assert_eq!(export(false).err().unwrap().status, 403);
+    let zip = export(true).ok().unwrap();
+    assert_eq!(zip.content_type, "application/zip");
+    assert!(zip.headers.contains(&("cache-control", "no-store".into())));
+    let bundle = lf_meetings::speakers::bundle::read(&zip.body).unwrap();
+    assert_eq!(bundle.entries, vec![created.1.clone()]);
+
+    // Rename by name, then ambiguity and forget.
+    let renamed = request(
+        f.app(),
+        "PATCH",
+        "/api/speakers/dana",
+        Some(json!({"name":"Dana S"})),
+    )
+    .await;
+    assert_eq!(renamed.0, 200, "{}", renamed.1);
+    assert_eq!(renamed.1["name"], "Dana S");
+    assert_eq!(renamed.1["id"], vp.as_str());
+    assert_eq!(
+        request(
+            f.app(),
+            "PATCH",
+            "/api/speakers/nobody",
+            Some(json!({"name":"X"}))
+        )
+        .await,
+        (404, json!({"detail":"unknown speaker"}))
+    );
+    assert_eq!(
+        enroll(json!({"name":"Dana S","meeting_id":id,"speaker_id":"S1"}))
+            .await
+            .0,
+        201
+    );
+    assert_eq!(
+        request(f.app(), "DELETE", "/api/speakers/Dana%20S", None).await,
+        (
+            409,
+            json!({"detail":"more than one enrolled speaker has this name; use its id (lf speakers list --json)"})
+        )
+    );
+    assert_eq!(
+        request(f.app(), "DELETE", &format!("/api/speakers/{vp}"), None).await,
+        (200, json!({"forgotten":1}))
+    );
+    assert!(!speakers_dir.join(format!("{vp}.npy")).exists());
+    assert_eq!(
+        request(f.app(), "DELETE", "/api/speakers", None).await,
+        (200, json!({"forgotten":1}))
+    );
+    for meeting in [&id, &second_id] {
+        for sp in sidecar(&f, meeting)["speakers"].as_array().unwrap() {
+            assert!(
+                sp["centroid"].is_null() && sp["voiceprint_id"].is_null(),
+                "{sp}"
+            );
+        }
+    }
+    assert!(fs::read_dir(&speakers_dir).unwrap().next().is_none());
+    // Names already in transcripts stay; recognition off stops all reads.
+    assert!(fs::read_to_string(second["log_path"].as_str().unwrap())
+        .unwrap()
+        .contains("**Dana:**"));
+    f.config.set_field("speaker_recognition", json!(false));
+    assert_eq!(request(f.app(), "GET", "/api/speakers", None).await.0, 403);
+}
+
+#[tokio::test]
+async fn a_forget_after_finalize_keeps_voice_data_out_of_that_sidecar() {
+    let mut f = speaker_fixture(true);
+    f.config.set_field("speaker_recognition", json!(true));
+    start_meeting(&f).await;
+    let (summarizing, release) = gate(&f.models.gate);
+    let stop = stop_request(&f);
+    summarizing.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Clustering (with centroids) is done; the note is not saved yet.
+    assert_eq!(
+        direct(&f, "DELETE", "/api/speakers", json!({}), true).body,
+        json!({"forgotten":0})
+    );
+    release.send(()).unwrap();
+    let saved = stop.join().unwrap();
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    let record = sidecar(&f, saved.body["meeting_id"].as_str().unwrap());
+    assert_eq!(record["speakers"].as_array().unwrap().len(), 2);
+    for sp in record["speakers"].as_array().unwrap() {
+        assert!(
+            sp["centroid"].is_null(),
+            "no stale centroid after forget: {sp}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_live_gate_is_rechecked_after_the_body_is_read() {
+    let mut f = speaker_fixture(true);
+    f.config.set_field("speaker_recognition", json!(true));
+    let saved = stopped_meeting(&f).await;
+    let id = saved["meeting_id"].as_str().unwrap();
+    // Same backend data, but the live config has recognition off again.
+    let off = MeetingsBackend::new()
+        .unwrap()
+        .with_speaker_data(Arc::new(SpeakerData::with_roots(
+            f.dir.path().join("meetings"),
+            f.dir.path().join("speakers"),
+        )))
+        .with_config_reader(Arc::new(|| Ok(Config::default())));
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    let response = off.handle_local(
+        BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/api/speakers".into(),
+            query: Default::default(),
+            headers,
+            body: json!({"name":"Dana","meeting_id":id,"speaker_id":"S2"})
+                .to_string()
+                .into(),
+            config: f.config.clone(),
+        },
+        true,
+    );
+    assert_eq!(response.status, 403);
+    assert!(!f.dir.path().join("speakers").exists());
+}
+
+#[tokio::test]
+async fn quick_exit_waits_for_an_in_flight_final_sidecar_but_not_for_slow_work() {
+    let f = speaker_fixture(true);
+    // The sidecar write's live-gate read is the stop's only config read
+    // (recognition was off at start): block it there, armed after the
+    // start's own read of the live diarization settings.
+    let slot: Arc<Mutex<Option<Gate>>> = Arc::default();
+    let (reader_slot, config) = (slot.clone(), f.config.clone());
+    let backend = Arc::new(
+        MeetingsBackend::new()
+            .unwrap()
+            .with_capture(f.capture.clone())
+            .with_providers(Arc::new(Providers(f.models.clone())))
+            .with_queue(PromptQueue::new(f.dir.path().join("queue.json")))
+            .with_history_path(f.dir.path().join("history.sqlite"))
+            .with_speaker_data(Arc::new(SpeakerData::with_roots(
+                f.dir.path().join("meetings"),
+                f.dir.path().join("speakers"),
+            )))
+            .with_config_reader(Arc::new(move || {
+                if let Some((entered, release)) = reader_slot.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                    release.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                Ok(config.clone())
+            })),
+    );
+    let start = request(
+        app(f.config.clone(), backend.clone()),
+        "POST",
+        "/meeting/start",
+        Some(json!({"title":"Speakers", "auto_title":false})),
+    )
+    .await;
+    assert_eq!(start.0, 200, "{}", start.1);
+    let (writing, release) = gate(&slot);
+    let (stopping, config) = (backend.clone(), f.config.clone());
+    let stop = std::thread::spawn(move || {
+        stopping.handle(BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/meeting/stop".into(),
+            body: Default::default(),
+            headers: Default::default(),
+            query: Default::default(),
+            config,
+        })
+    });
+    writing.recv_timeout(Duration::from_secs(10)).unwrap();
+    // The final note is on disk; its sidecar is being written.
+    let (done, finished) = mpsc::channel();
+    let waiting = backend.clone();
+    let waiter =
+        std::thread::spawn(move || done.send(waiting.wait_for_saved_transcript()).unwrap());
+    assert!(finished.recv_timeout(Duration::from_millis(100)).is_err());
+    release.send(()).unwrap();
+    assert_eq!(
+        finished.recv_timeout(Duration::from_secs(10)).unwrap(),
+        MeetingSave::Note
+    );
+    let sidecars = fs::read_dir(f.dir.path().join("meetings")).unwrap().count();
+    assert_eq!(sidecars, 1, "the sidecar is complete when Note is reported");
+    waiter.join().unwrap();
+    assert_eq!(stop.join().unwrap().status, 200);
+
+    // Slow work after the checkpoint (here the summary) is not waited for.
+    let f = speaker_fixture(true);
+    start_meeting(&f).await;
+    let (summarizing, release) = gate(&f.models.gate);
+    let stop = stop_request(&f);
+    summarizing.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        f.backend.wait_for_saved_transcript(),
+        MeetingSave::Transcript
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        stop.join().unwrap().status,
+        500,
+        "abandoned after the quick exit"
+    );
+    assert!(!f.dir.path().join("meetings").exists());
+}
+
+#[tokio::test]
+async fn a_worker_model_load_failure_shows_live_as_unavailable() {
+    let f = speaker_fixture(true);
+    f.capture.speaker_load_fail.store(true, Ordering::SeqCst);
+    let start = request(
+        f.app(),
+        "POST",
+        "/meeting/start",
+        Some(json!({"title":"Speakers", "auto_title":false})),
+    )
+    .await;
+    // The start never waits for the model load: either state is possible here.
+    assert!(
+        matches!(
+            start.1["diarization"].as_str(),
+            Some("collecting" | "unavailable")
+        ),
+        "{}",
+        start.1
+    );
+    let mut live = Value::Null;
+    for _ in 0..500 {
+        live = request(f.app(), "GET", "/meeting/status", None).await.1["session"].clone();
+        if live["diarization"] == "unavailable" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(live["diarization"], "unavailable", "{live}");
+    assert_eq!(
+        live["diarization_error"], "speaker label models could not be loaded",
+        "a fixed reason, never the backend's message"
+    );
+    // Stop keeps its channel fallback.
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await.1;
+    assert_eq!(saved["diarization"], "failed");
+    assert_eq!(saved["speakers"], json!([]));
+    let log = fs::read_to_string(saved["log_path"].as_str().unwrap()).unwrap();
+    assert!(log.contains("**Others:** sounds good, Dana owns the blog post"));
+}
+
+#[tokio::test]
+async fn sidecar_seconds_are_rounded_like_the_stop_payload() {
+    let f = speaker_fixture(true);
+    // Turns of 1.5 s - 0.123 s: 1.377 s of talk each.
+    f.capture.turn_trim_ms.store(123, Ordering::SeqCst);
+    let saved = stopped_meeting(&f).await;
+    assert_eq!(saved["diarization"], "ok", "{saved}");
+    let record = sidecar(&f, saved["meeting_id"].as_str().unwrap());
+    for (stored, public) in record["speakers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(saved["speakers"].as_array().unwrap())
+    {
+        assert_eq!(stored["seconds"], 1.4, "{stored}");
+        assert_eq!(stored["seconds"], public["seconds"]);
+    }
+}
+
+#[tokio::test]
+async fn opting_in_after_the_meeting_started_keeps_its_voice_data_off_disk() {
+    let mut f = speaker_fixture(true);
+    start_meeting(&f).await; // recognition off at start
+    f.config.set_field("speaker_recognition", json!(true));
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await;
+    assert_eq!(saved.0, 200, "{}", saved.1);
+    assert_eq!(saved.1["diarization"], "ok");
+    let record = sidecar(&f, saved.1["meeting_id"].as_str().unwrap());
+    for sp in record["speakers"].as_array().unwrap() {
+        assert!(
+            sp["centroid"].is_null() && sp["voiceprint_id"].is_null(),
+            "{sp}"
+        );
+    }
+    assert!(
+        !f.dir.path().join("speakers").exists(),
+        "no registry read or write"
+    );
+}
+
+#[tokio::test]
+async fn each_start_takes_the_live_diarization_settings_despite_a_stale_request_config() {
+    let mut f = speaker_fixture(true);
+    f.config.set_field("diarization_backend", json!("mock"));
+    // The live config file; `None` = unreadable.
+    let live: Arc<Mutex<Option<Config>>> = Arc::new(Mutex::new(Some(f.config.clone())));
+    let reader = live.clone();
+    f.backend = Arc::new(
+        MeetingsBackend::new()
+            .unwrap()
+            .with_capture(f.capture.clone())
+            .with_providers(Arc::new(Providers(f.models.clone())))
+            .with_queue(PromptQueue::new(f.dir.path().join("queue.json")))
+            .with_history_path(f.dir.path().join("history.sqlite"))
+            .with_speaker_data(Arc::new(SpeakerData::with_roots(
+                f.dir.path().join("meetings"),
+                f.dir.path().join("speakers"),
+            )))
+            .with_config_reader(Arc::new(move || {
+                reader
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("unreadable"))
+            })),
+    );
+    let set_live = |field: &str, value: Value| {
+        live.lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .set_field(field, value);
+    };
+    let centroids = |f: &Fixture, saved: &Value| -> Vec<bool> {
+        sidecar(f, saved["meeting_id"].as_str().unwrap())["speakers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sp| !sp["centroid"].is_null())
+            .collect()
+    };
+    let started = |f: &Fixture| {
+        let app = f.app();
+        async move {
+            let start = request(
+                app,
+                "POST",
+                "/meeting/start",
+                Some(json!({"title":"Speakers", "auto_title":false})),
+            )
+            .await;
+            assert_eq!(start.0, 200, "{}", start.1);
+            start.1
+        }
+    };
+    let stopped = |f: &Fixture| {
+        let app = f.app();
+        async move {
+            let saved = request(app, "POST", "/meeting/stop", None).await;
+            assert_eq!(saved.0, 200, "{}", saved.1);
+            saved.1
+        }
+    };
+
+    // Opted in via the file; the request snapshot still says off.
+    assert_eq!(f.config.field_bool("speaker_recognition"), Some(false));
+    set_live("speaker_recognition", json!(true));
+    assert_eq!(started(&f).await["diarization"], "collecting");
+    let saved = stopped(&f).await;
+    assert_eq!(saved["diarization"], "ok", "{saved}");
+    assert!(centroids(&f, &saved).iter().any(|c| *c), "{saved}");
+
+    // Opted out again; the request snapshot now says on.
+    f.config.set_field("speaker_recognition", json!(true));
+    set_live("speaker_recognition", json!(false));
+    started(&f).await;
+    let saved = stopped(&f).await;
+    assert_eq!(saved["diarization"], "ok", "{saved}");
+    assert!(centroids(&f, &saved).iter().all(|c| !*c), "{saved}");
+
+    // Speaker labels off via the file: no collector despite the request.
+    set_live("speaker_diarization", json!(false));
+    assert_eq!(started(&f).await["diarization"], "off");
+    assert_eq!(stopped(&f).await["diarization"], "off");
+
+    // An unreadable live config leaves labels (and recognition) off.
+    set_live("speaker_diarization", json!(true));
+    *live.lock().unwrap() = None;
+    assert_eq!(started(&f).await["diarization"], "off");
+    assert_eq!(stopped(&f).await["diarization"], "off");
+
+    // Readable again: the next meeting collects.
+    *live.lock().unwrap() = Some(f.config.clone());
+    assert_eq!(started(&f).await["diarization"], "collecting");
+    assert_eq!(stopped(&f).await["diarization"], "ok");
+}
+
+#[tokio::test]
+async fn a_trailing_slash_never_turns_a_delete_into_the_bulk_erase() {
+    let mut f = speaker_fixture(true);
+    f.config.set_field("speaker_recognition", json!(true));
+    let saved = stopped_meeting(&f).await;
+    let id = saved["meeting_id"].as_str().unwrap();
+    let body = json!({"name":"Dana","meeting_id":id,"speaker_id":"S2"});
+    assert_eq!(
+        request(f.app(), "POST", "/api/speakers", Some(body))
+            .await
+            .0,
+        201
+    );
+    for path in ["/api/speakers/", "/api/speakers//"] {
+        assert_eq!(
+            request(f.app(), "DELETE", path, None).await,
+            (404, json!({"detail":"Not Found"})),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        request(f.app(), "GET", "/api/speakers", None).await.1["speakers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "nothing was forgotten"
+    );
+    // Non-destructive slash redirects keep their Python parity.
+    let response = f
+        .app()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/speakers/")
+                .header("Host", "localhost")
+                .header("X-Localflow-Token", "test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 307);
+}
+
+#[tokio::test]
+async fn an_unavailable_embedder_never_stages_enrollment_audio() {
+    let mut f = Fixture::new();
+    f.config.set_field("speaker_diarization", json!(true));
+    f.config.set_field("speaker_recognition", json!(true));
+    // `Capture::diarizer` offers no backend (like a factory without one).
+    let mut clip = 24u32.to_be_bytes().to_vec();
+    clip.extend_from_slice(b"ftypM4A \0\0\0\0M4A isom");
+    let mut body = b"--b\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nAna\r\n\
+                     --b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.m4a\"\r\n\r\n"
+        .to_vec();
+    body.extend_from_slice(&clip);
+    body.extend_from_slice(b"\r\n--b--\r\n");
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "content-type",
+        "multipart/form-data; boundary=b".parse().unwrap(),
+    );
+    let response = f.backend.handle_local(
+        BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/api/speakers".into(),
+            query: Default::default(),
+            headers,
+            body: body.into(),
+            config: f.config.clone(),
+        },
+        true,
+    );
+    // 503 where ffmpeg runs (the pipe yields nothing for this stub clip); 500
+    // without ffmpeg. Either way the raw audio was never written to disk.
+    assert!(
+        response.status == 503 && response.body["detail"] == "voice model unavailable"
+            || response.status == 500,
+        "{} {}",
+        response.status,
+        response.body
+    );
+    assert!(!f.dir.path().join("speakers").exists());
     assert_eq!(f.capture.diarizer_calls.load(Ordering::SeqCst), 1);
 }

@@ -125,6 +125,39 @@ fn clusters_across_chunks_per_source_and_aligns_runs() {
 }
 
 #[test]
+fn speakers_carry_talk_time_and_centroids_only_when_asked() {
+    for centroids in [false, true] {
+        let collector = start(Fake::default());
+        assert!(collector.feed("others", 0.0, audio(&[0.1, 0.1, 0.3]), texts(3)));
+        assert!(collector.feed("others", 4.5, audio(&[0.3, 0.1]), texts(2)));
+        let result = collector.close().unwrap().wait_with(centroids);
+        assert_eq!(result.status, Status::Ok);
+        let stats: Vec<_> = result
+            .speakers
+            .iter()
+            .map(|s| (s.source.as_str(), s.cluster, s.seconds))
+            .collect();
+        assert_eq!(stats, [("others", 0, 4.5), ("others", 1, 3.0)]);
+        for stat in &result.speakers {
+            match (&stat.centroid, centroids) {
+                (None, false) => {}
+                (Some(c), true) => {
+                    let norm: f32 = c.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    assert!((norm - 1.0).abs() < 1e-6, "unit centroid");
+                    assert_eq!(c.iter().filter(|&&v| v > 0.0).count(), 1);
+                }
+                other => panic!("centroid computed only when asked: {other:?}"),
+            }
+        }
+    }
+    let collector = start(Fake::default());
+    assert!(collector.feed("others", 0.0, audio(&[0.1, 0.1]), texts(2)));
+    let result = collector.close().unwrap().wait_with(true);
+    assert_eq!(result.status, Status::Channel);
+    assert!(result.speakers.is_empty(), "no speakers without labels");
+}
+
+#[test]
 fn short_turns_are_not_embedded_and_text_falls_back_to_none() {
     let collector = start(Fake::default());
     // 0.5 s turn at the end is never embedded; its text is > 0.5 s from any embedded turn.

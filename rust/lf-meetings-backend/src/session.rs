@@ -44,6 +44,41 @@ pub(crate) struct Snapshot {
     pub segments: Vec<Segment>,
     pub system_audio: String,
     pub system_audio_error: String,
+    pub diarization: Diarization,
+}
+/// Fixed, safe live reason once the collector's backend failed to load (no
+/// path or model detail).
+const MODEL_LOAD_FAILED: &str = "speaker label models could not be loaded";
+
+/// The live speaker-label state (`session.diarization`, `diarization_error`).
+#[derive(Clone, Debug)]
+pub(crate) struct Diarization {
+    /// `off` | `collecting` | `unavailable`.
+    pub status: &'static str,
+    pub error: String,
+    /// The backend's embedder id (stored in the sidecar).
+    pub embedder: Option<&'static str>,
+    /// Speaker recognition was on when the meeting started (Python attaches
+    /// the registry only then); stop also requires it to be on still.
+    pub recognition: bool,
+}
+impl Diarization {
+    fn off() -> Self {
+        Self {
+            status: "off",
+            error: String::new(),
+            embedder: None,
+            recognition: false,
+        }
+    }
+    fn unavailable(error: String) -> Self {
+        Self {
+            status: "unavailable",
+            error,
+            embedder: None,
+            recognition: false,
+        }
+    }
 }
 pub(crate) struct Finished {
     pub started_at: NaiveDateTime,
@@ -52,19 +87,29 @@ pub(crate) struct Finished {
     pub segments: Vec<Segment>,
     /// Applied only after the recovery checkpoint holds `segments`.
     pub speaker_labels: Option<SpeakerLabels>,
+    pub diarization: Diarization,
 }
 
-fn speaker_collector(config: &Config, factory: &dyn CaptureFactory) -> Option<(Collector, bool)> {
+fn speaker_collector(
+    config: &Config,
+    factory: &dyn CaptureFactory,
+) -> Result<(Collector, bool, Diarization), Diarization> {
     if config.field_bool("speaker_diarization") != Some(true) {
-        return None;
+        return Err(Diarization::off());
     }
     let backend = match factory.diarizer(config) {
-        Ok(backend) => backend?,
+        Ok(Some(backend)) => backend,
+        Ok(None) => {
+            return Err(Diarization::unavailable(
+                "speaker labels are not available in this build".into(),
+            ))
+        }
         Err(error) => {
             eprintln!("speaker labels unavailable: {error}");
-            return None;
+            return Err(Diarization::unavailable(error.to_string()));
         }
     };
+    let embedder = backend.embedder_id();
     let options = Options {
         max_speakers: collector::max_speakers(
             config.field_i64("diarization_max_speakers").unwrap_or(0),
@@ -72,10 +117,19 @@ fn speaker_collector(config: &Config, factory: &dyn CaptureFactory) -> Option<(C
         ..Options::default()
     };
     match Collector::start(backend, options) {
-        Ok(collector) => Some((collector, config.field_bool("diarize_mic") == Some(true))),
+        Ok(collector) => Ok((
+            collector,
+            config.field_bool("diarize_mic") == Some(true),
+            Diarization {
+                status: "collecting",
+                error: String::new(),
+                embedder,
+                recognition: lf_meetings::speakers::recognition_on(config),
+            },
+        )),
         Err(error) => {
             eprintln!("speaker labels unavailable: {error}");
-            None
+            Err(Diarization::unavailable(error.to_string()))
         }
     }
 }
@@ -95,7 +149,7 @@ impl SessionActor {
         thread::Builder::new()
             .name("localflow-meeting-session".into())
             .spawn(move || {
-                let session = (|| -> Result<MeetingSession> {
+                let session = (|| -> Result<(MeetingSession, Diarization)> {
                     let (system_audio, error) =
                         if config.field_bool("capture_system_audio") == Some(true) {
                             match factory.system_audio(&config) {
@@ -120,14 +174,18 @@ impl SessionActor {
                                 .context("invalid chunk_seconds")?,
                         ),
                     )?;
-                    if let Some((collector, diarize_mic)) = speaker_collector(&config, &*factory) {
-                        session = session.with_diarization(collector, diarize_mic);
-                    }
+                    let diarization = match speaker_collector(&config, &*factory) {
+                        Ok((collector, diarize_mic, diarization)) => {
+                            session = session.with_diarization(collector, diarize_mic);
+                            diarization
+                        }
+                        Err(diarization) => diarization,
+                    };
                     session.system_audio_error = error;
                     session.start()?;
-                    Ok(session)
+                    Ok((session, diarization))
                 })();
-                let mut session = match session {
+                let (mut session, diarization) = match session {
                     Ok(session) => {
                         if ready_tx.send(Ok(())).is_err() {
                             return;
@@ -148,6 +206,14 @@ impl SessionActor {
                                 segments: session.segments(),
                                 system_audio: session.system_audio_status().into(),
                                 system_audio_error: session.system_audio_error.clone(),
+                                diarization: if diarization.status == "collecting"
+                                    && session.speaker_labels_failed()
+                                {
+                                    // Live only; stop's fallback is unchanged.
+                                    Diarization::unavailable(MODEL_LOAD_FAILED.into())
+                                } else {
+                                    diarization.clone()
+                                },
                             });
                         }
                         Command::Stop(reply) => {
@@ -159,6 +225,7 @@ impl SessionActor {
                                     seconds: session.elapsed_seconds(),
                                     segments,
                                     speaker_labels,
+                                    diarization: diarization.clone(),
                                 });
                             }
                             break;

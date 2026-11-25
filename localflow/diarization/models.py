@@ -49,6 +49,8 @@ class DiarModel:
     size_bytes: int
     licence: str
     source: str       # provenance of the weights and of the licence claim
+    # Embedders only: cosine-similarity floor for naming a recognised speaker (None = never).
+    match_threshold: float | None = None
 
 
 # Both repos are public and ungated. Revisions, sizes and SHA-256 were
@@ -85,6 +87,7 @@ DIAR_MODELS: tuple[DiarModel, ...] = (
             "sherpa-onnx export of 3D-Speaker CAM++; upstream ModelScope model "
             "iic/speech_campplus_sv_zh_en_16k-common_advanced declares Apache License 2.0"
         ),
+        match_threshold=0.6,  # provisional and deliberately strict; B10 sets the measured value
     ),
 )
 

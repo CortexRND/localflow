@@ -12,8 +12,8 @@ Inputs (``docs/plans/PLAN-perf-evals.md`` §5.3):
 
 Output:
 
-* one case per gate, ``meetings/gate/M1`` … ``meetings/gate/M13``, with
-  metric ``M1`` … ``M13`` (unit ``ratio``; the names the ``policy.toml``
+* one case per gate, ``meetings/gate/M1`` … ``meetings/gate/M14``, with
+  metric ``M1`` … ``M14`` (unit ``ratio``; the names the ``policy.toml``
   rules and caps use). ``value`` is the pooled rate over all repeats,
   ``k / n``; for ``M7`` it is the *unsupported*-number rate ``(n - k) / n``
   (lower is better), as ``gates.py`` reports it. ``evidence`` holds ``k``,
@@ -38,7 +38,7 @@ from typing import Any
 from ..schema import make_case, make_metric
 
 SUITE = "meetings"
-GATES = tuple(f"M{i}" for i in range(1, 14))
+GATES = tuple(f"M{i}" for i in range(1, 15))
 TIMING_METRICS = ("stop_to_notes_ms", "chat_ms", "llm_call_ms", "llm_calls_per_meeting")
 MAX_FAILURES = 50  # failing items kept per gate in evidence
 
@@ -57,8 +57,12 @@ GATE_INFO: dict[str, tuple[str, str, float | None]] = {
     "M11": ("notes_only", "exact", None),
     "M12": ("mic_only_fallback", "exact", None),
     "M13": ("restart_chat", "exact", None),
+    "M14": ("speaker_labels", "exact", None),
 }
 LOWER_IS_BETTER = frozenset({"M7"})
+#: Gates added after archived ``gates.json`` files were written; their absence
+#: from a summary is ``not_exercised`` (an older run), not a failure.
+OPTIONAL_LEGACY_GATES = frozenset({"M14"})
 
 
 def gate_case_name(gate: str) -> str:
@@ -153,6 +157,9 @@ def convert_gate(gates: dict, gate: str, *, runtime: str = "python") -> dict:
     dims = gate_dims(gate, runtime)
     name = gate_case_name(gate)
     summary = gates.get("summary") if isinstance(gates, dict) else None
+    if isinstance(summary, dict) and gate not in summary and gate in OPTIONAL_LEGACY_GATES:
+        return make_case(suite=SUITE, case=name, dims=dims, status="not_exercised",
+                         error=f"gate {gate} absent from gates.json summary (pre-{gate} run)")
     entry = summary.get(gate) if isinstance(summary, dict) else None
     if not isinstance(entry, dict):
         return make_case(suite=SUITE, case=name, dims=dims, status="failed",
@@ -194,7 +201,7 @@ def convert_gate(gates: dict, gate: str, *, runtime: str = "python") -> dict:
 
 
 def convert_gates(gates: Any, *, runtime: str = "python") -> list[dict]:
-    """One case per gate M1–M13 from parsed ``gates.json``."""
+    """One case per gate M1–M14 from parsed ``gates.json``."""
     if not isinstance(gates, dict) or not isinstance(gates.get("summary"), dict):
         return failed_cases(runtime, "gates.json: expected an object with a 'summary' table", timings=False)
     return [convert_gate(gates, g, runtime=runtime) for g in GATES]

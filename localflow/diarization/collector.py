@@ -6,6 +6,13 @@ embeddings in RAM (never the audio). ``finalize`` clusters all embeddings of a s
 the end of the meeting and relabels copies of the live segments as ``Speaker 1..N``. Every
 failure path returns the original segments; nothing here writes files or opens sockets.
 
+Recognition (slice B9) happens only when the server attached a ``registry`` (both speaker
+flags on): finalize then also computes one unit centroid per labelled speaker and asks the
+registry's ``match`` for a name. The registry is the only I/O and runs inside the finalize
+watchdog. With no registry no centroid is computed and the registry is never called.
+An optional ``recognition_allowed`` predicate (the server's live gate) is checked after the
+queue has drained and before every match; once it is False the result is anonymous.
+
 This module must not import ``localflow.meetings``, ``localflow.server``, ``sounddevice`` or
 ``sherpa_onnx``: segments are duck-typed dataclasses copied with ``dataclasses.replace``.
 """
@@ -47,6 +54,8 @@ class DiarizationResult:
     status: str  # "ok" | "channel" | "failed" | "timeout"
     segments: list  # meeting Segment objects (duck-typed), always a NEW list
     speakers: list[MeetingSpeaker]  # [] unless status == "ok" and labels were applied
+    # speaker id -> unit centroid; only filled when a registry was attached (recognition on)
+    centroids: dict[str, np.ndarray] = dataclasses.field(default_factory=dict)
 
 
 @dataclass
@@ -85,9 +94,12 @@ class DiarizationCollector:
 
     def __init__(self, diarizer, embedder, *, sample_rate: int = 16000,
                  diarize_mic: bool = False, max_speakers: int | None = None,
-                 threshold: float = DEFAULT_CLUSTER_THRESHOLD) -> None:
+                 threshold: float = DEFAULT_CLUSTER_THRESHOLD, registry=None,
+                 recognition_allowed=None) -> None:
         self.diarizer = diarizer
         self.embedder = embedder
+        self.registry = registry  # voiceprint matcher; None = recognition off
+        self.recognition_allowed = recognition_allowed  # () -> bool; None = always
         self.sample_rate = int(sample_rate)
         self.diarize_mic = bool(diarize_mic)
         self.max_speakers = _clamp_speakers(max_speakers)
@@ -301,19 +313,26 @@ class DiarizationCollector:
                         lost, offered)
             return DiarizationResult(STATUS_CHANNEL, list(segments), [])
 
+        # Read after the drain: an opt-out that landed while queued chunks were processed
+        # must stop recognition here, before any centroid is computed or registry read.
+        registry = self.registry if self._recognition_allowed() else None
         sources = ([SOURCE_ME] if self.diarize_mic else []) + [SOURCE_OTHERS]
         # (source, offset) -> runs; seconds per (source, cluster)
         runs_by_chunk: dict[tuple[str, float], list] = {}
         seconds: dict[tuple[str, int], float] = {}
+        centroid_of: dict[tuple[str, int], np.ndarray] = {}
         for source in sources:
-            labelled = self._label_source([r for r in records if r.source == source])
+            labelled = self._label_source([r for r in records if r.source == source],
+                                          centroids=registry is not None)
             if labelled is None:
                 continue
-            chunk_runs, source_seconds = labelled
+            chunk_runs, source_seconds, source_centroids = labelled
             for offset, runs in chunk_runs.items():
                 runs_by_chunk[(source, offset)] = runs
             for label, secs in source_seconds.items():
                 seconds[(source, label)] = secs
+            for label, vec in source_centroids.items():
+                centroid_of[(source, label)] = vec
 
         output: list = []
         replaced: list[tuple[object, str, int | None]] = []  # (segment, source, cluster)
@@ -349,12 +368,77 @@ class DiarizationCollector:
                            float(seconds.get((source, label), 0.0)))
             for (source, label), sid in ids.items()
         ]
-        log.info("speaker diarization: %d chunks offered, %d lost, %d speakers (%.1fs)",
-                 offered, lost, len(speakers), time.monotonic() - started)
-        return DiarizationResult(STATUS_OK, final, speakers)
+        centroids = {sid: centroid_of[key] for key, sid in ids.items() if key in centroid_of}
+        recognised = 0
+        if registry is not None and centroids:
+            named = self._recognise(registry, speakers, final, centroids)
+            if named is None:  # opted out mid-match: one coherent anonymous result
+                centroids = {}
+            else:
+                speakers, final, recognised = named
+        log.info("speaker diarization: %d chunks offered, %d lost, %d speakers, "
+                 "%d recognised (%.1fs)",
+                 offered, lost, len(speakers), recognised, time.monotonic() - started)
+        return DiarizationResult(STATUS_OK, final, speakers, centroids)
 
-    def _label_source(self, records: list[_Record]):
-        """({offset: runs}, {cluster: seconds}) when ≥2 speakers appear, else None."""
+    def _recognition_allowed(self) -> bool:
+        """Registry still attached and the injected gate (if any) still open."""
+        if self.registry is None:
+            return False
+        allowed = self.recognition_allowed
+        if allowed is None:
+            return True
+        try:
+            return bool(allowed())
+        except Exception:  # noqa: BLE001 - fail closed
+            return False
+
+    def _recognise(self, registry, speakers: list[MeetingSpeaker], segments: list,
+                   centroids: dict[str, np.ndarray]):
+        """Name speakers whose centroid matches an enrolled voiceprint of this embedder.
+        Any registry error stops matching; the rest stay anonymous. None when recognition
+        was turned off meanwhile (checked before each match and once after the last)."""
+        model_id = getattr(self.embedder, "id", None)
+        if not isinstance(model_id, str):
+            return speakers, segments, 0
+        names: dict[str, tuple[str, str]] = {}  # sid -> (name, voiceprint id)
+        for sp in speakers:
+            vec = centroids.get(sp.id)
+            if vec is None:
+                continue
+            if not self._recognition_allowed():
+                return None
+            try:
+                hit = registry.match(vec, model_id)
+            except Exception as exc:  # noqa: BLE001 - recognition is optional
+                log.warning("speaker recognition failed (%s); speakers stay anonymous",
+                            type(exc).__name__)
+                break
+            if hit is None:
+                continue
+            vp = hit[0]
+            name, vid = getattr(vp, "name", None), getattr(vp, "id", None)
+            if isinstance(name, str) and name and isinstance(vid, str):
+                names[sp.id] = (name, vid)
+        if not self._recognition_allowed():
+            return None
+        if not names:
+            return speakers, segments, 0
+        speakers = [
+            dataclasses.replace(sp, label=names[sp.id][0], name=names[sp.id][0],
+                                voiceprint_id=names[sp.id][1]) if sp.id in names else sp
+            for sp in speakers
+        ]
+        segments = [
+            dataclasses.replace(seg, speaker_label=names[seg.speaker_id][0])
+            if seg.speaker_id in names else seg
+            for seg in segments
+        ]
+        return speakers, segments, len(names)
+
+    def _label_source(self, records: list[_Record], *, centroids: bool = False):
+        """({offset: runs}, {cluster: seconds}, {cluster: unit centroid}) when ≥2 speakers
+        appear, else None. Centroids are only computed when asked (recognition on)."""
         keys = [(ri, ti) for ri, r in enumerate(records) for ti in sorted(r.vectors)]
         if not keys:
             return None
@@ -397,7 +481,17 @@ class DiarizationCollector:
             chunk_runs[record.offset] = runs
         if len(found) < 2:
             return None
-        return chunk_runs, seconds
+        means: dict[int, np.ndarray] = {}
+        if centroids:
+            groups: dict[int, list[np.ndarray]] = {}
+            for key, lab in label_of.items():
+                groups.setdefault(lab, []).append(records[key[0]].vectors[key[1]])
+            for lab in found:
+                vec = _unit_vector(np.mean(np.stack(groups[lab]), axis=0)) \
+                    if groups.get(lab) else None
+                if vec is not None:
+                    means[lab] = vec
+        return chunk_runs, seconds, means
 
     # ----------------------------------------------------------------- close ---
 

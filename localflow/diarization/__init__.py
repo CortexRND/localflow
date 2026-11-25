@@ -33,8 +33,9 @@ if TYPE_CHECKING:
         DiarizationCollector,
         DiarizationResult,
     )
-    from .factory import build_diarization
+    from .factory import build_diarization, build_embedder
     from .mock import MockDiarizer, MockEmbedder, tone_index
+    from .registry import FileSpeakerRegistry
     from .sherpa import SherpaDiarizer, SherpaEmbedder, load_sherpa_backends
 
 _LAZY = {
@@ -52,6 +53,8 @@ _LAZY = {
     "SherpaEmbedder": "sherpa",
     "load_sherpa_backends": "sherpa",
     "build_diarization": "factory",
+    "build_embedder": "factory",
+    "FileSpeakerRegistry": "registry",
 }
 
 __all__ = [
@@ -63,6 +66,7 @@ __all__ = [
     "DiarizationResult",
     "DiarizationUnavailable",
     "Diarizer",
+    "FileSpeakerRegistry",
     "MeetingSpeaker",
     "MockDiarizer",
     "MockEmbedder",
@@ -77,6 +81,7 @@ __all__ = [
     "Voiceprint",
     "assign_speakers",
     "build_diarization",
+    "build_embedder",
     "cluster",
     "load_sherpa_backends",
     "merge_runs",

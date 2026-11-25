@@ -48,6 +48,26 @@ the Python server. FastAPI validation envelopes/statuses are mirrored; malformed
 JSON parser wording/offsets and native I/O errors can differ. Hardware is never
 opened by tests, and no speech-to-text implementation is bundled.
 
+## Speaker data (B8/B9)
+
+`/meeting/stop` adds `meeting_id`, `diarization` and `speakers`; a diarized
+meeting saves its sidecar (`~/.localflow/meetings/<id>.json`, the Python
+format). `GET|PUT|POST /api/meetings/{id}/speakers[/{sid}|/merge]` read, rename
+and merge a saved meeting's speakers, rewriting only the transcript's
+`**MM:SS** **<label>:**` prefixes and `speakers:` frontmatter (never the notes
+file, never outside the vault). `/api/speakers*` (voiceprints) need both
+`speaker_diarization` and `speaker_recognition`; audio enrollment and
+`GET /api/speakers/export` (served through `Backend::download`) are only for
+requests `lf-server` judged local, so a direct `handle` call is never local.
+`GET /api/diarization/status` is read-only; models come from the Python
+`lf speakers download` (same Hugging Face cache files).
+
+`with_speaker_data` isolates the sidecar/voiceprint roots (tests);
+`with_config_reader` lets the recognition gate be re-read during slow work
+(without it the request's config snapshot is used); `with_model_cache` sets the
+hub cache for status. One server process is the single writer per data
+directory, as in Python: the two runtimes share a format, not concurrent writes.
+
 ## Runtime menu and dictation composition
 
 `MeetingStatusPoller` accepts a fetch closure, not an HTTP client. Call

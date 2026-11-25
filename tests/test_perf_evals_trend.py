@@ -563,7 +563,7 @@ def test_nightly_job_matrix(wf):
     assert job["strategy"]["fail-fast"] is False
     matrix = {e["os"]: e["suites"] for e in job["strategy"]["matrix"]["include"]}
     assert matrix == {
-        "ubuntu-latest": "stt,dictation,recall,footprint,meetings",
+        "ubuntu-latest": "stt,dictation,recall,footprint,meetings,diarization",
         "macos-latest": "stt,dictation,recall,footprint",
         "windows-latest": "stt,dictation",
     }

@@ -44,6 +44,9 @@ fn embedding_config(model: String) -> SpeakerEmbeddingExtractorConfig {
 }
 
 impl SpeakerBackend for SherpaBackend {
+    fn embedder_id(&self) -> Option<&'static str> {
+        Some(EMBEDDING.id)
+    }
     fn load(&mut self) -> Result<()> {
         let path = |model| {
             verified_path(&self.cache, model)

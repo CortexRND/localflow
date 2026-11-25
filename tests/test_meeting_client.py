@@ -277,3 +277,42 @@ def test_client_speaker_errors_carry_the_server_detail():
                  lambda: client.merge_speakers(MID, "S1", "S2")):
         with pytest.raises(MeetingClientError, match="no speaker data for this meeting"):
             call()
+
+
+class FakeHTTPWithDelete(FakeHTTP):
+    def delete(self, url, **kwargs):
+        return self._call("delete", url, **kwargs)
+
+
+def test_client_voiceprint_methods_use_api_routes():
+    http = FakeHTTPWithDelete()
+    http.response = FakeResponse(data={"ok": True})
+    client = MeetingClient("http://localhost:9876", "secret-token", http)
+    client.enrolled()
+    client.enroll("Dana Lee", MID, "S2")
+    client.forget("Dana Lee/..")
+    client.forget()
+    base = "http://localhost:9876/api/speakers"
+    assert [call[0:2] for call in http.calls] == [
+        ("get", base), ("post", base), ("delete", f"{base}/Dana%20Lee%2F.."), ("delete", base),
+    ]
+    assert http.calls[1][2]["json"] == {"name": "Dana Lee", "meeting_id": MID,
+                                        "speaker_id": "S2"}
+    assert all("json" not in call[2] for i, call in enumerate(http.calls) if i != 1)
+    assert [call[2]["timeout"] for call in http.calls] == [3, 10, 10, 10]
+    assert all(call[2]["headers"] == {"X-Localflow-Token": "secret-token"}
+               for call in http.calls)
+
+
+def test_client_voiceprint_errors_carry_the_server_detail():
+    http = FakeHTTPWithDelete()
+    http.response = FakeResponse(403, {"detail": "speaker recognition is off"})
+    client = MeetingClient("http://localhost:9876", "t", http)
+    for call in (client.enrolled, lambda: client.enroll("x", MID, "S1"), client.forget):
+        with pytest.raises(MeetingClientError, match="speaker recognition is off"):
+            call()
+
+
+def test_client_never_uploads_audio_or_downloads_exports():
+    assert not any(hasattr(MeetingClient, name)
+                   for name in ("export", "enroll_audio", "upload", "export_speakers"))
