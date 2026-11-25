@@ -213,6 +213,17 @@ impl SettingsPage {
         .detach();
     }
 
+    /// The window came back to the front: models installed meanwhile (the
+    /// server verifies their hashes and records them only with a receipt)
+    /// show up without leaving the tab. Asks again only while the Meetings
+    /// tab is shown and the last answer was not ready; no polling.
+    pub fn window_activated(&mut self, cx: &mut Context<Self>) {
+        if self.speaker_readiness() == hs::SpeakerReadiness::Ready {
+            return;
+        }
+        self.load_speaker_status(cx);
+    }
+
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
         self.load_speaker_status(cx);
@@ -1140,13 +1151,23 @@ mod speaker_switch_tests {
         })
     }
 
+    fn client(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) -> std::sync::Arc<FakeMeetingClient> {
+        shell.read_with(cx, |shell, _| match &shell.cx.services.remote {
+            Remote::Sandbox { meetings, .. } => meetings.clone(),
+            Remote::Http { .. } => panic!("sandbox"),
+        })
+    }
+
+    fn activate(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        shell.update(cx, |s, cx| s.window_activation_changed(true, cx));
+        cx.run_until_parked();
+    }
+
     fn status_calls(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> usize {
-        let client: std::sync::Arc<FakeMeetingClient> =
-            shell.read_with(cx, |shell, _| match &shell.cx.services.remote {
-                Remote::Sandbox { meetings, .. } => meetings.clone(),
-                Remote::Http { .. } => panic!("sandbox"),
-            });
-        client
+        client(shell, cx)
             .calls()
             .iter()
             .filter(|c| **c == MeetingCall::DiarizationStatus)
@@ -1184,6 +1205,73 @@ mod speaker_switch_tests {
             p.save(i, serde_json::json!(false), cx);
             assert!(!p.errors.contains_key(&i));
         });
+    }
+
+    /// Coming back to the window re-checks readiness only on Settings'
+    /// Meetings tab and only until it is ready (no polling otherwise).
+    #[gpui::test]
+    fn window_activation_rechecks_readiness_until_ready(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(Page::Settings, |_| {}, cx);
+        let settings = page(&shell, cx);
+        // General: activation asks nothing.
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), 0, "General asks nothing");
+
+        settings.update(cx, |p, cx| p.open_tab("meetings", cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 1);
+        // Losing the window asks nothing.
+        shell.update(cx, |s, cx| s.window_activation_changed(false, cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 1, "deactivation asks nothing");
+
+        // Not ready: regaining the window asks again and picks up models
+        // installed meanwhile.
+        client(&shell, cx).set_diarization_status(Some(serde_json::json!({
+            "models_ready": true,
+            "extra_installed": true,
+        })));
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), 2);
+        settings.read_with(cx, |p, _| {
+            assert_eq!(
+                p.speaker_readiness(),
+                lf_ui::hub_settings::SpeakerReadiness::Ready
+            );
+        });
+
+        // Ready: further activations ask nothing.
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), 2, "ready asks nothing");
+    }
+
+    /// Activation on another page, or on another Settings tab, asks nothing
+    /// even while not ready; returning to the tab still asks (existing path).
+    #[gpui::test]
+    fn window_activation_skips_other_pages_and_tabs(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(Page::Settings, |_| {}, cx);
+        let settings = page(&shell, cx);
+        settings.update(cx, |p, cx| p.open_tab("meetings", cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 1);
+
+        shell.update(cx, |s, cx| s.navigate(Page::Home, None, cx));
+        cx.run_until_parked();
+        let before = status_calls(&shell, cx);
+        activate(&shell, cx);
+        assert_eq!(
+            status_calls(&shell, cx),
+            before,
+            "another page asks nothing"
+        );
+
+        shell.update(cx, |s, cx| s.navigate(Page::Settings, None, cx));
+        cx.run_until_parked();
+        settings.update(cx, |p, cx| p.open_tab("general", cx));
+        cx.run_until_parked();
+        let before = status_calls(&shell, cx);
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), before, "another tab asks nothing");
     }
 }
 

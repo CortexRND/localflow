@@ -1018,6 +1018,27 @@ impl Shell {
         self.views.iter().find(|(p, _)| *p == page).map(|(_, v)| v)
     }
 
+    /// The window lost or regained activation. Losing it releases a setup
+    /// microphone test; regaining it while Settings is the current page lets
+    /// the page re-check speaker readiness (it asks only on the Meetings tab
+    /// when not ready yet).
+    pub(crate) fn window_activation_changed(&mut self, active: bool, cx: &mut Context<Self>) {
+        if !active {
+            if let Some(view) = self.setup_view.clone() {
+                view.update(cx, |v, cx| v.release_audio(cx));
+            }
+            return;
+        }
+        if *self.cx.current_page.borrow() != Page::Settings {
+            return;
+        }
+        let settings = match self.find(Page::Settings) {
+            Some(View::Settings(view)) => view.clone(),
+            _ => return,
+        };
+        settings.update(cx, |v, cx| v.window_activated(cx));
+    }
+
     /// A created page's view (page tests drive the real page through it).
     #[cfg(test)]
     pub(crate) fn view(&self, page: Page) -> Option<&View> {
@@ -2061,12 +2082,9 @@ pub fn run(launch: Launch) -> RunStatus {
                         // (also one still opening) and cancels a trial;
                         // nothing captures in the background. After a system
                         // permission prompt the user presses Test again.
+                        // Regaining it re-checks speaker readiness on Settings.
                         cx.observe_window_activation(window, |shell, window, cx| {
-                            if !window.is_window_active() {
-                                if let Some(view) = shell.setup_view.clone() {
-                                    view.update(cx, |v, cx| v.release_audio(cx));
-                                }
-                            }
+                            shell.window_activation_changed(window.is_window_active(), cx);
                         })
                         .detach();
                         // Follow the system light/dark setting live, in
