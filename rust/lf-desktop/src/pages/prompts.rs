@@ -100,7 +100,7 @@ impl PromptsPage {
                     Ok(()) => (
                         Tone::Success,
                         if approve {
-                            "Prompt approved. Send it with `lf prompts dispatch`."
+                            "Prompt approved. Run lf prompts dispatch to send it."
                         } else {
                             "Prompt rejected."
                         }
@@ -188,6 +188,7 @@ impl Render for PromptsPage {
             "prompt-filter",
             &items,
             self.filter,
+            ui::TabDensity::Regular,
             Rc::new(move |f, _, cx| {
                 let _ = this.update(cx, |p, cx| {
                     p.filter = f;
@@ -290,7 +291,7 @@ impl Render for PromptsPage {
             header(
                 &t,
                 "Prompts",
-                Some("Approved prompts are sent with `lf prompts dispatch`.".into()),
+                Some("Run lf prompts dispatch to send approved prompts.".into()),
                 vec![refresh],
             ),
             column("prompts-scroll", body),

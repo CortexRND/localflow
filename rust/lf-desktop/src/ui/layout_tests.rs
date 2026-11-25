@@ -254,3 +254,73 @@ fn setting_rows_fit_at_960(cx: &mut TestAppContext) {
         check(&case, 960., cx);
     }
 }
+
+/// The Settings tab strip, as the page builds it, in the same sidebar +
+/// column frame, with the longest label selected.
+struct TabsHarness {
+    density: TabDensity,
+}
+
+impl Render for TabsHarness {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use crate::controllers::settings::Tab;
+        let t = Theme::light();
+        let items: Vec<(Tab, &'static str)> = Tab::ALL.iter().map(|t| (*t, t.label())).collect();
+        let strip = div().debug_selector(|| "strip".into()).child(tabs(
+            &t,
+            "settings-tab",
+            &items,
+            Tab::Dictation,
+            self.density,
+            Rc::new(|_, _, _| {}),
+        ));
+        div()
+            .flex()
+            .size_full()
+            .child(div().flex_none().w(px(size::SIDEBAR)))
+            .child(column("column", div().child(strip)))
+    }
+}
+
+/// Settings' seven tabs at the 960 px minimum. The test font is a 0.6 em
+/// monospace, wider than the real UI font, so a one-line fit is checked
+/// visually; this pins what does not depend on glyphs: the 656 px budget,
+/// the compact capsule (8 px sides, same height) and wrap-not-overflow.
+#[gpui::test]
+fn settings_tabs_are_compact_and_stay_inside_at_960(cx: &mut TestAppContext) {
+    let widths = [TabDensity::Regular, TabDensity::Compact].map(|density| {
+        let (_view, cx) = cx.add_window_view(|_, _| TabsHarness { density });
+        cx.simulate_resize(size(px(960.), px(850.)));
+        cx.run_until_parked();
+        let strip = cx.debug_bounds("strip").expect("strip laid out");
+        assert_eq!(strip.size.width, px(656.), "{density:?}: strip budget");
+        [
+            "settings-tab-0",
+            "settings-tab-1",
+            "settings-tab-2",
+            "settings-tab-3",
+            "settings-tab-4",
+            "settings-tab-5",
+            "settings-tab-6",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, selector)| {
+            let tab = cx.debug_bounds(selector).expect("tab laid out");
+            assert_eq!(tab.size.height, size::control_sm(), "{density:?}: tab {i}");
+            assert!(
+                strip.left() <= tab.left() && tab.right() <= strip.right(),
+                "{density:?}: tab {i} at {tab:?} overflows the strip {strip:?}"
+            );
+            tab.size.width
+        })
+        .collect::<Vec<_>>()
+    });
+    for (i, (regular, compact)) in widths[0].iter().zip(&widths[1]).enumerate() {
+        assert_eq!(
+            *regular - *compact,
+            (space::s5() - space::s4()) * 2.,
+            "tab {i} should lose 4 px a side"
+        );
+    }
+}

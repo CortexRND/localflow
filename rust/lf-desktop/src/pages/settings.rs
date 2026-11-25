@@ -965,6 +965,7 @@ impl Render for SettingsPage {
             "settings-tab",
             &tab_items,
             self.tab,
+            ui::TabDensity::Compact,
             Rc::new(move |tab, _, cx| {
                 let _ = this.update(cx, |p, cx| {
                     p.tab = tab;
