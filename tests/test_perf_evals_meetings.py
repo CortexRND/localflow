@@ -812,6 +812,41 @@ def test_m14_not_exercised_without_diarized_scenario(tmp_path):
     assert case["status"] == "not_exercised"
 
 
+def _pre_m14_doc() -> dict:
+    doc = _gates_doc()
+    doc["summary"].pop("M14")
+    for rep in doc["per_repeat"].values():
+        rep.pop("M14")
+    return doc
+
+
+def test_adapter_pre_m14_gates_json_is_not_exercised_and_compare_passes(tmp_path, scored_run):
+    run = tmp_path / "archived"
+    run.mkdir()
+    (run / "gates.json").write_text(json.dumps(_pre_m14_doc()))
+    archived = mg.load_run_dir(run)
+    by = _by_case(archived)
+    m14 = by["meetings/gate/M14"]
+    assert m14["status"] == "not_exercised"
+    assert m14["error"] == "gate M14 absent from gates.json summary (pre-M14 run)"
+    assert all(by[f"meetings/gate/{g}"]["status"] == "ok" for g in mg.GATES if g != "M14")
+    # Archived pre-M14 baseline vs itself and vs a current (M14-scoring) candidate: neither blocks.
+    _, report = _verdicts(archived, archived)
+    assert not report.blocked
+    _, report = _verdicts(archived, mg.load_run_dir(scored_run))
+    assert not report.blocked
+
+
+def test_adapter_malformed_m14_and_missing_older_gates_still_fail():
+    doc = _gates_doc(M14="nope")
+    assert _by_case(mg.convert_gates(doc))["meetings/gate/M14"]["status"] == "failed"
+    doc = _pre_m14_doc()
+    doc["summary"].pop("M12")
+    by = _by_case(mg.convert_gates(doc))
+    assert by["meetings/gate/M12"]["status"] == "failed" and "missing" in by["meetings/gate/M12"]["error"]
+    assert by["meetings/gate/M14"]["status"] == "not_exercised"
+
+
 def test_adapter_m14_dims_and_compare_blocks(scored_run):
     base = mg.load_run_dir(scored_run)
     case = _by_case(base)["meetings/gate/M14"]

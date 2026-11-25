@@ -60,6 +60,9 @@ GATE_INFO: dict[str, tuple[str, str, float | None]] = {
     "M14": ("speaker_labels", "exact", None),
 }
 LOWER_IS_BETTER = frozenset({"M7"})
+#: Gates added after archived ``gates.json`` files were written; their absence
+#: from a summary is ``not_exercised`` (an older run), not a failure.
+OPTIONAL_LEGACY_GATES = frozenset({"M14"})
 
 
 def gate_case_name(gate: str) -> str:
@@ -154,6 +157,9 @@ def convert_gate(gates: dict, gate: str, *, runtime: str = "python") -> dict:
     dims = gate_dims(gate, runtime)
     name = gate_case_name(gate)
     summary = gates.get("summary") if isinstance(gates, dict) else None
+    if isinstance(summary, dict) and gate not in summary and gate in OPTIONAL_LEGACY_GATES:
+        return make_case(suite=SUITE, case=name, dims=dims, status="not_exercised",
+                         error=f"gate {gate} absent from gates.json summary (pre-{gate} run)")
     entry = summary.get(gate) if isinstance(summary, dict) else None
     if not isinstance(entry, dict):
         return make_case(suite=SUITE, case=name, dims=dims, status="failed",
