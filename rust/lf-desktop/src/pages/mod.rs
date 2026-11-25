@@ -6,6 +6,7 @@ pub mod history;
 pub mod home;
 pub mod meetings;
 pub mod models;
+pub mod people;
 pub mod prompts;
 pub mod settings;
 pub mod setup;

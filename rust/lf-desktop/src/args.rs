@@ -28,6 +28,11 @@ OPTIONS:
                        Hot Phrases, History, Prompts), print what was written and
                        exit without a window (only with --sandbox; refused while
                        that sandbox is open in another window)
+    --sandbox-fixture <SCENE>
+                       Screenshot scene over example speaker-label data:
+                       speakers-saved, speakers-recent, speakers-settings or
+                       speakers-people (only with --sandbox and --data-dir;
+                       seeds a new or reset directory only)
     -h, --help         Print this help
     -V, --version      Print the version
 
@@ -58,6 +63,7 @@ pub struct Args {
     pub sandbox_reset: bool,
     pub sandbox_exercise: bool,
     pub data_dir: Option<PathBuf>,
+    pub sandbox_fixture: Option<crate::sandbox::Fixture>,
     pub help: bool,
     pub version: bool,
 }
@@ -111,8 +117,23 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
                 }
             }
             "--data-dir" => out.data_dir = Some(PathBuf::from(value("--data-dir")?)),
+            "--sandbox-fixture" => {
+                let name = value("--sandbox-fixture")?;
+                out.sandbox_fixture =
+                    Some(crate::sandbox::Fixture::parse(&name).ok_or_else(|| {
+                        ArgError(format!("unknown --sandbox-fixture scene: {name}"))
+                    })?);
+            }
             other => return Err(ArgError(format!("unknown argument: {other}"))),
         }
+    }
+    // Never the default sandbox directory: the fixture seeds only where asked.
+    if out.sandbox_fixture.is_some()
+        && (!out.sandbox || out.data_dir.is_none() || out.sandbox_exercise)
+    {
+        return Err(ArgError(
+            "--sandbox-fixture needs --sandbox and --data-dir (and no --sandbox-exercise)".into(),
+        ));
     }
     if (out.data_dir.is_some() || out.sandbox_reset || out.sandbox_exercise) && !out.sandbox {
         return Err(ArgError(
@@ -207,6 +228,31 @@ mod tests {
         let a = p(&["--sandbox", "--data-dir", "/tmp/x", "--sandbox-reset"]).unwrap();
         assert_eq!(a.data_dir, Some(PathBuf::from("/tmp/x")));
         assert!(parse(Vec::new(), true).unwrap().sandbox);
+    }
+
+    #[test]
+    fn the_speaker_fixture_needs_an_explicit_sandbox_directory() {
+        use crate::sandbox::Fixture;
+        let a = p(&[
+            "--sandbox",
+            "--data-dir",
+            "/tmp/x",
+            "--sandbox-fixture",
+            "speakers-people",
+        ])
+        .unwrap();
+        assert_eq!(a.sandbox_fixture, Some(Fixture::SpeakersPeople));
+        assert!(p(&["--sandbox", "--sandbox-fixture", "speakers-saved"]).is_err());
+        assert!(p(&["--sandbox-fixture=speakers-saved", "--data-dir", "/tmp/x"]).is_err());
+        assert!(p(&["--sandbox", "--data-dir=/tmp/x", "--sandbox-fixture=nope"]).is_err());
+        assert!(p(&[
+            "--sandbox",
+            "--data-dir=/tmp/x",
+            "--sandbox-exercise",
+            "--sandbox-fixture=speakers-saved"
+        ])
+        .is_err());
+        assert_eq!(p(&["--sandbox"]).unwrap().sandbox_fixture, None);
     }
 
     #[test]

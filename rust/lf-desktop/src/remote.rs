@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::controllers::ask_agent::{AgentBackend, RECALL_NUM_CTX};
 use crate::controllers::mcp_client::{self, McpError, ToolTransport};
+use crate::controllers::people::People;
 use crate::data::{open_history, DataRoot};
 
 /// Whether the local service answers.
@@ -104,6 +105,75 @@ impl Remote {
                 match client.and_then(|c| c.get(url).send()) {
                     Ok(response) if response.status().is_success() => Health::Online,
                     _ => Health::Offline,
+                }
+            }
+        }
+    }
+
+    /// `GET /api/speakers` (People, read-only). Only call while
+    /// [`crate::controllers::people::enabled`]: both servers refuse it
+    /// otherwise. No other speaker-registry route is ever called from here
+    /// (in particular not `/api/speakers/export`, the one with vectors).
+    pub fn people(&self, config: &Config) -> People {
+        match self {
+            Remote::Sandbox { root, .. } => {
+                if crate::controllers::people::enabled(config) {
+                    People::List(crate::sandbox::people(root))
+                } else {
+                    People::Off
+                }
+            }
+            Remote::Http { token_path } => {
+                let url = format!("{}/api/speakers", configured_base_url(config));
+                let Ok(token) = lf_core::apitoken::load_at(token_path) else {
+                    return People::Offline;
+                };
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build();
+                let mut request = match client {
+                    Ok(client) => client.get(url),
+                    Err(_) => return People::Offline,
+                };
+                if !token.is_empty() {
+                    request = request.header("X-Localflow-Token", token);
+                }
+                match request.send() {
+                    Err(_) => People::Offline,
+                    Ok(response) if response.status() == reqwest::StatusCode::FORBIDDEN => {
+                        People::Off
+                    }
+                    Ok(response) if response.status().is_success() => {
+                        match response.json::<Value>() {
+                            Ok(reply) => People::List(crate::controllers::people::parse(&reply)),
+                            Err(_) => {
+                                People::Error("Invalid response from LocalFlow server".into())
+                            }
+                        }
+                    }
+                    Ok(response) => {
+                        let status = response.status();
+                        let detail = response
+                            .json::<Value>()
+                            .ok()
+                            .and_then(|v| {
+                                v.get("detail").and_then(Value::as_str).map(str::to_owned)
+                            })
+                            .filter(|d| !d.is_empty())
+                            .unwrap_or_else(|| {
+                                status.canonical_reason().unwrap_or("request failed").into()
+                            });
+                        People::Error(
+                            detail
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .chars()
+                                .take(200)
+                                .collect(),
+                        )
+                    }
                 }
             }
         }
@@ -370,6 +440,62 @@ mod tests {
         ));
         let turn = remote.ask(&config, "what did I say?", "Any time");
         assert!(!turn.error.is_empty() && turn.answer.is_empty());
+        assert_eq!(remote.people(&config), People::Offline);
+    }
+
+    /// A real server's People reply: 403 is "off", a list is allow-listed.
+    #[test]
+    fn people_reads_the_list_and_a_403_honestly() {
+        use std::io::{Read, Write};
+        let serve = |status: &'static str, body: &'static str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+                request
+            });
+            (port, handle)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("api-token");
+        std::fs::write(&token, "secret-token").unwrap();
+        let remote = Remote::Http { token_path: token };
+        let mut config = Config::defaults_for(false);
+
+        let (port, handle) = serve(
+            "403 Forbidden",
+            r#"{"detail":"speaker recognition is off"}"#,
+        );
+        config.set_field("server_port", json!(port));
+        assert_eq!(remote.people(&config), People::Off);
+        let request = handle.join().unwrap();
+        assert!(
+            request.starts_with("GET /api/speakers HTTP/1.1"),
+            "{request}"
+        );
+        assert!(request
+            .to_lowercase()
+            .contains("x-localflow-token: secret-token"));
+
+        let (port, handle) = serve(
+            "200 OK",
+            r#"{"speakers":[{"id":"vp1","name":"Priya","created":"2026-11-20T09:00:00Z","samples":2,"model_id":"m"}],"embedder":"m"}"#,
+        );
+        config.set_field("server_port", json!(port));
+        let People::List(people) = remote.people(&config) else {
+            panic!("expected a list");
+        };
+        handle.join().unwrap();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].name, "Priya");
     }
 
     #[test]
@@ -386,5 +512,7 @@ mod tests {
             .ask(&config, "zebra quantum", "Any time")
             .citations
             .is_empty());
+        // Default sandbox: both speaker flags off, so People is "off".
+        assert_eq!(remote.people(&config), People::Off);
     }
 }

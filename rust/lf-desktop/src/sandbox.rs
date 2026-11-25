@@ -183,6 +183,150 @@ pub fn check_dir(dir: &Path) -> Result<()> {
 /// The caller holds the sandbox's instance lock, so no other window uses
 /// the data being reset; the instance directory itself is kept.
 pub fn prepare(dir: &Path, reset: bool) -> Result<DataRoot> {
+    prepare_with(dir, reset, false)
+}
+
+// ------------------------------------------------- speaker-label fixture ---
+
+/// Marks a sandbox seeded with `--sandbox-fixture` (speaker labels on, two
+/// meetings with two speakers each, two remembered voices, ready models).
+/// Only ever written beside [`SANDBOX_MARKER`] in an explicit `--data-dir`.
+pub const FIXTURE_MARKER: &str = "speaker-fixture";
+/// The meeting the next sandbox Stop saves with speaker labels.
+pub const FIXTURE_SAVED_ID: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+/// The Recent note saved earlier with speaker labels.
+pub const FIXTURE_RECENT_ID: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+const FIXTURE_NOTE: &str = "2026-11-20 1400 Speaker sync.md";
+
+/// `--sandbox-fixture <scene>`: an opt-in screenshot scene over the fixture
+/// data. Each opens a real page and performs one real action there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fixture {
+    /// Meetings: start and stop a meeting, which saves with two speakers.
+    SpeakersSaved,
+    /// Meetings: open "Speakers…" on the labelled Recent note.
+    SpeakersRecent,
+    /// Settings: open the Meetings tab (speaker switches, models ready).
+    SpeakersSettings,
+    /// People: read the remembered voices.
+    SpeakersPeople,
+}
+
+impl Fixture {
+    pub const ALL: [Fixture; 4] = [
+        Fixture::SpeakersSaved,
+        Fixture::SpeakersRecent,
+        Fixture::SpeakersSettings,
+        Fixture::SpeakersPeople,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Fixture::SpeakersSaved => "speakers-saved",
+            Fixture::SpeakersRecent => "speakers-recent",
+            Fixture::SpeakersSettings => "speakers-settings",
+            Fixture::SpeakersPeople => "speakers-people",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Fixture> {
+        Fixture::ALL.into_iter().find(|f| f.name() == text.trim())
+    }
+
+    /// The page the scene opens.
+    pub fn page(self) -> crate::page::Page {
+        use crate::page::Page;
+        match self {
+            Fixture::SpeakersSaved | Fixture::SpeakersRecent => Page::Meetings,
+            Fixture::SpeakersSettings => Page::Settings,
+            Fixture::SpeakersPeople => Page::People,
+        }
+    }
+}
+
+/// The scene this process runs (`--sandbox-fixture`), set once at launch.
+static SCENE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+static SCENE_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The stderr line Gate 8 waits for before capturing a scene.
+pub fn scene_ready_line(fixture: Fixture) -> String {
+    format!("lf-desktop: scene ready: {}", fixture.name())
+}
+
+/// Record the scene this window runs (no effect without a fixture).
+pub fn set_scene(fixture: Fixture) {
+    let _ = SCENE.set(fixture);
+}
+
+/// A page rendered `fixture`'s real end state. Printed once, and only when
+/// that is the scene this process runs; otherwise nothing happens.
+pub fn scene_ready(fixture: Fixture) {
+    if SCENE.get() == Some(&fixture)
+        && !SCENE_REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        eprintln!("{}", scene_ready_line(fixture));
+    }
+}
+
+/// Whether this sandbox was seeded with the speaker fixture.
+pub fn has_fixture(root: &DataRoot) -> bool {
+    root.sandbox_dir
+        .as_ref()
+        .is_some_and(|dir| dir.join(FIXTURE_MARKER).is_file())
+}
+
+/// The two speakers of each fixture meeting (distinct labels and talk time).
+pub fn fixture_speakers() -> Vec<Value> {
+    vec![
+        json!({"id": "S1", "label": "Speaker 1", "name": null, "source": "others", "seconds": 312.4}),
+        json!({"id": "S2", "label": "Priya Raman", "name": "Priya Raman", "source": "others", "seconds": 95.0}),
+    ]
+}
+
+/// The sandbox People list: two names in a fixture sandbox, else none.
+pub fn people(root: &DataRoot) -> Vec<crate::controllers::people::Person> {
+    if !has_fixture(root) {
+        return Vec::new();
+    }
+    crate::controllers::people::parse(&json!({"speakers": [
+        {"name": "Priya Raman", "created": "2026-11-20T14:30:00Z", "samples": 3},
+        {"name": "Sam Okafor", "created": "2026-11-12T15:45:00Z", "samples": 1},
+    ]}))
+}
+
+/// Seed the fixture data and its marker into a freshly seeded sandbox.
+pub(crate) fn add_fixture(root: &DataRoot) -> Result<()> {
+    let base = root.sandbox_dir.clone().expect("sandbox root");
+    seed_fixture(root)?;
+    fs::write(
+        base.join(FIXTURE_MARKER),
+        "speaker-label screenshot fixture\n",
+    )?;
+    Ok(())
+}
+
+fn seed_fixture(root: &DataRoot) -> Result<()> {
+    let base = root.sandbox_dir.clone().expect("sandbox root");
+    let notes = base.join("vault").join("notes").join("meetings");
+    fs::write(
+        notes.join(FIXTURE_NOTE),
+        format!(
+            "---\ntitle: \"Speaker sync (example)\"\nmeeting_id: {FIXTURE_RECENT_ID}\n\
+             speakers: [\"Speaker 1\", \"Priya Raman\"]\n---\n# Speaker sync (example)\n\n\
+             ## Summary\n- Two speakers, labelled in the transcript.\n"
+        ),
+    )?;
+    let mut cfg = config::load_from(&root.config_path)?;
+    cfg.set_field("speaker_diarization", json!(true));
+    cfg.set_field("speaker_recognition", json!(true));
+    config::save_config(&cfg, Some(&root.config_path))?;
+    Ok(())
+}
+
+/// [`prepare`], optionally with the speaker fixture. The fixture only seeds
+/// a new (or reset) directory: one already seeded without it is refused,
+/// so example data is never mixed into an existing sandbox.
+pub fn prepare_with(dir: &Path, reset: bool, fixture: bool) -> Result<DataRoot> {
     let marker = dir.join(SANDBOX_MARKER);
     if reset && dir.exists() {
         // Only ever delete a directory we seeded ourselves.
@@ -202,11 +346,19 @@ pub fn prepare(dir: &Path, reset: bool) -> Result<DataRoot> {
     }
     let root = DataRoot::sandbox(dir);
     if marker.exists() {
+        anyhow::ensure!(
+            !fixture || dir.join(FIXTURE_MARKER).is_file(),
+            "{} was seeded without the speaker fixture; use a new --data-dir or --sandbox-reset",
+            dir.display()
+        );
         return Ok(root);
     }
     check_dir(dir)?;
     fs::create_dir_all(&root.localflow_dir)?;
     seed(&root)?;
+    if fixture {
+        add_fixture(&root)?;
+    }
     fs::write(&marker, MARKER_TEXT)?;
     Ok(root)
 }
@@ -343,6 +495,16 @@ pub fn meeting_client(root: &DataRoot) -> FakeMeetingClient {
     client.set_chat_answer(Some(
         "Sandbox answer: the example meeting agreed to ship the native app beside the existing Hub.",
     ));
+    if has_fixture(root) {
+        // The labelled Recent note, the next Stop, and ready models.
+        client.seed_speakers(FIXTURE_RECENT_ID, fixture_speakers());
+        client.seed_stop_speakers(FIXTURE_SAVED_ID, fixture_speakers());
+        client.set_diarization_status(Some(json!({
+            "models_ready": true, "reason": "", "extra_installed": true, "models": [],
+            "speaker_diarization": true, "diarize_mic": false, "speaker_recognition": true,
+            "download": {"state": "idle", "done_bytes": 0, "total_bytes": 0, "error": null},
+        })));
+    }
     client
 }
 
@@ -1817,6 +1979,66 @@ mod tests {
         assert!(history.delete(entry.id).unwrap());
         assert!(!clip.exists(), "{}", clip.display());
         assert!(history.get(entry.id).unwrap().is_none());
+    }
+
+    /// The default sandbox has no speaker data at all; the opt-in fixture
+    /// seeds exactly two speakers per meeting, ready models and both flags,
+    /// only in a new directory.
+    #[test]
+    fn the_speaker_fixture_is_opt_in_and_only_seeds_new_directories() {
+        use lf_ui::backends::meeting::{MeetingCall, MeetingClient};
+        let dir = tempfile::tempdir().unwrap();
+        let plain = prepare(&dir.path().join("plain"), false).unwrap();
+        assert!(!has_fixture(&plain));
+        let config = config::load_from(&plain.config_path).unwrap();
+        assert_eq!(config.field_bool("speaker_diarization"), Some(false));
+        assert_eq!(config.field_bool("speaker_recognition"), Some(false));
+        let client = meeting_client(&plain);
+        assert_eq!(client.speakers(FIXTURE_RECENT_ID).unwrap(), None);
+        assert!(people(&plain).is_empty());
+        // A plain sandbox can't be turned into a fixture one in place.
+        let err = prepare_with(&dir.path().join("plain"), false, true).unwrap_err();
+        assert!(format!("{err:#}").contains("--sandbox-reset"), "{err:#}");
+        assert!(!has_fixture(&plain));
+
+        let base = dir.path().join("speakers");
+        let root = prepare_with(&base, false, true).unwrap();
+        assert!(has_fixture(&root));
+        let config = config::load_from(&root.config_path).unwrap();
+        assert_eq!(config.field_bool("speaker_diarization"), Some(true));
+        assert!(crate::controllers::people::enabled(&config));
+        let note = base.join("vault/notes/meetings").join(FIXTURE_NOTE);
+        assert_eq!(
+            lf_ui::hub_model::note_meeting_id(&note).as_deref(),
+            Some(FIXTURE_RECENT_ID)
+        );
+        let client = meeting_client(&root);
+        let speakers = client.speakers(FIXTURE_RECENT_ID).unwrap().unwrap();
+        let listed = lf_ui::hub_model::meeting_speakers(&speakers);
+        assert_eq!(listed.len(), 2);
+        assert_ne!(listed[0].label, listed[1].label);
+        let status = client.diarization_status().unwrap();
+        assert_eq!(
+            lf_ui::hub_settings::speaker_readiness(Some(&Ok(status))),
+            lf_ui::hub_settings::SpeakerReadiness::Ready
+        );
+        assert_eq!(people(&root).len(), 2);
+        // Relaunching with or without the fixture keeps the same data.
+        assert!(prepare_with(&base, false, true).is_ok());
+        assert!(has_fixture(&prepare(&base, false).unwrap()));
+        assert!(client
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, MeetingCall::RenameSpeaker { .. })));
+        for fixture in Fixture::ALL {
+            assert_eq!(Fixture::parse(fixture.name()), Some(fixture));
+        }
+        assert_eq!(Fixture::parse("speakers"), None);
+        // The exact line scripts/gpui_screenshots.py waits for.
+        assert_eq!(
+            scene_ready_line(Fixture::SpeakersRecent),
+            "lf-desktop: scene ready: speakers-recent"
+        );
     }
 
     #[test]
