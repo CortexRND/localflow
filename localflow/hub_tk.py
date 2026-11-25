@@ -13,7 +13,13 @@ from tkinter import font as tkfont
 from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
-from localflow.hub_model import dictation_state
+from localflow.hub_model import (
+    SPEAKER_TARGET_PLACEHOLDER,
+    SPEAKERS_HEADING,
+    SpeakerPanel,
+    dictation_state,
+    speaker_row_meta,
+)
 from localflow.hub_settings import DIARIZATION_KEYS, diarization_disabled_reason
 from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, vault_notes_path
@@ -86,6 +92,10 @@ class HubWindow:
         self._meeting_results = queue.Queue()
         self._meeting_dispatch_after = None
         self._meeting_requests_in_flight = 0
+        # The post-stop Speakers editor: the panel is the state, the view only
+        # draws it and exists only while there are speakers to show.
+        self._meeting_speakers = SpeakerPanel()
+        self._meeting_speakers_view = None
         self.page = "Home"
         self.page_errors: dict[str, str] = {}
         root.title("LocalFlow Hub")
@@ -876,6 +886,10 @@ class HubWindow:
             self._meeting_title = self.meeting_title_entry.get()
         if hasattr(self, "meeting_template_var"):
             self._meeting_template = self.meeting_template_var.get()
+        if self._meeting_speakers_view is not None:
+            self._meeting_speakers_view.capture()
+        # _clear destroys the widgets with the rest of the page.
+        self._meeting_speakers_view = None
 
     def _meeting_request(self, operation, callback, *args):
         self._meeting_requests_in_flight += 1
@@ -920,6 +934,8 @@ class HubWindow:
             pass
 
     def _page_meetings(self):
+        # The old view went with the old page body; it is rebuilt on demand.
+        self._meeting_speakers_view = None
         self.meeting_down = tk.Frame(self.body, bg=self.tokens["paper"])
         self.meeting_down_label = tk.Label(
             self.meeting_down, text="LocalFlow server not running.",
@@ -1008,7 +1024,7 @@ class HubWindow:
             self.meeting_setup, bg=self.tokens["paper"], height=10,
         )
         self.meeting_speaker_spacer.pack(fill="x")
-        self._meeting_render_speakers()
+        self._meeting_render_speaker_toggles()
         self.meeting_setup.pack(fill="x")
 
         notes_heading = tk.Frame(self.meeting_content, bg=self.tokens["paper"])
@@ -1110,9 +1126,9 @@ class HubWindow:
         # Unknown (server down, older server) is not "not ready".
         self._meeting_diar_status = None if error else result
         if self.page == "Meetings":
-            self._meeting_render_speakers()
+            self._meeting_render_speaker_toggles()
 
-    def _meeting_render_speakers(self):
+    def _meeting_render_speaker_toggles(self):
         if not hasattr(self, "meeting_speaker_checks"):
             return
         reason = diarization_disabled_reason(self._meeting_diar_status)
@@ -1142,7 +1158,7 @@ class HubWindow:
         except Exception as exc:  # noqa: BLE001
             var.set(not value)
             self._meeting_show_error(exc)
-        self._meeting_render_speakers()
+        self._meeting_render_speaker_toggles()
 
     def _meeting_templates_loaded(self, result, error):
         if error:
@@ -1182,9 +1198,13 @@ class HubWindow:
     def _meeting_poll(self):
         if self.page != "Meetings":
             return
-        self._meeting_request("status", self._meeting_status_received)
+        ticket = self._meeting_speakers.ticket()
+        self._meeting_request(
+            "status",
+            lambda result, error: self._meeting_status_received(result, error, ticket),
+        )
 
-    def _meeting_status_received(self, result, error):
+    def _meeting_status_received(self, result, error, ticket=None):
         if error:
             self._meeting_status_data = {}
             self._meeting_session_active = False
@@ -1198,6 +1218,7 @@ class HubWindow:
         self._meeting_status_data = result
         if result.get("last_saved"):
             self._meeting_last_saved = result["last_saved"]
+            self._meeting_speakers.sync(result["last_saved"], ticket)
         session = result.get("session")
         if session and not self._meeting_session_active and not self._meeting_notes_dirty:
             self._meeting_notes_text = session.get("user_notes", "")
@@ -1303,6 +1324,7 @@ class HubWindow:
             self.meeting_saved_frame.pack(fill="x", pady=(0, 10))
         else:
             self.meeting_saved_frame.pack_forget()
+        self._meeting_render_speakers(session)
         if status.get("chat_available") or self._meeting_last_saved:
             self.meeting_chat_frame.pack(fill="x")
         else:
@@ -1451,6 +1473,7 @@ class HubWindow:
                     return
                 self._meeting_notes_dirty = False
                 self._meeting_last_saved = None
+                self._meeting_speakers.sync(None)
                 self._meeting_chat.clear()
                 if self._meeting_notes_visible():
                     self.meeting_notes_status.configure(
@@ -1490,6 +1513,7 @@ class HubWindow:
                     self._meeting_show_error(stop_error)
                 else:
                     self._meeting_last_saved = result
+                    self._meeting_speakers.sync(result)
                     self._meeting_notes_dirty = False
                     self._meeting_notes_text = ""
                     self._meeting_session_active = False
@@ -1507,6 +1531,38 @@ class HubWindow:
             self.root.after_cancel(self._meeting_notes_after)
             self._meeting_notes_after = None
         self._meeting_save_notes(flushed)
+
+    def _meeting_render_speakers(self, session=None):
+        if session is None:
+            session = self._meeting_status_data.get("session")
+        panel, view = self._meeting_speakers, self._meeting_speakers_view
+        if not (self._meeting_last_saved and not session and panel.visible):
+            if panel.mode and not panel.busy:
+                panel.cancel()  # nothing stays open off screen
+            if view is not None:
+                view.destroy()
+                self._meeting_speakers_view = None
+            return
+        if view is None:
+            view = self._meeting_speakers_view = SpeakerPanelView(
+                self, self.meeting_content, panel, self._meeting_speaker_send,
+            )
+        # A pack_forget-ed widget re-packs at the end; keep it under the saved row.
+        view.frame.pack(fill="x", pady=(0, 10), after=self.meeting_saved_frame)
+        view.render()
+
+    def _meeting_speaker_send(self, request):
+        operation, args, token = request
+        self._meeting_request(
+            operation,
+            lambda result, error: self._meeting_speaker_done(token, result, error),
+            *args,
+        )
+
+    def _meeting_speaker_done(self, token, result, error):
+        # State first: a TclError below must not leave the panel busy.
+        if self._meeting_speakers.finish(token, result, error) and self.page == "Meetings":
+            self._meeting_render_speakers()
 
     def _meeting_show_error(self, error):
         self._meeting_error_message = str(error)
@@ -1561,6 +1617,235 @@ class HubWindow:
                 anchor="w", justify="left", wraplength=700,
                 font=(self.font_family, 11),
             ).pack(fill="x", pady=(0, 8))
+
+
+class SpeakerPanelView:
+    """Draws a SpeakerPanel inside `parent`; all state lives in the panel.
+
+    Plain widgets only (no Tk variables): rename reads Entry.get() and the
+    merge target is a Menubutton whose Menu items call back directly.
+    """
+
+    def __init__(self, hub, parent, panel, send):
+        self.hub = hub
+        self.panel = panel
+        self.send = send
+        tokens = hub.tokens
+        family = hub.font_family
+        self.frame = tk.Frame(parent, bg=tokens["paper"])
+        self.heading = tk.Label(
+            self.frame, text=SPEAKERS_HEADING, bg=tokens["paper"], fg=tokens["ink"],
+            font=(family, 13, "bold"),
+        )
+        self.heading.pack(anchor="w", pady=(6, 6))
+        self.card = tk.Frame(
+            self.frame, bg=tokens["surface"],
+            highlightbackground=tokens["line"], highlightthickness=1,
+        )
+        self.card.pack(fill="x")
+        self.error = tk.Label(
+            self.frame, text="", bg=tokens["paper"], fg=tokens["red"],
+            font=(family, 12), wraplength=700, justify="left", anchor="w",
+        )
+        self._reset_refs()
+        self._rendered = None
+        self._edit_key = ("", "")
+
+    def _reset_refs(self):
+        self.entry = None
+        self.entry_id = ""
+        self.menubutton = None
+        self.menu = None
+        self.buttons = {}
+        self.name_labels = []
+        self.duration_labels = []
+
+    def render(self):
+        """Show the error line; rebuild the rows only when the panel changed."""
+        panel = self.panel
+        if panel.error:
+            self.error.configure(text=panel.error)
+            self.error.pack(fill="x", pady=(6, 0))
+        else:
+            self.error.configure(text="")
+            self.error.pack_forget()
+        if self._rendered == panel.revision:
+            return
+        self.capture()
+        self._fill()
+        self._rendered = panel.revision
+
+    def capture(self):
+        """Keep what is typed in the rename field in the panel."""
+        if self.entry is None:
+            return
+        try:
+            text = self.entry.get()
+        except tk.TclError:
+            return
+        self.panel.set_draft(text, self.entry_id)
+
+    def destroy(self):
+        self._reset_refs()
+        self.frame.destroy()
+
+    # ---------------------------------------------------------------- rows ---
+
+    def _fill(self):
+        panel = self.panel
+        tokens = self.hub.tokens
+        for child in self.card.winfo_children():
+            child.destroy()
+        self._reset_refs()
+        focus = False
+        for index, row in enumerate(panel.rows):
+            if index:
+                tk.Frame(self.card, bg=tokens["line"], height=1).pack(fill="x")
+            frame = tk.Frame(self.card, bg=tokens["surface"], padx=12, pady=6)
+            frame.pack(fill="x")
+            mode = panel.mode if row["id"] == panel.speaker_id else ""
+            if mode == "rename":
+                focus = self._edit_key != ("rename", row["id"])
+                self._rename_row(frame, row)
+            elif mode == "merge":
+                self._merge_row(frame, row)
+            else:
+                self._normal_row(frame, row)
+        self._edit_key = (panel.mode, panel.speaker_id)
+        if self.entry is not None and not panel.busy:
+            self.entry.focus_set()
+            if focus:
+                self.entry.selection_range(0, "end")
+            self.entry.icursor("end")
+        if panel.busy:
+            for button in self.buttons.values():
+                button.configure(state="disabled")
+            if self.entry is not None:
+                self.entry.configure(state="disabled")
+            if self.menubutton is not None:
+                self.menubutton.configure(state="disabled")
+
+    def _button(self, parent, key, label, command, kind="ghost"):
+        button = self.hub._button(parent, label, command, kind=kind, padx=10, pady=2)
+        self.buttons[key] = button
+        return button
+
+    def _normal_row(self, frame, row):
+        tokens = self.hub.tokens
+        family = self.hub.font_family
+        speaker_id = row["id"]
+        if self.panel.can_merge:
+            self._button(
+                frame, ("merge", speaker_id), "Merge",
+                lambda: self._begin("merge", speaker_id),
+            ).pack(side="right", padx=(8, 0))
+        self._button(
+            frame, ("rename", speaker_id), "Rename",
+            lambda: self._begin("rename", speaker_id),
+        ).pack(side="right")
+        name = tk.Label(
+            frame, text=row["label"], bg=tokens["surface"], fg=tokens["ink"],
+            font=(family, 12, "bold"), anchor="w",
+        )
+        name.pack(side="left")
+        duration = tk.Label(
+            frame, text=speaker_row_meta(self.panel.rows, row),
+            bg=tokens["surface"], fg=tokens["muted"], font=(family, 11),
+        )
+        duration.pack(side="left", padx=(10, 0))
+        self.name_labels.append(name)
+        self.duration_labels.append(duration)
+
+    def _rename_row(self, frame, row):
+        panel = self.panel
+        self._button(frame, ("cancel", row["id"]), "Cancel", self._cancel).pack(
+            side="right", padx=(8, 0),
+        )
+        self._button(
+            frame, ("save", row["id"]),
+            "Saving…" if panel.busy == "rename" else "Save", self._save, kind="secondary",
+        ).pack(side="right", padx=(12, 0))
+        entry = self.hub._entry(frame)
+        entry.insert(0, panel.draft)
+        entry.pack(side="left", fill="x", expand=True, ipady=4)
+        entry.bind("<Return>", lambda _event: self._save())
+        entry.bind("<Escape>", lambda _event: self._cancel())
+        self.entry = entry
+        self.entry_id = row["id"]
+
+    def _merge_row(self, frame, row):
+        panel = self.panel
+        tokens = self.hub.tokens
+        family = self.hub.font_family
+        self._button(frame, ("cancel", row["id"]), "Cancel", self._cancel).pack(
+            side="right", padx=(8, 0),
+        )
+        confirm = self._button(
+            frame, ("confirm", row["id"]),
+            "Merging…" if panel.busy == "merge" else "Merge", self._confirm,
+            kind="secondary",
+        )
+        confirm.pack(side="right", padx=(12, 0))
+        if not panel.into_id:
+            confirm.configure(state="disabled")
+        choices = panel.choices()
+        chosen = next(
+            (choice["title"] for choice in choices if choice["id"] == panel.into_id),
+            SPEAKER_TARGET_PLACEHOLDER,
+        )
+        menubutton = tk.Menubutton(
+            frame, text=chosen, bg=tokens["surface"], fg=tokens["ink"],
+            activebackground=tokens["surface"], relief="flat",
+            highlightthickness=1, highlightbackground=tokens["line"],
+            font=(family, 12), anchor="w", indicatoron=True,
+        )
+        menu = tk.Menu(menubutton, tearoff=0)
+        for choice in choices:
+            menu.add_command(
+                label=choice["title"],
+                command=lambda speaker_id=choice["id"]: self._choose(speaker_id),
+            )
+        menubutton.configure(menu=menu)
+        menubutton.pack(side="right", padx=(10, 0))
+        self.menubutton = menubutton
+        self.menu = menu
+        prompt = tk.Label(
+            frame, text=f"Merge {row['label']} into", bg=tokens["surface"],
+            fg=tokens["ink"], font=(family, 12), anchor="w",
+        )
+        prompt.pack(side="left", fill="x", expand=True)
+        self.name_labels.append(prompt)
+
+    # ----------------------------------------------------------- callbacks ---
+
+    def _begin(self, mode, speaker_id):
+        if mode == "rename":
+            self.panel.begin_rename(speaker_id)
+        else:
+            self.panel.begin_merge(speaker_id)
+        self.render()
+
+    def _choose(self, speaker_id):
+        self.panel.choose_target(speaker_id)
+        self.render()
+
+    def _cancel(self):
+        self.panel.cancel()
+        self.render()
+
+    def _save(self):
+        if self.entry is None:
+            return
+        request = self.panel.submit_rename(self.entry.get())
+        self.render()
+        if request:
+            self.send(request)
+
+    def _confirm(self):
+        request = self.panel.submit_merge()
+        self.render()
+        if request:
+            self.send(request)
 
 
 def main(initial_page="Home"):

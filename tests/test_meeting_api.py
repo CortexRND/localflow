@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localflow import meetings, server
-from localflow.config import Config
+from localflow.config import Config, save_config
 from localflow.diarization import collector as collector_module
 from localflow.diarization import factory as factory_module
 from localflow.diarization.collector import DiarizationCollector, DiarizationResult
@@ -88,6 +88,8 @@ def client(monkeypatch, tmp_path, tmp_path_factory):
         meeting_templates_dir=str(templates),
     )
     llm = FakeLLM("## Summary\nnotes")
+    # Meeting starts re-read the speaker flags; never from the developer's own file.
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(tmp_path / "config.toml"))
     monkeypatch.setattr(server, "_config", config)
     monkeypatch.setattr(server, "_summarizer", MeetingSummarizer(llm))
     monkeypatch.setattr(server, "_writer", ObsidianWriter(
@@ -1581,6 +1583,128 @@ def test_live_speaker_flags_keep_other_settings_behaviour(client, caplog):
     assert restart and "speaker_recognition" not in restart[0]
     assert "diarize_mic" not in restart[0]
     assert "diarization_max_speakers" in restart[0] and "server_port" in restart[0]
+
+
+def _saved_on_disk(**flags):
+    """Another process saved the file; the watcher has not polled, so _config is stale."""
+    import dataclasses
+
+    save_config(dataclasses.replace(server._config, **flags))
+
+
+def _start_and_stop(client):
+    start = client.post("/meeting/start", json={"title": "x"})
+    assert start.status_code == 200
+    collector = getattr(server._session, "diarization", None)
+    stop = client.post("/meeting/stop").json()
+    return start.json(), collector, stop
+
+
+def test_diarization_enabled_on_disk_just_before_start_is_used(diar, monkeypatch):
+    monkeypatch.setattr(server._config, "speaker_diarization", False)
+    port = server._config.server_port
+    _saved_on_disk(speaker_diarization=True, diarize_mic=True, server_port=1)
+    assert server._config.speaker_diarization is False  # no watcher tick
+    start, collector, stop = _start_and_stop(diar)
+    assert start["diarization"] == "collecting" and collector is not None
+    assert stop["diarization"] == "ok"
+    assert collector.registry is None  # recognition stayed off
+    # Only the speaker flags are picked up; restart-only settings stay as started.
+    assert server._config.speaker_diarization is True
+    assert server._config.diarize_mic is False and server._config.server_port == port
+
+
+def test_diarization_disabled_on_disk_just_before_start_is_used(diar, monkeypatch):
+    monkeypatch.setitem(sys.modules, "localflow.diarization.factory", None)
+    _saved_on_disk(speaker_diarization=False)
+    start, collector, stop = _start_and_stop(diar)
+    assert (start["diarization"], collector, stop["diarization"]) == ("off", None, "off")
+
+
+def test_recognition_opt_out_on_disk_just_before_start_reads_no_voiceprints(rec):
+    first = _saved(rec)
+    assert _enroll(rec, first).status_code == 201
+    used = len(rec.registry_used)
+    _saved_on_disk(speaker_recognition=False)
+    assert server._config.speaker_recognition is True  # no watcher tick
+    _, _, stop = _three_speaker_api_meeting(rec)  # Dana Lee would be named if stale
+    assert [s["label"] for s in stop["speakers"]] == ["Speaker 1", "Speaker 2", "Speaker 3"]
+    assert all(sp["centroid"] is None for sp in _sidecar(rec, stop["meeting_id"])["speakers"])
+    assert len(rec.registry_used) == used
+    assert rec.get("/api/speakers").status_code == 403
+
+
+@pytest.mark.parametrize("stale_callback", [False, True])
+def test_recognition_opt_in_on_disk_just_before_start_is_used(diar, voices, monkeypatch,
+                                                              stale_callback):
+    _saved_on_disk(speaker_recognition=True)
+    if stale_callback:
+        # The watcher read the file before the save; its callback lands after the refresh.
+        refresh = server._refresh_speaker_flags
+
+        def refresh_then_stale_callback():
+            fresh = refresh()
+            _file_says(speaker_recognition=False)
+            return fresh
+
+        monkeypatch.setattr(server, "_refresh_speaker_flags", refresh_then_stale_callback)
+        # The voices stub asserts the live gate the stale callback just closed; this one
+        # only constructs (no I/O). Voiceprint reads still pass the live gate later.
+        monkeypatch.setattr(server, "_speaker_registry", lambda: FileSpeakerRegistry(
+            diar.voices, meetings=server._meeting_store()))
+    assert diar.post("/meeting/start", json={"title": "x"}).status_code == 200
+    collector = server._session.diarization
+    assert collector.registry is not None
+    _push(np.concatenate([tone(0, 4), tone(1, 4), tone(2, 4)]))
+    if stale_callback:
+        assert server._recognition_on() is False
+        _file_says(speaker_recognition=True)  # the watcher's next poll corrects it
+    else:
+        assert diar.registry_used
+    stop = diar.post("/meeting/stop").json()
+    assert stop["diarization"] == "ok" and stop["speakers"]
+    assert all(sp["centroid"] for sp in _sidecar(diar, stop["meeting_id"])["speakers"])
+
+
+@pytest.mark.parametrize("text", [
+    "[speakers\nnot toml",
+    ('config_version = "2"\n[meetings]\nspeaker_diarization = false\n'
+     "speaker_recognition = false\n"),
+])
+def test_invalid_config_file_keeps_the_running_speaker_flags(rec, caplog, text):
+    Path(os.environ["LOCALFLOW_CONFIG"]).write_text(text, encoding="utf-8")
+    with caplog.at_level(logging.WARNING, "localflow.server"):
+        start, collector, _ = _start_and_stop(rec)
+    assert start["diarization"] == "collecting" and collector.registry is not None
+    assert server._config.speaker_diarization is True
+    assert server._config.speaker_recognition is True
+    assert any("config reload skipped" in r.getMessage() for r in caplog.records)
+
+
+def test_missing_config_with_a_legacy_file_starts_without_migrating(rec, monkeypatch, tmp_path):
+    from localflow import config as config_module
+
+    legacy = tmp_path / ".localflow.toml"
+    legacy.write_text('model_size = "tiny"\n', encoding="utf-8")  # no credentials
+    monkeypatch.setattr(config_module, "legacy_config_path", lambda: legacy)
+    active = Path(os.environ["LOCALFLOW_CONFIG"])
+    real_exists = Path.exists
+    assert not real_exists(active)
+    probes = []
+
+    def exists(self, *args, **kwargs):
+        # The active file is there for the first probe, then gone (deleted meanwhile).
+        if self == active and not probes:
+            probes.append(1)
+            return True
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    start, collector, _ = _start_and_stop(rec)  # asserts the start returned 200
+    assert start["diarization"] == "collecting" and collector.registry is not None
+    assert server._config.speaker_diarization and server._config.speaker_recognition
+    assert not real_exists(active)  # never migrated into a new v2 file
+    assert legacy.read_text(encoding="utf-8") == 'model_size = "tiny"\n'
 
 
 def _closing_during_body_read(monkeypatch):

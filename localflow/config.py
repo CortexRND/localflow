@@ -364,11 +364,16 @@ def migrate_legacy(path: Path | None = None) -> Config | None:
     return config
 
 
+def read_config_file(path: Path) -> Config:
+    """Read one v2 config file; no defaults, no migration. Raises FileNotFoundError."""
+    return _config_from_v2(_parse(path))
+
+
 def load_config() -> Config:
     """Load v2 config, migrating the legacy flat file when needed."""
     target = config_path()
     if target.exists():
-        return _config_from_v2(_parse(target))
+        return read_config_file(target)
     legacy = legacy_config_path()
     if legacy.exists():
         migrated = migrate_legacy(legacy)
