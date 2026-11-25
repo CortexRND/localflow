@@ -1809,6 +1809,28 @@ async fn speaker_labels_are_saved_after_a_channel_labelled_recovery_checkpoint()
 }
 
 #[tokio::test]
+async fn speaker_labels_are_skipped_when_the_channel_checkpoint_cannot_be_saved() {
+    let f = speaker_fixture(true);
+    // A vault path that is a file: every write fails, the full checkpoint included.
+    fs::write(f.dir.path().join("vault"), "not a directory").unwrap();
+    start_meeting(&f).await;
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await;
+    assert_eq!(saved, (500, json!({"detail":"Internal Server Error"})));
+    assert_eq!(f.capture.diarizer_calls.load(Ordering::SeqCst), 1);
+    // Stop still ran its channel path: the summary saw Me/Others, never labels.
+    let calls = f.models.calls.lock().unwrap();
+    let prompt = &calls[0].2;
+    assert!(
+        prompt.contains("Others: sounds good, Dana owns the blog post"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("Speaker 1") && !prompt.contains("remote part"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
 async fn speaker_labels_flag_off_never_asks_for_a_diarizer_and_output_is_channel() {
     let f = speaker_fixture(false);
     start_meeting(&f).await;
