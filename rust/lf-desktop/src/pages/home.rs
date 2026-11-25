@@ -447,7 +447,7 @@ impl HomePage {
         let mut rows = Vec::new();
         for entry in self.recent.iter() {
             let id = entry.id;
-            let text_value = history::row_text(entry);
+            let text_value = history::row_preview(entry);
             let chip = hub_model::history_status_chip(&entry.status);
             let copy_text = entry.final_text.clone();
             let open = self.pcx.clone();
@@ -473,7 +473,7 @@ impl HomePage {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .whitespace_nowrap()
+                            .line_clamp(1)
                             .text_ellipsis()
                             .child(text_value),
                     )
