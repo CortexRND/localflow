@@ -747,10 +747,15 @@ pub fn keys(t: &Theme, combo: &str) -> Div {
         .children(combo.split(" + ").map(|k| keycap(t, k.to_string())))
 }
 
+/// The diameter of [`dot`].
+pub fn dot_size() -> Pixels {
+    px(8.)
+}
+
 /// The bare dot of a status tone.
 pub fn dot(t: &Theme, tone: Tone) -> Div {
     div()
-        .size(px(8.))
+        .size(dot_size())
         .flex_none()
         .rounded_full()
         .bg(t.dot(tone))

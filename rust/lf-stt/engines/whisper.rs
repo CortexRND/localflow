@@ -128,8 +128,9 @@ impl SpeechEngine for WhisperEngine {
     fn transcribe(&mut self, pcm: &[f32], prompt: Option<&str>) -> Result<Transcript> {
         let context = self.context.as_ref().context("Whisper is not loaded")?;
         let start = Instant::now();
-        let text = if pcm.is_empty() {
-            String::new()
+        let audio_seconds = pcm.len() as f64 / 16000.0;
+        let (text, segments) = if pcm.is_empty() {
+            (String::new(), Vec::new())
         } else {
             if pcm.iter().any(|s| !s.is_finite()) {
                 bail!("PCM contains non-finite samples");
@@ -154,16 +155,28 @@ impl SpeechEngine for WhisperEngine {
             state.full(params, pcm)?;
             let segments = state
                 .as_iter()
-                .map(|s| s.to_str().map(str::to_owned))
+                .map(|s| {
+                    s.to_str()
+                        .map(|text| (s.start_timestamp(), s.end_timestamp(), text.to_owned()))
+                })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            super::join_segments(segments.iter().map(String::as_str))
+            (
+                super::join_segments(segments.iter().map(|(_, _, text)| text.as_str())),
+                super::timed_segments(
+                    segments
+                        .iter()
+                        .map(|(start, end, text)| (*start, *end, text.as_str())),
+                    audio_seconds,
+                ),
+            )
         };
         Ok(Transcript {
             text,
             timings: Timings {
-                audio_seconds: pcm.len() as f64 / 16000.0,
+                audio_seconds,
                 inference_ms: start.elapsed().as_secs_f64() * 1000.0,
             },
+            segments,
         })
     }
     fn unload(&mut self) {

@@ -95,6 +95,19 @@ def test_inventory_lists_only_catalog_models_with_deduplicated_sizes(cache):
     assert found[0].repo == FW_SMALL  # biggest first
 
 
+def test_inventory_skips_empty_leftover_folders(tmp_path):
+    # A cancelled download leaves the repo folder behind with no file bytes.
+    cache = tmp_path / "hub"
+    leftover = cache / ms.repo_folder_name(FW_TINY)
+    for name in ("blobs", "refs", "snapshots/rev1"):
+        (leftover / name).mkdir(parents=True)
+    (leftover / "blobs" / "empty.incomplete").write_bytes(b"")
+    _repo(cache, FW_BASE, {"e" * 40: 200})
+    found = ms.inventory(Config(stt_backend="parakeet"), cache=cache,
+                         mlx_available=no_mlx, leases=NONE)
+    assert [model.repo for model in found] == [FW_BASE]
+
+
 def test_running_model_is_marked_in_use_even_after_the_settings_changed(cache):
     # Dictation still runs Small (loaded at start); the user since chose Base.
     running = [Lease(4242, "faster-whisper", FW_SMALL, True)]

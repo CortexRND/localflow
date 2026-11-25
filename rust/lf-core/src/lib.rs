@@ -12,6 +12,12 @@ pub mod phrases_model;
 pub mod secrets;
 pub mod shortcuts;
 pub mod symbols;
+pub mod transcript;
+
+/// A random UUID v4 as 32 lowercase hex digits (Python's `uuid.uuid4().hex`).
+pub fn compact_uuid_v4() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
 
 /// Shared helpers for unit tests that touch process-global state.
 #[cfg(test)]

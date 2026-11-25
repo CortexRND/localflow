@@ -19,11 +19,12 @@ from localflow.meeting_templates import MeetingTemplate, load_templates, resolve
 
 m = types.ModuleType("meeting_reference")
 sys.modules[m.__name__] = m
-exec("import copy, json, logging, re, threading, time, unicodedata\nfrom dataclasses import dataclass\nfrom datetime import datetime\nfrom pathlib import Path", m.__dict__)
+exec("import copy, json, logging, re, threading, time, unicodedata, uuid\nfrom dataclasses import dataclass\nfrom datetime import datetime\nfrom pathlib import Path", m.__dict__)
 m.__dict__.update(MeetingTemplate=MeetingTemplate, resolve_template=resolve_template,
                   LLMProvider=object, log=logging.getLogger("fixture"))
 tree = ast.parse((ROOT / "localflow/meetings.py").read_text())
-names = {"SOURCE_ME", "SOURCE_OTHERS", "_SOURCE_LABELS", "Segment", "has_speakers", "format_transcript"}
+names = {"SOURCE_ME", "SOURCE_OTHERS", "_SOURCE_LABELS", "Segment", "MAX_SPEAKER_NAME_CHARS", "_SPEAKER_KEEP",
+         "clean_speaker_name", "_is_alnum", "has_speakers", "is_diarized", "_DiarizedTranscript", "format_transcript"}
 selected = [n for n in tree.body if n.lineno >= 405 or getattr(n, "name", None) in names or
             isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets)]
 exec(compile(ast.Module(body=selected, type_ignores=[]), "meetings-reference", "exec"), m.__dict__)
@@ -98,7 +99,7 @@ with tempfile.TemporaryDirectory() as tmp:
     ]):
         segments=[m.Segment(0,"hello"),m.Segment(61,"ship it", "others" if speakers else "me")]
         note=m.ObsidianWriter(Path(tmp)/str(i),"notes","logs").write(title=title,category="Zoom",started_at=when,duration_seconds=125,notes_md="## Summary\n![x](https://evil/x) **ok**",segments=segments,user_notes=user_notes,template=template,generated_title=generated)
-        writers.append(dict(title=title,generated=generated,segments=[dataclasses.asdict(s) for s in segments],user_notes=user_notes,template=template,notes=note.notes_path.read_text(),log=note.log_path.read_text(),notes_name=note.notes_path.name,log_name=note.log_path.name,heading=note.title,transcript=m.read_transcript_log(note.log_path)))
+        writers.append(dict(title=title,generated=generated,segments=[dict(offset_seconds=s.offset_seconds,text=s.text,source=s.source) for s in segments],user_notes=user_notes,template=template,notes=note.notes_path.read_text(),log=note.log_path.read_text(),notes_name=note.notes_path.name,log_name=note.log_path.name,heading=note.title,transcript=m.read_transcript_log(note.log_path)))
 
 sample="### Migrate session storage to Redis\n> Replace the local-file session storage in the app with Redis, keeping the\n> current session API unchanged. Done means existing session tests pass.\n\n### Update deploy docs for Redis sessions\n> After the migration lands, update the deployment documentation.\n"
 parse_cases=[sample,"", "(No new work identified.)", "> orphan\n## Title\nprose\n> body\n> more", "## Empty\n## Yes\n> x\n###\n> y", "####    title\n   > body", "# Heading only", "# T\r\n> One\r\n> Two\n"]

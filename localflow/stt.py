@@ -1,5 +1,6 @@
 import numpy as np
 
+from localflow.diarization.types import TimedText
 from localflow.providers import registry
 from localflow.providers.base import STTProvider
 from localflow.providers.stt_faster_whisper import FasterWhisperSTT
@@ -74,3 +75,16 @@ class Transcriber:
         if prompt is None:
             return self.provider.transcribe(audio)
         return self.provider.transcribe(audio, prompt=prompt)
+
+    def transcribe_timed(
+        self, audio: np.ndarray, *, prompt: str | None = None
+    ) -> list[TimedText]:
+        """Segments timed in seconds from audio start. Providers without
+        transcribe_timed yield one segment spanning the whole audio."""
+        timed = getattr(self.provider, "transcribe_timed", None)
+        if callable(timed):
+            if prompt is None:
+                return timed(audio)
+            return timed(audio, prompt=prompt)
+        text = self.transcribe(audio, prompt=prompt)
+        return [TimedText(0.0, len(audio) / 16000, text)]

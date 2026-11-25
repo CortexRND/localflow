@@ -1,5 +1,6 @@
 import numpy as np
 
+from localflow.diarization.types import TimedText
 from localflow.providers.base import ModelInfo
 
 PARAKEET_REPO = "mlx-community/parakeet-tdt-0.6b-v2"
@@ -33,22 +34,38 @@ class ParakeetSTT:
         mx.eval(self._parakeet.parameters())
         self._parakeet_generate(np.zeros(16000, dtype=np.float32))
 
-    def _parakeet_generate(self, audio: np.ndarray) -> str:
+    def _parakeet_result(self, audio: np.ndarray):
         # Bypass model.transcribe(path), which shells out to ffmpeg on a file;
         # feed the in-memory array straight into the log-mel front-end instead.
         cfg = self._parakeet.preprocessor_config
         x = self._mx.array(np.ascontiguousarray(audio, dtype=np.float32))
         # The reflect-padded STFT needs at least one full FFT frame of input.
         if x.shape[-1] < cfg.n_fft:
-            return ""
+            return None
         mel = self._parakeet_logmel(x, cfg)
-        result = self._parakeet.generate(mel)[0]
-        return result.text.strip()
+        return self._parakeet.generate(mel)[0]
+
+    def _parakeet_generate(self, audio: np.ndarray) -> str:
+        result = self._parakeet_result(audio)
+        return "" if result is None else result.text.strip()
 
     def transcribe(
         self, audio: np.ndarray, *, prompt: str | None = None
     ) -> str:
         return self._parakeet_generate(audio)
+
+    def transcribe_timed(
+        self, audio: np.ndarray, *, prompt: str | None = None
+    ) -> list[TimedText]:
+        # Sentence times are already in seconds; prompt is ignored as above.
+        result = self._parakeet_result(audio)
+        if result is None:
+            return []
+        return [
+            TimedText(float(s.start), float(s.end), s.text.strip())
+            for s in result.sentences
+            if s.text.strip()
+        ]
 
     def list_models(self) -> list[ModelInfo]:
         return [ModelInfo(id=PARAKEET_REPO, label=PARAKEET_REPO, installed=None)]
