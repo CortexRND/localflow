@@ -2276,10 +2276,10 @@ class HubWindowController(NSObject):
                 return
             if was_forget_all and error is None:
                 if panel is not None:
-                    panel.remembered.clear()
+                    panel.clear_remembered()
                     self.meeting_speakers_rendered = None
                 if recent is not None:
-                    recent.panel.remembered.clear()
+                    recent.panel.clear_remembered()
             if people.reload:
                 self._people_send(people.load())
             if was_forget_all and error is None and recent_shown:

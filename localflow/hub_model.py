@@ -570,6 +570,11 @@ class SpeakerPanel:
     def is_remembered(self, speaker_id) -> bool:
         return (self.meeting_id, speaker_id) in self.remembered
 
+    def clear_remembered(self) -> None:
+        """Drop session 'Remembered' badges (e.g. after Forget all)."""
+        self.remembered.clear()
+        self.revision += 1
+
     @property
     def can_merge(self) -> bool:
         return len(self.rows) >= 2

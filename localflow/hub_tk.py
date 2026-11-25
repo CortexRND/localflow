@@ -1647,7 +1647,7 @@ class HubWindow:
         if not people.finish(token, result, error):
             return
         if was_forget_all and error is None:
-            self._meeting_speakers.remembered.clear()
+            self._meeting_speakers.clear_remembered()
             self._meeting_render_speakers()
         request = people.load() if people.reload else None
         self._people_render()

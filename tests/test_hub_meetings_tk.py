@@ -1253,10 +1253,14 @@ def test_forget_all_clears_remembered_speakers(tmp_path, _isolated_config):
         _pump(root, lambda: window._meeting_speakers_view is not None, timeout=5)
         panel = window._meeting_speakers
         panel.remembered.add((panel.meeting_id, "S1"))
+        panel.revision += 1
         window._meeting_render_speakers()
+        assert str(window._meeting_speakers_view.buttons[("remember", "S1")].cget("state")) == "disabled"
         req = window._people.submit_forget_all()
         assert req is not None
         window._people_done(req[2], {"deleted": 1}, None)
         assert not panel.remembered
+        btn = window._meeting_speakers_view.buttons[("remember", "S1")]
+        assert str(btn.cget("state")) == "normal" and btn.cget("text") == "Remember"
     finally:
         _close(root, window, client)
