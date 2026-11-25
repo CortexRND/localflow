@@ -131,6 +131,11 @@ pub const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("system_audio_device", "system_audio_device"),
             ("default_template", "meeting_default_template"),
             ("templates_dir", "meeting_templates_dir"),
+            ("speaker_diarization", "speaker_diarization"),
+            ("diarization_backend", "diarization_backend"),
+            ("diarize_mic", "diarize_mic"),
+            ("max_speakers", "diarization_max_speakers"),
+            ("speaker_recognition", "speaker_recognition"),
         ],
     ),
     ("setup", &[("version", "setup_version")]),
@@ -155,6 +160,7 @@ pub const ENUM_VALUES: &[(&str, &[&str])] = &[
     ("style_email", STYLE_VALUES),
     ("style_personal", STYLE_VALUES),
     ("style_other", STYLE_VALUES),
+    ("diarization_backend", &["sherpa-onnx", "mock"]),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -182,6 +188,10 @@ const FIELD_TYPES: &[(&str, FieldType)] = &[
     ("system_audio_device", FieldType::Str),
     ("meeting_default_template", FieldType::Str),
     ("meeting_templates_dir", FieldType::Str),
+    ("speaker_diarization", FieldType::Bool),
+    ("diarize_mic", FieldType::Bool),
+    ("diarization_max_speakers", FieldType::Int),
+    ("speaker_recognition", FieldType::Bool),
 ];
 
 const DATETIME_MARKER: &str = "$__toml_datetime__";
@@ -236,7 +246,7 @@ impl Config {
         } else {
             "<ctrl>+<shift>+v"
         };
-        let entries: [(&str, Value); 60] = [
+        let entries: [(&str, Value); 65] = [
             ("model_size", json!("base")),
             ("stt_backend", json!("auto")),
             ("language", Value::Null),
@@ -302,6 +312,11 @@ impl Config {
                 "meeting_templates_dir",
                 json!("~/.localflow/meeting_templates"),
             ),
+            ("speaker_diarization", json!(false)),
+            ("diarization_backend", json!("sherpa-onnx")),
+            ("diarize_mic", json!(false)),
+            ("diarization_max_speakers", json!(0)),
+            ("speaker_recognition", json!(false)),
             ("input_device", json!("")),
             ("setup_version", json!(0)),
             ("history_enabled", json!(true)),
@@ -774,6 +789,12 @@ fn valid_field_value(field: &str, value: &Value) -> bool {
             }
             _ => false,
         };
+    }
+    if field == "diarization_max_speakers" {
+        return matches!(
+            value,
+            Value::Number(number) if number.as_i64().is_some_and(|n| (0..=10).contains(&n))
+        );
     }
     if field == "llm_key_ref" {
         return matches!(value, Value::String(text) if text.is_empty() || is_llm_activation_ref(text));
@@ -1768,7 +1789,7 @@ mod tests {
         assert!(!win_is_fully_qualified("\\\\?\\UNC\\"));
     }
 
-    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\nfast_model = \"\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\n\n[setup]\nversion = 0\n";
+    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\nfast_model = \"\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\nspeaker_diarization = false\ndiarization_backend = \"sherpa-onnx\"\ndiarize_mic = false\nmax_speakers = 0\nspeaker_recognition = false\n\n[setup]\nversion = 0\n";
 
     const VALID_REF: &str = "llm_activation_openai_0123456789abcdef0123456789abcdef";
 
@@ -1864,7 +1885,7 @@ mod tests {
         let names = field_names();
         let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len());
-        assert_eq!(names.len(), 60);
+        assert_eq!(names.len(), 65);
         let default_names: std::collections::BTreeSet<&str> =
             defaults.fields.keys().map(String::as_str).collect();
         assert_eq!(unique, default_names);
@@ -1986,6 +2007,11 @@ mod tests {
                 ("history_enabled", json!(false)),
                 ("keep_audio_clips", json!(0)),
                 ("hot_phrases", json!(false)),
+                ("speaker_diarization", json!(true)),
+                ("diarization_backend", json!("mock")),
+                ("diarize_mic", json!(true)),
+                ("diarization_max_speakers", json!(4)),
+                ("speaker_recognition", json!(true)),
             ],
         );
         assert_eq!(
@@ -2475,6 +2501,16 @@ mod tests {
             "[history]\nenabled = \"yes\"\n",
             "[history]\nkeep_audio_clips = -1\n",
             "[meetings]\ncapture_system_audio = 1\n",
+            "[meetings]\nspeaker_diarization = 1\n",
+            "[meetings]\ndiarize_mic = \"yes\"\n",
+            "[meetings]\nspeaker_recognition = 0\n",
+            "[meetings]\nmax_speakers = -1\n",
+            "[meetings]\nmax_speakers = 11\n",
+            "[meetings]\nmax_speakers = true\n",
+            "[meetings]\nmax_speakers = 1.5\n",
+            "[meetings]\nmax_speakers = \"3\"\n",
+            "[meetings]\ndiarization_backend = \"pyannote\"\n",
+            "[meetings]\ndiarization_backend = 1\n",
         ] {
             iso.write(contents);
             let (loaded, warnings) = iso.load(false).unwrap();
@@ -2540,6 +2576,115 @@ mod tests {
         assert_eq!(updated.field_i64("keep_audio_clips"), Some(3));
     }
 
+    fn assert_diarization_defaults(config: &Config) {
+        assert_eq!(config.field_bool("speaker_diarization"), Some(false));
+        assert_eq!(config.field_str("diarization_backend"), Some("sherpa-onnx"));
+        assert_eq!(config.field_bool("diarize_mic"), Some(false));
+        assert_eq!(config.field_i64("diarization_max_speakers"), Some(0));
+        assert_eq!(config.field_bool("speaker_recognition"), Some(false));
+    }
+
+    #[test]
+    fn diarization_config_defaults_round_trip_and_update() {
+        assert_diarization_defaults(&Config::defaults_for(false));
+        assert_diarization_defaults(&Config::defaults_for(true));
+
+        let iso = Isolated::new();
+        let defaults = Config::defaults_for(false);
+        let expected = with(
+            &defaults,
+            &[
+                ("speaker_diarization", json!(true)),
+                ("diarization_backend", json!("mock")),
+                ("diarize_mic", json!(true)),
+                ("diarization_max_speakers", json!(10)),
+                ("speaker_recognition", json!(true)),
+            ],
+        );
+        save_config(&expected, Some(&iso.target)).unwrap();
+        let (loaded, warnings) = iso.load(false).unwrap();
+        assert_eq!(loaded, expected);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let updated = apply_config_update(
+            &defaults,
+            &json!({"meetings": {
+                "speaker_diarization": true,
+                "diarization_backend": "mock",
+                "diarize_mic": true,
+                "max_speakers": 10,
+                "speaker_recognition": true,
+            }}),
+        )
+        .unwrap();
+        assert_eq!(updated, expected);
+        let zero =
+            apply_config_update(&expected, &json!({"meetings": {"max_speakers": 0}})).unwrap();
+        assert_eq!(zero.field_i64("diarization_max_speakers"), Some(0));
+    }
+
+    #[test]
+    fn invalid_diarization_backend_is_logged_and_defaulted() {
+        let iso = Isolated::new();
+        iso.write("[meetings]\ndiarization_backend = \"pyannote\"\nspeaker_diarization = true\n");
+        let (loaded, warnings) = iso.load(false).unwrap();
+        assert_eq!(loaded.field_str("diarization_backend"), Some("sherpa-onnx"));
+        assert_eq!(loaded.field_bool("speaker_diarization"), Some(true));
+        assert!(
+            warnings.iter().any(|w| w
+                == "invalid config value for meetings.diarization_backend: 'pyannote'; using default"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn config_without_diarization_keys_loads_without_warnings() {
+        let iso = Isolated::new();
+        iso.write(
+            "config_version = 2\n\n[meetings]\ncapture_system_audio = true\ntemplates_dir = \"/t\"\n",
+        );
+        let (loaded, warnings) = iso.load(false).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_diarization_defaults(&loaded);
+    }
+
+    #[test]
+    fn migrate_v1_maps_diarization_fields() {
+        let data = parse_toml_str(
+            "speaker_diarization = true\ndiarization_backend = \"mock\"\ndiarize_mic = true\ndiarization_max_speakers = 4\nspeaker_recognition = true\n",
+        )
+        .unwrap();
+        let (migrated, key) = migrate_v1(&data);
+        assert_eq!(
+            Value::Object(migrated),
+            json!({
+                "config_version": 2,
+                "meetings": {
+                    "speaker_diarization": true,
+                    "diarization_backend": "mock",
+                    "diarize_mic": true,
+                    "max_speakers": 4,
+                    "speaker_recognition": true,
+                }
+            })
+        );
+        assert_eq!(key, None);
+
+        let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let iso = Isolated::new();
+        fs::write(&iso.legacy, "server_port = 9999\n").unwrap();
+        let (loaded, _) = iso.load(false).unwrap();
+        assert_eq!(loaded.field_i64("server_port"), Some(9999));
+        assert_diarization_defaults(&loaded);
+        let written = fs::read_to_string(&iso.target).unwrap();
+        assert!(
+            written.contains(
+                "speaker_diarization = false\ndiarization_backend = \"sherpa-onnx\"\ndiarize_mic = false\nmax_speakers = 0\nspeaker_recognition = false\n"
+            ),
+            "{written}"
+        );
+    }
+
     #[test]
     fn config_to_dict_and_partial_update() {
         let original = Config::defaults_for(false);
@@ -2599,6 +2744,16 @@ mod tests {
             ),
             (json!({"dictation": {"max_recording_seconds": -1}}), "invalid value for config key 'dictation.max_recording_seconds'"),
             (json!({"history": {"keep_audio_clips": -1}}), "invalid value for config key 'history.keep_audio_clips'"),
+            (json!({"meetings": {"max_speakers": -1}}), "invalid value for config key 'meetings.max_speakers'"),
+            (json!({"meetings": {"max_speakers": 11}}), "invalid value for config key 'meetings.max_speakers'"),
+            (json!({"meetings": {"max_speakers": true}}), "invalid type for config key 'meetings.max_speakers'"),
+            (json!({"meetings": {"max_speakers": 1.5}}), "invalid type for config key 'meetings.max_speakers'"),
+            (json!({"meetings": {"speaker_diarization": 1}}), "invalid type for config key 'meetings.speaker_diarization'"),
+            (
+                json!({"meetings": {"diarization_backend": "pyannote"}}),
+                "invalid value for config key 'meetings.diarization_backend'; choose from: mock, sherpa-onnx",
+            ),
+            (json!({"meetings": {"diarization_backend": 1}}), "invalid type for config key 'meetings.diarization_backend'"),
             (json!({"llm": {"api_key_ref": "llm_api_key"}}), "invalid value for config key 'llm.api_key_ref'"),
             (
                 json!({"llm": {"api_key_ref": VALID_REF}}),
@@ -2690,8 +2845,16 @@ mod tests {
         assert_eq!(config_field("server.port.extra"), None);
         assert_eq!(config_field(""), None);
         let keys = valid_config_keys();
-        assert_eq!(keys.len(), 60);
+        assert_eq!(keys.len(), 65);
         assert_eq!(keys[0], "stt.provider");
+        assert_eq!(
+            config_field("meetings.max_speakers"),
+            Some(("meetings", "diarization_max_speakers"))
+        );
+        assert_eq!(
+            field_location("diarization_max_speakers"),
+            Some(("meetings", "max_speakers"))
+        );
         assert_eq!(keys.last().unwrap(), "setup.version");
         assert_eq!(
             field_location("pause_media_while_dictating"),

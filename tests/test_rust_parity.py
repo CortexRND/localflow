@@ -426,6 +426,7 @@ def _all_fields_update() -> dict:
         ("hotkey", "key"): '<ctrl>+"q"\\ü',
         ("meetings", "vault_path"): "~/Vault 🗂/notes\ttab\nline",
         ("meetings", "orca_repo"): "id:'quoted'",
+        ("meetings", "diarization_backend"): "mock",
     }
     update: dict = {}
     for section, values in config_to_dict(Config()).items():
@@ -573,6 +574,19 @@ LOAD_CASES = {
         "config_version = 2\n[server]\nport = \"8756\"\n[dictation]\n"
         "silence_threshold_dbfs = -40\ncommand_names = \"x\"\n"
     ),
+    "diarization valid": (
+        "config_version = 2\n[meetings]\nspeaker_diarization = true\n"
+        "diarization_backend = \"mock\"\ndiarize_mic = true\nmax_speakers = 10\n"
+        "speaker_recognition = true\n"
+    ),
+    "diarization invalid": (
+        "config_version = 2\n[meetings]\nspeaker_diarization = 1\n"
+        "diarization_backend = \"pyannote\"\ndiarize_mic = \"yes\"\nmax_speakers = 11\n"
+        "speaker_recognition = 0\n"
+    ),
+    "diarization max_speakers negative": "config_version = 2\n[meetings]\nmax_speakers = -1\n",
+    "diarization max_speakers bool": "config_version = 2\n[meetings]\nmax_speakers = true\n",
+    "diarization max_speakers float": "config_version = 2\n[meetings]\nmax_speakers = 1.5\n",
 }
 
 
@@ -622,6 +636,18 @@ UPDATE_CASES = [
     {"llm": {"bogus": 1}},
     {"llm": 5},
     {},
+    {"meetings": {"speaker_diarization": True}},
+    {"meetings": {"speaker_diarization": 1}},
+    {"meetings": {"diarization_backend": "mock"}},
+    {"meetings": {"diarization_backend": "pyannote"}},
+    {"meetings": {"diarization_backend": 1}},
+    {"meetings": {"max_speakers": 0}},
+    {"meetings": {"max_speakers": 10}},
+    {"meetings": {"max_speakers": 11}},
+    {"meetings": {"max_speakers": -1}},
+    {"meetings": {"max_speakers": True}},
+    {"meetings": {"max_speakers": 2.0}},
+    {"meetings": {"max_speakers": "3"}},
 ]
 
 
@@ -667,6 +693,14 @@ LEGACY_CASES = {
         "llm_key_ref": "not-a-ref", "history_enabled": "yes", "language": "",
     },
     "empty": {},
+    "diarization v1": {
+        "speaker_diarization": True, "diarization_backend": "mock", "diarize_mic": True,
+        "diarization_max_speakers": 4, "speaker_recognition": True,
+    },
+    "diarization invalid v1": {
+        "speaker_diarization": "yes", "diarization_backend": "pyannote",
+        "diarization_max_speakers": 11,
+    },
 }
 
 
@@ -1685,6 +1719,9 @@ def test_cli_config_get_set(rust_build, sandbox, py_env):
         ("hotkey.sounds", "true"),
         ("stt.language", ""),
         ("server.port", "8756"),
+        ("meetings.speaker_diarization", "false"),
+        ("meetings.diarization_backend", defaults.diarization_backend),
+        ("meetings.max_speakers", "0"),
     ):
         result = lf(rust_build, sandbox, "config", "get", key)
         assert (result.returncode, result.stdout) == (0, value + "\n"), key
@@ -1703,6 +1740,7 @@ def test_cli_config_get_set(rust_build, sandbox, py_env):
         ("llm.model", "qwen ✓"), ("hotkey.sounds", "FALSE"), ("server.port", " 9_000 "),
         ("dictation.silence_threshold_dbfs", "-42.5"), ("dictation.command_names", "a, b,,c "),
         ("stt.language", "fr"), ("paste.method", "clipboard"), ("cleanup.level", "medium"),
+        ("meetings.max_speakers", "10"), ("meetings.diarization_backend", "mock"),
     ):
         result = lf(rust_build, sandbox, "config", "set", key, raw)
         assert result.returncode == 0, result.stderr
@@ -1711,6 +1749,7 @@ def test_cli_config_get_set(rust_build, sandbox, py_env):
     assert (loaded.llm_model, loaded.sounds_enabled, loaded.server_port) == ("qwen ✓", False, 9000)
     assert loaded.silence_threshold_dbfs == -42.5 and loaded.command_names == ["a", "b", "c"]
     assert (loaded.language, loaded.paste_method, loaded.cleanup_level) == ("fr", "clipboard", "medium")
+    assert (loaded.diarization_max_speakers, loaded.diarization_backend) == (10, "mock")
     assert lf(rust_build, sandbox, "config", "set", "stt.language", "").returncode == 0
     assert py_config.load_config().language is None
 
@@ -1723,6 +1762,8 @@ def test_cli_config_get_set(rust_build, sandbox, py_env):
          "auto, clipboard, wtype, xdotool, pynput, osascript\n")),
         (("cleanup.level", "loud"), None),
         (("dictation.max_recording_seconds", "-1"), None),
+        (("meetings.max_speakers", "11"), None),
+        (("meetings.diarization_backend", "pyannote"), None),
         (("llm.api_key_ref", "llm_activation_openai_0123456789abcdef0123456789abcdef"), None),
     ):
         result = lf(rust_build, sandbox, "config", "set", *args)
