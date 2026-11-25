@@ -20,6 +20,7 @@ pub use media::strip_remote_media;
 pub use prompts::ENHANCE_INSTRUCTION;
 use regex::Regex;
 use std::{
+    borrow::Cow,
     fs,
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -81,6 +82,13 @@ pub struct Segment {
     pub offset_seconds: f64,
     pub text: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_seconds: Option<f64>,
+    /// Meeting-local diarization id; never rendered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_label: Option<String>,
 }
 impl Segment {
     pub fn new(offset_seconds: f64, text: impl Into<String>) -> Self {
@@ -88,6 +96,9 @@ impl Segment {
             offset_seconds,
             text: text.into(),
             source: SOURCE_ME.into(),
+            end_seconds: None,
+            speaker_id: None,
+            speaker_label: None,
         }
     }
     pub fn stamp(&self) -> String {
@@ -98,19 +109,98 @@ impl Segment {
             seconds.rem_euclid(60)
         )
     }
-    pub fn speaker(&self) -> &str {
-        match self.source.as_str() {
+    /// The cleaned display label when there is one, else the source label.
+    pub fn speaker(&self) -> Cow<'_, str> {
+        if let Some(label) = self.speaker_label.as_deref().and_then(clean_speaker_name) {
+            return Cow::Owned(label);
+        }
+        Cow::Borrowed(match self.source.as_str() {
             SOURCE_ME => "Me",
             SOURCE_OTHERS => "Others",
             other => other,
-        }
+        })
     }
+}
+pub const MAX_SPEAKER_NAME_CHARS: usize = 40;
+/// Python's `_is_alnum`: letters (`L*`) and decimal digits (`Nd`) only.
+fn is_name_char(c: char) -> bool {
+    use unicode_general_category::{get_general_category as cat, GeneralCategory as G};
+    matches!(
+        cat(c),
+        G::UppercaseLetter
+            | G::LowercaseLetter
+            | G::TitlecaseLetter
+            | G::ModifierLetter
+            | G::OtherLetter
+            | G::DecimalNumber
+    )
+}
+/// A speaker label safe for transcript lines and prompts, or `None`: NFKC,
+/// then only letters, decimal digits and `-` `'` `.` survive (everything else
+/// becomes a space), whitespace collapsed, capped at
+/// [`MAX_SPEAKER_NAME_CHARS`]; a name with no letter or digit is refused.
+pub fn clean_speaker_name(name: &str) -> Option<String> {
+    use unicode_normalization::UnicodeNormalization;
+    let kept: String = name
+        .nfkc()
+        .map(|c| {
+            if is_name_char(c) || "-'.".contains(c) {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let joined = words(&kept).collect::<Vec<_>>().join(" ");
+    let label: String = joined.chars().take(MAX_SPEAKER_NAME_CHARS).collect();
+    let label = label.trim_end_matches(' ');
+    label.chars().any(is_name_char).then(|| label.to_string())
 }
 pub fn has_speakers(segments: &[Segment]) -> bool {
     segments.iter().any(|s| s.source != SOURCE_ME)
 }
+/// True when diarization attributed any segment to a speaker id.
+pub fn is_diarized(segments: &[Segment]) -> bool {
+    segments.iter().any(|s| s.speaker_id.is_some())
+}
+/// Transcript text plus whether it came from diarized segments. Plain `&str`
+/// converts with `diarized = false`; the flag is only ever set explicitly
+/// from segment data, never inferred from the text.
+#[derive(Clone, Copy, Debug)]
+pub struct Transcript<'a> {
+    text: &'a str,
+    diarized: bool,
+}
+impl<'a> Transcript<'a> {
+    pub fn new(text: &'a str, diarized: bool) -> Self {
+        Self { text, diarized }
+    }
+    pub fn text(&self) -> &'a str {
+        self.text
+    }
+    pub fn diarized(&self) -> bool {
+        self.diarized
+    }
+}
+impl<'a> From<&'a str> for Transcript<'a> {
+    fn from(text: &'a str) -> Self {
+        Self::new(text, false)
+    }
+}
+impl<'a> From<&'a String> for Transcript<'a> {
+    fn from(text: &'a String) -> Self {
+        Self::new(text, false)
+    }
+}
+fn speaker_note(diarized: bool) -> &'static str {
+    if diarized {
+        prompts::DIARIZED_SPEAKER_NOTE
+    } else {
+        prompts::SPEAKER_NOTE
+    }
+}
 pub fn format_transcript(segments: &[Segment]) -> String {
-    if has_speakers(segments) {
+    if has_speakers(segments) || is_diarized(segments) {
         segments
             .iter()
             .map(|s| format!("[{}] {}: {}", s.stamp(), s.speaker(), s.text))
@@ -187,7 +277,7 @@ fn render(pattern: &str, fields: &[(&str, String)]) -> String {
         })
         .into()
 }
-fn template_fields(t: &MeetingTemplate) -> Vec<(&'static str, String)> {
+fn template_fields(t: &MeetingTemplate, diarized: bool) -> Vec<(&'static str, String)> {
     let instructions = trim(&t.instructions);
     vec![
         ("sections", t.sections_markdown()),
@@ -207,21 +297,27 @@ fn template_fields(t: &MeetingTemplate) -> Vec<(&'static str, String)> {
                 format!("{instructions}\n\n")
             },
         ),
-        ("speaker_note", prompts::SPEAKER_NOTE.into()),
+        ("speaker_note", speaker_note(diarized).into()),
         ("data_note", prompts::DATA_NOTE.into()),
         ("enhance", ENHANCE_INSTRUCTION.into()),
     ]
 }
 pub fn build_notes_prompt(template: Option<&MeetingTemplate>) -> String {
+    notes_prompt(template, false)
+}
+fn notes_prompt(template: Option<&MeetingTemplate>, diarized: bool) -> String {
     let default = templates::resolve_template(None, None);
     render(
         prompts::NOTES_PROMPT,
-        &template_fields(template.unwrap_or(&default)),
+        &template_fields(template.unwrap_or(&default), diarized),
     )
 }
 pub fn build_enhance_prompt(user_notes: &str, template: Option<&MeetingTemplate>) -> String {
+    enhance_prompt(user_notes, template, false)
+}
+fn enhance_prompt(user_notes: &str, template: Option<&MeetingTemplate>, diarized: bool) -> String {
     let default = templates::resolve_template(None, None);
-    let mut fields = template_fields(template.unwrap_or(&default));
+    let mut fields = template_fields(template.unwrap_or(&default), diarized);
     let headings = heading_lines(user_notes);
     fields.push(("heading_skeleton",if headings.is_empty(){String::new()}else{format!("Your output MUST start with the user's headings, written exactly as below and in this order, each followed by its expanded points:\n{}\n\n",headings.join("\n"))}));
     fields.push(("user_notes", neutralize(trim(user_notes))));
@@ -246,12 +342,16 @@ impl<'a> MeetingSummarizer<'a> {
             .map(|s| s.join(" "))
             .collect()
     }
-    pub fn summarize(
+    /// A plain `&str` transcript gets the channel speaker note; pass
+    /// `Transcript::new(text, is_diarized(segments))` for diarized segments.
+    pub fn summarize<'t>(
         &self,
-        transcript: &str,
+        transcript: impl Into<Transcript<'t>>,
         user_notes: &str,
         template: Option<&MeetingTemplate>,
     ) -> String {
+        let transcript = transcript.into();
+        let (transcript, diarized) = (transcript.text(), transcript.diarized());
         let default = templates::resolve_template(None, None);
         let template = template.unwrap_or(&default);
         let user_notes = trim(user_notes);
@@ -267,9 +367,9 @@ impl<'a> MeetingSummarizer<'a> {
         let generate = |prompt: &str| self.llm.complete("", prompt, None);
         let attempt = (|| {
             let prefix = if enhanced {
-                build_enhance_prompt(user_notes, Some(template))
+                enhance_prompt(user_notes, Some(template), diarized)
             } else {
-                build_notes_prompt(Some(template))
+                notes_prompt(Some(template), diarized)
             };
             let mut parts = Vec::new();
             for chunk in chunks {
@@ -280,7 +380,7 @@ impl<'a> MeetingSummarizer<'a> {
             if parts.len() == 1 {
                 return Ok(parts.remove(0));
             }
-            let mut fields = template_fields(template);
+            let mut fields = template_fields(template, diarized);
             fields.push(("user_notes", neutralize(user_notes)));
             let merge = render(
                 if enhanced {
@@ -345,17 +445,21 @@ impl<'a> MeetingSummarizer<'a> {
 }
 pub const CHAT_NOT_FOUND: &str = "NOT IN THIS PART";
 pub const CHAT_NO_ANSWER: &str = "The transcript doesn't mention that.";
-pub fn answer_question(
+/// A plain `&str` transcript (such as saved-log text) gets the channel
+/// speaker note; pass `Transcript::new(text, true)` for diarized segments.
+pub fn answer_question<'t>(
     llm: &dyn LlmProvider,
-    transcript: &str,
+    transcript: impl Into<Transcript<'t>>,
     question: &str,
     words_per_chunk: usize,
 ) -> Result<String, lf_providers::ProviderError> {
+    let transcript = transcript.into();
+    let (transcript, diarized) = (transcript.text(), transcript.diarized());
     let count = words(transcript).count();
     if count == 0 {
         return Ok(CHAT_NO_ANSWER.into());
     }
-    let speaker = format!("{}\n{}", prompts::SPEAKER_NOTE, prompts::DATA_NOTE);
+    let speaker = format!("{}\n{}", speaker_note(diarized), prompts::DATA_NOTE);
     let call = |pattern: &str, mut fields: Vec<(&str, String)>| {
         fields.extend([
             ("question", question.into()),
