@@ -34,7 +34,15 @@ def vault_notes_path(notes_path, vault_path) -> str | None:
 
 
 class MeetingClientError(RuntimeError):
-    """A meeting request failed or the local server is unavailable."""
+    """A meeting request failed or the local server is unavailable.
+
+    `status_code` is the HTTP status of a non-2xx answer; None when the server
+    could not be reached (or the error was raised without one).
+    """
+
+    def __init__(self, message="", status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class MeetingClient:
@@ -77,7 +85,8 @@ class MeetingClient:
             except (ValueError, AttributeError):
                 detail = None
             raise MeetingClientError(
-                str(detail or getattr(response, "reason", "request failed"))
+                str(detail or getattr(response, "reason", "request failed")),
+                status_code=response.status_code,
             )
         if response.status_code == 204:
             return {}

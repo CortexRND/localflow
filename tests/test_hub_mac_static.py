@@ -564,3 +564,272 @@ def test_meeting_capture_state_keeps_the_rename_draft():
     )
     controller._meeting_capture_state()
     assert panel.draft == "Half"
+
+
+# ---------------------------------------------------- recent meetings speakers ---
+
+RECENT_SELECTORS = (
+    "meetingRecentSpeakers_", "meetingRecentSpeakersRetry_",
+    "meetingRecentSpeakerRename_", "meetingRecentSpeakerMerge_",
+    "meetingRecentSpeakerTarget_", "meetingRecentSpeakerSave_",
+    "meetingRecentSpeakerConfirmMerge_", "meetingRecentSpeakerCancel_",
+)
+RECENT_MID = "0123456789abcdef0123456789abcdef"
+OTHER_MID = "fedcba9876543210fedcba9876543210"
+RECENT_NOTE = {"title": "Sync", "date_label": "Today", "path": "/v/sync.md",
+               "meeting_id": RECENT_MID}
+
+
+def _recent_payload(meeting_id=RECENT_MID, first="Speaker 1"):
+    return {"meeting_id": meeting_id, "speakers": [
+        {"id": "S1", "label": first, "seconds": 30},
+        {"id": "S2", "label": "Speaker 2", "seconds": 30},
+    ]}
+
+
+def test_recent_speaker_selectors_never_call_the_client_directly():
+    methods = {method.name: method for method in _controller_methods()}
+    sources = _method_sources()
+    for name in RECENT_SELECTORS:
+        assert name in methods, name
+        assert not _python_method(methods[name])
+        assert "self.meeting_client" not in sources[name]
+        assert sources[name].count('if self.page != "Meetings":') == 1
+    send = sources["_meeting_recent_send"]
+    assert "threading.Thread(" in send
+    assert "self.meeting_events.put((event, (token, result), error))" in send
+    # The U3 sender is left as it was.
+    assert 'self.meeting_events.put(("speakers", (token, result), error))' in (
+        sources["_meeting_speaker_send"]
+    )
+
+
+def test_recent_card_uses_the_pure_layout_and_lazy_state():
+    sources = _method_sources()
+    render = sources["_meeting_render_recent"]
+    assert "recent_layout(" in render
+    assert "Edit speakers:" in render and "Hide speakers:" in render
+    assert '"meetingRecentSpeakers:"' in render
+    assert "self.meeting_client" not in render and "_meeting_recent_send" not in render
+    page = sources["_page_meetings"]
+    assert "self._meeting_recent_reset_views()" in page
+    # Built once with the controller, so the hidden set outlives page visits.
+    builders = [name for name, text in sources.items() if "RecentSpeakers(" in text]
+    assert len(builders) == 1 and builders[0].startswith("initWith"), builders
+    # No speakers request when Meetings opens or on the poll.
+    for name in ("_page_meetings", "_meeting_poll", "meetingTimerTick_", "_meeting_render"):
+        assert "_meeting_recent_send" not in sources[name], name
+    assert "state.reconcile(self.meeting_recent)" in sources["_meeting_load_recent"]
+    drawer = sources["_meeting_recent_drawer"]
+    assert "RECENT_SPEAKER_ACTIONS" in drawer and "self._meeting_speaker_rows(" in drawer
+    assert "SPEAKER_ACTIONS" in sources["_meeting_speakers_fill"]
+
+
+def test_recent_speaker_actions_name_existing_selectors():
+    import re as _re
+
+    source = SOURCE.read_text(encoding="utf-8")
+    names = {method.name for method in _controller_methods()}
+    for table in ("SPEAKER_ACTIONS", "RECENT_SPEAKER_ACTIONS"):
+        block = source[source.index(f"\n{table} = {{"):]
+        block = block[:block.index("}")]
+        selectors = _re.findall(r'"(meeting\w+:)"', block)
+        assert len(selectors) == 6, table
+        for selector in selectors:
+            assert selector.replace(":", "_") in names, selector
+
+
+def _recent_event_controller(page="Meetings", post_stop=None):
+    from localflow.hub_model import RecentSpeakers, SpeakerPanel, mirror_speakers
+
+    methods = _extract(
+        ("_meeting_event", "_meeting_speakers_mirror"), {"mirror_speakers": mirror_speakers},
+    )
+    refreshes, renders = [], []
+    controller = SimpleNamespace(
+        page=page, meeting_recent_speakers=RecentSpeakers(),
+        meeting_speakers=post_stop or SpeakerPanel(), meeting_recent_card=object(),
+        meeting_last_saved=None,
+        _meeting_recent_refresh=lambda: refreshes.append(True),
+        _meeting_render=lambda: renders.append(True),
+    )
+    return _bind(controller, methods), refreshes, renders
+
+
+def test_recent_load_event_renders_and_drops_stale_answers():
+    controller, refreshes, _renders = _recent_event_controller()
+    state = controller.meeting_recent_speakers
+    _op, _args, old = state.toggle(RECENT_NOTE)
+    _op, _args, token = state.toggle({**RECENT_NOTE, "path": "/v/b.md", "meeting_id": OTHER_MID})
+    controller._meeting_event("recent_speakers_load", (old, _recent_payload()), None)
+    assert refreshes == [] and state.state == "loading"
+    controller._meeting_event("recent_speakers_load", (token, _recent_payload(OTHER_MID)), None)
+    assert refreshes == [True] and state.state == "ready"
+    assert [row["id"] for row in state.panel.rows] == ["S1", "S2"]
+
+
+def test_recent_load_404_hides_the_button_without_an_error():
+    from localflow.meeting_client import MeetingClientError
+
+    controller, refreshes, _renders = _recent_event_controller()
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    controller._meeting_event(
+        "recent_speakers_load", (token, None), MeetingClientError("Not Found", 404),
+    )
+    assert refreshes == [True]
+    assert state.hidden == {RECENT_MID} and state.load_error == "" and state.state == ""
+
+
+def test_recent_load_off_the_page_updates_without_rendering():
+    controller, refreshes, renders = _recent_event_controller(page="Home")
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    controller._meeting_event("recent_speakers_load", (token, _recent_payload()), None)
+    assert refreshes == [] and renders == [] and state.state == "ready"
+
+
+def _post_stop_panel(meeting_id):
+    from localflow.hub_model import SpeakerPanel
+
+    panel = SpeakerPanel()
+    panel.sync(_recent_payload(meeting_id))
+    return panel
+
+
+def test_recent_rename_mirrors_into_the_post_stop_panel_of_the_same_meeting():
+    for meeting_id, mirrored in ((RECENT_MID, True), (OTHER_MID, False)):
+        post_stop = _post_stop_panel(meeting_id)
+        controller, refreshes, _renders = _recent_event_controller(post_stop=post_stop)
+        saved = {**_recent_payload(meeting_id), "notes_path": "/v/sync.md"}
+        controller.meeting_last_saved = saved
+        state = controller.meeting_recent_speakers
+        _op, _args, token = state.toggle(RECENT_NOTE)
+        state.loaded(token, _recent_payload(), None)
+        state.panel.begin_rename("S1")
+        _op, _args, token = state.panel.submit_rename("Sarah")
+        controller._meeting_event("recent_speakers", (token, _recent_payload(first="Sarah")), None)
+        assert refreshes == [True] and state.panel.row("S1")["label"] == "Sarah"
+        expected = "Sarah" if mirrored else "Speaker 1"
+        assert post_stop.row("S1")["label"] == expected
+        if mirrored:
+            assert controller.meeting_last_saved["speakers"][0]["label"] == "Sarah"
+            assert controller.meeting_last_saved["notes_path"] == "/v/sync.md"
+        else:
+            assert controller.meeting_last_saved is saved
+
+
+def test_post_stop_rename_mirrors_into_the_open_drawer():
+    post_stop = _post_stop_panel(RECENT_MID)
+    controller, refreshes, renders = _recent_event_controller(post_stop=post_stop)
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    post_stop.begin_rename("S1")
+    _op, _args, token = post_stop.submit_rename("Sarah")
+    controller._meeting_event("speakers", (token, _recent_payload(first="Sarah")), None)
+    assert state.panel.row("S1")["label"] == "Sarah"
+    assert refreshes == [True] and renders == []
+    # A failed rename mirrors nothing and only redraws the post-stop card.
+    post_stop.begin_rename("S2")
+    _op, _args, token = post_stop.submit_rename("Bo")
+    controller._meeting_event("speakers", (token, None), Exception("boom"))
+    assert state.panel.row("S2")["label"] == "Speaker 2"
+    assert renders == [True] and refreshes == [True]
+
+
+def test_recent_rename_after_the_drawer_closed_is_dropped():
+    controller, refreshes, _renders = _recent_event_controller()
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    state.panel.begin_rename("S1")
+    _op, _args, token = state.panel.submit_rename("Sarah")
+    state.close()
+    controller._meeting_event("recent_speakers", (token, _recent_payload(first="Sarah")), None)
+    assert refreshes == [] and not state.panel.visible
+
+
+def test_meeting_recent_speaker_save_sends_one_request():
+    from localflow.hub_model import RecentSpeakers
+
+    methods = _extract(("meetingRecentSpeakerSave_",))
+    state = RecentSpeakers()
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    state.panel.begin_rename("S2")
+    sent, renders = [], []
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", meeting_recent_speakers=state,
+            meeting_recent_field=_FakeView("  Bo  "),
+            _meeting_recent_refresh=lambda: renders.append(state.panel.busy),
+            _meeting_recent_send=lambda request, event: sent.append((request, event)),
+        ),
+        methods,
+    )
+    controller.meetingRecentSpeakerSave_(None)
+    assert sent == [(
+        ("rename_speaker", (RECENT_MID, "S2", "Bo"), state.panel.epoch), "recent_speakers",
+    )]
+    assert renders == ["rename"]
+    controller.meetingRecentSpeakerSave_(None)
+    assert len(sent) == 1
+
+
+def test_meeting_recent_speakers_toggle_sends_the_lazy_load():
+    from localflow.hub_model import RecentSpeakers
+
+    methods = _extract(("meetingRecentSpeakers_",))
+    state = RecentSpeakers()
+    sent, renders = [], []
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", meeting_recent_speakers=state,
+            meeting_recent=[{**RECENT_NOTE, "meeting_id": None}, RECENT_NOTE],
+            _meeting_recent_refresh=lambda: renders.append(state.state),
+            _meeting_recent_send=lambda request, event: sent.append((request, event)),
+        ),
+        methods,
+    )
+    sender = SimpleNamespace(tag=lambda: 1)
+    controller.meetingRecentSpeakers_(sender)
+    assert sent == [(("speakers", (RECENT_MID,), state.seq), "recent_speakers_load")]
+    assert renders == ["loading"]
+    controller.meetingRecentSpeakers_(sender)  # Done closes, no request
+    assert len(sent) == 1 and renders == ["loading", ""]
+    controller.meetingRecentSpeakers_(SimpleNamespace(tag=lambda: 0))  # no meeting_id
+    controller.meetingRecentSpeakers_(SimpleNamespace(tag=lambda: 7))
+    assert len(sent) == 1
+
+
+def test_meeting_capture_state_keeps_the_recent_rename_draft():
+    from localflow.hub_model import RecentSpeakers
+
+    methods = _extract(("_meeting_capture_state",))
+    state = RecentSpeakers()
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    state.panel.begin_rename("S2")
+
+    class _Combo:
+        def indexOfSelectedItem(self):
+            return -1
+
+    controller = _bind(
+        SimpleNamespace(
+            meeting_notes=SimpleNamespace(string=lambda: "notes"),
+            meeting_title=_FakeView("Title"), meeting_title_shows_session=False,
+            meeting_template=_Combo(), meeting_templates=[],
+            meeting_recent_speakers=state, meeting_recent_field=_FakeView("Hal"),
+            meeting_recent_field_id="S2",
+        ),
+        methods,
+    )
+    controller._meeting_capture_state()
+    assert state.panel.draft == "Hal"
+    # A field drawn for another row never overwrites the draft.
+    controller.meeting_recent_field_id = "S1"
+    controller.meeting_recent_field = _FakeView("Stale")
+    controller._meeting_capture_state()
+    assert state.panel.draft == "Hal"

@@ -469,6 +469,127 @@ def test_recent_notes_reuse_the_writer_storage_layout(tmp_path):
     assert error == "" and len(notes) == 1
     assert notes[0]["title"] == "Planning"
     assert Path(notes[0]["path"]).resolve() == saved.notes_path.resolve()
+    assert notes[0]["meeting_id"] is None  # saved without speakers
+
+
+MID = "0123456789abcdef0123456789abcdef"
+
+
+def _raw_note(root, stem, text, newline="\n"):
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{stem}.md"
+    path.write_bytes(text.replace("\n", newline).encode("utf-8"))
+    return path
+
+
+def _only_note(tmp_path):
+    notes, error = hub_model.recent_notes(tmp_path / "v", "n")
+    assert error == "" and len(notes) == 1
+    return notes[0]
+
+
+@pytest.mark.parametrize("line", [
+    f'meeting_id: "{MID}"', f"meeting_id: '{MID}'", f"meeting_id: {MID}",
+    f"meeting_id:{MID}  ",
+])
+def test_recent_notes_read_the_frontmatter_meeting_id(tmp_path, line):
+    path = _raw_note(
+        tmp_path / "v" / "n" / "Zoom", "2026-11-01 0900 Sync",
+        f"---\ntitle: \"Sync\"\n{line}\nspeakers: [\"A\", \"B\"]\n---\n\n# Weekly sync\n",
+    )
+    note = _only_note(tmp_path)
+    assert note == {
+        "title": "Weekly sync", "date_label": note["date_label"],
+        "path": str(path), "meeting_id": MID,
+    }
+
+
+@pytest.mark.parametrize("text", [
+    "---\ntitle: x\n---\n\n# T\n",                                   # absent
+    "---\nmeeting_id: null\n---\n\n# T\n",
+    f"---\nmeeting_id: \"{MID.upper()}\"\n---\n\n# T\n",
+    f"---\nmeeting_id: \"{MID[:-1]}\"\n---\n\n# T\n",                 # 31 chars
+    f"---\nmeeting_id: \"{MID}0\"\n---\n\n# T\n",                     # 33 chars
+    f"---\nmeeting_id: {MID} # note\n---\n\n# T\n",
+    f"---\nparent:\n  meeting_id: \"{MID}\"\n---\n\n# T\n",          # nested key
+    f"---\ntitle: x\n---\n\n# T\n\nmeeting_id: \"{MID}\"\n",          # in the body
+    f"# T\n\nmeeting_id: \"{MID}\"\n",                                # no frontmatter
+])
+def test_recent_notes_ignore_a_missing_or_malformed_meeting_id(tmp_path, text):
+    _raw_note(tmp_path / "v" / "n" / "Zoom", "2026-11-01 0900 Sync", text)
+    note = _only_note(tmp_path)
+    assert note["meeting_id"] is None
+    assert note["title"] == "T"
+
+
+def test_recent_notes_meeting_id_works_with_crlf(tmp_path):
+    _raw_note(
+        tmp_path / "v" / "n" / "Zoom", "2026-11-01 0900 Sync",
+        f"---\nmeeting_id: \"{MID}\"\n---\n\n# Crlf\n", newline="\r\n",
+    )
+    note = _only_note(tmp_path)
+    assert (note["title"], note["meeting_id"]) == ("Crlf", MID)
+
+
+def test_recent_notes_meeting_id_before_a_fence_past_the_head(tmp_path):
+    long_line = "speakers: [" + ", ".join(['"Speaker"'] * 1000) + "]"
+    _raw_note(
+        tmp_path / "v" / "n" / "Zoom", "2026-11-01 0900 Long",
+        f"---\nmeeting_id: \"{MID}\"\n{long_line}\n---\n\n# Long\n",
+    )
+    assert _only_note(tmp_path)["meeting_id"] == MID
+    # A meeting_id cut off by the bounded read never counts.
+    padding = "x: " + "y" * (hub_model._HEAD_BYTES - 30) + "\n"
+    cut = f"---\n{padding}meeting_id: \"{MID}\"\n---\n"
+    assert len(cut.split("meeting_id")[0]) < hub_model._HEAD_BYTES < len(cut)
+    for path in (tmp_path / "v" / "n" / "Zoom").iterdir():
+        path.unlink()
+    _raw_note(tmp_path / "v" / "n" / "Zoom", "2026-11-01 0900 Cut", cut)
+    assert _only_note(tmp_path)["meeting_id"] is None
+
+
+def test_recent_notes_open_each_listed_note_once(vault, monkeypatch):
+    import builtins
+
+    opened = []
+    real_open = builtins.open
+
+    def counting_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", counting_open)
+    notes, _ = hub_model.recent_notes(vault, "notes/meetings")
+    assert len(notes) == 5
+    assert sorted(opened) == sorted(note["path"] for note in notes)
+
+
+def test_recent_notes_meeting_id_round_trips_through_the_writer(tmp_path):
+    meetings = pytest.importorskip("localflow.meetings")
+    store = pytest.importorskip("localflow.diarization.store")
+    writer = meetings.ObsidianWriter(str(tmp_path), "notes/meetings", "notes/transcripts")
+    segments = [
+        meetings.Segment(0, "Hello", "others", speaker_id="S1", speaker_label="Speaker 1"),
+        meetings.Segment(5, "Hi", "others", speaker_id="S2", speaker_label="Speaker 2"),
+    ]
+    saved = writer.write(
+        title="Planning", category="Zoom", started_at=datetime(2026, 11, 15, 14, 30),
+        duration_seconds=60, notes_md="## Summary\n- ok", segments=segments,
+    )
+    assert saved.meeting_id
+    notes, _ = hub_model.recent_notes(tmp_path, "notes/meetings")
+    assert notes[0]["meeting_id"] == saved.meeting_id
+    assert store.valid_meeting_id(notes[0]["meeting_id"])
+
+
+@pytest.mark.parametrize("candidate", [MID, "f" * 32, "0" * 32])
+def test_accepted_meeting_ids_match_the_store_format(candidate):
+    store = pytest.importorskip("localflow.diarization.store")
+    match = hub_model._MEETING_ID_LINE.fullmatch(f"meeting_id: {candidate}")
+    assert match and store.valid_meeting_id(candidate)
+    for bad in (candidate.upper() if candidate != "0" * 32 else "g" * 32, candidate[:-1]):
+        assert not hub_model._MEETING_ID_LINE.fullmatch(f"meeting_id: {bad}")
+        assert not store.valid_meeting_id(bad)
 
 
 # --------------------------------------------------------------------- style ---

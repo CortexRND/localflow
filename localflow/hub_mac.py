@@ -50,11 +50,15 @@ from localflow.hub_model import (
     PROMPTS_EMPTY,
     PROMPTS_UNREADABLE,
     RECENT_EMPTY,
+    RECENT_LOADING,
     RECENT_ROW_H,
+    RECENT_SPEAKERS_DONE,
+    RECENT_SPEAKERS_TITLE,
     SPEAKER_TARGET_PLACEHOLDER,
     SPEAKERS_HEADING,
     STYLE_AUTOSAVE_HINT,
     STYLE_SAVE_FAILED,
+    RecentSpeakers,
     SpeakerPanel,
     dictation_state,
     dictionary_entries,
@@ -63,8 +67,10 @@ from localflow.hub_model import (
     meeting_form_layout,
     meeting_notes_height,
     meeting_speakers_layout,
+    mirror_speakers,
     prompt_row_layout,
     prompt_rows,
+    recent_layout,
     recent_notes,
     remove_entry,
     review_prompt,
@@ -165,6 +171,19 @@ PAGES = (
     "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
     "Meetings", "History", "Style", "Models", "Settings",
 )
+
+# The selectors one speaker list's rows send: the post-stop Speakers card, and
+# the drawer under a Recent meetings row (same rows, its own SpeakerPanel).
+SPEAKER_ACTIONS = {
+    "rename": "meetingSpeakerRename:", "merge": "meetingSpeakerMerge:",
+    "target": "meetingSpeakerTarget:", "save": "meetingSpeakerSave:",
+    "confirm": "meetingSpeakerConfirmMerge:", "cancel": "meetingSpeakerCancel:",
+}
+RECENT_SPEAKER_ACTIONS = {
+    "rename": "meetingRecentSpeakerRename:", "merge": "meetingRecentSpeakerMerge:",
+    "target": "meetingRecentSpeakerTarget:", "save": "meetingRecentSpeakerSave:",
+    "confirm": "meetingRecentSpeakerConfirmMerge:", "cancel": "meetingRecentSpeakerCancel:",
+}
 
 
 def _label(
@@ -300,6 +319,11 @@ class HubWindowController(NSObject):
         self.meeting_speaker_row_ids = []  # ids as drawn; a button tag indexes this
         self.meeting_speaker_choice_ids = []  # picker index -> id (None: placeholder)
         self.meeting_speaker_edit_key = ("", "")  # (mode, id) at the last fill
+        # Recent meetings: one row's speakers open in a drawer under it, with
+        # its own panel. The hidden set outlives page visits (see RecentSpeakers).
+        self.meeting_recent_speakers = RecentSpeakers()
+        self.meeting_recent_no_speakers = self.meeting_recent_speakers.hidden
+        self._meeting_recent_reset_views()
         self.tokens = LIGHT
         self.page = "Home"
         self.page_errors = {}
@@ -1595,6 +1619,7 @@ class HubWindowController(NSObject):
         self.meeting_speaker_field = None
         self.meeting_speaker_field_id = ""
         self.meeting_speaker_picker = None
+        self._meeting_recent_reset_views()
         width = self.body.frame().size.width
         # Everything is placed relative to the standard header offset (plus any
         # error callout), never from y=0 where the page title sits.
@@ -1793,18 +1818,45 @@ class HubWindowController(NSObject):
             getattr(self.config, "vault_path", ""),
             getattr(self.config, "notes_folder", ""),
         )
+        # An open speakers drawer whose note is gone (or changed) closes.
+        state = getattr(self, "meeting_recent_speakers", None)
+        if state is not None:
+            state.reconcile(self.meeting_recent)
+
+    @objc.python_method
+    def _meeting_recent_reset_views(self):
+        """Forget the views of the Recent meetings drawer (not the edit key)."""
+        self.meeting_recent_field = None
+        self.meeting_recent_field_id = ""  # the row the field was drawn for
+        self.meeting_recent_picker = None
+        self.meeting_recent_row_ids = []  # ids as drawn; a button tag indexes this
+        self.meeting_recent_choice_ids = []  # picker index -> id (None: placeholder)
+        if not hasattr(self, "meeting_recent_edit_key"):
+            self.meeting_recent_edit_key = ("", "")  # (mode, id) at the last fill
 
     @objc.python_method
     def _meeting_render_recent(self):
-        """Rows of the Recent meetings card: title, date and Open."""
+        """Rows of the Recent meetings card (title, date, Speakers…, Open) and
+        the speakers drawer under the open row.
+
+        Rebuilt on open/close, load and edit changes only, never by the 2s
+        poll, so a rename field being typed in is never replaced under the user.
+        """
         card = self.meeting_recent_card
+        state = self.meeting_recent_speakers
+        panel = state.panel
+        field = self.meeting_recent_field
+        if field is not None:
+            panel.set_draft(field.stringValue(), self.meeting_recent_field_id)
         for view in list(card.subviews()):
             view.removeFromSuperview()
+        self._meeting_recent_reset_views()
         width = self.body.frame().size.width
         notes = self.meeting_recent
         if not notes:
             message = self.meeting_recent_error or RECENT_EMPTY
             card.setFrame_(NSMakeRect(0, card.frame().origin.y, width, RECENT_ROW_H))
+            card.layer().setMasksToBounds_(False)
             card.addSubview_(
                 _label(
                     message, CARD_PADDING, 12, width - 2 * CARD_PADDING, 12,
@@ -1812,39 +1864,156 @@ class HubWindowController(NSObject):
                 )
             )
             return
-        card.setFrame_(
-            NSMakeRect(0, card.frame().origin.y, width, len(notes) * RECENT_ROW_H)
+        layout = recent_layout(
+            width, notes, state, error_height=self._meeting_recent_error_height(width),
         )
-        date_w = 150
-        open_w = 72
-        for index, note in enumerate(notes):
-            y = index * RECENT_ROW_H
-            open_x = width - CARD_PADDING - open_w
-            date_x = open_x - 12 - date_w
+        drawer = layout["drawer"]
+        card.setFrame_(NSMakeRect(0, card.frame().origin.y, width, layout["height"]))
+        # The drawer's tray is clipped to the card's rounded corners.
+        card.layer().setMasksToBounds_(drawer is not None)
+        controls = []
+        for index, (note, row) in enumerate(zip(notes, layout["rows"])):
+            frames = row["frames"]
+            x, y, w, h = frames["title"]
             card.addSubview_(
                 _label(
-                    note["title"], CARD_PADDING, y + 12, date_x - CARD_PADDING - 12,
-                    13, "ink", palette=self.tokens, height=20, weight="semibold",
+                    note["title"], x, y, w, 13, "ink",
+                    palette=self.tokens, height=h, weight="semibold",
                 )
             )
+            x, y, w, h = frames["date"]
             date = _label(
-                note["date_label"], date_x, y + 14, date_w, 11, "muted",
-                palette=self.tokens, height=18,
+                note["date_label"], x, y, w, 11, "muted", palette=self.tokens, height=h,
             )
             date.setAlignment_(AppKit.NSTextAlignmentRight)
             card.addSubview_(date)
+            if row["show_speakers"]:
+                x, y, w, h = frames["speakers"]
+                toggle = self._button(
+                    RECENT_SPEAKERS_DONE if row["expanded"] else RECENT_SPEAKERS_TITLE,
+                    "meetingRecentSpeakers:", x, y, index, w,
+                    parent=card, kind="ghost", height=h,
+                )
+                toggle.setAccessibilityLabel_(
+                    f"Hide speakers: {note['title']}" if row["expanded"]
+                    else f"Edit speakers: {note['title']}"
+                )
+                controls.append(toggle)
+            x, y, w, h = frames["open"]
             button = self._button(
-                "Open", "meetingOpenRecent:", open_x, y + 8, index, open_w,
-                parent=card, kind="ghost", height=28,
+                "Open", "meetingOpenRecent:", x, y, index, w,
+                parent=card, kind="ghost", height=h,
             )
             button.setAccessibilityLabel_(f"Open notes: {note['title']}")
-            if index < len(notes) - 1:
-                divider = NSView.alloc().initWithFrame_(
-                    NSMakeRect(12, y + RECENT_ROW_H - 1, width - 24, 1)
-                )
-                divider.setWantsLayer_(True)
-                divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
-                card.addSubview_(divider)
+            # Under the open row the drawer's own hairline takes the divider's place.
+            if index < len(notes) - 1 and not (row["expanded"] and drawer is not None):
+                self._meeting_divider(card, (12, row["y"] + RECENT_ROW_H - 1, width - 24, 1))
+        opened = False
+        if drawer is not None:
+            drawn, opened = self._meeting_recent_drawer(card, drawer, layout["height"])
+            controls += drawn
+        self.meeting_recent_edit_key = (panel.mode, panel.speaker_id)
+        if panel.busy:
+            for control in controls:
+                control.setEnabled_(False)
+        elif self.meeting_recent_field is not None:
+            self.window.makeFirstResponder_(self.meeting_recent_field)
+            if opened:
+                self.meeting_recent_field.selectText_(None)
+
+    @objc.python_method
+    def _meeting_recent_drawer(self, card, drawer, card_height):
+        """The recessed tray under the open Recent meetings row: (controls, opened)."""
+        state = self.meeting_recent_speakers
+        panel = state.panel
+        x, y, width, height = drawer["frame"]
+        view = FlippedView.alloc().initWithFrame_(NSMakeRect(x, y, width, height))
+        view.setWantsLayer_(True)
+        view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
+        card.addSubview_(view)
+        self._meeting_divider(view, (0, 0, width, 1))
+        if y + height < card_height:
+            self._meeting_divider(view, (0, height - 1, width, 1))
+        if drawer["kind"] == "loading":
+            x, y, w, h = drawer["label"]
+            view.addSubview_(
+                _label(RECENT_LOADING, x, y, w, 12, "muted", palette=self.tokens, height=h)
+            )
+            return [], False
+        if drawer["kind"] == "error":
+            x, y, w, h = drawer["label"]
+            label = _label(state.load_error, x, y, w, 12, "red", palette=self.tokens, height=h)
+            label.setToolTip_(state.load_error)
+            view.addSubview_(label)
+            x, y, w, h = drawer["retry"]
+            retry = self._button(
+                "Retry", "meetingRecentSpeakersRetry:", x, y, 0, w,
+                parent=view, kind="ghost", height=h,
+            )
+            retry.setAccessibilityLabel_("Retry loading speakers")
+            return [retry], False
+        self.meeting_recent_row_ids = [row["id"] for row in panel.rows]
+        controls, refs, opened = self._meeting_speaker_rows(
+            view, panel, width, RECENT_SPEAKER_ACTIONS, self.meeting_recent_edit_key,
+        )
+        self.meeting_recent_field = refs.get("field")
+        self.meeting_recent_field_id = refs.get("field_id", "")
+        self.meeting_recent_picker = refs.get("picker")
+        self.meeting_recent_choice_ids = refs.get("choice_ids", [])
+        if drawer["error"]:
+            x, y, w, h = drawer["error"]
+            view.addSubview_(
+                _label(panel.error, x, y, w, 12, "red", palette=self.tokens, height=h, wrap=True)
+            )
+        return controls, opened
+
+    @objc.python_method
+    def _meeting_recent_error_height(self, width):
+        """Wrapped height of the drawer panel's error, 0 when there is none."""
+        state = self.meeting_recent_speakers
+        error = state.panel.error if state.state == "ready" else ""
+        if not error:
+            return 0
+        error_font = _font(12)
+        lines = wrap_lines(
+            error, width - 2 * CARD_PADDING - 8, lambda text: measure_text(text, error_font),
+        )
+        return max(1, len(lines)) * 16 + 2
+
+    @objc.python_method
+    def _meeting_recent_refresh(self):
+        """Redraw the Recent meetings card, then the page around its new height."""
+        self._meeting_render_recent()
+        self._meeting_render()
+
+    @objc.python_method
+    def _meeting_recent_send(self, request, event):
+        """Run a RecentSpeakers/drawer panel request; the answer comes back as `event`."""
+        operation, args, token = request
+        client = self.meeting_client
+
+        def run():
+            try:
+                result, error = getattr(client, operation)(*args), None
+            except Exception as exc:  # noqa: BLE001
+                result, error = None, exc
+            self.meeting_events.put((event, (token, result), error))
+
+        threading.Thread(target=run, name=f"localflow-recent-{operation}", daemon=True).start()
+
+    @objc.python_method
+    def _meeting_speakers_mirror(self, source, target, payload, error):
+        """After a successful edit in one speakers panel, show it in the other
+        when both are on the same meeting; True when `target` changed."""
+        if not mirror_speakers(source, target, payload, error):
+            return False
+        saved = getattr(self, "meeting_last_saved", None)
+        if (
+            target is getattr(self, "meeting_speakers", None) and isinstance(saved, dict)
+            and saved.get("meeting_id") == target.meeting_id
+        ):
+            self.meeting_last_saved = {**saved, "speakers": payload.get("speakers")}
+        return True
 
     @objc.python_method
     def _meeting_worker(self, operation, *args):
@@ -2014,13 +2183,34 @@ class HubWindowController(NSObject):
         # Fakes in the tests run this without a panel and with no module
         # globals: reach it through getattr and call only its methods.
         panel = getattr(self, "meeting_speakers", None)
+        recent = getattr(self, "meeting_recent_speakers", None)
+        recent_shown = self.page == "Meetings" and hasattr(self, "meeting_recent_card")
         if operation == "speakers":
             token, payload = result
-            if (
-                panel is not None and panel.finish(token, payload, error)
-                and self.page == "Meetings"
-            ):
+            if panel is None or not panel.finish(token, payload, error):
+                return
+            # The same meeting open in a Recent meetings drawer shows the edit too.
+            mirrored = recent is not None and self._meeting_speakers_mirror(
+                panel, recent.panel, payload, error,
+            )
+            if mirrored and recent_shown:
+                self._meeting_recent_refresh()
+            elif self.page == "Meetings":
                 self._meeting_render()
+            return
+        if operation == "recent_speakers_load":
+            token, payload = result
+            if recent is not None and recent.loaded(token, payload, error) and recent_shown:
+                self._meeting_recent_refresh()
+            return
+        if operation == "recent_speakers":
+            token, payload = result
+            if recent is None or not recent.panel.finish(token, payload, error):
+                return
+            if panel is not None:
+                self._meeting_speakers_mirror(recent.panel, panel, payload, error)
+            if recent_shown:
+                self._meeting_recent_refresh()
             return
         if operation == "templates":
             if not error:
@@ -2437,33 +2627,19 @@ class HubWindowController(NSObject):
         card = self.meeting_speakers_card
         for view in list(card.subviews()):
             view.removeFromSuperview()
-        self.meeting_speaker_field = None
-        self.meeting_speaker_field_id = ""
-        self.meeting_speaker_picker = None
-        self.meeting_speaker_choice_ids = []
         width = self.body.frame().size.width
         rows = panel.rows
         card.setFrame_(
             NSMakeRect(0, card.frame().origin.y, width, len(rows) * RECENT_ROW_H)
         )
         self.meeting_speaker_row_ids = [row["id"] for row in rows]
-        controls = []
-        opened = False
-        for index, row in enumerate(rows):
-            mode = panel.mode if row["id"] == panel.speaker_id else ""
-            frames = speaker_row_frames(width, index, mode, can_merge=panel.can_merge)
-            if mode == "rename":
-                opened = self.meeting_speaker_edit_key != ("rename", row["id"])
-                controls += self._meeting_speaker_rename_row(card, index, row, frames)
-            elif mode == "merge":
-                controls += self._meeting_speaker_merge_row(card, index, row, frames)
-            else:
-                controls += self._meeting_speaker_normal_row(card, index, row, frames)
-            if index < len(rows) - 1:
-                divider = NSView.alloc().initWithFrame_(NSMakeRect(*frames["divider"]))
-                divider.setWantsLayer_(True)
-                divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
-                card.addSubview_(divider)
+        controls, refs, opened = self._meeting_speaker_rows(
+            card, panel, width, SPEAKER_ACTIONS, self.meeting_speaker_edit_key,
+        )
+        self.meeting_speaker_field = refs.get("field")
+        self.meeting_speaker_field_id = refs.get("field_id", "")
+        self.meeting_speaker_picker = refs.get("picker")
+        self.meeting_speaker_choice_ids = refs.get("choice_ids", [])
         self.meeting_speaker_edit_key = (panel.mode, panel.speaker_id)
         if panel.busy:
             for control in controls:
@@ -2474,21 +2650,63 @@ class HubWindowController(NSObject):
                 self.meeting_speaker_field.selectText_(None)
 
     @objc.python_method
-    def _meeting_speaker_normal_row(self, card, index, row, frames):
+    def _meeting_speaker_rows(self, card, panel, width, actions, edit_key):
+        """Draw `panel`'s rows into `card`: (controls, refs, opened).
+
+        `refs` holds the open edit's views (field and its row id, or picker
+        and its choice ids); `opened` is True when the rename field is new
+        since `edit_key`, so its text gets selected once.
+        """
+        controls, refs, opened = [], {}, False
+        rows = panel.rows
+        for index, row in enumerate(rows):
+            mode = panel.mode if row["id"] == panel.speaker_id else ""
+            frames = speaker_row_frames(width, index, mode, can_merge=panel.can_merge)
+            if mode == "rename":
+                opened = edit_key != ("rename", row["id"])
+                drawn, refs = self._meeting_speaker_rename_row(
+                    card, index, row, frames, panel=panel, actions=actions,
+                )
+            elif mode == "merge":
+                drawn, refs = self._meeting_speaker_merge_row(
+                    card, index, row, frames, panel=panel, actions=actions,
+                )
+            else:
+                drawn, _refs = self._meeting_speaker_normal_row(
+                    card, index, row, frames, panel=panel, actions=actions,
+                )
+            controls += drawn
+            if index < len(rows) - 1:
+                self._meeting_divider(card, frames["divider"])
+        return controls, refs, opened
+
+    @objc.python_method
+    def _meeting_divider(self, parent, frame):
+        divider = NSView.alloc().initWithFrame_(NSMakeRect(*frame))
+        divider.setWantsLayer_(True)
+        divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
+        parent.addSubview_(divider)
+        return divider
+
+    @objc.python_method
+    def _meeting_speaker_normal_row(
+        self, card, index, row, frames, *, panel=None, actions=SPEAKER_ACTIONS,
+    ):
+        panel = panel if panel is not None else self.meeting_speakers
         name = _label(
             row["label"], *frames["name"][:3], 13, "ink",
             palette=self.tokens, height=frames["name"][3], weight="semibold",
         )
         card.addSubview_(name)
         duration = _label(
-            speaker_row_meta(self.meeting_speakers.rows, row), *frames["duration"][:3], 11, "muted",
+            speaker_row_meta(panel.rows, row), *frames["duration"][:3], 11, "muted",
             palette=self.tokens, height=frames["duration"][3],
         )
         duration.setAlignment_(AppKit.NSTextAlignmentRight)
         card.addSubview_(duration)
         x, y, w, h = frames["rename"]
         rename = self._button(
-            "Rename", "meetingSpeakerRename:", x, y, index, w,
+            "Rename", actions["rename"], x, y, index, w,
             parent=card, kind="ghost", height=h,
         )
         rename.setAccessibilityLabel_(f"Rename {row['label']}")
@@ -2496,38 +2714,40 @@ class HubWindowController(NSObject):
         if "merge" in frames:
             x, y, w, h = frames["merge"]
             merge = self._button(
-                "Merge", "meetingSpeakerMerge:", x, y, index, w,
+                "Merge", actions["merge"], x, y, index, w,
                 parent=card, kind="ghost", height=h,
             )
             merge.setAccessibilityLabel_(f"Merge {row['label']} into another speaker")
             controls.append(merge)
-        return controls
+        return controls, {}
 
     @objc.python_method
-    def _meeting_speaker_rename_row(self, card, index, row, frames):
-        panel = self.meeting_speakers
+    def _meeting_speaker_rename_row(
+        self, card, index, row, frames, *, panel=None, actions=SPEAKER_ACTIONS,
+    ):
+        panel = panel if panel is not None else self.meeting_speakers
         x, y, w, _h = frames["field"]
-        field = self._field(panel.draft, x, y, w, parent=card, action="meetingSpeakerSave:")
+        field = self._field(panel.draft, x, y, w, parent=card, action=actions["save"])
         # Only Return or Save submit; losing focus never does.
         field.cell().setSendsActionOnEndEditing_(False)
         field.setAccessibilityLabel_("Speaker name")
-        self.meeting_speaker_field = field
-        self.meeting_speaker_field_id = row["id"]
         x, y, w, h = frames["save"]
         save = self._button(
-            "Saving…" if panel.busy == "rename" else "Save", "meetingSpeakerSave:",
+            "Saving…" if panel.busy == "rename" else "Save", actions["save"],
             x, y, index, w, parent=card, kind="secondary", height=h,
         )
         x, y, w, h = frames["cancel"]
         cancel = self._button(
-            "Cancel", "meetingSpeakerCancel:", x, y, index, w,
+            "Cancel", actions["cancel"], x, y, index, w,
             parent=card, kind="ghost", height=h,
         )
-        return [field, save, cancel]
+        return [field, save, cancel], {"field": field, "field_id": row["id"]}
 
     @objc.python_method
-    def _meeting_speaker_merge_row(self, card, index, row, frames):
-        panel = self.meeting_speakers
+    def _meeting_speaker_merge_row(
+        self, card, index, row, frames, *, panel=None, actions=SPEAKER_ACTIONS,
+    ):
+        panel = panel if panel is not None else self.meeting_speakers
         card.addSubview_(
             _label(
                 f"Merge {row['label']} into", *frames["prompt"][:3], 13, "ink",
@@ -2548,24 +2768,22 @@ class HubWindowController(NSObject):
         picker.addItemsWithTitles_(titles)
         picker.selectItemAtIndex_(ids.index(panel.into_id) if panel.into_id in ids else 0)
         picker.setTarget_(self)
-        picker.setAction_("meetingSpeakerTarget:")
+        picker.setAction_(actions["target"])
         picker.setAccessibilityLabel_("Merge into")
         card.addSubview_(picker)
-        self.meeting_speaker_picker = picker
-        self.meeting_speaker_choice_ids = ids
         x, y, w, h = frames["confirm"]
         confirm = self._button(
             "Merging…" if panel.busy == "merge" else "Merge",
-            "meetingSpeakerConfirmMerge:", x, y, index, w,
+            actions["confirm"], x, y, index, w,
             parent=card, kind="secondary", height=h,
         )
         confirm.setEnabled_(bool(panel.into_id))
         x, y, w, h = frames["cancel"]
         cancel = self._button(
-            "Cancel", "meetingSpeakerCancel:", x, y, index, w,
+            "Cancel", actions["cancel"], x, y, index, w,
             parent=card, kind="ghost", height=h,
         )
-        return [picker, confirm, cancel]
+        return [picker, confirm, cancel], {"picker": picker, "choice_ids": ids}
 
     @objc.python_method
     def _meeting_speakers_error_height(self, width):
@@ -2725,6 +2943,12 @@ class HubWindowController(NSObject):
         panel = getattr(self, "meeting_speakers", None)
         if field is not None and panel is not None:
             panel.set_draft(field.stringValue(), getattr(self, "meeting_speaker_field_id", None))
+        field = getattr(self, "meeting_recent_field", None)
+        recent = getattr(self, "meeting_recent_speakers", None)
+        if field is not None and recent is not None:
+            recent.panel.set_draft(
+                field.stringValue(), getattr(self, "meeting_recent_field_id", None),
+            )
 
     @objc.python_method
     def _meeting_speaker_row_id(self, sender):
@@ -2786,6 +3010,88 @@ class HubWindowController(NSObject):
             return
         self.meeting_speakers.cancel()
         self._meeting_render()
+
+    # Recent meetings drawer: the same six edits against its own panel.
+
+    def meetingRecentSpeakers_(self, sender):
+        if self.page != "Meetings":
+            return
+        index = sender.tag()
+        if not 0 <= index < len(self.meeting_recent):
+            return
+        request = self.meeting_recent_speakers.toggle(self.meeting_recent[index])
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers_load")
+
+    def meetingRecentSpeakersRetry_(self, _sender):
+        if self.page != "Meetings":
+            return
+        request = self.meeting_recent_speakers.retry()
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers_load")
+
+    @objc.python_method
+    def _meeting_recent_row_id(self, sender):
+        index = sender.tag()
+        ids = self.meeting_recent_row_ids
+        return ids[index] if 0 <= index < len(ids) else None
+
+    def meetingRecentSpeakerRename_(self, sender):
+        if self.page != "Meetings":
+            return
+        speaker_id = self._meeting_recent_row_id(sender)
+        if speaker_id is None:
+            return
+        self.meeting_recent_speakers.panel.begin_rename(speaker_id)
+        self._meeting_recent_refresh()
+
+    def meetingRecentSpeakerMerge_(self, sender):
+        if self.page != "Meetings":
+            return
+        speaker_id = self._meeting_recent_row_id(sender)
+        if speaker_id is None:
+            return
+        self.meeting_recent_speakers.panel.begin_merge(speaker_id)
+        self._meeting_recent_refresh()
+
+    def meetingRecentSpeakerTarget_(self, sender):
+        if self.page != "Meetings":
+            return
+        index = sender.indexOfSelectedItem()
+        ids = self.meeting_recent_choice_ids
+        speaker_id = ids[index] if 0 <= index < len(ids) else None
+        if speaker_id is None:
+            return
+        self.meeting_recent_speakers.panel.choose_target(speaker_id)
+        self._meeting_recent_refresh()
+
+    def meetingRecentSpeakerSave_(self, _sender):
+        if self.page != "Meetings":
+            return
+        field = self.meeting_recent_field
+        if field is None:
+            return
+        request = self.meeting_recent_speakers.panel.submit_rename(str(field.stringValue()))
+        # Render first: the disabled state is on screen before the thread starts.
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers")
+
+    def meetingRecentSpeakerConfirmMerge_(self, _sender):
+        if self.page != "Meetings":
+            return
+        request = self.meeting_recent_speakers.panel.submit_merge()
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers")
+
+    def meetingRecentSpeakerCancel_(self, _sender):
+        if self.page != "Meetings":
+            return
+        self.meeting_recent_speakers.panel.cancel()
+        self._meeting_recent_refresh()
 
     def meetingOpenNotes_(self, _sender):
         saved = self.meeting_last_saved or {}

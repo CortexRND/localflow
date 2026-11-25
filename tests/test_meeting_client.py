@@ -279,6 +279,35 @@ def test_client_speaker_errors_carry_the_server_detail():
             call()
 
 
+def test_client_errors_carry_the_http_status_code():
+    http = FakeHTTP()
+    client = MeetingClient("http://localhost:9876", "t", http)
+    http.response = FakeResponse(404, {"detail": "no speaker data for this meeting"})
+    with pytest.raises(MeetingClientError) as caught:
+        client.speakers("x")
+    assert caught.value.status_code == 404
+    assert str(caught.value) == "no speaker data for this meeting"
+
+    http.response = FakeResponse(409, {"detail": "meeting already running"})
+    with pytest.raises(MeetingClientError) as caught:
+        client.status()
+    assert caught.value.status_code == 409
+
+    for error in (requests.ConnectionError("down"), ConnectionRefusedError("refused")):
+        http.error = error
+        with pytest.raises(MeetingClientError) as caught:
+            client.speakers("x")
+        assert caught.value.status_code is None
+
+
+def test_client_error_stays_backwards_compatible():
+    error = MeetingClientError("boom")
+    assert error.status_code is None
+    assert str(error) == "boom"
+    assert isinstance(error, RuntimeError)
+    assert MeetingClientError("gone", 404).status_code == 404
+
+
 class FakeHTTPWithDelete(FakeHTTP):
     def delete(self, url, **kwargs):
         return self._call("delete", url, **kwargs)
