@@ -1,9 +1,9 @@
-"""CLI: ``python -m evals.perf {run,compare,validate}``.
+"""CLI: ``python -m evals.perf {run,compare,validate,trend,trend-append,regressions}``.
 
 Exit codes:
-  0  ok (compare: pass or warnings only)
+  0  ok (compare: pass or warnings only; regressions: report written)
   1  compare found a blocking regression
-  2  invalid input (unreadable/invalid result or policy file, bad arguments)
+  2  invalid input (unreadable/invalid result, index or policy file, bad arguments)
 """
 
 from __future__ import annotations
@@ -27,6 +27,13 @@ from .schema import (
     write_result,
 )
 from .suites import load_builtin_suites
+from .trend import (
+    DEFAULT_CONSECUTIVE,
+    DEFAULT_LIMIT,
+    append_run,
+    detect_consecutive_regressions,
+    render_trend,
+)
 
 load_builtin_suites()
 
@@ -138,6 +145,75 @@ def cmd_run(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _append(store: Path, results: list[Path]) -> int:
+    for path in results:
+        try:
+            info = append_run(store, path)
+        except (OSError, TypeError, ValueError) as exc:
+            _err(f"error: {path}: {exc}")
+            return EXIT_INVALID
+        _err(
+            f"stored {path} -> {info['run_file']}"
+            f"{' (replaced)' if info['replaced'] else ''}: "
+            f"{info['appended']} index lines appended, {info['skipped']} already present"
+        )
+    return EXIT_OK
+
+
+def cmd_trend_append(args: argparse.Namespace) -> int:
+    return _append(args.store, args.result)
+
+
+def cmd_trend(args: argparse.Namespace) -> int:
+    if args.append:
+        if not args.store:
+            _err("error: --append needs --store")
+            return EXIT_INVALID
+        code = _append(args.store, args.append)
+        if code != EXIT_OK:
+            return code
+    index = args.index or (args.store / "index.jsonl" if args.store else None)
+    if index is None:
+        _err("error: pass --index (or --store)")
+        return EXIT_INVALID
+    try:
+        markdown = render_trend(index, limit=args.limit, tier=args.tier)
+    except (OSError, TypeError, ValueError) as exc:
+        _err(f"error: {exc}")
+        return EXIT_INVALID
+    if args.output:
+        _write_text(args.output, markdown)
+        _err(f"wrote {args.output}")
+    else:
+        print(markdown, end="")
+    return EXIT_OK
+
+
+def cmd_regressions(args: argparse.Namespace) -> int:
+    try:
+        report = detect_consecutive_regressions(
+            args.index, args.policy, consecutive=args.consecutive, tier=args.tier or None
+        )
+    except (OSError, TypeError, ValueError) as exc:  # tomllib.TOMLDecodeError is a ValueError
+        _err(f"error: {exc}")
+        return EXIT_INVALID
+    text = json.dumps(report, indent=2) + "\n"
+    if args.output:
+        _write_text(args.output, text)
+        _err(
+            f"wrote {args.output}: {len(report['active_regressions'])} active, "
+            f"{len(report['recovered'])} recovered, {len(report['pending'])} pending"
+        )
+    else:
+        print(text, end="")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m evals.perf",
@@ -171,6 +247,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--output", type=Path, help="result path (default: print to stdout)")
     p_run.add_argument("--runner-label", help="runner label recorded in run.runner.label")
     p_run.set_defaults(func=cmd_run)
+
+    p_tr = sub.add_parser("trend", help="render trend.md from a trend store index.jsonl")
+    p_tr.add_argument("--index", type=Path, help="index.jsonl (default: <store>/index.jsonl)")
+    p_tr.add_argument("--store", type=Path, help="trend store directory (needed with --append)")
+    p_tr.add_argument(
+        "--append", type=Path, action="append", default=[],
+        help="result.json to append to --store before rendering (repeatable)",
+    )
+    p_tr.add_argument("--output", type=Path, help="write trend.md here (default: stdout)")
+    p_tr.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="runs per series window")
+    p_tr.add_argument("--tier", choices=VALID_TIERS, help="only this tier (default: all)")
+    p_tr.set_defaults(func=cmd_trend)
+
+    p_ta = sub.add_parser("trend-append", help="append result files to a trend store")
+    p_ta.add_argument("--store", type=Path, required=True, help="trend store directory")
+    p_ta.add_argument(
+        "--result", type=Path, action="append", required=True, help="result.json (repeatable)"
+    )
+    p_ta.set_defaults(func=cmd_trend_append)
+
+    p_rg = sub.add_parser("regressions", help="find regressions persisting N consecutive runs")
+    p_rg.add_argument("--index", type=Path, required=True, help="index.jsonl")
+    p_rg.add_argument("--policy", type=Path, default=DEFAULT_POLICY_PATH, help="policy.toml")
+    p_rg.add_argument("--consecutive", type=int, default=DEFAULT_CONSECUTIVE)
+    p_rg.add_argument(
+        "--tier", default="nightly", help="only this tier (default: nightly; '' for all)"
+    )
+    p_rg.add_argument("--output", type=Path, help="write the JSON report here (default: stdout)")
+    p_rg.set_defaults(func=cmd_regressions)
     return parser
 
 
