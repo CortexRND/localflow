@@ -829,14 +829,14 @@ def test_real_rust_seam_is_scored_by_gates(fake_ollama, tmp_path, monkeypatch):
     srv = fake_ollama(["llama3.2:3b"])
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     out = tmp_path / "out"
-    ids = ["pricing-review", "vendor-call-micfallback"]
+    ids = ["pricing-review", "vendor-call-micfallback", "launch-sync-diarized"]
     cases = meetings.run_meetings(RunContext(
         tier="smoke", runtime="rust", repo_root=REPO_ROOT,
         options={"ollama_url": srv.url, "output_dir": str(out), "scenarios": ",".join(ids), "timeout_s": 300}))
     _valid(cases, "rust")
     by = _by_case(cases)
-    # Deterministic lifecycle gates pass through the Rust backend whatever the LLM says.
-    for gate in ("M1", "M2", "M3", "M12", "M13"):
+    # Deterministic lifecycle gates (including M14 speaker labels) pass through the Rust backend whatever the LLM says.
+    for gate in ("M1", "M2", "M3", "M12", "M13", "M14"):
         case = by[f"meetings/gate/{gate}"]
         assert case["status"] == "ok", case
         assert case["metrics"][gate]["value"] == 1.0, case

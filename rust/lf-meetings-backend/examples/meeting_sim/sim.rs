@@ -23,7 +23,10 @@ use axum::{
 };
 use lf_core::config::Config;
 use lf_meetings::{
-    dispatch::PromptQueue, AudioCallback, AudioSource, SystemAudioUnavailable, Transcriber,
+    diarize::{SpeakerBackend, SpeakerTurn},
+    dispatch::PromptQueue,
+    speakers::SpeakerData,
+    AudioCallback, AudioSource, SystemAudioUnavailable, TimedText, TimedTranscript, Transcriber,
 };
 use lf_meetings_backend::{CaptureFactory, MeetingsBackend, ProviderFactory, TitleLlm};
 use lf_providers::{
@@ -142,13 +145,46 @@ pub fn load_scenario(path: &Path, id: &str) -> Result<Value> {
 
 type Slot = Arc<Mutex<Option<AudioCallback>>>;
 const FILLER: f32 = 0.05;
+const DIARIZED_STRIDE: usize = 64;
 
-fn tone(index: usize) -> Vec<f32> {
-    vec![0.1 + index as f32 * 0.001; RATE * LINE_SECONDS]
+fn tone(code: usize) -> Vec<f32> {
+    vec![0.1 + code as f32 * 0.001; RATE * LINE_SECONDS]
 }
 
 fn filler() -> Vec<f32> {
     vec![FILLER; RATE * LINE_SECONDS]
+}
+
+/// Mock diarizer + embedder matching `evals/meeting_sim/driver.py`: each chunk
+/// is one turn, and its embedding is a one-hot on `tone_code % 64`.
+struct MockSpeakerBackend;
+impl SpeakerBackend for MockSpeakerBackend {
+    fn embedder_id(&self) -> Option<&'static str> {
+        Some("mock")
+    }
+    fn load(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn diarize(&mut self, audio: &[f32]) -> Result<Vec<SpeakerTurn>> {
+        if audio.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![SpeakerTurn {
+            start: 0.0,
+            end: audio.len() as f64 / RATE as f64,
+            local_speaker: 0,
+        }])
+    }
+    fn embed(&mut self, audio: &[f32]) -> Result<Vec<f32>> {
+        let mean = audio.iter().map(|v| f64::from(*v)).sum::<f64>() / audio.len().max(1) as f64;
+        let code = ((mean - 0.1) / 0.001).round();
+        if code < 0.0 {
+            bail!("sim: unscripted audio for speaker embedding (mean {mean})");
+        }
+        let mut vector = vec![0.0f32; DIARIZED_STRIDE];
+        vector[(code as usize) % DIARIZED_STRIDE] = 1.0;
+        Ok(vector)
+    }
 }
 
 struct FeedSource {
@@ -172,20 +208,35 @@ impl AudioSource for FeedSource {
 struct ScriptTranscriber {
     lines: Arc<Vec<String>>,
     chunks: Arc<AtomicUsize>,
+    stride: usize,
 }
 impl Transcriber for ScriptTranscriber {
+    fn transcribe_chunk(&self, audio: &[f32], prompt: Option<&str>) -> Result<TimedTranscript> {
+        let text = self.transcribe(audio, prompt)?;
+        let segments = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![TimedText {
+                start: 0.0,
+                end: audio.len() as f64 / RATE as f64,
+                text: text.clone(),
+            }]
+        };
+        Ok(TimedTranscript { text, segments })
+    }
     fn transcribe(&self, audio: &[f32], _prompt: Option<&str>) -> Result<String> {
         let _counted = Counted(&self.chunks);
         let mean = audio.iter().map(|v| f64::from(*v)).sum::<f64>() / audio.len().max(1) as f64;
         if (mean - f64::from(FILLER)).abs() < 0.0005 {
             return Ok(String::new());
         }
-        let index = ((mean - 0.1) / 0.001).round();
-        if index < 0.0 {
+        let code = ((mean - 0.1) / 0.001).round();
+        if code < 0.0 {
             bail!("sim: unscripted audio (mean {mean})");
         }
+        let index = (code as usize) / self.stride.max(1);
         self.lines
-            .get(index as usize)
+            .get(index)
             .cloned()
             .ok_or_else(|| anyhow!("sim: no scripted line {index}"))
     }
@@ -204,6 +255,8 @@ struct ScriptedCapture {
     lines: Arc<Vec<String>>,
     chunks: Arc<AtomicUsize>,
     system_ok: bool,
+    stride: usize,
+    diarized: bool,
     mic: Slot,
     others: Slot,
 }
@@ -212,6 +265,7 @@ impl CaptureFactory for ScriptedCapture {
         Ok(Arc::new(ScriptTranscriber {
             lines: self.lines.clone(),
             chunks: self.chunks.clone(),
+            stride: self.stride,
         }))
     }
     fn microphone(&self, _: &Config) -> Result<Box<dyn AudioSource>> {
@@ -226,6 +280,11 @@ impl CaptureFactory for ScriptedCapture {
             slot: self.others.clone(),
             label: "sim-loopback",
         })))
+    }
+    fn diarizer(&self, _: &Config) -> Result<Option<Box<dyn SpeakerBackend>>> {
+        Ok(self
+            .diarized
+            .then(|| Box::new(MockSpeakerBackend) as Box<dyn SpeakerBackend>))
     }
 }
 
@@ -416,7 +475,7 @@ fn pair(status: u16, body: &Value) -> Value {
     json!([status, body])
 }
 
-pub fn sim_config(work: &Path, args: &Args) -> Config {
+pub fn sim_config(work: &Path, args: &Args, diarized: bool) -> Config {
     let mut config = Config::default();
     for (key, value) in [
         ("llm_provider", json!(args.llm_provider)),
@@ -438,6 +497,10 @@ pub fn sim_config(work: &Path, args: &Args) -> Config {
     ] {
         config.set_field(key, value);
     }
+    if diarized {
+        config.set_field("speaker_diarization", json!(true));
+        config.set_field("diarization_backend", json!("mock"));
+    }
     config
 }
 
@@ -450,7 +513,11 @@ fn backend(work: &Path, capture: Arc<ScriptedCapture>, calls: &Calls) -> Arc<Mee
                 calls: calls.clone(),
             }))
             .with_queue(PromptQueue::new(work.join("queue.json")))
-            .with_history_path(work.join("history.sqlite")),
+            .with_history_path(work.join("history.sqlite"))
+            .with_speaker_data(Arc::new(SpeakerData::with_roots(
+                work.join("meetings"),
+                work.join("speakers"),
+            ))),
     )
 }
 
@@ -500,6 +567,43 @@ pub fn run(args: &Args) -> Result<Value> {
         })
         .collect();
     let system_ok = str_field(&sc, "system_audio")? == "ok";
+    let diar_backend = sc.get("diarization_backend").and_then(Value::as_str);
+    if matches!(diar_backend, Some(b) if b != "mock") {
+        bail!("meeting_sim: only diarization_backend 'mock' is supported");
+    }
+    let diarized = diar_backend == Some("mock");
+    let stride = if diarized { DIARIZED_STRIDE } else { 1 };
+    let line_slots: Vec<usize> = if diarized {
+        let speakers = sc["line_speakers"]
+            .as_array()
+            .filter(|a| a.len() == lines.len())
+            .ok_or_else(|| anyhow!("meeting_sim: line_speakers must have one entry per line"))?;
+        let mut slots: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut out = Vec::with_capacity(lines.len());
+        for ((src, _), who) in lines.iter().zip(speakers) {
+            let who = who
+                .as_str()
+                .ok_or_else(|| anyhow!("meeting_sim: line_speakers entries must be strings"))?;
+            if (src == "me") != (who == "me") {
+                bail!("meeting_sim: line_speakers must be 'me' exactly on the 'me' lines");
+            }
+            if src == "me" {
+                out.push(0);
+            } else {
+                let next = slots.len() + 1;
+                let slot = *slots.entry(who.to_string()).or_insert(next);
+                out.push(slot);
+            }
+        }
+        let max_code = lines.len().saturating_sub(1) * stride + slots.len();
+        anyhow::ensure!(
+            0.1 + max_code as f64 * 0.001 < 1.0,
+            "diarized scenario too long for the tone code"
+        );
+        out
+    } else {
+        vec![0; lines.len()]
+    };
     let notes_final = format!(
         "{}{}",
         str_field(&sc, "notes_final")?,
@@ -510,12 +614,14 @@ pub fn run(args: &Args) -> Result<Value> {
         .tempdir()
         .context("create sim temp dir")?;
     let work = work_dir.path().to_path_buf();
-    let config = sim_config(&work, args);
+    let config = sim_config(&work, args, diarized);
     let calls: Calls = Arc::default();
     let capture = Arc::new(ScriptedCapture {
         lines: Arc::new(lines.iter().map(|(_, text)| text.clone()).collect()),
         chunks: Arc::default(),
         system_ok,
+        stride,
+        diarized,
         mic: Arc::default(),
         others: Arc::default(),
     });
@@ -554,7 +660,7 @@ pub fn run(args: &Args) -> Result<Value> {
             (None, &capture.mic)
         };
         if let Some(active) = active {
-            chunks += usize::from(feed(active, tone(i)));
+            chunks += usize::from(feed(active, tone(i * stride + line_slots[i])));
             segments += 1;
         }
         chunks += usize::from(feed(idle, filler()));
