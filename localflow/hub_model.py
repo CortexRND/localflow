@@ -701,6 +701,10 @@ class SpeakerPanel:
         """("enroll", (name, meeting_id, speaker_id), token) or None."""
         if self.busy or self.mode != "remember" or not self.remember:
             return None
+        if self.is_remembered(self.speaker_id):
+            self._close_edit()
+            self.revision += 1
+            return None
         self.draft = str(name)
         problem = speaker_name_error(name)
         if problem:
