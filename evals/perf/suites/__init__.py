@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 
-BUILTIN_SUITES = ("stt", "dictation", "footprint", "recall")
+BUILTIN_SUITES = ("stt", "dictation", "footprint", "recall", "meetings")
 
 
 def load_builtin_suites() -> None:

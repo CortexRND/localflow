@@ -466,6 +466,33 @@ block_factor = 2.0
 on_pr = "warn"
 
 # --------------------------------------------------------------------------
+# Meetings suite (evals/perf/suites/meetings.py, adapters/meeting_gates.py)
+# --------------------------------------------------------------------------
+
+# Gates M1-M4, M11-M13 are exact (pooled rate must be 1.0) and M5-M10 are
+# quality (abs_tol vs baseline plus the gates.py floors in [[caps]] below);
+# those rules are in the Exact / Quality sections above. stop_to_notes_ms,
+# summarize_ms and chat_ms are in the latency section.
+
+# Per LLM call during a meeting (summarize, retry, chat).
+[metrics.llm_call_ms]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# LLM calls per meeting (summarize + retries + chat); more calls = slower notes.
+[metrics.llm_calls_per_meeting]
+class = "noisy"
+better = "lower"
+rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# --------------------------------------------------------------------------
 # Absolute caps, checked on the candidate regardless of baseline.
 # --------------------------------------------------------------------------
 
