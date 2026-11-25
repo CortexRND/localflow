@@ -2229,7 +2229,13 @@ async fn rename_and_merge_rewrite_only_speaker_prefixes_frontmatter_and_sidecar(
         .any(|s| s["speaker_id"] == "S1"));
 
     // A transcript edited since: refused, nothing written.
-    let edited = log.replace("**00:01** **Dana O'Neil:** remote part 2\n\n", "");
+    // Only the line's contents are removed, so the edit works with either
+    // line ending (the transcript is CRLF on Windows).
+    let line = "**00:01** **Dana O'Neil:** remote part 2";
+    assert_eq!(log.matches(line).count(), 1, "{log}");
+    let edited = log.replace(line, "");
+    assert_ne!(edited, log, "the simulated edit removed the line");
+    assert!(!edited.contains(line));
     fs::write(&log_path, &edited).unwrap();
     let record = sidecar(&f, &id);
     assert_eq!(
