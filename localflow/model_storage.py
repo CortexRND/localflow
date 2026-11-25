@@ -1,8 +1,9 @@
-"""Speech models LocalFlow downloaded into the Hugging Face cache.
+"""Speech and speaker-label models LocalFlow downloaded into the Hugging Face cache.
 
 Used by Models & keys -> "Free up space". Only the exact repositories
-LocalFlow's speech catalog can download are ever listed or deleted (Whisper
-via faster-whisper or MLX, Parakeet); any other Hugging Face model (a 15 GB
+LocalFlow's catalogs can download are ever listed or deleted (Whisper via
+faster-whisper or MLX, Parakeet, and the speaker-label models in
+localflow.diarization.models); any other Hugging Face model (a 15 GB
 LLM, say) and every Ollama model are invisible here. Nothing is loaded,
 downloaded or initialised to build the list: it is only `stat` calls.
 
@@ -15,7 +16,8 @@ Deletion refuses (re-checked at click time):
   dictation app and server keep their model until restarted, even after the
   saved config changes, and `auto` can fall back from MLX at load time);
 - any model the saved config could load (both MLX and faster-whisper when
-  the MLX import can't be ruled out);
+  the MLX import can't be ruled out, and the speaker-label models while
+  `speaker_diarization` is on);
 - everything, when a plug-in backend or an unreadable lease makes the use
   unknown;
 - anything not in the catalog, and any folder that is a symlink or resolves
@@ -33,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from localflow.config import Config
+from localflow.diarization.models import diarization_repos
 from localflow.providers.stt_mlx_whisper import _MLX_REPOS
 from localflow.providers.stt_parakeet import PARAKEET_REPO
 
@@ -70,7 +73,10 @@ _SIZE_LABELS = {
 
 
 def catalog() -> dict[str, str]:
-    """repo id -> display label for every speech model LocalFlow downloads."""
+    """repo id -> display label for every speech and speaker-label model LocalFlow downloads.
+
+    Speaker-label models come last.
+    """
     repos = {
         FASTER_WHISPER_REPOS[size]: f"Whisper {_SIZE_LABELS[size]}"
         for size in _FW_CATALOG
@@ -80,6 +86,7 @@ def catalog() -> dict[str, str]:
         for size in _MLX_CATALOG
     })
     repos[PARAKEET_REPO] = "Parakeet v2"
+    repos.update(diarization_repos())
     return repos
 
 
@@ -141,6 +148,21 @@ def _faster_whisper_repo(size) -> str | None:
 
 def selected_repos(config: Config, mlx_available: Callable[[], bool] = _mlx_available):
     """Repos the saved config could load (a frozenset), or UNKNOWN.
+
+    The speech model(s) from `_selected_stt_repos`, plus the speaker-label
+    models while `speaker_diarization` is on. A plug-in speech backend still
+    fails closed (UNKNOWN) whatever the flag.
+    """
+    repos = _selected_stt_repos(config, mlx_available)
+    if repos is UNKNOWN:
+        return UNKNOWN
+    if config.speaker_diarization:
+        repos = repos | frozenset(diarization_repos())
+    return repos
+
+
+def _selected_stt_repos(config: Config, mlx_available: Callable[[], bool]):
+    """Speech repos the saved config could load (a frozenset), or UNKNOWN.
 
     Mirrors stt.Transcriber without loading anything. parakeet -> Parakeet.
     auto/mlx with device auto and an MLX size tries MLX first and falls back
@@ -312,6 +334,10 @@ def delete_unused(
             f"{label} is loaded by a running LocalFlow process, so it was kept."
         )
     if repo in guard.selected:
+        if repo in diarization_repos():
+            raise ModelStorageError(
+                f"{label} is used for speaker labels in your settings, so it was kept."
+            )
         raise ModelStorageError(
             f"{label} is the speech model in your settings, so it was kept."
         )

@@ -1793,6 +1793,55 @@ def menubar() -> None:
     menubar_main()
 
 
+@cli.group("speakers", hidden=True)
+def speakers() -> None:
+    """Speaker labels for meetings: models and status."""
+
+
+@speakers.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def speakers_status(as_json: bool) -> None:
+    """Show whether speaker-label models and the runtime are ready (offline)."""
+    from localflow.diarization import models as diar_models
+
+    info = {**diar_models.status(), **diar_models.flags(load_config())}
+    if as_json:
+        click.echo(json.dumps(info))
+        return
+    if info["models_ready"]:
+        click.echo("models: ready")
+    else:
+        click.echo(f"models: not ready — {info['reason']}")
+    for model in info["models"]:
+        click.echo(f"{model['id']}: {'verified' if model['ready'] else model['reason']}")
+    installed = "installed" if info["extra_installed"] else "not installed"
+    click.echo(f"runtime (sherpa-onnx): {installed}")
+    for name in diar_models.FLAG_NAMES:
+        click.echo(f"{name}: {'true' if info[name] else 'false'}")
+
+
+@speakers.command("download")
+def speakers_download() -> None:
+    """Download and verify the speaker-label models."""
+    from localflow.diarization import models as diar_models
+    from localflow.models import DownloadCancelled, friendly_download_error
+
+    try:
+        _progress(
+            "Downloading speaker models",
+            lambda update: diar_models.download_diarization_models(
+                lambda done, total: update(
+                    done, total, f"{done / 1_000_000:.0f}/{total / 1_000_000:.0f} MB"
+                ),
+            ),
+        )
+    except DownloadCancelled:
+        raise click.Abort() from None
+    except Exception as exc:
+        raise click.ClickException(friendly_download_error(exc)) from exc
+    console.print("[green]downloaded[/green] speaker models")
+
+
 @cli.group(hidden=True)
 def agent() -> None:
     """Alias of `lf autostart` (launchd LaunchAgent on macOS)."""

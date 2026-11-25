@@ -3472,7 +3472,11 @@ def test_stt_catalog_runtime_selection_and_sizes(stt_driver):
         ms.format_bytes(s) for s in sizes_bytes
     ]
     catalog = stt_driver([{"op": "catalog"}])[0]
-    assert catalog[:len(ms.catalog())] == [list(item) for item in ms.catalog().items()]
+    from localflow.diarization.models import DIAR_MODELS
+
+    diar = {model.repo for model in DIAR_MODELS}  # Rust lists these from R3/R4 on
+    python_catalog = [list(item) for item in ms.catalog().items() if item[0] not in diar]
+    assert catalog[:len(python_catalog)] == python_catalog
     cpp = "ggerganov/whisper.cpp"
     onnx = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
     assert dict(catalog)[cpp] == "Whisper (whisper.cpp)"
