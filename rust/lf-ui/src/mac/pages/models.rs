@@ -3262,6 +3262,10 @@ fn storage_inventory(
         let Some(folder) = model_folder(&cache, &repo) else {
             continue;
         };
+        let size_bytes = folder_size(&folder);
+        if size_bytes == 0 {
+            continue;
+        }
         let status = if guard.running.contains(&repo) {
             "In use".to_string()
         } else if guard.selected.contains(&repo) {
@@ -3274,7 +3278,7 @@ fn storage_inventory(
         found.push(CachedModel {
             repo,
             label,
-            size_bytes: folder_size(&folder),
+            size_bytes,
             status,
         });
     }
@@ -4104,6 +4108,34 @@ mod tests {
     }
 
     #[test]
+    fn storage_skips_catalog_folder_with_no_file_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = SystemModelsBackend {
+            cache: Some(temp.path().to_path_buf()),
+            leases: Some(temp.path().join("leases")),
+            mlx_available: false,
+        };
+        let config = config(&[
+            ("stt_backend", "faster-whisper"),
+            ("model_size", "base"),
+            ("stt_device", "auto"),
+        ]);
+        let empty = temp
+            .path()
+            .join(repo_folder_name("Systran/faster-whisper-small"));
+        let full = temp
+            .path()
+            .join(repo_folder_name("Systran/faster-whisper-base"));
+        std::fs::create_dir_all(empty.join("snapshots/rev")).unwrap();
+        std::fs::create_dir_all(full.join("snapshots/rev")).unwrap();
+        std::fs::write(full.join("snapshots/rev/model.bin"), vec![0_u8; 100]).unwrap();
+        let models = backend.inventory(&config).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].repo, "Systran/faster-whisper-base");
+        assert_eq!(models[0].size_bytes, 100);
+    }
+
+    #[test]
     fn deletion_refuses_symlinked_model_and_unknown_live_lease() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
@@ -4111,6 +4143,7 @@ mod tests {
         let leases = temp.path().join("leases");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("model.bin"), b"test").unwrap();
         std::fs::create_dir_all(&leases).unwrap();
         std::os::unix::fs::symlink(
             &outside,
@@ -4135,6 +4168,7 @@ mod tests {
         assert!(real.symlink_metadata().unwrap().file_type().is_symlink());
         std::fs::remove_file(&real).unwrap();
         std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("model.bin"), b"test").unwrap();
         std::fs::write(
             leases.join(format!("{}.json", std::process::id())),
             format!(
