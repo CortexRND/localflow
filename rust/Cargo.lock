@@ -1810,6 +1810,7 @@ dependencies = [
  "lf-agent",
  "lf-ask",
  "lf-core",
+ "lf-diarize",
  "lf-meetings",
  "lf-meetings-backend",
  "lf-providers",
@@ -1894,6 +1895,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lf-diarize"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "lf-core",
+ "log",
+ "serde_json",
+ "sha2 0.10.9",
+ "sherpa-onnx",
+ "tempfile",
+]
+
+[[package]]
 name = "lf-input"
 version = "0.2.3"
 dependencies = [
@@ -1918,6 +1932,7 @@ dependencies = [
  "lf-agent",
  "lf-ask",
  "lf-core",
+ "lf-diarize",
  "lf-providers",
  "log",
  "objc2",

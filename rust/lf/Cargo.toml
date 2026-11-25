@@ -14,7 +14,13 @@ path = "src/lib.rs"
 name = "lf-rs"
 path = "src/main.rs"
 
+[features]
+default = []
+# Speaker labels in `lf-rs serve` meetings via sherpa-onnx (default off).
+diarize = ["dep:lf-diarize", "lf-diarize/sherpa"]
+
 [dependencies]
+lf-diarize = { path = "../lf-diarize", optional = true }
 lf-agent = { path = "../lf-agent" }
 lf-ask = { path = "../lf-ask" }
 lf-core = { path = "../lf-core" }

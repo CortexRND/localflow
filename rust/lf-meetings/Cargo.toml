@@ -12,6 +12,7 @@ capture = ["dep:cpal"]
 [dependencies]
 lf-core = { path = "../lf-core" }
 lf-providers = { path = "../lf-providers" }
+lf-diarize = { path = "../lf-diarize" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

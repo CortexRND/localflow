@@ -379,7 +379,7 @@ impl MeetingsBackend {
         if let Some(watcher) = &self.watcher {
             watcher.resume();
         }
-        let finished = finished.map_err(|_| internal())?;
+        let mut finished = finished.map_err(|_| internal())?;
         if let Some(saved) = self.checkpoint(
             &writer,
             &meta,
@@ -392,6 +392,11 @@ impl MeetingsBackend {
             }
             self.state().saved = MeetingSave::Transcript;
             self.idle.notify_all();
+        }
+        // Speaker labels may wait up to their finalize timeout, so only after
+        // the channel-labelled transcript is durable (design §6).
+        if let Some(labels) = finished.speaker_labels.take() {
+            finished.segments = labels.apply(&finished.segments);
         }
         let transcript = format_transcript(&finished.segments);
         let template = templates::resolve_template(
