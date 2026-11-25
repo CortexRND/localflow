@@ -4307,7 +4307,7 @@ mod tests {
                 .filter(|call| matches!(call, MeetingCall::Speakers(_)))
                 .count()
         };
-        let before = reads(&*client);
+        let before = reads(&client);
         page.state.apply_event(Event {
             generation,
             kind: EventKind::SpeakerProbe(vec![(MEETING.into(), Ok(Some(old.clone())))]),
@@ -4319,7 +4319,7 @@ mod tests {
         );
         assert!(page.state.probe_in_flight.get(), "the id is read again");
         apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
-        assert_eq!(reads(&*client), before + 1);
+        assert_eq!(reads(&client), before + 1);
         let cached = page.state.recent_speakers.borrow().get(MEETING).cloned();
         assert_eq!(cached.flatten().unwrap()[1].label, "Ana");
 
