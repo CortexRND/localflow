@@ -62,7 +62,10 @@ class _Record:
 
 def _unit_vector(vec) -> np.ndarray | None:
     """1-D finite L2-normalised float32 copy, or None when unusable."""
-    arr = np.asarray(vec, dtype=np.float32)
+    try:
+        arr = np.asarray(vec, dtype=np.float32)
+    except (TypeError, ValueError):  # ragged or non-numeric output
+        return None
     if arr.ndim != 1 or arr.size == 0 or not np.isfinite(arr).all():
         return None
     norm = float(np.linalg.norm(arr))
@@ -247,7 +250,11 @@ class DiarizationCollector:
                 return result
         except Exception:
             log.exception("speaker diarization finalize failed")
-            return DiarizationResult(STATUS_FAILED, list(segments), [])
+            # e.g. the finalize thread could not start: stop the worker, stay idempotent.
+            self.close()
+            if self._result is None:
+                self._result = DiarizationResult(STATUS_FAILED, list(segments), [])
+            return self._result
 
     def _release(self) -> None:
         """Drop embeddings once a result exists; the worker is told to stop."""
@@ -373,11 +380,18 @@ class DiarizationCollector:
             for ti, turn in enumerate(record.turns):
                 label = label_of.get((ri, ti), fallback.get(turn.local_speaker))
                 if label is None:
+                    # Unknown voice: a negative sentinel keeps the turn occupying its time,
+                    # so a neighbour within GAP_TOLERANCE_S can't claim its text.
+                    global_turns.append(
+                        SpeakerTurn(turn.start, turn.end, -(turn.local_speaker + 1)))
                     continue
                 global_turns.append(SpeakerTurn(turn.start, turn.end, label))
                 seconds[label] = seconds.get(label, 0.0) + (turn.end - turn.start)
-            runs = merge_runs(assign_speakers(list(record.timed), global_turns),
-                              chunk_offset=record.offset)
+            assigned = [
+                (t, None if speaker is None or speaker < 0 else speaker)
+                for t, speaker in assign_speakers(list(record.timed), global_turns)
+            ]
+            runs = merge_runs(assigned, chunk_offset=record.offset)
             runs = [run for run in runs if run.text]
             found.update(run.speaker for run in runs if run.speaker is not None)
             chunk_runs[record.offset] = runs

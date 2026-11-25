@@ -16,7 +16,7 @@ from localflow.diarization.collector import (
     DiarizationCollector,
 )
 from localflow.diarization.mock import MockDiarizer, MockEmbedder, tone_index
-from localflow.diarization.types import TimedText
+from localflow.diarization.types import SpeakerTurn, TimedText
 
 RATE = 16000
 
@@ -420,6 +420,50 @@ def test_finalize_is_idempotent_and_close_is_safe():
     result = closed.finalize([seg])
     assert result.status == "failed" and result.segments == [seg]
     _wait_no_threads()
+
+
+def test_unembedded_interjection_is_not_credited_to_a_neighbour():
+    class ScriptedDiarizer(MockDiarizer):
+        def diarize(self, audio, sample_rate):
+            return [SpeakerTurn(0.0, 2.0, 0), SpeakerTurn(2.2, 2.7, 1), SpeakerTurn(3.0, 5.0, 2)]
+
+    c = _make(ScriptedDiarizer(), MockEmbedder())
+    audio = np.concatenate([tone(0, 2), silence(1.0), tone(1, 2)])
+    timed = [TimedText(0.0, 2.0, "first"), TimedText(2.2, 2.7, "yeah"),
+             TimedText(3.0, 5.0, "second")]
+    assert c.feed("others", 0.0, audio, timed) is True
+    result = c.finalize([Seg(0.0, "first yeah second", "others")])
+    assert result.status == "ok"
+    assert [(s.offset_seconds, s.speaker_id, s.text) for s in result.segments] == [
+        (0.0, "S1", "first"), (2.2, None, "yeah"), (3.0, "S2", "second"),
+    ]
+    assert [s.seconds for s in result.speakers] == pytest.approx([2.0, 2.0])
+
+
+@pytest.mark.parametrize("vec", [[[1.0, 2.0], [3.0]], ["a", "b"], object()])
+def test_unusable_embedder_output_is_no_embedding(vec):
+    assert collector_module._unit_vector(vec) is None
+
+
+def test_finalize_that_cannot_start_closes_and_stays_idempotent(monkeypatch):
+    c = _new()
+    _, seg = _chunk(c, "others", 0.0, _two_voice(), wait=True)
+    worker = c._worker
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(collector_module.threading, "Thread", NoThread)
+    result = c.finalize([seg])
+    monkeypatch.undo()
+    assert result.status == "failed" and result.segments == [seg]
+    assert c.finalize([seg]) is result
+    worker.join(2.0)
+    assert not worker.is_alive()
 
 
 def test_close_wakes_an_idle_worker_at_once(monkeypatch):
