@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -612,6 +613,54 @@ def test_cancel_between_files_skips_the_second(cache, net, monkeypatch):
     assert dm.check_model(SEG)[0] is not None
     assert not os.path.lexists(pointer(cache, EMB))
     assert_no_partials(cache)
+
+
+# ----------------------------------------------------- stale partial files ---
+
+
+@posix_only
+def test_explicit_download_removes_only_old_matching_regular_partials(cache, net, tmp_path):
+    blobs = folder(cache, SEG) / "blobs"
+    blobs.mkdir(parents=True)
+    old = time.time() - 2 * 60 * 60
+    prefix = SEG.sha256[:16]
+
+    def aged(path):
+        os.utime(path, (old, old), follow_symlinks=False)
+        return path
+
+    stale = blobs / f"{prefix}.abc123{dm._PART_SUFFIX}"
+    stale.write_bytes(b"left by a killed process")
+    aged(stale)
+    fresh = blobs / f"{prefix}.live99{dm._PART_SUFFIX}"
+    fresh.write_bytes(b"another process is downloading")
+    other_model = blobs / f"{EMB.sha256[:16]}.abc{dm._PART_SUFFIX}"
+    other_model.write_bytes(b"x")
+    aged(other_model)
+    other_suffix = blobs / f"{prefix}.abc.tmp"
+    other_suffix.write_bytes(b"x")
+    aged(other_suffix)
+    directory = blobs / f"{prefix}.dir{dm._PART_SUFFIX}"
+    directory.mkdir()
+    (directory / "inside").write_bytes(b"x")
+    aged(directory)
+    outside = tmp_path / "outside-part"
+    outside.write_bytes(b"precious")
+    aged(outside)
+    link = blobs / f"{prefix}.link{dm._PART_SUFFIX}"
+    link.symlink_to(outside)
+    aged(link)
+
+    assert dm.models_ready()[0] is False  # checks never clean up
+    assert dm.status()["models_ready"] is False
+    assert stale.exists()
+
+    download(cache)
+    assert not os.path.lexists(stale)
+    for kept in (fresh, other_model, other_suffix, directory / "inside", link):
+        assert os.path.lexists(kept), kept
+    assert outside.read_bytes() == b"precious"
+    assert dm.models_ready() == (True, "")
 
 
 # ------------------------------------------------- offline, no runtime import ---

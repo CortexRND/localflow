@@ -135,6 +135,8 @@ _history: HistoryStore | None = None
 _diar_lock = threading.Lock()
 _diar_download = {"state": "idle", "done_bytes": 0, "total_bytes": 0, "error": None}
 _diar_cancel = threading.Event()
+_diar_thread: threading.Thread | None = None  # the last worker started, under _diar_lock
+_DIAR_SHUTDOWN_JOIN_SECONDS = 2.0
 
 
 @app.on_event("startup")
@@ -147,7 +149,14 @@ def _start_watcher() -> None:
 
 @app.on_event("shutdown")
 def _cancel_diarization_download() -> None:
-    _diar_cancel.set()  # the worker stops at the next chunk and removes its partial file
+    # Ask the worker to stop and give it a bounded moment to clean up. A read
+    # stalled on the network (up to 30 s) can outlast the wait; any partial
+    # file left behind is removed by a later explicit download once it is old.
+    with _diar_lock:  # a POST holding the lock can't clear the event after this
+        _diar_cancel.set()
+        worker = _diar_thread
+    if worker is not None:
+        worker.join(timeout=_DIAR_SHUTDOWN_JOIN_SECONDS)  # not under _diar_lock
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -562,15 +571,19 @@ def _diar_worker() -> None:
 @app.get("/api/diarization/status")
 def api_diarization_status() -> dict:
     # Plain def: FastAPI runs it in the threadpool, so hashing never blocks the loop.
+    # Snapshot the download first: a download finishing while the files are
+    # hashed then reads "downloading" (poll again), never "idle" and not ready.
+    download = _diar_snapshot()
     return {
         **diar_models.status(),
         **diar_models.flags(_config),
-        "download": _diar_snapshot(),
+        "download": download,
     }
 
 
 @app.post("/api/diarization/download", status_code=202)
 def api_diarization_download() -> dict:
+    global _diar_thread
     with _diar_lock:
         if _diar_download["state"] == "downloading":
             return {"started": False, "download": dict(_diar_download)}
@@ -583,14 +596,16 @@ def api_diarization_download() -> dict:
         _diar_cancel.clear()
         snapshot = dict(_diar_download)
         try:
-            threading.Thread(
+            worker = threading.Thread(
                 target=_diar_worker, name="diarization-download", daemon=True
-            ).start()
+            )
+            worker.start()
         except Exception as exc:  # noqa: BLE001 - e.g. RuntimeError: can't start new thread
             log.warning("Could not start the speaker model download: %s", exc)
             message = "Could not start the speaker model download. Try again."
             _diar_download.update(state="failed", error=message)
             raise HTTPException(status_code=503, detail=message) from None
+        _diar_thread = worker
     return {"started": True, "download": snapshot}
 
 

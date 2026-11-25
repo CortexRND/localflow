@@ -29,6 +29,7 @@ import os
 import stat
 import tempfile
 import threading
+import time
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -93,6 +94,7 @@ FLAG_NAMES = ("speaker_diarization", "diarize_mic", "speaker_recognition")
 _HASH_CHUNK_BYTES = 1024 * 1024
 _CHUNK_BYTES = 256 * 1024
 _PART_SUFFIX = ".lf-part"
+_STALE_PART_SECONDS = 60 * 60  # a live download rewrites its partial every chunk
 # Windows junction reparse tag; the stat module only defines it on Windows.
 _MOUNT_POINT_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
 # Held around check+evict and around publication, so an in-process status
@@ -462,6 +464,31 @@ def _prepare_folders(model: DiarModel, cache: Path) -> Path:
     return folder
 
 
+def _remove_stale_parts(blobs: Path, model: DiarModel) -> None:
+    """Delete this model's old partial downloads (left by a killed process).
+
+    Only regular files directly in the plain `blobs/` folder named
+    `<sha256[:16]>.*.lf-part` and untouched for `_STALE_PART_SECONDS` are
+    removed: a fresh one may belong to a download running in another process.
+    Nothing is traversed, followed or resolved. Best effort.
+    """
+    prefix = model.sha256[:16] + "."
+    cutoff = time.time() - _STALE_PART_SECONDS
+    try:
+        entries = list(os.scandir(blobs))
+    except OSError:
+        return
+    for entry in entries:
+        if not (entry.name.startswith(prefix) and entry.name.endswith(_PART_SUFFIX)):
+            continue
+        try:
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                os.unlink(entry.path)
+        except OSError:
+            continue
+
+
 def _fetch(
     model: DiarModel,
     cache: Path,
@@ -478,6 +505,7 @@ def _fetch(
         raise DownloadError(f"Could not save {model.filename}: {exc.strerror or exc}") from exc
     blobs = folder / "blobs"
     url = _model_url(model)
+    _remove_stale_parts(blobs, model)
     try:
         fd, tmp_name = tempfile.mkstemp(
             dir=blobs, prefix=model.sha256[:16] + ".", suffix=_PART_SUFFIX

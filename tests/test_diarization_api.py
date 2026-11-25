@@ -77,6 +77,7 @@ def isolated(tmp_path, monkeypatch, config):
         "state": "idle", "done_bytes": 0, "total_bytes": 0, "error": None,
     })
     monkeypatch.setattr(server, "_diar_cancel", threading.Event())
+    monkeypatch.setattr(server, "_diar_thread", None)
 
 
 @pytest.fixture
@@ -219,6 +220,80 @@ def test_shutdown_cancels_a_running_download():
     with TestClient(server.app, base_url=BASE, headers={"X-Localflow-Token": TOKEN}):
         assert not server._diar_cancel.is_set()
     assert server._diar_cancel.is_set()
+
+
+def test_status_snapshots_the_download_before_hashing(client, monkeypatch):
+    server._diar_download.update(state="downloading", done_bytes=10, total_bytes=10)
+    real_status = dm.status
+
+    def finishes_while_hashing(*args, **kwargs):
+        # The worker publishes the last file and goes idle mid-check.
+        with server._diar_lock:
+            server._diar_download.update(state="idle")
+        return {**real_status(*args, **kwargs), "models_ready": True, "reason": ""}
+
+    monkeypatch.setattr(dm, "status", finishes_while_hashing)
+    body = client.get("/api/diarization/status").json()
+    assert body["models_ready"] is True
+    assert body["download"]["state"] == "downloading"  # stale but harmless: poll again
+    assert client.get("/api/diarization/status").json()["download"]["state"] == "idle"
+
+
+def test_shutdown_waits_for_the_worker_without_holding_the_lock(monkeypatch):
+    seen = threading.Event()
+
+    def stops_on_cancel(on_progress, cancel=None, **kwargs):
+        on_progress(1, 10)
+        seen.set()
+        assert cancel.wait(5)
+        on_progress(7, 10)  # needs _diar_lock while shutdown is joining
+        raise DownloadCancelled("Download cancelled")
+
+    monkeypatch.setattr(dm, "download_diarization_models", stops_on_cancel)
+    monkeypatch.setattr(server, "_DIAR_SHUTDOWN_JOIN_SECONDS", 5.0)
+    with TestClient(
+        server.app, base_url=BASE, client=("127.0.0.1", 1234),
+        headers={"X-Localflow-Token": TOKEN},
+    ) as c:
+        assert c.post("/api/diarization/download").json()["started"] is True
+        assert seen.wait(5)
+        worker = server._diar_thread
+        assert worker is not None and worker.is_alive()
+        started = time.monotonic()
+    assert time.monotonic() - started < 4  # joined as soon as the worker finished
+    assert not worker.is_alive()
+    assert server._diar_download == {
+        "state": "cancelled", "done_bytes": 7, "total_bytes": 10, "error": None,
+    }
+
+
+def test_shutdown_wait_is_bounded_when_the_worker_is_stuck(monkeypatch):
+    release = threading.Event()
+    seen = threading.Event()
+
+    def stuck(on_progress, cancel=None, **kwargs):
+        seen.set()
+        release.wait(10)  # e.g. a read stalled on the network, ignoring cancel
+        raise DownloadCancelled("Download cancelled")
+
+    monkeypatch.setattr(dm, "download_diarization_models", stuck)
+    monkeypatch.setattr(server, "_DIAR_SHUTDOWN_JOIN_SECONDS", 0.2)
+    try:
+        with TestClient(
+            server.app, base_url=BASE, client=("127.0.0.1", 1234),
+            headers={"X-Localflow-Token": TOKEN},
+        ) as c:
+            c.post("/api/diarization/download")
+            assert seen.wait(5)
+            started = time.monotonic()
+        assert time.monotonic() - started < 3
+        assert server._diar_cancel.is_set()
+        assert server._diar_thread.is_alive()
+        assert server._diar_download["state"] == "downloading"
+    finally:
+        release.set()
+        server._diar_thread.join(5)
+    assert server._diar_download["state"] == "cancelled"
 
 
 def test_nothing_else_downloads_speaker_models(client, monkeypatch):
