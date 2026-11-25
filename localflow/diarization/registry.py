@@ -440,7 +440,13 @@ class FileSpeakerRegistry:
                     raise UnknownVoiceprint("unknown speaker")
             else:
                 raw = self._load_raw() or []
-            changed, failed = store.strip_voiceprints(voiceprint_id)
+            strip_error: OSError | None = None
+            try:
+                changed, failed = store.strip_voiceprints(voiceprint_id)
+            except OSError as exc:  # e.g. the meetings folder can't be listed
+                # Still delete the voiceprint(s) and staged audio below, then re-raise:
+                # the API maps it to a fixed message; nothing here logs its text.
+                strip_error, changed, failed = exc, 0, 0
             audio_failed = 0
             if single:
                 self._unlink(f"{voiceprint_id}.npy")
@@ -454,6 +460,8 @@ class FileSpeakerRegistry:
                 audio_failed = staging.sweep(self.root)[1]
                 self._remove_owned_files()
         log.info("speakers forgotten: %d voiceprints, %d meeting entries", removed, changed)
+        if strip_error is not None:
+            raise strip_error
         if failed or audio_failed:
             raise ErasureIncomplete(removed, failed, audio_failed)
         return removed

@@ -641,6 +641,45 @@ def test_unexaminable_root_refuses_staging_with_the_fixed_error(registry, monkey
     assert not registry.root.exists()
 
 
+def _unlistable_meetings(monkeypatch, meetings):
+    real_listdir = os.listdir
+
+    def listdir(path="."):
+        if Path(path) == Path(meetings.root):
+            raise PermissionError("denied")
+        return real_listdir(path)
+
+    monkeypatch.setattr(store_module.os, "listdir", listdir)
+
+
+def test_unlistable_meetings_folder_still_forgets_all_then_raises(rooms, monkeypatch):
+    registry, meetings = rooms
+    vp = registry.enroll("Dana", [onehot(0)], "mock")
+    _seed(meetings, vp.id)
+    (registry.root / STAGED).write_bytes(b"raw voice audio")
+    epoch = reg.forget_epoch()
+    _unlistable_meetings(monkeypatch, meetings)
+    with pytest.raises(PermissionError):
+        registry.forget()
+    assert reg.forget_epoch() == epoch + 1
+    assert list(registry.root.iterdir()) == []  # voiceprints and staged audio are gone
+    assert registry.list() == []
+
+
+def test_unlistable_meetings_folder_still_forgets_one_then_raises(rooms, monkeypatch):
+    registry, meetings = rooms
+    vp = registry.enroll("Dana", [onehot(0)], "mock")
+    keep = registry.enroll("Lee", [onehot(1)], "mock")
+    _seed(meetings, vp.id)
+    (registry.root / STAGED).write_bytes(b"in flight")
+    _unlistable_meetings(monkeypatch, meetings)
+    with pytest.raises(PermissionError):
+        registry.forget(vp.id)
+    assert registry.list() == [keep]
+    assert not (registry.root / f"{vp.id}.npy").exists()
+    assert (registry.root / STAGED).exists()  # single forget never sweeps staged audio
+
+
 def test_name_collision_never_deletes_the_existing_file(registry, monkeypatch):
     registry.root.mkdir(parents=True)
     (registry.root / STAGED).write_bytes(b"someone else's")
