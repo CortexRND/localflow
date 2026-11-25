@@ -314,15 +314,32 @@ def test_real_two_voice_mix():
     assert same > cross
 
 
-def test_real_backend_coexists_with_onnxruntime():
+_COEXIST = """
+import sys
+from pathlib import Path
+import numpy as np
+import faster_whisper, onnxruntime
+from localflow.diarization.sherpa import load_sherpa_backends
+vad = sorted((Path(faster_whisper.__file__).parent / "assets").glob("*.onnx"))[0]
+def ort():
+    return onnxruntime.InferenceSession(str(vad), providers=["CPUExecutionProvider"])
+if sys.argv[1] == "sherpa-first":
+    diarizer, _ = load_sherpa_backends()
+    session = ort()
+else:
+    session = ort()
+    diarizer, _ = load_sherpa_backends()
+noise = np.random.default_rng(0).normal(0, 0.1, 32000).astype(np.float32)
+assert isinstance(diarizer.diarize(noise, 16000), list)
+assert session.get_inputs()
+"""
+
+
+@pytest.mark.parametrize("order", ["sherpa-first", "onnxruntime-first"])
+def test_real_backend_coexists_with_onnxruntime(order):
     _require_real_backend()
-    onnxruntime = pytest.importorskip("onnxruntime")
+    pytest.importorskip("onnxruntime")
     faster_whisper = pytest.importorskip("faster_whisper")
-    vad = sorted((Path(faster_whisper.__file__).parent / "assets").glob("*.onnx"))
-    if not vad:
+    if not sorted((Path(faster_whisper.__file__).parent / "assets").glob("*.onnx")):
         pytest.skip("faster-whisper ships no bundled VAD model")
-    session = onnxruntime.InferenceSession(str(vad[0]), providers=["CPUExecutionProvider"])
-    diarizer, _embedder = load_sherpa_backends()
-    noise = np.random.default_rng(0).normal(0, 0.1, 32000).astype(np.float32)
-    assert isinstance(diarizer.diarize(noise, 16000), list)
-    assert session.get_inputs()
+    subprocess.run([sys.executable, "-c", _COEXIST, order], check=True)
