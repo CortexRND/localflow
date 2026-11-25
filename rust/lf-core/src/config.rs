@@ -2676,7 +2676,9 @@ mod tests {
         let (loaded, _) = iso.load(false).unwrap();
         assert_eq!(loaded.field_i64("server_port"), Some(9999));
         assert_diarization_defaults(&loaded);
-        let written = fs::read_to_string(&iso.target).unwrap();
+        let written = fs::read_to_string(&iso.target)
+            .unwrap()
+            .replace("\r\n", "\n");
         assert!(
             written.contains(
                 "speaker_diarization = false\ndiarization_backend = \"sherpa-onnx\"\ndiarize_mic = false\nmax_speakers = 0\nspeaker_recognition = false\n"
