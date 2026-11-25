@@ -4143,6 +4143,7 @@ mod tests {
         let leases = temp.path().join("leases");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("model.bin"), b"test").unwrap();
         std::fs::create_dir_all(&leases).unwrap();
         std::os::unix::fs::symlink(
             &outside,
