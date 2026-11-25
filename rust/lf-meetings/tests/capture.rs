@@ -24,6 +24,12 @@ impl Source {
         let callback = self.callback.lock().unwrap().clone().unwrap();
         callback(vec![volume; (seconds * SAMPLE_RATE as f64) as usize]);
     }
+    /// One 1.5 s block per level (the fake speaker backend's turn encoding).
+    fn feed_blocks(&self, levels: &[f32]) {
+        for &level in levels {
+            self.feed(BLOCK, level);
+        }
+    }
 }
 impl AudioSource for Source {
     fn start(&mut self, callback: AudioCallback) -> Result<(), SystemAudioUnavailable> {
@@ -326,4 +332,323 @@ fn transcribe_timed_defaults_to_one_whole_clip_span() {
             text: "own".into(),
         }]
     );
+}
+
+// ---- speaker labels (R3) ----
+
+use lf_meetings::{
+    diarize::{Collector, Options, SpeakerBackend, SpeakerTurn},
+    Segment, TimedTranscript,
+};
+
+const BLOCK: f64 = 1.5;
+fn bucket(sample: f32) -> usize {
+    (sample * 10.0).round() as usize
+}
+/// Each 1.5 s block is one turn whose speaker (and one-hot embedding) is its amplitude.
+struct Speakers;
+impl SpeakerBackend for Speakers {
+    fn load(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn diarize(&mut self, audio: &[f32]) -> Result<Vec<SpeakerTurn>> {
+        let block = (BLOCK * SAMPLE_RATE as f64) as usize;
+        Ok(audio
+            .chunks(block)
+            .enumerate()
+            .map(|(i, s)| SpeakerTurn {
+                start: i as f64 * BLOCK,
+                end: i as f64 * BLOCK + s.len() as f64 / SAMPLE_RATE as f64,
+                local_speaker: bucket(s[0]),
+            })
+            .collect())
+    }
+    fn embed(&mut self, audio: &[f32]) -> Result<Vec<f32>> {
+        let mut v = vec![0.0; 8];
+        v[bucket(audio[0])] = 1.0;
+        Ok(v)
+    }
+}
+/// Flat text plus one timed segment per 1.5 s block, from one call either way.
+#[derive(Default)]
+struct TimedStt {
+    flat: AtomicUsize,
+    chunked: AtomicUsize,
+    shared_lock: Option<Arc<Mutex<()>>>,
+    /// Timings to report for the next chunks instead of one per block.
+    timings: Mutex<VecDeque<Vec<TimedText>>>,
+}
+impl Transcriber for TimedStt {
+    fn transcribe(&self, audio: &[f32], _: Option<&str>) -> Result<String> {
+        self.flat.fetch_add(1, Ordering::SeqCst);
+        Ok(format!("flat {} samples", audio.len()))
+    }
+    fn transcribe_chunk(&self, audio: &[f32], _: Option<&str>) -> Result<TimedTranscript> {
+        if let Some(lock) = &self.shared_lock {
+            assert!(lock.try_lock().is_err());
+        }
+        self.chunked.fetch_add(1, Ordering::SeqCst);
+        let blocks = (audio.len() as f64 / SAMPLE_RATE as f64 / BLOCK).round() as usize;
+        let segments = self.timings.lock().unwrap().pop_front().unwrap_or_else(|| {
+            (0..blocks)
+                .map(|i| TimedText {
+                    start: i as f64 * BLOCK,
+                    end: (i + 1) as f64 * BLOCK,
+                    text: format!("b{i}"),
+                })
+                .collect()
+        });
+        Ok(TimedTranscript {
+            text: format!("flat {} samples", audio.len()),
+            segments,
+        })
+    }
+}
+type Row<'a> = (f64, Option<f64>, &'a str, &'a str, Option<&'a str>, String);
+fn labelled(segments: &[Segment]) -> Vec<Row<'_>> {
+    segments
+        .iter()
+        .map(|s| {
+            (
+                s.offset_seconds,
+                s.end_seconds,
+                s.source.as_str(),
+                s.text.as_str(),
+                s.speaker_id.as_deref(),
+                s.speaker().into_owned(),
+            )
+        })
+        .collect()
+}
+fn diarized_session(
+    transcriber: Arc<dyn Transcriber>,
+    mic: &Source,
+    others: &Source,
+    diarize_mic: bool,
+) -> MeetingSession {
+    MeetingSession::new(
+        transcriber,
+        Arc::default(),
+        Box::new(mic.clone()),
+        Some(Box::new(others.clone())),
+        Duration::from_secs(3600),
+    )
+    .unwrap()
+    .with_diarization(
+        Collector::start(Box::new(Speakers), Options::default()).unwrap(),
+        diarize_mic,
+    )
+}
+
+#[test]
+fn injected_backend_labels_two_remote_speakers_and_keeps_me_and_live_view() {
+    let mic = Source::default();
+    let others = Source::default();
+    let stt = Arc::new(TimedStt::default());
+    let mut session = diarized_session(stt.clone(), &mic, &others, false);
+    session.start().unwrap();
+    mic.feed_blocks(&[0.5, 0.5]);
+    others.feed_blocks(&[0.1, 0.1, 0.3]);
+    session.drain_once();
+    others.feed_blocks(&[0.3, 0.1]);
+    let channel = session.stop();
+    // Live and stop-time segments are the flag-off channel segments.
+    let me = "flat 48000 samples";
+    assert_eq!(
+        labelled(&channel),
+        [
+            (0.0, None, "me", me, None, "Me".into()),
+            (
+                0.0,
+                None,
+                "others",
+                "flat 72000 samples",
+                None,
+                "Others".into()
+            ),
+            (
+                4.5,
+                None,
+                "others",
+                "flat 48000 samples",
+                None,
+                "Others".into()
+            ),
+        ]
+    );
+    assert_eq!(session.segments(), channel);
+    // The mic is not diarized without `diarize_mic`: plain transcribe only.
+    assert_eq!(stt.flat.load(Ordering::SeqCst), 1);
+    assert_eq!(stt.chunked.load(Ordering::SeqCst), 2);
+    let labels = session.take_speaker_labels().unwrap();
+    assert!(session.take_speaker_labels().is_none());
+    let out = labels.apply(&channel);
+    assert_eq!(
+        labelled(&out),
+        [
+            (0.0, None, "me", me, None, "Me".into()),
+            (
+                0.0,
+                Some(3.0),
+                "others",
+                "b0 b1",
+                Some("S1"),
+                "Speaker 1".into()
+            ),
+            (
+                3.0,
+                Some(4.5),
+                "others",
+                "b2",
+                Some("S2"),
+                "Speaker 2".into()
+            ),
+            (
+                4.5,
+                Some(6.0),
+                "others",
+                "b0",
+                Some("S2"),
+                "Speaker 2".into()
+            ),
+            (
+                6.0,
+                Some(7.5),
+                "others",
+                "b1",
+                Some("S1"),
+                "Speaker 1".into()
+            ),
+        ]
+    );
+    assert!(lf_meetings::is_diarized(&out));
+}
+
+#[test]
+fn chunks_without_a_labelled_nonempty_run_keep_their_exact_channel_segment() {
+    let mic = Source::default();
+    let others = Source::default();
+    let timed = |start: f64, text: &str| TimedText {
+        start,
+        end: start + 0.5,
+        text: text.into(),
+    };
+    let stt = Arc::new(TimedStt {
+        timings: Mutex::new(
+            [
+                // 1st chunk: default per-block timings (two speakers).
+                (0..2)
+                    .map(|i| timed(i as f64 * BLOCK, &format!("b{i}")))
+                    .collect(),
+                // 2nd: text too far from every turn, so every run is unlabelled.
+                vec![timed(20.0, "far away")],
+                // 3rd: only blank timed text, so every run is empty.
+                vec![timed(0.0, "  "), timed(1.5, "\u{3000}")],
+            ]
+            .into(),
+        ),
+        ..TimedStt::default()
+    });
+    let mut session = diarized_session(stt, &mic, &others, false);
+    session.start().unwrap();
+    others.feed_blocks(&[0.1, 0.3]);
+    session.drain_once();
+    others.feed_blocks(&[0.1, 0.3]);
+    session.drain_once();
+    others.feed_blocks(&[0.3, 0.1]);
+    let channel = session.stop();
+    assert_eq!(channel.len(), 3);
+    let out = session.take_speaker_labels().unwrap().apply(&channel);
+    assert_eq!(
+        out.iter()
+            .map(|s| (s.offset_seconds, s.speaker_id.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (0.0, Some("S1")),
+            (1.5, Some("S2")),
+            (3.0, None),
+            (6.0, None)
+        ]
+    );
+    // Flat text, source, offset and missing timings are untouched.
+    assert_eq!(out[2], channel[1]);
+    assert_eq!(out[3], channel[2]);
+    assert_eq!(out[2].text, "flat 48000 samples");
+}
+
+#[test]
+fn diarize_mic_labels_mic_speakers_with_ids_unique_across_sources() {
+    let mic = Source::default();
+    let others = Source::default();
+    let mut session = diarized_session(Arc::new(TimedStt::default()), &mic, &others, true);
+    session.start().unwrap();
+    mic.feed_blocks(&[0.5, 0.6]);
+    others.feed_blocks(&[0.1, 0.3]);
+    let channel = session.stop();
+    let out = session.take_speaker_labels().unwrap().apply(&channel);
+    assert_eq!(
+        out.iter()
+            .map(|s| (s.source.as_str(), s.speaker_id.as_deref().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            ("me", "S1"),
+            ("others", "S2"),
+            ("me", "S3"),
+            ("others", "S4")
+        ]
+    );
+}
+
+#[test]
+fn untimed_transcriber_and_single_remote_speaker_keep_channel_labels() {
+    // No `transcribe_chunk` override: no timings, so nothing is relabelled.
+    let mic = Source::default();
+    let others = Source::default();
+    let transcriber = Arc::new(FakeTranscriber::default());
+    let mut session = diarized_session(transcriber.clone(), &mic, &others, false);
+    session.start().unwrap();
+    others.feed_blocks(&[0.1, 0.3]);
+    let channel = session.stop();
+    assert_eq!(transcriber.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        session.take_speaker_labels().unwrap().apply(&channel),
+        channel
+    );
+
+    let mut session = diarized_session(Arc::new(TimedStt::default()), &mic, &others, false);
+    session.start().unwrap();
+    others.feed_blocks(&[0.1, 0.1]);
+    let channel = session.stop();
+    let out = session.take_speaker_labels().unwrap().apply(&channel);
+    assert_eq!(out, channel);
+    assert_eq!(out[0].speaker(), "Others");
+}
+
+#[test]
+fn flag_off_session_makes_only_plain_transcribe_calls() {
+    let mic = Source::default();
+    let others = Source::default();
+    let lock = Arc::new(Mutex::new(()));
+    let stt = Arc::new(TimedStt {
+        shared_lock: Some(lock.clone()),
+        ..TimedStt::default()
+    });
+    let mut session = MeetingSession::new(
+        stt.clone(),
+        lock,
+        Box::new(mic.clone()),
+        Some(Box::new(others.clone())),
+        Duration::from_secs(3600),
+    )
+    .unwrap();
+    session.start().unwrap();
+    mic.feed_blocks(&[0.5]);
+    others.feed_blocks(&[0.1, 0.3]);
+    let segments = session.stop();
+    assert_eq!(stt.flat.load(Ordering::SeqCst), 2);
+    assert_eq!(stt.chunked.load(Ordering::SeqCst), 0);
+    assert!(session.take_speaker_labels().is_none());
+    assert!(segments
+        .iter()
+        .all(|s| s.speaker_id.is_none() && s.end_seconds.is_none()));
 }

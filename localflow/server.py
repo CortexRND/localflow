@@ -33,6 +33,7 @@ from localflow.config import (
     save_config,
 )
 from localflow.context import category_for
+from localflow.diarization import models as diar_models
 from localflow.dictionary import DictionaryStore, apply_replacements, stt_prompt
 from localflow.dispatch import (
     APPROVE_FROM,
@@ -55,18 +56,22 @@ from localflow.live_config import (
 )
 from localflow.log import SERVER_LOG_PATH, setup_logging
 from localflow.logfiles import prepare_process_logs
+from localflow.meeting_client import vault_notes_path
 from localflow.meeting_templates import load_templates, resolve_template
 from localflow.meetings import (
     MeetingSession,
     MeetingSummarizer,
     MeetingWatcher,
     ObsidianWriter,
+    TranscriptChanged,
     answer_question,
+    clean_speaker_name,
     format_transcript,
     generate_title,
     is_default_title,
     latest_transcript_log,
     read_transcript_log,
+    relabel_transcript,
     title_client,
 )
 from localflow.platform import current
@@ -131,6 +136,13 @@ _history: HistoryStore | None = None
 # No queue lock here on purpose: PromptQueue serialises across processes itself,
 # and status changes go through its compare-and-set. A lock here would only
 # guard the server against the server.
+# Speaker-label model download: only POST /api/diarization/download starts it,
+# and only the shutdown hook sets the cancel event.
+_diar_lock = threading.Lock()
+_diar_download = {"state": "idle", "done_bytes": 0, "total_bytes": 0, "error": None}
+_diar_cancel = threading.Event()
+_diar_thread: threading.Thread | None = None  # the last worker started, under _diar_lock
+_DIAR_SHUTDOWN_JOIN_SECONDS = 2.0
 
 
 @app.on_event("startup")
@@ -157,6 +169,18 @@ def _record_perf(config: Config, kind: str, ok: bool, started: float, *, llm: bo
         total_ms=elapsed,
         llm=perf_ledger.llm_labels(config) if llm else None,
     )
+
+
+@app.on_event("shutdown")
+def _cancel_diarization_download() -> None:
+    # Ask the worker to stop and give it a bounded moment to clean up. A read
+    # stalled on the network (up to 30 s) can outlast the wait; any partial
+    # file left behind is removed by a later explicit download once it is old.
+    with _diar_lock:  # a POST holding the lock can't clear the event after this
+        _diar_cancel.set()
+        worker = _diar_thread
+    if worker is not None:
+        worker.join(timeout=_DIAR_SHUTDOWN_JOIN_SECONDS)  # not under _diar_lock
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -542,6 +566,73 @@ def api_config_update(body: dict) -> dict:
     return {**result, "restart_required": api_logic.restart_required(body)}
 
 
+def _diar_snapshot() -> dict:
+    with _diar_lock:
+        return dict(_diar_download)
+
+
+def _diar_progress(done: int, total: int) -> None:
+    with _diar_lock:
+        _diar_download.update(done_bytes=done, total_bytes=total)
+
+
+def _diar_worker() -> None:
+    from localflow.models import DownloadCancelled, friendly_download_error
+
+    state, error = "failed", "Download failed."
+    try:
+        diar_models.download_diarization_models(_diar_progress, _diar_cancel)
+        state, error = "idle", None
+    except DownloadCancelled:
+        state, error = "cancelled", None
+    except Exception as exc:  # noqa: BLE001
+        error = friendly_download_error(exc)
+    finally:  # never left "downloading", whatever was raised
+        with _diar_lock:
+            _diar_download.update(state=state, error=error)
+
+
+@app.get("/api/diarization/status")
+def api_diarization_status() -> dict:
+    # Plain def: FastAPI runs it in the threadpool, so hashing never blocks the loop.
+    # Snapshot the download first: a download finishing while the files are
+    # hashed then reads "downloading" (poll again), never "idle" and not ready.
+    download = _diar_snapshot()
+    return {
+        **diar_models.status(),
+        **diar_models.flags(_config),
+        "download": download,
+    }
+
+
+@app.post("/api/diarization/download", status_code=202)
+def api_diarization_download() -> dict:
+    global _diar_thread
+    with _diar_lock:
+        if _diar_download["state"] == "downloading":
+            return {"started": False, "download": dict(_diar_download)}
+        _diar_download.update(
+            state="downloading",
+            done_bytes=0,
+            total_bytes=sum(model.size_bytes for model in diar_models.DIAR_MODELS),
+            error=None,
+        )
+        _diar_cancel.clear()
+        snapshot = dict(_diar_download)
+        try:
+            worker = threading.Thread(
+                target=_diar_worker, name="diarization-download", daemon=True
+            )
+            worker.start()
+        except Exception as exc:  # noqa: BLE001 - e.g. RuntimeError: can't start new thread
+            log.warning("Could not start the speaker model download: %s", exc)
+            message = "Could not start the speaker model download. Try again."
+            _diar_download.update(state="failed", error=message)
+            raise HTTPException(status_code=503, detail=message) from None
+        _diar_thread = worker
+    return {"started": True, "download": snapshot}
+
+
 @app.get("/api/providers/stt")
 def api_stt_providers() -> list[dict]:
     return api_logic.stt_providers()
@@ -719,6 +810,7 @@ def meeting_status() -> dict:
             "user_notes": meta.get("user_notes", ""),
             "system_audio": session.system_audio_status,
             "system_audio_error": session.system_audio_error,
+            **_diarization_payload(session),
             "seconds": int(session.elapsed_seconds()),
             "segments": [
                 {"stamp": s.stamp, "text": s.text, "source": s.source}
@@ -738,6 +830,7 @@ def meeting_status() -> dict:
         "platform": _watcher.platform,
         "auto_start": _config.meeting_auto_start,
         "capture_system_audio": _config.capture_system_audio,
+        "speaker_diarization": bool(_config.speaker_diarization),
         "session": live,
         "last_saved": last_saved,
         "chat_available": _chat_transcript_path() is not None,
@@ -753,6 +846,96 @@ def _open_system_audio():
     except Exception as exc:  # noqa: BLE001 - a missing source means mic-only
         log.warning("system audio unavailable; mic only: %s", exc)
         return None, str(exc) or type(exc).__name__
+
+
+def _open_diarization():
+    """Diarization collector per config, or (None, reason). Never raises.
+    With the flag off nothing from localflow.diarization is imported."""
+    if not _config.speaker_diarization:
+        return None, ""
+    try:
+        from localflow.diarization.factory import build_diarization
+        return build_diarization(_config)
+    except Exception as exc:  # noqa: BLE001 - diarization is optional
+        log.warning("speaker diarization unavailable: %s", exc)
+        return None, str(exc) or type(exc).__name__
+
+
+def _diarization_state(session) -> tuple[str, str]:
+    """(status, error) for a session; tolerant of sessions without the attributes."""
+    error = getattr(session, "diarization_error", "") or ""
+    status = getattr(session, "diarization_status", None)
+    if status not in ("off", "collecting", "unavailable"):
+        status = "unavailable" if error else "off"
+    return status, error
+
+
+def _diarization_payload(session) -> dict:
+    status, error = _diarization_state(session)
+    return {"diarization": status, "diarization_error": error}
+
+
+def _close_diarization(session) -> None:
+    """Stop a session's collector without finalizing. Never raises."""
+    collector = getattr(session, "diarization", None)
+    if collector is None:
+        return
+    try:
+        collector.close()
+    except Exception:
+        log.exception("closing speaker diarization failed")
+
+
+def _finalize_diarization(session, segments) -> tuple[list, str, list[dict]]:
+    """(segments, status, speakers). Never raises; any problem keeps the original segments."""
+    collector = getattr(session, "diarization", None)
+    if collector is None:
+        return segments, "off", []
+    try:
+        result = collector.finalize(segments)
+        if result.status == "ok":
+            speakers = [
+                {"id": s.id, "label": s.label, "name": s.name, "source": s.source,
+                 "seconds": round(float(s.seconds), 1)}
+                for s in result.speakers
+            ]
+            return list(result.segments), "ok", speakers
+        status = result.status if result.status in ("channel", "failed", "timeout") else "failed"
+    except Exception:
+        log.exception("speaker diarization finalize failed; keeping channel labels")
+        return segments, "failed", []
+    return segments, status, []
+
+
+def _meeting_store():
+    """The meeting speaker sidecar store; imported on first use only."""
+    from localflow.diarization.store import MeetingSpeakerStore
+    return MeetingSpeakerStore()
+
+
+def _write_speaker_sidecar(saved, session, segments, status: str, speakers: list[dict]) -> None:
+    """Persist the saved meeting's speaker record. Never raises; the save already succeeded."""
+    try:
+        from localflow.diarization.store import build_record
+        rendered = {s.speaker_id: s.speaker for s in reversed(segments) if s.speaker_id is not None}
+        speakers = [{**sp, "label": rendered.get(sp["id"], sp["label"])} for sp in speakers]
+        embedder = getattr(getattr(getattr(session, "diarization", None), "embedder", None),
+                           "id", None)
+        if not isinstance(embedder, str):
+            embedder = None
+        record = build_record(
+            meeting_id=saved.meeting_id,
+            log_path=str(saved.log_path),
+            notes_path=str(saved.notes_path),
+            started_at=session.started_at.isoformat(timespec="seconds"),
+            embedder=embedder,
+            status=status,
+            speakers=speakers,
+            segments=segments,
+        )
+        _meeting_store().save(record)
+    except Exception:
+        log.exception("writing meeting speaker data failed; notes still saved")
 
 
 def _start_session(title: str, category: str, template: str = "",
@@ -787,14 +970,19 @@ def _start_session(title: str, category: str, template: str = "",
     _watcher.pause()  # we hold the mic now; don't self-detect
     try:
         system_audio, system_error = _open_system_audio()
+        collector, diarization_error = _open_diarization()
+        extra = {"diarization": collector} if collector is not None else {}
         session = MeetingSession(
             _get_transcriber(),
             _transcribe_lock,
             sample_rate=_config.sample_rate,
             chunk_seconds=_config.meeting_chunk_seconds,
             system_audio=system_audio,
+            **extra,
         )
         session.system_audio_error = system_error
+        if diarization_error:
+            session.diarization_error = diarization_error
         session.start()
     except Exception as exc:  # noqa: BLE001 - cleanup boundary: always release the slot
         _watcher.resume()
@@ -821,6 +1009,7 @@ def _start_session(title: str, category: str, template: str = "",
         "template": template_id,
         "system_audio": session.system_audio_status,
         "system_audio_error": session.system_audio_error,
+        **_diarization_payload(session),
     }
 
 
@@ -978,10 +1167,17 @@ async def meeting_stop() -> dict:
 
     def _finish() -> dict:
         global _last_saved
-        segments = session.stop()
-        if _config.sounds_enabled:
-            sounds.play("stop")
-        _watcher.resume()
+        finalized = False
+        try:
+            segments = session.stop()
+            if _config.sounds_enabled:
+                sounds.play("stop")
+            _watcher.resume()
+            segments, diarization_status, speakers = _finalize_diarization(session, segments)
+            finalized = True
+        finally:
+            if not finalized:  # capture shutdown failed: don't leave the worker running
+                _close_diarization(session)
         # Snapshot the summary client and config together before a reload can
         # change the provider or model for the title.
         with _config_lock:
@@ -1034,6 +1230,8 @@ async def meeting_stop() -> dict:
             template=template.id,
             generated_title=auto_title,
         )
+        if getattr(saved, "meeting_id", None) and speakers:
+            _write_speaker_sidecar(saved, session, segments, diarization_status, speakers)
         payload = {
             "title": saved.title,
             "title_generated": title_from_model,
@@ -1042,6 +1240,9 @@ async def meeting_stop() -> dict:
             "segments": len(segments),
             "template": template.id,
             "enhanced": bool(user_notes.strip()),
+            "meeting_id": getattr(saved, "meeting_id", None),
+            "diarization": diarization_status,
+            "speakers": speakers,
             **extra,
         }
         with _session_lock:
@@ -1060,6 +1261,127 @@ async def meeting_stop() -> dict:
 def meeting_dismiss() -> dict:
     _watcher.dismiss()
     return {"ok": True}
+
+
+# ---- meeting speakers: rename/merge on a saved meeting's sidecar + transcript.
+# Under /api/ so the token always applies; the notes file is never touched.
+
+def _speakers_response(meeting_id: str, record: dict) -> dict:
+    from localflow.diarization.store import public_speakers
+    return {"meeting_id": meeting_id, "speakers": public_speakers(record)}
+
+
+def _speaker_record(store, meeting_id: str) -> dict:
+    record = store.load(meeting_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="no speaker data for this meeting")
+    return record
+
+
+def _sidecar_transcript(record: dict) -> Path:
+    log_path = record.get("log_path")
+    resolved = vault_notes_path(log_path, _config.vault_path)
+    if resolved:
+        notes_path = record.get("notes_path")
+        try:
+            is_notes = isinstance(notes_path, str) and (
+                Path(notes_path).expanduser().resolve() == Path(resolved))
+        except (OSError, RuntimeError, ValueError):
+            is_notes = False
+        if is_notes:
+            raise HTTPException(status_code=409, detail="transcript is the meeting notes file")
+        return Path(resolved)
+    try:
+        exists = isinstance(log_path, str) and Path(log_path).expanduser().is_file()
+    except (OSError, ValueError):
+        exists = False
+    if not exists:
+        raise HTTPException(status_code=404, detail="transcript file not found")
+    raise HTTPException(status_code=409, detail="transcript is outside the meeting vault")
+
+
+def _apply_speaker_edit(store, meeting_id: str, record: dict, updated: dict,
+                        lines, old: str, new: str) -> dict:
+    """Rewrite the transcript, then save the sidecar. Caller holds ``store.lock``."""
+    global _last_saved
+    from localflow.diarization.store import frontmatter_speakers, public_speakers
+    path = _sidecar_transcript(record)
+    try:
+        changed = relabel_transcript(path, lines, old, new,
+                                     speakers=frontmatter_speakers(updated),
+                                     meeting_id=meeting_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="transcript file not found") from None
+    except TranscriptChanged as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except UnicodeError:
+        raise HTTPException(status_code=409, detail="transcript is not readable") from None
+    except OSError:
+        log.exception("rewriting transcript failed")
+        raise HTTPException(status_code=500, detail="could not rewrite the transcript") from None
+    try:
+        store.save(updated)
+    except Exception:
+        log.exception("saving meeting speaker data failed")
+        raise HTTPException(
+            status_code=500, detail="transcript updated but speaker data could not be saved",
+        ) from None
+    log.info("meeting speakers updated: %d transcript lines, %d speakers",
+             changed, len(updated["speakers"]))
+    with _session_lock:
+        if _last_saved and _last_saved.get("meeting_id") == meeting_id:
+            _last_saved = {**_last_saved, "speakers": public_speakers(updated)}
+    return _speakers_response(meeting_id, updated)
+
+
+@app.get("/api/meetings/{meeting_id}/speakers")
+def api_meeting_speakers(meeting_id: str) -> dict:
+    """A saved meeting's speakers (no voiceprint data). Under /api/ so the token always applies."""
+    store = _meeting_store()
+    return _speakers_response(meeting_id, _speaker_record(store, meeting_id))
+
+
+@app.put("/api/meetings/{meeting_id}/speakers/{speaker_id}")
+def api_meeting_speaker_rename(meeting_id: str, speaker_id: str, body: dict) -> dict:
+    """Rename one speaker in a saved meeting's transcript and sidecar."""
+    from localflow.diarization.store import find_speaker, rename_speaker, speaker_lines
+    name = clean_speaker_name(body.get("name"))
+    if name is None:
+        raise HTTPException(status_code=400, detail="invalid speaker name")
+    store = _meeting_store()
+    with store.lock:
+        record = _speaker_record(store, meeting_id)
+        speaker = find_speaker(record, speaker_id)
+        if speaker is None:
+            raise HTTPException(status_code=404, detail="unknown speaker")
+        if speaker["label"] == name:
+            return _speakers_response(meeting_id, record)
+        return _apply_speaker_edit(store, meeting_id, record,
+                                   rename_speaker(record, speaker_id, name),
+                                   speaker_lines(record, speaker_id), speaker["label"], name)
+
+
+@app.post("/api/meetings/{meeting_id}/speakers/merge")
+def api_meeting_speakers_merge(meeting_id: str, body: dict) -> dict:
+    """Merge one speaker of a saved meeting into another."""
+    from localflow.diarization.store import find_speaker, merge_speakers, speaker_lines
+    from_id, into_id = body.get("from"), body.get("into")
+    if not (isinstance(from_id, str) and isinstance(into_id, str) and from_id and into_id) \
+            or from_id == into_id:
+        raise HTTPException(status_code=400,
+                            detail="from and into must be two different speaker ids")
+    store = _meeting_store()
+    with store.lock:
+        record = _speaker_record(store, meeting_id)
+        source, target = find_speaker(record, from_id), find_speaker(record, into_id)
+        if source is None or target is None:
+            raise HTTPException(status_code=404, detail="unknown speaker")
+        new = clean_speaker_name(target["label"])
+        if new is None:
+            raise HTTPException(status_code=409, detail="speaker data is not usable")
+        return _apply_speaker_edit(store, meeting_id, record,
+                                   merge_speakers(record, from_id, into_id),
+                                   speaker_lines(record, from_id), source["label"], new)
 
 
 # Prompts are reviewed here but dispatched from the CLI only — no run endpoint.

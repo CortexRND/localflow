@@ -339,17 +339,23 @@ class MeetingSession:
     ``source="me"`` (mic) or ``source="others"`` (what the machine played).
     A system source that fails to open never blocks the meeting: the session
     falls back to mic-only and reports why in ``system_audio_error``.
+
+    With a ``diarization`` collector (``localflow.diarization.DiarizationCollector``)
+    each transcribed chunk is also fed to it, outside the transcription lock;
+    live segments stay Me/Others and speaker labels are applied on stop.
     """
 
     def __init__(self, transcriber, transcribe_lock: threading.Lock,
                  sample_rate: int = 16000, chunk_seconds: int = 30,
-                 system_audio=None):
+                 system_audio=None, diarization=None):
         self.transcriber = transcriber
         self.transcribe_lock = transcribe_lock
         self.sample_rate = sample_rate
         self.chunk_seconds = chunk_seconds
         self.system_audio = system_audio
         self.system_audio_error = ""
+        self.diarization = diarization
+        self.diarization_error = ""
         self.segments: list[Segment] = []
         self.started_at: datetime | None = None
         self.active = False
@@ -366,6 +372,13 @@ class MeetingSession:
         if self.system_audio is not None:
             return "on"
         return "error" if self.system_audio_error else "off"
+
+    @property
+    def diarization_status(self) -> str:
+        """'off' / 'collecting' / 'unavailable' — for the UI."""
+        if self.diarization is not None and not self.diarization_error:
+            return "collecting"
+        return "unavailable" if self.diarization_error else "off"
 
     def start(self) -> None:
         self._stream = sd.InputStream(
@@ -402,6 +415,12 @@ class MeetingSession:
         # Skip near-silent chunks — whisper hallucinates on silence.
         if len(audio) < self.sample_rate or float(np.abs(audio).max()) < 0.01:
             return
+        # Mic chunks the collector ignores keep plain transcribe(), so their text is unchanged.
+        if self.diarization is not None and (
+            buffer.source != SOURCE_ME or getattr(self.diarization, "diarize_mic", True)
+        ):
+            self._transcribe_chunk_diarized(audio, buffer, offset)
+            return
         with self.transcribe_lock:
             text = self.transcriber.transcribe(audio)
         text = (text or "").strip()
@@ -413,6 +432,36 @@ class MeetingSession:
                 key=lambda seg: seg.offset_seconds,
             )
             log.info("segment @%.0fs (%s): %d chars", offset, buffer.source, len(text))
+
+    def _transcribe_chunk_diarized(self, audio: np.ndarray, buffer: _SourceBuffer,
+                                   offset: float) -> None:
+        """Like the plain path, plus timed text fed to the collector outside the lock."""
+        transcribe_timed = getattr(self.transcriber, "transcribe_timed", None)
+        with self.transcribe_lock:
+            if callable(transcribe_timed):
+                timed = list(transcribe_timed(audio) or [])
+            else:
+                plain = self.transcriber.transcribe(audio)
+        if not callable(transcribe_timed):
+            from localflow.diarization.types import TimedText
+
+            plain = (plain or "").strip()
+            timed = [TimedText(0.0, len(audio) / self.sample_rate, plain)] if plain else []
+        text = " ".join(s for s in ((t.text or "").strip() for t in timed) if s)
+        if not text:
+            return
+        bisect.insort(
+            self.segments, Segment(offset, text, buffer.source),
+            key=lambda seg: seg.offset_seconds,
+        )
+        log.info("segment @%.0fs (%s): %d chars", offset, buffer.source, len(text))
+        try:
+            self.diarization.feed(buffer.source, offset, audio, timed)
+        except Exception:
+            log.exception("diarization feed failed (%s)", buffer.source)
+        error = getattr(self.diarization, "error", "")
+        if isinstance(error, str) and error:
+            self.diarization_error = error
 
     def _drain_once(self) -> None:
         for buffer in (self._mic, self._others):
@@ -457,11 +506,12 @@ _SPEAKER_NOTE = (
 )
 
 _DIARIZED_SPEAKER_NOTE = (
-    'Transcript lines are prefixed with a speaker: "Me" is the user (their '
-    'microphone); "Speaker 1", "Speaker 2" and so on are distinct remote '
-    "participants told apart by voice; any other name is a participant as "
-    'labelled by the user; "Others" is call audio (system audio) without a '
-    "more specific display label."
+    'Transcript lines are prefixed with a speaker: "Speaker 1", "Speaker 2" '
+    "and so on are distinct people told apart by voice, whether they spoke "
+    "into the user's microphone or on the call; \"Me\" is the user's "
+    'microphone and "Others" is call audio (system audio), each where no more '
+    "specific label was found; any other name is a participant as labelled "
+    "by the user."
 )
 
 
@@ -911,6 +961,119 @@ def latest_transcript_log(logs_root: Path) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime, default=None)
 
 
+class TranscriptChanged(RuntimeError):
+    """The transcript is not the file this edit was computed for; nothing was written."""
+
+
+_FRONT_END = re.compile(r"^---\r?$", re.MULTILINE)
+_RAW_NOTES_LINE = re.compile(r"^## My raw notes\r?$", re.MULTILINE)
+# Flow style (`speakers: [...]`) or block style (`speakers:` + `  - item` lines),
+# as Obsidian's Properties editor may rewrite it; blank and comment lines
+# between items belong to the list.
+_SPEAKERS_LINE = re.compile(
+    r"^speakers:(?:[ \t][^\r\n]*)?"
+    r"(?:(?:\r?\n[ \t]*(?:#[^\r\n]*)?)*\r?\n[ \t]*-(?:[ \t][^\r\n]*)?(?=\r?\n|$))*",
+    re.MULTILINE,
+)
+
+
+def _relabel_text(text: str, lines, old: str, new: str,
+                  speakers: list[str] | None = None,
+                  meeting_id: str | None = None) -> tuple[str, int]:
+    """Relabel ``**MM:SS** **old:** `` transcript lines to ``new`` and replace
+    the frontmatter ``speakers:`` entry; returns (text, lines changed).
+
+    ``lines`` maps a stamp to one flag per ``old``-labelled line at that stamp,
+    in body order; the i-th such line is rewritten iff its flag is True. A
+    stamp whose line count differs raises TranscriptChanged.
+    """
+    head, rest = "", text
+    if text.startswith(("---\n", "---\r\n")):
+        m = _FRONT_END.search(text, 4)
+        if m:
+            head, rest = text[:m.end()], text[m.end():]
+    m2 = _RAW_NOTES_LINE.search(rest)
+    body, tail = (rest[:m2.start()], rest[m2.start():]) if m2 else (rest, "")
+    if meeting_id is not None:
+        wanted = re.compile(
+            r"meeting_id:[ \t]*(?:\"{0}\"|'{0}'|{0})\s*".format(re.escape(meeting_id)))
+        if not any(wanted.fullmatch(line.rstrip("\r")) for line in head.split("\n")):
+            raise TranscriptChanged("transcript does not belong to this meeting")
+    count = 0
+    if old != new and lines:
+        pattern = re.compile(
+            r"^\*\*(\d{2,}:\d{2})\*\* \*\*" + re.escape(old) + r":\*\* ", re.MULTILINE)
+        seen: dict[str, int] = {}
+
+        def repl(m: re.Match) -> str:
+            nonlocal count
+            key = m.group(1)
+            index = seen.get(key, 0)
+            seen[key] = index + 1
+            flags = lines.get(key)
+            if flags is not None and index < len(flags) and flags[index]:
+                count += 1
+                return f"**{key}** **{new}:** "
+            return m.group(0)
+
+        body = pattern.sub(repl, body)
+        if any(seen.get(key, 0) != len(flags) for key, flags in lines.items()):
+            raise TranscriptChanged("transcript lines do not match the speaker data")
+    if speakers is not None and head:
+        line = "speakers: " + json.dumps(speakers, ensure_ascii=False)
+        head = _SPEAKERS_LINE.sub(lambda _m: line, head, count=1)
+    return head + body + tail, count
+
+
+def relabel_transcript(path: Path, lines, old: str, new: str, *,
+                       speakers: list[str] | None = None,
+                       meeting_id: str | None = None) -> int:
+    """Rewrite a saved transcript's speaker labels in place (atomic, mode kept,
+    mtime moved by 2 s, alternating up and down so repeated edits stay
+    within 2 s of the original: whole-second sync tools see every change,
+    and the file never overtakes a newer transcript).
+
+    ``lines``: see ``_relabel_text``. Raises TranscriptChanged when the file
+    is not this meeting's, its lines no longer match, or it changed while
+    being rewritten. The notes file is never touched.
+    """
+    import os
+    import tempfile
+
+    path = Path(path)
+    before = os.stat(path)
+    raw = path.read_bytes()
+    text = raw.decode("utf-8")
+    new_text, count = _relabel_text(text, lines, old, new, speakers, meeting_id)
+    data = new_text.encode("utf-8")
+    if data == raw:
+        return 0
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, before.st_mode & 0o7777)
+        except OSError:
+            pass
+        step = 2_000_000_000
+        sign = 1 if (before.st_mtime_ns // step) % 2 == 0 else -1
+        os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns + sign * step))
+        now = os.stat(path)
+        if (now.st_size, now.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            raise TranscriptChanged("transcript changed while it was being rewritten")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+    return count
+
+
 # ----------------------------------------------------------- meeting titles ---
 #
 # A meeting saved with the default title ("Meeting", empty, or the watcher's
@@ -1093,6 +1256,7 @@ class SavedNote:
     notes_path: Path
     log_path: Path
     title: str = ""
+    meeting_id: str | None = None
 
 
 def _diarized_speakers(segments: list[Segment]) -> list[str]:
@@ -1245,4 +1409,4 @@ class ObsidianWriter:
                     pass
             raise
         log.info("wrote %s and %s", notes_path, log_path)
-        return SavedNote(notes_path, log_path, heading)
+        return SavedNote(notes_path, log_path, heading, meeting_id)

@@ -402,8 +402,8 @@ impl MeetingsBackend {
         if let Some(watcher) = &self.watcher {
             watcher.resume();
         }
-        let finished = finished.map_err(|_| internal())?;
-        if let Some(saved) = self.checkpoint(
+        let mut finished = finished.map_err(|_| internal())?;
+        let checkpointed = if let Some(saved) = self.checkpoint(
             &writer,
             &meta,
             finished.started_at,
@@ -415,6 +415,20 @@ impl MeetingsBackend {
             }
             self.state().saved = MeetingSave::Transcript;
             self.idle.notify_all();
+            true
+        } else {
+            false
+        };
+        // Speaker labels may wait up to their finalize timeout, so they run only
+        // once the full channel-labelled transcript is durable (design §6).
+        // Without that checkpoint, dropping the handle cancels them unclustered.
+        if let Some(labels) = finished.speaker_labels.take() {
+            if checkpointed {
+                finished.segments = labels.apply(&finished.segments);
+            } else {
+                drop(labels);
+                eprintln!("speaker labels skipped: the transcript checkpoint was not saved");
+            }
         }
         let transcript = format_transcript(&finished.segments);
         let template = templates::resolve_template(

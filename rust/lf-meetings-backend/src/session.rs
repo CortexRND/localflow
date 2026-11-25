@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDateTime;
 use lf_core::config::Config;
-use lf_meetings::{AudioSource, MeetingSession, Segment, Transcriber};
+use lf_meetings::{
+    diarize::{collector, Collector, Options, SpeakerBackend},
+    AudioSource, MeetingSession, Segment, SpeakerLabels, Transcriber,
+};
 use std::{
     sync::{mpsc, Arc, Mutex},
     thread,
@@ -16,6 +19,12 @@ pub trait CaptureFactory: Send + Sync + 'static {
     fn microphone(&self, config: &Config) -> Result<Box<dyn AudioSource>>;
     fn system_audio(&self, _config: &Config) -> Result<Option<Box<dyn AudioSource>>> {
         anyhow::bail!("system audio unavailable")
+    }
+    /// The speaker-label backend, asked only when `speaker_diarization` is on.
+    /// It is loaded on the collector's worker, so this must not load models.
+    /// `None` or an error leaves the meeting channel-labelled.
+    fn diarizer(&self, _config: &Config) -> Result<Option<Box<dyn SpeakerBackend>>> {
+        Ok(None)
     }
 }
 
@@ -39,7 +48,36 @@ pub(crate) struct Snapshot {
 pub(crate) struct Finished {
     pub started_at: NaiveDateTime,
     pub seconds: f64,
+    /// Channel-labelled, exactly as captured.
     pub segments: Vec<Segment>,
+    /// Applied only after the recovery checkpoint holds `segments`.
+    pub speaker_labels: Option<SpeakerLabels>,
+}
+
+fn speaker_collector(config: &Config, factory: &dyn CaptureFactory) -> Option<(Collector, bool)> {
+    if config.field_bool("speaker_diarization") != Some(true) {
+        return None;
+    }
+    let backend = match factory.diarizer(config) {
+        Ok(backend) => backend?,
+        Err(error) => {
+            eprintln!("speaker labels unavailable: {error}");
+            return None;
+        }
+    };
+    let options = Options {
+        max_speakers: collector::max_speakers(
+            config.field_i64("diarization_max_speakers").unwrap_or(0),
+        ),
+        ..Options::default()
+    };
+    match Collector::start(backend, options) {
+        Ok(collector) => Some((collector, config.field_bool("diarize_mic") == Some(true))),
+        Err(error) => {
+            eprintln!("speaker labels unavailable: {error}");
+            None
+        }
+    }
 }
 enum Command {
     Snapshot(mpsc::Sender<Snapshot>),
@@ -82,6 +120,9 @@ impl SessionActor {
                                 .context("invalid chunk_seconds")?,
                         ),
                     )?;
+                    if let Some((collector, diarize_mic)) = speaker_collector(&config, &*factory) {
+                        session = session.with_diarization(collector, diarize_mic);
+                    }
                     session.system_audio_error = error;
                     session.start()?;
                     Ok(session)
@@ -111,11 +152,13 @@ impl SessionActor {
                         }
                         Command::Stop(reply) => {
                             let segments = session.stop();
+                            let speaker_labels = session.take_speaker_labels();
                             if let Some(reply) = reply {
                                 let _ = reply.send(Finished {
                                     started_at: session.started_at.expect("started session"),
                                     seconds: session.elapsed_seconds(),
                                     segments,
+                                    speaker_labels,
                                 });
                             }
                             break;

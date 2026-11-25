@@ -4222,6 +4222,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lf-diarize"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "lf-core",
+ "log",
+]
+
+[[package]]
 name = "lf-input"
 version = "0.2.3"
 dependencies = [
@@ -4244,6 +4253,7 @@ dependencies = [
  "chrono",
  "cpal 0.16.0",
  "lf-core",
+ "lf-diarize",
  "lf-providers",
  "log",
  "objc2",

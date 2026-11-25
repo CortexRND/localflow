@@ -20,6 +20,7 @@ from localflow.meetings import (
     MeetingSummarizer,
     ObsidianWriter,
     Segment,
+    TranscriptChanged,
     answer_question,
     build_enhance_prompt,
     build_notes_prompt,
@@ -27,6 +28,7 @@ from localflow.meetings import (
     latest_transcript_log,
     missing_user_headings,
     read_transcript_log,
+    relabel_transcript,
     user_headings,
 )
 
@@ -806,3 +808,584 @@ def test_hostile_label_stays_inside_its_line(tmp_path, label, cleaned):
     text = saved.log_path.read_text(encoding="utf-8")
     assert len(re.findall(r"(?m)^\*\*\d\d:\d\d\*\* \*\*", text)) == len(segs)
     assert _front(saved.log_path)["speakers"] == ["Me", cleaned]
+
+
+# ------------------------------------------------- diarization (slice B5) ---
+
+class _NoTimedTranscriber(FakeTranscriber):
+    """Flag off must never call transcribe_timed."""
+
+    def transcribe_timed(self, audio):
+        raise AssertionError("transcribe_timed called with diarization off")
+
+
+def _diarization_threads():
+    return [t for t in threading.enumerate() if t.name.startswith("localflow-diarization")]
+
+
+def _flag_off_meeting(tmp_path):
+    """The mic + system audio meeting of
+    test_session_transcribes_mic_and_system_audio_with_sources, saved."""
+    source = FakeSystemSource()
+    session = MeetingSession(_NoTimedTranscriber(), threading.Lock(),
+                             chunk_seconds=3600, system_audio=source)
+    session.start()
+    session._stream.callback(_speech(2)[:, None], 0, None, None)
+    source.callback(_speech(2))
+    session._drain_once()
+    session._stream.callback(_speech(2)[:, None], 0, None, None)
+    segments = session.stop()
+    saved = ObsidianWriter(str(tmp_path), "notes", "logs").write(
+        title="Sync", category="Zoom", started_at=datetime(2026, 11, 14, 9, 0),
+        duration_seconds=125, notes_md="## Summary\nok", segments=segments,
+    )
+    return session, segments, saved
+
+
+# Captured on the tree before slice B5.
+_FLAG_OFF_LOG = (
+    b'---\ntitle: "Sync"\ndate: 2026-11-14T09:00\nplatform: Zoom\nduration_minutes: 2\n'
+    b"tags: [meeting, localflow]\n---\n\n# Sync \xe2\x80\x94 transcript\n\n"
+    b"**00:00** **Me:** text 1\n\n**00:00** **Others:** text 2\n\n**00:02** **Me:** text 3\n\n"
+    b"Notes: [[2026-11-14 0900 Sync]]\n"
+)
+_FLAG_OFF_NOTES = (
+    b'---\ntitle: "Sync"\ndate: 2026-11-14T09:00\nplatform: Zoom\nduration_minutes: 2\n'
+    b"tags: [meeting, localflow]\n---\n\n# Sync\n\n## Summary\nok\n\n"
+    b"Raw transcript: [[2026-11-14 0900 Sync (transcript)]]\n"
+)
+
+
+def test_diarization_off_session_is_identical(fake_mic, tmp_path):
+    session, segments, saved = _flag_off_meeting(tmp_path)
+    assert [(s.offset_seconds, s.source, s.text) for s in segments] == [
+        (0.0, "me", "text 1"), (0.0, "others", "text 2"), (2.0, "me", "text 3"),
+    ]
+    assert all(s.speaker_id is None and s.end_seconds is None for s in segments)
+    assert _diarization_threads() == []
+    # Text with universal newlines: write_text emits CRLF on Windows.
+    assert saved.log_path.read_text(encoding="utf-8") == _FLAG_OFF_LOG.decode("utf-8")
+    assert saved.notes_path.read_text(encoding="utf-8") == _FLAG_OFF_NOTES.decode("utf-8")
+    assert session.diarization_status == "off"
+    assert session.diarization_error == ""
+    assert session.diarization is None
+
+
+def test_diarization_off_imports_nothing():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, threading\n"
+        "import numpy as np\n"
+        "from localflow import meetings\n"
+        "class Stream:\n"
+        "    def __init__(self, **kw): self.callback = kw['callback']\n"
+        "    def start(self): pass\n"
+        "    def stop(self): pass\n"
+        "    def close(self): pass\n"
+        "class STT:\n"
+        "    def transcribe(self, audio): return 'hello'\n"
+        "meetings.sd.InputStream = Stream\n"
+        "s = meetings.MeetingSession(STT(), threading.Lock(), chunk_seconds=3600)\n"
+        "s.start()\n"
+        "s._stream.callback((np.ones(32000, dtype=np.float32) * 0.1)[:, None], 0, None, None)\n"
+        "assert [x.text for x in s.stop()] == ['hello']\n"
+        "bad = [m for m in sys.modules if m.startswith('localflow.diarization')]\n"
+        "assert not bad, bad\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], check=False,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+RATE = 16000
+
+
+def tone(i, seconds):
+    return np.full(int(RATE * seconds), 0.1 + i * 0.001, dtype=np.float32)
+
+
+class ToneTimedTranscriber:
+    """One TimedText per tone run, text 'line <tone index>'."""
+
+    def transcribe_timed(self, audio):
+        from localflow.diarization import MockDiarizer, TimedText, tone_index
+
+        return [
+            TimedText(t.start, t.end,
+                      f"line {tone_index(audio[int(t.start * RATE):int(t.end * RATE)])}")
+            for t in MockDiarizer().diarize(audio, RATE)
+        ]
+
+    def transcribe(self, audio):
+        return " ".join(t.text for t in self.transcribe_timed(audio))
+
+
+class RecordingCollector:
+    def __init__(self, lock=None, fail=False):
+        self.lock = lock
+        self.fail = fail
+        self.calls = []
+        self.error = ""
+
+    def feed(self, source, offset, audio, timed):
+        locked = self.lock.locked() if self.lock is not None else None
+        self.calls.append((source, offset, len(audio), list(timed), locked))
+        if self.fail:
+            raise RuntimeError("feed broke")
+        return True
+
+
+class TimedOnly:
+    def __init__(self, timed=None):
+        self.timed_calls = 0
+        self.timed = timed
+
+    def transcribe(self, audio):
+        raise AssertionError("transcribe called although transcribe_timed exists")
+
+    def transcribe_timed(self, audio):
+        from localflow.diarization.types import TimedText
+
+        self.timed_calls += 1
+        if self.timed is not None:
+            return self.timed
+        return [TimedText(0.0, 1.0, " hello "), TimedText(1.0, 2.0, "world")]
+
+
+class BlankTranscriber:
+    def transcribe(self, audio):
+        return "  "
+
+
+def _diarized_session(transcriber, collector, lock=None):
+    return MeetingSession(transcriber, lock or threading.Lock(), chunk_seconds=3600,
+                          diarization=collector)
+
+
+def _assert_worker_exited(collector, timeout=2.0):
+    """This collector's own worker is gone, so no thread outlives the test."""
+    worker = collector._worker
+    if worker is not None:
+        worker.join(timeout)
+        assert not worker.is_alive()
+
+
+def test_collector_is_fed_outside_the_lock():
+    lock = threading.Lock()
+    collector = RecordingCollector(lock)
+    stt = TimedOnly()
+    session = _diarized_session(stt, collector, lock)
+    session._mic.append(_speech(2))
+    session._others.append(_speech(3))
+    session._drain_once()
+    session._mic.append(np.zeros(32000, dtype=np.float32))  # silent: not fed
+    session._others.append(_speech(2))
+    session._drain_once()
+    assert stt.timed_calls == 3
+    assert [(s.offset_seconds, s.source, s.text) for s in session.segments] == [
+        (0.0, "me", "hello world"), (0.0, "others", "hello world"),
+        (3.0, "others", "hello world"),
+    ]
+    assert [(c[0], c[1], c[2], c[4]) for c in collector.calls] == [
+        ("me", 0.0, 32000, False), ("others", 0.0, 48000, False),
+        ("others", 3.0, 32000, False),
+    ]
+    assert session.diarization_status == "collecting"
+
+
+def test_collector_fallback_without_transcribe_timed():
+    from localflow.diarization.types import TimedText
+
+    collector = RecordingCollector()
+    session = _diarized_session(FakeTranscriber(), collector)
+    session._others.append(_speech(2))
+    session._drain_once()
+    assert collector.calls[0][3] == [TimedText(0.0, 2.0, "text 1")]
+    assert [s.text for s in session.segments] == ["text 1"]
+
+
+def test_live_segments_stay_channel_labelled():
+    from localflow.diarization import DiarizationCollector, MockDiarizer, MockEmbedder
+
+    collector = DiarizationCollector(MockDiarizer(), MockEmbedder())
+    try:
+        session = _diarized_session(ToneTimedTranscriber(), collector)
+        for audio in (np.concatenate([tone(0, 2), tone(1, 2)]),
+                      np.concatenate([tone(2, 2), tone(0, 2)])):
+            session._others.append(audio)
+            session._drain_once()
+        assert [(s.offset_seconds, s.source, s.speaker_id, s.speaker_label, s.text)
+                for s in session.segments] == [
+            (0.0, "others", None, None, "line 0 line 1"),
+            (4.0, "others", None, None, "line 2 line 0"),
+        ]
+    finally:
+        collector.close()
+    _assert_worker_exited(collector)
+
+
+def test_undiarized_mic_keeps_plain_transcribe():
+    from localflow.diarization import DiarizationCollector, MockDiarizer, MockEmbedder
+    from localflow.diarization.types import TimedText
+
+    class SpySTT:
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, audio):
+            self.calls.append("transcribe")
+            return " plain  text "
+
+        def transcribe_timed(self, audio):
+            self.calls.append("transcribe_timed")
+            return [TimedText(0.0, 2.0, "timed text")]
+
+    stt = SpySTT()
+    collector = DiarizationCollector(MockDiarizer(), MockEmbedder(), diarize_mic=False)
+    try:
+        session = _diarized_session(stt, collector)
+        session._mic.append(_speech(2))
+        session._others.append(_speech(2))
+        session._drain_once()
+        assert stt.calls == ["transcribe", "transcribe_timed"]
+        assert [(s.source, s.text) for s in session.segments] == [
+            ("me", "plain  text"), ("others", "timed text"),
+        ]
+        assert collector.stats()["offered"] == 1
+    finally:
+        collector.close()
+    _assert_worker_exited(collector)
+
+
+def test_feed_raising_keeps_the_segment():
+    session = _diarized_session(TimedOnly(), RecordingCollector(fail=True))
+    session._others.append(_speech(2))
+    session._drain_once()  # must not raise
+    assert [s.text for s in session.segments] == ["hello world"]
+
+
+@pytest.mark.parametrize("make_stt", [BlankTranscriber, lambda: TimedOnly([])])
+def test_empty_text_feeds_nothing(make_stt):
+    collector = RecordingCollector()
+    session = _diarized_session(make_stt(), collector)
+    session._others.append(_speech(2))
+    session._drain_once()
+    assert session.segments == [] and collector.calls == []
+
+
+def test_diarization_status_mapping():
+    collecting = _diarized_session(FakeTranscriber(), RecordingCollector())
+    assert collecting.diarization_status == "collecting"
+    off = MeetingSession(FakeTranscriber(), threading.Lock())
+    off.diarization_error = "the backend is missing"
+    assert off.diarization_status == "unavailable"
+    collector = RecordingCollector()
+    session = _diarized_session(FakeTranscriber(), collector)
+    collector.error = "speaker diarization stopped after 3 consecutive failures"
+    session._others.append(_speech(2))
+    session._drain_once()
+    assert session.diarization_status == "unavailable"
+    assert session.diarization_error == collector.error
+
+
+def _three_speaker_meeting(session):
+    session._mic.append(tone(5, 2))
+    session._others.append(np.concatenate([tone(0, 4), tone(1, 4), tone(2, 4), tone(0, 2)]))
+    session._drain_once()
+    session._others.append(np.concatenate([tone(2, 3), tone(1, 3)]))
+    session._drain_once()
+
+
+def test_three_speaker_mock_meeting_end_to_end(fake_mic, tmp_path):
+    from localflow.diarization import DiarizationCollector, MockDiarizer, MockEmbedder
+
+    collector = DiarizationCollector(MockDiarizer(), MockEmbedder())
+    session = _diarized_session(ToneTimedTranscriber(), collector)
+    session.start()
+    _three_speaker_meeting(session)
+    segments = session.stop()
+    live = list(segments)
+    result = collector.finalize(segments)
+    assert result.status == "ok" and segments == live
+    saved = _write(tmp_path, result.segments)
+    text = saved.log_path.read_text(encoding="utf-8")
+    assert "**00:00** **Me:** line 5" in text
+    assert "**00:04** **Speaker 2:** line 1" in text
+    assert "**00:17** **Speaker 2:** line 1" in text
+    front = _front(saved.log_path)
+    assert front["speakers"] == ["Me", "Speaker 1", "Speaker 2", "Speaker 3"]
+    assert saved.meeting_id == front["meeting_id"] == _front(saved.notes_path)["meeting_id"]
+    # finalize joined this collector's own worker; other tests' threads don't matter.
+    assert collector._worker is not None and not collector._worker.is_alive()
+
+
+def test_saved_note_meeting_id(tmp_path):
+    import re
+
+    assert _write(tmp_path / "a", [Segment(0, "a"), _o(1)]).meeting_id is None
+    assert _write(tmp_path / "b", [_o(0, "S1", "Speaker 1")]).meeting_id is None
+    saved = _write(tmp_path / "c", [Segment(0, "a", "me"), _o(1, "S1", "Speaker 1")])
+    assert re.fullmatch(r"[0-9a-f]{32}", saved.meeting_id)
+    assert saved.meeting_id == _front(saved.log_path)["meeting_id"]
+
+
+# ---- transcript relabel (slice B8)
+
+_RELABEL_SPEAKERS = ["Me", "Speaker 1", "Dåna", "Speaker 2"]
+
+
+def _relabel_fixture(tmp_path):
+    segments = [
+        Segment(0, "hello", "me"),
+        Segment(5, "a **Speaker 2:** b", "others", 9, "S1", "Speaker 1"),
+        Segment(70, "second", "others", 80, "S2", "Speaker 2"),
+        Segment(75, "third", "others", 85, "S3", "Speaker 2"),
+        Segment(130, "again", "others", 140, "S2", "Speaker 2"),
+    ]
+    return _write(tmp_path, segments, user_notes="**01:10** **Speaker 2:** mine")
+
+
+_S2_LINES = {"01:10": [True], "02:10": [True]}
+
+
+def _relabel(saved, lines=_S2_LINES, old="Speaker 2", new="Dåna",
+             speakers=_RELABEL_SPEAKERS):
+    return relabel_transcript(saved.log_path, lines, old, new, speakers=speakers,
+                              meeting_id=saved.meeting_id)
+
+
+def _lines(path):
+    return path.read_text(encoding="utf-8").split("\n")
+
+
+def test_relabel_rewrites_only_exact_prefixes(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    before = _lines(saved.log_path)
+    assert _relabel(saved) == 2
+    after = _lines(saved.log_path)
+    assert len(before) == len(after)
+    changed = [b for a, b in zip(before, after, strict=True) if a != b]
+    assert changed == [
+        'speakers: ["Me", "Speaker 1", "Dåna", "Speaker 2"]',
+        "**01:10** **Dåna:** second",
+        "**02:10** **Dåna:** again",
+    ]
+    assert "**00:05** **Speaker 1:** a **Speaker 2:** b" in after
+
+
+def test_relabel_leaves_same_label_other_speaker_alone(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    _relabel(saved)
+    assert "**01:15** **Speaker 2:** third" in _lines(saved.log_path)
+
+
+def test_relabel_leaves_raw_notes_and_footer_alone(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    _relabel(saved)
+    text = saved.log_path.read_text(encoding="utf-8")
+    raw = text[text.index("## My raw notes"):]
+    assert "**01:10** **Speaker 2:** mine" in raw
+    assert f"Notes: [[{saved.notes_path.stem}]]" in raw
+
+
+def _listing(saved):
+    return sorted(p.name for p in (*saved.notes_path.parent.iterdir(),
+                                   *saved.log_path.parent.iterdir()))
+
+
+def test_relabel_never_touches_the_notes_file(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    notes_bytes = saved.notes_path.read_bytes()
+    notes_mtime = saved.notes_path.stat().st_mtime_ns
+    listing = _listing(saved)
+    _relabel(saved)
+    assert saved.notes_path.read_bytes() == notes_bytes
+    assert saved.notes_path.stat().st_mtime_ns == notes_mtime
+    assert _listing(saved) == listing
+
+
+def test_relabel_updates_frontmatter_speakers_only(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    front_before = _front(saved.log_path)
+    _relabel(saved)
+    front_after = _front(saved.log_path)
+    assert front_after["speakers"] == _RELABEL_SPEAKERS
+    assert "Dåna" in saved.log_path.read_text(encoding="utf-8")
+    assert list(front_after) == list(front_before)
+    assert {k: v for k, v in front_after.items() if k != "speakers"} == {
+        k: v for k, v in front_before.items() if k != "speakers"}
+    assert _front(saved.notes_path)["speakers"] == front_before["speakers"]
+
+
+def test_relabel_without_changes_does_not_rewrite(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    mtime = saved.log_path.stat().st_mtime_ns
+    data = saved.log_path.read_bytes()
+    assert _relabel(saved, lines={}, speakers=None) == 0
+    assert saved.log_path.stat().st_mtime_ns == mtime
+    assert saved.log_path.read_bytes() == data
+
+
+def test_relabel_same_label_only_updates_frontmatter(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    assert _relabel(saved, new="Speaker 2", speakers=["Me", "Speaker 1", "Speaker 2"]) == 0
+    assert _front(saved.log_path)["speakers"] == ["Me", "Speaker 1", "Speaker 2"]
+    assert "**01:10** **Speaker 2:** second" in _lines(saved.log_path)
+
+
+def test_relabel_refuses_a_file_that_changed(tmp_path, monkeypatch):
+    saved = _relabel_fixture(tmp_path)
+    real = meetings._relabel_text
+
+    def racing(*args, **kwargs):
+        with open(saved.log_path, "ab") as fh:
+            fh.write(b"edited elsewhere\n")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(meetings, "_relabel_text", racing)
+    original = saved.log_path.read_bytes()
+    with pytest.raises(TranscriptChanged):
+        _relabel(saved)
+    assert saved.log_path.read_bytes() == original + b"edited elsewhere\n"
+    assert not [p for p in saved.log_path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_relabel_refuses_another_meetings_transcript(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    original = saved.log_path.read_bytes()
+    with pytest.raises(TranscriptChanged):
+        relabel_transcript(saved.log_path, {"01:10": [True]}, "Speaker 2", "Dana",
+                           speakers=["x"], meeting_id="f" * 32)
+    assert saved.log_path.read_bytes() == original
+
+
+def test_relabel_preserves_mode_and_newlines(tmp_path):
+    import os
+    import stat
+
+    saved = _relabel_fixture(tmp_path)
+    crlf = saved.log_path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    saved.log_path.write_bytes(crlf)
+    os.chmod(saved.log_path, 0o640)
+    assert _relabel(saved) == 2
+    data = saved.log_path.read_bytes()
+    assert data.count(b"\n") == data.count(b"\r\n")
+    assert "**01:10** **Dåna:** second\r\n".encode() in data
+    assert 'speakers: ["Me", "Speaker 1", "Dåna", "Speaker 2"]\r\n'.encode() in data
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(saved.log_path).st_mode) == 0o640
+
+
+def test_relabel_handles_long_meeting_stamps(tmp_path):
+    saved = _write(tmp_path, [Segment(0, "hi", "me"),
+                              Segment(6005, "late", "others", None, "S1", "Speaker 1")])
+    assert relabel_transcript(saved.log_path, {"100:05": [True]}, "Speaker 1", "Dana",
+                              meeting_id=saved.meeting_id) == 1
+    assert "**100:05** **Dana:** late" in _lines(saved.log_path)
+
+
+def test_relabel_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        relabel_transcript(tmp_path / "nope.md", {"00:00": [True]}, "a", "b")
+
+
+def test_relabel_rewrites_only_the_flagged_occurrence_at_a_shared_stamp(tmp_path):
+    saved = _write(tmp_path, [
+        Segment(0, "hello", "me"),
+        Segment(70, "first", "others", 70.4, "S2", "Speaker 2"),
+        Segment(70.4, "second", "others", 72, "S3", "Speaker 2"),
+    ])
+    assert relabel_transcript(saved.log_path, {"01:10": [False, True]}, "Speaker 2", "Bob",
+                              meeting_id=saved.meeting_id) == 1
+    lines = _lines(saved.log_path)
+    assert "**01:10** **Speaker 2:** first" in lines
+    assert "**01:10** **Bob:** second" in lines
+
+
+@pytest.mark.parametrize("lines", [
+    {"01:10": [True, False]},
+    {"01:15": [True, True]},
+    {"05:00": [True]},
+])
+def test_relabel_refuses_when_lines_do_not_match(tmp_path, lines):
+    saved = _relabel_fixture(tmp_path)
+    original = saved.log_path.read_bytes()
+    with pytest.raises(TranscriptChanged):
+        _relabel(saved, lines=lines)
+    assert saved.log_path.read_bytes() == original
+    assert not [p for p in saved.log_path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_relabel_keeps_an_older_transcript_older(tmp_path):
+    import os
+
+    old = _relabel_fixture(tmp_path)
+    newer = _write(tmp_path, [Segment(0, "hi", "me")], title="Later",
+                   started_at=datetime(2026, 11, 14, 11, 0))
+    base = old.log_path.stat().st_mtime_ns
+    os.utime(old.log_path, ns=(base, base))
+    os.utime(newer.log_path, ns=(base + 60_000_000_000, base + 60_000_000_000))
+    assert latest_transcript_log(tmp_path / "logs") == newer.log_path
+    step = 2_000_000_000
+    seen = [base]
+    for i in range(6):
+        names = ("Dåna", "Speaker 2") if i % 2 == 0 else ("Speaker 2", "Dåna")
+        current = old.log_path.stat().st_mtime_ns
+        assert _relabel(old, old=names[1], new=names[0]) == 2
+        mtime = old.log_path.stat().st_mtime_ns
+        assert abs(mtime - current) == step
+        seen.append(mtime)
+    assert max(seen) - min(seen) <= step
+    assert latest_transcript_log(tmp_path / "logs") == newer.log_path
+
+
+def _rewrite_front(saved, old_line, new_line):
+    data = saved.log_path.read_text(encoding="utf-8")
+    assert old_line in data
+    saved.log_path.write_text(data.replace(old_line, new_line, 1), encoding="utf-8")
+
+
+@pytest.mark.parametrize("form", ["{id}", "'{id}'", '"{id}"  ', "{id}\t"])
+def test_relabel_accepts_obsidian_meeting_id_forms(tmp_path, form):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, f'meeting_id: "{saved.meeting_id}"',
+                   "meeting_id: " + form.format(id=saved.meeting_id))
+    assert _relabel(saved) == 2
+
+
+@pytest.mark.parametrize("form", ["{id}0", "'{id}\"", "x{id}", "{id} # c"])
+def test_relabel_rejects_other_meeting_id_values(tmp_path, form):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, f'meeting_id: "{saved.meeting_id}"',
+                   "meeting_id: " + form.format(id=saved.meeting_id))
+    original = saved.log_path.read_bytes()
+    with pytest.raises(TranscriptChanged):
+        _relabel(saved)
+    assert saved.log_path.read_bytes() == original
+
+
+def test_relabel_replaces_block_style_speakers_with_gaps(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, 'speakers: ["Me", "Speaker 1", "Speaker 2", "Speaker 2"]\n',
+                   "speakers:\n  - Me\n\n  # remote side\n  - Speaker 1\n  - Speaker 2\n"
+                   "  - Speaker 2\n")
+    assert _relabel(saved) == 2
+    text = saved.log_path.read_text(encoding="utf-8")
+    assert '\nspeakers: ["Me", "Speaker 1", "Dåna", "Speaker 2"]\ntags: [meeting, localflow]\n' \
+        in text
+    assert "  - " not in text and "# remote side" not in text
+    assert _front(saved.log_path)["speakers"] == _RELABEL_SPEAKERS
+
+
+def test_relabel_replaces_block_style_speakers(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, 'speakers: ["Me", "Speaker 1", "Speaker 2", "Speaker 2"]\n',
+                   "speakers:\n  - Me\n  - Speaker 1\n  - Speaker 2\n  - Speaker 2\n")
+    assert _relabel(saved) == 2
+    text = saved.log_path.read_text(encoding="utf-8")
+    assert '\nspeakers: ["Me", "Speaker 1", "Dåna", "Speaker 2"]\ntags: [meeting, localflow]\n' \
+        in text
+    assert "  - " not in text
+    assert _front(saved.log_path)["speakers"] == _RELABEL_SPEAKERS

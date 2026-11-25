@@ -336,9 +336,12 @@ def test_hf_cache_location_follows_huggingface_variables():
 def test_catalog_matches_the_download_catalog_and_faster_whisper():
     from faster_whisper.utils import _MODELS
 
+    from localflow.diarization.models import DIAR_MODELS
     from localflow.models import STT_MODELS
 
-    assert set(ms.catalog()) == {model.repo for model in STT_MODELS}
+    assert set(ms.catalog()) == (
+        {model.repo for model in STT_MODELS} | {model.repo for model in DIAR_MODELS}
+    )
     for size, repo in ms.FASTER_WHISPER_REPOS.items():
         assert _MODELS.get(size) == repo, size
 
