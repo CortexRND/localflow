@@ -32,9 +32,10 @@ and launch codes never enter browser argv or URLs. Call it on a blocking thread.
 | `/api/models`, `/api/test/llm` | STT catalogs/aliases and real Rust LLM clients, including endpoint-bound key protection |
 | `/api/secrets` GET, `/api/secrets/{name}` PUT | Boolean status only, OS keychain writes, same endpoint-bound activation slots |
 | `/api/autostart` GET/POST | Status via backend; POST validates boolean then delegates |
+| `/api/perf` GET | `?window=24h\|7d\|30d` (default `7d`, else 400) summary of the local perf ledger (`LOCALFLOW_PERF_LEDGER`), byte-identical to Python via `lf_core::perf_ledger::summary_json` |
 | `/docs`, `/redoc`, `/docs/oauth2-redirect`, `/openapi.json` | Embedded token-gated FastAPI documentation/schema snapshots from the Python API at the base revision |
 
-No changes to `lf-core` or `lf-providers` are needed.
+No changes to `lf-providers` are needed; `/api/perf` uses `lf_core::perf_ledger`.
 
 ## Runtime integration and gaps
 

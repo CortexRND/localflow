@@ -124,6 +124,7 @@ fn main() {
         build_stt: Arc::new(|_| Ok(Arc::new(NullSpeech) as Arc<dyn SpeechEngine>)),
         deliver: Arc::new(|_, _, _| {}),
         last_text_path: None,
+        perf: None,
     };
     std::thread::spawn(move || worker.run(work_rx));
     let (hub, _) = KeyboardHub::new(

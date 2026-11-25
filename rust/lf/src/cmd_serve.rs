@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use lf_core::config::{load_config, Config};
+use lf_core::perf_ledger::{self, Kind, PerfEvent, PerfLedger, Status};
 use lf_meetings::{system_audio, AudioSource, TimedTranscript, Transcriber};
 use lf_meetings_backend::{CaptureFactory, MeetingSave, MeetingsBackend};
 use lf_server::{backend::UnavailableBackend, Server, ServerState};
@@ -70,6 +71,7 @@ impl CaptureFactory for MeetingCapture {
 }
 
 pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> Result<()> {
+    let started = std::time::Instant::now();
     let config = load_config()?;
     let host = host
         .as_deref()
@@ -84,6 +86,7 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
         .max_blocking_threads(16)
         .enable_all()
         .build()?;
+    let ledger = PerfLedger::default();
     // Staged enrollment audio a killed server left behind, whatever the speaker
     // flags are now; creates nothing and never fails.
     lf_meetings::speakers::registry::sweep(&lf_meetings::speakers::default_speakers_root());
@@ -94,6 +97,7 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
             // The saved file is what `PUT /api/config` writes: the live speaker gate.
             .with_config_reader(Arc::new(load_config))
             .with_capture(Arc::new(MeetingCapture(speech.clone())))
+            .with_perf_ledger(ledger.clone())
             .with_inner(Arc::new(SttBackend::with_speech(
                 UnavailableBackend,
                 speech,
@@ -105,6 +109,15 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
             .with_speaker_config_reader(Arc::new(load_config)),
     );
     let server = runtime.block_on(Server::bind_with_state(host, port, state.clone()))?;
+    // Ready to accept requests: config, backends and the bound socket.
+    let elapsed = perf_ledger::ms(started.elapsed());
+    ledger.record_if(
+        &config,
+        &PerfEvent {
+            total_ms: Some(elapsed),
+            ..PerfEvent::new(Kind::Startup, Status::Ok)
+        },
+    );
     outln!(
         io.out,
         "LocalFlow Rust server listening on {}",

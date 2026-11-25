@@ -43,6 +43,9 @@ pub enum Command {
     /// Show dictation statistics (same as `history stats`).
     #[command(hide = true)]
     Stats,
+    /// Show local speed metrics from the perf ledger.
+    #[command(verbatim_doc_comment)]
+    Perf(PerfArgs),
     /// Inspect and select language-model providers.
     #[command(subcommand)]
     Llm(LlmCommand),
@@ -298,6 +301,21 @@ pub struct RecallArgs {
     /// Machine-readable output.
     #[arg(long = "json")]
     pub json: bool,
+}
+
+/// `--window` is a plain string checked by the command, so its error reads
+/// like click's `Choice` (`Error: Invalid value for '--window': …`).
+#[derive(Debug, Args)]
+pub struct PerfArgs {
+    /// Time window to summarize: 24h, 7d or 30d.
+    #[arg(long, default_value = "7d", allow_hyphen_values = true)]
+    pub window: String,
+    /// Print the raw summary JSON.
+    #[arg(long = "json")]
+    pub json: bool,
+    /// Delete the local perf ledger.
+    #[arg(long)]
+    pub clear: bool,
 }
 
 /// The missing or blank REQUEST and the `--undo` combinations are checked by

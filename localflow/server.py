@@ -20,8 +20,8 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from localflow import api as api_logic
+from localflow import perf_ledger, sounds, stt_lease
 from localflow import recall as recall_logic
-from localflow import sounds, stt_lease
 from localflow.apitoken import load_or_create
 from localflow.audio import rms_dbfs
 from localflow.cleanup import Cleaner
@@ -105,6 +105,8 @@ _cleaner: Cleaner | None = None
 _lock = threading.RLock()
 _config_lock = threading.Lock()
 _transcribe_lock = threading.Lock()
+# time.monotonic() when main() started serving (the perf ledger's `startup`).
+_serving_since: float | None = None
 
 # `_on_meeting_detected` is defined further down; forward it lazily.
 _watcher = MeetingWatcher(
@@ -170,6 +172,24 @@ def _start_watcher() -> None:
     _sweep_enrollment_staging()
     if _config.meetings_enabled and _config.meeting_watch:
         _watcher.start()
+    if _serving_since is not None:
+        # main() to ready-to-serve, as `lf-rs serve` measures it; tests
+        # driving the app through TestClient never call main().
+        _record_perf(_config, "startup", True, _serving_since, llm=False)
+
+
+def _record_perf(config: Config, kind: str, ok: bool, started: float, *, llm: bool) -> None:
+    """Time a server request into the perf ledger: numbers and model labels
+    only (never the question, transcript or answer). Never raises."""
+    elapsed = (time.monotonic() - started) * 1000
+    perf_ledger.record_for(
+        config,
+        kind,
+        status="ok" if ok else "error",
+        llm_ms=elapsed if llm else None,
+        total_ms=elapsed,
+        llm=perf_ledger.llm_labels(config) if llm else None,
+    )
 
 
 @app.on_event("shutdown")
@@ -705,6 +725,19 @@ def api_secret_update(name: str, body: dict) -> dict[str, bool]:
     return api_logic.secrets_status(_config)
 
 
+@app.get("/api/perf")
+def api_perf(window: str = perf_ledger.DEFAULT_WINDOW) -> Response:
+    """Local speed summary from the perf ledger: numbers and labels only.
+
+    The body is `perf_ledger.summary_json`, byte-identical to `lf-rs serve`.
+    """
+    try:
+        summary = perf_ledger.summarize(window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(perf_ledger.summary_json(summary), media_type="application/json")
+
+
 @app.get("/api/autostart")
 def api_autostart() -> dict[str, str]:
     try:
@@ -1159,11 +1192,15 @@ async def meeting_chat(body: MeetingChat) -> dict:
     def _answer() -> str:
         return answer_question(_summarizer.llm, transcript, question)
 
+    config = _config
+    started = time.monotonic()
     try:
         answer = await run_in_threadpool(_answer)
     except Exception as exc:
+        _record_perf(config, "meeting_chat", False, started, llm=True)
         log.exception("meeting chat failed")
         raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
+    _record_perf(config, "meeting_chat", True, started, llm=True)
     return {"answer": answer, "log_path": str(path)}
 
 
@@ -1210,11 +1247,15 @@ async def api_recall(body: RecallRequest) -> dict:
             return recall_logic.search(question, **kwargs)
         return recall_logic.recall(question, llm=_summarizer.llm, **kwargs)
 
+    config = _config
+    started = time.monotonic()
     try:
         result = await run_in_threadpool(_run)
     except Exception as exc:
+        _record_perf(config, "recall", False, started, llm=body.llm)
         log.exception("recall failed")
         raise HTTPException(status_code=500, detail=f"recall failed: {exc}")
+    _record_perf(config, "recall", True, started, llm=body.llm)
     return result.to_dict()
 
 
@@ -1264,7 +1305,13 @@ async def meeting_stop() -> dict:
         transcript = format_transcript(segments)
         template = resolve_template(meta.get("template"), config.meeting_templates_dir)
         user_notes = meta.get("user_notes", "")
-        notes_md = summarizer.summarize(transcript, user_notes=user_notes, template=template)
+        summarize_started = time.monotonic()
+        try:
+            notes_md = summarizer.summarize(transcript, user_notes=user_notes, template=template)
+        except Exception:
+            _record_perf(config, "meeting_summarize", False, summarize_started, llm=True)
+            raise
+        _record_perf(config, "meeting_summarize", True, summarize_started, llm=True)
         title = meta.get("title", "Meeting")
         title_from_model = False
         auto_title = bool(meta.get("title_auto"))
@@ -1954,6 +2001,8 @@ def _uvicorn_log_config() -> dict:
 def main() -> None:
     import uvicorn
 
+    global _serving_since
+    _serving_since = time.monotonic()
     prepare_process_logs()
     # Started here, not in the startup hook, so tests driving the app through
     # TestClient never watch the real config file.
