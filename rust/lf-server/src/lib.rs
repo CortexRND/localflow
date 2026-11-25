@@ -724,6 +724,56 @@ mod openapi_tests {
         assert_eq!(methods("/api/speakers/export"), ["get"]);
         assert_eq!(methods("/api/speakers/{ref}"), ["patch", "delete"]);
         assert!(spec["paths"]["/api/speakers"]["post"]["responses"]["201"].is_object());
+        // Request bodies: required, with the fields the backend reads.
+        let body = |path: &str, method: &str, media: &str| -> (Vec<String>, Value) {
+            let request = &paths[path][method]["requestBody"];
+            assert_eq!(request["required"], true, "{method} {path}");
+            let schema = request["content"][media]["schema"].clone();
+            let mut fields: Vec<String> = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{method} {path} {media}"))
+                .keys()
+                .cloned()
+                .collect();
+            fields.sort();
+            let mut required: Vec<String> =
+                serde_json::from_value(schema["required"].clone()).unwrap();
+            required.sort();
+            assert_eq!(required, fields, "{method} {path} {media}");
+            (fields, schema)
+        };
+        let (fields, json_enroll) = body("/api/speakers", "post", "application/json");
+        assert_eq!(fields, ["meeting_id", "name", "speaker_id"]);
+        assert_eq!(
+            json_enroll["properties"]["meeting_id"]["pattern"],
+            "^[0-9a-f]{32}$"
+        );
+        let (fields, upload) = body("/api/speakers", "post", "multipart/form-data");
+        assert_eq!(fields, ["file", "name"]);
+        assert_eq!(upload["properties"]["file"]["format"], "binary");
+        assert_eq!(
+            paths["/api/speakers"]["post"]["requestBody"]["content"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        let (fields, _) = body("/api/speakers/{ref}", "patch", "application/json");
+        assert_eq!(fields, ["name"]);
+        // The export is a ZIP attachment, never JSON.
+        let export = &paths["/api/speakers/export"]["get"]["responses"]["200"];
+        let media: Vec<&str> = export["content"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(media, ["application/zip"]);
+        assert_eq!(
+            export["content"]["application/zip"]["schema"]["format"],
+            "binary"
+        );
+        assert!(export["headers"]["Content-Disposition"].is_object());
         assert!(
             !paths.contains_key("/api/diarization/download"),
             "not served by Rust"

@@ -984,6 +984,58 @@
         "summary": "Api Speakers Enroll",
         "description": "Enroll a voice: JSON ``{name, meeting_id, speaker_id}`` from a meeting saved with\nrecognition on, or multipart ``file`` + ``name`` (local only; the audio is not retained:\nit is decoded in memory, except that an M4A/MP4 needing seeking gets a short-lived private\ntemporary copy, deleted right after decoding). The gate is checked before the body is\nread.",
         "operationId": "api_speakers_enroll_api_speakers_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "title": "Enroll From Meeting",
+                "required": [
+                  "name",
+                  "meeting_id",
+                  "speaker_id"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "title": "Name"
+                  },
+                  "meeting_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$",
+                    "title": "Meeting Id"
+                  },
+                  "speaker_id": {
+                    "type": "string",
+                    "title": "Speaker Id"
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "title": "Enroll From Audio",
+                "required": [
+                  "name",
+                  "file"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "title": "Name"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "title": "File"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": "Successful Response",
@@ -1027,9 +1079,20 @@
         "responses": {
           "200": {
             "description": "Successful Response",
+            "headers": {
+              "Content-Disposition": {
+                "description": "attachment; filename=\"localflow-speakers.zip\"",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
-              "application/json": {
-                "schema": {}
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
               }
             }
           }
@@ -1052,6 +1115,26 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "title": "Rename Speaker",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "title": "Name"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
