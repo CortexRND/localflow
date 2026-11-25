@@ -322,3 +322,33 @@ fn unreachable_llm_still_writes_a_scorable_result() {
     let calls = res["llm_calls"].as_array().unwrap();
     assert!(!calls.is_empty() && calls.iter().all(|c| c["error"].is_string()));
 }
+
+#[test]
+fn diarized_meeting_emits_numbered_speaker_labels() {
+    let llm = MockOllama::start();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r1/results/launch-sync-diarized.json");
+    let summary = sim::run(&args(
+        &out,
+        &llm.url,
+        "launch-sync-diarized",
+        &["--cleanup"],
+    ))
+    .unwrap();
+    assert_eq!(summary["stop"], 200, "{summary}");
+    let res: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(res["stop"][1]["diarization"], "ok", "{res}");
+    let mut labels: Vec<&str> = res["stop"][1]["speakers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["label"].as_str())
+        .collect();
+    labels.sort();
+    assert_eq!(labels, vec!["Speaker 1", "Speaker 2", "Speaker 3"]);
+    let log = res["log_text"].as_str().unwrap().replace("\r\n", "\n");
+    for label in &labels {
+        assert!(log.contains(&format!("**{label}:**")), "{log}");
+    }
+    assert!(!log.contains("**Others:**"), "{log}");
+}
