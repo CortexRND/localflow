@@ -108,10 +108,16 @@ pub fn read(data: &[u8]) -> Result<Bundle> {
         _ => return Err(NOT_EXPORT),
     };
     let mut entries = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
     for item in raw {
         let vp = entry(item)
             .filter(|vp| files.contains_key(&format!("{}.npy", vp.id)))
             .ok_or(RegistryError::Other("the speaker export is incomplete"))?;
+        // A valid export lists each voiceprint once; a repeat could otherwise
+        // pass the file count below with another, unlisted vector.
+        if !ids.insert(vp.id.clone()) {
+            return Err(NOT_EXPORT);
+        }
         entries.push(vp.public());
     }
     if files.len() != entries.len() {

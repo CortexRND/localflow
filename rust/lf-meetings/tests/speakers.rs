@@ -527,6 +527,25 @@ fn export_bundles_round_trip_and_hostile_archives_are_refused_before_writing() {
         ]),
         "the speaker export contains an unexpected file",
     );
+    // One id listed twice: refused even when an unlisted vector makes the
+    // file count match the entry count, and without that extra vector.
+    let other = "e".repeat(32);
+    let other_name = format!("{other}.npy");
+    refuse(
+        &make(&[
+            ("registry.json", meta(&[&id, &id]).as_bytes()),
+            (&npy_name, &npy_ok),
+            (&other_name, &npy_ok),
+        ]),
+        "not a speaker export",
+    );
+    refuse(
+        &make(&[
+            ("registry.json", meta(&[&id, &id]).as_bytes()),
+            (&npy_name, &npy_ok),
+        ]),
+        "not a speaker export",
+    );
     refuse(
         &make(&[(
             "registry.json",
