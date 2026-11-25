@@ -9,8 +9,9 @@ use lf_core::{
     history::{HistoryStore, NewEntry},
 };
 use lf_meetings::{
+    diarize::{SpeakerBackend, SpeakerTurn},
     dispatch::{PromptQueue, WorkPrompt},
-    AudioCallback, AudioSource, SystemAudioUnavailable, Transcriber,
+    AudioCallback, AudioSource, SystemAudioUnavailable, TimedText, TimedTranscript, Transcriber,
 };
 use lf_meetings_backend::{
     CaptureFactory, MeetingSave, MeetingsBackend, ProviderFactory, TitleLlm,
@@ -46,13 +47,51 @@ struct Capture {
     stopped: Arc<AtomicUsize>,
     gate: Mutex<Option<Gate>>,
     transcription_gate: Arc<Mutex<Option<Gate>>>,
+    /// Speaker labels: system audio carries two 1.5 s speakers and a fake backend is offered.
+    speakers: AtomicBool,
+    diarizer_fail: AtomicBool,
+    diarizer_calls: AtomicUsize,
+    speaker_gate: Arc<Mutex<Option<Gate>>>,
 }
 struct Device {
     _local: Rc<()>,
     owner: std::thread::ThreadId,
     sample: f32,
+    /// A second 1.5 s speaker after 1.5 s of `sample` (else 1 s of `sample`).
+    second: Option<f32>,
     started: Arc<AtomicUsize>,
     stopped: Arc<AtomicUsize>,
+}
+const BLOCK: usize = 24_000;
+/// One turn per 1.5 s block, speaker and one-hot embedding by amplitude.
+struct Speakers(Arc<Mutex<Option<Gate>>>);
+fn bucket(sample: f32) -> usize {
+    (sample * 10.0).round() as usize
+}
+impl SpeakerBackend for Speakers {
+    fn load(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn diarize(&mut self, audio: &[f32]) -> Result<Vec<SpeakerTurn>> {
+        if let Some((entered, release)) = self.0.lock().unwrap().take() {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
+        Ok(audio
+            .chunks(BLOCK)
+            .enumerate()
+            .map(|(i, s)| SpeakerTurn {
+                start: i as f64 * 1.5,
+                end: i as f64 * 1.5 + s.len() as f64 / 16000.0,
+                local_speaker: bucket(s[0]),
+            })
+            .collect())
+    }
+    fn embed(&mut self, audio: &[f32]) -> Result<Vec<f32>> {
+        let mut v = vec![0.0; 8];
+        v[bucket(audio[0])] = 1.0;
+        Ok(v)
+    }
 }
 impl AudioSource for Device {
     fn start(
@@ -61,7 +100,13 @@ impl AudioSource for Device {
     ) -> std::result::Result<(), SystemAudioUnavailable> {
         assert_eq!(self.owner, std::thread::current().id());
         self.started.fetch_add(1, Ordering::SeqCst);
-        callback(vec![self.sample; 16000]);
+        match self.second {
+            None => callback(vec![self.sample; 16000]),
+            Some(second) => {
+                callback(vec![self.sample; BLOCK]);
+                callback(vec![second; BLOCK]);
+            }
+        }
         Ok(())
     }
     fn stop(&mut self) -> std::result::Result<(), SystemAudioUnavailable> {
@@ -89,13 +134,32 @@ impl Transcriber for Stt {
         }
         .into())
     }
+    /// Same flat text, plus one timed segment per 1.5 s block.
+    fn transcribe_chunk(&self, audio: &[f32], prompt: Option<&str>) -> Result<TimedTranscript> {
+        Ok(TimedTranscript {
+            text: self.transcribe(audio, prompt)?,
+            segments: audio
+                .chunks(BLOCK)
+                .enumerate()
+                .map(|(i, s)| TimedText {
+                    start: i as f64 * 1.5,
+                    end: i as f64 * 1.5 + s.len() as f64 / 16000.0,
+                    text: format!("remote part {}", i + 1),
+                })
+                .collect(),
+        })
+    }
 }
 impl Capture {
     fn device(&self, sample: f32) -> Box<dyn AudioSource> {
+        self.device_with(sample, None)
+    }
+    fn device_with(&self, sample: f32, second: Option<f32>) -> Box<dyn AudioSource> {
         Box::new(Device {
             _local: Rc::new(()),
             owner: std::thread::current().id(),
             sample,
+            second,
             started: self.started.clone(),
             stopped: self.stopped.clone(),
         })
@@ -122,7 +186,19 @@ impl CaptureFactory for Capture {
     }
     fn system_audio(&self, _: &Config) -> Result<Option<Box<dyn AudioSource>>> {
         anyhow::ensure!(self.system.load(Ordering::SeqCst), "install loopback");
-        Ok(Some(self.device(0.2)))
+        let second = self.speakers.load(Ordering::SeqCst).then_some(0.4);
+        Ok(Some(self.device_with(0.2, second)))
+    }
+    fn diarizer(&self, _: &Config) -> Result<Option<Box<dyn SpeakerBackend>>> {
+        self.diarizer_calls.fetch_add(1, Ordering::SeqCst);
+        anyhow::ensure!(
+            !self.diarizer_fail.load(Ordering::SeqCst),
+            "speaker models missing"
+        );
+        Ok(self
+            .speakers
+            .load(Ordering::SeqCst)
+            .then(|| Box::new(Speakers(self.speaker_gate.clone())) as Box<dyn SpeakerBackend>))
     }
 }
 #[derive(Default)]
@@ -1656,4 +1732,127 @@ async fn delegation_preserves_request_and_auth_remains_in_server() {
     );
     assert_eq!(f.capture.opened.load(Ordering::SeqCst), 0);
     assert!(!MeetingsBackend::new().unwrap().stt_available("mock"));
+}
+
+fn speaker_fixture(diarization: bool) -> Fixture {
+    let mut f = Fixture::new();
+    f.config.set_field("capture_system_audio", json!(true));
+    f.config
+        .set_field("speaker_diarization", json!(diarization));
+    f.capture.system.store(true, Ordering::SeqCst);
+    f.capture.speakers.store(true, Ordering::SeqCst);
+    f
+}
+async fn start_meeting(f: &Fixture) {
+    let start = request(
+        f.app(),
+        "POST",
+        "/meeting/start",
+        Some(json!({"title":"Speakers", "auto_title":false})),
+    )
+    .await;
+    assert_eq!(start.0, 200, "{}", start.1);
+}
+
+#[tokio::test]
+async fn speaker_labels_are_saved_after_a_channel_labelled_recovery_checkpoint() {
+    let f = speaker_fixture(true);
+    start_meeting(&f).await;
+    let (diarizing, release) = gate(&f.capture.speaker_gate);
+    let stop = stop_request(&f);
+    diarizing.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Finalize is blocked; the full transcript is already durable with channel labels.
+    let (mut recovery, mut recovery_log) = (String::new(), String::new());
+    for _ in 0..500 {
+        let last = request(f.app(), "GET", "/meeting/status", None).await.1["last_saved"].clone();
+        if last["recovery"] == true {
+            recovery_log = last["log_path"].as_str().unwrap().to_string();
+            recovery = fs::read_to_string(&recovery_log).unwrap_or_default();
+            if recovery.contains("Dana owns the blog post") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        recovery.contains("**Others:** sounds good, Dana owns the blog post"),
+        "{recovery}"
+    );
+    assert!(recovery.contains("**Me:** we will launch on March 3"));
+    assert!(!recovery.contains("Speaker 1") && !recovery.contains("remote part"));
+    release.send(()).unwrap();
+    let saved = stop.join().unwrap();
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    assert_eq!(saved.body["segments"], 3);
+    let log = fs::read_to_string(saved.body["log_path"].as_str().unwrap()).unwrap();
+    assert!(
+        log.contains("**00:00** **Me:** we will launch on March 3"),
+        "{log}"
+    );
+    assert!(
+        log.contains("**00:00** **Speaker 1:** remote part 1"),
+        "{log}"
+    );
+    assert!(
+        log.contains("**00:01** **Speaker 2:** remote part 2"),
+        "{log}"
+    );
+    assert!(!log.contains("**Others:**"));
+    assert!(
+        log.contains("speakers: [\"Me\", \"Speaker 1\", \"Speaker 2\"]"),
+        "{log}"
+    );
+    assert!(!Path::new(&recovery_log).exists());
+    let prompt = f.models.calls.lock().unwrap()[0].2.clone();
+    assert!(prompt.contains("Speaker 2: remote part 2"), "{prompt}");
+    assert_eq!(f.capture.diarizer_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn speaker_labels_are_skipped_when_the_channel_checkpoint_cannot_be_saved() {
+    let f = speaker_fixture(true);
+    // A vault path that is a file: every write fails, the full checkpoint included.
+    fs::write(f.dir.path().join("vault"), "not a directory").unwrap();
+    start_meeting(&f).await;
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await;
+    assert_eq!(saved, (500, json!({"detail":"Internal Server Error"})));
+    assert_eq!(f.capture.diarizer_calls.load(Ordering::SeqCst), 1);
+    // Stop still ran its channel path: the summary saw Me/Others, never labels.
+    let calls = f.models.calls.lock().unwrap();
+    let prompt = &calls[0].2;
+    assert!(
+        prompt.contains("Others: sounds good, Dana owns the blog post"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("Speaker 1") && !prompt.contains("remote part"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn speaker_labels_flag_off_never_asks_for_a_diarizer_and_output_is_channel() {
+    let f = speaker_fixture(false);
+    start_meeting(&f).await;
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await;
+    assert_eq!(saved.0, 200, "{}", saved.1);
+    assert_eq!(saved.1["segments"], 2);
+    let log = fs::read_to_string(saved.1["log_path"].as_str().unwrap()).unwrap();
+    assert!(log.contains("**00:00** **Others:** sounds good, Dana owns the blog post"));
+    assert!(!log.contains("Speaker 1") && !log.contains("remote part"));
+    assert!(!log.contains("speakers:"));
+    assert_eq!(f.capture.diarizer_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn speaker_labels_diarizer_error_still_starts_and_saves_channel_labels() {
+    let f = speaker_fixture(true);
+    f.capture.diarizer_fail.store(true, Ordering::SeqCst);
+    start_meeting(&f).await;
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await;
+    assert_eq!(saved.0, 200, "{}", saved.1);
+    let log = fs::read_to_string(saved.1["log_path"].as_str().unwrap()).unwrap();
+    assert!(log.contains("**Others:** sounds good, Dana owns the blog post"));
+    assert!(!log.contains("Speaker 1"));
+    assert_eq!(f.capture.diarizer_calls.load(Ordering::SeqCst), 1);
 }
