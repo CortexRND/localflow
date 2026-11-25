@@ -95,6 +95,19 @@ def test_import_is_isolated(stmt, forbidden):
     _run(f"import sys\n{stmt}\n{check}\nassert not bad, bad")
 
 
+def test_lazy_exports_stay_isolated():
+    _run(
+        "import sys\n"
+        "import localflow.diarization as d\n"
+        "[getattr(d, n) for n in d.__all__]\n"
+        "bad = [m for m in ('localflow.meetings', 'localflow.server', 'sherpa_onnx')"
+        " if m in sys.modules]\n"
+        "assert not bad, bad\n"
+        f"missing = [m for m in {_LAZY_MODS!r} if m not in sys.modules]\n"
+        "assert not missing, missing"
+    )
+
+
 _PKG_ATTR = "cluster = localflow.diarization.cluster"
 
 
