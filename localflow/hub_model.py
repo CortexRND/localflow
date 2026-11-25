@@ -399,6 +399,10 @@ _SPEAKER_ERRORS = {
     "transcript file not found": (
         "The transcript file was moved or deleted, so speakers can't be changed."
     ),
+    "this meeting has no stored voice data": (
+        "This meeting was saved without speaker recognition, so there is no voice to remember."
+    ),
+    "speaker recognition is off": "Speaker recognition is off.",
 }
 
 
@@ -551,10 +555,19 @@ class SpeakerPanel:
         self.error = ""
         self.epoch = 0          # request/poll freshness
         self.revision = 0       # bumps on every visible change
+        # Remember (speaker recognition): offered only while `remember` is on.
+        # `remembered` holds (meeting_id, speaker_id) pairs remembered this
+        # session; the controller may share one set between panels.
+        self.remember = False
+        self.remembered = set()
+        self.last_action = ""   # the action of the last answer applied by finish
 
     @property
     def visible(self) -> bool:
         return bool(self.rows)
+
+    def is_remembered(self, speaker_id) -> bool:
+        return (self.meeting_id, speaker_id) in self.remembered
 
     @property
     def can_merge(self) -> bool:
@@ -653,11 +666,53 @@ class SpeakerPanel:
         was drawn for) is not the row being renamed: a field left over from an
         older edit never overwrites the current draft.
         """
-        if self.mode != "rename" or self.busy:
+        if self.mode not in ("rename", "remember") or self.busy:
             return
         if speaker_id is not None and speaker_id != self.speaker_id:
             return
         self.draft = str(text)
+
+    def set_remember(self, on) -> None:
+        """Offer Remember (both speaker flags on) or not; off closes an open remember edit."""
+        on = bool(on)
+        if on == self.remember:
+            return
+        self.remember = on
+        if not on and self.mode == "remember" and not self.busy:
+            self._close_edit()
+            self.error = ""
+        self.revision += 1
+
+    def begin_remember(self, speaker_id, draft) -> None:
+        """Open the name prompt for Remember. `draft` is the prefill: the caller
+        passes "" for a generic label ("Speaker 2") and the label otherwise."""
+        if not self.remember or self.busy or self.row(speaker_id) is None:
+            return
+        if self.is_remembered(speaker_id):
+            return
+        self.mode = "remember"
+        self.speaker_id = speaker_id
+        self.into_id = ""
+        self.draft = str(draft or "")
+        self.error = ""
+        self.revision += 1
+
+    def submit_remember(self, name):
+        """("enroll", (name, meeting_id, speaker_id), token) or None."""
+        if self.busy or self.mode != "remember" or not self.remember:
+            return None
+        self.draft = str(name)
+        problem = speaker_name_error(name)
+        if problem:
+            self.error = problem
+            self.revision += 1
+            return None
+        self.busy = "remember"
+        self.error = ""
+        self.epoch += 1
+        self.revision += 1
+        collapsed = " ".join(str(name).split())
+        return ("enroll", (collapsed, self.meeting_id, self.speaker_id), self.epoch)
 
     def cancel(self) -> None:
         if self.busy:
@@ -709,6 +764,16 @@ class SpeakerPanel:
         self.busy = ""
         self.epoch += 1
         self.revision += 1
+        self.last_action = action
+        if action == "remember":
+            # The answer is a voiceprint, not this meeting's speakers: rows stay.
+            if error:
+                self.error = speaker_error_text("remember", error)
+            else:
+                self.remembered.add((self.meeting_id, self.speaker_id))
+                self._close_edit()
+                self.error = ""
+            return True
         if error:
             self.error = speaker_error_text(action, error)
             return True
@@ -728,7 +793,9 @@ SPEAKER_ROW_H = RECENT_ROW_H
 SPEAKERS_CARD_Y = 28          # heading 22 + 6, as Recent meetings
 SPEAKERS_ERROR_GAP = 6
 SPEAKERS_GAP = 12             # panel -> next section
-SPEAKER_BUTTONS = {"rename": 84, "merge": 72, "save": 84, "confirm": 92, "cancel": 72}
+SPEAKER_BUTTONS = {
+    "rename": 84, "merge": 72, "save": 84, "confirm": 92, "cancel": 72, "remember": 100,
+}
 _SPEAKER_PAD = 16             # == ui_tokens.CARD_PADDING
 _SPEAKER_BUTTON_GAP = 8
 
@@ -749,8 +816,20 @@ def meeting_speakers_layout(width: int, y: int, count: int, *, error_height: int
     return frames
 
 
-def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: bool = True) -> dict:
-    """Card-local frames of one speaker row in its normal, rename or merge state."""
+def speaker_row_frames(
+    width: int, index: int, mode: str = "", *, can_merge: bool = True, remember: bool = False,
+) -> dict:
+    """Card-local frames of one speaker row in its normal, rename or merge state.
+
+    `remember=True` adds a Remember button left of Rename in the normal row
+    (name and duration move left to make room); without it the numbers are
+    exactly the pre-recognition ones. Mode "remember" is drawn as the rename row,
+    with a submit button as wide as Remember (it reads "Remember"/"Remembering…").
+    """
+    save_w = SPEAKER_BUTTONS["save"]
+    if mode == "remember":
+        mode = "rename"
+        save_w = SPEAKER_BUTTONS["remember"]
     y0 = index * SPEAKER_ROW_H
     pad = _SPEAKER_PAD
     gap = _SPEAKER_BUTTON_GAP
@@ -765,6 +844,10 @@ def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: boo
         rename_w = SPEAKER_BUTTONS["rename"]
         rename_x = right - rename_w
         frames["rename"] = (rename_x, by, rename_w, 28)
+        if remember:
+            remember_w = SPEAKER_BUTTONS["remember"]
+            rename_x = rename_x - gap - remember_w
+            frames["remember"] = (rename_x, by, remember_w, 28)
         duration_x = rename_x - 12 - 80
         frames["duration"] = (duration_x, y0 + 14, 80, 18)
         frames["name"] = (pad, y0 + 12, duration_x - 12 - pad, 20)
@@ -773,7 +856,6 @@ def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: boo
     cancel_x = right - cancel_w
     frames["cancel"] = (cancel_x, by, cancel_w, 28)
     if mode == "rename":
-        save_w = SPEAKER_BUTTONS["save"]
         save_x = cancel_x - gap - save_w
         frames["save"] = (save_x, by, save_w, 28)
         frames["field"] = (pad, y0 + 6, save_x - 12 - pad, 32)
@@ -1005,6 +1087,8 @@ def mirror_speakers(source, target, payload, error) -> bool:
     Authoritative (no ticket), so `target`'s epoch moves on: a status poll
     sent before the edit can't put the old names back.
     """
+    if getattr(source, "last_action", "") == "remember":
+        return False  # a voiceprint answer, not speakers: syncing it would wipe `target`
     if error or source.error or not source.meeting_id or source.meeting_id != target.meeting_id:
         return False
     if not isinstance(payload, dict) or payload.get("meeting_id") not in (None, source.meeting_id):

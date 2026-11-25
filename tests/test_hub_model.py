@@ -1687,3 +1687,141 @@ def test_recent_speakers_reload_after_stale_speaker_error():
     assert state.state == "ready"
     assert state.panel.row("S1")["label"] == "Sarah"
 
+
+# ------------------------------------------------- remember (recognition) ---
+
+def _no_overlaps(frames):
+    keys = [key for key in frames if key != "divider"]
+    for i, first in enumerate(keys):
+        ax, ay, aw, ah = frames[first]
+        assert aw > 0, first
+        for second in keys[i + 1:]:
+            bx, by, bw, bh = frames[second]
+            assert not (ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah), (
+                first, second,
+            )
+
+
+@pytest.mark.parametrize("width", [SPEAKER_BODY_MIN, 600, SPEAKER_BODY_WIDE])
+def test_speaker_row_frames_without_remember_are_unchanged(width):
+    for mode in ("", "rename", "merge"):
+        for can_merge in (True, False):
+            assert hub_model.speaker_row_frames(width, 2, mode, can_merge=can_merge) == (
+                hub_model.speaker_row_frames(width, 2, mode, can_merge=can_merge, remember=False)
+            )
+    plain = hub_model.speaker_row_frames(width, 1, "")
+    added = hub_model.speaker_row_frames(width, 1, "", remember=True)
+    assert set(added) - set(plain) == {"remember"}
+    assert added["rename"] == plain["rename"] and added["merge"] == plain["merge"]
+    assert added["remember"][0] + added["remember"][2] + 8 == plain["rename"][0]
+    assert added["name"][2] == plain["name"][2] - 108
+    _no_overlaps(added)
+    _no_overlaps(hub_model.speaker_row_frames(width, 1, "", can_merge=False, remember=True))
+    # Rename and merge rows don't change with remember on.
+    for mode in ("rename", "merge"):
+        assert hub_model.speaker_row_frames(width, 1, mode, remember=True) == (
+            hub_model.speaker_row_frames(width, 1, mode)
+        )
+
+
+@pytest.mark.parametrize("width", [SPEAKER_BODY_MIN, SPEAKER_BODY_WIDE])
+def test_remember_mode_is_the_rename_row_with_a_wider_submit(width):
+    rename = hub_model.speaker_row_frames(width, 0, "rename")
+    remember = hub_model.speaker_row_frames(width, 0, "remember")
+    assert set(remember) == set(rename)
+    assert remember["cancel"] == rename["cancel"]
+    assert remember["save"][2] == hub_model.SPEAKER_BUTTONS["remember"]
+    _no_overlaps(remember)
+
+
+def test_begin_remember_needs_the_flag_and_prefills_the_given_draft():
+    panel = _panel()
+    panel.begin_remember("S1", "")
+    assert panel.mode == ""
+    revision = panel.revision
+    panel.set_remember(True)
+    assert panel.remember and panel.revision == revision + 1
+    panel.begin_remember("S9", "")
+    assert panel.mode == ""
+    panel.begin_remember("S1", "")
+    assert panel.mode == "remember" and panel.draft == "" and panel.speaker_id == "S1"
+    panel.set_draft("Sar", "S1")
+    panel.set_draft("stale", "S2")
+    assert panel.draft == "Sar"
+    panel.begin_remember("S2", "Speaker Two")
+    assert panel.speaker_id == "S2" and panel.draft == "Speaker Two"
+
+
+def test_submit_remember_validates_and_sends_enroll():
+    panel = _panel()
+    panel.set_remember(True)
+    panel.begin_remember("S2", "")
+    assert panel.submit_remember("   ") is None and panel.error == "Type a name first."
+    request = panel.submit_remember("  Dana   Lee ")
+    assert request == ("enroll", ("Dana Lee", SPEAKER_MID, "S2"), panel.epoch)
+    assert panel.busy == "remember"
+    assert panel.submit_remember("Again") is None
+
+
+def test_finish_remember_marks_remembered_and_keeps_the_rows():
+    panel = _panel()
+    panel.set_remember(True)
+    rows = list(panel.rows)
+    panel.begin_remember("S1", "")
+    _op, _args, token = panel.submit_remember("Sarah")
+    assert panel.finish(token, {"id": "a" * 32, "name": "Sarah"}, None) is True
+    assert panel.rows == rows and panel.error == "" and panel.mode == ""
+    assert panel.is_remembered("S1") and not panel.is_remembered("S2")
+    assert panel.last_action == "remember"
+    panel.begin_remember("S1", "")
+    assert panel.mode == ""  # already remembered this session
+
+
+def test_finish_remember_error_text_keeps_the_prompt():
+    from localflow.meeting_client import MeetingClientError
+
+    panel = _panel()
+    panel.set_remember(True)
+    panel.begin_remember("S1", "")
+    _op, _args, token = panel.submit_remember("Sarah")
+    error = MeetingClientError("this meeting has no stored voice data", 409)
+    assert panel.finish(token, None, error)
+    assert panel.error == (
+        "Couldn't remember the speaker: This meeting was saved without speaker "
+        "recognition, so there is no voice to remember."
+    )
+    assert panel.mode == "remember" and panel.draft == "Sarah"
+    assert not panel.is_remembered("S1")
+
+
+def test_set_remember_off_closes_an_open_remember_edit():
+    panel = _panel()
+    panel.set_remember(True)
+    panel.begin_remember("S1", "Draft")
+    panel.set_remember(False)
+    assert panel.mode == "" and panel.draft == "" and not panel.remember
+    panel.set_remember(True)
+    panel.begin_rename("S1")
+    panel.set_remember(False)
+    assert panel.mode == "rename"  # other edits stay
+
+
+def test_mirror_after_remember_never_wipes_the_other_panel():
+    source = _speaker_panel_for(RECENT_MID)
+    target = _speaker_panel_for(RECENT_MID)
+    source.set_remember(True)
+    source.begin_remember("S1", "")
+    _op, _args, token = source.submit_remember("Sarah")
+    voiceprint = {"id": "a" * 32, "name": "Sarah"}
+    source.finish(token, voiceprint, None)
+    rows, epoch = list(target.rows), target.epoch
+    assert hub_model.mirror_speakers(source, target, voiceprint, None) is False
+    assert target.rows == rows and target.epoch == epoch
+    # A later rename mirrors as before.
+    source.begin_rename("S2")
+    _op, _args, token = source.submit_rename("Bo")
+    payload = _recent_payload(RECENT_MID, "Speaker 1", "Bo")
+    source.finish(token, payload, None)
+    assert hub_model.mirror_speakers(source, target, payload, None) is True
+    assert target.row("S2")["label"] == "Bo"
+
