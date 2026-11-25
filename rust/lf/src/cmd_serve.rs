@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use lf_core::config::{load_config, Config};
-use lf_meetings::{system_audio, AudioSource, Transcriber};
+use lf_meetings::{system_audio, AudioSource, TimedTranscript, Transcriber};
 use lf_meetings_backend::{CaptureFactory, MeetingSave, MeetingsBackend};
 use lf_server::{backend::UnavailableBackend, Server, ServerState};
 use lf_stt::server::{SharedSpeech, SttBackend};
@@ -17,6 +17,15 @@ struct MeetingSpeech(SharedSpeech, Config);
 impl Transcriber for MeetingSpeech {
     fn transcribe(&self, audio: &[f32], prompt: Option<&str>) -> Result<String> {
         Ok(self.0.transcribe(&self.1, audio, prompt)?.text)
+    }
+
+    /// The same single inference; the engine's segment timings ride along.
+    fn transcribe_chunk(&self, audio: &[f32], prompt: Option<&str>) -> Result<TimedTranscript> {
+        let transcript = self.0.transcribe(&self.1, audio, prompt)?;
+        Ok(TimedTranscript {
+            text: transcript.text,
+            segments: transcript.segments,
+        })
     }
 }
 
@@ -42,6 +51,21 @@ impl CaptureFactory for MeetingCapture {
             system_audio::SAMPLE_RATE,
             config.field_str("system_audio_device").unwrap_or_default(),
         )?))
+    }
+
+    /// Built with `--features diarize`: the verified B6 models from the local
+    /// Hugging Face cache, loaded on the collector's worker (never downloaded).
+    #[cfg(feature = "diarize")]
+    fn diarizer(
+        &self,
+        config: &Config,
+    ) -> Result<Option<Box<dyn lf_meetings::diarize::SpeakerBackend>>> {
+        if config.field_str("diarization_backend") != Some("sherpa-onnx") {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(lf_diarize::sherpa::SherpaBackend::new(
+            lf_stt::model_storage::hf_hub_cache(None),
+        ))))
     }
 }
 

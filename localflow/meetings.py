@@ -506,11 +506,12 @@ _SPEAKER_NOTE = (
 )
 
 _DIARIZED_SPEAKER_NOTE = (
-    'Transcript lines are prefixed with a speaker: "Me" is the user (their '
-    'microphone); "Speaker 1", "Speaker 2" and so on are distinct remote '
-    "participants told apart by voice; any other name is a participant as "
-    'labelled by the user; "Others" is call audio (system audio) without a '
-    "more specific display label."
+    'Transcript lines are prefixed with a speaker: "Speaker 1", "Speaker 2" '
+    "and so on are distinct people told apart by voice, whether they spoke "
+    "into the user's microphone or on the call; \"Me\" is the user's "
+    'microphone and "Others" is call audio (system audio), each where no more '
+    "specific label was found; any other name is a participant as labelled "
+    "by the user."
 )
 
 

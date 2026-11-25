@@ -11,10 +11,11 @@ pub mod titles;
 pub mod watcher;
 pub mod writer;
 
-pub use capture::{MeetingSession, Transcriber};
+pub use capture::{MeetingSession, SpeakerLabels, TimedTranscript, Transcriber};
 use caseless::Caseless;
 use lf_core::symbols::pycompat as py;
 pub use lf_core::transcript::TimedText;
+pub use lf_diarize as diarize;
 use lf_providers::LlmProvider;
 pub use media::strip_remote_media;
 pub use prompts::ENHANCE_INSTRUCTION;
