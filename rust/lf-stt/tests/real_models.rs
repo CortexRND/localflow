@@ -3,7 +3,7 @@
 mod support;
 
 #[cfg(any(feature = "whisper", feature = "parakeet"))]
-fn exercise(mut engine: impl lf_stt::SpeechEngine, model: &str) {
+fn exercise(mut engine: impl lf_stt::SpeechEngine, model: &str) -> lf_stt::Transcript {
     let _lease = lf_stt::stt_lease::record(engine.id(), model, None, true).unwrap();
     let clip = support::read_clip(None).unwrap();
     eprintln!("{} (source: {} Hz)", clip.name, clip.original_sample_rate);
@@ -28,6 +28,7 @@ fn exercise(mut engine: impl lf_stt::SpeechEngine, model: &str) {
     engine.unload();
     assert!(!engine.loaded());
     assert!(engine.transcribe(&clip.pcm, None).is_err());
+    transcript
 }
 
 /// Downloads models: `cargo test -p lf-stt whisper_real_model -- --ignored`.
@@ -46,5 +47,10 @@ fn whisper_real_model() {
 #[test]
 #[ignore]
 fn parakeet_real_model() {
-    exercise(lf_stt::engines::ParakeetEngine::new("cpu").unwrap(), "base");
+    let transcript = exercise(lf_stt::engines::ParakeetEngine::new("cpu").unwrap(), "base");
+    let boundaries = [". ", "? ", "! "]
+        .iter()
+        .map(|mark| transcript.text.matches(mark).count())
+        .sum::<usize>();
+    assert_eq!(transcript.segments.len(), 1 + boundaries);
 }
