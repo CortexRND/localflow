@@ -2,6 +2,7 @@
 //! port of `cluster.py`, in f64 throughout.
 
 use anyhow::{bail, Result};
+use std::collections::BTreeSet;
 
 pub const DIST_SLACK: f64 = 1e-12;
 
@@ -41,50 +42,48 @@ pub fn cluster<V: AsRef<[f64]>>(
         });
     }
     let n = x.len();
-    // Upper triangle only (i < j); everything else is +inf, as in the Python matrix.
-    let mut dist = vec![f64::INFINITY; n * n];
+    // The Python matrix's upper triangle (i < j). Dead clusters' entries are
+    // never read again, so they are left as they are rather than set to +inf.
+    let mut dist = vec![0.0f64; n * n];
+    // Every live pair keyed by (distance, row, column): the first key is
+    // np.argmin's first row-major minimum. Keys are removed exactly when their
+    // pair changes, so the index holds at most n(n-1)/2 entries, never stale ones.
+    let mut pairs = BTreeSet::new();
     for i in 0..n {
         for j in i + 1..n {
             let dot: f64 = x[i].iter().zip(&x[j]).map(|(a, b)| a * b).sum();
-            dist[i * n + j] = (1.0 - dot).max(0.0);
+            let d = (1.0 - dot).max(0.0);
+            dist[i * n + j] = d;
+            pairs.insert(Pair::new(d, i, j));
         }
     }
     let mut sizes = vec![1.0f64; n];
+    let mut alive_mask = vec![true; n];
     let mut parent: Vec<usize> = (0..n).collect();
     let mut alive = n;
     let limit = max_speakers.unwrap_or(n);
     while alive > 1 {
-        // np.argmin: the first minimum in row-major order.
-        let mut flat = 0;
-        for k in 1..n * n {
-            if dist[k] < dist[flat] {
-                flat = k;
-            }
-        }
-        let (i, j) = (flat / n, flat % n);
-        let d = dist[flat];
+        let Some(&Pair(d, i, j)) = pairs.first() else {
+            break;
+        };
         if d > threshold + DIST_SLACK && alive <= limit {
             break;
         }
-        let at = |a: usize, b: usize| dist[a * n + b];
-        let merged: Vec<f64> = (0..n)
-            .map(|k| {
-                let col_i = at(k, i).min(at(i, k));
-                let col_j = at(k, j).min(at(j, k));
-                (sizes[i] * col_i + sizes[j] * col_j) / (sizes[i] + sizes[j])
-            })
-            .collect();
-        for (k, value) in merged.iter().enumerate() {
-            if k < i {
-                dist[k * n + i] = *value;
-            } else if k > i {
-                dist[i * n + k] = *value;
+        let at = |dist: &[f64], a: usize, b: usize| dist[a.min(b) * n + a.max(b)];
+        alive_mask[j] = false;
+        for k in (0..n).filter(|&k| alive_mask[k]) {
+            if k == i {
+                continue;
             }
+            let (d_ki, d_kj) = (at(&dist, k, i), at(&dist, k, j));
+            pairs.remove(&Pair::new(d_ki, k.min(i), k.max(i)));
+            pairs.remove(&Pair::new(d_kj, k.min(j), k.max(j)));
+            // Same arithmetic as the Python update, so ties break identically.
+            let merged = (sizes[i] * d_ki + sizes[j] * d_kj) / (sizes[i] + sizes[j]);
+            dist[k.min(i) * n + k.max(i)] = merged;
+            pairs.insert(Pair::new(merged, k.min(i), k.max(i)));
         }
-        for k in 0..n {
-            dist[j * n + k] = f64::INFINITY;
-            dist[k * n + j] = f64::INFINITY;
-        }
+        pairs.remove(&Pair::new(at(&dist, i, j), i, j));
         sizes[i] += sizes[j];
         for p in parent.iter_mut() {
             if *p == j {
@@ -93,15 +92,45 @@ pub fn cluster<V: AsRef<[f64]>>(
         }
         alive -= 1;
     }
-    let mut labels: Vec<usize> = Vec::new();
+    let mut labels = vec![usize::MAX; n];
+    let mut next = 0;
     Ok(parent
         .iter()
-        .map(|p| match labels.iter().position(|l| l == p) {
-            Some(label) => label,
-            None => {
-                labels.push(*p);
-                labels.len() - 1
+        .map(|&p| {
+            if labels[p] == usize::MAX {
+                labels[p] = next;
+                next += 1;
             }
+            labels[p]
         })
         .collect())
+}
+
+/// `(distance, row, column)`, ordered by distance, then row, then column.
+#[derive(Clone, Copy, Debug)]
+struct Pair(f64, usize, usize);
+impl Pair {
+    /// `-0.0` becomes `0.0`, so the order matches `<` on the Python matrix.
+    fn new(d: f64, i: usize, j: usize) -> Self {
+        Self(if d == 0.0 { 0.0 } else { d }, i, j)
+    }
+}
+impl PartialEq for Pair {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for Pair {}
+impl PartialOrd for Pair {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Pair {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .total_cmp(&other.0)
+            .then(self.1.cmp(&other.1))
+            .then(self.2.cmp(&other.2))
+    }
 }
