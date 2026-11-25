@@ -519,3 +519,165 @@ def test_collector_import_is_isolated():
         "bad = {'localflow.meetings', 'localflow.server', 'sounddevice', 'sherpa_onnx'}\n"
         "assert not bad & set(sys.modules), bad & set(sys.modules)\n"
     )
+
+
+# ------------------------------------------------------ recognition (slice B9) ---
+
+class FakeVoiceprint:
+    def __init__(self, vid, name):
+        self.id, self.name = vid, name
+
+
+class FakeRegistry:
+    """Names tone 0 "Dana"; records every query."""
+
+    def __init__(self, known=None, error=None, delay=0.0):
+        self.known = {0: FakeVoiceprint("a" * 32, "Dana")} if known is None else known
+        self.error, self.delay = error, delay
+        self.calls = []
+
+    def match(self, vector, model_id):
+        self.calls.append((np.asarray(vector).copy(), model_id))
+        if self.delay:
+            time.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        vp = self.known.get(int(np.argmax(vector)))
+        return None if vp is None else (vp, 1.0)
+
+
+def _three_voice_meeting(c):
+    _, a = _chunk(c, "others", 0.0, np.concatenate([tone(0, 4), tone(1, 4), tone(2, 4)]))
+    return c.finalize([Seg(0.0, "hello", "me"), a])
+
+
+def test_recognised_speaker_is_named_on_speaker_and_segments():
+    registry = FakeRegistry()
+    result = _three_voice_meeting(_new(registry=registry))
+    assert result.status == "ok"
+    assert [(s.id, s.label, s.name, s.voiceprint_id) for s in result.speakers] == [
+        ("S1", "Dana", "Dana", "a" * 32), ("S2", "Speaker 2", None, None),
+        ("S3", "Speaker 3", None, None)]
+    assert [(s.speaker_id, s.speaker_label) for s in result.segments] == [
+        (None, None), ("S1", "Dana"), ("S2", "Speaker 2"), ("S3", "Speaker 3")]
+    assert [m for _, m in registry.calls] == ["mock"] * 3
+    assert sorted(result.centroids) == ["S1", "S2", "S3"]
+    for sid, idx in (("S1", 0), ("S2", 1), ("S3", 2)):
+        vec = result.centroids[sid]
+        assert vec.dtype == np.float32 and int(np.argmax(vec)) == idx
+        assert float(np.linalg.norm(vec)) == pytest.approx(1.0)
+
+
+def test_one_voiceprint_may_name_several_speakers():
+    vp = FakeVoiceprint("a" * 32, "Dana")
+    result = _three_voice_meeting(_new(registry=FakeRegistry({0: vp, 2: vp})))
+    assert [s.label for s in result.speakers] == ["Dana", "Speaker 2", "Dana"]
+    assert [s.speaker_id for s in result.segments] == [None, "S1", "S2", "S3"]
+
+
+def test_no_registry_computes_no_centroids_and_names_nobody(monkeypatch):
+    seen = []
+    real = collector_module.DiarizationCollector._label_source
+
+    def spy(self, records, **kwargs):
+        seen.append(kwargs)
+        return real(self, records, **kwargs)
+
+    monkeypatch.setattr(collector_module.DiarizationCollector, "_label_source", spy)
+    result = _three_voice_meeting(_new())
+    assert result.centroids == {}
+    assert seen and all(kw == {"centroids": False} for kw in seen)
+    assert [s.label for s in result.speakers] == ["Speaker 1", "Speaker 2", "Speaker 3"]
+
+
+def test_registry_attached_then_removed_before_finalize_is_never_called():
+    registry = FakeRegistry()
+    c = _new(registry=registry)
+    c.registry = None  # the server does this when recognition was turned off mid-meeting
+    result = _three_voice_meeting(c)
+    assert registry.calls == [] and result.centroids == {}
+    assert result.speakers[0].label == "Speaker 1"
+
+
+def test_raising_registry_leaves_everyone_anonymous(caplog):
+    registry = FakeRegistry(error=RuntimeError("secret Dana [0.1, 0.2]"))
+    with caplog.at_level("DEBUG", "localflow.diarization"):
+        result = _three_voice_meeting(_new(registry=registry))
+    assert result.status == "ok"
+    assert [s.label for s in result.speakers] == ["Speaker 1", "Speaker 2", "Speaker 3"]
+    assert len(registry.calls) == 1  # stops after the first failure
+    text = "\n".join(r.getMessage() + str(r.exc_info or "") for r in caplog.records)
+    assert "secret" not in text and "Dana" not in text
+
+
+def test_unknown_embedder_id_skips_recognition():
+    class NoId(MockEmbedder):
+        id = None
+
+    registry = FakeRegistry()
+    c = _make(MockDiarizer(), NoId(), registry=registry)
+    result = _three_voice_meeting(c)
+    assert registry.calls == []
+    assert result.speakers[0].label == "Speaker 1"
+
+
+def test_single_remote_voice_is_not_recognised():
+    registry = FakeRegistry()
+    c = _new(registry=registry)
+    _, a = _chunk(c, "others", 0.0, tone(0, 4))
+    result = c.finalize([a])
+    assert result.speakers == [] and registry.calls == []
+    assert result.segments[0].speaker_label is None
+
+
+def test_slow_registry_is_bounded_by_the_finalize_timeout():
+    registry = FakeRegistry(delay=0.5)
+    c = _new(registry=registry)
+    _, a = _chunk(c, "others", 0.0, np.concatenate([tone(0, 4), tone(1, 4), tone(2, 4)]))
+    t0 = time.monotonic()
+    result = c.finalize([a], timeout=0.2)
+    assert time.monotonic() - t0 < 0.45
+    assert result.status == "timeout" and result.segments == [a] and result.centroids == {}
+    # The abandoned matcher (3 x 0.5 s) ends before the autouse thread check gives up.
+
+
+def test_gate_closed_after_the_drain_skips_recognition_entirely():
+    registry = FakeRegistry()
+    gate = {"open": True}
+    c = _new(registry=registry, recognition_allowed=lambda: gate["open"])
+    _, a = _chunk(c, "others", 0.0, np.concatenate([tone(0, 4), tone(1, 4), tone(2, 4)]))
+    gate["open"] = False  # opted out after capture, before finalize reads the gate
+    result = c.finalize([Seg(0.0, "hello", "me"), a])
+    assert result.status == "ok" and result.centroids == {} and registry.calls == []
+    assert [s.label for s in result.speakers] == ["Speaker 1", "Speaker 2", "Speaker 3"]
+
+
+def test_gate_closing_mid_match_drops_names_found_so_far():
+    gate = {"open": True}
+
+    class ClosingRegistry(FakeRegistry):
+        def match(self, vector, model_id):
+            hit = super().match(vector, model_id)
+            gate["open"] = False  # the opt-out lands during the first match
+            return hit
+
+    registry = ClosingRegistry()
+    c = _new(registry=registry, recognition_allowed=lambda: gate["open"])
+    result = _three_voice_meeting(c)
+    assert len(registry.calls) == 1  # no further registry reads after the opt-out
+    assert result.status == "ok" and result.centroids == {}
+    assert [(s.label, s.name, s.voiceprint_id) for s in result.speakers] == [
+        ("Speaker 1", None, None), ("Speaker 2", None, None), ("Speaker 3", None, None)]
+    assert [s.speaker_label for s in result.segments] == [
+        None, "Speaker 1", "Speaker 2", "Speaker 3"]
+
+
+def test_raising_gate_fails_closed():
+    registry = FakeRegistry()
+
+    def broken():
+        raise RuntimeError("config unavailable")
+
+    result = _three_voice_meeting(_new(registry=registry, recognition_allowed=broken))
+    assert registry.calls == [] and result.centroids == {}
+    assert result.speakers[0].label == "Speaker 1"

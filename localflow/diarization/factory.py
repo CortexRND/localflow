@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from localflow.config import Config
 
     from .collector import DiarizationCollector
+    from .types import SpeakerEmbedder
 
 log = logging.getLogger("localflow.diarization")
 
@@ -54,3 +55,31 @@ def build_diarization(config: Config) -> tuple[DiarizationCollector | None, str]
         reason = str(exc) or type(exc).__name__
         log.warning("speaker diarization unavailable: %s", reason)
         return None, reason
+
+
+def build_embedder(config: Config) -> SpeakerEmbedder:
+    """A loaded embedder for enrollment from audio; raises DiarizationUnavailable.
+
+    Not cached: enrollment is rare, and keeping the model loaded would change idle memory.
+    """
+    from .types import DiarizationUnavailable
+
+    backend = getattr(config, "diarization_backend", "sherpa-onnx")
+    if backend == "mock":
+        from .mock import MockEmbedder
+
+        embedder = MockEmbedder()
+    elif backend == "sherpa-onnx":
+        from .sherpa import SherpaEmbedder
+
+        embedder = SherpaEmbedder()
+    else:
+        raise DiarizationUnavailable("unknown diarization backend")
+    try:
+        embedder.load()
+    except DiarizationUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surfaced as "unavailable"
+        raise DiarizationUnavailable(
+            f"The voice model could not be loaded ({type(exc).__name__}).") from None
+    return embedder

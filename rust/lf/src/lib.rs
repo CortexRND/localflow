@@ -36,6 +36,7 @@ mod cmd_recall;
 mod cmd_secret;
 mod cmd_serve;
 mod cmd_setup;
+mod cmd_speakers;
 mod cmd_status;
 mod cmd_stt;
 mod cmd_token;
@@ -314,6 +315,7 @@ fn dispatch(command: Command, io: &mut Io<'_>) -> anyhow::Result<()> {
         Command::Secret(command) => cmd_secret::run(command, io),
         Command::Status { json } => cmd_status::run(json, io),
         Command::Meeting(command) => cmd_meeting::run(command, io),
+        Command::Speakers(command) => cmd_speakers::run(command, io),
         Command::Prompts(command) => cmd_prompts::run(command, io),
         Command::Recall(args) => cmd_recall::run(args, io),
         Command::Hub { page, gpui, legacy } => cmd_hub::run(page, gpui, legacy, io),

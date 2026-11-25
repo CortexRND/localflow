@@ -3013,6 +3013,82 @@ def test_cli_recall_llm_answers(rust_build, sandbox):
         server.server_close()
 
 
+# Labelled first lines, each its own transcript (so its own chunk), and the
+# speaker the live real cleaner allows; only byte-identical clean names count.
+_SPEAKER_LINES = [
+    ("**00:00** **Me:** roadmap kickoff", "Me"),
+    ("**[01:15]** **Speaker 2:** roadmap bracketed", "Speaker 2"),
+    ("**1:02:03**\t**Dana O'Neil:** roadmap tab", "Dana O'Neil"),
+    ("**00:00** **José:** roadmap composed", "José"),
+    (f"**00:00** **{'A' * 40}:** roadmap forty", "A" * 40),
+    (f"**00:00** **{'A' * 41}:** roadmap forty-one", None),           # capped at 40
+    ("**00:00** **José:** roadmap decomposed", None),            # NFKC composes
+    ("**00:00** **Ｄａｎａ:** roadmap fullwidth", None),  # NFKC folds
+    ("**00:00** **Dana  Smith:** roadmap spaced", None),
+    ("**00:00** **!!!:** roadmap junk", None),
+    ("**00:00** **Me:** roadmap no-break space", None),
+    ("**00:00** roadmap unlabelled\n**00:05** **Dana:** roadmap later", None),
+]
+
+
+def test_cli_recall_speaker_citations_follow_setting(rust_build, sandbox):
+    _require_isolated(rust_build, sandbox, "history_path")
+    port = _free_port()
+    _seed_recall(sandbox, base_url=f"http://127.0.0.1:{port}")
+    vault = sandbox["root"] / "vault"
+    for i, (text, _) in enumerate(_SPEAKER_LINES):
+        (vault / "Transcripts" / f"2026-11-20 09{i:02d} S{i} (transcript).md").write_text(
+            f"# S{i}\n\n{text}\n", encoding="utf-8")
+    (vault / "Notes" / "2026-11-20 1000 Labelled.md").write_text("**00:00** **Me:** roadmap note", encoding="utf-8")
+    HistoryStore(sandbox["home"] / ".localflow" / "history.sqlite", sandbox["home"] / ".localflow" / "clips").add(
+        kind="dictate", app_name="Editor", final_text="**00:00** **Me:** roadmap dictation",
+        ts=datetime.now().timestamp())
+    expected = {f"S{i}": speaker for i, (_, speaker) in enumerate(_SPEAKER_LINES)}
+
+    def without_speaker(body):
+        return {**body, "citations": [{k: v for k, v in c.items() if k != "speaker"} for c in body["citations"]]}
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeOllama)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    _FakeOllama.status, _FakeOllama.reply = 200, "Roadmap kicked off [1]."
+    try:
+        for flags in [("--no-llm", "--json"), ("--no-llm",), ("--json",), ()]:
+            outputs, prompts = [], []
+            for enabled in (False, True):
+                save_config(Config(vault_path=str(vault), notes_folder="Notes", logs_folder="Transcripts",
+                                   llm_provider="ollama", llm_base_url=f"http://127.0.0.1:{port}",
+                                   speaker_diarization=enabled), sandbox["config"])
+                _FakeOllama.prompts.clear()
+                rust, python = _clis(rust_build, sandbox, "recall", "roadmap", "--k", "20", *flags)
+                assert _cli_output(rust) == _cli_output(python), (flags, enabled)
+                assert rust.returncode == 0 and not rust.stderr, (flags, enabled, rust.stderr)
+                llm = "--no-llm" not in flags
+                assert len(_FakeOllama.prompts) == 2 * llm
+                if llm:
+                    assert _FakeOllama.prompts[0] == _FakeOllama.prompts[1]
+                prompts.append(list(_FakeOllama.prompts))
+                outputs.append(rust.stdout)
+                if "--json" in flags:
+                    body = json.loads(rust.stdout)
+                    assert (body["answer"] is not None) == llm
+                    sources = {c["source"] for c in body["citations"]}
+                    assert sources == {"meeting", "notes", "dictation"}, sources
+                    for c in body["citations"]:
+                        want = expected.get(c["title"]) if enabled and c["source"] == "meeting" else None
+                        assert c.get("speaker") == want and ("speaker" in c) == (want is not None), (flags, c)
+                        assert list(c)[-1] == ("speaker" if want else "ref")
+            assert prompts[0] == prompts[1], flags
+            if "--json" in flags:
+                off, on = (json.loads(out) for out in outputs)
+                assert any("speaker" in c for c in on["citations"])
+                assert without_speaker(on) == off
+            else:
+                assert outputs[0] == outputs[1], flags  # plain text never shows speakers
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # ------------------------------------------------------------- token / hub ---
 
 

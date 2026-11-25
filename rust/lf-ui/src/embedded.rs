@@ -476,6 +476,7 @@ impl EmbeddedRuntime {
                 ensure_server_token(&lf_core::apitoken::try_token_path()?)?;
                 let dictation = dictation_backend(speech.clone(), &config);
                 let backend = lf_meetings_backend::MeetingsBackend::new()?
+                    .with_config_reader(Arc::new(lf_core::config::load_config))
                     .with_inner(Arc::new(dictation))
                     .with_capture(Arc::new(Capture {
                         speech: server_shared.clone(),

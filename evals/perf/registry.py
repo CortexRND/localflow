@@ -1,7 +1,7 @@
 """Suite registry.
 
 Later PRs register suites here (``stt``, ``footprint``, ``dictation``,
-``recall``, ``meetings``)::
+``recall``, ``meetings``, ``diarization``)::
 
     from evals.perf.registry import RunContext, register_suite
 
@@ -21,7 +21,7 @@ from pathlib import Path
 
 #: Suites from the design spec, in report order. Any of these that is not
 #: registered yet shows up as ``not_exercised`` rather than silently absent.
-PLANNED_SUITES = ("stt", "dictation", "meetings", "recall", "footprint")
+PLANNED_SUITES = ("stt", "dictation", "meetings", "recall", "footprint", "diarization")
 
 NOT_IMPLEMENTED_REASON = "suite not implemented yet"
 

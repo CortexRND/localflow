@@ -37,11 +37,34 @@ impl BackendResponse {
     }
 }
 
+/// A binary response (the voiceprint export), outside the JSON envelope.
+pub struct Download {
+    pub content_type: &'static str,
+    pub headers: Vec<(&'static str, String)>,
+    pub body: Vec<u8>,
+}
+
 /// Runs on Tokio's blocking pool, never on an executor worker. Implementations
 /// own validation and lifecycle for their routes. They must not log request
 /// bodies/headers (which can contain credentials or private recordings).
 pub trait Backend: Send + Sync + 'static {
     fn handle(&self, request: BackendRequest) -> BackendResponse;
+
+    /// [`handle`](Self::handle) for a request the HTTP server judged `local`:
+    /// a loopback peer and `Host`, without proxy/forwarding headers. Routes
+    /// that are only for this computer must treat a plain `handle` call as
+    /// remote (fail closed).
+    fn handle_local(&self, request: BackendRequest, local: bool) -> BackendResponse {
+        let _ = local;
+        self.handle(request)
+    }
+
+    /// A binary download route (`GET /api/speakers/export`); `local` as in
+    /// [`handle_local`](Self::handle_local).
+    fn download(&self, request: BackendRequest, local: bool) -> Result<Download, BackendResponse> {
+        let _ = local;
+        Err(self.handle(request))
+    }
 
     /// Execute maintenance only while no owned session can start or stop.
     fn while_idle(&self, action: &mut dyn FnMut()) -> bool {
@@ -76,6 +99,12 @@ impl Backend for UnavailableBackend {
             "/api/autostart" => "autostart",
             p if p.starts_with("/prompts") => "prompts",
             p if p.starts_with("/meeting") => "meeting",
+            p if p.starts_with("/api/speakers")
+                || p.starts_with("/api/meetings/")
+                || p == "/api/diarization/status" =>
+            {
+                "meeting"
+            }
             _ => "settings agent",
         };
         BackendResponse::error(503, format!("{name} backend unavailable"))

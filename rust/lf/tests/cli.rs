@@ -1145,3 +1145,369 @@ mod hub_unix {
         assert_eq!(lines(&record, 4).len(), 4);
     }
 }
+
+/// A loopback HTTP stub answering each connection with the next canned
+/// `(status line, content type, body)`; returns the port and the requests
+/// it saw (request line + body).
+fn stub(
+    answers: Vec<(&'static str, &'static str, Vec<u8>)>,
+) -> (u16, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Read};
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (seen, requests) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for (status, content_type, body) in answers {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap();
+                }
+            }
+            let mut payload = vec![0; length];
+            reader.read_exact(&mut payload).unwrap();
+            let _ = seen.send(format!(
+                "{}{}",
+                first.trim_end(),
+                String::from_utf8_lossy(&payload)
+            ));
+            let mut stream = stream;
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nLocation: http://127.0.0.1:1/x\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        }
+    });
+    (port, requests)
+}
+
+#[test]
+fn speaker_commands_validate_arguments_before_any_request() {
+    let sandbox = Sandbox::new();
+    let clip = sandbox.root().join("clip.wav");
+    std::fs::write(&clip, b"RIFF").unwrap();
+    let clip = clip.to_string_lossy().into_owned();
+    for (args, message) in [
+        (
+            &["speakers", "enroll", "Ana"][..],
+            "Error: use exactly one of --from-meeting, --file or --record\n",
+        ),
+        (
+            &[
+                "speakers", "enroll", "Ana", "--file", &clip, "--record", "3",
+            ],
+            "Error: use exactly one of --from-meeting, --file or --record\n",
+        ),
+        (
+            &["speakers", "enroll", "Ana", "--from-meeting", "m"],
+            "Error: --speaker goes with --from-meeting (and is required by it)\n",
+        ),
+        (
+            &["speakers", "forget"],
+            "Error: pass a NAME_OR_ID or --all\n",
+        ),
+        (
+            &["speakers", "forget", "Ana", "--all"],
+            "Error: pass a NAME_OR_ID or --all\n",
+        ),
+        (
+            &["meeting", "rename-speaker", "S2"],
+            "Error: expected [ID] SPEAKER NAME\n",
+        ),
+        (
+            &["meeting", "merge-speakers", "a", "b", "c", "d"],
+            "Error: expected [ID] FROM INTO\n",
+        ),
+    ] {
+        let out = sandbox.run(args);
+        assert_eq!(
+            (code(&out), stderr(&out)),
+            (2, message.to_string()),
+            "{args:?}"
+        );
+    }
+    assert_eq!(
+        code(&sandbox.run(&["speakers", "enroll", "Ana", "--record", "301"])),
+        2
+    );
+    // Audio and exports never go to a server that is not on this computer,
+    // and the check comes before the file is read.
+    assert_eq!(
+        code(&sandbox.run(&["config", "set", "server.host", "192.168.1.5"])),
+        0
+    );
+    let remote = "error: voice audio and exports only go to a LocalFlow server on this computer \
+                  (server_host is not a loopback address)\n";
+    for args in [
+        &["speakers", "enroll", "Ana", "--file", &clip][..],
+        &[
+            "speakers",
+            "export",
+            &sandbox.root().join("out").to_string_lossy(),
+        ],
+    ] {
+        let out = sandbox.run(args);
+        assert_eq!(
+            (code(&out), stderr(&out)),
+            (1, remote.to_string()),
+            "{args:?}"
+        );
+    }
+    assert!(!sandbox.root().join("out").exists());
+    // Never into the vault.
+    let vault = sandbox.root().join("vault");
+    assert_eq!(
+        code(&sandbox.run(&[
+            "config",
+            "set",
+            "meetings.vault_path",
+            &vault.to_string_lossy()
+        ])),
+        0
+    );
+    let out = sandbox.run(&[
+        "speakers",
+        "export",
+        &vault.join("voices").to_string_lossy(),
+    ]);
+    assert_eq!(
+        (code(&out), stderr(&out)),
+        (
+            1,
+            "error: don't export voiceprints into the Obsidian vault\n".to_string()
+        )
+    );
+}
+
+#[test]
+fn speaker_commands_talk_to_the_local_server_and_refuse_redirects() {
+    let sandbox = Sandbox::new();
+    let env = [("COLUMNS", "200"), ("NO_COLOR", "1")];
+    let status = br#"{"last_saved": {"meeting_id": "abc"}}"#.to_vec();
+    let speakers = br#"{"meeting_id": "abc", "speakers": [{"id": "S1", "label": "Speaker 1", "name": null, "source": "others", "seconds": 12}]}"#.to_vec();
+    let (port, seen) = stub(vec![
+        ("200 OK", "application/json", status),
+        ("200 OK", "application/json", speakers.clone()),
+        ("200 OK", "application/json", speakers),
+        ("404 Not Found", "application/json", br#"{"detail": "no speaker data for this meeting"}"#.to_vec()),
+        ("200 OK", "application/json", br#"{"speakers": [{"name": "Ana", "samples": 1, "created": "2026-01-01T00:00:00Z", "model_id": "old"}], "embedder": "mock"}"#.to_vec()),
+        ("200 OK", "application/json", br#"{"forgotten": 2}"#.to_vec()),
+        ("302 Found", "text/plain", Vec::new()),
+    ]);
+    assert_eq!(
+        code(&sandbox.run(&["config", "set", "server.port", &port.to_string()])),
+        0
+    );
+    let out = sandbox.run_with(&["meeting", "speakers"], &env, "");
+    assert_eq!(
+        (code(&out), stdout(&out)),
+        (0, "meeting abc\nS1\tSpeaker 1\t12.0s\tothers\n".into())
+    );
+    assert_eq!(seen.recv().unwrap(), "GET /meeting/status HTTP/1.1");
+    assert_eq!(
+        seen.recv().unwrap(),
+        "GET /api/meetings/abc/speakers HTTP/1.1"
+    );
+    let out = sandbox.run_with(
+        &["meeting", "rename-speaker", "a b", "S1", "Dana"],
+        &env,
+        "",
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        seen.recv().unwrap(),
+        r#"PUT /api/meetings/a%20b/speakers/S1 HTTP/1.1{"name":"Dana"}"#
+    );
+    let out = sandbox.run_with(&["meeting", "speakers", "zzz"], &env, "");
+    assert_eq!(
+        (code(&out), stderr(&out)),
+        (1, "error: no speaker data for this meeting\n".into())
+    );
+    seen.recv().unwrap();
+    let out = sandbox.run_with(&["speakers", "list"], &env, "");
+    assert_eq!(
+        stdout(&out),
+        "Ana\t1\t2026-01-01T00:00:00Z\told\tneeds re-enrollment (different voice model)\n"
+    );
+    seen.recv().unwrap();
+    let out = sandbox.run_with(&["speakers", "forget", "--all"], &env, "");
+    assert_eq!(stdout(&out), "forgot 2 speaker(s)\n");
+    assert_eq!(seen.recv().unwrap(), "DELETE /api/speakers HTTP/1.1");
+    let target = sandbox.root().join("voices");
+    let out = sandbox.run_with(&["speakers", "export", &target.to_string_lossy()], &env, "");
+    assert_eq!(
+        (code(&out), stdout(&out)),
+        (
+            1,
+            "error: the server answered with a redirect; refusing it\n".into()
+        )
+    );
+    assert!(!target.exists());
+}
+
+#[test]
+fn empty_and_dot_speaker_references_are_refused_before_any_request() {
+    let sandbox = Sandbox::new();
+    let (port, seen) = stub(vec![("200 OK", "application/json", b"{}".to_vec())]);
+    assert_eq!(
+        code(&sandbox.run(&["config", "set", "server.port", &port.to_string()])),
+        0
+    );
+    for (args, message) in [
+        (
+            &["speakers", "rename", "", "X"][..],
+            "Error: invalid NAME_OR_ID: ''\n",
+        ),
+        (
+            &["speakers", "rename", ".", "X"],
+            "Error: invalid NAME_OR_ID: '.'\n",
+        ),
+        (
+            &["speakers", "forget", ""],
+            "Error: invalid NAME_OR_ID: ''\n",
+        ),
+        (
+            &["speakers", "forget", ".."],
+            "Error: invalid NAME_OR_ID: '..'\n",
+        ),
+        (
+            &["meeting", "rename-speaker", "abc", ".", "Dana"],
+            "Error: invalid speaker ID: '.'\n",
+        ),
+        (
+            &["meeting", "rename-speaker", "", "Dana"],
+            "Error: invalid speaker ID: ''\n",
+        ),
+        (
+            &["meeting", "rename-speaker", "..", "S1", "Dana"],
+            "Error: invalid meeting ID: '..'\n",
+        ),
+        (
+            &["meeting", "merge-speakers", ".", "S1", "S2"],
+            "Error: invalid meeting ID: '.'\n",
+        ),
+        (
+            &["meeting", "speakers", ".."],
+            "Error: invalid meeting ID: '..'\n",
+        ),
+    ] {
+        let out = sandbox.run(args);
+        assert_eq!(
+            (code(&out), stderr(&out)),
+            (2, message.to_string()),
+            "{args:?}"
+        );
+    }
+    assert!(
+        seen.recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "no request was sent"
+    );
+}
+
+#[test]
+fn redirected_speaker_mutations_are_refused_not_followed() {
+    let sandbox = Sandbox::new();
+    let env = [("COLUMNS", "200"), ("NO_COLOR", "1")];
+    let redirect = || ("307 Temporary Redirect", "text/plain", Vec::new());
+    let (port, seen) = stub(vec![
+        redirect(),
+        redirect(),
+        redirect(),
+        redirect(),
+        redirect(),
+    ]);
+    assert_eq!(
+        code(&sandbox.run(&["config", "set", "server.port", &port.to_string()])),
+        0
+    );
+    let refused = "error: the server answered with a redirect; refusing it\n";
+    for (args, request) in [
+        (
+            &["speakers", "rename", "Ana", "Bo"][..],
+            "PATCH /api/speakers/Ana HTTP/1.1",
+        ),
+        (
+            &["speakers", "forget", "Ana"],
+            "DELETE /api/speakers/Ana HTTP/1.1",
+        ),
+        (
+            &[
+                "speakers",
+                "enroll",
+                "Ana",
+                "--from-meeting",
+                "m",
+                "--speaker",
+                "S2",
+            ],
+            "POST /api/speakers HTTP/1.1",
+        ),
+        (
+            &["meeting", "rename-speaker", "m", "S1", "Dana"],
+            "PUT /api/meetings/m/speakers/S1 HTTP/1.1",
+        ),
+        (
+            &["meeting", "merge-speakers", "m", "S1", "S2"],
+            "POST /api/meetings/m/speakers/merge HTTP/1.1",
+        ),
+    ] {
+        let out = sandbox.run_with(args, &env, "");
+        assert_eq!(
+            (code(&out), stdout(&out)),
+            (1, refused.to_string()),
+            "{args:?}"
+        );
+        assert!(seen.recv().unwrap().starts_with(request), "{args:?}");
+    }
+}
+
+#[test]
+fn speakers_status_is_local_and_reports_models_runtime_and_flags() {
+    let sandbox = Sandbox::new();
+    let hub = sandbox.root().join("hub");
+    let env = [("HF_HUB_CACHE", hub.to_str().unwrap())];
+    let out = sandbox.run_with(&["speakers", "status", "--json"], &env, "");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let info: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let keys: Vec<&str> = info
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "models_ready",
+            "reason",
+            "extra_installed",
+            "models",
+            "speaker_diarization",
+            "diarize_mic",
+            "speaker_recognition"
+        ]
+    );
+    assert_eq!(info["models_ready"], false);
+    assert_eq!(info["models"].as_array().unwrap().len(), 2);
+    let text = stdout(&sandbox.run_with(&["speakers", "status"], &env, ""));
+    assert!(
+        text.starts_with("models: not ready — Speaker models are not downloaded."),
+        "{text}"
+    );
+    assert!(text.contains("\nspeaker_recognition: false\n"));
+    assert!(text.contains("run `lf speakers download`"));
+}

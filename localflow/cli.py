@@ -859,6 +859,7 @@ def recall_cmd(question: str, since: str | None, k: int, no_llm: bool, as_json: 
         "logs_folder": config.logs_folder,
         "k": k,
         "since": since,
+        "cite_speakers": bool(config.speaker_diarization),
     }
     if no_llm:
         result = recall_module.search(question, **kwargs)
@@ -1905,7 +1906,10 @@ def menubar() -> None:
 
 @cli.group("speakers", hidden=True)
 def speakers() -> None:
-    """Speaker labels for meetings: models and status."""
+    """Speaker labels for meetings: models, status and enrolled voices.
+
+    Enrolled voices need [meetings] speaker_diarization and speaker_recognition on.
+    """
 
 
 @speakers.command("status")
@@ -1950,6 +1954,242 @@ def speakers_download() -> None:
     except Exception as exc:
         raise click.ClickException(friendly_download_error(exc)) from exc
     console.print("[green]downloaded[/green] speaker models")
+
+
+# ---- enrolled voices (speaker recognition). Every command goes through the local server,
+# the single writer of the voiceprint registry. Raw audio uploads and the export use
+# _local_send: loopback only, no proxies from the environment, no redirects.
+
+MAX_ENROLL_UPLOAD_BYTES = 25 * 1024 * 1024  # = server.MAX_UPLOAD_BYTES
+MAX_RECORD_SECONDS = 300
+
+
+def _patch(path: str, json: dict | None = None) -> dict:
+    try:
+        resp = requests.patch(BASE + path, json=json, headers=_auth_headers(), timeout=30)
+    except requests.ConnectionError:
+        console.print(f"[red]server not running[/red] — {_START_SERVER_HINT}")
+        sys.exit(1)
+    if not resp.ok:
+        console.print(f"[red]error:[/red] {_error_detail(resp)}")
+        sys.exit(1)
+    return resp.json()
+
+
+def _delete(path: str) -> dict:
+    try:
+        resp = requests.delete(BASE + path, headers=_auth_headers(), timeout=60)
+    except requests.ConnectionError:
+        console.print(f"[red]server not running[/red] — {_START_SERVER_HINT}")
+        sys.exit(1)
+    if not resp.ok:
+        console.print(f"[red]error:[/red] {_error_detail(resp)}")
+        sys.exit(1)
+    return resp.json()
+
+
+def _local_base() -> str:
+    """The server URL when the configured server is on this computer; else exit."""
+    import ipaddress
+
+    from localflow.server_url import base_url, client_host
+
+    config = load_config()
+    host = client_host(config.server_host)
+    if host.lower() == "localhost":
+        # A literal address, so a hosts-file or resolver entry can't send voice data elsewhere.
+        host = "127.0.0.1"
+    try:
+        local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        local = False
+    if not local:
+        click.echo("error: voice audio and exports only go to a LocalFlow server on this "
+                   "computer (server_host is not a loopback address)", err=True)
+        sys.exit(1)
+    return base_url(host, config.server_port)
+
+
+def _local_send(method: str, path: str, **kwargs) -> requests.Response:
+    session = requests.Session()
+    session.trust_env = False  # never route voice data through an environment proxy
+    try:
+        resp = session.request(method, _local_base() + path, headers=_auth_headers(),
+                               timeout=600, allow_redirects=False, **kwargs)
+    except requests.ConnectionError:
+        console.print(f"[red]server not running[/red] — {_START_SERVER_HINT}")
+        sys.exit(1)
+    finally:
+        session.close()
+    if 300 <= resp.status_code < 400:  # .ok is True for 3xx; never follow or accept one
+        console.print("[red]error:[/red] the server answered with a redirect; refusing it")
+        sys.exit(1)
+    if not 200 <= resp.status_code < 300:
+        console.print(f"[red]error:[/red] {_error_detail(resp)}")
+        sys.exit(1)
+    return resp
+
+
+def _wav_bytes(audio, sample_rate: int) -> bytes:
+    """16-bit PCM mono WAV in memory."""
+    import io
+    import wave
+
+    import numpy as np
+
+    pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767).astype("<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(int(sample_rate))
+        wav.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def _record_voice(seconds: int) -> bytes:
+    from localflow.audio import Recorder
+
+    config = load_config()
+    recorder = Recorder(sample_rate=config.sample_rate, device=config.input_device or None)
+    recorder.start()
+    try:
+        with console.status(f"recording {seconds}s — speak normally…"):
+            time.sleep(seconds)
+    finally:
+        audio = recorder.stop()
+    if len(audio) == 0:
+        click.echo("error: nothing was recorded", err=True)
+        sys.exit(1)
+    return _wav_bytes(audio, config.sample_rate)
+
+
+def _inside_vault(target: Path) -> bool:
+    vault_path = load_config().vault_path
+    if not vault_path:
+        return False
+    try:
+        vault = Path(vault_path).expanduser()
+        targets = {target.absolute(), target.resolve()}
+        vaults = {vault.absolute(), vault.resolve()}
+    except (OSError, RuntimeError, ValueError):
+        return True  # can't tell: refuse rather than risk a synced folder
+    return any(t == v or t.is_relative_to(v) for t in targets for v in vaults)
+
+
+@speakers.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Print the server JSON (includes ids).")
+def speakers_list(as_json: bool) -> None:
+    """List enrolled voices: name, samples, enrolled at, voice model."""
+    try:
+        out = _get("/api/speakers")
+    except requests.HTTPError as exc:
+        click.echo(f"error: {_error_detail(exc.response)}", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(out))
+        return
+    if "embedder" in out:  # the server's own voice model is authoritative
+        current_model = out["embedder"]
+    else:
+        from localflow.diarization.registry import embedder_id_for_backend
+
+        current_model = embedder_id_for_backend(load_config().diarization_backend)
+    rows = out.get("speakers") or []
+    if not rows:
+        click.echo("no enrolled speakers")
+        return
+    for s in rows:
+        line = f"{s['name']}\t{s['samples']}\t{s['created']}\t{s['model_id']}"
+        if s.get("model_id") != current_model:
+            line += "\tneeds re-enrollment (different voice model)"
+        click.echo(line)
+
+
+@speakers.command("enroll")
+@click.argument("name")
+@click.option("--from-meeting", "meeting_id", help="Meeting id (see `lf meeting speakers`).")
+@click.option("--speaker", "speaker_id", help="Speaker id in that meeting, e.g. S2.")
+@click.option("--file", "audio_file", type=click.Path(exists=True, dir_okay=False,
+                                                       path_type=Path),
+              help="An audio clip of only this person speaking.")
+@click.option("--record", "record_seconds", type=click.IntRange(1, MAX_RECORD_SECONDS),
+              help="Record this many seconds from the microphone now.")
+def speakers_enroll(name: str, meeting_id: str | None, speaker_id: str | None,
+                    audio_file: Path | None, record_seconds: int | None) -> None:
+    """Remember a voice under NAME, from one source: a meeting speaker, a file or the mic.
+
+    Audio is sent only to the local server and is not retained there; some M4A/MP4 files
+    need a short-lived private temporary copy while they are decoded.
+    """
+    sources = [meeting_id is not None, audio_file is not None, record_seconds is not None]
+    if sum(sources) != 1:
+        raise click.UsageError("use exactly one of --from-meeting, --file or --record")
+    if (meeting_id is None) != (speaker_id is None):
+        raise click.UsageError("--speaker goes with --from-meeting (and is required by it)")
+    if meeting_id is not None:
+        out = _post("/api/speakers",
+                    {"name": name, "meeting_id": meeting_id, "speaker_id": speaker_id})
+    else:
+        _local_base()  # refuse a remote server before reading or recording any audio
+        if audio_file is not None:
+            if audio_file.stat().st_size > MAX_ENROLL_UPLOAD_BYTES:
+                click.echo("error: audio file is larger than 25 MB", err=True)
+                sys.exit(1)
+            data, filename = audio_file.read_bytes(), audio_file.name
+        else:
+            data, filename = _record_voice(record_seconds), "recording.wav"
+        out = _local_send("post", "/api/speakers", data={"name": name},
+                          files={"file": (filename, data, "application/octet-stream")}).json()
+        del data
+    click.echo(f"enrolled {out['name']}")
+
+
+@speakers.command("rename")
+@click.argument("old")
+@click.argument("new")
+def speakers_rename(old: str, new: str) -> None:
+    """Rename an enrolled voice (by name or id); applies to later meetings."""
+    out = _patch(f"/api/speakers/{quote(old, safe='')}", {"name": new})
+    click.echo(f"renamed to {out['name']}")
+
+
+@speakers.command("forget")
+@click.argument("name_or_id", required=False)
+@click.option("--all", "forget_all", is_flag=True, help="Forget every enrolled voice.")
+def speakers_forget(name_or_id: str | None, forget_all: bool) -> None:
+    """Forget an enrolled voice (or --all) and erase stored voice data from every saved
+    meeting. Names already written into transcripts are not changed."""
+    if forget_all == (name_or_id is not None):
+        raise click.UsageError("pass a NAME_OR_ID or --all")
+    path = "/api/speakers" if forget_all else f"/api/speakers/{quote(name_or_id, safe='')}"
+    out = _delete(path)
+    click.echo(f"forgot {out.get('forgotten', 0)} speaker(s)")
+
+
+@speakers.command("export")
+@click.argument("directory", type=click.Path(file_okay=False, path_type=Path))
+def speakers_export(directory: Path) -> None:
+    """Copy enrolled voices (registry.json + .npy voiceprints) into a new or empty DIRECTORY
+    on this computer. Not allowed inside the Obsidian vault (vaults get synced)."""
+    target = directory.expanduser()
+    if _inside_vault(target):
+        click.echo("error: don't export voiceprints into the Obsidian vault", err=True)
+        sys.exit(1)
+    if target.exists() and (not target.is_dir() or any(target.iterdir())):
+        click.echo("error: the export folder must be new or empty", err=True)
+        sys.exit(1)
+    from localflow.diarization.registry import RegistryError, write_bundle
+
+    resp = _local_send("get", "/api/speakers/export")
+    try:
+        out_dir, count = write_bundle(resp.content, target)
+    except (RegistryError, OSError) as exc:
+        click.echo(f"error: {exc if isinstance(exc, RegistryError) else 'could not write'}",
+                   err=True)
+        sys.exit(1)
+    click.echo(f"exported {count} speaker(s) to {out_dir}")
+    click.echo("These files are voiceprints. Keep them private.")
 
 
 @cli.group(hidden=True)

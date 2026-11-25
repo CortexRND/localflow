@@ -5,13 +5,16 @@ pub mod dispatch;
 mod macos_audio;
 mod media;
 pub mod prompts;
+pub mod speakers;
 pub mod system_audio;
 pub mod templates;
 pub mod titles;
 pub mod watcher;
 pub mod writer;
 
-pub use capture::{MeetingSession, SpeakerLabels, TimedTranscript, Transcriber};
+pub use capture::{
+    Labelled, LabelledSpeaker, MeetingSession, SpeakerLabels, TimedTranscript, Transcriber,
+};
 use caseless::Caseless;
 use lf_core::symbols::pycompat as py;
 pub use lf_core::transcript::TimedText;

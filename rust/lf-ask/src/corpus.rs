@@ -16,7 +16,7 @@ use std::{
 static FILE_STAMP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:[\s\x1c-\x1f]+(.*))?\n?\z").unwrap()
 });
-static STAMP: LazyLock<Regex> =
+pub(crate) static STAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\*\*\[?(\d+:\d{2}(?::\d{2})?)\]?\*\*").unwrap());
 
 #[derive(Default)]

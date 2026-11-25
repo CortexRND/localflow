@@ -6,12 +6,13 @@
 pub mod api;
 mod auth;
 pub mod backend;
+mod local;
 pub mod server_url;
 pub mod weblaunch;
 
 use axum::{
     body::{to_bytes, Bytes},
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{header, Method, StatusCode},
     middleware,
     response::{Html, IntoResponse, Response},
@@ -24,6 +25,7 @@ use lf_providers::{api as providers, store::CoreSecrets};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
@@ -39,6 +41,7 @@ pub struct ServerState {
     backend: Arc<dyn Backend>,
     config_updater: Option<Arc<ConfigUpdater>>,
     config_reader: Option<Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>>,
+    speaker_config_reader: Option<Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>>,
     reload_before_put: bool,
 }
 
@@ -70,6 +73,7 @@ impl ServerState {
             backend,
             config_updater: None,
             config_reader: None,
+            speaker_config_reader: None,
             reload_before_put: false,
         }
     }
@@ -88,6 +92,7 @@ impl ServerState {
             backend,
             config_updater: None,
             config_reader: None,
+            speaker_config_reader: None,
             reload_before_put: true,
         })
     }
@@ -104,6 +109,56 @@ impl ServerState {
         self.config_reader = Some(reader);
         self
     }
+
+    /// Re-read the diarization settings only for the speaker-data routes
+    /// (`/api/speakers*`, a meeting's speakers, `/api/diarization/status`), so
+    /// the voiceprint gate follows edits to the saved file while every other
+    /// setting and route keeps the server's config. A general
+    /// `with_config_reader` already covers them.
+    pub fn with_speaker_config_reader(
+        mut self,
+        reader: Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>,
+    ) -> Self {
+        self.speaker_config_reader = Some(reader);
+        self
+    }
+
+    /// The config a speaker-data request is judged by: freshly read with a
+    /// general reader; with only a speaker reader, the server's config with
+    /// just the diarization fields taken from the fresh read (so the vault and
+    /// every other setting stay those meeting saves use); else the server's.
+    fn speaker_config(&self) -> anyhow::Result<Config> {
+        if let Some(reader) = self.config_reader.as_ref() {
+            return reader();
+        }
+        let Some(reader) = self.speaker_config_reader.as_ref() else {
+            return Ok(self.config.lock().unwrap().clone());
+        };
+        let live = reader()?;
+        let mut config = self.config.lock().unwrap().clone();
+        for field in SPEAKER_FIELDS {
+            if let Some(value) = live.field(field) {
+                config.set_field(field, value.clone());
+            }
+        }
+        Ok(config)
+    }
+}
+
+/// The settings a speaker reader keeps live (the diarization fields).
+const SPEAKER_FIELDS: [&str; 5] = [
+    "speaker_diarization",
+    "speaker_recognition",
+    "diarization_backend",
+    "diarization_max_speakers",
+    "diarize_mic",
+];
+
+/// Routes whose config must be live for the speaker-recognition gate.
+fn is_speaker_data_path(path: &str) -> bool {
+    local::is_speakers_path(path)
+        || path == "/api/diarization/status"
+        || meeting_speakers_route(path).is_some()
 }
 
 pub fn router(state: Arc<ServerState>) -> Router {
@@ -148,9 +203,12 @@ impl Server {
         self,
         stop: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> anyhow::Result<()> {
-        axum::serve(self.listener, router(self.state))
-            .with_graceful_shutdown(stop)
-            .await?;
+        axum::serve(
+            self.listener,
+            router(self.state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(stop)
+        .await?;
         Ok(())
     }
 
@@ -171,9 +229,12 @@ impl Server {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        axum::serve(self.listener, router(self.state))
-            .with_graceful_shutdown(shutdown())
-            .await?;
+        axum::serve(
+            self.listener,
+            router(self.state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown())
+        .await?;
         Ok(())
     }
 }
@@ -257,6 +318,18 @@ fn route_methods(path: &str) -> Option<&'static [&'static str]> {
         "/api/launch-code" | "/api/test/llm" | "/transcribe" | "/meeting/start"
         | "/meeting/notes" | "/meeting/chat" | "/api/recall" | "/meeting/stop"
         | "/meeting/dismiss" => Some(&["POST"]),
+        // Voiceprints (B9); `export` also matches the `{ref}` rename/forget routes.
+        "/api/speakers" => Some(&["GET", "POST", "DELETE"]),
+        "/api/speakers/export" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/diarization/status" => Some(&["GET"]),
+        p if p
+            .strip_prefix("/api/speakers/")
+            .is_some_and(|s| !s.is_empty() && !s.contains('/')) =>
+        {
+            Some(&["PATCH", "DELETE"])
+        }
+        // A saved meeting's speakers (B8).
+        p if meeting_speakers_route(p).is_some() => meeting_speakers_route(p),
         p if p
             .strip_prefix("/api/secrets/")
             .is_some_and(|s| !s.is_empty() && !s.contains('/')) =>
@@ -273,11 +346,29 @@ fn route_methods(path: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// `/api/meetings/{id}/speakers` (GET), `…/speakers/merge` (POST, and PUT as
+/// a speaker id) and `…/speakers/{sid}` (PUT); one non-empty segment each.
+fn meeting_speakers_route(path: &str) -> Option<&'static [&'static str]> {
+    let rest = path.strip_prefix("/api/meetings/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [id, "speakers"] if !id.is_empty() => Some(&["GET"]),
+        [id, "speakers", "merge"] if !id.is_empty() => Some(&["PUT", "POST"]),
+        [id, "speakers", sid] if !id.is_empty() && !sid.is_empty() => Some(&["PUT"]),
+        _ => None,
+    }
+}
+
 async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Response {
     let path = auth::scope_path(&request);
     let method = request.method().clone();
     let Some(methods) = route_methods(&path) else {
         let trimmed = path.trim_end_matches('/');
+        // A redirected DELETE would land on the bulk voiceprint erase: only
+        // an explicit `DELETE /api/speakers` may forget every voice.
+        if method == Method::DELETE && trimmed == "/api/speakers" {
+            return error(404, "Not Found");
+        }
         if trimmed != path && route_methods(trimmed).is_some() {
             // The URI is still percent-encoded while `path` is decoded. Strip
             // both representations, preserving escapes in the rest of the URI.
@@ -320,16 +411,38 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
         .unwrap_or_default()
         .0;
     let query = auth::query_values(request.uri().query());
-    let (parts, body) = request.into_parts();
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    let local = local::is_local(peer, request.headers());
     // Bound uploads even without Content-Length (including chunked requests).
     // Config/notes requests have a separate generous defensive ceiling.
-    let limit = if path == "/transcribe" {
+    let mut limit = Some(if path == "/transcribe" {
         MAX_UPLOAD_BYTES + 1024 * 1024
     } else {
         8 * 1024 * 1024
-    };
-    let Ok(body) = to_bytes(body, limit).await else {
-        return error(413, "upload too large");
+    });
+    if local::is_speakers_path(&path) {
+        // Voiceprint routes: the recognition gate, then locality, before any
+        // body byte is read (the backend re-checks the gate itself).
+        let reader = state.clone();
+        let Ok(Ok(config)) = tokio::task::spawn_blocking(move || reader.speaker_config()).await
+        else {
+            return error(503, "could not load config");
+        };
+        match local::speakers_gate(&config, &method, &path, request.headers(), local) {
+            local::Gate::Refuse(status, detail) => return error(status, detail),
+            local::Gate::Read(bound) => limit = bound,
+        }
+    }
+    let (parts, body) = request.into_parts();
+    let body = match limit {
+        Some(limit) => match to_bytes(body, limit).await {
+            Ok(body) => body,
+            Err(_) => return error(413, "upload too large"),
+        },
+        None => Bytes::new(),
     };
     match tokio::task::spawn_blocking(move || {
         dispatch(
@@ -340,6 +453,7 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
             parts.headers,
             body,
             page_token,
+            local,
         )
     })
     .await
@@ -349,6 +463,7 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     state: &ServerState,
     method: &Method,
@@ -357,6 +472,7 @@ fn dispatch(
     headers: axum::http::HeaderMap,
     body: Bytes,
     page_token: String,
+    local: bool,
 ) -> Response {
     if path == "/healthz" {
         return Json(json!({"ok": true})).into_response();
@@ -429,7 +545,14 @@ fn dispatch(
         result["restart_required"] = json!(api::restart_required(&update));
         return Json(result).into_response();
     }
-    let config = state.config.lock().unwrap().clone();
+    let config = if is_speaker_data_path(path) && state.config_reader.is_none() {
+        match state.speaker_config() {
+            Ok(config) => config,
+            Err(_) => return error(503, "could not load config"),
+        }
+    } else {
+        state.config.lock().unwrap().clone()
+    };
     match path {
         "/openapi.json" => (
             [(header::CONTENT_TYPE, "application/json")],
@@ -515,14 +638,40 @@ fn dispatch(
                     return error(400, "enabled must be a boolean");
                 }
             }
-            let response = state.backend.handle(BackendRequest {
+            let mut config = config;
+            if path == "/api/recall" && state.reload_before_put && state.config_reader.is_none() {
+                // Speaker labels follow the saved file like `lf-rs recall`, even
+                // when the startup snapshot differs; an unreadable file omits them.
+                let speakers = config::reload_config(&config)
+                    .is_ok_and(|saved| saved.field_bool("speaker_diarization") == Some(true));
+                config.set_field("speaker_diarization", json!(speakers));
+            }
+            let request = BackendRequest {
                 method: method.clone(),
                 path: path.into(),
                 query,
                 headers,
                 body,
                 config,
-            });
+            };
+            if method == Method::GET && path == "/api/speakers/export" {
+                return match state.backend.download(request, local) {
+                    Ok(download) => {
+                        let mut response = download.body.into_response();
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(header::CONTENT_TYPE, download.content_type.parse().unwrap());
+                        for (name, value) in download.headers {
+                            if let Ok(value) = value.parse() {
+                                headers.insert(name, value);
+                            }
+                        }
+                        response
+                    }
+                    Err(response) => respond(response.status, response.body),
+                };
+            }
+            let response = state.backend.handle_local(request, local);
             respond(response.status, response.body)
         }
     }
@@ -550,6 +699,110 @@ fn render_page(template: &str, marker: &str, token: &str) -> String {
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .replace(marker, &weblaunch::escape_html(token))
+}
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+
+    /// Every documented operation is routed, and the speaker paths are documented.
+    #[test]
+    fn the_schema_documents_routed_operations_including_speakers() {
+        let spec: Value =
+            serde_json::from_slice(RESOURCES.get_file("openapi.json").unwrap().contents()).unwrap();
+        let paths = spec["paths"].as_object().unwrap();
+        for (path, item) in paths {
+            // A template segment `{x}` becomes a concrete one.
+            let concrete: String = path
+                .split('/')
+                .map(|s| if s.starts_with('{') { "x" } else { s })
+                .collect::<Vec<_>>()
+                .join("/");
+            let routed = route_methods(&concrete).unwrap_or_else(|| panic!("{path} is not routed"));
+            for method in item.as_object().unwrap().keys() {
+                assert!(
+                    routed.contains(&method.to_uppercase().as_str()),
+                    "{method} {path}"
+                );
+            }
+        }
+        let methods = |path: &str| -> Vec<&str> {
+            paths[path]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect()
+        };
+        assert_eq!(methods("/api/diarization/status"), ["get"]);
+        assert_eq!(methods("/api/meetings/{meeting_id}/speakers"), ["get"]);
+        assert_eq!(
+            methods("/api/meetings/{meeting_id}/speakers/{speaker_id}"),
+            ["put"]
+        );
+        assert_eq!(
+            methods("/api/meetings/{meeting_id}/speakers/merge"),
+            ["post"]
+        );
+        assert_eq!(methods("/api/speakers"), ["get", "post", "delete"]);
+        assert_eq!(methods("/api/speakers/export"), ["get"]);
+        assert_eq!(methods("/api/speakers/{ref}"), ["patch", "delete"]);
+        assert!(spec["paths"]["/api/speakers"]["post"]["responses"]["201"].is_object());
+        // Request bodies: required, with the fields the backend reads.
+        let body = |path: &str, method: &str, media: &str| -> (Vec<String>, Value) {
+            let request = &paths[path][method]["requestBody"];
+            assert_eq!(request["required"], true, "{method} {path}");
+            let schema = request["content"][media]["schema"].clone();
+            let mut fields: Vec<String> = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{method} {path} {media}"))
+                .keys()
+                .cloned()
+                .collect();
+            fields.sort();
+            let mut required: Vec<String> =
+                serde_json::from_value(schema["required"].clone()).unwrap();
+            required.sort();
+            assert_eq!(required, fields, "{method} {path} {media}");
+            (fields, schema)
+        };
+        let (fields, json_enroll) = body("/api/speakers", "post", "application/json");
+        assert_eq!(fields, ["meeting_id", "name", "speaker_id"]);
+        assert_eq!(
+            json_enroll["properties"]["meeting_id"]["pattern"],
+            "^[0-9a-f]{32}$"
+        );
+        let (fields, upload) = body("/api/speakers", "post", "multipart/form-data");
+        assert_eq!(fields, ["file", "name"]);
+        assert_eq!(upload["properties"]["file"]["format"], "binary");
+        assert_eq!(
+            paths["/api/speakers"]["post"]["requestBody"]["content"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        let (fields, _) = body("/api/speakers/{ref}", "patch", "application/json");
+        assert_eq!(fields, ["name"]);
+        // The export is a ZIP attachment, never JSON.
+        let export = &paths["/api/speakers/export"]["get"]["responses"]["200"];
+        let media: Vec<&str> = export["content"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(media, ["application/zip"]);
+        assert_eq!(
+            export["content"]["application/zip"]["schema"]["format"],
+            "binary"
+        );
+        assert!(export["headers"]["Content-Disposition"].is_object());
+        assert!(
+            !paths.contains_key("/api/diarization/download"),
+            "not served by Rust"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 Stdlib only; never imports ``localflow`` (``docs/plans/PLAN-perf-evals.md`` §5.3).
 Cases come from :mod:`evals.perf.adapters.meeting_gates`: ``meetings/gate/M1``
-… ``M13`` (pooled rate + Wilson interval) and ``meetings/timings/<runtime>``
+… ``M14`` (pooled rate + Wilson interval) and ``meetings/timings/<runtime>``
 (``stop_to_notes_ms``, ``chat_ms``, ``llm_call_ms``, ``llm_calls_per_meeting``).
 
 * **Rust**, existing run: ``options["rust_run_dir"]`` (env
