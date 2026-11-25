@@ -1,0 +1,247 @@
+{
+  "version": 1,
+  "gap_tolerance_s": 0.5,
+  "assign_cases": [
+    {
+      "name": "single_speaker",
+      "timed": [{"start": 0.0, "end": 2.0, "text": "hello"}, {"start": 2.0, "end": 4.0, "text": "world"}],
+      "turns": [{"start": 0.0, "end": 4.0, "local_speaker": 0}],
+      "expected": [0, 0]
+    },
+    {
+      "name": "two_speaker_alternation",
+      "timed": [
+        {"start": 0.0, "end": 1.0, "text": "a"},
+        {"start": 1.0, "end": 2.0, "text": "b"},
+        {"start": 2.0, "end": 3.0, "text": "c"}
+      ],
+      "turns": [
+        {"start": 0.0, "end": 1.0, "local_speaker": 0},
+        {"start": 1.0, "end": 2.0, "local_speaker": 1},
+        {"start": 2.0, "end": 3.0, "local_speaker": 0}
+      ],
+      "expected": [0, 1, 0]
+    },
+    {
+      "name": "straddle_larger_overlap_wins",
+      "timed": [{"start": 1.5, "end": 3.0, "text": "straddle"}],
+      "turns": [{"start": 0.0, "end": 2.0, "local_speaker": 0}, {"start": 2.0, "end": 4.0, "local_speaker": 1}],
+      "expected": [1]
+    },
+    {
+      "name": "overlap_tie_earlier_start_wins",
+      "timed": [{"start": 1.0, "end": 3.0, "text": "tie"}],
+      "turns": [{"start": 2.0, "end": 4.0, "local_speaker": 1}, {"start": 0.0, "end": 2.0, "local_speaker": 0}],
+      "expected": [0]
+    },
+    {
+      "name": "overlap_tie_identical_start_earlier_in_list",
+      "timed": [{"start": 0.0, "end": 1.0, "text": "tie"}],
+      "turns": [{"start": 0.0, "end": 2.0, "local_speaker": 1}, {"start": 0.0, "end": 3.0, "local_speaker": 0}],
+      "expected": [1]
+    },
+    {
+      "name": "overlap_beats_zero_gap",
+      "timed": [{"start": 0.875, "end": 2.0, "text": "x"}],
+      "turns": [{"start": 0.0, "end": 1.0, "local_speaker": 0}, {"start": 2.0, "end": 3.0, "local_speaker": 1}],
+      "expected": [0]
+    },
+    {
+      "name": "gap_0_3_nearest_turn",
+      "timed": [{"start": 2.3, "end": 3.0, "text": "near"}],
+      "turns": [{"start": 0.0, "end": 2.0, "local_speaker": 0}, {"start": 3.5, "end": 5.0, "local_speaker": 1}],
+      "expected": [0]
+    },
+    {
+      "name": "gap_exactly_0_5_assigned",
+      "timed": [{"start": 1.5, "end": 2.0, "text": "edge"}],
+      "turns": [{"start": 0.0, "end": 1.0, "local_speaker": 0}],
+      "expected": [0]
+    },
+    {
+      "name": "gap_exactly_0_5_before_turn_assigned",
+      "timed": [{"start": 0.0, "end": 0.5, "text": "edge"}],
+      "turns": [{"start": 1.0, "end": 2.0, "local_speaker": 3}],
+      "expected": [3]
+    },
+    {
+      "name": "gap_0_6_null",
+      "timed": [{"start": 1.6, "end": 2.0, "text": "far"}],
+      "turns": [{"start": 0.0, "end": 1.0, "local_speaker": 0}],
+      "expected": [null]
+    },
+    {
+      "name": "equidistant_nearest_earlier_start",
+      "timed": [{"start": 1.25, "end": 2.75, "text": "between"}],
+      "turns": [{"start": 3.0, "end": 4.0, "local_speaker": 1}, {"start": 0.0, "end": 1.0, "local_speaker": 0}],
+      "expected": [0]
+    },
+    {
+      "name": "equidistant_identical_start_earlier_in_list",
+      "timed": [{"start": 2.5, "end": 2.75, "text": "before"}],
+      "turns": [{"start": 3.0, "end": 4.0, "local_speaker": 1}, {"start": 3.0, "end": 5.0, "local_speaker": 2}],
+      "expected": [1]
+    },
+    {
+      "name": "empty_turns_all_null",
+      "timed": [{"start": 0.0, "end": 1.0, "text": "a"}, {"start": 1.0, "end": 2.0, "text": "b"}],
+      "turns": [],
+      "expected": [null, null]
+    },
+    {
+      "name": "empty_timed",
+      "timed": [],
+      "turns": [{"start": 0.0, "end": 1.0, "local_speaker": 0}],
+      "expected": []
+    },
+    {
+      "name": "unsorted_turns",
+      "timed": [
+        {"start": 0.5, "end": 1.5, "text": "a"},
+        {"start": 2.5, "end": 3.5, "text": "b"},
+        {"start": 4.5, "end": 5.5, "text": "c"},
+        {"start": 1.5, "end": 2.25, "text": "d"}
+      ],
+      "turns": [
+        {"start": 4.0, "end": 6.0, "local_speaker": 2},
+        {"start": 0.0, "end": 2.0, "local_speaker": 0},
+        {"start": 2.0, "end": 4.0, "local_speaker": 1}
+      ],
+      "expected": [0, 1, 2, 0]
+    },
+    {
+      "name": "zero_length_text_inside_turn",
+      "timed": [{"start": 1.0, "end": 1.0, "text": "blip"}],
+      "turns": [{"start": 0.0, "end": 2.0, "local_speaker": 0}, {"start": 2.0, "end": 4.0, "local_speaker": 1}],
+      "expected": [0]
+    },
+    {
+      "name": "zero_length_text_at_turn_edge",
+      "timed": [{"start": 2.0, "end": 2.0, "text": "shared edge"}, {"start": 4.0, "end": 4.0, "text": "end edge"}],
+      "turns": [{"start": 0.0, "end": 2.0, "local_speaker": 0}, {"start": 2.0, "end": 4.0, "local_speaker": 1}],
+      "expected": [0, 1]
+    },
+    {
+      "name": "touching_turn_gap_zero",
+      "timed": [{"start": 1.0, "end": 2.0, "text": "after"}, {"start": 2.5, "end": 3.0, "text": "before"}],
+      "turns": [{"start": 0.0, "end": 1.0, "local_speaker": 0}, {"start": 3.0, "end": 4.0, "local_speaker": 1}],
+      "expected": [0, 1]
+    },
+    {
+      "name": "mixed_assigned_and_null",
+      "timed": [{"start": 0.0, "end": 1.0, "text": "in"}, {"start": 5.0, "end": 6.0, "text": "out"}],
+      "turns": [{"start": 0.0, "end": 1.5, "local_speaker": 0}],
+      "expected": [0, null]
+    }
+  ],
+  "merge_cases": [
+    {
+      "name": "alternating_speakers",
+      "chunk_offset": 0.0,
+      "assigned": [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": 0},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": 1},
+        {"start": 2.0, "end": 3.0, "text": "c", "speaker": 0}
+      ],
+      "expected": [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": 0},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": 1},
+        {"start": 2.0, "end": 3.0, "text": "c", "speaker": 0}
+      ]
+    },
+    {
+      "name": "consecutive_same_speaker_with_offset",
+      "chunk_offset": 30.0,
+      "assigned": [
+        {"start": 0.0, "end": 1.0, "text": " Hello ", "speaker": 0},
+        {"start": 1.0, "end": 2.5, "text": "world", "speaker": 0},
+        {"start": 2.5, "end": 4.0, "text": "bye", "speaker": 1}
+      ],
+      "expected": [
+        {"start": 30.0, "end": 32.5, "text": "Hello world", "speaker": 0},
+        {"start": 32.5, "end": 34.0, "text": "bye", "speaker": 1}
+      ]
+    },
+    {
+      "name": "null_runs_merge",
+      "chunk_offset": 10.0,
+      "assigned": [
+        {"start": 0.0, "end": 1.0, "text": "x", "speaker": null},
+        {"start": 1.0, "end": 2.0, "text": "y", "speaker": null},
+        {"start": 2.0, "end": 3.0, "text": "z", "speaker": 0}
+      ],
+      "expected": [
+        {"start": 10.0, "end": 12.0, "text": "x y", "speaker": null},
+        {"start": 12.0, "end": 13.0, "text": "z", "speaker": 0}
+      ]
+    },
+    {
+      "name": "zero_and_null_are_distinct",
+      "chunk_offset": 0.0,
+      "assigned": [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": 0},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": null},
+        {"start": 2.0, "end": 3.0, "text": "c", "speaker": 0}
+      ],
+      "expected": [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": 0},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": null},
+        {"start": 2.0, "end": 3.0, "text": "c", "speaker": 0}
+      ]
+    },
+    {
+      "name": "all_empty_run_kept_with_empty_text",
+      "chunk_offset": 0.0,
+      "assigned": [
+        {"start": 0.0, "end": 1.0, "text": "", "speaker": 0},
+        {"start": 1.0, "end": 2.0, "text": "   ", "speaker": 0},
+        {"start": 2.0, "end": 3.0, "text": "hi", "speaker": 1}
+      ],
+      "expected": [
+        {"start": 0.0, "end": 2.0, "text": "", "speaker": 0},
+        {"start": 2.0, "end": 3.0, "text": "hi", "speaker": 1}
+      ]
+    },
+    {
+      "name": "empty_text_skipped_inside_mixed_run",
+      "chunk_offset": 0.0,
+      "assigned": [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": 0},
+        {"start": 1.0, "end": 2.0, "text": "", "speaker": 0},
+        {"start": 2.0, "end": 3.0, "text": " b", "speaker": 0}
+      ],
+      "expected": [{"start": 0.0, "end": 3.0, "text": "a b", "speaker": 0}]
+    },
+    {
+      "name": "string_speaker_keys",
+      "chunk_offset": 60.0,
+      "assigned": [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": "S1"},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": "S1"},
+        {"start": 2.0, "end": 3.0, "text": "c", "speaker": "S2"}
+      ],
+      "expected": [
+        {"start": 60.0, "end": 62.0, "text": "a b", "speaker": "S1"},
+        {"start": 62.0, "end": 63.0, "text": "c", "speaker": "S2"}
+      ]
+    },
+    {
+      "name": "input_order_preserved",
+      "chunk_offset": 0.0,
+      "assigned": [
+        {"start": 5.0, "end": 6.0, "text": "late", "speaker": 0},
+        {"start": 0.0, "end": 1.0, "text": "early", "speaker": 1}
+      ],
+      "expected": [
+        {"start": 5.0, "end": 6.0, "text": "late", "speaker": 0},
+        {"start": 0.0, "end": 1.0, "text": "early", "speaker": 1}
+      ]
+    },
+    {
+      "name": "empty_input",
+      "chunk_offset": 5.0,
+      "assigned": [],
+      "expected": []
+    }
+  ]
+}
