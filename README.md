@@ -524,7 +524,7 @@ lf recall "what did I tell Sarah?" --json --k 5
   otherwise. If the LLM is down you still get the matching passages. With a cloud LLM
   provider those passages are sent to it, so use a local one if that matters.
 - With `[history] enabled = false` dictations are skipped; meetings and notes still count.
-- With `[meetings] speaker_diarization = true` (Python runtime only), a citation from a
+- With `[meetings] speaker_diarization = true`, a citation from a
   meeting transcript may include `speaker` in `--json` output and the HTTP response: the
   label on the first line of the passage if that line has a timestamp and a label (Me,
   Others, Speaker 2 or a name). It is read from the transcript text, independent of

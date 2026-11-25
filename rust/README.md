@@ -569,8 +569,9 @@ below.
   keys (`speaker_diarization`, `diarization_backend`, `diarize_mic`, `max_speakers`,
   `speaker_recognition`) from the saved file at each meeting start, so none needs a
   restart. If the file cannot be read at start, that meeting runs without labels.
-* **Not ported.** Recall citations have no `speaker` field, and there is no Rust UI for
-  speakers.
+* **Recall.** With `speaker_diarization = true`, Recall can include the speaker label
+  from a saved transcript in JSON citations without reading voiceprints. There is no
+  dedicated Rust UI for managing speakers.
 
 ## Standalone audio and STT
 
