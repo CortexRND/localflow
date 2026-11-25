@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use lf_meetings::{
     system_audio::{find_loopback_device, resample, to_mono, InputDevice, SAMPLE_RATE},
-    AudioCallback, AudioSource, MeetingSession, SystemAudioUnavailable, Transcriber,
+    AudioCallback, AudioSource, MeetingSession, SystemAudioUnavailable, TimedText, Transcriber,
 };
 use std::{
     collections::VecDeque,
@@ -275,4 +275,55 @@ fn open_system_audio_explains_when_nothing_found() {
     assert_eq!(error.to_string(), "no input device matching 'missing'");
     #[cfg(not(target_os = "macos"))]
     assert_eq!(lf_meetings::system_audio::open_system_audio(16000, "").err().unwrap().to_string(), "no system audio source found: set [meetings] system_audio_device to a loopback/monitor input device");
+}
+struct Fixed(Result<&'static str, &'static str>);
+impl Transcriber for Fixed {
+    fn transcribe(&self, _: &[f32], prompt: Option<&str>) -> Result<String> {
+        assert_eq!(prompt, Some("hint"));
+        self.0.map(Into::into).map_err(|e| anyhow!(e))
+    }
+}
+struct Timed;
+impl Transcriber for Timed {
+    fn transcribe(&self, _: &[f32], _: Option<&str>) -> Result<String> {
+        unreachable!()
+    }
+    fn transcribe_timed(&self, _: &[f32], _: Option<&str>) -> Result<Vec<TimedText>> {
+        Ok(vec![TimedText {
+            start: 0.5,
+            end: 1.0,
+            text: "own".into(),
+        }])
+    }
+}
+#[test]
+fn transcribe_timed_defaults_to_one_whole_clip_span() {
+    let audio = vec![0.0; SAMPLE_RATE as usize * 5 / 2];
+    assert_eq!(
+        Fixed(Ok("  hello there \n"))
+            .transcribe_timed(&audio, Some("hint"))
+            .unwrap(),
+        [TimedText {
+            start: 0.0,
+            end: 2.5,
+            text: "hello there".into(),
+        }]
+    );
+    for blank in ["", " \t\n", "\u{1c}"] {
+        assert!(Fixed(Ok(blank))
+            .transcribe_timed(&audio, Some("hint"))
+            .unwrap()
+            .is_empty());
+    }
+    let error = Fixed(Err("boom")).transcribe_timed(&audio, Some("hint"));
+    assert_eq!(error.unwrap_err().to_string(), "boom");
+    let transcriber: Arc<dyn Transcriber> = Arc::new(Timed);
+    assert_eq!(
+        transcriber.transcribe_timed(&audio, None).unwrap(),
+        [TimedText {
+            start: 0.5,
+            end: 1.0,
+            text: "own".into(),
+        }]
+    );
 }

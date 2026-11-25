@@ -14,6 +14,7 @@ pub mod writer;
 pub use capture::{MeetingSession, Transcriber};
 use caseless::Caseless;
 use lf_core::symbols::pycompat as py;
+pub use lf_core::transcript::TimedText;
 use lf_providers::LlmProvider;
 pub use media::strip_remote_media;
 pub use prompts::ENHANCE_INSTRUCTION;

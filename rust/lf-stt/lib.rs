@@ -15,6 +15,7 @@ pub mod setup_downloads;
 pub mod stt_lease;
 
 pub use engine::{EngineSpec, LoadInfo, SpeechEngine, SttSlot, Timings, Transcript};
+pub use lf_core::transcript::TimedText;
 
 /// Return unused allocator pages after native speech resources have been dropped.
 pub fn release_idle_memory() -> usize {
