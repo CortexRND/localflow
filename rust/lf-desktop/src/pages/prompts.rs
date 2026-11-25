@@ -100,7 +100,7 @@ impl PromptsPage {
                     Ok(()) => (
                         Tone::Success,
                         if approve {
-                            "Prompt approved. Run lf prompts dispatch to send it."
+                            "Prompt approved. Run lf prompts dispatch --all to send all approved prompts."
                         } else {
                             "Prompt rejected."
                         }
@@ -291,7 +291,7 @@ impl Render for PromptsPage {
             header(
                 &t,
                 "Prompts",
-                Some("Run lf prompts dispatch to send approved prompts.".into()),
+                Some("Run lf prompts dispatch --all to send all approved prompts.".into()),
                 vec![refresh],
             ),
             column("prompts-scroll", body),
