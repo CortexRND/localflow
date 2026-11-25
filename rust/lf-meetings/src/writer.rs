@@ -16,6 +16,9 @@ pub struct SavedNote {
     pub notes_path: PathBuf,
     pub log_path: PathBuf,
     pub title: String,
+    /// Written into the frontmatter when diarization found ≥2 speakers; the
+    /// key of the meeting's speaker sidecar.
+    pub meeting_id: Option<String>,
 }
 pub fn reserve(notes_dir: &Path, logs_dir: &Path, base: &str) -> io::Result<(PathBuf, PathBuf)> {
     for attempt in 1..=MAX_NAME_ATTEMPTS {
@@ -113,15 +116,15 @@ impl ObsidianWriter {
         let speakers = diarized_speakers(n.segments);
         // Quoted so an all-digit hex stays a YAML string; labels are already
         // cleaned, and raw UTF-8 avoids surrogate-pair escapes.
-        let speaker_meta = if speakers.is_empty() {
-            String::new()
-        } else {
+        let meeting_id = (!speakers.is_empty()).then(lf_core::compact_uuid_v4);
+        let speaker_meta = if let Some(meeting_id) = &meeting_id {
             let speakers = speakers.into_iter().map(serde_json::Value::String);
             format!(
-                "meeting_id: \"{}\"\nspeakers: {}\n",
-                lf_core::compact_uuid_v4(),
+                "meeting_id: \"{meeting_id}\"\nspeakers: {}\n",
                 py::json_dumps(&serde_json::Value::Array(speakers.collect()), None, false)
             )
+        } else {
+            String::new()
         };
         let frontmatter=format!("---\ntitle: {}\ndate: {}\nplatform: {category}\nduration_minutes: {minutes}\n{}{speaker_meta}tags: [meeting, localflow]\n---\n\n",py::json_dumps(&serde_json::Value::String(heading.clone()),None,true),n.started_at.format("%Y-%m-%dT%H:%M"),if n.template.is_empty(){String::new()}else{format!("template: {}\n",safe_title(n.template))});
         let result = (|| {
@@ -176,6 +179,7 @@ impl ObsidianWriter {
             notes_path,
             log_path,
             title: heading,
+            meeting_id,
         })
     }
 }

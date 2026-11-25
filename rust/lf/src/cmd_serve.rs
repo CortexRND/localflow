@@ -84,9 +84,15 @@ pub(crate) fn run(host: Option<String>, port: Option<u16>, io: &mut Io<'_>) -> R
         .max_blocking_threads(16)
         .enable_all()
         .build()?;
+    // Staged enrollment audio a killed server left behind, whatever the speaker
+    // flags are now; creates nothing and never fails.
+    lf_meetings::speakers::registry::sweep(&lf_meetings::speakers::default_speakers_root());
     let speech = SharedSpeech::new();
     let meetings = Arc::new(
         MeetingsBackend::new()?
+            .with_model_cache(lf_stt::model_storage::hf_hub_cache(None))
+            // The saved file is what `PUT /api/config` writes: the live speaker gate.
+            .with_config_reader(Arc::new(load_config))
             .with_capture(Arc::new(MeetingCapture(speech.clone())))
             .with_inner(Arc::new(SttBackend::with_speech(
                 UnavailableBackend,

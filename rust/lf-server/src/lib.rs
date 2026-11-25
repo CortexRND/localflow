@@ -6,12 +6,13 @@
 pub mod api;
 mod auth;
 pub mod backend;
+mod local;
 pub mod server_url;
 pub mod weblaunch;
 
 use axum::{
     body::{to_bytes, Bytes},
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{header, Method, StatusCode},
     middleware,
     response::{Html, IntoResponse, Response},
@@ -24,6 +25,7 @@ use lf_providers::{api as providers, store::CoreSecrets};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
@@ -104,6 +106,14 @@ impl ServerState {
         self.config_reader = Some(reader);
         self
     }
+
+    /// The live config, re-read when a reader is attached (as `dispatch` does).
+    fn current_config(&self) -> anyhow::Result<Config> {
+        match self.config_reader.as_ref() {
+            Some(reader) => reader(),
+            None => Ok(self.config.lock().unwrap().clone()),
+        }
+    }
 }
 
 pub fn router(state: Arc<ServerState>) -> Router {
@@ -148,9 +158,12 @@ impl Server {
         self,
         stop: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> anyhow::Result<()> {
-        axum::serve(self.listener, router(self.state))
-            .with_graceful_shutdown(stop)
-            .await?;
+        axum::serve(
+            self.listener,
+            router(self.state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(stop)
+        .await?;
         Ok(())
     }
 
@@ -171,9 +184,12 @@ impl Server {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        axum::serve(self.listener, router(self.state))
-            .with_graceful_shutdown(shutdown())
-            .await?;
+        axum::serve(
+            self.listener,
+            router(self.state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown())
+        .await?;
         Ok(())
     }
 }
@@ -257,6 +273,18 @@ fn route_methods(path: &str) -> Option<&'static [&'static str]> {
         "/api/launch-code" | "/api/test/llm" | "/transcribe" | "/meeting/start"
         | "/meeting/notes" | "/meeting/chat" | "/api/recall" | "/meeting/stop"
         | "/meeting/dismiss" => Some(&["POST"]),
+        // Voiceprints (B9); `export` also matches the `{ref}` rename/forget routes.
+        "/api/speakers" => Some(&["GET", "POST", "DELETE"]),
+        "/api/speakers/export" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/diarization/status" => Some(&["GET"]),
+        p if p
+            .strip_prefix("/api/speakers/")
+            .is_some_and(|s| !s.is_empty() && !s.contains('/')) =>
+        {
+            Some(&["PATCH", "DELETE"])
+        }
+        // A saved meeting's speakers (B8).
+        p if meeting_speakers_route(p).is_some() => meeting_speakers_route(p),
         p if p
             .strip_prefix("/api/secrets/")
             .is_some_and(|s| !s.is_empty() && !s.contains('/')) =>
@@ -273,11 +301,29 @@ fn route_methods(path: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// `/api/meetings/{id}/speakers` (GET), `…/speakers/merge` (POST, and PUT as
+/// a speaker id) and `…/speakers/{sid}` (PUT); one non-empty segment each.
+fn meeting_speakers_route(path: &str) -> Option<&'static [&'static str]> {
+    let rest = path.strip_prefix("/api/meetings/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [id, "speakers"] if !id.is_empty() => Some(&["GET"]),
+        [id, "speakers", "merge"] if !id.is_empty() => Some(&["PUT", "POST"]),
+        [id, "speakers", sid] if !id.is_empty() && !sid.is_empty() => Some(&["PUT"]),
+        _ => None,
+    }
+}
+
 async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Response {
     let path = auth::scope_path(&request);
     let method = request.method().clone();
     let Some(methods) = route_methods(&path) else {
         let trimmed = path.trim_end_matches('/');
+        // A redirected DELETE would land on the bulk voiceprint erase: only
+        // an explicit `DELETE /api/speakers` may forget every voice.
+        if method == Method::DELETE && trimmed == "/api/speakers" {
+            return error(404, "Not Found");
+        }
         if trimmed != path && route_methods(trimmed).is_some() {
             // The URI is still percent-encoded while `path` is decoded. Strip
             // both representations, preserving escapes in the rest of the URI.
@@ -320,16 +366,38 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
         .unwrap_or_default()
         .0;
     let query = auth::query_values(request.uri().query());
-    let (parts, body) = request.into_parts();
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    let local = local::is_local(peer, request.headers());
     // Bound uploads even without Content-Length (including chunked requests).
     // Config/notes requests have a separate generous defensive ceiling.
-    let limit = if path == "/transcribe" {
+    let mut limit = Some(if path == "/transcribe" {
         MAX_UPLOAD_BYTES + 1024 * 1024
     } else {
         8 * 1024 * 1024
-    };
-    let Ok(body) = to_bytes(body, limit).await else {
-        return error(413, "upload too large");
+    });
+    if local::is_speakers_path(&path) {
+        // Voiceprint routes: the recognition gate, then locality, before any
+        // body byte is read (the backend re-checks the gate itself).
+        let reader = state.clone();
+        let Ok(Ok(config)) = tokio::task::spawn_blocking(move || reader.current_config()).await
+        else {
+            return error(503, "could not load config");
+        };
+        match local::speakers_gate(&config, &method, &path, request.headers(), local) {
+            local::Gate::Refuse(status, detail) => return error(status, detail),
+            local::Gate::Read(bound) => limit = bound,
+        }
+    }
+    let (parts, body) = request.into_parts();
+    let body = match limit {
+        Some(limit) => match to_bytes(body, limit).await {
+            Ok(body) => body,
+            Err(_) => return error(413, "upload too large"),
+        },
+        None => Bytes::new(),
     };
     match tokio::task::spawn_blocking(move || {
         dispatch(
@@ -340,6 +408,7 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
             parts.headers,
             body,
             page_token,
+            local,
         )
     })
     .await
@@ -349,6 +418,7 @@ async fn handle(State(state): State<Arc<ServerState>>, request: Request) -> Resp
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     state: &ServerState,
     method: &Method,
@@ -357,6 +427,7 @@ fn dispatch(
     headers: axum::http::HeaderMap,
     body: Bytes,
     page_token: String,
+    local: bool,
 ) -> Response {
     if path == "/healthz" {
         return Json(json!({"ok": true})).into_response();
@@ -514,14 +585,32 @@ fn dispatch(
                     return error(400, "enabled must be a boolean");
                 }
             }
-            let response = state.backend.handle(BackendRequest {
+            let request = BackendRequest {
                 method: method.clone(),
                 path: path.into(),
                 query,
                 headers,
                 body,
                 config,
-            });
+            };
+            if method == Method::GET && path == "/api/speakers/export" {
+                return match state.backend.download(request, local) {
+                    Ok(download) => {
+                        let mut response = download.body.into_response();
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(header::CONTENT_TYPE, download.content_type.parse().unwrap());
+                        for (name, value) in download.headers {
+                            if let Ok(value) = value.parse() {
+                                headers.insert(name, value);
+                            }
+                        }
+                        response
+                    }
+                    Err(response) => respond(response.status, response.body),
+                };
+            }
+            let response = state.backend.handle_local(request, local);
             respond(response.status, response.body)
         }
     }

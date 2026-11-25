@@ -296,9 +296,19 @@ impl SpeakerLabels {
     /// keeps its original segment. On timeout, failure or fewer than two
     /// speakers, `segments` comes back as is. Dropping `self` cancels.
     pub fn apply(self, segments: &[Segment]) -> Vec<Segment> {
-        let result = self.0.wait();
+        self.apply_detailed(segments, false).segments
+    }
+    /// [`apply`](Self::apply) plus the outcome and one entry per assigned
+    /// speaker id (in id order). Centroids are computed only with `centroids`
+    /// (speaker recognition on).
+    pub fn apply_detailed(self, segments: &[Segment], centroids: bool) -> Labelled {
+        let result = self.0.wait_with(centroids);
         if result.status != Status::Ok {
-            return segments.to_vec();
+            return Labelled {
+                status: result.status,
+                segments: segments.to_vec(),
+                speakers: Vec::new(),
+            };
         }
         let mut chunks: HashMap<(&str, u64), &lf_diarize::LabelledChunk> = result
             .chunks
@@ -334,7 +344,8 @@ impl SpeakerLabels {
         }
         out.sort_by(|a, b| a.0.offset_seconds.total_cmp(&b.0.offset_seconds));
         let mut ids: Vec<(String, usize)> = Vec::new();
-        out.into_iter()
+        let segments = out
+            .into_iter()
             .map(|(mut segment, cluster)| {
                 if let Some(cluster) = cluster {
                     let key = (segment.source.clone(), cluster);
@@ -350,8 +361,43 @@ impl SpeakerLabels {
                 }
                 segment
             })
-            .collect()
+            .collect();
+        let mut stats = result.speakers;
+        let speakers = ids
+            .into_iter()
+            .enumerate()
+            .map(|(at, (source, cluster))| {
+                let stat = stats
+                    .iter_mut()
+                    .find(|s| s.source == source && s.cluster == cluster);
+                LabelledSpeaker {
+                    id: format!("S{}", at + 1),
+                    seconds: stat.as_ref().map_or(0.0, |s| s.seconds),
+                    centroid: stat.and_then(|s| s.centroid.take()),
+                    source,
+                }
+            })
+            .collect();
+        Labelled {
+            status: Status::Ok,
+            segments,
+            speakers,
+        }
     }
+}
+
+/// [`SpeakerLabels::apply_detailed`]'s result.
+pub struct Labelled {
+    pub status: Status,
+    pub segments: Vec<Segment>,
+    pub speakers: Vec<LabelledSpeaker>,
+}
+/// One assigned meeting speaker (`S<n>`); the centroid stays in memory.
+pub struct LabelledSpeaker {
+    pub id: String,
+    pub source: String,
+    pub seconds: f64,
+    pub centroid: Option<Vec<f32>>,
 }
 impl Drop for MeetingSession {
     fn drop(&mut self) {

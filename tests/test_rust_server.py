@@ -402,6 +402,231 @@ def test_meeting_start_fails_when_the_speech_model_cannot_load(rust_build, sandb
     assert not list((sandbox["home"] / "vault").rglob("*"))
 
 
+SPEAKER_ROUTES = [
+    ("GET", "/api/speakers"), ("POST", "/api/speakers"), ("DELETE", "/api/speakers"),
+    ("GET", "/api/speakers/export"), ("PATCH", "/api/speakers/Ana"), ("DELETE", "/api/speakers/Ana"),
+]
+
+
+def test_speaker_routes_auth_gates_and_unknown_meetings_match_python(servers):
+    """Recognition is off in the shared fixture: every voiceprint route is 403 on
+    both servers (before any body is read), every new route needs the token."""
+    meeting = "/api/meetings/" + "a" * 32 + "/speakers"
+    for method, path in SPEAKER_ROUTES:
+        compare(servers, path, method, {}, auth=False)
+        compare(servers, path, method, {})
+    compare(servers, "/api/speakers", "POST", "x" * 200_000, headers={"Content-Type": "application/json"})
+    for method, path, body in [("GET", meeting, None), ("PUT", meeting + "/S1", {"name": "Dana"}),
+                               ("POST", meeting + "/merge", {"from": "S1", "into": "S2"}),
+                               ("GET", "/api/meetings/not-an-id/speakers", None)]:
+        compare(servers, path, method, body, auth=False)
+        compare(servers, path, method, body)
+    statuses = [server.request("/api/diarization/status") for server in servers]
+    assert [s[0] for s in statuses] == [200, 200]
+    py, rs = (s[1] for s in statuses)
+    assert list(py) == list(rs)
+    assert (py["models_ready"], py["reason"]) == (rs["models_ready"], rs["reason"])
+    assert [{k: m[k] for k in m if k != "reason"} for m in py["models"]] == \
+        [{k: m[k] for k in m if k != "reason"} for m in rs["models"]]
+
+
+@pytest.fixture
+def speaker_server(rust_build, sandbox):
+    """`lf-rs serve` alone, with both speaker flags on and a temp vault."""
+    env = {**sandbox["env"], "PYNPUT_BACKEND": "dummy"}
+    vault = sandbox["root"] / "vault"
+    vault.mkdir()
+    config = sandbox["config"]
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'config_version = 2\n[features]\nmeetings = false\n'
+        f'[meetings]\nwatch = false\nvault_path = {json.dumps(str(vault))}\n'
+        'speaker_diarization = true\nspeaker_recognition = true\ndiarization_backend = "mock"\n',
+        encoding="utf-8",
+    )
+    token_path = _token_path(env)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text("localflow-http-test-token\n", encoding="utf-8")
+    port = _free_port()
+    command = [str(LF_RS), "serve", "--host", "127.0.0.1", "--port", str(port)]
+    with _start(command, env, token_path, sandbox["root"] / "rust-server.log", port) as rust:
+        yield rust, vault
+
+
+def _python_meeting(sandbox, vault):
+    """A diarized meeting saved by the Python writer + store, with voice data."""
+    from datetime import datetime
+
+    from localflow import meetings
+    from localflow.diarization.store import MeetingSpeakerStore, build_record
+
+    segments = [
+        meetings.Segment(0.0, "we ship Friday", "me"),
+        meetings.Segment(3.0, "pricing is done", "others", 5.0, "S1", "Speaker 1"),
+        meetings.Segment(6.0, "docs too", "others", 8.0, "S2", "Speaker 2"),
+        meetings.Segment(9.0, "and the blog", "others", 11.0, "S3", "Speaker 3"),
+        meetings.Segment(70.0, "agreed", "others", 72.0, "S1", "Speaker 1"),
+    ]
+    saved = meetings.ObsidianWriter(str(vault), "Notes", "Transcripts").write(
+        title="Launch", category="Zoom", started_at=datetime(2026, 11, 25, 10, 30),
+        duration_seconds=125.0, notes_md="## Summary\nShip", segments=segments,
+        user_notes="- **00:03** **Speaker 1:** not a transcript line", template="general")
+    assert saved.meeting_id
+    centroid = [0.0, 0.6, 0.8, 0.0]
+    speakers = [
+        {"id": "S1", "source": "others", "label": "Speaker 1", "seconds": 4.0},
+        {"id": "S2", "source": "others", "label": "Speaker 2", "seconds": 2.0, "centroid": centroid},
+        {"id": "S3", "source": "others", "label": "Speaker 3", "seconds": 2.0, "centroid": [1.0, 0.0, 0.0, 0.0]},
+    ]
+    store = MeetingSpeakerStore(root=sandbox["home"] / ".localflow" / "meetings")
+    store.save(build_record(meeting_id=saved.meeting_id, log_path=str(saved.log_path),
+                            notes_path=str(saved.notes_path), started_at="2026-11-25T10:30:00",
+                            embedder="mock", status="ok", speakers=speakers, segments=segments))
+    return saved, store, centroid
+
+
+def test_speaker_data_round_trips_between_python_and_rust(speaker_server, sandbox, tmp_path):
+    np = pytest.importorskip("numpy")
+    import zipfile
+
+    from localflow.diarization import registry as reg
+    from localflow.diarization.store import _problem, public_speakers
+    from localflow.meetings import read_transcript_log
+
+    rust, vault = speaker_server
+    saved, store, centroid = _python_meeting(sandbox, vault)
+    mid = saved.meeting_id
+    speakers_root = sandbox["home"] / ".localflow" / "speakers"
+    registry = reg.FileSpeakerRegistry(root=speakers_root, meetings=store)
+    ana = registry.enroll("Ana", [np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)], "mock")
+    notes_before = Path(saved.notes_path).read_bytes()
+
+    # Python wrote, Rust reads and edits.
+    status, body, _ = rust.request(f"/api/meetings/{mid}/speakers")
+    assert (status, body) == (200, {"meeting_id": mid, "speakers": public_speakers(store.load(mid))})
+    status, body, _ = rust.request(f"/api/meetings/{mid}/speakers/S1", "PUT", {"name": "Dana"})
+    assert status == 200, body
+    status, body, _ = rust.request(f"/api/meetings/{mid}/speakers/merge", "POST", {"from": "S3", "into": "S2"})
+    assert status == 200, body
+    record = store.load(mid)  # Rust's rewrite validates in Python
+    assert record is not None and _problem(record, mid) is None
+    assert [(s["id"], s["label"], s["seconds"]) for s in record["speakers"]] == \
+        [("S1", "Dana", 4.0), ("S2", "Speaker 2", 4.0)]
+    assert record["speakers"][1]["centroid"] == centroid
+    transcript = read_transcript_log(Path(saved.log_path))
+    text = Path(saved.log_path).read_text(encoding="utf-8")
+    assert "**00:03** **Dana:** pricing is done" in transcript
+    assert "**01:10** **Dana:** agreed" in transcript
+    assert "**00:09** **Speaker 2:** and the blog" in transcript
+    assert 'speakers: ["Me", "Dana", "Speaker 2"]' in text
+    assert "- **00:03** **Speaker 1:** not a transcript line" in text, "raw notes are not relabelled"
+    assert Path(saved.notes_path).read_bytes() == notes_before
+
+    # Voiceprints: Python-enrolled read by Rust; Rust-enrolled read by Python.
+    status, body, _ = rust.request("/api/speakers")
+    assert (status, body) == (200, {"speakers": [reg.public(ana)], "embedder": "mock"})
+    status, bo, _ = rust.request("/api/speakers", "POST", {"name": "Bo", "meeting_id": mid, "speaker_id": "S2"})
+    assert status == 201, bo
+    assert [vp.name for vp in registry.list()] == ["Ana", "Bo"]
+    vector = np.load(speakers_root / f"{bo['id']}.npy", allow_pickle=False)
+    assert vector.dtype == np.float32 and vector.shape == (4,)
+    assert abs(float(np.linalg.norm(vector)) - 1.0) < 1e-6
+    assert np.allclose(vector, np.asarray(centroid, dtype=np.float32), atol=1e-6)
+    expected = (speakers_root / f"{bo['id']}.npy").read_bytes()
+    import io
+    buf = io.BytesIO()
+    np.save(buf, vector, allow_pickle=False)
+    assert expected == buf.getvalue(), "the .npy bytes are exactly NumPy's"
+    assert registry.match(np.asarray(centroid, dtype=np.float32), "mock")[0].id == bo["id"]
+    assert store.load(mid)["speakers"][1]["voiceprint_id"] == bo["id"]
+    status, renamed, _ = rust.request(f"/api/speakers/{bo['id']}", "PATCH", {"name": "Bo B"})
+    assert (status, renamed["name"]) == (200, "Bo B")
+    assert registry.find(bo["id"]).name == "Bo B"
+
+    # Export: only on this computer; Python reads Rust's ZIP.
+    for headers in [{"Host": "remote.example"}, {"X-Forwarded-For": "10.0.0.9"}, {"Via": "1.1 proxy"}]:
+        status, body, _ = rust.request("/api/speakers/export", headers=headers)
+        assert (status, body) == (403, {"detail": "export is only available on this computer"})
+    status, data, headers = _raw_get(rust, "/api/speakers/export")
+    assert status == 200
+    assert headers["Content-Type"] == "application/zip"
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Content-Disposition"] == 'attachment; filename="localflow-speakers.zip"'
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert zf.namelist()[0] == "registry.json"
+        assert sorted(zf.namelist()[1:]) == sorted(f"{i}.npy" for i in (ana.id, bo["id"]))
+    out, count = reg.write_bundle(data, tmp_path / "py-export")
+    assert count == 2
+
+    # Forget across runtimes erases every copy of voice data, staged audio included.
+    staged = speakers_root / f".enroll-{'e' * 32}.audio"
+    staged.write_bytes(b"left by a killed server")
+    status, body, _ = rust.request("/api/speakers", "DELETE")
+    assert (status, body) == (200, {"forgotten": 2})
+    assert registry.list() == [] and not list(speakers_root.glob("*.npy")) and not staged.exists()
+    for sp in store.load(mid)["speakers"]:
+        assert sp["centroid"] is None and sp["voiceprint_id"] is None
+    assert "Dana" in Path(saved.log_path).read_text(encoding="utf-8"), "names in transcripts stay"
+
+
+def _raw_get(endpoint, path):
+    request = Request(f"http://127.0.0.1:{endpoint.port}{path}",
+                      headers={"X-Localflow-Token": endpoint.token_path.read_text().strip()})
+    with urlopen(request, timeout=5) as response:
+        return response.status, response.read(), response.headers
+
+
+def test_rust_cli_writes_a_python_export_and_refuses_an_invalid_one(rust_build, sandbox, tmp_path):
+    """`lf-rs speakers export` against a local stub serving Python's export ZIP."""
+    np = pytest.importorskip("numpy")
+    import http.server
+    import threading
+
+    from localflow.diarization import registry as reg
+    from localflow.diarization.store import MeetingSpeakerStore
+
+    source = reg.FileSpeakerRegistry(root=tmp_path / "source",
+                                     meetings=MeetingSpeakerStore(root=tmp_path / "m"))
+    ana = source.enroll("Ana", [np.array([0.0, 3.0, 4.0], dtype=np.float32)], "mock")
+    bodies = [source.export_zip(), b"PK\x03\x04 not really"]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = bodies.pop(0)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        config = sandbox["config"]
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(f"config_version = 2\n[server]\nhost = \"localhost\"\nport = {httpd.server_port}\n",
+                          encoding="utf-8")
+        target = tmp_path / "rust-export"
+        out = subprocess.run([str(LF_RS), "speakers", "export", str(target)], env=sandbox["env"],
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout == (f"exported 1 speaker(s) to {target}\n"
+                              "These files are voiceprints. Keep them private.\n")
+        copy = reg.FileSpeakerRegistry(root=target, meetings=MeetingSpeakerStore(root=tmp_path / "m2"))
+        assert [reg.public(vp) for vp in copy.list()] == [reg.public(ana)]
+        assert copy.match(np.array([0.0, 0.6, 0.8], dtype=np.float32), "mock")[0].id == ana.id
+        bad = subprocess.run([str(LF_RS), "speakers", "export", str(tmp_path / "bad")], env=sandbox["env"],
+                             capture_output=True, text=True, timeout=60)
+        assert (bad.returncode, bad.stderr) == (1, "error: not a speaker export\n")
+        assert not (tmp_path / "bad").exists()
+    finally:
+        httpd.shutdown()
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc RSS measurement")
 def test_idle_rss(servers):
     """Reports comparable unloaded HTTP hosts, not the full desktop/dictation app."""
