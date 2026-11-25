@@ -1326,10 +1326,10 @@ def test_relabel_keeps_an_older_transcript_older(tmp_path):
                    started_at=datetime(2026, 11, 14, 11, 0))
     base = old.log_path.stat().st_mtime_ns
     os.utime(old.log_path, ns=(base, base))
-    os.utime(newer.log_path, ns=(base + 10_000_000, base + 10_000_000))
+    os.utime(newer.log_path, ns=(base + 60_000_000_000, base + 60_000_000_000))
     assert latest_transcript_log(tmp_path / "logs") == newer.log_path
     assert _relabel(old) == 2
-    assert old.log_path.stat().st_mtime_ns == base + 1000
+    assert old.log_path.stat().st_mtime_ns == base + 2_000_000_000
     assert latest_transcript_log(tmp_path / "logs") == newer.log_path
 
 
