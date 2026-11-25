@@ -48,7 +48,8 @@ def run_node(script: str, tmp_path: Path) -> str:
     path.write_text(script, encoding="utf-8")
     proc = subprocess.run(
         [NODE, str(path)],
-        check=False, capture_output=True, text=True, timeout=30, cwd=tmp_path,
+        check=False, capture_output=True, text=True, encoding="utf-8",
+        timeout=30, cwd=tmp_path,
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
@@ -152,6 +153,25 @@ def test_start_hides_speakers():
         HTML,
     )
     assert m
+
+
+def test_poll_resets_speakers_when_live():
+    poll = HTML[HTML.index("async function pollMeeting()"):]
+    poll = poll[: poll.index("\n  }\n")]
+    m = re.search(
+        r"if \(live\) \{\s*(?://[^\n]*\s*)*"
+        r"if \(meetingSpeakers\.style\.display === 'block'\) resetSpeakers\(\);",
+        poll,
+    )
+    assert m, "pollMeeting must reset the speakers block while a meeting is live"
+
+
+def test_sync_checks_freshness_before_empty_list():
+    block = speakers_js()
+    sync = block[block.index("function syncSpeakers"):]
+    sync = sync[: sync.index("\n  }\n")]
+    assert sync.index("epoch !== spkEpoch") < sync.index("if (!list.length)")
+    assert sync.index("if (spkBusy) return;") < sync.index("if (!list.length)")
 
 
 def test_show_saved_wires_speakers():
@@ -309,6 +329,9 @@ const B = { id: 'S 2/x', label: 'Speaker 2', name: '', source: 'others', seconds
   // stale poll carrying old labels is ignored
   syncSpeakers({ meeting_id: 'm1', speakers: [A, B] }, staleEpoch);
   out.afterStale = rows()[1].children[0].textContent;
+  // a stale poll with *empty* speakers must not clear the panel either
+  syncSpeakers({ meeting_id: 'm1', speakers: [] }, staleEpoch);
+  out.afterStaleEmpty = { display: box.style.display, rows: rows().length };
 
   // a re-render from a changed poll keeps focus on the same row button
   spkButtons['S1'].merge.focus();
@@ -378,6 +401,19 @@ const B = { id: 'S 2/x', label: 'Speaker 2', name: '', source: 'others', seconds
   rows()[0].children[0].fire('submit', { preventDefault() {} });
   out.emptyRename = { calls: calls.length - before, status: status.textContent };
 
+  // duplicate labels: merge targets get talk time + id, unique ones stay clean
+  resetSpeakers();
+  syncSpeakers({ meeting_id: 'm2', speakers: [
+    A,
+    { id: 'S3', label: 'Alice', name: 'Alice', source: 'others', seconds: 12 },
+    { id: 'S4', label: 'Dan', name: 'Dan', source: 'others', seconds: 5 },
+  ] });
+  btn(rows()[2], 'Merge').fire('click');
+  out.dupOptions = rows()[2].find(c => c.tagName === 'SELECT').children.map(o => [o.value, o.textContent]);
+  rows()[2].children[0].fire('keydown', { key: 'Escape', preventDefault() {} });
+  btn(rows()[0], 'Merge').fire('click');
+  out.dupOptionsFromAlice = rows()[0].find(c => c.tagName === 'SELECT').children.map(o => o.textContent);
+
   resetSpeakers();
   out.reset = { display: box.style.display, rows: rows().length };
   process.stdout.write(JSON.stringify(out));
@@ -409,6 +445,7 @@ def test_speakers_render_behaviour(tmp_path):
     }
     assert out["afterRename"] == {"name": "Bob", "status": "Renamed", "focusOnRename": True}
     assert out["afterStale"] == "Bob"
+    assert out["afterStaleEmpty"] == {"display": "block", "rows": 2}
     assert out["syncFocus"] == {"rerendered": True, "focused": True}
     assert out["noSteal"] == {
         "chatFocused": True,
@@ -432,6 +469,11 @@ def test_speakers_render_behaviour(tmp_path):
         "focusOnSurvivor": True,
     }
     assert out["emptyRename"] == {"calls": 0, "status": "Enter a name"}
+    assert out["dupOptions"] == [
+        ["S1", "Alice (1m05s · S1)"],
+        ["S3", "Alice (0m12s · S3)"],
+    ]
+    assert out["dupOptionsFromAlice"] == ["Alice (0m12s · S3)", "Dan"]
     assert out["reset"] == {"display": "none", "rows": 0}
 
 

@@ -1284,13 +1284,13 @@
 
   // Only entry point from showSaved(); idempotent, runs on every idle poll.
   function syncSpeakers(saved, epoch) {
+    if (epoch !== undefined && epoch !== spkEpoch) return;   // stale poll
+    if (spkBusy) return;
     const list = spkFilter(saved && saved.speakers);
     if (!list.length) {
       if (meetingSpeakers.style.display === 'block') resetSpeakers();
       return;
     }
-    if (epoch !== undefined && epoch !== spkEpoch) return;   // stale poll
-    if (spkBusy) return;
     const mid = saved.meeting_id ? String(saved.meeting_id) : null;
     const key = spkMakeKey(mid, list);
     if (key === spkKey) return;
@@ -1407,11 +1407,20 @@
         const select = document.createElement('select');
         select.className = 'spkInput';
         select.setAttribute('aria-label', 'Merge ' + label + ' into');
+        const labelCount = {};
+        for (const other of spkList) {
+          const l = spkLabel(other);
+          labelCount[l] = (labelCount[l] || 0) + 1;
+        }
         for (const other of spkList) {
           if (other.id === sp.id) continue;
           const opt = document.createElement('option');
           opt.value = other.id;
-          opt.textContent = spkLabel(other);
+          const otherLabel = spkLabel(other);
+          // Same label twice: add talk time + id so the targets can be told apart.
+          opt.textContent = labelCount[otherLabel] > 1
+            ? otherLabel + ' (' + fmtSeconds(Math.round(Number(other.seconds) || 0)) + ' · ' + other.id + ')'
+            : otherLabel;
           select.appendChild(opt);
         }
         if (spkEdit.value !== undefined) select.value = spkEdit.value;
@@ -1637,6 +1646,8 @@
       }
       meetingActive = !!live;
       if (live) {
+        // Auto-started / other-tab meeting: drop the previous meeting's controls.
+        if (meetingSpeakers.style.display === 'block') resetSpeakers();
         // Adopt server notes once per session (e.g. an auto-started meeting, or
         // a second tab) unless the user is mid-edit here.
         const key = live.title + '|' + live.seconds;
