@@ -1661,11 +1661,18 @@ def test_recognition_opt_in_on_disk_just_before_start_is_used(diar, voices, monk
     assert all(sp["centroid"] for sp in _sidecar(diar, stop["meeting_id"])["speakers"])
 
 
-def test_invalid_config_file_keeps_the_running_speaker_flags(rec, caplog):
-    Path(os.environ["LOCALFLOW_CONFIG"]).write_text("[speakers\nnot toml", encoding="utf-8")
+@pytest.mark.parametrize("text", [
+    "[speakers\nnot toml",
+    'config_version = "2"\n[meetings]\nspeaker_diarization = false\n'
+    "speaker_recognition = false\n",
+])
+def test_invalid_config_file_keeps_the_running_speaker_flags(rec, caplog, text):
+    Path(os.environ["LOCALFLOW_CONFIG"]).write_text(text, encoding="utf-8")
     with caplog.at_level(logging.WARNING, "localflow.server"):
         start, collector, _ = _start_and_stop(rec)
     assert start["diarization"] == "collecting" and collector.registry is not None
+    assert server._config.speaker_diarization is True
+    assert server._config.speaker_recognition is True
     assert any("config reload skipped" in r.getMessage() for r in caplog.records)
 
 

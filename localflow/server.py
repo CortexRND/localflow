@@ -1006,7 +1006,8 @@ def _refresh_speaker_flags() -> Config:
         try:
             path = config_path()
             fresh = load_config() if path.exists() else None
-        except (ConfigError, OSError, ValueError) as exc:
+        # TypeError: valid TOML with a wrongly typed value, e.g. config_version = "2".
+        except (ConfigError, OSError, ValueError, TypeError) as exc:
             log.warning("config reload skipped: %s", exc)
             fresh = None
         if fresh is not None:
