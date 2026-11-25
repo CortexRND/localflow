@@ -1041,7 +1041,7 @@ pub fn checks(config: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
             "https://ffmpeg.org/download.html#build-linux",
         )),
         "Windows" => Some((
-            "Not found — install ffmpeg and add it to PATH",
+            "Not found — run: winget install Gyan.FFmpeg",
             "https://ffmpeg.org/download.html#build-windows",
         )),
         _ => None,
@@ -3052,6 +3052,9 @@ mod tests {
             );
             if system != "Darwin" {
                 assert!(!ffmpeg.detail.contains("brew"), "{system}");
+            }
+            if system == "Windows" {
+                assert_eq!(ffmpeg.detail, "Not found — run: winget install Gyan.FFmpeg");
             }
         }
         // Installed: no fix on any system.
