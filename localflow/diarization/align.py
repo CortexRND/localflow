@@ -82,8 +82,9 @@ def merge_runs(
 ) -> list[SpeakerRun]:
     """Merge consecutive items with an equal speaker key into one ``SpeakerRun``.
 
-    Times are shifted by ``chunk_offset``; text is the stripped non-empty texts joined by a
-    space. A run whose texts are all empty is kept with text ``""``. Order is preserved.
+    A run spans ``chunk_offset`` plus the min start and max end of its items; text is the
+    stripped non-empty texts in input order joined by a space. A run whose texts are all
+    empty is kept with text ``""``. Runs keep input order and are never re-sorted.
     """
     runs: list[SpeakerRun] = []
     group: list[TimedText] = []
@@ -91,11 +92,9 @@ def merge_runs(
 
     def flush() -> None:
         text = " ".join(s for s in (g.text.strip() for g in group) if s)
-        runs.append(
-            SpeakerRun(
-                chunk_offset + group[0].start, chunk_offset + group[-1].end, text, key
-            )
-        )
+        start = chunk_offset + min(g.start for g in group)
+        end = chunk_offset + max(g.end for g in group)
+        runs.append(SpeakerRun(start, end, text, key))
 
     for item, speaker in assigned:
         if group and speaker != key:
