@@ -1,0 +1,1820 @@
+{
+ "cell": "mcp-readonly",
+ "suite": "mcp",
+ "kind": "mcp",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:51",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "ids": {
+  "Migrate session storage to Redis": "2851d5f9",
+  "Update deploy docs for Redis sessions": "b9b5e39f",
+  "Audit TLS certificates": "6fe36be6"
+ },
+ "db": "home/.localflow/history.sqlite",
+ "queue": "home/.localflow/queue.json",
+ "server_module_in_sut": true,
+ "python": {
+  "exchanges": [
+   {
+    "name": "initialize",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"lfsim\", \"version\": \"1\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {\"tools\": {}}, \"serverInfo\": {\"name\": \"localflow\", \"version\": \"0.2.2\"}, \"instructions\": \"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 1,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-older-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\"}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"result\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {\"tools\": {}}, \"serverInfo\": {\"name\": \"localflow\", \"version\": \"0.2.2\"}, \"instructions\": \"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 2,
+     "result": {
+      "protocolVersion": "2024-11-05",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-unknown-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"1999-01-01\"}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"result\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {\"tools\": {}}, \"serverInfo\": {\"name\": \"localflow\", \"version\": \"0.2.2\"}, \"instructions\": \"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 3,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialized-notification",
+    "sent": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}",
+    "raw": null,
+    "reply": null
+   },
+   {
+    "name": "ping",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"result\": {}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 4,
+     "result": {}
+    }
+   },
+   {
+    "name": "tools-list",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"tools/list\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"result\": {\"tools\": [{\"name\": \"search_dictations\", \"description\": \"Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Words to find; omit to list recent.\"}, \"since\": {\"type\": \"string\", \"description\": \"Start: today, yesterday, 7d, 30d or YYYY-MM-DD.\"}, \"until\": {\"type\": \"string\", \"description\": \"End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive).\"}, \"app\": {\"type\": \"string\", \"description\": \"App name substring (case-insensitive) or exact bundle id.\"}, \"kind\": {\"type\": \"string\", \"enum\": [\"dictate\", \"command\", \"transform\"]}, \"limit\": {\"type\": \"integer\", \"description\": \"Maximum results (1-50, default 10).\"}}, \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}, {\"name\": \"get_dictation\", \"description\": \"Full text of one dictation by id (from search_dictations).\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"integer\"}}, \"required\": [\"id\"], \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}, {\"name\": \"search_prompts\", \"description\": \"Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Words to find; omit to list recent.\"}, \"status\": {\"type\": \"string\", \"enum\": [\"pending\", \"approved\", \"rejected\", \"dispatched\", \"failed\"]}, \"limit\": {\"type\": \"integer\", \"description\": \"Maximum results (1-50, default 10).\"}}, \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}, {\"name\": \"get_prompt\", \"description\": \"Full body and status of one work prompt by id (from search_prompts).\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"string\"}}, \"required\": [\"id\"], \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}]}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 5,
+     "result": {
+      "tools": [
+       {
+        "name": "search_dictations",
+        "description": "Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "since": {
+           "type": "string",
+           "description": "Start: today, yesterday, 7d, 30d or YYYY-MM-DD."
+          },
+          "until": {
+           "type": "string",
+           "description": "End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive)."
+          },
+          "app": {
+           "type": "string",
+           "description": "App name substring (case-insensitive) or exact bundle id."
+          },
+          "kind": {
+           "type": "string",
+           "enum": [
+            "dictate",
+            "command",
+            "transform"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_dictation",
+        "description": "Full text of one dictation by id (from search_dictations).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "search_prompts",
+        "description": "Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "pending",
+            "approved",
+            "rejected",
+            "dispatched",
+            "failed"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_prompt",
+        "description": "Full body and status of one work prompt by id (from search_prompts).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "name": "dictations-recent",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 10, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 10, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":5,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\"},{\\\"id\\\":2,\\\"when\\\":\\\"2026-11-23T08:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Mail\\\",\\\"category\\\":\\\"email\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Please send the Hartwell invoice to accounting by Friday.\\\"},{\\\"id\\\":3,\\\"when\\\":\\\"2026-11-22T08:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Cursor\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":5,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Shortened the paragraph about caching.\\\"},{\\\"id\\\":4,\\\"when\\\":\\\"2026-11-21T07:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Notes\\\",\\\"category\\\":\\\"other\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Converted the list into a table of quarterly targets.\\\"},{\\\"id\\\":5,\\\"when\\\":\\\"2026-11-20T06:01:51\\\",\\\"kind\\\":\\\"transform\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":8,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Rewrote the apology message in a formal tone.\\\"}]}\"}], \"structuredContent\": {\"count\": 5, \"match\": \"recent\", \"results\": [{\"id\": 1, \"when\": \"2026-11-24T09:01:51\", \"kind\": \"dictate\", \"app\": \"Slack\", \"category\": \"work\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"The Kubernetes rollout is paused until the canary passes.\"}, {\"id\": 2, \"when\": \"2026-11-23T08:01:51\", \"kind\": \"dictate\", \"app\": \"Mail\", \"category\": \"email\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"Please send the Hartwell invoice to accounting by Friday.\"}, {\"id\": 3, \"when\": \"2026-11-22T08:01:51\", \"kind\": \"command\", \"app\": \"Cursor\", \"category\": \"work\", \"words\": 5, \"duration_s\": 4.0, \"snippet\": \"Shortened the paragraph about caching.\"}, {\"id\": 4, \"when\": \"2026-11-21T07:01:51\", \"kind\": \"command\", \"app\": \"Notes\", \"category\": \"other\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"Converted the list into a table of quarterly targets.\"}, {\"id\": 5, \"when\": \"2026-11-20T06:01:51\", \"kind\": \"transform\", \"app\": \"Slack\", \"category\": \"work\", \"words\": 8, \"duration_s\": 4.0, \"snippet\": \"Rewrote the apology message in a formal tone.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 10,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":5,\"match\":\"recent\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"},{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"},{\"id\":3,\"when\":\"2026-11-22T08:01:51\",\"kind\":\"command\",\"app\":\"Cursor\",\"category\":\"work\",\"words\":5,\"duration_s\":4.0,\"snippet\":\"Shortened the paragraph about caching.\"},{\"id\":4,\"when\":\"2026-11-21T07:01:51\",\"kind\":\"command\",\"app\":\"Notes\",\"category\":\"other\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Converted the list into a table of quarterly targets.\"},{\"id\":5,\"when\":\"2026-11-20T06:01:51\",\"kind\":\"transform\",\"app\":\"Slack\",\"category\":\"work\",\"words\":8,\"duration_s\":4.0,\"snippet\":\"Rewrote the apology message in a formal tone.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 5,
+       "match": "recent",
+       "results": [
+        {
+         "id": 1,
+         "when": "2026-11-24T09:01:51",
+         "kind": "dictate",
+         "app": "Slack",
+         "category": "work",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "The Kubernetes rollout is paused until the canary passes."
+        },
+        {
+         "id": 2,
+         "when": "2026-11-23T08:01:51",
+         "kind": "dictate",
+         "app": "Mail",
+         "category": "email",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Please send the Hartwell invoice to accounting by Friday."
+        },
+        {
+         "id": 3,
+         "when": "2026-11-22T08:01:51",
+         "kind": "command",
+         "app": "Cursor",
+         "category": "work",
+         "words": 5,
+         "duration_s": 4.0,
+         "snippet": "Shortened the paragraph about caching."
+        },
+        {
+         "id": 4,
+         "when": "2026-11-21T07:01:51",
+         "kind": "command",
+         "app": "Notes",
+         "category": "other",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Converted the list into a table of quarterly targets."
+        },
+        {
+         "id": 5,
+         "when": "2026-11-20T06:01:51",
+         "kind": "transform",
+         "app": "Slack",
+         "category": "work",
+         "words": 8,
+         "duration_s": 4.0,
+         "snippet": "Rewrote the apology message in a formal tone."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-query",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 11, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"query\": \"kubernetes rollout\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 11, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":1,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\"}]}\"}], \"structuredContent\": {\"count\": 1, \"match\": \"ranked\", \"results\": [{\"id\": 1, \"when\": \"2026-11-24T09:01:51\", \"kind\": \"dictate\", \"app\": \"Slack\", \"category\": \"work\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"The Kubernetes rollout is paused until the canary passes.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 11,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "ranked",
+       "results": [
+        {
+         "id": 1,
+         "when": "2026-11-24T09:01:51",
+         "kind": "dictate",
+         "app": "Slack",
+         "category": "work",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "The Kubernetes rollout is paused until the canary passes."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-kind-command",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 12, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"command\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 12, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":2,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":3,\\\"when\\\":\\\"2026-11-22T08:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Cursor\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":5,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Shortened the paragraph about caching.\\\"},{\\\"id\\\":4,\\\"when\\\":\\\"2026-11-21T07:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Notes\\\",\\\"category\\\":\\\"other\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Converted the list into a table of quarterly targets.\\\"}]}\"}], \"structuredContent\": {\"count\": 2, \"match\": \"recent\", \"results\": [{\"id\": 3, \"when\": \"2026-11-22T08:01:51\", \"kind\": \"command\", \"app\": \"Cursor\", \"category\": \"work\", \"words\": 5, \"duration_s\": 4.0, \"snippet\": \"Shortened the paragraph about caching.\"}, {\"id\": 4, \"when\": \"2026-11-21T07:01:51\", \"kind\": \"command\", \"app\": \"Notes\", \"category\": \"other\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"Converted the list into a table of quarterly targets.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 12,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":2,\"match\":\"recent\",\"results\":[{\"id\":3,\"when\":\"2026-11-22T08:01:51\",\"kind\":\"command\",\"app\":\"Cursor\",\"category\":\"work\",\"words\":5,\"duration_s\":4.0,\"snippet\":\"Shortened the paragraph about caching.\"},{\"id\":4,\"when\":\"2026-11-21T07:01:51\",\"kind\":\"command\",\"app\":\"Notes\",\"category\":\"other\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Converted the list into a table of quarterly targets.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 2,
+       "match": "recent",
+       "results": [
+        {
+         "id": 3,
+         "when": "2026-11-22T08:01:51",
+         "kind": "command",
+         "app": "Cursor",
+         "category": "work",
+         "words": 5,
+         "duration_s": 4.0,
+         "snippet": "Shortened the paragraph about caching."
+        },
+        {
+         "id": 4,
+         "when": "2026-11-21T07:01:51",
+         "kind": "command",
+         "app": "Notes",
+         "category": "other",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Converted the list into a table of quarterly targets."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-kind-transform-query",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 13, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"transform\", \"query\": \"formal tone\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 13, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":1,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":5,\\\"when\\\":\\\"2026-11-20T06:01:51\\\",\\\"kind\\\":\\\"transform\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":8,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Rewrote the apology message in a formal tone.\\\"}]}\"}], \"structuredContent\": {\"count\": 1, \"match\": \"ranked\", \"results\": [{\"id\": 5, \"when\": \"2026-11-20T06:01:51\", \"kind\": \"transform\", \"app\": \"Slack\", \"category\": \"work\", \"words\": 8, \"duration_s\": 4.0, \"snippet\": \"Rewrote the apology message in a formal tone.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 13,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":5,\"when\":\"2026-11-20T06:01:51\",\"kind\":\"transform\",\"app\":\"Slack\",\"category\":\"work\",\"words\":8,\"duration_s\":4.0,\"snippet\":\"Rewrote the apology message in a formal tone.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "ranked",
+       "results": [
+        {
+         "id": 5,
+         "when": "2026-11-20T06:01:51",
+         "kind": "transform",
+         "app": "Slack",
+         "category": "work",
+         "words": 8,
+         "duration_s": 4.0,
+         "snippet": "Rewrote the apology message in a formal tone."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-limit",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 14, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"limit\": 2}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 14, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":2,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\"},{\\\"id\\\":2,\\\"when\\\":\\\"2026-11-23T08:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Mail\\\",\\\"category\\\":\\\"email\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Please send the Hartwell invoice to accounting by Friday.\\\"}]}\"}], \"structuredContent\": {\"count\": 2, \"match\": \"recent\", \"results\": [{\"id\": 1, \"when\": \"2026-11-24T09:01:51\", \"kind\": \"dictate\", \"app\": \"Slack\", \"category\": \"work\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"The Kubernetes rollout is paused until the canary passes.\"}, {\"id\": 2, \"when\": \"2026-11-23T08:01:51\", \"kind\": \"dictate\", \"app\": \"Mail\", \"category\": \"email\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"Please send the Hartwell invoice to accounting by Friday.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 14,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":2,\"match\":\"recent\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"},{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 2,
+       "match": "recent",
+       "results": [
+        {
+         "id": 1,
+         "when": "2026-11-24T09:01:51",
+         "kind": "dictate",
+         "app": "Slack",
+         "category": "work",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "The Kubernetes rollout is paused until the canary passes."
+        },
+        {
+         "id": 2,
+         "when": "2026-11-23T08:01:51",
+         "kind": "dictate",
+         "app": "Mail",
+         "category": "email",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Please send the Hartwell invoice to accounting by Friday."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-app",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 15, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"app\": \"mail\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 15, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":1,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":2,\\\"when\\\":\\\"2026-11-23T08:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Mail\\\",\\\"category\\\":\\\"email\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Please send the Hartwell invoice to accounting by Friday.\\\"}]}\"}], \"structuredContent\": {\"count\": 1, \"match\": \"recent\", \"results\": [{\"id\": 2, \"when\": \"2026-11-23T08:01:51\", \"kind\": \"dictate\", \"app\": \"Mail\", \"category\": \"email\", \"words\": 9, \"duration_s\": 4.0, \"snippet\": \"Please send the Hartwell invoice to accounting by Friday.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 15,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "recent",
+       "results": [
+        {
+         "id": 2,
+         "when": "2026-11-23T08:01:51",
+         "kind": "dictate",
+         "app": "Mail",
+         "category": "email",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Please send the Hartwell invoice to accounting by Friday."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-failed-hidden",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 16, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"query\": \"zebra\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 16, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":0,\\\"match\\\":\\\"substring\\\",\\\"results\\\":[]}\"}], \"structuredContent\": {\"count\": 0, \"match\": \"substring\", \"results\": []}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 16,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":0,\"match\":\"substring\",\"results\":[]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 0,
+       "match": "substring",
+       "results": []
+      }
+     }
+    }
+   },
+   {
+    "name": "get-dictation",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 17, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 17, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"status\\\":\\\"ok\\\",\\\"app\\\":\\\"Slack\\\",\\\"bundle_id\\\":\\\"\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"final_text\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\",\\\"raw_text\\\":\\\"um the kubernetes rollout is paused until the canary passes\\\",\\\"truncated\\\":false}\"}], \"structuredContent\": {\"id\": 1, \"when\": \"2026-11-24T09:01:51\", \"kind\": \"dictate\", \"status\": \"ok\", \"app\": \"Slack\", \"bundle_id\": \"\", \"category\": \"work\", \"words\": 9, \"duration_s\": 4.0, \"final_text\": \"The Kubernetes rollout is paused until the canary passes.\", \"raw_text\": \"um the kubernetes rollout is paused until the canary passes\", \"truncated\": false}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 17,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"status\":\"ok\",\"app\":\"Slack\",\"bundle_id\":\"\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"final_text\":\"The Kubernetes rollout is paused until the canary passes.\",\"raw_text\":\"um the kubernetes rollout is paused until the canary passes\",\"truncated\":false}"
+       }
+      ],
+      "structuredContent": {
+       "id": 1,
+       "when": "2026-11-24T09:01:51",
+       "kind": "dictate",
+       "status": "ok",
+       "app": "Slack",
+       "bundle_id": "",
+       "category": "work",
+       "words": 9,
+       "duration_s": 4.0,
+       "final_text": "The Kubernetes rollout is paused until the canary passes.",
+       "raw_text": "um the kubernetes rollout is paused until the canary passes",
+       "truncated": false
+      }
+     }
+    }
+   },
+   {
+    "name": "get-dictation-missing",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 18, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": 9999}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 18, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"no dictation with id 9999\"}], \"isError\": true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 18,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "no dictation with id 9999"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "prompts-recent",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 20, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 20, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":3,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"6fe36be6\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.500243\\\",\\\"snippet\\\":\\\"Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"},{\\\"id\\\":\\\"b9b5e39f\\\",\\\"title\\\":\\\"Update deploy docs for Redis sessions\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"rejected\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.479392\\\",\\\"snippet\\\":\\\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\\\"},{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"snippet\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"}]}\"}], \"structuredContent\": {\"count\": 3, \"match\": \"recent\", \"results\": [{\"id\": \"6fe36be6\", \"title\": \"Audit TLS certificates\", \"meeting\": \"Platform sync\", \"status\": \"pending\", \"created\": \"2026-11-24T10:01:51.500243\", \"snippet\": \"Audit the other 12 certificates this week and record every expiry date in the runbook.\"}, {\"id\": \"b9b5e39f\", \"title\": \"Update deploy docs for Redis sessions\", \"meeting\": \"Platform sync\", \"status\": \"rejected\", \"created\": \"2026-11-24T10:01:51.479392\", \"snippet\": \"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"}, {\"id\": \"2851d5f9\", \"title\": \"Migrate session storage to Redis\", \"meeting\": \"Platform sync\", \"status\": \"approved\", \"created\": \"2026-11-24T10:01:51.458596\", \"snippet\": \"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 20,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":3,\"match\":\"recent\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"},{\"id\":\"b9b5e39f\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.479392\",\"snippet\":\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"},{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 3,
+       "match": "recent",
+       "results": [
+        {
+         "id": "6fe36be6",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.500243",
+         "snippet": "Audit the other 12 certificates this week and record every expiry date in the runbook."
+        },
+        {
+         "id": "b9b5e39f",
+         "title": "Update deploy docs for Redis sessions",
+         "meeting": "Platform sync",
+         "status": "rejected",
+         "created": "2026-11-24T10:01:51.479392",
+         "snippet": "Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya."
+        },
+        {
+         "id": "2851d5f9",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.458596",
+         "snippet": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-status-approved",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 21, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"status\": \"approved\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 21, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":1,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"snippet\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"}]}\"}], \"structuredContent\": {\"count\": 1, \"match\": \"recent\", \"results\": [{\"id\": \"2851d5f9\", \"title\": \"Migrate session storage to Redis\", \"meeting\": \"Platform sync\", \"status\": \"approved\", \"created\": \"2026-11-24T10:01:51.458596\", \"snippet\": \"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 21,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "recent",
+       "results": [
+        {
+         "id": "2851d5f9",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.458596",
+         "snippet": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-query",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 22, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"query\": \"redis\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 22, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":2,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"snippet\\\":\\\"Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"},{\\\"id\\\":\\\"b9b5e39f\\\",\\\"title\\\":\\\"Update deploy docs for Redis sessions\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"rejected\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.479392\\\",\\\"snippet\\\":\\\"Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\\\"}]}\"}], \"structuredContent\": {\"count\": 2, \"match\": \"ranked\", \"results\": [{\"id\": \"2851d5f9\", \"title\": \"Migrate session storage to Redis\", \"meeting\": \"Platform sync\", \"status\": \"approved\", \"created\": \"2026-11-24T10:01:51.458596\", \"snippet\": \"Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}, {\"id\": \"b9b5e39f\", \"title\": \"Update deploy docs for Redis sessions\", \"meeting\": \"Platform sync\", \"status\": \"rejected\", \"created\": \"2026-11-24T10:01:51.479392\", \"snippet\": \"Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 22,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":2,\"match\":\"ranked\",\"results\":[{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"},{\"id\":\"b9b5e39f\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.479392\",\"snippet\":\"Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 2,
+       "match": "ranked",
+       "results": [
+        {
+         "id": "2851d5f9",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.458596",
+         "snippet": "Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        },
+        {
+         "id": "b9b5e39f",
+         "title": "Update deploy docs for Redis sessions",
+         "meeting": "Platform sync",
+         "status": "rejected",
+         "created": "2026-11-24T10:01:51.479392",
+         "snippet": "Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-query-body",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 23, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"query\": \"expiry runbook\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 23, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":1,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":\\\"6fe36be6\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.500243\\\",\\\"snippet\\\":\\\"Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"}]}\"}], \"structuredContent\": {\"count\": 1, \"match\": \"ranked\", \"results\": [{\"id\": \"6fe36be6\", \"title\": \"Audit TLS certificates\", \"meeting\": \"Platform sync\", \"status\": \"pending\", \"created\": \"2026-11-24T10:01:51.500243\", \"snippet\": \"Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 23,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "ranked",
+       "results": [
+        {
+         "id": "6fe36be6",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.500243",
+         "snippet": "Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-limit",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 24, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"limit\": 1}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 24, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"count\\\":1,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"6fe36be6\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.500243\\\",\\\"snippet\\\":\\\"Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"}]}\"}], \"structuredContent\": {\"count\": 1, \"match\": \"recent\", \"results\": [{\"id\": \"6fe36be6\", \"title\": \"Audit TLS certificates\", \"meeting\": \"Platform sync\", \"status\": \"pending\", \"created\": \"2026-11-24T10:01:51.500243\", \"snippet\": \"Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 24,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "recent",
+       "results": [
+        {
+         "id": "6fe36be6",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.500243",
+         "snippet": "Audit the other 12 certificates this week and record every expiry date in the runbook."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "get-prompt",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 25, \"method\": \"tools/call\", \"params\": {\"name\": \"get_prompt\", \"arguments\": {\"id\": \"2851d5f9\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 25, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"path\\\":\\\"/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md\\\",\\\"worktree\\\":\\\"\\\",\\\"repo\\\":\\\"\\\",\\\"error\\\":\\\"\\\",\\\"body\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\\n\\\",\\\"truncated\\\":false}\"}], \"structuredContent\": {\"id\": \"2851d5f9\", \"title\": \"Migrate session storage to Redis\", \"meeting\": \"Platform sync\", \"status\": \"approved\", \"created\": \"2026-11-24T10:01:51.458596\", \"path\": \"/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md\", \"worktree\": \"\", \"repo\": \"\", \"error\": \"\", \"body\": \"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\n\", \"truncated\": false}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 25,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"path\":\"/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md\",\"worktree\":\"\",\"repo\":\"\",\"error\":\"\",\"body\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\n\",\"truncated\":false}"
+       }
+      ],
+      "structuredContent": {
+       "id": "2851d5f9",
+       "title": "Migrate session storage to Redis",
+       "meeting": "Platform sync",
+       "status": "approved",
+       "created": "2026-11-24T10:01:51.458596",
+       "path": "/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md",
+       "worktree": "",
+       "repo": "",
+       "error": "",
+       "body": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\n",
+       "truncated": false
+      }
+     }
+    }
+   },
+   {
+    "name": "get-prompt-missing",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 26, \"method\": \"tools/call\", \"params\": {\"name\": \"get_prompt\", \"arguments\": {\"id\": \"deadbeef\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 26, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"no work prompt with id 'deadbeef'\"}], \"isError\": true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 26,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "no work prompt with id 'deadbeef'"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "malformed-json",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 30, \"method\": ",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": null,
+     "error": {
+      "code": -32700,
+      "message": "parse error"
+     }
+    }
+   },
+   {
+    "name": "unknown-method",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 31, \"method\": \"resources/list\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 31, \"error\": {\"code\": -32601, \"message\": \"method not found: resources/list\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 31,
+     "error": {
+      "code": -32601,
+      "message": "method not found: resources/list"
+     }
+    }
+   },
+   {
+    "name": "unknown-tool",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 32, \"method\": \"tools/call\", \"params\": {\"name\": \"delete_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 32, \"error\": {\"code\": -32602, \"message\": \"unknown tool: 'delete_dictation'\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 32,
+     "error": {
+      "code": -32602,
+      "message": "unknown tool: 'delete_dictation'"
+     }
+    }
+   },
+   {
+    "name": "missing-required-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 33, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 33, \"error\": {\"code\": -32602, \"message\": \"missing argument(s): id\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 33,
+     "error": {
+      "code": -32602,
+      "message": "missing argument(s): id"
+     }
+    }
+   },
+   {
+    "name": "unknown-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 34, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"sql\": \"DROP TABLE dictations\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 34, \"error\": {\"code\": -32602, \"message\": \"unknown argument(s): sql\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 34,
+     "error": {
+      "code": -32602,
+      "message": "unknown argument(s): sql"
+     }
+    }
+   },
+   {
+    "name": "wrong-type-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 35, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": \"1\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 35, \"error\": {\"code\": -32602, \"message\": \"id must be a integer\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 35,
+     "error": {
+      "code": -32602,
+      "message": "id must be a integer"
+     }
+    }
+   },
+   {
+    "name": "bad-enum-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 36, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"everything\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 36, \"error\": {\"code\": -32602, \"message\": \"kind must be one of dictate, command, transform\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 36,
+     "error": {
+      "code": -32602,
+      "message": "kind must be one of dictate, command, transform"
+     }
+    }
+   },
+   {
+    "name": "params-not-object",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 37, \"method\": \"tools/call\", \"params\": [1, 2]}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 37, \"error\": {\"code\": -32602, \"message\": \"params must be an object\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 37,
+     "error": {
+      "code": -32602,
+      "message": "params must be an object"
+     }
+    }
+   },
+   {
+    "name": "server-still-alive",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 38, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 38, \"result\": {}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 38,
+     "result": {}
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "2106bc3e2b1f0b0fe31b2ca2fc6521ac653b32600c8ba85055d45b413953dddc",
+   "home/.localflow/history.sqlite": "0c13a35d1a82f6d5ebaa52f7cca91db9cf1cdf1e7de40ca455c8c13adf8d9208",
+   "home/.localflow/queue.json": "46890b1beaaadc09e514a28bb9c639347f02f62d093631a58853253158f76fba",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f5494825b10cfdb1212539c6df3a2cf4e177220e129e0d660ccc568dc34420e6",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "33e34f0ce46e6bbe40cf3d2b9ac7e7d7f32a4b057d9d3d151f6ad207508a3a16",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "80d900d7cd39863848e590b0316bee164f5211b931d759bcceaf66bb926b4145"
+  },
+  "hash_after": {
+   "config.toml": "2106bc3e2b1f0b0fe31b2ca2fc6521ac653b32600c8ba85055d45b413953dddc",
+   "home/.localflow/history.sqlite": "0c13a35d1a82f6d5ebaa52f7cca91db9cf1cdf1e7de40ca455c8c13adf8d9208",
+   "home/.localflow/queue.json": "46890b1beaaadc09e514a28bb9c639347f02f62d093631a58853253158f76fba",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f5494825b10cfdb1212539c6df3a2cf4e177220e129e0d660ccc568dc34420e6",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "33e34f0ce46e6bbe40cf3d2b9ac7e7d7f32a4b057d9d3d151f6ad207508a3a16",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "80d900d7cd39863848e590b0316bee164f5211b931d759bcceaf66bb926b4145"
+  },
+  "stderr_tail": ""
+ },
+ "rust": {
+  "exchanges": [
+   {
+    "name": "initialize",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"lfsim\", \"version\": \"1\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"localflow\",\"version\":\"0.2.2\"},\"instructions\":\"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 1,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-older-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\"}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"localflow\",\"version\":\"0.2.2\"},\"instructions\":\"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 2,
+     "result": {
+      "protocolVersion": "2024-11-05",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-unknown-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"1999-01-01\"}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"localflow\",\"version\":\"0.2.2\"},\"instructions\":\"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 3,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialized-notification",
+    "sent": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}",
+    "raw": null,
+    "reply": null
+   },
+   {
+    "name": "ping",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 4,
+     "result": {}
+    }
+   },
+   {
+    "name": "tools-list",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"tools/list\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"tools\":[{\"name\":\"search_dictations\",\"description\":\"Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Words to find; omit to list recent.\"},\"since\":{\"type\":\"string\",\"description\":\"Start: today, yesterday, 7d, 30d or YYYY-MM-DD.\"},\"until\":{\"type\":\"string\",\"description\":\"End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive).\"},\"app\":{\"type\":\"string\",\"description\":\"App name substring (case-insensitive) or exact bundle id.\"},\"kind\":{\"type\":\"string\",\"enum\":[\"dictate\",\"command\",\"transform\"]},\"limit\":{\"type\":\"integer\",\"description\":\"Maximum results (1-50, default 10).\"}},\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}},{\"name\":\"get_dictation\",\"description\":\"Full text of one dictation by id (from search_dictations).\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}},{\"name\":\"search_prompts\",\"description\":\"Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Words to find; omit to list recent.\"},\"status\":{\"type\":\"string\",\"enum\":[\"pending\",\"approved\",\"rejected\",\"dispatched\",\"failed\"]},\"limit\":{\"type\":\"integer\",\"description\":\"Maximum results (1-50, default 10).\"}},\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}},{\"name\":\"get_prompt\",\"description\":\"Full body and status of one work prompt by id (from search_prompts).\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}}]}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 5,
+     "result": {
+      "tools": [
+       {
+        "name": "search_dictations",
+        "description": "Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "since": {
+           "type": "string",
+           "description": "Start: today, yesterday, 7d, 30d or YYYY-MM-DD."
+          },
+          "until": {
+           "type": "string",
+           "description": "End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive)."
+          },
+          "app": {
+           "type": "string",
+           "description": "App name substring (case-insensitive) or exact bundle id."
+          },
+          "kind": {
+           "type": "string",
+           "enum": [
+            "dictate",
+            "command",
+            "transform"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_dictation",
+        "description": "Full text of one dictation by id (from search_dictations).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "search_prompts",
+        "description": "Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "pending",
+            "approved",
+            "rejected",
+            "dispatched",
+            "failed"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_prompt",
+        "description": "Full body and status of one work prompt by id (from search_prompts).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "name": "dictations-recent",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 10, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":5,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\"},{\\\"id\\\":2,\\\"when\\\":\\\"2026-11-23T08:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Mail\\\",\\\"category\\\":\\\"email\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Please send the Hartwell invoice to accounting by Friday.\\\"},{\\\"id\\\":3,\\\"when\\\":\\\"2026-11-22T08:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Cursor\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":5,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Shortened the paragraph about caching.\\\"},{\\\"id\\\":4,\\\"when\\\":\\\"2026-11-21T07:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Notes\\\",\\\"category\\\":\\\"other\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Converted the list into a table of quarterly targets.\\\"},{\\\"id\\\":5,\\\"when\\\":\\\"2026-11-20T06:01:51\\\",\\\"kind\\\":\\\"transform\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":8,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Rewrote the apology message in a formal tone.\\\"}]}\"}],\"structuredContent\":{\"count\":5,\"match\":\"recent\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"},{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"},{\"id\":3,\"when\":\"2026-11-22T08:01:51\",\"kind\":\"command\",\"app\":\"Cursor\",\"category\":\"work\",\"words\":5,\"duration_s\":4.0,\"snippet\":\"Shortened the paragraph about caching.\"},{\"id\":4,\"when\":\"2026-11-21T07:01:51\",\"kind\":\"command\",\"app\":\"Notes\",\"category\":\"other\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Converted the list into a table of quarterly targets.\"},{\"id\":5,\"when\":\"2026-11-20T06:01:51\",\"kind\":\"transform\",\"app\":\"Slack\",\"category\":\"work\",\"words\":8,\"duration_s\":4.0,\"snippet\":\"Rewrote the apology message in a formal tone.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 10,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":5,\"match\":\"recent\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"},{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"},{\"id\":3,\"when\":\"2026-11-22T08:01:51\",\"kind\":\"command\",\"app\":\"Cursor\",\"category\":\"work\",\"words\":5,\"duration_s\":4.0,\"snippet\":\"Shortened the paragraph about caching.\"},{\"id\":4,\"when\":\"2026-11-21T07:01:51\",\"kind\":\"command\",\"app\":\"Notes\",\"category\":\"other\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Converted the list into a table of quarterly targets.\"},{\"id\":5,\"when\":\"2026-11-20T06:01:51\",\"kind\":\"transform\",\"app\":\"Slack\",\"category\":\"work\",\"words\":8,\"duration_s\":4.0,\"snippet\":\"Rewrote the apology message in a formal tone.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 5,
+       "match": "recent",
+       "results": [
+        {
+         "id": 1,
+         "when": "2026-11-24T09:01:51",
+         "kind": "dictate",
+         "app": "Slack",
+         "category": "work",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "The Kubernetes rollout is paused until the canary passes."
+        },
+        {
+         "id": 2,
+         "when": "2026-11-23T08:01:51",
+         "kind": "dictate",
+         "app": "Mail",
+         "category": "email",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Please send the Hartwell invoice to accounting by Friday."
+        },
+        {
+         "id": 3,
+         "when": "2026-11-22T08:01:51",
+         "kind": "command",
+         "app": "Cursor",
+         "category": "work",
+         "words": 5,
+         "duration_s": 4.0,
+         "snippet": "Shortened the paragraph about caching."
+        },
+        {
+         "id": 4,
+         "when": "2026-11-21T07:01:51",
+         "kind": "command",
+         "app": "Notes",
+         "category": "other",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Converted the list into a table of quarterly targets."
+        },
+        {
+         "id": 5,
+         "when": "2026-11-20T06:01:51",
+         "kind": "transform",
+         "app": "Slack",
+         "category": "work",
+         "words": 8,
+         "duration_s": 4.0,
+         "snippet": "Rewrote the apology message in a formal tone."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-query",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 11, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"query\": \"kubernetes rollout\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":1,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\"}]}\"}],\"structuredContent\":{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 11,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "ranked",
+       "results": [
+        {
+         "id": 1,
+         "when": "2026-11-24T09:01:51",
+         "kind": "dictate",
+         "app": "Slack",
+         "category": "work",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "The Kubernetes rollout is paused until the canary passes."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-kind-command",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 12, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"command\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":2,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":3,\\\"when\\\":\\\"2026-11-22T08:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Cursor\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":5,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Shortened the paragraph about caching.\\\"},{\\\"id\\\":4,\\\"when\\\":\\\"2026-11-21T07:01:51\\\",\\\"kind\\\":\\\"command\\\",\\\"app\\\":\\\"Notes\\\",\\\"category\\\":\\\"other\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Converted the list into a table of quarterly targets.\\\"}]}\"}],\"structuredContent\":{\"count\":2,\"match\":\"recent\",\"results\":[{\"id\":3,\"when\":\"2026-11-22T08:01:51\",\"kind\":\"command\",\"app\":\"Cursor\",\"category\":\"work\",\"words\":5,\"duration_s\":4.0,\"snippet\":\"Shortened the paragraph about caching.\"},{\"id\":4,\"when\":\"2026-11-21T07:01:51\",\"kind\":\"command\",\"app\":\"Notes\",\"category\":\"other\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Converted the list into a table of quarterly targets.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 12,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":2,\"match\":\"recent\",\"results\":[{\"id\":3,\"when\":\"2026-11-22T08:01:51\",\"kind\":\"command\",\"app\":\"Cursor\",\"category\":\"work\",\"words\":5,\"duration_s\":4.0,\"snippet\":\"Shortened the paragraph about caching.\"},{\"id\":4,\"when\":\"2026-11-21T07:01:51\",\"kind\":\"command\",\"app\":\"Notes\",\"category\":\"other\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Converted the list into a table of quarterly targets.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 2,
+       "match": "recent",
+       "results": [
+        {
+         "id": 3,
+         "when": "2026-11-22T08:01:51",
+         "kind": "command",
+         "app": "Cursor",
+         "category": "work",
+         "words": 5,
+         "duration_s": 4.0,
+         "snippet": "Shortened the paragraph about caching."
+        },
+        {
+         "id": 4,
+         "when": "2026-11-21T07:01:51",
+         "kind": "command",
+         "app": "Notes",
+         "category": "other",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Converted the list into a table of quarterly targets."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-kind-transform-query",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 13, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"transform\", \"query\": \"formal tone\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":13,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":1,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":5,\\\"when\\\":\\\"2026-11-20T06:01:51\\\",\\\"kind\\\":\\\"transform\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":8,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Rewrote the apology message in a formal tone.\\\"}]}\"}],\"structuredContent\":{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":5,\"when\":\"2026-11-20T06:01:51\",\"kind\":\"transform\",\"app\":\"Slack\",\"category\":\"work\",\"words\":8,\"duration_s\":4.0,\"snippet\":\"Rewrote the apology message in a formal tone.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 13,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":5,\"when\":\"2026-11-20T06:01:51\",\"kind\":\"transform\",\"app\":\"Slack\",\"category\":\"work\",\"words\":8,\"duration_s\":4.0,\"snippet\":\"Rewrote the apology message in a formal tone.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "ranked",
+       "results": [
+        {
+         "id": 5,
+         "when": "2026-11-20T06:01:51",
+         "kind": "transform",
+         "app": "Slack",
+         "category": "work",
+         "words": 8,
+         "duration_s": 4.0,
+         "snippet": "Rewrote the apology message in a formal tone."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-limit",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 14, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"limit\": 2}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":14,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":2,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Slack\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\"},{\\\"id\\\":2,\\\"when\\\":\\\"2026-11-23T08:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Mail\\\",\\\"category\\\":\\\"email\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Please send the Hartwell invoice to accounting by Friday.\\\"}]}\"}],\"structuredContent\":{\"count\":2,\"match\":\"recent\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"},{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 14,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":2,\"match\":\"recent\",\"results\":[{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"app\":\"Slack\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"The Kubernetes rollout is paused until the canary passes.\"},{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 2,
+       "match": "recent",
+       "results": [
+        {
+         "id": 1,
+         "when": "2026-11-24T09:01:51",
+         "kind": "dictate",
+         "app": "Slack",
+         "category": "work",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "The Kubernetes rollout is paused until the canary passes."
+        },
+        {
+         "id": 2,
+         "when": "2026-11-23T08:01:51",
+         "kind": "dictate",
+         "app": "Mail",
+         "category": "email",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Please send the Hartwell invoice to accounting by Friday."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-app",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 15, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"app\": \"mail\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":15,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":1,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":2,\\\"when\\\":\\\"2026-11-23T08:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"app\\\":\\\"Mail\\\",\\\"category\\\":\\\"email\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"snippet\\\":\\\"Please send the Hartwell invoice to accounting by Friday.\\\"}]}\"}],\"structuredContent\":{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 15,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":2,\"when\":\"2026-11-23T08:01:51\",\"kind\":\"dictate\",\"app\":\"Mail\",\"category\":\"email\",\"words\":9,\"duration_s\":4.0,\"snippet\":\"Please send the Hartwell invoice to accounting by Friday.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "recent",
+       "results": [
+        {
+         "id": 2,
+         "when": "2026-11-23T08:01:51",
+         "kind": "dictate",
+         "app": "Mail",
+         "category": "email",
+         "words": 9,
+         "duration_s": 4.0,
+         "snippet": "Please send the Hartwell invoice to accounting by Friday."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "dictations-failed-hidden",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 16, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"query\": \"zebra\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":16,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":0,\\\"match\\\":\\\"substring\\\",\\\"results\\\":[]}\"}],\"structuredContent\":{\"count\":0,\"match\":\"substring\",\"results\":[]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 16,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":0,\"match\":\"substring\",\"results\":[]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 0,
+       "match": "substring",
+       "results": []
+      }
+     }
+    }
+   },
+   {
+    "name": "get-dictation",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 17, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":17,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"id\\\":1,\\\"when\\\":\\\"2026-11-24T09:01:51\\\",\\\"kind\\\":\\\"dictate\\\",\\\"status\\\":\\\"ok\\\",\\\"app\\\":\\\"Slack\\\",\\\"bundle_id\\\":\\\"\\\",\\\"category\\\":\\\"work\\\",\\\"words\\\":9,\\\"duration_s\\\":4.0,\\\"final_text\\\":\\\"The Kubernetes rollout is paused until the canary passes.\\\",\\\"raw_text\\\":\\\"um the kubernetes rollout is paused until the canary passes\\\",\\\"truncated\\\":false}\"}],\"structuredContent\":{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"status\":\"ok\",\"app\":\"Slack\",\"bundle_id\":\"\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"final_text\":\"The Kubernetes rollout is paused until the canary passes.\",\"raw_text\":\"um the kubernetes rollout is paused until the canary passes\",\"truncated\":false}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 17,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"id\":1,\"when\":\"2026-11-24T09:01:51\",\"kind\":\"dictate\",\"status\":\"ok\",\"app\":\"Slack\",\"bundle_id\":\"\",\"category\":\"work\",\"words\":9,\"duration_s\":4.0,\"final_text\":\"The Kubernetes rollout is paused until the canary passes.\",\"raw_text\":\"um the kubernetes rollout is paused until the canary passes\",\"truncated\":false}"
+       }
+      ],
+      "structuredContent": {
+       "id": 1,
+       "when": "2026-11-24T09:01:51",
+       "kind": "dictate",
+       "status": "ok",
+       "app": "Slack",
+       "bundle_id": "",
+       "category": "work",
+       "words": 9,
+       "duration_s": 4.0,
+       "final_text": "The Kubernetes rollout is paused until the canary passes.",
+       "raw_text": "um the kubernetes rollout is paused until the canary passes",
+       "truncated": false
+      }
+     }
+    }
+   },
+   {
+    "name": "get-dictation-missing",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 18, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": 9999}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":18,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"no dictation with id 9999\"}],\"isError\":true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 18,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "no dictation with id 9999"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "prompts-recent",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 20, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":20,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":3,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"6fe36be6\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.500243\\\",\\\"snippet\\\":\\\"Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"},{\\\"id\\\":\\\"b9b5e39f\\\",\\\"title\\\":\\\"Update deploy docs for Redis sessions\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"rejected\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.479392\\\",\\\"snippet\\\":\\\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\\\"},{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"snippet\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"}]}\"}],\"structuredContent\":{\"count\":3,\"match\":\"recent\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"},{\"id\":\"b9b5e39f\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.479392\",\"snippet\":\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"},{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 20,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":3,\"match\":\"recent\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"},{\"id\":\"b9b5e39f\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.479392\",\"snippet\":\"Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"},{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 3,
+       "match": "recent",
+       "results": [
+        {
+         "id": "6fe36be6",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.500243",
+         "snippet": "Audit the other 12 certificates this week and record every expiry date in the runbook."
+        },
+        {
+         "id": "b9b5e39f",
+         "title": "Update deploy docs for Redis sessions",
+         "meeting": "Platform sync",
+         "status": "rejected",
+         "created": "2026-11-24T10:01:51.479392",
+         "snippet": "Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya."
+        },
+        {
+         "id": "2851d5f9",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.458596",
+         "snippet": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-status-approved",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 21, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"status\": \"approved\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":1,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"snippet\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"}]}\"}],\"structuredContent\":{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 21,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "recent",
+       "results": [
+        {
+         "id": "2851d5f9",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.458596",
+         "snippet": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-query",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 22, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"query\": \"redis\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":22,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":2,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"snippet\\\":\\\"Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\"},{\\\"id\\\":\\\"b9b5e39f\\\",\\\"title\\\":\\\"Update deploy docs for Redis sessions\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"rejected\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.479392\\\",\\\"snippet\\\":\\\"Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\\\"}]}\"}],\"structuredContent\":{\"count\":2,\"match\":\"ranked\",\"results\":[{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"},{\"id\":\"b9b5e39f\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.479392\",\"snippet\":\"Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 22,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":2,\"match\":\"ranked\",\"results\":[{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"snippet\":\"Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\"},{\"id\":\"b9b5e39f\",\"title\":\"Update deploy docs for Redis sessions\",\"meeting\":\"Platform sync\",\"status\":\"rejected\",\"created\":\"2026-11-24T10:01:51.479392\",\"snippet\":\"Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 2,
+       "match": "ranked",
+       "results": [
+        {
+         "id": "2851d5f9",
+         "title": "Migrate session storage to Redis",
+         "meeting": "Platform sync",
+         "status": "approved",
+         "created": "2026-11-24T10:01:51.458596",
+         "snippet": "Migrate session storage to Redis Platform sync Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis."
+        },
+        {
+         "id": "b9b5e39f",
+         "title": "Update deploy docs for Redis sessions",
+         "meeting": "Platform sync",
+         "status": "rejected",
+         "created": "2026-11-24T10:01:51.479392",
+         "snippet": "Update deploy docs for Redis sessions Platform sync Document Redis provisioning and connection configuration in the deploy docs. Owner per the meeting: Priya."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-query-body",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 23, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"query\": \"expiry runbook\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":23,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":1,\\\"match\\\":\\\"ranked\\\",\\\"results\\\":[{\\\"id\\\":\\\"6fe36be6\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.500243\\\",\\\"snippet\\\":\\\"Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"}]}\"}],\"structuredContent\":{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 23,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"ranked\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "ranked",
+       "results": [
+        {
+         "id": "6fe36be6",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.500243",
+         "snippet": "Audit TLS certificates Platform sync Audit the other 12 certificates this week and record every expiry date in the runbook."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "prompts-limit",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 24, \"method\": \"tools/call\", \"params\": {\"name\": \"search_prompts\", \"arguments\": {\"limit\": 1}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":24,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"count\\\":1,\\\"match\\\":\\\"recent\\\",\\\"results\\\":[{\\\"id\\\":\\\"6fe36be6\\\",\\\"title\\\":\\\"Audit TLS certificates\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"pending\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.500243\\\",\\\"snippet\\\":\\\"Audit the other 12 certificates this week and record every expiry date in the runbook.\\\"}]}\"}],\"structuredContent\":{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 24,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"count\":1,\"match\":\"recent\",\"results\":[{\"id\":\"6fe36be6\",\"title\":\"Audit TLS certificates\",\"meeting\":\"Platform sync\",\"status\":\"pending\",\"created\":\"2026-11-24T10:01:51.500243\",\"snippet\":\"Audit the other 12 certificates this week and record every expiry date in the runbook.\"}]}"
+       }
+      ],
+      "structuredContent": {
+       "count": 1,
+       "match": "recent",
+       "results": [
+        {
+         "id": "6fe36be6",
+         "title": "Audit TLS certificates",
+         "meeting": "Platform sync",
+         "status": "pending",
+         "created": "2026-11-24T10:01:51.500243",
+         "snippet": "Audit the other 12 certificates this week and record every expiry date in the runbook."
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "name": "get-prompt",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 25, \"method\": \"tools/call\", \"params\": {\"name\": \"get_prompt\", \"arguments\": {\"id\": \"2851d5f9\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":25,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"id\\\":\\\"2851d5f9\\\",\\\"title\\\":\\\"Migrate session storage to Redis\\\",\\\"meeting\\\":\\\"Platform sync\\\",\\\"status\\\":\\\"approved\\\",\\\"created\\\":\\\"2026-11-24T10:01:51.458596\\\",\\\"path\\\":\\\"/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md\\\",\\\"worktree\\\":\\\"\\\",\\\"repo\\\":\\\"\\\",\\\"error\\\":\\\"\\\",\\\"body\\\":\\\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\\\n\\\",\\\"truncated\\\":false}\"}],\"structuredContent\":{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"path\":\"/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md\",\"worktree\":\"\",\"repo\":\"\",\"error\":\"\",\"body\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\n\",\"truncated\":false}}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 25,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "{\"id\":\"2851d5f9\",\"title\":\"Migrate session storage to Redis\",\"meeting\":\"Platform sync\",\"status\":\"approved\",\"created\":\"2026-11-24T10:01:51.458596\",\"path\":\"/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md\",\"worktree\":\"\",\"repo\":\"\",\"error\":\"\",\"body\":\"Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\\n\",\"truncated\":false}"
+       }
+      ],
+      "structuredContent": {
+       "id": "2851d5f9",
+       "title": "Migrate session storage to Redis",
+       "meeting": "Platform sync",
+       "status": "approved",
+       "created": "2026-11-24T10:01:51.458596",
+       "path": "/tmp/lfsim-mcp-readonly-upvsjuxc/prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md",
+       "worktree": "",
+       "repo": "",
+       "error": "",
+       "body": "Replace the local-file session storage with Redis before the pilot launch. Done means all session reads and writes go through Redis.\n",
+       "truncated": false
+      }
+     }
+    }
+   },
+   {
+    "name": "get-prompt-missing",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 26, \"method\": \"tools/call\", \"params\": {\"name\": \"get_prompt\", \"arguments\": {\"id\": \"deadbeef\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":26,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"no work prompt with id 'deadbeef'\"}],\"isError\":true}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 26,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "no work prompt with id 'deadbeef'"
+       }
+      ],
+      "isError": true
+     }
+    }
+   },
+   {
+    "name": "malformed-json",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 30, \"method\": ",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"parse error\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": null,
+     "error": {
+      "code": -32700,
+      "message": "parse error"
+     }
+    }
+   },
+   {
+    "name": "unknown-method",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 31, \"method\": \"resources/list\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":31,\"error\":{\"code\":-32601,\"message\":\"method not found: resources/list\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 31,
+     "error": {
+      "code": -32601,
+      "message": "method not found: resources/list"
+     }
+    }
+   },
+   {
+    "name": "unknown-tool",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 32, \"method\": \"tools/call\", \"params\": {\"name\": \"delete_dictation\", \"arguments\": {\"id\": 1}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":32,\"error\":{\"code\":-32602,\"message\":\"unknown tool: 'delete_dictation'\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 32,
+     "error": {
+      "code": -32602,
+      "message": "unknown tool: 'delete_dictation'"
+     }
+    }
+   },
+   {
+    "name": "missing-required-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 33, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":33,\"error\":{\"code\":-32602,\"message\":\"missing argument(s): id\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 33,
+     "error": {
+      "code": -32602,
+      "message": "missing argument(s): id"
+     }
+    }
+   },
+   {
+    "name": "unknown-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 34, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"sql\": \"DROP TABLE dictations\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":34,\"error\":{\"code\":-32602,\"message\":\"unknown argument(s): sql\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 34,
+     "error": {
+      "code": -32602,
+      "message": "unknown argument(s): sql"
+     }
+    }
+   },
+   {
+    "name": "wrong-type-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 35, \"method\": \"tools/call\", \"params\": {\"name\": \"get_dictation\", \"arguments\": {\"id\": \"1\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":35,\"error\":{\"code\":-32602,\"message\":\"id must be a integer\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 35,
+     "error": {
+      "code": -32602,
+      "message": "id must be a integer"
+     }
+    }
+   },
+   {
+    "name": "bad-enum-arg",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 36, \"method\": \"tools/call\", \"params\": {\"name\": \"search_dictations\", \"arguments\": {\"kind\": \"everything\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":36,\"error\":{\"code\":-32602,\"message\":\"kind must be one of dictate, command, transform\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 36,
+     "error": {
+      "code": -32602,
+      "message": "kind must be one of dictate, command, transform"
+     }
+    }
+   },
+   {
+    "name": "params-not-object",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 37, \"method\": \"tools/call\", \"params\": [1, 2]}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":37,\"error\":{\"code\":-32602,\"message\":\"params must be an object\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 37,
+     "error": {
+      "code": -32602,
+      "message": "params must be an object"
+     }
+    }
+   },
+   {
+    "name": "server-still-alive",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 38, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":38,\"result\":{}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 38,
+     "result": {}
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "2106bc3e2b1f0b0fe31b2ca2fc6521ac653b32600c8ba85055d45b413953dddc",
+   "home/.localflow/history.sqlite": "0c13a35d1a82f6d5ebaa52f7cca91db9cf1cdf1e7de40ca455c8c13adf8d9208",
+   "home/.localflow/queue.json": "46890b1beaaadc09e514a28bb9c639347f02f62d093631a58853253158f76fba",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f5494825b10cfdb1212539c6df3a2cf4e177220e129e0d660ccc568dc34420e6",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "33e34f0ce46e6bbe40cf3d2b9ac7e7d7f32a4b057d9d3d151f6ad207508a3a16",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "80d900d7cd39863848e590b0316bee164f5211b931d759bcceaf66bb926b4145"
+  },
+  "hash_after": {
+   "config.toml": "2106bc3e2b1f0b0fe31b2ca2fc6521ac653b32600c8ba85055d45b413953dddc",
+   "home/.localflow/history.sqlite": "0c13a35d1a82f6d5ebaa52f7cca91db9cf1cdf1e7de40ca455c8c13adf8d9208",
+   "home/.localflow/queue.json": "46890b1beaaadc09e514a28bb9c639347f02f62d093631a58853253158f76fba",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "f5494825b10cfdb1212539c6df3a2cf4e177220e129e0d660ccc568dc34420e6",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "33e34f0ce46e6bbe40cf3d2b9ac7e7d7f32a4b057d9d3d151f6ad207508a3a16",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "80d900d7cd39863848e590b0316bee164f5211b931d759bcceaf66bb926b4145"
+  },
+  "stderr_tail": ""
+ },
+ "rust_bin": "localflow-mcp",
+ "finished": "2026-11-24T10:01:51"
+}
