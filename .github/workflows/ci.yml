@@ -73,5 +73,9 @@ jobs:
           tests/test_gpui_packaging.py
           localflow/desktop_launch.py
           tests/test_desktop_launch.py
+          localflow/diarization
+          tests/test_diarization_align.py
+          tests/test_diarization_cluster.py
+          tests/test_diarization_mock.py
       - name: Test
         run: pytest -q
