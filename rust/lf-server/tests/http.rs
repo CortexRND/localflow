@@ -278,6 +278,7 @@ impl Backend for Flags {
             body: json!({
                 "path": request.path,
                 "recognition": request.config.field_bool("speaker_recognition"),
+                "vault": request.config.field_str("vault_path"),
             }),
         }
     }
@@ -285,11 +286,18 @@ impl Backend for Flags {
 
 #[tokio::test]
 async fn speaker_routes_follow_the_saved_config_while_other_routes_keep_the_loaded_one() {
-    // The "saved file": edited while the server runs.
+    // The server's loaded config and the "saved file", edited while the
+    // server runs (here also to a different vault, as `lf config set` may).
+    let mut loaded = Config::default();
+    loaded.set_field("vault_path", json!("/loaded/vault"));
     let saved = Arc::new(std::sync::Mutex::new(Config::default()));
+    saved
+        .lock()
+        .unwrap()
+        .set_field("vault_path", json!("/live/vault"));
     let file = saved.clone();
     let state = Arc::new(
-        ServerState::new(Config::default(), "test-token".into(), Arc::new(Flags))
+        ServerState::new(loaded, "test-token".into(), Arc::new(Flags))
             .with_speaker_config_reader(Arc::new(move || Ok(file.lock().unwrap().clone()))),
     );
     let app = || router(state.clone());
@@ -325,10 +333,36 @@ async fn speaker_routes_follow_the_saved_config_while_other_routes_keep_the_load
     }
     assert_eq!(
         send("GET", "/api/speakers", vec![]).await,
-        (200, json!({"path": "/api/speakers", "recognition": true}))
+        (
+            200,
+            json!({"path": "/api/speakers", "recognition": true, "vault": "/loaded/vault"})
+        )
     );
     let meeting = format!("/api/meetings/{}/speakers", "a".repeat(32));
     assert_eq!(send("GET", &meeting, vec![]).await.1["recognition"], true);
+    // A speaker rename and a meeting save use the same (loaded) vault; only
+    // the diarization settings come from the saved file.
+    let rename = send(
+        "PUT",
+        &format!("{meeting}/S1"),
+        br#"{"name":"Dana"}"#.to_vec(),
+    )
+    .await;
+    assert_eq!(
+        rename,
+        (
+            200,
+            json!({"path": format!("{meeting}/S1"), "recognition": true, "vault": "/loaded/vault"})
+        )
+    );
+    let stop = send("POST", "/meeting/stop", vec![]).await;
+    assert_eq!(
+        stop,
+        (
+            200,
+            json!({"path": "/meeting/stop", "recognition": false, "vault": "/loaded/vault"})
+        )
+    );
     // The pre-body contract is intact: gate first, then the size cap.
     assert_eq!(
         send("POST", "/api/speakers", vec![b' '; 70_000]).await,

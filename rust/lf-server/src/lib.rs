@@ -110,10 +110,11 @@ impl ServerState {
         self
     }
 
-    /// Re-read config only for the speaker-data routes (`/api/speakers*`, a
-    /// meeting's speakers, `/api/diarization/status`), so the voiceprint gate
-    /// follows edits to the saved file while every other route keeps the
-    /// server's config. A general `with_config_reader` already covers them.
+    /// Re-read the diarization settings only for the speaker-data routes
+    /// (`/api/speakers*`, a meeting's speakers, `/api/diarization/status`), so
+    /// the voiceprint gate follows edits to the saved file while every other
+    /// setting and route keeps the server's config. A general
+    /// `with_config_reader` already covers them.
     pub fn with_speaker_config_reader(
         mut self,
         reader: Arc<dyn Fn() -> anyhow::Result<Config> + Send + Sync>,
@@ -122,19 +123,36 @@ impl ServerState {
         self
     }
 
-    /// The config a speaker-data request is judged by: freshly read when a
-    /// reader is attached, else the server's config.
+    /// The config a speaker-data request is judged by: freshly read with a
+    /// general reader; with only a speaker reader, the server's config with
+    /// just the diarization fields taken from the fresh read (so the vault and
+    /// every other setting stay those meeting saves use); else the server's.
     fn speaker_config(&self) -> anyhow::Result<Config> {
-        match self
-            .config_reader
-            .as_ref()
-            .or(self.speaker_config_reader.as_ref())
-        {
-            Some(reader) => reader(),
-            None => Ok(self.config.lock().unwrap().clone()),
+        if let Some(reader) = self.config_reader.as_ref() {
+            return reader();
         }
+        let Some(reader) = self.speaker_config_reader.as_ref() else {
+            return Ok(self.config.lock().unwrap().clone());
+        };
+        let live = reader()?;
+        let mut config = self.config.lock().unwrap().clone();
+        for field in SPEAKER_FIELDS {
+            if let Some(value) = live.field(field) {
+                config.set_field(field, value.clone());
+            }
+        }
+        Ok(config)
     }
 }
+
+/// The settings a speaker reader keeps live (the diarization fields).
+const SPEAKER_FIELDS: [&str; 5] = [
+    "speaker_diarization",
+    "speaker_recognition",
+    "diarization_backend",
+    "diarization_max_speakers",
+    "diarize_mic",
+];
 
 /// Routes whose config must be live for the speaker-recognition gate.
 fn is_speaker_data_path(path: &str) -> bool {
