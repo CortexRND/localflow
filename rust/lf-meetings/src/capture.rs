@@ -1,6 +1,6 @@
 use crate::{
     system_audio::{AudioCallback, AudioSource, SAMPLE_RATE},
-    Segment, SOURCE_ME, SOURCE_OTHERS,
+    Segment, TimedText, SOURCE_ME, SOURCE_OTHERS,
 };
 use anyhow::Result;
 use chrono::{Local, NaiveDateTime};
@@ -12,6 +12,20 @@ use std::{
 
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, audio: &[f32], prompt: Option<&str>) -> Result<String>;
+    /// Segment timings for `audio`; implementations without timing return one span for the whole clip.
+    fn transcribe_timed(&self, audio: &[f32], prompt: Option<&str>) -> Result<Vec<TimedText>> {
+        let text = self.transcribe(audio, prompt)?;
+        let text = crate::trim(&text);
+        Ok(if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![TimedText {
+                start: 0.0,
+                end: audio.len() as f64 / SAMPLE_RATE as f64,
+                text: text.into(),
+            }]
+        })
+    }
 }
 #[derive(Default)]
 struct SourceBuffer {

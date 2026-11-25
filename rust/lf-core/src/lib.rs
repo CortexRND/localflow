@@ -12,6 +12,7 @@ pub mod phrases_model;
 pub mod secrets;
 pub mod shortcuts;
 pub mod symbols;
+pub mod transcript;
 
 /// Shared helpers for unit tests that touch process-global state.
 #[cfg(test)]
