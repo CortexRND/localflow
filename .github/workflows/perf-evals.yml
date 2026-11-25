@@ -57,7 +57,9 @@ jobs:
       LF_PERF_CACHE_DIR: ${{ github.workspace }}/.perf-cache/corpus
       PYNPUT_BACKEND: dummy
       # Untrusted inputs go through env, never straight into a script.
-      PERF_SUITES_INPUT: ${{ inputs.suites || 'stt,dictation,recall' }}
+      # diarization is safe here: its mock cases carry only deterministic quality
+      # metrics, and the sherpa cases are not_exercised (plain `pip install -e .`).
+      PERF_SUITES_INPUT: ${{ inputs.suites || 'stt,dictation,recall,diarization' }}
       PERF_RUNTIMES_INPUT: ${{ inputs.runtimes || 'python,rust' }}
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +91,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .perf-cache
-          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}
+          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
 
       - name: Select suites and runtimes
         shell: bash
@@ -345,7 +347,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            suites: stt,dictation,recall,footprint,meetings
+            suites: stt,dictation,recall,footprint,meetings,diarization
           - os: macos-latest
             suites: stt,dictation,recall,footprint
           - os: windows-latest
@@ -395,13 +397,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf-cache
-          key: perf-hf-v1-${{ runner.os }}-${{ runner.arch }}
+          # v2: the first run after the diarization suite saves a cache that also
+          # holds the speaker models (an exact-key hit is never re-saved).
+          key: perf-hf-v2-${{ runner.os }}-${{ runner.arch }}
 
       - name: Cache perf corpus
         uses: actions/cache@v4
         with:
           path: .perf-cache
-          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}
+          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
 
       - name: Select runtimes
         shell: bash
@@ -423,9 +427,18 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
             pip install -e ".[mlx]"
+          elif printf ',%s,' "$PERF_SUITES" | grep -q ',diarization,'; then
+            pip install -e ".[diarization]"
           else
             pip install -e .
           fi
+
+      # Speaker models land in HF_HUB_CACHE (.hf-cache/hub). Without them the
+      # sherpa diarization cases are not_exercised, never failed.
+      - name: Download speaker models
+        if: contains(matrix.suites, 'diarization')
+        shell: bash
+        run: lf speakers download || echo "::warning::speaker model download failed; diarization cases will be not_exercised"
 
       - name: Restore native runtimes pruned by Rust cache
         shell: bash
@@ -643,7 +656,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .perf-cache
-          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}
+          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
 
       - name: Select runtimes
         shell: bash

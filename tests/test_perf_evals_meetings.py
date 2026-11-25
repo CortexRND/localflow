@@ -39,7 +39,7 @@ SIM_DIR = REPO_ROOT / "evals" / "meeting_sim"
 GATES_PY = SIM_DIR / "gates.py"
 STDLIB_OK = set(sys.stdlib_module_names) | {"__future__"}
 SCENARIOS = json.loads((SIM_DIR / "scenarios.json").read_text(encoding="utf-8"))["scenarios"]
-EXACT = ("M1", "M2", "M3", "M4", "M11", "M12", "M13")
+EXACT = ("M1", "M2", "M3", "M4", "M11", "M12", "M13", "M14")
 QUALITY = ("M5", "M6", "M7", "M8", "M9", "M10")
 LOG_PATH = "/sim/vault/log.md"
 
@@ -68,6 +68,20 @@ def _template_sections(name: str) -> list[str]:
     return resolve_template(name).section_names()
 
 
+DIARIZED_ID = "launch-sync-diarized"
+
+
+def _is_diarized(sc: dict) -> bool:
+    return bool(sc.get("diarization_backend")) and sc["system_audio"] == "ok"
+
+
+def speaker_labels(sc: dict) -> dict[int, str]:
+    """Line index -> "Speaker k" (first appearance among remote speakers)."""
+    rank: dict[str, int] = {}
+    return {i: f"Speaker {rank.setdefault(who, len(rank) + 1)}"
+            for i, ((src, _), who) in enumerate(zip(sc["lines"], sc["line_speakers"])) if src == "others"}
+
+
 def perfect_result(sc: dict, *, rep: int = 1, stop_ms: float = 1200.0) -> dict:
     nf = sc["notes_final"] + sc.get("notes_final_extra", "")
     lines = []
@@ -80,10 +94,13 @@ def perfect_result(sc: dict, *, rep: int = 1, stop_ms: float = 1200.0) -> dict:
     md = "\n".join(lines) + "\n\n" + "\n".join(f"- {w}" for w in words) + "\n"
     notes_text = f"---\ntemplate: {sc['template']}\n---\n# {_safe_title(sc['title'])}\n{md}\nRaw transcript: [[log]]\n"
     ok = sc["system_audio"] == "ok"
+    labels = speaker_labels(sc) if _is_diarized(sc) else {}
     log_lines = [
-        f"**00:{i * 5:02d}** **{'Me' if src == 'me' else 'Others'}:** {text}"
+        f"**00:{i * 5:02d}** **{'Me' if src == 'me' else labels.get(i, 'Others')}:** {text}"
         for i, (src, text) in enumerate(sc["lines"]) if ok or src == "me"
     ]
+    speakers = [{"id": f"S{label.split()[1]}", "label": label, "name": None, "source": "others", "seconds": 10.0}
+                for label in dict.fromkeys(labels.values())]
     log_text = "# Log\n\n" + "\n".join(log_lines) + "\n"
     if nf.strip():
         log_text += f"\n## My raw notes\n\n{nf.strip()}\n"
@@ -105,7 +122,7 @@ def perfect_result(sc: dict, *, rep: int = 1, stop_ms: float = 1200.0) -> dict:
         "status_mid": [200, {"system_audio": start["system_audio"]}],
         "notes_save": [200, {}],
         "stop": [200, {"template": sc["template"], "enhanced": bool(nf.strip()), "notes_path": "/sim/n.md",
-                       "log_path": LOG_PATH}],
+                       "log_path": LOG_PATH, "diarization": "ok" if labels else "off", "speakers": speakers}],
         "notes_text": notes_text, "log_text": log_text, "summarize_calls": 1, "chats": chats,
         "restart": {"status": 200, "log_path": LOG_PATH, "expected": LOG_PATH},
         "http": http,
@@ -241,7 +258,7 @@ def test_gates_py_scenarios_subset_and_missing_scenario(tmp_path):
     out.mkdir(parents=True)
     sc = SCENARIOS[0]
     (out / f"{sc['id']}.json").write_text(json.dumps(perfect_result(sc)))
-    # Default scenarios file: the five missing scenarios fail M1.
+    # Default scenarios file: the other missing scenarios fail M1.
     assert run_gates_py(str(run), "--sut", str(REPO_ROOT)).returncode == 0
     m1 = json.loads((run / "gates.json").read_text())["summary"]["M1"]
     assert m1["status"] == "fail" and m1["pooled_n"] == len(SCENARIOS)
@@ -335,7 +352,7 @@ def test_wilson_matches_gates_py():
 @pytest.mark.parametrize("bad", [None, [], {"summary": "x"}, {"per_repeat": {}}])
 def test_adapter_malformed_gates_doc_fails_every_gate(bad):
     cases = mg.convert_gates(bad)
-    assert len(cases) == 13 and all(c["status"] == "failed" and c["error"] for c in cases)
+    assert len(cases) == len(mg.GATES) == 14 and all(c["status"] == "failed" and c["error"] for c in cases)
 
 
 def test_adapter_bad_entries_fail_that_gate_only():
@@ -456,7 +473,7 @@ def test_compare_slower_stop_to_notes_warns_then_blocks(scored_run):
 def test_rust_is_not_exercised():
     cases = meetings.run_meetings(_ctx("rust"))
     _valid(cases, "rust")
-    assert len(cases) == 14
+    assert len(cases) == len(mg.GATES) + 1 == 15
     assert all(c["status"] == "not_exercised" and c["error"] == meetings.RUST_REASON for c in cases)
     assert "meetings/timings/rust" in _by_case(cases)
 
@@ -467,7 +484,7 @@ def test_python_run_dir_option_and_env(scored_run, monkeypatch):
     assert all(c["status"] == "ok" for c in cases)
     assert _by_case(cases)["meetings/timings/python"]["evidence"]["run_dir"] == str(scored_run)
     monkeypatch.setenv("LF_PERF_MEETING_RUN_DIR", str(scored_run))
-    assert [c["status"] for c in meetings.run_meetings(_ctx())] == ["ok"] * 14
+    assert [c["status"] for c in meetings.run_meetings(_ctx())] == ["ok"] * (len(mg.GATES) + 1)
 
 
 def test_python_run_dir_without_gates_json_is_scored(tmp_path):
@@ -497,7 +514,7 @@ def test_python_without_ollama_is_not_exercised(monkeypatch, tmp_path):
     monkeypatch.setenv("LF_PERF_MEETING_OUT", str(tmp_path / "out"))
     cases = meetings.run_meetings(_ctx(tier="nightly", ollama_timeout_s=0.5))
     _valid(cases)
-    assert len(cases) == 14
+    assert len(cases) == len(mg.GATES) + 1
     assert all(c["status"] == "not_exercised" and "Ollama not reachable" in c["error"] for c in cases)
     assert not (tmp_path / "out").exists()
 
@@ -626,9 +643,9 @@ def test_live_run_with_stub_driver_and_real_gates(tmp_path):
     by = _by_case(cases)
     assert all(c["status"] == "ok" for c in cases), [c for c in cases if c["status"] != "ok"]
     assert json.loads((out / "gates.json").read_text())["summary"]["M2"]["pass_count"] == "2/2"
-    assert sorted(p.parent.parent.name for p in out.glob("r*/results/*.json")) == ["r1"] * 6 + ["r2"] * 6
+    assert sorted(p.parent.parent.name for p in out.glob("r*/results/*.json")) == ["r1"] * len(SCENARIOS) + ["r2"] * len(SCENARIOS)
     calls = (fixtures / "calls.log").read_text().splitlines()
-    assert len(calls) == 12 and all(c.endswith("http://ollama.test:1 m:1 True") for c in calls)
+    assert len(calls) == 2 * len(SCENARIOS) and all(c.endswith("http://ollama.test:1 m:1 True") for c in calls)
     ev = by["meetings/timings/python"]["evidence"]
     assert ev["repeats"] == 2 and ev["driver_failures"] == [] and ev["llm_model"] == "m:1"
     assert "MATRIX_DONE" in (out / "matrix.log").read_text()
@@ -664,7 +681,7 @@ def test_cli_run_rust_smoke(tmp_path):
                           text=True, check=False, timeout=120)
     assert proc.returncode == 0, proc.stderr
     data = json.loads(out.read_text())
-    assert validate_result(data) == [] and len(data["cases"]) == 14
+    assert validate_result(data) == [] and len(data["cases"]) == len(mg.GATES) + 1
 
 
 # --------------------------------------------------------------------------
@@ -693,3 +710,134 @@ def test_real_driver_records_ms_timings(fake_ollama, tmp_path, monkeypatch):
     assert not Path(res["tmp"]).exists()  # --cleanup
     assert srv.prompts
     assert _by_case(cases)["meetings/timings/python"]["status"] == "ok"
+
+
+# --------------------------------------------------------------------------
+# M14 speaker labels (diarized scenario, mock backend)
+# --------------------------------------------------------------------------
+
+
+def _diarized() -> dict:
+    return next(s for s in SCENARIOS if s["id"] == DIARIZED_ID)
+
+
+def _gates_for(tmp_path: Path, mutate=None, repeats: int = 1, scenarios: list[dict] | None = None) -> dict:
+    run = write_run(tmp_path / "run", repeats=repeats, mutate=mutate)
+    args = [str(run), "--sut", str(REPO_ROOT)]
+    if scenarios is not None:
+        subset = tmp_path / "subset.json"
+        subset.write_text(json.dumps({"scenarios": scenarios}))
+        keep = {s["id"] for s in scenarios}
+        for path in run.glob("r*/results/*.json"):
+            if path.stem not in keep:
+                path.unlink()
+        args += ["--scenarios", str(subset)]
+    proc = run_gates_py(*args)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads((run / "gates.json").read_text())
+
+
+def _relabel(sid: str, fn):
+    def mutate(_k, res):
+        if res["scenario"] == sid:
+            res["log_text"] = fn(res["log_text"])
+    return mutate
+
+
+def test_diarized_scenario_shape():
+    sc = _diarized()
+    assert SCENARIOS.index(sc) == 6 and sc["diarization_backend"] == "mock"
+    assert len(sc["line_speakers"]) == len(sc["lines"]) <= 13
+    assert all((src == "me") == (who == "me") for (src, _), who in zip(sc["lines"], sc["line_speakers"]))
+    labels = speaker_labels(sc)
+    assert {sc["line_speakers"][i]: lab for i, lab in labels.items()} == {
+        "Ana": "Speaker 1", "Ben": "Speaker 2", "Chloe": "Speaker 3"}
+    assert sum(1 for s in SCENARIOS if s.get("diarization_backend")) == 1
+
+
+def test_m14_passes_on_perfect_run(scored_run):
+    summary = json.loads((scored_run / "gates.json").read_text())["summary"]
+    assert summary["M14"]["status"] == "pass"
+    assert summary["M14"]["pooled_n"] == 2 * 8  # 7 remote lines + 1 speakers check per repeat
+    assert summary["M2"]["status"] == "pass"
+
+
+def test_m14_fails_when_labels_missing_but_m2_holds(tmp_path):
+    import re
+
+    data = _gates_for(tmp_path, _relabel(DIARIZED_ID, lambda t: re.sub(r"\*\*Speaker \d+:\*\*", "**Others:**", t)))
+    s = data["summary"]
+    assert s["M2"]["status"] == "pass" and data["per_repeat"]["r1"]["M2"]["value"] == 1.0
+    assert s["M14"]["status"] == "fail"
+    assert f"{DIARIZED_ID}#1" in data["per_repeat"]["r1"]["M14"]["fail"]
+
+
+def test_m14_fails_when_speakers_swapped(tmp_path):
+    def swap(text):
+        return text.replace("**Speaker 2:**", "**Speaker X:**").replace(
+            "**Speaker 3:**", "**Speaker 2:**").replace("**Speaker X:**", "**Speaker 3:**")
+
+    data = _gates_for(tmp_path, _relabel(DIARIZED_ID, swap))
+    assert data["summary"]["M2"]["status"] == "pass"
+    assert data["summary"]["M14"]["status"] == "fail"
+    fails = data["per_repeat"]["r1"]["M14"]["fail"]
+    assert f"{DIARIZED_ID}#2" in fails and f"{DIARIZED_ID}:speakers" not in fails
+
+
+def test_m14_speakers_check_needs_diarization_ok(tmp_path):
+    def channel(_k, res):
+        if res["scenario"] == DIARIZED_ID:
+            res["stop"][1]["diarization"] = "channel"
+
+    data = _gates_for(tmp_path, channel)
+    assert data["per_repeat"]["r1"]["M14"]["fail"] == [f"{DIARIZED_ID}:speakers"]
+    assert data["summary"]["M2"]["status"] == "pass"
+
+
+def test_m2_relaxation_is_scenario_scoped(tmp_path):
+    sid = SCENARIOS[0]["id"]
+    data = _gates_for(tmp_path, _relabel(sid, lambda t: t.replace("**Others:**", "**Speaker 1:**")))
+    fails = data["per_repeat"]["r1"]["M2"]["fail"]
+    assert data["summary"]["M2"]["status"] == "fail"
+    assert any(item.startswith(f"{sid}#") for item in fails)
+    assert not any(item.startswith(DIARIZED_ID) for item in fails)
+    assert data["summary"]["M14"]["status"] == "pass"
+
+
+def test_m14_not_exercised_without_diarized_scenario(tmp_path):
+    subset = [s for s in SCENARIOS if s["id"] != DIARIZED_ID]
+    data = _gates_for(tmp_path, scenarios=subset)
+    assert data["summary"]["M14"]["status"] == "not exercised" and data["summary"]["M14"]["pooled_n"] == 0
+    case = _by_case(mg.convert_gates(data))["meetings/gate/M14"]
+    assert case["status"] == "not_exercised"
+
+
+def test_adapter_m14_dims_and_compare_blocks(scored_run):
+    base = mg.load_run_dir(scored_run)
+    case = _by_case(base)["meetings/gate/M14"]
+    assert case["status"] == "ok" and case["metrics"]["M14"]["value"] == 1.0
+    assert case["dims"]["check"] == "speaker_labels" and case["dims"]["class"] == "exact"
+    rows, report = _verdicts(base, _set_gate(base, "M14", 0.9))
+    assert rows[("meetings/gate/M14", "M14")].blocking and report.blocked
+
+
+@pytest.mark.skipif(not HAS_DRIVER_DEPS, reason=f"driver.py needs {', '.join(meetings.PRODUCT_DEPS)}")
+def test_real_driver_diarized_scenario_labels_speakers(fake_ollama, tmp_path, monkeypatch):
+    """End to end: driver tone coding -> mock diarization collector -> Speaker k in the log."""
+    srv = fake_ollama(["llama3.2:3b"])
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    out = tmp_path / "out"
+    cases = meetings.run_meetings(_ctx(ollama_url=srv.url, output_dir=str(out), scenarios=DIARIZED_ID,
+                                       timeout_s=300))
+    _valid(cases)
+    res = json.loads((out / "r1" / "results" / f"{DIARIZED_ID}.json").read_text())
+    assert "**Speaker 3:**" in res["log_text"], res["log_text"]
+    stop = res["stop"][1]
+    assert stop["diarization"] == "ok"
+    assert sorted(s["label"] for s in stop["speakers"]) == ["Speaker 1", "Speaker 2", "Speaker 3"]
+    stats = res["diarization"]["stats"]
+    assert stats["dropped"] == stats["failed"] == 0 and stats["processed"] == stats["offered"] == 7
+    by = _by_case(cases)
+    for gate in ("M2", "M14"):
+        case = by[f"meetings/gate/{gate}"]
+        assert case["status"] == "ok" and case["metrics"][gate]["value"] == 1.0, case

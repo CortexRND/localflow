@@ -2,6 +2,8 @@
 SUT: CortexRND/localflow @ 27f2bba (PR #19 head; product code == c54aca8), worktree ~/work/sim-sut (detached).
 LLM under test: Ollama llama3.2:3b (shipped default), CPU, product's own prompts/params (no changes).
 STT: scripted transcriber (each line encoded as 5 s of tone on the speaker's source, 5 s silence on the other source; clocks aligned).
+  Tone coding: amplitude 0.1 + code*0.001 with code = line index; in a diarized scenario (diarization_backend "mock") code = line*64 + speaker slot
+  (slot 0 = me, remote speakers 1, 2, 3 … by first appearance in line_speakers), so the mock embedder (one-hot on code % 64) hears one voice per scripted speaker.
 Audio: sd.InputStream patched to a no-op; system audio = fake source (ok) or open_system_audio raises (fail scenario).
 Driver: real FastAPI app via TestClient: /meeting/templates, /meeting/start {title,template,user_notes=notes_initial},
   feed lines, /meeting/status mid-way, /meeting/notes {notes_final} (autosave), /meeting/stop, /meeting/chat per question,
@@ -12,7 +14,7 @@ Judge: Jev via cortex evals/sim/judge.ts (live). Trusted this run: answer (1.000
 
 ## Deterministic gates (pass = passes in every repeat; flaky = differs between repeats)
 M1 lifecycle: all HTTP calls 2xx; notes+log files exist; payload.template == scenario.template; payload.enhanced == bool(notes_final). Threshold: all.
-M2 attribution: logged speaker labels/order match scripted lines (system ok) — rate 1.0.
+M2 attribution: logged speaker labels/order match scripted lines (system ok) — rate 1.0. Diarized scenario: labels Me|Others|Speaker N are accepted and compared by channel (any non-Me label counts as Others).
 M3 raw notes: log contains "## My raw notes\n\n" + notes_final.strip() exactly (when notes non-empty) and NOT notes_initial-only — all.
 M4 structure: every user heading appears as a Markdown heading in notes_md, same relative order — every enhanced meeting.
 M5 user-point coverage: pooled share of user_points with >=1 keyword (case-insens.) in notes_md — >= 0.90.
@@ -24,6 +26,7 @@ M10 chat abstention (unanswerable): share of answers matching abstain regex — 
 M11 notes-only: answer abstains AND does not contain token — all.
 M12 mic-only fallback: start.system_audio=="error" with non-empty error; status reports it; meeting saves; no "Others" lines; all Me lines present — all.
 M13 restart chat: after _last_saved=None, chat 200 and log_path == saved log — all.
+M14 speaker labels (diarized scenario, system ok): every Others line is logged as "Speaker k" (k = first-appearance rank of line_speakers among remote speakers) with its text, and stop.diarization == "ok" with stop.speakers labels == the expected set — all.
 Not exercised (by design): long-transcript chunked summarize/merge and chat map-reduce (>2500/4000 words), real STT, real ScreenCaptureKit, native Hub UI.
 Abstain regex: (doesn'?t|does not|did not|didn'?t|isn'?t|wasn'?t|is not|was not|not)\s+(mention|mentioned|contain|say|said|discuss|discussed|specif|state|include|provide|cover)|no (mention|information|record|details?)|not (in|part of) the transcript|transcript (doesn'?t|does not)
 

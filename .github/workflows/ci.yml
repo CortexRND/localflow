@@ -78,5 +78,10 @@ jobs:
           tests/test_diarization_cluster.py
           tests/test_diarization_mock.py
           tests/test_diarization_sherpa.py
+          evals/perf/der.py
+          evals/perf/corpus/mixes.py
+          evals/perf/suites/diarization.py
+          evals/perf/benches/py_diarization.py
+          tests/test_perf_evals_diarization.py
       - name: Test
         run: pytest -q

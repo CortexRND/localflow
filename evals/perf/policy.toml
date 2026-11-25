@@ -73,6 +73,10 @@ on_pr = "block"
 class = "exact"
 on_pr = "block"
 
+[metrics.M14]
+class = "exact"
+on_pr = "block"
+
 # --------------------------------------------------------------------------
 # Quality: absolute tolerance vs baseline
 # --------------------------------------------------------------------------
@@ -469,7 +473,7 @@ on_pr = "warn"
 # Meetings suite (evals/perf/suites/meetings.py, adapters/meeting_gates.py)
 # --------------------------------------------------------------------------
 
-# Gates M1-M4, M11-M13 are exact (pooled rate must be 1.0) and M5-M10 are
+# Gates M1-M4, M11-M14 are exact (pooled rate must be 1.0) and M5-M10 are
 # quality (abs_tol vs baseline plus the gates.py floors in [[caps]] below);
 # those rules are in the Exact / Quality sections above. stop_to_notes_ms,
 # summarize_ms and chat_ms are in the latency section.
@@ -488,6 +492,60 @@ on_pr = "warn"
 class = "noisy"
 better = "lower"
 rel_tol = 0.15
+mad_k = 3.0
+block_factor = 2.0
+on_pr = "warn"
+
+# --------------------------------------------------------------------------
+# Diarization suite (evals/perf/suites/diarization.py, evals/perf/der.py)
+# --------------------------------------------------------------------------
+
+# Frame-based DER (collar 0.25 s) and speaker-count error, scored in the
+# harness. rtf, latency_ms, first_ms, load_ms and rss_* use the rules above;
+# the absolute design gates (§10 Q10) are [[caps]] below.
+
+[metrics.der]
+class = "quality"
+better = "lower"
+abs_tol = 0.03
+on_pr = "block"
+
+# DER components: tracked, warn only.
+[metrics.missed_speech]
+class = "quality"
+better = "lower"
+abs_tol = 0.03
+on_pr = "warn"
+
+[metrics.false_alarm]
+class = "quality"
+better = "lower"
+abs_tol = 0.03
+on_pr = "warn"
+
+[metrics.speaker_confusion]
+class = "quality"
+better = "lower"
+abs_tol = 0.03
+on_pr = "warn"
+
+[metrics.speaker_count_error]
+class = "quality"
+better = "lower"
+abs_tol = 0.5
+on_pr = "block"
+
+[metrics.speaker_count_exact]
+class = "quality"
+better = "higher"
+abs_tol = 0.0
+on_pr = "block"
+
+# Peak RSS minus RSS before the diarization runtime was imported.
+[metrics.rss_delta_bytes]
+class = "noisy"
+better = "lower"
+rel_tol = 0.10
 mad_k = 3.0
 block_factor = 2.0
 on_pr = "warn"
@@ -545,3 +603,27 @@ suite = "meetings"
 metric = "M10"
 min_value = 0.8
 reason = "meeting_sim gate M10 >= 0.80"
+
+# Diarization gates (design §10 Q10). They apply to the product path: the
+# chunked pipeline on the real backend, pooled over the corpus.
+
+[[caps]]
+suite = "diarization"
+metric = "der"
+dims_match = { backend = "sherpa-onnx", pipeline = "chunked", kind = "aggregate" }
+max_value = 0.20
+reason = "Diarization gate: DER <= 0.20 (collar 0.25 s)"
+
+[[caps]]
+suite = "diarization"
+metric = "rtf"
+dims_match = { backend = "sherpa-onnx", pipeline = "chunked", kind = "aggregate" }
+max_value = 0.20
+reason = "Diarization gate: RTF <= 0.20 on CPU"
+
+[[caps]]
+suite = "diarization"
+metric = "rss_delta_bytes"
+dims_match = { backend = "sherpa-onnx", pipeline = "chunked", kind = "aggregate" }
+max_value = 314572800
+reason = "Diarization gate: RSS delta <= 300 MiB"

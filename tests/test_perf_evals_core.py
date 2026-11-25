@@ -335,7 +335,7 @@ def test_write_rejects_invalid(tmp_path):
 # Policy
 # --------------------------------------------------------------------------
 
-EXACT = "exact_match_rate citation_equal pid_cleanup_ok lifecycle_ok gate_pass M1 M2 M3 M4 M11 M12 M13"
+EXACT = "exact_match_rate citation_equal pid_cleanup_ok lifecycle_ok gate_pass M1 M2 M3 M4 M11 M12 M13 M14"
 LATENCY = (
     "latency_ms first_ms load_ms download_ms rtf startup_ms search_ms llm_ms summarize_ms "
     "chat_ms stop_to_notes_ms server_ms wall_ms render_us cpu_s cold_ms warm_ms reload_ms"

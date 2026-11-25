@@ -399,7 +399,7 @@ def test_workflow_setup_steps(steps):
 def test_workflow_caches(steps):
     caches = {s["with"]["path"]: s["with"]["key"] for s in steps if str(s.get("uses", "")).startswith("actions/cache@v4")}
     assert caches[".hf-cache"] == "perf-hf-v1-${{ runner.os }}-${{ runner.arch }}"
-    assert caches[".perf-cache"] == "perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}"
+    assert caches[".perf-cache"] == "perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}"
 
 
 def test_workflow_candidate_runs(steps):

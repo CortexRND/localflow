@@ -40,6 +40,32 @@ with open(args.scenarios, encoding="utf-8") as fh:
     sc = next((s for s in json.load(fh)["scenarios"] if s["id"] == args.scenario), None)
 if sc is None:
     sys.exit(f"driver: scenario {args.scenario!r} not in {args.scenarios}")
+lines = sc["lines"]
+# Diarized scenarios (PROTOCOL.md M14): tone code = line*64 + remote speaker slot, so the mock
+# embedder (one-hot on code % 64) sees one voice per scripted speaker.
+diar = sc.get("diarization_backend")
+if diar is not None and diar != "mock":
+    sys.exit("driver: only diarization_backend 'mock' is supported")
+if diar:
+    speakers = sc.get("line_speakers")
+    if not isinstance(speakers, list) or len(speakers) != len(lines):
+        sys.exit("driver: line_speakers must have one entry per line")
+    if any((src == "me") != (who == "me") for (src, _), who in zip(lines, speakers)):
+        sys.exit("driver: line_speakers must be 'me' exactly on the 'me' lines")
+STRIDE = 64 if diar else 1
+_slots = {}
+if diar:
+    for (src, _), who in zip(lines, sc["line_speakers"]):
+        if src != "me":
+            _slots.setdefault(who, len(_slots) + 1)
+    assert 0.1 + ((len(lines) - 1) * STRIDE + len(_slots)) * 0.001 < 1.0, "diarized scenario too long for the tone code"
+
+
+def slot(i):
+    if not diar or lines[i][0] == "me":
+        return 0
+    return _slots[sc["line_speakers"][i]]
+
 
 import numpy as np
 
@@ -60,7 +86,7 @@ chunk_seconds = 3600
 work_prompts = false
 capture_system_audio = true
 templates_dir = {json.dumps((tmp / 'templates').as_posix())}
-''')
+''' + ('speaker_diarization = true\ndiarization_backend = "mock"\n' if diar else ''))
 os.environ.update(LOCALFLOW_CONFIG=str(cfg), XDG_CONFIG_HOME=str(tmp / "xdg"), XDG_DATA_HOME=str(tmp / "xdgdata"))
 sys.path.insert(0, str(SUT))
 
@@ -73,7 +99,6 @@ from localflow import meetings, server
 
 RATE = 16000
 LINE_SECONDS = 5
-lines = sc["lines"]
 
 
 def ms_since(t0):
@@ -90,7 +115,7 @@ class FakeStream:
 class ScriptTranscriber:
     def transcribe(self, audio):
         idx = round((float(np.median(audio)) - 0.1) / 0.001)
-        return lines[idx][1]
+        return lines[idx // STRIDE][1]
 
 
 class FakeSystemAudio:
@@ -142,7 +167,21 @@ def sut_commit():
         return "unknown"
 
 
-tone = lambda i: np.full(RATE * LINE_SECONDS, 0.1 + i * 0.001, dtype=np.float32)
+tone = lambda i: np.full(RATE * LINE_SECONDS, 0.1 + (i * STRIDE + slot(i)) * 0.001, dtype=np.float32)
+
+
+def wait_for_diarization(session):
+    """The collector queue holds 4 chunks and its worker is async: wait until it caught up."""
+    collector = getattr(session, "diarization", None)
+    if collector is None:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        s = collector.stats()
+        if s["processed"] + s["failed"] + s["skipped"] + s["dropped"] >= s["offered"]:
+            return
+        time.sleep(0.01)
+
 silence = np.zeros(RATE * LINE_SECONDS, dtype=np.float32)
 notes_final = sc["notes_final"] + sc.get("notes_final_extra", "")
 res = {"scenario": sc["id"], "commit": sut_commit(), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -155,6 +194,7 @@ try:
         res["start"] = call(client, "post", "/meeting/start", json={"title": sc["title"], "template": sc["template"], "user_notes": sc["notes_initial"]})
         session = server._session
         assert session is not None, res["start"]
+        collector = getattr(session, "diarization", None)  # taken before /meeting/stop
         for i, (src, _text) in enumerate(lines):
             if src == "me":
                 session._mic.append(tone(i)); session._others.append(silence)
@@ -163,10 +203,14 @@ try:
             else:
                 session._mic.append(silence)
             session._drain_once()
+            wait_for_diarization(session)
             if i == len(lines) // 2:
                 res["status_mid"] = call(client, "get", "/meeting/status")
                 res["notes_save"] = call(client, "post", "/meeting/notes", json={"notes": notes_final})
         res["stop"] = call(client, "post", "/meeting/stop")
+        start_body = res["start"][1] if isinstance(res["start"][1], dict) else {}
+        res["diarization"] = {"start": start_body.get("diarization"),
+                              "stats": collector.stats() if collector is not None else None}
         # POST /meeting/stop summarizes and writes the notes before returning.
         timings["summarize_ms"] = timings["stop_to_notes_ms"] = http[-1]["ms"]
         stop = res["stop"][1] if isinstance(res["stop"][1], dict) else {}
