@@ -26,6 +26,35 @@ use crate::ui::{self, Button};
 const MERGE_SELECT_MAX: f32 = 220.;
 const MERGE_SELECT_MIN: f32 = 120.;
 
+/// What the merge select shows for its "nothing chosen" item: the shared
+/// placeholder clips in a shrunk picker (#183), and the row's "Merge <name>
+/// into" label already says what to choose.
+const MERGE_PLACEHOLDER_SHORT: &str = "Choose…";
+
+/// The merge select's options for `picker`: its titles, except an unchosen
+/// picker's placeholder (always first) shows [`MERGE_PLACEHOLDER_SHORT`],
+/// suffixed like the shared one if a speaker title equals it. Display only:
+/// picks still map through the picker's own titles by index.
+fn merge_select_options(picker: &hub_model::MergePicker) -> Vec<SharedString> {
+    let mut options: Vec<SharedString> = picker
+        .titles
+        .iter()
+        .cloned()
+        .map(SharedString::from)
+        .collect();
+    if !picker.chosen && !options.is_empty() {
+        let taken = |label: &str| picker.titles[1..].iter().any(|t| t == label);
+        let mut label = MERGE_PLACEHOLDER_SHORT.to_string();
+        let mut n = 2;
+        while taken(&label) {
+            label = format!("{MERGE_PLACEHOLDER_SHORT} {n}");
+            n += 1;
+        }
+        options[0] = label.into();
+    }
+    options
+}
+
 pub struct MeetingsPage {
     pcx: PageCx,
     phase: Phase,
@@ -530,12 +559,7 @@ impl MeetingsPage {
             self.merge_titles.clear();
             return;
         }
-        let options: Vec<SharedString> = picker
-            .titles
-            .iter()
-            .cloned()
-            .map(SharedString::from)
-            .collect();
+        let options = merge_select_options(&picker);
         self.merge_titles = picker.titles;
         let selected = Some(picker.selected);
         let busy = self.speakers.editor.busy;
@@ -1663,6 +1687,17 @@ mod speaker_tests {
             w >= gpui::px(super::MERGE_SELECT_MIN) && w < gpui::px(super::MERGE_SELECT_MAX),
             "the picker shrinks but stays readable: {w:?}"
         );
+        // Nothing chosen: the shrunk trigger shows the short placeholder,
+        // while the picks still map through the shared titles.
+        meetings.read_with(cx, |p, _| {
+            let (_, picker) = p.speakers.merge_picker();
+            assert!(!picker.chosen);
+            assert_eq!(p.merge_titles[0], lf_ui::hub_model::MERGE_PLACEHOLDER);
+            let options = super::merge_select_options(&picker);
+            assert_eq!(options[0].as_ref(), super::MERGE_PLACEHOLDER_SHORT);
+            let rest: Vec<&str> = options[1..].iter().map(|o| o.as_ref()).collect();
+            assert_eq!(rest, picker.titles[1..]);
+        });
         // Keyboard: the shrunk picker still takes focus and its keys.
         let select = meetings.read_with(cx, |p, _| p.merge_select.clone());
         let focus = cx.update(|_, cx| gpui::Focusable::focus_handle(select.read(cx), cx));
