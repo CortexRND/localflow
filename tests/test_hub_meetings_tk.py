@@ -1243,3 +1243,20 @@ def test_people_views_add_no_tk_variables():
     assert module.count("tk.StringVar(") == 8
     for name in ("IntVar(", "BooleanVar(", "DoubleVar(", "tk.Variable("):
         assert name not in module, name
+
+
+def test_forget_all_clears_remembered_speakers(tmp_path, _isolated_config):
+    _flags(_isolated_config, True, True)
+    client = PeopleClient(state="saved-speakers")
+    root, window, _view = _people_window(tmp_path, client)
+    try:
+        _pump(root, lambda: window._meeting_speakers_view is not None, timeout=5)
+        panel = window._meeting_speakers
+        panel.remembered.add((panel.meeting_id, "S1"))
+        window._meeting_render_speakers()
+        req = window._people.submit_forget_all()
+        assert req is not None
+        window._people_done(req[2], {"deleted": 1}, None)
+        assert not panel.remembered
+    finally:
+        _close(root, window, client)

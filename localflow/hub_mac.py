@@ -2271,11 +2271,20 @@ class HubWindowController(NSObject):
             return
         if operation == "people":
             token, payload = result
+            was_forget_all = people is not None and people.busy == "forget_all"
             if people is None or not people.finish(token, payload, error):
                 return
+            if was_forget_all and error is None:
+                if panel is not None:
+                    panel.remembered.clear()
+                    self.meeting_speakers_rendered = None
+                if recent is not None:
+                    recent.panel.remembered.clear()
             if people.reload:
                 self._people_send(people.load())
-            if self.page == "Meetings":
+            if was_forget_all and error is None and recent_shown:
+                self._meeting_recent_refresh()
+            elif self.page == "Meetings":
                 self._meeting_render()
             return
         if operation == "speakers":
