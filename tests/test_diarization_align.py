@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -74,7 +75,7 @@ def _run(code):
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-_LAZY_MODS = tuple(f"localflow.diarization.{m}" for m in ("align", "cluster", "mock"))
+_LAZY_MODS = ("localflow.diarization.align", "localflow.diarization.mock")
 
 
 @pytest.mark.parametrize(
@@ -132,3 +133,18 @@ def test_all_names_resolve():
         assert getattr(pkg, name) is not None
     assert set(pkg.__all__) <= set(dir(pkg))
     assert inspect.isfunction(pkg.cluster)
+
+
+def test_cluster_can_be_patched():
+    import localflow.diarization as pkg
+
+    original = pkg.cluster
+
+    def fake(*args, **kwargs):
+        return []
+
+    with mock.patch.object(pkg, "cluster", fake):
+        from localflow.diarization import cluster
+
+        assert pkg.cluster is fake and cluster is fake
+    assert pkg.cluster is original

@@ -1,17 +1,16 @@
 """Speaker diarization core: contracts, alignment, clustering and mock backends.
 
-Only ``.types`` is imported eagerly so STT code importing ``TimedText`` stays cheap; the rest
-load on first access (PEP 562). ``cluster`` is both a submodule and the exported function, so
-a ``_Package`` property always returns the function, even after the submodule is imported.
+``.types`` and ``.cluster`` (numpy only) are imported eagerly; align and mock load on first
+access (PEP 562) so STT code importing ``TimedText`` stays cheap. Binding the ``cluster``
+function here, after its submodule has loaded, makes the function win in every import order.
 """
 
 from __future__ import annotations
 
 import importlib
-import sys
-import types as _pytypes
 from typing import TYPE_CHECKING
 
+from .cluster import cluster
 from .types import (
     SOURCE_ME,
     SOURCE_OTHERS,
@@ -28,7 +27,6 @@ from .types import (
 
 if TYPE_CHECKING:
     from .align import GAP_TOLERANCE_S, SpeakerRun, assign_speakers, merge_runs
-    from .cluster import cluster
     from .mock import MockDiarizer, MockEmbedder, tone_index
 
 _LAZY = {
@@ -36,7 +34,6 @@ _LAZY = {
     "SpeakerRun": "align",
     "assign_speakers": "align",
     "merge_runs": "align",
-    "cluster": "cluster",
     "MockDiarizer": "mock",
     "MockEmbedder": "mock",
     "tone_index": "mock",
@@ -75,16 +72,3 @@ def __getattr__(name: str):
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_LAZY))
-
-
-class _Package(_pytypes.ModuleType):
-    @property
-    def cluster(self):
-        return importlib.import_module(f"{__name__}.cluster").cluster
-
-    @cluster.setter
-    def cluster(self, value) -> None:
-        pass
-
-
-sys.modules[__name__].__class__ = _Package
