@@ -1046,6 +1046,47 @@ def _hub_storage_snapshots(base):
         controller.storage_message = ("Deleted Parakeet v2 and freed 2.5 GB.", True)
         controller.show_page("Models")
         _hub_sized_shots(controller, "hub-models-storage-deleted")
+    _hub_speaker_snapshots(base)
+
+
+def _speaker_snapshot_state(phase, **changes):
+    from localflow.models_layout import speaker_initial_state
+
+    state = speaker_initial_state()
+    state.update(phase=phase, **changes)
+    return state
+
+
+def _hub_speaker_snapshots(base):
+    """Models & keys -> Speaker labels: not downloaded, downloading, ready and
+    kept while speaker labels are on. States are set directly; nothing is
+    checked, downloaded or removed."""
+    from localflow.models_layout import speaker_total_bytes
+
+    config = _isolated_config(base, "speakers")
+    total = speaker_total_bytes()
+    shots = {
+        "missing": (config, _speaker_snapshot_state("missing")),
+        "downloading": (config, _speaker_snapshot_state(
+            "downloading", done=total * 35 // 100, total=total)),
+        "ready": (config, _speaker_snapshot_state(
+            "ready", message=("Speaker models verified.", "success"))),
+        "protected": (replace(config, speaker_diarization=True),
+                      _speaker_snapshot_state("ready")),
+    }
+    for name, (shown, state) in shots.items():
+        with patch("localflow.hub_mac.load_config", return_value=shown):
+            controller = build_hub_window(
+                HistoryStore(base / f"speakers-{name}.sqlite", base / f"speakers-{name}-clips"),
+                DictionaryStore(base / f"speakers-{name}-dictionary.json"), shown,
+            )
+            controller.provider_snapshot_mode = True
+            controller.show_page("Models")
+            # Redrawing the page in place keeps the state set here (only
+            # entering Models from another page checks again).
+            controller.speaker_state = state
+            controller.show_page("Models")
+            _hub_sized_shots(controller, f"hub-models-speakers-{name}")
 
 
 def main():
@@ -1080,6 +1121,13 @@ def main():
         patch(
             "localflow.hub_mac.ollama_models",
             return_value=(["gemma4:e4b", "llama3.2:3b"], "ready"),
+        ),
+        # Speaker labels starts settled ("Not downloaded"), so a Models shot
+        # never races its first offline check (which would read the empty
+        # temp cache above anyway).
+        patch(
+            "localflow.hub_mac.speaker_initial_state",
+            side_effect=lambda: _speaker_snapshot_state("missing"),
         ),
     ):
         tmp = Path(tmp)

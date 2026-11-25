@@ -18,6 +18,7 @@ from AppKit import (
     NSComboBox,
     NSMakeRect,
     NSPopUpButton,
+    NSProgressIndicator,
     NSScrollView,
     NSSearchField,
     NSSwitch,
@@ -105,6 +106,7 @@ from localflow.models_layout import (
     CLEANUP_LABEL,
     IMPORT_HEADER_H,
     IMPORT_ROW_H,
+    MESSAGE_LINE,
     STT_FIXED_MODEL,
     ModelChoiceError,
     action_frames,
@@ -124,6 +126,26 @@ from localflow.models_layout import (
     row_columns,
     set_active_model,
     set_speech,
+    speaker_apply_download,
+    speaker_apply_progress,
+    speaker_apply_removed,
+    speaker_apply_status,
+    speaker_begin,
+    speaker_buttons,
+    speaker_cancel,
+    speaker_card_height,
+    speaker_detail,
+    speaker_initial_state,
+    speaker_layout,
+    speaker_lines,
+    speaker_pill,
+    speaker_progress,
+    speaker_protected,
+    speaker_reset,
+    speaker_run_check,
+    speaker_run_download,
+    speaker_run_remove,
+    speaker_total_bytes,
     speech_model_choices,
     speech_provider_choices,
     speech_summary,
@@ -496,6 +518,12 @@ class HubWindowController(NSObject):
             # action from a removed one is ignored (see _quick_live).
             self.quick_controls = {}
             self.quick_geometry = None
+            # The Speaker labels views go too; their state stays.
+            self.speaker_controls = {}
+        # Entering Models (not a resize rebuild) checks the speaker models
+        # again, so a CLI download or delete since then is picked up.
+        if page == "Models" and self.page != "Models" and hasattr(self, "speaker_state"):
+            self.speaker_state = speaker_reset(self.speaker_state)
         self.tokens = tokens_for_window(self.window)
         self.page = page
         self.root_view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
@@ -594,6 +622,11 @@ class HubWindowController(NSObject):
             self.settings_page.shutdown()
         if self.phrases is not None:
             self.phrases.cancel()
+        # A speaker model download unwinds through DownloadCancelled and
+        # removes its own partial file; its late result is dropped (_closed).
+        cancel = getattr(self, "speaker_state", {}).get("cancel")
+        if cancel is not None:
+            cancel.set()
 
     @objc.python_method
     def _meeting_flush_on_close(self):
@@ -2466,6 +2499,7 @@ class HubWindowController(NSObject):
         if self.provider_candidates:
             self._models_import_card(width, statuses)
         self._models_provider_list(width, statuses)
+        self._speaker_card(width)
         self._models_storage_card(width)
 
     @objc.python_method
@@ -2575,7 +2609,294 @@ class HubWindowController(NSObject):
             self.storage_message = (
                 f"Deleted {label} and freed {model_storage.format_bytes(freed)}.", True
             )
+            if repo in model_storage.diarization_repos() and hasattr(self, "speaker_state"):
+                # The Speaker labels card checks again instead of showing Ready.
+                self.speaker_state = speaker_reset(self.speaker_state)
         self.show_page("Models")
+
+    # ------------------------------------------------------ Speaker labels ---
+    # The two pinned speaker-label models: offline status, Download with
+    # progress and Cancel, Verify and Remove. Rules and geometry live in
+    # models_layout (speaker_*); status, download and delete run on a worker
+    # thread and come back through the main queue, where a closed Hub, a
+    # stale token or another page drops them. Progress and phase changes
+    # update the card in place (no page rebuild, so a key typed in a provider
+    # editor is never lost). Nothing downloads unless Download is clicked.
+
+    @objc.python_method
+    def _speaker_state(self):
+        if not hasattr(self, "speaker_state"):
+            self.speaker_state = speaker_initial_state()
+        return self.speaker_state
+
+    @objc.python_method
+    def _speaker_card(self, width):
+        state = self._speaker_state()
+        self.speaker_controls = {}
+        if state["phase"] == "unknown":
+            self._speaker_check()  # first open, or entering the page: never a resize
+        card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, self.cursor_y, width, speaker_card_height(width))
+        )
+        style_surface(card, self.tokens)
+        self.body.addSubview_(card)
+        frames = speaker_layout(width, buttons=0, progress=False)
+        for text, key, size, token, weight in (
+            ("Speaker labels", "title", 15, "ink", "semibold"),
+            (speaker_detail(), "detail", 12, "muted", "regular"),
+        ):
+            x, y, w, h = frames[key]
+            card.addSubview_(_label(
+                text, x, y, w, size, token, palette=self.tokens, height=h, weight=weight,
+            ))
+        self.speaker_controls = {"card": card, "width": width, "views": [], "drawn": None}
+        self._speaker_render()
+        card = self.speaker_controls["card"]
+        self.cursor_y = card.frame().origin.y + card.frame().size.height + 12
+
+    @objc.python_method
+    def _speaker_render(self):
+        """Show the current state in the live card, in place.
+
+        The pill, buttons, progress row and notes are redrawn only when what
+        they show changed; a progress tick only moves the bar and its text.
+        """
+        controls = getattr(self, "speaker_controls", None)
+        if self._closed or self.page != "Models" or not controls:
+            return
+        state, config = self._speaker_state(), self.config
+        buttons = speaker_buttons(state, config)
+        lines = speaker_lines(state, config)
+        progress = state["phase"] in ("downloading", "cancelling")
+        drawn = (state["phase"], tuple(buttons), tuple(lines))
+        if controls["drawn"] != drawn:
+            self._speaker_draw(buttons, lines, progress)
+            controls["drawn"] = drawn
+        if progress:
+            fraction, text = speaker_progress(state)
+            controls["bar"].setDoubleValue_(fraction)
+            controls["progress_text"].setStringValue_(text)
+
+    @objc.python_method
+    def _speaker_draw(self, buttons, lines, progress):
+        controls = self.speaker_controls
+        card, width = controls["card"], controls["width"]
+        for view in controls["views"]:
+            view.removeFromSuperview()
+        controls["views"] = views = []
+        for key in ("bar", "progress_text"):
+            controls.pop(key, None)
+        note_font = _font(12)
+        inner = width - 2 * CARD_PADDING
+        counts = [
+            note_lines([text], inner, lambda line: measure_text(line, note_font))
+            for text, _tone in lines
+        ]
+        frames = speaker_layout(
+            width, buttons=len(buttons), progress=progress, note_lines=sum(counts),
+        )
+
+        def add(view):
+            card.addSubview_(view)
+            views.append(view)
+            return view
+
+        label, kind = speaker_pill(self.speaker_state)
+        pill = add(make_pill(label, kind, self.tokens))
+        x, y, _w, _h = frames["pill"]
+        pill.setFrameOrigin_(NSMakePoint(x, y))
+        actions = {
+            "download": ("speakerDownload:", "Download speaker models"),
+            "cancel": ("speakerCancel:", "Cancel speaker model download"),
+            "verify": ("speakerVerify:", "Verify speaker models"),
+            "remove": ("speakerRemove:", "Remove speaker models"),
+        }
+        for index, (button_id, title, button_kind, enabled) in enumerate(buttons):
+            x, y, w, h = frames[f"button{index}"]
+            action, accessibility = actions[button_id]
+            button = self._button(
+                title, action, x, y, width=w, parent=card, kind=button_kind, height=h,
+            )
+            button.setEnabled_(enabled)
+            button.setAccessibilityLabel_(accessibility)
+            views.append(button)
+        if progress:
+            bar = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect(*frames["progress"])
+            )
+            bar.setIndeterminate_(False)
+            bar.setMinValue_(0.0)
+            bar.setMaxValue_(1.0)
+            bar.setAccessibilityLabel_("Speaker model download progress")
+            controls["bar"] = add(bar)
+            x, y, w, h = frames["progress_text"]
+            controls["progress_text"] = add(
+                _label("", x, y, w, 11, "muted", palette=self.tokens, height=h)
+            )
+        if lines:
+            x, y, w, _h = frames["note"]
+            for (text, tone), count in zip(lines, counts, strict=True):
+                height = count * MESSAGE_LINE
+                add(_label(text, x, y, w, 12, tone, palette=self.tokens, height=height,
+                           wrap=True))
+                y += height
+        self._speaker_resize(speaker_card_height(width, sum(counts)))
+
+    @objc.python_method
+    def _speaker_resize(self, height):
+        """Size the card to `height`; views below it move by the change."""
+        card = self.speaker_controls["card"]
+        old = card.frame()
+        delta = height - old.size.height
+        if not delta:
+            return
+        bottom = old.origin.y + old.size.height
+        card.setFrame_(NSMakeRect(old.origin.x, old.origin.y, old.size.width, height))
+        for view in self.body.subviews():
+            origin = view.frame().origin
+            if view is not card and origin.y >= bottom:
+                view.setFrameOrigin_(NSMakePoint(origin.x, origin.y + delta))
+        self.cursor_y += delta
+        self._fit_body_height()
+
+    @objc.python_method
+    def _speaker_start(self, run):
+        threading.Thread(target=run, daemon=True, name="localflow-speaker-models").start()
+
+    @objc.python_method
+    def _speaker_main(self, block):
+        from Foundation import NSOperationQueue
+
+        NSOperationQueue.mainQueue().addOperationWithBlock_(block)
+
+    @objc.python_method
+    def _speaker_run(self, phase, work, finish, *, cancel=None, keep_message=False):
+        """Run `work(post)` off the main thread, then `finish(result)` on it.
+
+        `post(apply)` hands `apply()` to the main thread (progress). Every
+        delivery is dropped once the Hub closed or a newer operation began;
+        the card is redrawn in place after each one (a no-op off the page).
+        """
+        self.speaker_state = speaker_begin(
+            self._speaker_state(), phase, cancel=cancel, keep_message=keep_message,
+        )
+        token = self.speaker_state["token"]
+        self._speaker_render()
+        if getattr(self, "provider_snapshot_mode", False):
+            return
+
+        def post(apply):
+            def deliver():
+                if self._closed or self._speaker_state()["token"] != token:
+                    return
+                apply()
+                self._speaker_render()
+
+            self._speaker_main(deliver)
+
+        def run():
+            result = work(post)
+            post(lambda: finish(result))
+
+        self._speaker_start(run)
+
+    @objc.python_method
+    def _speaker_check(self, verify=False, keep_message=False):
+        backend = getattr(self, "speaker_backend", None)
+        cache = getattr(self, "storage_cache", None)
+
+        def work(_post):
+            return speaker_run_check(backend, cache)
+
+        def finish(status):
+            self.speaker_state = speaker_apply_status(
+                self.speaker_state, status, verify=verify,
+            )
+
+        self._speaker_run("checking", work, finish, keep_message=keep_message)
+
+    @objc.python_method
+    def _speaker_refresh(self):
+        """Redraw Models after a download or remove (Free up space lists the
+        speaker repos too), unless a provider editor is open: rebuilding then
+        would drop a key being typed, so only the card is updated."""
+        if self.page == "Models" and getattr(self, "provider_expanded", None) is None:
+            self._rebuild_current_page()
+        else:
+            self._speaker_render()
+
+    def speakerDownload_(self, _sender):
+        if self._speaker_state()["phase"] != "missing":
+            return
+        backend = getattr(self, "speaker_backend", None)
+        cache = getattr(self, "storage_cache", None)
+        cancel = threading.Event()
+
+        def work(post):
+            def report(done, total):
+                def tick():
+                    self.speaker_state = speaker_apply_progress(
+                        self.speaker_state, done, total,
+                    )
+
+                post(tick)
+
+            return speaker_run_download(backend, cache, cancel, report)
+
+        def finish(result):
+            self.speaker_state = speaker_apply_download(self.speaker_state, *result)
+            self._speaker_refresh()
+
+        self._speaker_run("downloading", work, finish, cancel=cancel)
+
+    def speakerCancel_(self, _sender):
+        state = self._speaker_state()
+        if state["phase"] != "downloading":
+            return
+        if state["cancel"] is not None:
+            state["cancel"].set()
+        self.speaker_state = speaker_cancel(state)
+        self._speaker_render()
+
+    def speakerVerify_(self, _sender):
+        if self._speaker_state()["phase"] == "ready":
+            self._speaker_check(verify=True)
+
+    def speakerRemove_(self, _sender):
+        from localflow.model_storage import format_bytes
+
+        if self._speaker_state()["phase"] != "ready":
+            return
+        # Re-read now: speaker labels may have been turned on since the card
+        # was drawn, and models in use are never removed.
+        config = load_config()
+        if speaker_protected(config):
+            self.config = config
+            self._speaker_render()  # Remove disabled, with the reason under it
+            return
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Remove speaker models?")
+        alert.setInformativeText_(
+            f"This frees about {format_bytes(speaker_total_bytes())}. "
+            "LocalFlow can download them again later."
+        )
+        alert.addButtonWithTitle_("Remove")
+        alert.addButtonWithTitle_("Cancel")
+        if alert.runModal() != AppKit.NSAlertFirstButtonReturn:
+            return
+        backend = getattr(self, "speaker_backend", None)
+        cache = getattr(self, "storage_cache", None)
+
+        def work(_post):
+            # A freshly loaded config again, on the worker (see speaker_run_remove).
+            return speaker_run_remove(backend, cache, load_config)
+
+        def finish(result):
+            self.speaker_state = speaker_apply_removed(self.speaker_state, *result)
+            self._speaker_refresh()
+            self._speaker_check(keep_message=True)
+
+        self._speaker_run("removing", work, finish)
 
     # ---------------------------------------------------------- Models card ---
     # The one card at the top of Models & keys: pick the speech engine/model

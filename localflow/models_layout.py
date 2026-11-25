@@ -19,6 +19,7 @@ from localflow.ui_tokens import (
     MODELS_LABEL_HEIGHT,
     MODELS_ROW_GAP,
     MODELS_ROW_HEIGHT,
+    PILL_HEIGHT,
 )
 
 ACTION_H = 28
@@ -482,3 +483,381 @@ def quick_layout(width, *, ollama, fixed_speech, message_lines=0):
         y += message_lines * MESSAGE_LINE
     frames["height"] = y + CARD_PADDING
     return frames
+
+
+# ------------------------------------------------------ speaker label models ---
+#
+# The "Speaker labels" card: offline readiness, Download (with progress and
+# Cancel), Verify and Remove of the two pinned diarization models. The state
+# is a plain dict and every transition returns a new one, so both hubs share
+# these rules and only render them. Imports stay lazy:
+# localflow.diarization.models is stdlib-only, and nothing here imports
+# requests, sherpa_onnx, huggingface_hub or localflow.models.
+
+SPEAKER_PHASES = (
+    "unknown", "checking", "missing", "ready", "downloading", "cancelling", "removing",
+)
+SPEAKER_BUSY = ("checking", "downloading", "cancelling", "removing")
+SPEAKER_TITLE = "Speaker labels"
+SPEAKER_TITLE_W = 120
+SPEAKER_PILL_W = 120
+SPEAKER_BUTTON_W = 96
+PROGRESS_H = 6
+PROGRESS_GAP = 4
+SPEAKER_PROTECTED_NOTE = "In use for speaker labels. Turn speaker labels off to remove."
+SPEAKER_HINT = "Install localflow[diarization] to use speaker labels."
+SPEAKER_CHECK_FAILED = "Couldn't check the speaker models."
+SPEAKER_DOWNLOAD_FAILED = "Couldn't download the speaker models."
+SPEAKER_REMOVE_FAILED = "Couldn't remove the speaker models."
+_CLI_HINT = re.compile(r"\s*Run `lf speakers download`\.")
+
+
+def speaker_initial_state():
+    """`message` is (text, tone token): "success", "red" or "muted"."""
+    return {
+        "phase": "unknown", "done": 0, "total": 0, "extra_installed": True,
+        "message": ("", "muted"), "token": 0, "cancel": None,
+    }
+
+
+def _speaker(state, **changes):
+    updated = dict(state)
+    updated.update(changes)
+    return updated
+
+
+def speaker_busy(state):
+    """An operation (check, download, cancel or remove) is in flight."""
+    return state["phase"] in SPEAKER_BUSY
+
+
+def speaker_begin(state, phase, *, cancel=None, keep_message=False):
+    """Start an operation: a new token makes any older result stale."""
+    return _speaker(
+        state, phase=phase, token=state["token"] + 1, done=0, total=0, cancel=cancel,
+        message=state["message"] if keep_message else ("", "muted"),
+    )
+
+
+def speaker_reset(state):
+    """Forget the cached status so the next draw checks again; never mid-operation."""
+    if speaker_busy(state):
+        return state
+    return _speaker(state, phase="unknown", message=("", "muted"), cancel=None)
+
+
+def speaker_reason(text):
+    """A status reason for the GUI: the CLI hint becomes "Choose Download."."""
+    text = (text or "").strip()
+    if not _CLI_HINT.search(text):
+        return text
+    return _CLI_HINT.sub(" Choose Download.", text).strip()
+
+
+def speaker_apply_status(state, status, *, verify=False):
+    """Settle a check.
+
+    `status` is diarization.models.status(), or None when the check itself
+    failed. A plain "not downloaded" is no error; a checksum eviction or an
+    odd folder is. Without `verify` an earlier message (a finished remove,
+    say) is kept.
+    """
+    if status is None:
+        return _speaker(
+            state, phase="missing", cancel=None, message=(SPEAKER_CHECK_FAILED, "red"),
+        )
+    from localflow.diarization.models import NOT_DOWNLOADED
+
+    ready = bool(status.get("models_ready"))
+    reason = status.get("reason") or ""
+    message = state["message"]
+    if verify:
+        message = (
+            ("Speaker models verified.", "success") if ready
+            else (speaker_reason(reason) or "The speaker models need downloading again.",
+                  "red")
+        )
+    elif not ready and reason and reason != NOT_DOWNLOADED:
+        message = (speaker_reason(reason), "red")
+    return _speaker(
+        state, phase="ready" if ready else "missing", cancel=None, message=message,
+        extra_installed=bool(status.get("extra_installed", True)),
+    )
+
+
+def speaker_apply_progress(state, done, total):
+    """Bytes so far, clamped to the total and never moving backwards."""
+    if state["phase"] not in ("downloading", "cancelling"):
+        return state
+    total = max(int(total or 0), 0)
+    done = min(max(int(done or 0), state["done"]), total) if total else 0
+    return _speaker(state, done=done, total=total)
+
+
+def speaker_cancel(state):
+    """Cancel was clicked; the worker's own result still settles the phase."""
+    if state["phase"] != "downloading":
+        return state
+    return _speaker(state, phase="cancelling")
+
+
+def speaker_apply_download(state, outcome, detail=""):
+    """outcome: "done", "cancelled" or "error" (`detail` is user-facing text)."""
+    if outcome == "done":
+        message = ("Speaker models downloaded.", "success")
+        return _speaker(state, phase="ready", cancel=None, message=message)
+    if outcome == "cancelled":
+        message = ("Download cancelled.", "muted")
+    else:
+        message = (detail or SPEAKER_DOWNLOAD_FAILED, "red")
+    return _speaker(state, phase="missing", cancel=None, message=message)
+
+
+def speaker_apply_removed(state, freed, errors):
+    """Settle a remove: the bytes freed, or the first refusal (models kept)."""
+    from localflow.model_storage import format_bytes
+
+    if errors:
+        return _speaker(state, phase="ready", cancel=None, message=(errors[0], "red"))
+    return _speaker(
+        state, phase="missing", cancel=None,
+        message=(f"Removed speaker models and freed {format_bytes(freed)}.", "success"),
+    )
+
+
+def speaker_total_bytes():
+    from localflow.diarization.models import DIAR_MODELS
+
+    return sum(model.size_bytes for model in DIAR_MODELS)
+
+
+def speaker_detail():
+    from localflow.diarization.models import DIAR_MODELS
+    from localflow.model_storage import format_bytes
+
+    return (
+        f"Names who spoke in meeting notes. {len(DIAR_MODELS)} models, "
+        f"{format_bytes(speaker_total_bytes())}, run on this computer."
+    )
+
+
+_SPEAKER_PILLS = {
+    "unknown": ("Checking…", ("muted", "muted")),
+    "checking": ("Checking…", ("muted", "muted")),
+    "missing": ("Not downloaded", ("muted", "muted")),
+    "downloading": ("Downloading", ("cobalt", "cobalt")),
+    "cancelling": ("Downloading", ("cobalt", "cobalt")),
+    "removing": ("Removing…", ("muted", "muted")),
+    "ready": ("Ready", ("success", "success")),
+}
+
+
+def speaker_pill(state):
+    """(label, (tint token, text token)) of the status pill."""
+    return _SPEAKER_PILLS[state["phase"]]
+
+
+def speaker_progress(state):
+    """(fraction 0..1, text) of the download progress row."""
+    from localflow.model_storage import format_bytes
+
+    done, total = state["done"], state["total"]
+    fraction = done / total if total else 0.0
+    if state["phase"] == "cancelling":
+        return fraction, "Cancelling…"
+    if not total:
+        return 0.0, "Starting…"
+    return fraction, f"{format_bytes(done)} of {format_bytes(total)} · {int(fraction * 100)}%"
+
+
+def speaker_protected(config):
+    """Speaker labels are on, so the models are kept (model_storage refuses too)."""
+    return bool(getattr(config, "speaker_diarization", False))
+
+
+def speaker_hint(state):
+    """The runtime is missing: said quietly; it never disables a button."""
+    return "" if state["extra_installed"] else SPEAKER_HINT
+
+
+def speaker_buttons(state, config):
+    """[(id, title, kind, enabled)] of the title row, left to right."""
+    phase = state["phase"]
+    if phase == "missing":
+        return [("download", "Download", "primary", True)]
+    if phase in ("downloading", "cancelling"):
+        return [("cancel", "Cancel", "secondary", phase == "downloading")]
+    if phase == "ready":
+        return [
+            ("verify", "Verify", "secondary", True),
+            ("remove", "Remove…", "destructive_ghost", not speaker_protected(config)),
+        ]
+    return []
+
+
+def speaker_lines(state, config):
+    """[(text, tone token)] under the row: the last result, why Remove is
+    off, and the install hint, each only when it applies."""
+    lines = []
+    text, tone = state["message"]
+    if text:
+        lines.append((text, tone))
+    if state["phase"] == "ready" and speaker_protected(config):
+        lines.append((SPEAKER_PROTECTED_NOTE, "muted"))
+    hint = speaker_hint(state)
+    if hint:
+        lines.append((hint, "muted"))
+    return lines
+
+
+def speaker_remove_repos(inventory):
+    """Speaker repos actually on disk (a model_storage.inventory list), in catalog order."""
+    from localflow.diarization.models import diarization_repos
+
+    present = {model.repo for model in inventory}
+    return [repo for repo in diarization_repos() if repo in present]
+
+
+def speaker_default_backend():
+    """The real status/download/inventory/delete calls (hubs accept a fake)."""
+    from types import SimpleNamespace
+
+    from localflow import model_storage
+    from localflow.diarization import models
+
+    return SimpleNamespace(
+        status=models.status, download=models.download_diarization_models,
+        inventory=model_storage.inventory, delete=model_storage.delete_unused,
+    )
+
+
+def _speaker_log(what, exc):
+    import logging
+
+    # The type only: a download error's text can carry a signed URL.
+    logging.getLogger("localflow.hub").warning("speaker model %s failed (%s)",
+                                               what, type(exc).__name__)
+
+
+# The three workers below block (hashing, network, disk): hubs run them on a
+# worker thread and apply the result on the UI thread.
+
+
+def speaker_run_check(backend, cache):
+    """diarization status (offline, re-hashes ~34 MB), or None if the check failed."""
+    try:
+        return (backend or speaker_default_backend()).status(cache=cache)
+    except Exception as exc:  # noqa: BLE001 - shown as a failed check
+        _speaker_log("check", exc)
+        return None
+
+
+def speaker_run_download(backend, cache, cancel, report, *, interval=0.1, clock=None):
+    """Download both models; (outcome, detail) for speaker_apply_download.
+
+    `report(done, total)` is called at most every `interval` seconds, plus
+    always for the first and the last bytes. localflow.models (requests,
+    huggingface_hub) is imported here, only once a download was asked for.
+    """
+    import time
+
+    clock = clock or time.monotonic
+    try:
+        from localflow.models import DownloadCancelled, DownloadError
+    except ImportError as exc:
+        _speaker_log("download", exc)
+        return "error", SPEAKER_DOWNLOAD_FAILED
+    last = [None]
+
+    def on_progress(done, total):
+        now = clock()
+        if 0 < done < total and last[0] is not None and now - last[0] < interval:
+            return
+        last[0] = now
+        report(done, total)
+
+    try:
+        (backend or speaker_default_backend()).download(on_progress, cancel=cancel, cache=cache)
+    except DownloadCancelled:
+        return "cancelled", ""
+    except DownloadError as exc:
+        return "error", str(exc) or SPEAKER_DOWNLOAD_FAILED
+    except Exception as exc:  # noqa: BLE001 - its text may hold a URL: never shown
+        _speaker_log("download", exc)
+        return "error", SPEAKER_DOWNLOAD_FAILED
+    return "done", ""
+
+
+def speaker_run_remove(backend, cache, load):
+    """Delete the speaker repos on disk; (freed bytes, [error]) for speaker_apply_removed.
+
+    `load()` re-reads the config now, and delete_unused re-checks it (and the
+    live leases) per repo: models turned on or loaded meanwhile are kept.
+    """
+    from localflow.model_storage import ModelStorageError
+
+    storage = backend or speaker_default_backend()
+    try:
+        config = load()
+        repos = speaker_remove_repos(storage.inventory(config, cache=cache))
+    except Exception as exc:  # noqa: BLE001 - shown as a failed remove
+        _speaker_log("remove", exc)
+        return 0, [SPEAKER_REMOVE_FAILED]
+    if not repos:
+        return 0, ["The speaker models aren't downloaded."]
+    freed, errors = 0, []
+    for repo in repos:
+        try:
+            freed += storage.delete(repo, config, cache=cache)
+        except ModelStorageError as exc:
+            errors.append(str(exc))
+        except Exception as exc:  # noqa: BLE001 - never leave the card stuck in removing
+            _speaker_log("remove", exc)
+            errors.append(SPEAKER_REMOVE_FAILED)
+    return freed, errors
+
+
+def speaker_layout(width, *, buttons, progress, note_lines=0):
+    """Frames (x, y, w, h) of the Speaker labels card; nothing overlaps.
+
+    Title row: the title, the status pill slot, then `buttons` slots
+    right-aligned (`button0` leftmost). A detail line, the progress bar and
+    its text while `progress`, then `note_lines` wrapped note lines. The
+    height always includes the progress row, so a download starting or
+    ending moves nothing below the card.
+    """
+    inner = width - 2 * CARD_PADDING
+    x = y = CARD_PADDING
+    frames = {
+        "title": (x, y + (ACTION_H - 20) // 2, SPEAKER_TITLE_W, 20),
+        "pill": (
+            x + SPEAKER_TITLE_W + CONTROL_GAP, y + (ACTION_H - PILL_HEIGHT) // 2,
+            SPEAKER_PILL_W, PILL_HEIGHT,
+        ),
+    }
+    right = x + inner
+    for index in reversed(range(buttons)):
+        right -= SPEAKER_BUTTON_W
+        frames[f"button{index}"] = (right, y, SPEAKER_BUTTON_W, ACTION_H)
+        right -= CONTROL_GAP
+    y += ACTION_H + 2
+    frames["detail"] = (x, y, inner, STATUS_H)
+    y += STATUS_H
+    progress_h = MODELS_ROW_GAP + PROGRESS_H + PROGRESS_GAP + STATUS_H
+    if progress:
+        frames["progress"] = (x, y + MODELS_ROW_GAP, inner, PROGRESS_H)
+        frames["progress_text"] = (
+            x, y + MODELS_ROW_GAP + PROGRESS_H + PROGRESS_GAP, inner, STATUS_H,
+        )
+        y += progress_h
+    if note_lines:
+        y += MODELS_ROW_GAP
+        frames["note"] = (x, y, inner, note_lines * MESSAGE_LINE)
+        y += note_lines * MESSAGE_LINE
+    frames["height"] = y + CARD_PADDING + (0 if progress else progress_h)
+    return frames
+
+
+def speaker_card_height(width, note_lines=0):
+    """The card height for `note_lines`: the same in every phase."""
+    return speaker_layout(width, buttons=0, progress=True, note_lines=note_lines)["height"]
