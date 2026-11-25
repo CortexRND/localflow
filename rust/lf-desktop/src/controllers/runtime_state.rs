@@ -299,7 +299,7 @@ fn classify_listener(file: &StatusFile) -> State {
     }
 }
 
-fn shortcut_line(session: Session, listening: bool, state: &State) -> (Signal, String) {
+pub(crate) fn shortcut_line(session: Session, listening: bool, state: &State) -> (Signal, String) {
     match session {
         Session::Wayland => (
             Signal::Warning,
@@ -483,9 +483,7 @@ pub fn derive(obs: &Observation, cx: &Context) -> RuntimeView {
         })
         .unwrap_or_default();
     if let Some(tool) = cx.missing_paste_tool {
-        warnings.push(format!(
-            "Pasting dictated text needs `{tool}`, which isn't installed. Install it with your package manager."
-        ));
+        warnings.push(missing_paste_tool_warning(tool));
     }
     if let OwnEngine::OwnedElsewhere(pid) = &obs.own {
         warnings.push(match pid {
@@ -716,10 +714,30 @@ pub fn observe(root: &DataRoot, own: OwnEngine, own_instance: Option<String>) ->
 /// `wtype` on Wayland), using `which`.
 pub fn missing_paste_tool(session: Session, which: &dyn Fn(&str) -> bool) -> Option<&'static str> {
     match session {
-        Session::X11 if !which("xdotool") => Some("xdotool"),
-        Session::Wayland if !which("wtype") => Some("wtype"),
+        Session::X11 if !which(XDOTOOL) => Some(XDOTOOL),
+        Session::Wayland if !which(WTYPE) => Some(WTYPE),
         _ => None,
     }
+}
+
+const XDOTOOL: &str = "xdotool";
+const WTYPE: &str = "wtype";
+
+/// Home's full guidance for a missing paste helper.
+fn missing_paste_tool_warning(tool: &str) -> String {
+    format!(
+        "Pasting dictated text needs `{tool}`, which isn't installed. Install it with your package manager."
+    )
+}
+
+/// The Linux tray's short form of `warning`, when it is the missing
+/// paste-helper warning; any other warning has none.
+#[cfg(target_os = "linux")]
+pub fn compact_paste_tool_warning(warning: &str) -> Option<String> {
+    [XDOTOOL, WTYPE]
+        .into_iter()
+        .find(|tool| warning == missing_paste_tool_warning(tool))
+        .map(|tool| format!("Paste needs {tool} (not installed)"))
 }
 
 #[cfg(test)]

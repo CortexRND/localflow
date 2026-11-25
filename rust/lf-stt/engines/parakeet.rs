@@ -154,8 +154,9 @@ impl SpeechEngine for ParakeetEngine {
     }
     fn transcribe(&mut self, pcm: &[f32], _prompt: Option<&str>) -> Result<Transcript> {
         let start = Instant::now();
-        let text = if super::parakeet_too_short(pcm) {
-            String::new()
+        let audio_seconds = pcm.len() as f64 / 16000.0;
+        let (text, segments) = if super::parakeet_too_short(pcm) {
+            (String::new(), Vec::new())
         } else {
             if pcm.len() > i32::MAX as usize {
                 bail!("Parakeet clip is too long");
@@ -167,19 +168,24 @@ impl SpeechEngine for ParakeetEngine {
             let stream = recognizer.create_stream();
             stream.accept_waveform(16000, pcm);
             recognizer.decode(&stream);
-            stream
-                .get_result()
-                .context("Parakeet returned no result")?
-                .text
-                .trim()
-                .into()
+            let result = stream.get_result().context("Parakeet returned no result")?;
+            (
+                result.text.trim().into(),
+                super::token_segments(
+                    &result.tokens,
+                    result.timestamps.as_deref(),
+                    result.durations.as_deref(),
+                    audio_seconds,
+                ),
+            )
         };
         Ok(Transcript {
             text,
             timings: Timings {
-                audio_seconds: pcm.len() as f64 / 16000.0,
+                audio_seconds,
                 inference_ms: start.elapsed().as_secs_f64() * 1000.0,
             },
+            segments,
         })
     }
     fn unload(&mut self) {
@@ -258,6 +264,11 @@ mod tests {
     fn short_input_never_runs_or_loads_the_recognizer() {
         let mut engine = ParakeetEngine::new("cpu").unwrap();
         assert!(engine.transcribe(&[], None).unwrap().text.is_empty());
+        assert!(engine
+            .transcribe(&[0.0; 511], None)
+            .unwrap()
+            .segments
+            .is_empty());
         assert!(engine
             .transcribe(&[0.0; 511], Some("ignored"))
             .unwrap()

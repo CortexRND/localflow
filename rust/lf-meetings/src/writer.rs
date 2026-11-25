@@ -1,5 +1,5 @@
 use crate::{
-    has_speakers, strip_remote_media,
+    has_speakers, is_diarized, strip_remote_media,
     titles::{heading_text, safe_title, MAX_NAME_ATTEMPTS},
     trim, write_text, Segment,
 };
@@ -46,6 +46,31 @@ pub fn reserve(notes_dir: &Path, logs_dir: &Path, base: &str) -> io::Result<(Pat
         format!("no free file name for {}", py::repr_str(base)),
     ))
 }
+/// One display label per distinct speaker identity for the `speakers:`
+/// frontmatter, in first-appearance order (labels may repeat), or empty below
+/// two identities. Only diarized meetings qualify; a mic segment without an id
+/// is the local user, and un-attributed call audio is not a speaker.
+fn diarized_speakers(segments: &[Segment]) -> Vec<String> {
+    if !is_diarized(segments) {
+        return Vec::new();
+    }
+    // `None` is the local user (mic without an id).
+    let mut labels: Vec<(Option<&str>, String)> = Vec::new();
+    for s in segments {
+        let identity = match (&s.speaker_id, s.source == crate::SOURCE_ME) {
+            (Some(id), _) => Some(id.as_str()),
+            (None, true) => None,
+            (None, false) => continue,
+        };
+        if !labels.iter().any(|(seen, _)| *seen == identity) {
+            labels.push((identity, s.speaker().into_owned()));
+        }
+    }
+    if labels.len() < 2 {
+        return Vec::new();
+    }
+    labels.into_iter().map(|(_, label)| label).collect()
+}
 pub struct ObsidianWriter {
     pub vault: PathBuf,
     pub notes_folder: PathBuf,
@@ -85,7 +110,20 @@ impl ObsidianWriter {
         fs::create_dir_all(&logs_dir)?;
         let (notes_path, log_path) = reserve(&notes_dir, &logs_dir, &format!("{stamp} {title}"))?;
         let minutes = (n.duration_seconds / 60.0).floor() as i64;
-        let frontmatter=format!("---\ntitle: {}\ndate: {}\nplatform: {category}\nduration_minutes: {minutes}\n{}tags: [meeting, localflow]\n---\n\n",py::json_dumps(&serde_json::Value::String(heading.clone()),None,true),n.started_at.format("%Y-%m-%dT%H:%M"),if n.template.is_empty(){String::new()}else{format!("template: {}\n",safe_title(n.template))});
+        let speakers = diarized_speakers(n.segments);
+        // Quoted so an all-digit hex stays a YAML string; labels are already
+        // cleaned, and raw UTF-8 avoids surrogate-pair escapes.
+        let speaker_meta = if speakers.is_empty() {
+            String::new()
+        } else {
+            let speakers = speakers.into_iter().map(serde_json::Value::String);
+            format!(
+                "meeting_id: \"{}\"\nspeakers: {}\n",
+                lf_core::compact_uuid_v4(),
+                py::json_dumps(&serde_json::Value::Array(speakers.collect()), None, false)
+            )
+        };
+        let frontmatter=format!("---\ntitle: {}\ndate: {}\nplatform: {category}\nduration_minutes: {minutes}\n{}{speaker_meta}tags: [meeting, localflow]\n---\n\n",py::json_dumps(&serde_json::Value::String(heading.clone()),None,true),n.started_at.format("%Y-%m-%dT%H:%M"),if n.template.is_empty(){String::new()}else{format!("template: {}\n",safe_title(n.template))});
         let result = (|| {
             write_text(
                 &notes_path,
@@ -95,7 +133,7 @@ impl ObsidianWriter {
                     log_path.file_stem().unwrap().to_string_lossy()
                 ),
             )?;
-            let speakers = has_speakers(n.segments);
+            let speakers = has_speakers(n.segments) || is_diarized(n.segments);
             let body = n
                 .segments
                 .iter()

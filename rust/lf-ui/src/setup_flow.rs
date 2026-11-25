@@ -1094,10 +1094,29 @@ pub fn mac_permission_checks(platform: &dyn SetupPlatform) -> Vec<Check> {
     ]
 }
 
+/// `_ffmpeg_install_hint`: (detail when missing, install URL) for `system`.
+fn ffmpeg_install_hint(system: &str) -> (&'static str, &'static str) {
+    match system {
+        "Darwin" => (
+            "Not found — run: brew install ffmpeg",
+            "https://formulae.brew.sh/formula/ffmpeg",
+        ),
+        "Windows" => (
+            "Not found — run: winget install Gyan.FFmpeg",
+            "https://ffmpeg.org/download.html",
+        ),
+        _ => (
+            "Not found — install it with your package manager (e.g. sudo apt install ffmpeg)",
+            "https://ffmpeg.org/download.html",
+        ),
+    }
+}
+
 /// `run_checks`: ffmpeg, the cleanup model (Ollama or another provider), the
 /// input device and, on macOS, the privacy permissions.
 pub fn run_checks(cfg: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
     let ffmpeg_installed = platform.which("ffmpeg");
+    let (missing_detail, install_url) = ffmpeg_install_hint(&platform.system());
     let mut checks = vec![Check::new(
         "ffmpeg",
         "ffmpeg",
@@ -1105,10 +1124,10 @@ pub fn run_checks(cfg: &Config, platform: &dyn SetupPlatform) -> Vec<Check> {
         if ffmpeg_installed {
             "Installed"
         } else {
-            "Not found — run: brew install ffmpeg"
+            missing_detail
         },
         "Install ffmpeg",
-        "https://formulae.brew.sh/formula/ffmpeg",
+        install_url,
     )];
     let provider = cfg.field_str("llm_provider").unwrap_or("");
     if provider == "ollama" {

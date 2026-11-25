@@ -1,6 +1,6 @@
 [package]
 name = "lf-runtime"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Dictation controller, worker loop and menu bar for the LocalFlow Rust port"
 license = "MIT"

@@ -1,5 +1,6 @@
 import numpy as np
 
+from localflow.diarization.types import TimedText
 from localflow.providers.base import ModelInfo
 
 _MLX_REPOS = {
@@ -39,11 +40,24 @@ class MlxWhisperSTT:
     def transcribe(
         self, audio: np.ndarray, *, prompt: str | None = None
     ) -> str:
+        result = self._mlx.transcribe(audio, **self._options(prompt))
+        return result["text"].strip()
+
+    def transcribe_timed(
+        self, audio: np.ndarray, *, prompt: str | None = None
+    ) -> list[TimedText]:
+        result = self._mlx.transcribe(audio, **self._options(prompt))
+        return [
+            TimedText(float(seg["start"]), float(seg["end"]), seg["text"].strip())
+            for seg in result["segments"]
+            if seg["text"].strip()
+        ]
+
+    def _options(self, prompt: str | None) -> dict:
         options = {"path_or_hf_repo": self._mlx_repo, "language": self.language}
         if prompt is not None:
             options["initial_prompt"] = prompt
-        result = self._mlx.transcribe(audio, **options)
-        return result["text"].strip()
+        return options
 
     def list_models(self) -> list[ModelInfo]:
         return [

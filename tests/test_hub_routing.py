@@ -319,11 +319,19 @@ def test_menu_bar_hot_phrases_item_opens_the_hub_page():
     assert 'rumps.MenuItem("Hot Phrases…", callback=self.open_phrases)' in source
 
 
-def test_lf_phrases_uses_the_dispatcher(monkeypatch):
+def _no_preview_package(monkeypatch, tmp_path):
+    # Without a LocalFlow Preview package, the GPUI default opens legacy windows.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LOCALFLOW_DESKTOP_BIN", raising=False)
+    monkeypatch.delenv("LOCALFLOW_UI", raising=False)
+
+
+def test_lf_phrases_uses_the_dispatcher(monkeypatch, tmp_path):
     from click.testing import CliRunner
 
     from localflow import cli
 
+    _no_preview_package(monkeypatch, tmp_path)
     opened = []
     monkeypatch.setattr(phrases_window, "main", lambda path=None: opened.append(path))
 
@@ -333,11 +341,12 @@ def test_lf_phrases_uses_the_dispatcher(monkeypatch):
     assert opened == [None]
 
 
-def test_lf_hub_page_option_is_validated_and_forwarded(monkeypatch):
+def test_lf_hub_page_option_is_validated_and_forwarded(monkeypatch, tmp_path):
     from click.testing import CliRunner
 
     from localflow import cli
 
+    _no_preview_package(monkeypatch, tmp_path)
     launched = []
     monkeypatch.setattr(cli.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
 

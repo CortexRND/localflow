@@ -1187,6 +1187,7 @@ impl Render for TextInput {
             .id(ElementId::Name(
                 format!("text-input-{}", cx.entity_id()).into(),
             ))
+            .debug_selector(|| format!("text-input-{}", self.placeholder))
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)

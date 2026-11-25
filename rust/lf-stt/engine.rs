@@ -5,6 +5,7 @@ use lf_core::perf_ledger::{self, Kind, PerfEvent, PerfLedger, Status, SttLabels}
 use serde::{Deserialize, Serialize};
 
 use crate::stt_lease::{self, LeaseGuard};
+use crate::TimedText;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Timings {
@@ -15,6 +16,8 @@ pub struct Timings {
 pub struct Transcript {
     pub text: String,
     pub timings: Timings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<TimedText>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LoadInfo {
@@ -215,6 +218,7 @@ mod tests {
                     audio_seconds: pcm.len() as f64 / 16000.0,
                     inference_ms: 0.0,
                 },
+                segments: Vec::new(),
             })
         }
         fn unload(&mut self) {
@@ -341,5 +345,29 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
         slot.release();
         assert_eq!(Arc::strong_count(&counts), 1);
+    }
+
+    #[test]
+    fn untimed_transcript_json_is_unchanged() {
+        let json = serde_json::to_value(Transcript::default()).unwrap();
+        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["text", "timings"]);
+        let parsed: Transcript = serde_json::from_str(
+            r#"{"text":"hi","timings":{"audio_seconds":1.0,"inference_ms":2.0}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.text, "hi");
+        assert!(parsed.segments.is_empty());
+        let timed = Transcript {
+            segments: vec![TimedText {
+                start: 0.0,
+                end: 1.0,
+                text: "hi".into(),
+            }],
+            ..Transcript::default()
+        };
+        let json = serde_json::to_string(&timed).unwrap();
+        let back: Transcript = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.segments, timed.segments);
     }
 }

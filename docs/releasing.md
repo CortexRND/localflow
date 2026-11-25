@@ -1,4 +1,4 @@
-# Releasing LocalFlow v0.2.2
+# Releasing LocalFlow v0.2.3
 
 The macOS installer defaults to the native Rust app, built for the current Mac.
 It provisions stable Rust with rustup (minimal profile) and waits up to 30 minutes
@@ -111,8 +111,8 @@ release version.
 After the release branch is merged, a maintainer can tag its commit and push:
 
 ```sh
-git tag v0.2.2
-git push origin v0.2.2
+git tag v0.2.3
+git push origin v0.2.3
 ```
 
 The existing **Mac installer** workflow (`.github/workflows/mac-installer.yml`)
@@ -123,8 +123,8 @@ and uploads all five assets:
 - `Install.LocalFlow.cmd` (the repository's `packaging/windows/Install LocalFlow.cmd`;
   GitHub replaces spaces in asset names with dots, so the workflow copies it to
   the dotted name and checksums that exact name)
-- `localflow-0.2.2.tar.gz`
-- `localflow-0.2.2.zip`
+- `localflow-0.2.3.tar.gz`
+- `localflow-0.2.3.zip`
 - `LocalFlow-Installer.dmg`
 - `SHA256SUMS` (covers all four downloadable files, by their uploaded names)
 
@@ -135,7 +135,7 @@ not listed under its exact upload name.
 The source archives are reproducible and the tag version must match
 `pyproject.toml`. No tag or release is published just by pushing a branch.
 Before announcing the release, confirm that the published
-`raw.githubusercontent.com/CortexRND/localflow/v0.2.2/install.sh` and
+`raw.githubusercontent.com/CortexRND/localflow/v0.2.3/install.sh` and
 `install.ps1` hash to the README digests.
 
 ### LocalFlow Preview assets
@@ -148,10 +148,10 @@ verifies them natively on `ubuntu-22.04`, `macos-latest` and
 tag-only `publish-gpui-preview` job runs `scripts/gpui_preview_assets.sh` and
 uploads to the release that `build` created (it never creates one):
 
-- `LocalFlow-Preview-0.2.2-linux-x86_64.tar.gz`
-- `LocalFlow-Preview-0.2.2-macos-arm64.tar.gz`
-- `LocalFlow-Preview-0.2.2-macos-x86_64.tar.gz`
-- `LocalFlow-Preview-0.2.2-windows-x86_64.zip`
+- `LocalFlow-Preview-0.2.3-linux-x86_64.tar.gz`
+- `LocalFlow-Preview-0.2.3-macos-arm64.tar.gz`
+- `LocalFlow-Preview-0.2.3-macos-x86_64.tar.gz`
+- `LocalFlow-Preview-0.2.3-windows-x86_64.zip`
 - `SHA256SUMS-gpui-preview` (covers exactly those four, by their uploaded names)
 
 `SHA256SUMS` and the five assets above are untouched; `install.sh` keeps
@@ -183,12 +183,12 @@ release notes:
 For a manual build on a Mac, check out the tag in a clean checkout, then:
 
 ```sh
-git checkout v0.2.2 &&
+git checkout v0.2.3 &&
 bash scripts/build_mac_installer.sh &&
-bash scripts/release-assets.sh v0.2.2 &&
+bash scripts/release-assets.sh v0.2.3 &&
 cp dist/LocalFlow-Installer.dmg dist/release/LocalFlow-Installer.dmg &&
 cp "packaging/windows/Install LocalFlow.cmd" dist/release/Install.LocalFlow.cmd &&
 (cd dist/release && shasum -a 256 LocalFlow-Installer.dmg Install.LocalFlow.cmd >> SHA256SUMS) &&
 (cd dist/release && shasum -a 256 -c SHA256SUMS) &&
-gh release create v0.2.2 dist/release/* --verify-tag --generate-notes
+gh release create v0.2.3 dist/release/* --verify-tag --generate-notes
 ```

@@ -523,6 +523,7 @@ mod tests {
             Ok(Transcript {
                 text: self.text.clone(),
                 timings: Timings::default(),
+                segments: Vec::new(),
             })
         }
     }

@@ -452,6 +452,11 @@ pub fn inventory(
         .into_iter()
         .filter_map(|(repo, label)| {
             let path = model_folder(cache, &repo)?;
+            // An empty or leftover folder (e.g. a cancelled download) is not a stored model.
+            let size_bytes = folder_size(&path);
+            if size_bytes == 0 {
+                return None;
+            }
             let status = match guard.status(&repo) {
                 "" if !guard.unknown.is_empty() => "Unknown use",
                 status => status,
@@ -463,7 +468,7 @@ pub fn inventory(
                 label
             };
             Some(CachedModel {
-                size_bytes: folder_size(&path),
+                size_bytes,
                 repo,
                 label,
                 path,
@@ -783,6 +788,23 @@ mod tests {
             Some(&[])
         )
         .is_empty());
+    }
+
+    #[test]
+    fn inventory_skips_empty_leftover_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let leftover = root.path().join(repo_folder_name(WHISPER_CPP_REPO));
+        for dir in ["blobs", "refs", "snapshots/rev1"] {
+            fs::create_dir_all(leftover.join(dir)).unwrap();
+        }
+        fs::write(leftover.join("blobs/empty.incomplete"), "").unwrap();
+        repo(root.path(), BASE, 200);
+        let cfg = config("parakeet", "base", "auto");
+        let inv = inventory(&cfg, Some(root.path()), || false, Some(&[]));
+        assert_eq!(
+            inv.iter().map(|m| m.repo.as_str()).collect::<Vec<_>>(),
+            [BASE]
+        );
     }
 
     #[test]
