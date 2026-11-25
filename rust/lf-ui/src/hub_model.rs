@@ -2395,6 +2395,67 @@ pub fn resolve_merge_target(
 /// Shown when the merge picker's choice no longer names another speaker.
 pub const MERGE_PICK_AGAIN: &str = "Choose the speaker to merge into again.";
 
+/// Title of the merge picker's "nothing chosen" item (made unique when a
+/// speaker title happens to equal it).
+pub const MERGE_PLACEHOLDER: &str = "Choose a speaker…";
+
+/// The merge picker as drawn: its titles, the selected index, and whether
+/// that selection is a real target (only then may Merge be enabled).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergePicker {
+    pub titles: Vec<String>,
+    pub selected: usize,
+    pub chosen: bool,
+}
+
+/// Lay out the merge picker for `items` (from [`merge_target_items`]) and the
+/// current `choice`. A choice naming one of the items selects it. Any other
+/// choice (stale after a refresh, or cleared) never falls back to a real
+/// speaker: an unmapped placeholder is put first and selected, with a title
+/// no item or speaker label shares, so it can never be read back as an id.
+pub fn merge_picker(
+    items: &[MergeTarget],
+    speakers: &[MeetingSpeaker],
+    choice: &str,
+) -> MergePicker {
+    let titles: Vec<String> = items.iter().map(|item| item.title.clone()).collect();
+    if let Some(selected) = items.iter().position(|item| item.id == choice) {
+        return MergePicker {
+            titles,
+            selected,
+            chosen: true,
+        };
+    }
+    let used = |title: &str| {
+        titles.iter().any(|other| other == title) || speakers.iter().any(|sp| sp.label == title)
+    };
+    let mut placeholder = MERGE_PLACEHOLDER.to_string();
+    let mut n = 2;
+    while used(&placeholder) {
+        placeholder = format!("{MERGE_PLACEHOLDER} {n}");
+        n += 1;
+    }
+    let mut all = Vec::with_capacity(titles.len() + 1);
+    all.push(placeholder);
+    all.extend(titles);
+    MergePicker {
+        titles: all,
+        selected: 0,
+        chosen: false,
+    }
+}
+
+/// The speaker id behind the picker's selected `title`: matched by the
+/// item's own unique title, never by position. The placeholder (or any
+/// unknown title) gives an empty choice, which commits nothing.
+pub fn merge_choice_for_title(items: &[MergeTarget], title: &str) -> String {
+    items
+        .iter()
+        .find(|item| item.title == title)
+        .map(|item| item.id.clone())
+        .unwrap_or_default()
+}
+
 /// Height of the live speaker-label line wrapped to `lines` lines: one line
 /// keeps the familiar 20 pt row.
 pub fn speaker_status_height(lines: usize) -> f64 {
@@ -3699,6 +3760,54 @@ mod speaker_tests {
         assert_eq!(speaker_status_height(0), 20.0);
         assert_eq!(speaker_status_height(1), 20.0);
         assert_eq!(speaker_status_height(3), 52.0);
+    }
+
+    #[test]
+    fn a_stale_merge_pick_selects_an_unmapped_placeholder_never_another_speaker() {
+        // Merging S0 with S1 picked; a refresh then removes S1, S2 remains.
+        let before = vec![
+            speaker("S0", "Ana", 1.0),
+            speaker("S1", "Bo", 1.0),
+            speaker("S2", "Cy", 1.0),
+        ];
+        let items = merge_target_items(&before, "S0");
+        let picker = merge_picker(&items, &before, "S1");
+        assert_eq!(picker.titles, ["Bo", "Cy"]);
+        assert_eq!((picker.selected, picker.chosen), (0, true));
+        assert_eq!(merge_choice_for_title(&items, &picker.titles[0]), "S1");
+
+        let after = vec![speaker("S0", "Ana", 1.0), speaker("S2", "Cy", 1.0)];
+        let items = merge_target_items(&after, "S0");
+        for stale in ["S1", "", "S0"] {
+            let picker = merge_picker(&items, &after, stale);
+            assert_eq!(picker.titles, [MERGE_PLACEHOLDER, "Cy"], "{stale:?}");
+            assert_eq!((picker.selected, picker.chosen), (0, false));
+            // Read back, the selection is no speaker, so nothing can commit.
+            let captured = merge_choice_for_title(&items, &picker.titles[picker.selected]);
+            assert_eq!(captured, "");
+            assert_eq!(resolve_merge_target(&after, "S0", &captured), None);
+        }
+        // Only an explicit pick of S2 chooses it.
+        let picked = merge_choice_for_title(&items, "Cy");
+        let picker = merge_picker(&items, &after, &picked);
+        assert_eq!(
+            (picker.titles.len(), picker.selected, picker.chosen),
+            (1, 0, true)
+        );
+
+        // The placeholder never collides with a genuine (or suffixed) title.
+        let tricky = vec![
+            speaker("S0", "Ana", 1.0),
+            speaker("S1", MERGE_PLACEHOLDER, 1.0),
+            speaker("S2", "Choose a speaker… 2", 1.0),
+            speaker("S3", "Choose a speaker… 3", 1.0),
+        ];
+        let items = merge_target_items(&tricky, "S3");
+        let picker = merge_picker(&items, &tricky, "S9");
+        assert_eq!(picker.titles[0], "Choose a speaker… 4");
+        let unique: std::collections::BTreeSet<&String> = picker.titles.iter().collect();
+        assert_eq!(unique.len(), picker.titles.len());
+        assert_eq!(merge_choice_for_title(&items, &picker.titles[0]), "");
     }
 
     #[test]

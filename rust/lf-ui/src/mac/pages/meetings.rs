@@ -32,10 +32,10 @@ use crate::backends::meeting::{
 };
 use crate::hub_model::{
     meeting_capture_status, meeting_form_layout, meeting_notes_height, meeting_speaker_status,
-    meeting_speakers, merge_target_items, note_date_label, note_meeting_id, recent_notes,
-    resolve_merge_target, saved_meeting_id, saved_notes_message, speaker_panel_height,
-    speaker_status_height, speaker_talk_time, MeetingSpeaker, MergeTarget, RecentNote,
-    SpeakerEditor, SpeakerMode, MEETING_NOTES_PLACEHOLDER, MEETING_SUBTITLE,
+    meeting_speakers, merge_choice_for_title, merge_picker, merge_target_items, note_date_label,
+    note_meeting_id, recent_notes, resolve_merge_target, saved_meeting_id, saved_notes_message,
+    speaker_panel_height, speaker_status_height, speaker_talk_time, MeetingSpeaker, MergeTarget,
+    RecentNote, SpeakerEditor, SpeakerMode, MEETING_NOTES_PLACEHOLDER, MEETING_SUBTITLE,
     MEETING_TITLE_PLACEHOLDER, MERGE_PICK_AGAIN, RECENT_EMPTY, RECENT_NOTES_LIMIT, RECENT_ROW_H,
     SPEAKER_ERROR_LINE_H, SPEAKER_HEADER_H, SPEAKER_PAD, SPEAKER_ROW_H,
 };
@@ -486,11 +486,7 @@ impl State {
                 .titleOfSelectedItem()
                 .map(|title| title.to_string())
                 .unwrap_or_default();
-            *self.merge_choice.borrow_mut() = items
-                .iter()
-                .find(|item| item.title == title)
-                .map(|item| item.id.clone())
-                .unwrap_or_default();
+            *self.merge_choice.borrow_mut() = merge_choice_for_title(items, &title);
         }
     }
 
@@ -1119,6 +1115,16 @@ impl State {
             *self.merge_choice.borrow_mut() = first;
             self.request_rebuild();
         }
+    }
+
+    /// The merge picker's selection changed: read it back and redraw, so
+    /// Merge is enabled exactly when a real speaker is selected.
+    fn pick_merge_target(&self) {
+        if self.closed.get() {
+            return;
+        }
+        self.capture();
+        self.request_rebuild();
     }
 
     fn cancel_speaker_edit(&self) {
@@ -1895,7 +1901,7 @@ fn speaker_panel(
         })
     };
     let mut name_field = None;
-    let mut merge_picker = None;
+    let mut merge_target = None;
     for (index, speaker) in speakers.iter().enumerate() {
         let row_y = f64::from(SPEAKER_PAD + SPEAKER_HEADER_H + index as i32 * SPEAKER_ROW_H);
         let cancel_x = right - SPEAKER_BUTTON_W;
@@ -1964,32 +1970,46 @@ fn speaker_panel(
                     palette,
                 ));
                 let picker_x = inset + prompt_w + SPEAKER_GAP;
-                let titles: Vec<String> = targets.iter().map(|item| item.title.clone()).collect();
+                // A choice that no longer names a target (e.g. removed by a
+                // refresh) selects an unmapped placeholder, never another
+                // speaker; Merge stays off until a speaker is picked.
                 let choice = state.merge_choice.borrow().clone();
-                let selected = targets
-                    .iter()
-                    .position(|other| other.id == choice)
-                    .unwrap_or(0);
+                let layout = merge_picker(&targets, speakers, &choice);
+                if !layout.chosen && !choice.is_empty() {
+                    // Invalidated (e.g. by a refresh): drop it, so only a new
+                    // explicit pick can commit.
+                    state.merge_choice.borrow_mut().clear();
+                }
                 let picker = popup(
                     mtm,
-                    &titles,
-                    selected,
+                    &layout.titles,
+                    layout.selected,
                     picker_x,
                     row_y + 4.0,
                     (commit_x - SPEAKER_GAP - picker_x).max(80.0),
                     &prompt,
                 );
                 picker.setEnabled(!busy);
+                {
+                    // A pick is captured and redrawn, so Merge enables only
+                    // once the selection is a real speaker.
+                    let weak = Rc::downgrade(state);
+                    ctx.target.on_action(&picker, move || {
+                        if let Some(state) = weak.upgrade() {
+                            state.pick_merge_target();
+                        }
+                    });
+                }
                 panel.addSubview(&picker);
                 // Every item must be its own speaker; otherwise refuse to merge.
-                let complete = usize::try_from(picker.numberOfItems()) == Ok(targets.len());
+                let complete = usize::try_from(picker.numberOfItems()) == Ok(layout.titles.len());
                 let merge = action(
                     if busy { "Merging…" } else { "Merge" },
                     &format!("Merge {} into the chosen speaker", speaker.label),
                     (commit_x, row_y + 6.0, SPEAKER_BUTTON_W),
                     ButtonKind::Primary,
                 );
-                merge.setEnabled(!busy && complete && !targets.is_empty());
+                merge.setEnabled(!busy && complete && layout.chosen);
                 {
                     let commit = commit.clone();
                     ctx.target.on_action(&merge, move || commit());
@@ -2005,7 +2025,7 @@ fn speaker_panel(
                     let cancel = cancel.clone();
                     ctx.target.on_action(&close, move || cancel());
                 }
-                merge_picker = Some((picker, targets));
+                merge_target = Some((picker, targets));
             }
             _ => {
                 let merge_x = right - SPEAKER_BUTTON_W;
@@ -2112,7 +2132,7 @@ fn speaker_panel(
         ));
     }
     parent.addSubview(&panel);
-    (name_field, merge_picker)
+    (name_field, merge_target)
 }
 
 impl HubPage for MeetingsPage {
@@ -4011,6 +4031,50 @@ mod tests {
             page.state.cancel_speaker_edit();
         }
         assert_eq!(merge_calls(&client).len(), 1);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn a_pick_removed_by_a_refresh_needs_a_new_explicit_pick_before_merging() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let speaker = |id: &str, label: &str| json!({"id": id, "label": label, "name": null, "source": "others", "seconds": 10.0});
+        let page = stopped_with(
+            &client,
+            vec![
+                speaker("S0", "Ana"),
+                speaker("S1", "Bo"),
+                speaker("S2", "Cy"),
+            ],
+        );
+        page.state.begin_merge(MEETING, "S0", false);
+        *page.state.merge_choice.borrow_mut() = "S1".into();
+        // A refresh removes S1; S2 is still available.
+        page.state.store_speakers(
+            MEETING,
+            Some(&json!({"speakers": [speaker("S0", "Ana"), speaker("S2", "Cy")]})),
+        );
+        // Drawn exactly as the panel draws it, then read back as capture does.
+        let speakers = page.state.speakers_of(MEETING);
+        let targets = merge_target_items(&speakers, "S0");
+        let choice = page.state.merge_choice.borrow().clone();
+        let layout = merge_picker(&targets, &speakers, &choice);
+        assert!(!layout.chosen, "Merge must stay disabled");
+        assert_ne!(layout.titles[layout.selected], "Cy");
+        *page.state.merge_choice.borrow_mut() =
+            merge_choice_for_title(&targets, &layout.titles[layout.selected]);
+        page.state.commit_speaker_edit();
+        let editor = page.state.speaker_editor.borrow().clone();
+        assert!(!editor.busy);
+        assert_eq!(editor.error, MERGE_PICK_AGAIN);
+        assert!(merge_calls(&client).is_empty(), "S2 was never picked");
+
+        // The person now picks S2 explicitly: exactly S2 is merged into.
+        *page.state.merge_choice.borrow_mut() = merge_choice_for_title(&targets, "Cy");
+        let layout = merge_picker(&targets, &speakers, &page.state.merge_choice.borrow());
+        assert!(layout.chosen);
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        assert_eq!(merge_calls(&client), [("S0".to_string(), "S2".to_string())]);
         page.state.shutdown();
     }
 
