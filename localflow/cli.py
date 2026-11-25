@@ -2088,7 +2088,8 @@ def speakers_enroll(name: str, meeting_id: str | None, speaker_id: str | None,
                     audio_file: Path | None, record_seconds: int | None) -> None:
     """Remember a voice under NAME, from one source: a meeting speaker, a file or the mic.
 
-    Audio is sent only to the local server, analysed in memory and never stored.
+    Audio is sent only to the local server and is not retained there; some M4A/MP4 files
+    need a short-lived private temporary copy while they are decoded.
     """
     sources = [meeting_id is not None, audio_file is not None, record_seconds is not None]
     if sum(sources) != 1:

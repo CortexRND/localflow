@@ -406,14 +406,24 @@ def _decode_audio(data: bytes) -> np.ndarray:
 _FFMPEG_INPUT_FORMATS = "matroska,webm,ogg,mov,mp4,m4a,wav,mp3,aac,flac,caf"
 
 
-def _run_ffmpeg(data: bytes, max_seconds: int = 1200) -> subprocess.CompletedProcess:
+def _run_ffmpeg(data: bytes, max_seconds: int = 1200, *,
+                source: str | None = None) -> subprocess.CompletedProcess:
+    """Decode ``data`` from stdin; or, with ``source``, that one local ISO BMFF (M4A/MP4)
+    file: only the file protocol, the mov demuxer forced and external data references off."""
+    if source is None:
+        input_args = ["-protocol_whitelist", "pipe",
+                      "-format_whitelist", _FFMPEG_INPUT_FORMATS,
+                      "-i", "pipe:0"]
+    else:
+        input_args = ["-protocol_whitelist", "file",
+                      "-format_whitelist", _FFMPEG_INPUT_FORMATS,
+                      "-f", "mov", "-enable_drefs", "0",
+                      "-i", f"file:{source}"]
     return subprocess.run(
         [
             "ffmpeg",
             "-nostdin",
-            "-protocol_whitelist", "pipe",
-            "-format_whitelist", _FFMPEG_INPUT_FORMATS,
-            "-i", "pipe:0",
+            *input_args,
             "-t", str(max(1, int(max_seconds))),
             "-f", "f32le",
             "-ac", "1",
@@ -831,6 +841,8 @@ def _open_diarization():
     if collector is not None and _recognition_on():
         try:
             collector.registry = _speaker_registry()
+            # The live gate, re-read by finalize after the queue drains and before each match.
+            collector.recognition_allowed = _recognition_on
         except Exception as exc:  # noqa: BLE001 - labels still work without names
             log.warning("speaker recognition unavailable (%s)", type(exc).__name__)
     return collector, reason
@@ -841,8 +853,6 @@ def _diarization_state(session) -> tuple[str, str]:
     error = getattr(session, "diarization_error", "") or ""
     status = getattr(session, "diarization_status", None)
     if status not in ("off", "collecting", "unavailable"):
-            # The live gate, re-read by finalize after the queue drains and before each match.
-            collector.recognition_allowed = _recognition_on
         status = "unavailable" if error else "off"
     return status, error
 
@@ -1549,18 +1559,80 @@ def _enroll_from_meeting(body: dict):
     return vp
 
 
+# Enrollment clips have their own bound, independent of dictation's max_recording_seconds
+# (0 = unlimited there): the longest `lf speakers enroll --record`. Longer is refused, never cut.
+ENROLL_MAX_SECONDS = 300
+
+
+def _run_ffmpeg_seekable(data: bytes, max_seconds: int) -> subprocess.CompletedProcess:
+    """Decode an ISO BMFF clip from a private (0700 dir, 0600 file) temporary copy that is
+    deleted as soon as ffmpeg exits: an M4A/MP4 with its index after the audio needs seeking."""
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="localflow-enroll-") as folder:
+        path = os.path.join(folder, "clip")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                     0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        return _run_ffmpeg(b"", max_seconds, source=path)
+
+
+_BMFF_PADDING_BOXES = (b"free", b"skip", b"wide")
+
+
+def _is_iso_bmff(data: bytes) -> bool:
+    """True for ISO BMFF (M4A/MP4) bytes: an ``ftyp`` box first, after at most a few
+    free/skip/wide padding boxes."""
+    offset = 0
+    for _ in range(4):
+        if len(data) < offset + 8:
+            return False
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        kind = data[offset + 4:offset + 8]
+        if kind == b"ftyp":
+            return 16 <= size <= len(data) - offset  # major brand + minor version at least
+        if kind not in _BMFF_PADDING_BOXES or size < 8:
+            return False
+        offset += size
+    return False
+
+
+def _decode_enrollment_audio(data: bytes) -> np.ndarray:
+    """16 kHz mono float32 of an enrollment clip, at most ENROLL_MAX_SECONDS long.
+
+    Tries the stdin pipe first, as /transcribe does. Only an ISO BMFF (M4A/MP4) clip that
+    yields no audio there (its index can follow the audio) is retried from a seekable
+    temporary copy; nothing else ever touches disk. Errors are fixed messages.
+    """
+    limit = ENROLL_MAX_SECONDS + 1  # decode one second past the bound to detect overflow
+    try:
+        proc = _run_ffmpeg(data, limit)
+        if not proc.stdout and _is_iso_bmff(data):
+            proc = _run_ffmpeg_seekable(data, limit)
+    except FileNotFoundError:
+        raise HTTPException(status_code=500,
+                            detail="ffmpeg not installed (brew install ffmpeg)") from None
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=400, detail="audio decode timed out") from None
+    if proc.returncode != 0 or not proc.stdout:
+        raise HTTPException(status_code=400, detail="could not decode the audio")
+    audio = np.frombuffer(proc.stdout, dtype=np.float32)
+    if audio.size > ENROLL_MAX_SECONDS * 16000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"recording is longer than {ENROLL_MAX_SECONDS} seconds; use a shorter clip")
+    return audio
+
+
 def _enroll_from_audio(name: str, data: bytes):
-    """Decode, embed and enroll; the audio only ever lives in memory here."""
+    """Decode, embed and enroll. The audio is not retained; only an M4A/MP4 that needs seeking
+    is briefly copied to a private temporary file (see _run_ffmpeg_seekable)."""
     from localflow.diarization.factory import build_embedder
     from localflow.diarization.registry import forget_epoch
     from localflow.diarization.types import DiarizationUnavailable
     epoch = forget_epoch()  # a forget during the slow work below voids this enrollment
-    try:
-        audio = _decode_audio(data)
-    except HTTPException as exc:
-        if exc.status_code == 400:
-            raise HTTPException(status_code=400, detail="could not decode the audio") from None
-        raise
+    audio = _decode_enrollment_audio(data)
     del data
     if audio.size == 0:
         raise HTTPException(status_code=400, detail="decoded audio is empty")
@@ -1593,8 +1665,10 @@ def api_speakers() -> dict:
 @app.post("/api/speakers", status_code=201)
 async def api_speakers_enroll(request: Request) -> dict:
     """Enroll a voice: JSON ``{name, meeting_id, speaker_id}`` from a meeting saved with
-    recognition on, or multipart ``file`` + ``name`` (local only; decoded in memory, never
-    stored). The gate is checked before the body is read."""
+    recognition on, or multipart ``file`` + ``name`` (local only; the audio is not retained:
+    it is decoded in memory, except that an M4A/MP4 needing seeking gets a short-lived private
+    temporary copy, deleted right after decoding). The gate is checked before the body is
+    read."""
     _require_recognition()
     from localflow.diarization.registry import public
     content_type = request.headers.get("Content-Type", "").split(";")[0].strip().lower()

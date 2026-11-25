@@ -1027,6 +1027,7 @@ from localflow.diarization import registry as registry_module
 from localflow.diarization.registry import FileSpeakerRegistry
 
 _HEX32 = re.compile(r"\b[0-9a-f]{32}\b")
+_REAL_ENROLL_DECODE = server._decode_enrollment_audio
 _SPEAKER_ROUTES = [
     ("GET", "/api/speakers"), ("POST", "/api/speakers"), ("GET", "/api/speakers/export"),
     ("PATCH", "/api/speakers/Dana"), ("DELETE", "/api/speakers/Dana"),
@@ -1167,7 +1168,7 @@ def test_every_speaker_route_is_403_while_recognition_is_off(
     def never(*args, **kwargs):
         raise AssertionError("body read or audio decoded with recognition off")
 
-    monkeypatch.setattr(server, "_decode_audio", never)
+    monkeypatch.setattr(server, "_decode_enrollment_audio", never)
     monkeypatch.setattr(server, "_bounded_body", never)
     kwargs = {"files": {"file": ("a.wav", b"RIFF" * 10)}, "data": {"name": "Dana"}} \
         if method == "POST" else {}
@@ -1357,7 +1358,7 @@ def audio_rec(rec, monkeypatch):
         decoded.append(len(data))
         return np.concatenate([tone(0, 6)])
 
-    monkeypatch.setattr(server, "_decode_audio", decode)
+    monkeypatch.setattr(server, "_decode_enrollment_audio", decode)
     rec.decoded = decoded
     return rec
 
@@ -1393,18 +1394,22 @@ def test_enroll_from_audio_rejections(audio_rec, monkeypatch):
     assert _upload(audio_rec, data=b"x" * (70 * 1024)).status_code == 413
     assert _upload(audio_rec, data=b"x" * 11).status_code == 413
     monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
-    monkeypatch.setattr(server, "_decode_audio", lambda data: np.zeros(16000 * 6, np.float32))
+    monkeypatch.setattr(server, "_decode_enrollment_audio",
+                        lambda data: np.zeros(16000 * 6, np.float32))
     assert _upload(audio_rec).json() == {"detail": "no speech detected"}
-    monkeypatch.setattr(server, "_decode_audio", lambda data: np.zeros(0, np.float32))
+    monkeypatch.setattr(server, "_decode_enrollment_audio",
+                        lambda data: np.zeros(0, np.float32))
     assert _upload(audio_rec).status_code == 400
     assert not audio_rec.voices.exists()
 
 
 def test_enroll_from_audio_decode_errors_are_generic(audio_rec, monkeypatch):
-    def bad(data):
-        raise server.HTTPException(status_code=400, detail="/private/path/clip.wav: Invalid")
+    monkeypatch.setattr(server, "_decode_enrollment_audio", _REAL_ENROLL_DECODE)
 
-    monkeypatch.setattr(server, "_decode_audio", bad)
+    def bad(data, max_seconds=1200, *, source=None):
+        return subprocess.CompletedProcess([], 1, b"", b"/private/path/clip.wav: Invalid")
+
+    monkeypatch.setattr(server, "_run_ffmpeg", bad)
     assert _upload(audio_rec).json() == {"detail": "could not decode the audio"}
 
 
@@ -1437,7 +1442,7 @@ def test_forget_during_audio_inference_does_not_recreate_a_voiceprint(audio_rec,
         assert audio_rec.delete("/api/speakers").json() == {"forgotten": 1}
         return tone(0, 6)
 
-    monkeypatch.setattr(server, "_decode_audio", decode_while_forgetting)
+    monkeypatch.setattr(server, "_decode_enrollment_audio", decode_while_forgetting)
     resp = _upload(audio_rec)
     assert resp.status_code == 409 and "forgotten" in resp.json()["detail"]
     assert list(audio_rec.voices.iterdir()) == []
@@ -1448,7 +1453,7 @@ def test_recognition_off_during_audio_inference_stores_nothing(audio_rec, monkey
         monkeypatch.setattr(server._config, "speaker_recognition", False)
         return tone(0, 6)
 
-    monkeypatch.setattr(server, "_decode_audio", decode_then_disable)
+    monkeypatch.setattr(server, "_decode_enrollment_audio", decode_then_disable)
     assert _upload(audio_rec).status_code == 403
     assert not audio_rec.voices.exists()
 
@@ -1719,3 +1724,150 @@ def test_opt_out_while_finalize_drains_queued_chunks_names_nobody(rec, monkeypat
     assert matched == []
     assert all(sp["centroid"] is None and sp["voiceprint_id"] is None
                for sp in _sidecar(rec, stop["meeting_id"])["speakers"])
+
+
+# ---- enrollment decoding: seekable containers, own duration bound (BUG_0001, BUG_0004)
+
+def _late_moov_m4a(tmp_path, seconds=12):
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    out = tmp_path / "gen" / "late.m4a"
+    out.parent.mkdir()
+    subprocess.run([ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    f"sine=frequency=300:duration={seconds}", "-c:a", "aac", str(out)],
+                   check=True)
+    data = out.read_bytes()
+    out.unlink()
+    assert data[4:8] == b"ftyp" and server._is_iso_bmff(data)  # standard M4A, ftyp first
+    assert data.find(b"moov") > data.find(b"mdat") > 0  # index after the audio
+    return data
+
+
+def test_real_late_moov_m4a_decodes_for_enrollment(tmp_path, monkeypatch):
+    import tempfile
+
+    data = _late_moov_m4a(tmp_path)  # whichever path this FFmpeg needs, the clip decodes
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    audio = _REAL_ENROLL_DECODE(data)
+    assert audio.dtype == np.float32 and 11.9 * RATE <= audio.size <= 12.1 * RATE
+    assert list(scratch.iterdir()) == []  # the seekable copy is gone
+
+
+def test_real_late_moov_m4a_enrolls_end_to_end(rec, tmp_path):
+    data = _late_moov_m4a(tmp_path)
+    resp = _upload(rec, data=data, name="Dana")
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["name"] == "Dana"
+
+
+def _fake_ffmpeg(monkeypatch, outputs):
+    """Fake _run_ffmpeg: pops one stdout per call; records (max_seconds, source, file state)."""
+    calls = []
+
+    def run(data, max_seconds=1200, *, source=None):
+        state = None
+        if source is not None:
+            st = os.stat(source)
+            state = (Path(source).read_bytes(), st.st_mode & 0o777,
+                     os.stat(os.path.dirname(source)).st_mode & 0o777)
+        calls.append((max_seconds, source, state))
+        return subprocess.CompletedProcess([], 0, outputs.pop(0), b"")
+
+    monkeypatch.setattr(server, "_run_ffmpeg", run)
+    return calls
+
+
+def _pcm(seconds):
+    return np.full(int(seconds * RATE), 0.2, dtype=np.float32).tobytes()
+
+
+_FTYP = b"\x00\x00\x00\x18ftypM4A \x00\x00\x02\x00isomM4A "  # conventional M4A first box
+_BMFF_CLIP = _FTYP + b"\x00\x00\x00\x08mdat"
+
+
+def test_enrollment_retries_with_a_private_seekable_copy_only_when_needed(monkeypatch):
+    calls = _fake_ffmpeg(monkeypatch, [b"", _pcm(6)])
+    audio = _REAL_ENROLL_DECODE(_BMFF_CLIP)
+    assert audio.size == 6 * RATE
+    assert [(m, s is None) for m, s, _ in calls] == [(301, True), (301, False)]
+    source, (content, mode, dir_mode) = calls[1][1], calls[1][2]
+    assert content == _BMFF_CLIP
+    if os.name != "nt":
+        assert (mode, dir_mode) == (0o600, 0o700)
+    assert not os.path.exists(source) and not os.path.exists(os.path.dirname(source))
+    calls = _fake_ffmpeg(monkeypatch, [_pcm(6)])
+    _REAL_ENROLL_DECODE(_BMFF_CLIP)
+    assert [s for _, s, _ in calls] == [None]  # pipe worked: no temporary file at all
+
+
+@pytest.mark.parametrize("data", [
+    b"clip-bytes", b"RIFF\x24\x00\x00\x00WAVEfmt ", b"OggS\x00\x02", b"\x1aE\xdf\xa3",
+    b"\x00\x00\x00\x08moov", b"\x00\x00\x00\x0cftypM4A ", b"\x00\x00\x00\x04free" + _FTYP,
+    b"",
+])
+def test_non_iso_bmff_input_is_never_retried_from_disk(monkeypatch, data):
+    calls = _fake_ffmpeg(monkeypatch, [b""])
+    with pytest.raises(server.HTTPException) as info:
+        _REAL_ENROLL_DECODE(data)
+    assert info.value.detail == "could not decode the audio"
+    assert [s for _, s, _ in calls] == [None]  # only the pipe ran
+
+
+def test_iso_bmff_detection_allows_leading_padding_boxes():
+    assert server._is_iso_bmff(_BMFF_CLIP)
+    assert server._is_iso_bmff(b"\x00\x00\x00\x08free" + _FTYP)
+    assert server._is_iso_bmff(b"\x00\x00\x00\x08skip\x00\x00\x00\x08wide" + _FTYP)
+    assert not server._is_iso_bmff(b"\x00\x00\x00\x08free" * 4 + _FTYP)  # bounded walk
+
+
+def test_seekable_command_forces_mov_without_external_references(monkeypatch):
+    seen = []
+
+    def run(cmd, **kwargs):
+        seen.append((cmd, kwargs.get("input")))
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    server._run_ffmpeg(b"pipe-bytes", 301)
+    server._run_ffmpeg(b"", 301, source="/tmp/x/clip")
+    (pipe_cmd, pipe_input), (file_cmd, _) = seen
+    assert pipe_cmd[:8] == ["ffmpeg", "-nostdin", "-protocol_whitelist", "pipe",
+                            "-format_whitelist", server._FFMPEG_INPUT_FORMATS,
+                            "-i", "pipe:0"] and pipe_input == b"pipe-bytes"
+    assert "-enable_drefs" not in pipe_cmd and "mov" not in pipe_cmd
+    assert file_cmd[:12] == ["ffmpeg", "-nostdin", "-protocol_whitelist", "file",
+                             "-format_whitelist", server._FFMPEG_INPUT_FORMATS,
+                             "-f", "mov", "-enable_drefs", "0", "-i", "file:/tmp/x/clip"]
+    assert pipe_cmd[8:] == file_cmd[12:]  # same bounded output either way
+
+
+@pytest.mark.parametrize("dictation_limit", [0, 1, 20])
+def test_dictation_limit_never_truncates_enrollment(monkeypatch, dictation_limit):
+    monkeypatch.setattr(server._config, "max_recording_seconds", dictation_limit)
+    calls = _fake_ffmpeg(monkeypatch, [_pcm(45)])
+    assert _REAL_ENROLL_DECODE(b"x").size == 45 * RATE
+    assert calls[0][0] == server.ENROLL_MAX_SECONDS + 1 == 301
+
+
+def test_enrollment_over_the_bound_is_refused_not_cut(audio_rec, monkeypatch):
+    monkeypatch.setattr(server, "_decode_enrollment_audio", _REAL_ENROLL_DECODE)
+    _fake_ffmpeg(monkeypatch, [_pcm(300)])
+    assert _REAL_ENROLL_DECODE(b"x").size == 300 * RATE  # exactly the bound is fine
+    _fake_ffmpeg(monkeypatch, [_pcm(300) + np.zeros(1, np.float32).tobytes()])
+    resp = _upload(audio_rec)
+    assert resp.status_code == 400
+    assert resp.json() == {"detail": "recording is longer than 300 seconds; use a shorter clip"}
+    assert not audio_rec.voices.exists()
+
+
+def test_transcribe_keeps_its_pipe_and_dictation_limit(client, monkeypatch):
+    monkeypatch.setattr(server._config, "max_recording_seconds", 0)
+    calls = _fake_ffmpeg(monkeypatch, [b""])
+    with pytest.raises(server.HTTPException):
+        server._decode_audio(b"x")
+    assert calls == [(0, None, None)]  # no seekable retry; same max_seconds as before
