@@ -13,7 +13,7 @@ use crate::controllers::{history, setup};
 use crate::page::Page;
 use crate::pages::{column, header, page};
 use crate::remote::Health;
-use crate::theme::{size, space, text, theme, Tone};
+use crate::theme::{size, space, text, theme, Theme, Tone};
 use crate::ui::{self, Button, IconButton, Switch};
 
 pub struct HomePage {
@@ -242,16 +242,7 @@ impl HomePage {
             );
         let mut rows: Vec<AnyElement> = vec![hero.into_any_element()];
         for (tone, line) in lines {
-            rows.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .min_h(px(36.))
-                    .px(ui::row_inset())
-                    .py(space::s3())
-                    .child(ui::status_dot(&t, tone, line))
-                    .into_any_element(),
-            );
+            rows.push(status_row(&t, tone, line).into_any_element());
         }
         let save_error = self.save_error.clone();
         if note.is_some() || save_error.is_some() {
@@ -552,6 +543,47 @@ impl HomePage {
             ui::row_inset(),
         ))
     }
+}
+
+/// One inset status row under the hero (shortcut, microphone, service).
+///
+/// A block row, not a flex one: the text sits in normal flow at the card's
+/// width, so its height is measured at the width it wraps to and the row
+/// grows with it (long copy such as Wayland's stays inside the card instead
+/// of being clipped by the group). In a flex row the text was measured
+/// unwrapped and the row kept a one-line height. The dot is positioned on the
+/// first line, in room reserved by the left padding. The vertical padding
+/// makes one line exactly 36 px.
+pub(crate) fn status_row(t: &Theme, tone: Tone, line: String) -> gpui::Div {
+    let (sz, lh) = text::body();
+    let pad = (px(36.) - lh) * 0.5;
+    let mark = div()
+        .absolute()
+        .left(ui::row_inset())
+        .top(pad)
+        .h(lh)
+        .flex()
+        .items_center()
+        .child(ui::dot(t, tone));
+    let words = div().child(line);
+    #[cfg(test)]
+    let (mark, words) = (
+        mark.debug_selector(|| "status-dot".into()),
+        words.debug_selector(|| "status-text".into()),
+    );
+    div()
+        .block()
+        .relative()
+        .w_full()
+        .min_w_0()
+        .pl(ui::row_inset() + ui::dot_size() + space::s3())
+        .pr(ui::row_inset())
+        .py(pad)
+        .text_size(sz)
+        .line_height(lh)
+        .text_color(t.text)
+        .child(mark)
+        .child(words)
 }
 
 /// Theme tone for a status level.
