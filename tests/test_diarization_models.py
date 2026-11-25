@@ -183,6 +183,7 @@ def test_pinned_catalog_is_exact():
         size_bytes=28281165,
         licence="Apache-2.0",
         source=emb.source,
+        match_threshold=0.6,
     )
     hexdigits = set("0123456789abcdef")
     for model in REAL_MODELS:

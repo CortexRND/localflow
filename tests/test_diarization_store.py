@@ -285,3 +285,60 @@ def test_store_module_stays_dependency_free():
         for name in names:
             assert not name.startswith("numpy")
             assert name not in ("localflow.meetings", "localflow.server")
+
+
+# ------------------------------------------------- voice data (slice B9) ---
+
+def _with_voice(speakers, index, centroid, vid):
+    speakers[index] = {**speakers[index], "centroid": centroid, "voiceprint_id": vid}
+    return speakers
+
+
+def test_build_record_carries_supplied_voice_data_only():
+    record = _record(speakers=_with_voice(_speakers(), 0, [0.6, 0.8], "a" * 32))
+    first = record["speakers"][0]
+    assert (first["centroid"], first["voiceprint_id"]) == ([0.6, 0.8], "a" * 32)
+    assert all(sp["centroid"] is None and sp["voiceprint_id"] is None
+               for sp in record["speakers"][1:])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("centroid", "x"), ("centroid", []), ("centroid", [1.0, "a"]), ("centroid", [True]),
+    ("centroid", [float("inf")]), ("centroid", [0.0] * 4097), ("voiceprint_id", 5),
+])
+def test_bad_voice_data_makes_the_sidecar_unusable(store, field, value):
+    record = _record()
+    record["speakers"][0][field] = value
+    store.root.mkdir(parents=True)
+    (store.root / f"{MID}.json").write_text(json.dumps(record))
+    assert store.load(MID) is None
+
+
+def test_strip_voiceprints_nulls_centroids_and_matching_links(store):
+    speakers = _with_voice(_speakers(), 0, [1.0, 0.0], "a" * 32)
+    speakers = _with_voice(speakers, 1, [0.0, 1.0], "b" * 32)
+    store.save(_record(speakers=speakers))
+    assert store.strip_voiceprints("a" * 32) == (2, 0)
+    stored = store.load(MID)
+    assert [(sp["centroid"], sp["voiceprint_id"]) for sp in stored["speakers"]] == [
+        (None, None), (None, "b" * 32), (None, None)]
+    others = _record()
+    assert all(stored[k] == others[k] for k in others if k != "speakers")
+    assert store.strip_voiceprints() == (1, 0)
+    assert store.load(MID)["speakers"][1]["voiceprint_id"] is None
+    before = (store.root / f"{MID}.json").read_bytes()
+    assert store.strip_voiceprints() == (0, 0)  # nothing left: the file is not rewritten
+    assert (store.root / f"{MID}.json").read_bytes() == before
+
+
+def test_strip_voiceprints_without_a_store_dir_is_a_noop(store):
+    assert store.strip_voiceprints() == (0, 0)
+    assert not store.root.exists()
+
+
+def test_rename_and_merge_keep_b8_semantics_for_voice_data():
+    record = _record(speakers=_with_voice(_speakers(), 1, [0.0, 1.0], "b" * 32))
+    assert rename_speaker(record, "S2", "Dana")["speakers"][1]["voiceprint_id"] == "b" * 32
+    merged = merge_speakers(record, "S2", "S1")
+    assert [sp["id"] for sp in merged["speakers"]] == ["S1", "S3"]
+    assert all(sp["centroid"] is None for sp in merged["speakers"])

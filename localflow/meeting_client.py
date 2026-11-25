@@ -133,3 +133,23 @@ class MeetingClient:
             "post", f"/api/meetings/{quote(str(meeting_id), safe='')}/speakers/merge",
             timeout=10, json={"from": from_id, "into": into_id},
         )
+
+    # Enrolled voices (speaker recognition). Raw audio enrollment and export are local-only
+    # and live in the CLI, so this client never uploads voice audio or downloads vectors.
+
+    def enrolled(self) -> dict:
+        return self._request("get", "/api/speakers")
+
+    def enroll(self, name: str, meeting_id: str, speaker_id: str) -> dict:
+        """Remember a speaker of a meeting saved with speaker recognition on."""
+        return self._request(
+            "post", "/api/speakers", timeout=10,
+            json={"name": name, "meeting_id": meeting_id, "speaker_id": speaker_id},
+        )
+
+    def forget(self, voiceprint_id: str | None = None) -> dict:
+        """Forget one enrolled voice (id or name), or every voice with None."""
+        path = "/api/speakers"
+        if voiceprint_id is not None:
+            path += f"/{quote(str(voiceprint_id), safe='')}"
+        return self._request("delete", path, timeout=10)
