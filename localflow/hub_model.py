@@ -805,6 +805,11 @@ def speakers_not_found(error) -> bool:
     return getattr(error, "status_code", None) == 404
 
 
+def speaker_error_is_stale(error) -> bool:
+    """True when a speaker rename/merge failed because the speaker no longer exists."""
+    return str(error or "").strip().lower() == "unknown speaker"
+
+
 def recent_speakers_error_text(error) -> str:
     """The line shown in a Recent meetings drawer when the speakers didn't load."""
     return "Couldn't load speakers: " + safe_text(" ".join(str(error).split()), SPEAKER_ERROR_MAX)
@@ -930,6 +935,15 @@ class RecentSpeakers:
 
     def retry(self):
         if self.state != "error" or self.panel.busy:
+            return None
+        self.state = "loading"
+        self.load_error = ""
+        self.seq += 1
+        return self._request()
+
+    def reload(self):
+        """Re-fetch speakers for the open drawer after a stale-speaker edit."""
+        if self.state != "ready" or self.panel.busy:
             return None
         self.state = "loading"
         self.load_error = ""

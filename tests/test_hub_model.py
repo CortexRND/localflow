@@ -1672,3 +1672,18 @@ def test_recent_speakers_malformed_200_shows_retry_instead_of_hiding():
     assert state.state == "error"
     assert RECENT_MID not in state.hidden
 
+
+def test_recent_speakers_reload_after_stale_speaker_error():
+    from localflow.meeting_client import MeetingClientError
+
+    note = _recent_note("a", RECENT_MID)
+    state = _ready(hub_model.RecentSpeakers(), note)
+    assert hub_model.speaker_error_is_stale(MeetingClientError("unknown speaker", 404))
+    assert not hub_model.speaker_error_is_stale(MeetingClientError("server down", 500))
+    op, args, seq = state.reload()
+    assert (op, args) == ("speakers", (RECENT_MID,))
+    assert state.state == "loading"
+    assert state.loaded(seq, _recent_payload(RECENT_MID, "Sarah", "Bob"), None) is True
+    assert state.state == "ready"
+    assert state.panel.row("S1")["label"] == "Sarah"
+

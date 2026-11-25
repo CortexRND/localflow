@@ -78,6 +78,7 @@ from localflow.hub_model import (
     shortcut_rows,
     sidebar_label,
     sidebar_title,
+    speaker_error_is_stale,
     speaker_row_frames,
     speaker_row_meta,
     stat_layout,
@@ -2207,7 +2208,11 @@ class HubWindowController(NSObject):
             token, payload = result
             if recent is None or not recent.panel.finish(token, payload, error):
                 return
-            if panel is not None:
+            if error and speaker_error_is_stale(error):
+                request = recent.reload()
+                if request is not None:
+                    self._meeting_recent_send(request, "recent_speakers_load")
+            elif panel is not None:
                 self._meeting_speakers_mirror(recent.panel, panel, payload, error)
             if recent_shown:
                 self._meeting_recent_refresh()
