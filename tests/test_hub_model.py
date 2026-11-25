@@ -1787,8 +1787,8 @@ def test_finish_remember_error_text_keeps_the_prompt():
     error = MeetingClientError("this meeting has no stored voice data", 409)
     assert panel.finish(token, None, error)
     assert panel.error == (
-        "Couldn't remember the speaker: This meeting was saved without speaker "
-        "recognition, so there is no voice to remember."
+        "Couldn't remember the speaker: This meeting has no stored voice data "
+        "(recognition was off when saved, or voice data was forgotten)."
     )
     assert panel.mode == "remember" and panel.draft == "Sarah"
     assert not panel.is_remembered("S1")
