@@ -1646,6 +1646,15 @@ def test_note_head_unclosed_fence_short_file_ignores_body_meeting_id(tmp_path):
     assert hub_model._note_head(note) == ("", None)
 
 
+def test_note_head_ignores_indented_yaml_separator_before_meeting_id(tmp_path):
+    note = tmp_path / "2026-04-12 0930 Block.md"
+    note.write_text(
+        f"---\nsummary: |\n  ---\nmeeting_id: {RECENT_MID}\n---\n# Standup\n",
+        encoding="utf-8",
+    )
+    assert hub_model._note_head(note) == ("Standup", RECENT_MID)
+
+
 def test_recent_speakers_malformed_200_shows_retry_instead_of_hiding():
     note = _recent_note("a", RECENT_MID)
     state = hub_model.RecentSpeakers()

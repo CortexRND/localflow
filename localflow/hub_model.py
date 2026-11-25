@@ -246,10 +246,10 @@ def _note_head(path: Path) -> tuple[str, str | None]:
         return "", None
     lines = head.splitlines()
     meeting_id = None
-    if lines and lines[0].strip() == "---":
+    if lines and lines[0].rstrip() == "---":
         frontmatter = lines[1:]
         for index in range(1, len(lines)):
-            if lines[index].strip() == "---":
+            if lines[index].rstrip() == "---":
                 frontmatter = lines[1:index]
                 lines = lines[index + 1:]
                 break
