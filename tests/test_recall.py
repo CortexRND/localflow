@@ -368,3 +368,125 @@ def test_transcript_with_bad_encoding_is_skipped(tmp_path):
     bad = tmp_path / "2026-11-12 1400 Sync (transcript).md"
     bad.write_bytes(b"**00:01** **Me:** caf\xe9 \xff\xfe")
     assert recall_mod.transcript_passages(bad) == []
+
+
+# ------------------------------------------------------- speaker citations ---
+
+def _without_speaker(citations):
+    return [{k: v for k, v in c.items() if k != "speaker"} for c in citations]
+
+
+def _diarized_vault(tmp_path):
+    # Mic-only segments carrying speaker ids: lines are labelled only because the
+    # meeting is diarized (the writer's is_diarized branch, not channel attribution).
+    vault = tmp_path / "dvault"
+    ObsidianWriter(str(vault), "notes", "logs").write(
+        title="Pricing review", category="Zoom", started_at=datetime(2026, 11, 13, 9, 0),
+        duration_seconds=600, notes_md="## Summary\nPricing stays.",
+        segments=[
+            Segment(0, "welcome everyone to the call", "me",
+                    speaker_id="spk0", speaker_label="Speaker 2"),
+            Segment(20, "the launch pricing stays at ten dollars", "me",
+                    speaker_id="spk1", speaker_label="Dana O'Neil"),
+        ],
+    )
+    return vault
+
+
+@pytest.mark.parametrize("text, speaker", [
+    ("**00:00** **Me:** we drop the beta", "Me"),
+    ("**01:15** **Others:** agreed", "Others"),
+    ("**02:30** **Speaker 2:** sounds good", "Speaker 2"),
+    ("**03:45** **Dana O'Neil:** I own it", "Dana O'Neil"),
+    ("**04:00** **José:** listo", "José"),
+    ("**[05:10]** **Speaker 3:** bracketed stamp", "Speaker 3"),
+    ("**1:02:03**\t**Me:** hour stamp, tab separator", "Me"),
+    ("**00:00** **Me:** hi\n**00:10** **Dana:** the budget", "Me"),  # first line wins
+    ("**00:00** budget\n**00:05** **Dana:** budget", None),          # later line only
+    ("**00:00** we drop the beta", None),                             # unlabelled log
+    ("**00:00**\n**Me:** hello", None),                               # never crosses a newline
+    ("**00:00** said **Me:** hello", None),                           # not right after stamp
+    ("**Me:** no stamp at all", None),
+    ("continuation of an over-long line **Me:** text", None),
+    ("**00:00** **Dana  Smith:** needs rewriting", None),             # not a clean name
+    ("**00:00** **!!!:** junk", None),
+])
+def test_meeting_citation_speaker_from_first_line(text, speaker):
+    passage = _p(text, source="meeting", ref="m.md#00:00")
+    [off] = recall_mod._citations([passage], "budget")
+    [on] = recall_mod._citations([passage], "budget", cite_speakers=True)
+    assert "speaker" not in off
+    assert on.get("speaker") == speaker and ("speaker" in on) == (speaker is not None)
+    assert _without_speaker([on]) == [off]
+
+
+@pytest.mark.parametrize("source", ["dictation", "notes"])
+def test_non_meeting_citations_never_get_speaker(source):
+    passage = _p("**00:00** **Me:** budget", source=source)
+    on = recall_mod._citations([passage], "budget", cite_speakers=True)
+    assert on == recall_mod._citations([passage], "budget")
+
+
+def test_search_and_recall_speaker_on_vs_off(tmp_path, store):
+    vault = _diarized_vault(tmp_path)
+    kwargs = {"store": store, "vault_path": vault, "notes_folder": "notes",
+              "logs_folder": "logs", "now": NOW}
+    off = search("launch pricing", **kwargs).to_dict()
+    on = search("launch pricing", cite_speakers=True, **kwargs).to_dict()
+    assert off["citations"] and all("speaker" not in c for c in off["citations"])
+    meeting = next(c for c in on["citations"] if c["source"] == "meeting")
+    # The chunk starts with Speaker 2 even though the match is on Dana's line.
+    assert meeting["speaker"] == "Speaker 2"
+    assert all("speaker" not in c for c in on["citations"] if c["source"] != "meeting")
+    assert _without_speaker(on["citations"]) == off["citations"]
+    assert on["answer"] == off["answer"]
+
+    llm_off, llm_on = FakeLLM("Ten dollars [1]."), FakeLLM("Ten dollars [1].")
+    r_off = recall("launch pricing", llm=llm_off, **kwargs).to_dict()
+    r_on = recall("launch pricing", llm=llm_on, cite_speakers=True, **kwargs).to_dict()
+    assert llm_on.prompts == llm_off.prompts
+    assert r_on["answer"] == r_off["answer"]
+    assert _without_speaker(r_on["citations"]) == r_off["citations"]
+    assert all("speaker" not in c for c in r_off["citations"])
+    assert any(c.get("speaker") == "Speaker 2" for c in r_on["citations"])
+
+
+def _assert_speakers(body, *, use_llm, enabled):
+    # _vault's channel-attributed meeting starts with "**00:00** **Me:**".
+    assert body["answer"] == ("Budget is five thousand [1]." if use_llm else None)
+    assert {c["source"] for c in body["citations"]} == {"meeting", "notes"}
+    for c in body["citations"]:
+        expected = "Me" if enabled and c["source"] == "meeting" else None
+        assert c.get("speaker") == expected and ("speaker" in c) == (expected is not None)
+
+
+@pytest.mark.parametrize("use_llm", [True, False])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_api_recall_speaker_follows_setting(api, monkeypatch, enabled, use_llm):
+    monkeypatch.setattr(server._config, "speaker_diarization", enabled)
+    resp = api.post("/api/recall", json={"question": "windows beta", "llm": use_llm})
+    assert resp.status_code == 200
+    _assert_speakers(resp.json(), use_llm=use_llm, enabled=enabled)
+
+
+@pytest.mark.parametrize("use_llm", [True, False])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cli_recall_json_speaker_follows_setting(cli_env, enabled, use_llm):
+    config, _ = cli_env
+    config.speaker_diarization = enabled
+    args = ["recall", "windows beta", "--json"] + ([] if use_llm else ["--no-llm"])
+    result = CliRunner().invoke(cli_module.cli, args)
+    assert result.exit_code == 0, result.output
+    _assert_speakers(json.loads(result.output), use_llm=use_llm, enabled=enabled)
+
+
+@pytest.mark.parametrize("flags", [[], ["--no-llm"]])
+def test_cli_recall_plain_text_unchanged_by_speaker_setting(cli_env, flags):
+    config, _ = cli_env
+    outputs = []
+    for enabled in (False, True):
+        config.speaker_diarization = enabled
+        result = CliRunner().invoke(cli_module.cli, ["recall", "windows beta", *flags])
+        assert result.exit_code == 0, result.output
+        outputs.append(result.output)
+    assert outputs[0] == outputs[1]

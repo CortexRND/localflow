@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from localflow.history import HistoryStore
-from localflow.meetings import read_transcript_log
+from localflow.meetings import clean_speaker_name, read_transcript_log
 from localflow.providers.base import LLMProvider, ProviderError
 
 log = logging.getLogger("localflow.recall")
@@ -56,6 +56,9 @@ _STOPWORDS = frozenset(_STOPWORD_TEXT.split())
 _WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 _PHRASE_RE = re.compile(r'"([^"]+)"')
 _STAMP_RE = re.compile(r"^\*\*\[?(\d+:\d{2}(?::\d{2})?)\]?\*\*")
+# The ``**Label:**`` that follows a _STAMP_RE match; horizontal whitespace only,
+# so the separator can never cross into the next line.
+_SPEAKER_LABEL_RE = re.compile(r"[ \t]+\*\*([^*:\r\n]+):\*\*(?=[ \t]|$)")
 _FILE_STAMP_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:\s+(.*))?$")
 _CITATION_RE = re.compile(r"\[(\d{1,2}(?:\s*[,;]\s*\d{1,2})*)\]")
 _RELATIVE_RE = re.compile(r"^(\d+)\s*d$", re.IGNORECASE)
@@ -379,12 +382,36 @@ def _snippet(text: str, terms: set[str]) -> str:
     return ("…" if start else "") + piece + ("…" if start + SNIPPET_CHARS < len(flat) else "")
 
 
-def _citation(n: int, passage: Passage, terms: set[str]) -> dict:
+def _passage_speaker(passage: Passage) -> str | None:
+    """Speaker label on the first line of a meeting passage, or None.
+
+    Only the first line counts (it is the line the citation's timestamp points
+    at). The label is returned exactly as written, and only when it is already
+    a clean speaker name (Me, Others, Speaker 2, an enrolled name, ...).
+    """
+    if passage.source != SOURCE_MEETING:
+        return None
+    first = passage.text.split("\n", 1)[0]
+    stamp = _STAMP_RE.match(first)
+    if not stamp:
+        return None
+    match = _SPEAKER_LABEL_RE.match(first, stamp.end())
+    if not match:
+        return None
+    label = match.group(1)
+    if clean_speaker_name(label) != label:
+        return None
+    return label
+
+
+def _citation(
+    n: int, passage: Passage, terms: set[str], *, cite_speakers: bool = False,
+) -> dict:
     when = (
         datetime.fromtimestamp(passage.ts).isoformat(timespec="minutes")
         if passage.ts is not None else ""
     )
-    return {
+    citation = {
         "n": n,
         "source": passage.source,
         "title": passage.title,
@@ -393,12 +420,22 @@ def _citation(n: int, passage: Passage, terms: set[str]) -> dict:
         "snippet": _snippet(passage.text, terms),
         "ref": passage.ref,
     }
+    if cite_speakers:
+        speaker = _passage_speaker(passage)
+        if speaker:
+            citation["speaker"] = speaker
+    return citation
 
 
-def _citations(passages: list[Passage], question: str) -> list[dict]:
+def _citations(
+    passages: list[Passage], question: str, *, cite_speakers: bool = False,
+) -> list[dict]:
     plain, _ = extract_phrases(question)
     terms = set(tokenize(plain))
-    return [_citation(i, p, terms) for i, p in enumerate(passages, start=1)]
+    return [
+        _citation(i, p, terms, cite_speakers=cite_speakers)
+        for i, p in enumerate(passages, start=1)
+    ]
 
 
 def clean_citations(answer: str, valid: int) -> str:
@@ -458,14 +495,21 @@ def search(
     k: int = 8,
     since: str | date | datetime | None = None,
     now: datetime | None = None,
+    cite_speakers: bool = False,
 ) -> RecallResult:
-    """Retrieval only: ranked passages as citations, ``answer=None``."""
+    """Retrieval only: ranked passages as citations, ``answer=None``.
+
+    ``cite_speakers`` (the caller's live ``speaker_diarization`` setting) adds a
+    ``speaker`` key to meeting citations whose first line carries a label.
+    """
     corpus = build_corpus(
         store=store, vault_path=vault_path, notes_folder=notes_folder,
         logs_folder=logs_folder,
     )
     top = rank(question, corpus, k=k, since=since, now=now)
-    return RecallResult(answer=None, citations=_citations(top, question))
+    return RecallResult(
+        answer=None, citations=_citations(top, question, cite_speakers=cite_speakers),
+    )
 
 
 def recall(
@@ -479,8 +523,12 @@ def recall(
     k: int = 8,
     since: str | date | datetime | None = None,
     now: datetime | None = None,
+    cite_speakers: bool = False,
 ) -> RecallResult:
-    """Answer ``question`` from the user's own history using only retrieved passages."""
+    """Answer ``question`` from the user's own history using only retrieved passages.
+
+    ``cite_speakers`` behaves as in :func:`search`; the prompt is unaffected.
+    """
     corpus = build_corpus(
         store=store, vault_path=vault_path, notes_folder=notes_folder,
         logs_folder=logs_folder,
@@ -488,7 +536,7 @@ def recall(
     top = rank(question, corpus, k=k, since=since, now=now)
     if not top:
         return RecallResult(answer=NO_ANSWER, citations=[])
-    citations = _citations(top, question)
+    citations = _citations(top, question, cite_speakers=cite_speakers)
     try:
         reply = llm.complete("", build_prompt(question, top)).strip()
     except (ProviderError, OSError) as exc:

@@ -1171,6 +1171,7 @@ async def api_recall(body: RecallRequest) -> dict:
         "logs_folder": _config.logs_folder,
         "k": body.k,
         "since": body.since,
+        "cite_speakers": bool(_config.speaker_diarization),
     }
 
     def _run():
