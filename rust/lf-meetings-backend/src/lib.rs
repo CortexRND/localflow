@@ -102,7 +102,40 @@ pub struct MeetingsBackend {
 }
 
 pub type ConfigReader = Arc<dyn Fn() -> Result<Config> + Send + Sync>;
+/// Speaker-label settings a new meeting takes from the live config.
+const LIVE_DIARIZATION_FIELDS: [&str; 5] = [
+    "speaker_diarization",
+    "diarization_backend",
+    "diarize_mic",
+    "diarization_max_speakers",
+    "speaker_recognition",
+];
 impl MeetingsBackend {
+    /// The capture config for a new meeting: the request's, with only the
+    /// diarization fields taken from the live config (when a reader is
+    /// attached) so opting in or out applies from the next meeting. An
+    /// unreadable live config means speaker labels and recognition stay off.
+    fn capture_config(&self, request: &Config) -> Config {
+        let mut config = request.clone();
+        let Some(reader) = &self.config_reader else {
+            return config;
+        };
+        match reader() {
+            Ok(live) => {
+                for field in LIVE_DIARIZATION_FIELDS {
+                    if let Some(value) = live.field(field) {
+                        config.set_field(field, value.clone());
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("could not read config; speaker labels off for this meeting");
+                config.set_field("speaker_diarization", Value::Bool(false));
+                config.set_field("speaker_recognition", Value::Bool(false));
+            }
+        }
+        config
+    }
     /// Poll the same in-process status as GET /meeting/status using live config snapshots.
     pub fn start_status_poller(
         self: &Arc<Self>,
@@ -312,7 +345,7 @@ impl MeetingsBackend {
             watcher.pause();
         }
         let opened = SessionActor::open(
-            config.clone(),
+            self.capture_config(config),
             self.capture.clone(),
             self.transcribe_lock.clone(),
         );

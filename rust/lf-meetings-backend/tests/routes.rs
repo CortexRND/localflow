@@ -2695,9 +2695,9 @@ async fn the_live_gate_is_rechecked_after_the_body_is_read() {
 async fn quick_exit_waits_for_an_in_flight_final_sidecar_but_not_for_slow_work() {
     let f = speaker_fixture(true);
     // The sidecar write's live-gate read is the stop's only config read
-    // (recognition was off at start): block it there.
+    // (recognition was off at start): block it there, armed after the
+    // start's own read of the live diarization settings.
     let slot: Arc<Mutex<Option<Gate>>> = Arc::default();
-    let (writing, release) = gate(&slot);
     let (reader_slot, config) = (slot.clone(), f.config.clone());
     let backend = Arc::new(
         MeetingsBackend::new()
@@ -2726,6 +2726,7 @@ async fn quick_exit_waits_for_an_in_flight_final_sidecar_but_not_for_slow_work()
     )
     .await;
     assert_eq!(start.0, 200, "{}", start.1);
+    let (writing, release) = gate(&slot);
     let (stopping, config) = (backend.clone(), f.config.clone());
     let stop = std::thread::spawn(move || {
         stopping.handle(BackendRequest {
@@ -2852,6 +2853,103 @@ async fn opting_in_after_the_meeting_started_keeps_its_voice_data_off_disk() {
         !f.dir.path().join("speakers").exists(),
         "no registry read or write"
     );
+}
+
+#[tokio::test]
+async fn each_start_takes_the_live_diarization_settings_despite_a_stale_request_config() {
+    let mut f = speaker_fixture(true);
+    f.config.set_field("diarization_backend", json!("mock"));
+    // The live config file; `None` = unreadable.
+    let live: Arc<Mutex<Option<Config>>> = Arc::new(Mutex::new(Some(f.config.clone())));
+    let reader = live.clone();
+    f.backend = Arc::new(
+        MeetingsBackend::new()
+            .unwrap()
+            .with_capture(f.capture.clone())
+            .with_providers(Arc::new(Providers(f.models.clone())))
+            .with_queue(PromptQueue::new(f.dir.path().join("queue.json")))
+            .with_history_path(f.dir.path().join("history.sqlite"))
+            .with_speaker_data(Arc::new(SpeakerData::with_roots(
+                f.dir.path().join("meetings"),
+                f.dir.path().join("speakers"),
+            )))
+            .with_config_reader(Arc::new(move || {
+                reader
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("unreadable"))
+            })),
+    );
+    let set_live = |field: &str, value: Value| {
+        live.lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .set_field(field, value);
+    };
+    let centroids = |f: &Fixture, saved: &Value| -> Vec<bool> {
+        sidecar(f, saved["meeting_id"].as_str().unwrap())["speakers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sp| !sp["centroid"].is_null())
+            .collect()
+    };
+    let started = |f: &Fixture| {
+        let app = f.app();
+        async move {
+            let start = request(
+                app,
+                "POST",
+                "/meeting/start",
+                Some(json!({"title":"Speakers", "auto_title":false})),
+            )
+            .await;
+            assert_eq!(start.0, 200, "{}", start.1);
+            start.1
+        }
+    };
+    let stopped = |f: &Fixture| {
+        let app = f.app();
+        async move {
+            let saved = request(app, "POST", "/meeting/stop", None).await;
+            assert_eq!(saved.0, 200, "{}", saved.1);
+            saved.1
+        }
+    };
+
+    // Opted in via the file; the request snapshot still says off.
+    assert_eq!(f.config.field_bool("speaker_recognition"), Some(false));
+    set_live("speaker_recognition", json!(true));
+    assert_eq!(started(&f).await["diarization"], "collecting");
+    let saved = stopped(&f).await;
+    assert_eq!(saved["diarization"], "ok", "{saved}");
+    assert!(centroids(&f, &saved).iter().any(|c| *c), "{saved}");
+
+    // Opted out again; the request snapshot now says on.
+    f.config.set_field("speaker_recognition", json!(true));
+    set_live("speaker_recognition", json!(false));
+    started(&f).await;
+    let saved = stopped(&f).await;
+    assert_eq!(saved["diarization"], "ok", "{saved}");
+    assert!(centroids(&f, &saved).iter().all(|c| !*c), "{saved}");
+
+    // Speaker labels off via the file: no collector despite the request.
+    set_live("speaker_diarization", json!(false));
+    assert_eq!(started(&f).await["diarization"], "off");
+    assert_eq!(stopped(&f).await["diarization"], "off");
+
+    // An unreadable live config leaves labels (and recognition) off.
+    set_live("speaker_diarization", json!(true));
+    *live.lock().unwrap() = None;
+    assert_eq!(started(&f).await["diarization"], "off");
+    assert_eq!(stopped(&f).await["diarization"], "off");
+
+    // Readable again: the next meeting collects.
+    *live.lock().unwrap() = Some(f.config.clone());
+    assert_eq!(started(&f).await["diarization"], "collecting");
+    assert_eq!(stopped(&f).await["diarization"], "ok");
 }
 
 #[tokio::test]
