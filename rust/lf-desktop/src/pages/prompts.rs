@@ -14,6 +14,25 @@ use crate::remote::Health;
 use crate::theme::{space, theme, Tone};
 use crate::ui::{self, Button, Switch};
 
+/// Page subtitle. The sandbox never points at the real `lf` CLI, which would
+/// dispatch the user's real approved prompts.
+fn subtitle(sandbox: bool) -> &'static str {
+    if sandbox {
+        "Review example prompts without sending them."
+    } else {
+        "Run lf prompts dispatch --all to send all approved prompts."
+    }
+}
+
+/// Notice shown after approving a prompt (sandbox-aware, like [`subtitle`]).
+fn approved_notice(sandbox: bool) -> &'static str {
+    if sandbox {
+        "Prompt approved. Sandbox prompts are never sent."
+    } else {
+        "Prompt approved. Run lf prompts dispatch --all to send all approved prompts."
+    }
+}
+
 pub struct PromptsPage {
     pcx: PageCx,
     rows: Vec<PromptRow>,
@@ -100,7 +119,7 @@ impl PromptsPage {
                     Ok(()) => (
                         Tone::Success,
                         if approve {
-                            "Prompt approved. Send it with `lf prompts dispatch`."
+                            approved_notice(this.pcx.services.is_sandbox())
                         } else {
                             "Prompt rejected."
                         }
@@ -188,6 +207,7 @@ impl Render for PromptsPage {
             "prompt-filter",
             &items,
             self.filter,
+            ui::TabDensity::Regular,
             Rc::new(move |f, _, cx| {
                 let _ = this.update(cx, |p, cx| {
                     p.filter = f;
@@ -290,10 +310,26 @@ impl Render for PromptsPage {
             header(
                 &t,
                 "Prompts",
-                Some("Approved prompts are sent with `lf prompts dispatch`.".into()),
+                Some(subtitle(self.pcx.services.is_sandbox()).into()),
                 vec![refresh],
             ),
             column("prompts-scroll", body),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_copy_never_suggests_dispatch() {
+        for copy in [subtitle(true), approved_notice(true)] {
+            assert!(!copy.contains("dispatch"), "{copy}");
+            assert!(!copy.contains("lf prompts"), "{copy}");
+        }
+        for copy in [subtitle(false), approved_notice(false)] {
+            assert!(copy.contains("lf prompts dispatch --all"), "{copy}");
+        }
     }
 }

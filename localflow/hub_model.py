@@ -7,6 +7,7 @@ responsive sizing) can be unit-tested on any platform.
 import math
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from localflow.dispatch import (
     approve_prompt,
     reject_prompt,
 )
+from localflow.settings_agent import safe_text
 from localflow.text_wrap import wrap_lines
 from localflow.ui_tokens import HUB_HEADER_OFFSET
 
@@ -489,6 +491,414 @@ def _recent_notes_in(root: Path, limit: int, now: datetime | None):
 
 RECENT_ROW_H = 44
 RECENT_EMPTY = "No saved meeting notes yet. Notes you save appear here."
+
+
+# ----------------------------------------------------------------- speakers ---
+
+SPEAKER_LABEL_MAX = 60        # display cap; the server caps names at 40
+SPEAKER_ID_MAX = 24
+SPEAKER_NAME_MAX = 40         # == meetings.MAX_SPEAKER_NAME_CHARS
+SPEAKER_ERROR_MAX = 200
+SPEAKER_ROWS_MAX = 32
+SPEAKERS_HEADING = "Speakers"
+SPEAKER_FALLBACK_LABEL = "Unnamed speaker"
+SPEAKER_TARGET_PLACEHOLDER = "Choose a speaker…"
+SPEAKER_NO_UPDATE = "LocalFlow didn't return the updated speakers. The list will refresh."
+
+_SPEAKER_ERRORS = {
+    "invalid speaker name": "That name can't be used. Use letters or numbers.",
+    "unknown speaker": "That speaker is no longer in this meeting. The list will refresh.",
+    "no speaker data for this meeting": "This meeting's speaker data is no longer available.",
+    "transcript file not found": (
+        "The transcript file was moved or deleted, so speakers can't be changed."
+    ),
+}
+
+
+def format_speaker_duration(seconds) -> str:
+    """'45s', '1m 12s' or '1h 2m' for a speaker's talk time; '0s' for junk."""
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return "0s"
+    if math.isnan(seconds) or math.isinf(seconds) or seconds <= 0:
+        return "0s"
+    total = int(seconds + 0.5)
+    if total == 0:
+        return "<1s"
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m {total % 60}s"
+    return f"{total // 3600}h {total % 3600 // 60}m"
+
+
+def sanitize_speaker_label(label, fallback: str = SPEAKER_FALLBACK_LABEL) -> str:
+    """One escaped, bounded display line for a speaker label from the server."""
+    if not isinstance(label, str):
+        return fallback
+    return safe_text(" ".join(label.split()), SPEAKER_LABEL_MAX) or fallback
+
+
+def _speaker_seconds(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    value = float(value)
+    return value if math.isfinite(value) and value > 0 else 0.0
+
+
+def speaker_rows(saved) -> list[dict]:
+    """Display rows for a saved meeting's `speakers`; [] when there are none."""
+    if not isinstance(saved, dict):
+        return []
+    meeting_id = saved.get("meeting_id")
+    speakers = saved.get("speakers")
+    if not isinstance(meeting_id, str) or not meeting_id or not isinstance(speakers, list):
+        return []
+    rows = []
+    seen = set()
+    for entry in speakers:
+        if len(rows) >= SPEAKER_ROWS_MAX:
+            break
+        if not isinstance(entry, dict):
+            continue
+        raw_id = entry.get("id")
+        if not isinstance(raw_id, str) or not raw_id or raw_id in seen:
+            continue
+        seen.add(raw_id)
+        source = entry.get("source")
+        rows.append({
+            "id": raw_id,
+            "id_text": safe_text(raw_id, SPEAKER_ID_MAX),
+            "label": sanitize_speaker_label(entry.get("label")),
+            "seconds": _speaker_seconds(entry.get("seconds")),
+            "duration": format_speaker_duration(entry.get("seconds")),
+            "source": source if isinstance(source, str) else "",
+        })
+    return rows
+
+
+def speaker_meeting_id(saved) -> str:
+    """The saved meeting's id, only when it has speaker rows to show."""
+    return saved["meeting_id"] if speaker_rows(saved) else ""
+
+
+def merge_target_choices(rows, source_id) -> list[dict]:
+    """[{id, title}] for every row but `source_id`; titles are always unique.
+
+    NSPopUpButton drops an earlier item with a repeated title, so labels shared
+    by several speakers get the speaker id, and any title still repeated a
+    counter.
+    """
+    counts = {}
+    for row in rows:
+        key = row["label"].casefold()
+        counts[key] = counts.get(key, 0) + 1
+    choices = []
+    used = set()
+    for row in rows:
+        if row["id"] == source_id:
+            continue
+        title = f"{row['label']} · {row['duration']}"
+        if counts[row["label"].casefold()] > 1:
+            title = f"{title} · {row['id_text']}"
+        unique, n = title, 2
+        while unique in used:
+            unique = f"{title} ({n})"
+            n += 1
+        used.add(unique)
+        choices.append({"id": row["id"], "title": unique})
+    return choices
+
+
+def speaker_row_meta(rows, row) -> str:
+    """Secondary text for one speaker row: talk time, plus id when names collide."""
+    key = row["label"].casefold()
+    if sum(1 for item in rows if item["label"].casefold() == key) > 1:
+        return f"{row['duration']} · {row['id_text']}"
+    return row["duration"]
+
+
+def speaker_name_error(name, current_label: str = "") -> str | None:
+    """Why `name` can't be a speaker name, or None. Mirrors the server's rules."""
+    text = " ".join(str(name or "").split())
+    if not text:
+        return "Type a name first."
+    normalized = unicodedata.normalize("NFKC", text)
+    if not any(
+        unicodedata.category(ch)[0] == "L" or unicodedata.category(ch) == "Nd"
+        for ch in normalized
+    ):
+        return "Use letters or numbers in the name."
+    if len(normalized) > SPEAKER_NAME_MAX:
+        return f"Keep the name to {SPEAKER_NAME_MAX} characters or fewer."
+    return None
+
+
+def speaker_error_text(action: str, error) -> str:
+    """The line shown under the Speakers card when a rename or merge failed."""
+    text = safe_text(" ".join(str(error).split()), SPEAKER_ERROR_MAX)
+    text = _SPEAKER_ERRORS.get(text, text)
+    return f"Couldn't {action} the speaker: {text}"
+
+
+class PolledStatus(dict):
+    """A /meeting/status payload that remembers the speaker ticket it was requested under."""
+
+    speaker_ticket = None
+
+    def __init__(self, data, ticket):
+        super().__init__(data)
+        self.speaker_ticket = ticket
+
+
+class SpeakerPanel:
+    """One meeting's Speakers editor: rows, the open edit, busy, error. No UI, no I/O."""
+
+    def __init__(self):
+        self.meeting_id = ""
+        self.rows = []
+        self.mode = ""          # "" | "rename" | "merge"
+        self.speaker_id = ""    # the row being renamed / merged away
+        self.into_id = ""       # chosen merge target
+        self.draft = ""         # rename text, survives rebuilds
+        self.busy = ""          # "" | "rename" | "merge"
+        self.error = ""
+        self.epoch = 0          # request/poll freshness
+        self.revision = 0       # bumps on every visible change
+
+    @property
+    def visible(self) -> bool:
+        return bool(self.rows)
+
+    @property
+    def can_merge(self) -> bool:
+        return len(self.rows) >= 2
+
+    def row(self, speaker_id):
+        for row in self.rows:
+            if row["id"] == speaker_id:
+                return row
+        return None
+
+    def choices(self) -> list[dict]:
+        if self.mode != "merge":
+            return []
+        return merge_target_choices(self.rows, self.speaker_id)
+
+    def ticket(self) -> int:
+        """Taken on the UI thread when a status request is sent."""
+        return self.epoch
+
+    def stamp(self, result, ticket):
+        return PolledStatus(result, ticket) if isinstance(result, dict) else result
+
+    def _close_edit(self):
+        self.mode = ""
+        self.speaker_id = ""
+        self.into_id = ""
+        self.draft = ""
+
+    def sync(self, saved, ticket=None) -> bool:
+        """Adopt the speakers of `saved`; True when anything visible changed."""
+        if ticket is not None and ticket != self.epoch:
+            return False
+        meeting_id = speaker_meeting_id(saved)
+        rows = speaker_rows(saved)
+        if meeting_id != self.meeting_id:
+            self.meeting_id = meeting_id
+            self.rows = rows
+            self._close_edit()
+            self.busy = ""
+            self.error = ""
+            self.epoch += 1
+            self.revision += 1
+            return True
+        if not meeting_id:
+            return False
+        if self.busy or (ticket is not None and ticket != self.epoch):
+            return False
+        if rows == self.rows:
+            return False
+        self.rows = rows
+        if self.mode:
+            if self.row(self.speaker_id) is None or (
+                self.mode == "merge" and not self.can_merge
+            ):
+                self._close_edit()
+            elif self.into_id and self.row(self.into_id) is None:
+                self.into_id = ""
+        self.revision += 1
+        return True
+
+    def begin_rename(self, speaker_id) -> None:
+        row = self.row(speaker_id)
+        if self.busy or row is None:
+            return
+        self.mode = "rename"
+        self.speaker_id = speaker_id
+        self.into_id = ""
+        self.draft = row["label"]
+        self.error = ""
+        self.revision += 1
+
+    def begin_merge(self, speaker_id) -> None:
+        if self.busy or self.row(speaker_id) is None or not self.can_merge:
+            return
+        self.mode = "merge"
+        self.speaker_id = speaker_id
+        self.draft = ""
+        self.error = ""
+        choices = self.choices()
+        self.into_id = choices[0]["id"] if len(choices) == 1 else ""
+        self.revision += 1
+
+    def choose_target(self, speaker_id) -> None:
+        if self.mode != "merge" or self.busy:
+            return
+        if speaker_id not in [choice["id"] for choice in self.choices()]:
+            return
+        self.into_id = speaker_id
+        self.revision += 1
+
+    def set_draft(self, text, speaker_id=None) -> None:
+        """Keep the rename text; no revision bump (called before a rebuild).
+
+        Ignored outside rename mode, and when `speaker_id` (the row the field
+        was drawn for) is not the row being renamed: a field left over from an
+        older edit never overwrites the current draft.
+        """
+        if self.mode != "rename" or self.busy:
+            return
+        if speaker_id is not None and speaker_id != self.speaker_id:
+            return
+        self.draft = str(text)
+
+    def cancel(self) -> None:
+        if self.busy:
+            return
+        changed = bool(self.mode or self.speaker_id or self.into_id or self.draft or self.error)
+        self._close_edit()
+        self.error = ""
+        if changed:
+            self.revision += 1
+
+    def submit_rename(self, name):
+        """("rename_speaker", (meeting_id, speaker_id, name), token) or None."""
+        if self.busy or self.mode != "rename":
+            return None
+        self.draft = str(name)
+        problem = speaker_name_error(name)
+        if problem:
+            self.error = problem
+            self.revision += 1
+            return None
+        collapsed = " ".join(str(name).split())
+        row = self.row(self.speaker_id)
+        if row is not None and collapsed == row["label"]:
+            self.cancel()
+            return None
+        self.busy = "rename"
+        self.error = ""
+        self.epoch += 1
+        self.revision += 1
+        return ("rename_speaker", (self.meeting_id, self.speaker_id, collapsed), self.epoch)
+
+    def submit_merge(self):
+        """("merge_speakers", (meeting_id, from_id, into_id), token) or None."""
+        if self.busy or self.mode != "merge":
+            return None
+        if not self.into_id or self.into_id == self.speaker_id:
+            return None
+        self.busy = "merge"
+        self.error = ""
+        self.epoch += 1
+        self.revision += 1
+        return ("merge_speakers", (self.meeting_id, self.speaker_id, self.into_id), self.epoch)
+
+    def finish(self, token, result, error) -> bool:
+        """Apply a rename/merge response; False when it belongs to an older state."""
+        if token != self.epoch:
+            return False
+        action = self.busy or "update"
+        self.busy = ""
+        self.epoch += 1
+        self.revision += 1
+        if error:
+            self.error = speaker_error_text(action, error)
+            return True
+        rows = []
+        if isinstance(result, dict) and result.get("meeting_id") in (None, self.meeting_id):
+            rows = speaker_rows({"meeting_id": self.meeting_id, "speakers": result.get("speakers")})
+        if rows:
+            self.rows = rows
+            self._close_edit()
+            self.error = ""
+        else:
+            self.error = SPEAKER_NO_UPDATE
+        return True
+
+
+SPEAKER_ROW_H = RECENT_ROW_H
+SPEAKERS_CARD_Y = 28          # heading 22 + 6, as Recent meetings
+SPEAKERS_ERROR_GAP = 6
+SPEAKERS_GAP = 12             # panel -> next section
+SPEAKER_BUTTONS = {"rename": 84, "merge": 72, "save": 84, "confirm": 92, "cancel": 72}
+_SPEAKER_PAD = 16             # == ui_tokens.CARD_PADDING
+_SPEAKER_BUTTON_GAP = 8
+
+
+def meeting_speakers_layout(width: int, y: int, count: int, *, error_height: int = 0) -> dict:
+    """Heading, card and error frames of the Speakers block, and the y below it."""
+    if count <= 0:
+        return {"bottom": y}
+    bottom = y + SPEAKERS_CARD_Y + count * SPEAKER_ROW_H
+    frames = {
+        "heading": (0, y, 400, 22),
+        "card": (0, y + SPEAKERS_CARD_Y, width, count * SPEAKER_ROW_H),
+    }
+    if error_height:
+        frames["error"] = (0, bottom + SPEAKERS_ERROR_GAP, width, error_height)
+        bottom += SPEAKERS_ERROR_GAP + error_height
+    frames["bottom"] = bottom + SPEAKERS_GAP
+    return frames
+
+
+def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: bool = True) -> dict:
+    """Card-local frames of one speaker row in its normal, rename or merge state."""
+    y0 = index * SPEAKER_ROW_H
+    pad = _SPEAKER_PAD
+    gap = _SPEAKER_BUTTON_GAP
+    by = y0 + 8
+    frames = {"divider": (12, y0 + SPEAKER_ROW_H - 1, width - 24, 1)}
+    right = width - pad
+    if mode == "":
+        if can_merge:
+            merge_w = SPEAKER_BUTTONS["merge"]
+            frames["merge"] = (right - merge_w, by, merge_w, 28)
+            right = right - merge_w - gap
+        rename_w = SPEAKER_BUTTONS["rename"]
+        rename_x = right - rename_w
+        frames["rename"] = (rename_x, by, rename_w, 28)
+        duration_x = rename_x - 12 - 80
+        frames["duration"] = (duration_x, y0 + 14, 80, 18)
+        frames["name"] = (pad, y0 + 12, duration_x - 12 - pad, 20)
+        return frames
+    cancel_w = SPEAKER_BUTTONS["cancel"]
+    cancel_x = right - cancel_w
+    frames["cancel"] = (cancel_x, by, cancel_w, 28)
+    if mode == "rename":
+        save_w = SPEAKER_BUTTONS["save"]
+        save_x = cancel_x - gap - save_w
+        frames["save"] = (save_x, by, save_w, 28)
+        frames["field"] = (pad, y0 + 6, save_x - 12 - pad, 32)
+        return frames
+    confirm_w = SPEAKER_BUTTONS["confirm"]
+    confirm_x = cancel_x - gap - confirm_w
+    frames["confirm"] = (confirm_x, by, confirm_w, 28)
+    picker_w = max(160, min(280, (width - 216) // 2))
+    picker_x = confirm_x - 12 - picker_w
+    frames["picker"] = (picker_x, by, picker_w, 28)
+    frames["prompt"] = (pad, y0 + 12, picker_x - 12 - pad, 20)
+    return frames
 
 
 # -------------------------------------------------------------------- style ---

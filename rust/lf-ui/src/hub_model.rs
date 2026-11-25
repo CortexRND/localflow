@@ -2400,6 +2400,425 @@ pub fn saved_notes_message(saved: &Value) -> String {
     format!("Notes saved: {title}")
 }
 
+// ------------------------------------------------------ speaker labels ---
+
+/// Longest server reason shown on the live status line (characters).
+pub const SPEAKER_REASON_CHARS: usize = 120;
+
+/// One plain line of whitespace (any run, newlines included, becomes one
+/// space), cut to `limit` characters with an ellipsis.
+fn one_line(text: &str, limit: usize) -> String {
+    let joined = text.py_split().join(" ");
+    if joined.chars().count() <= limit {
+        return joined;
+    }
+    let cut: String = joined.chars().take(limit.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// The live speaker-label line shown under the capture status (U5):
+/// `"Speaker labels: collecting"` or `"Speaker labels: unavailable (reason)"`.
+/// `None` for `off`, a missing field (an older server) or anything unknown,
+/// so a meeting without speaker labels looks exactly as before. `session` is
+/// the server's `session` object; the transcript itself stays Me/Others.
+pub fn meeting_speaker_status(session: &Value) -> Option<String> {
+    match session.get("diarization").and_then(Value::as_str)? {
+        "collecting" => Some("Speaker labels: collecting".to_string()),
+        "unavailable" => {
+            let reason = session
+                .get("diarization_error")
+                .and_then(Value::as_str)
+                .map(|reason| one_line(reason, SPEAKER_REASON_CHARS))
+                .unwrap_or_default();
+            Some(if reason.is_empty() {
+                "Speaker labels: unavailable".to_string()
+            } else {
+                format!("Speaker labels: unavailable ({reason})")
+            })
+        }
+        _ => None,
+    }
+}
+
+/// One speaker of a saved meeting, as both servers return it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeetingSpeaker {
+    pub id: String,
+    pub label: String,
+    pub seconds: f64,
+}
+
+/// Longest speaker label drawn (the servers cap names well below this).
+const SPEAKER_LABEL_CHARS: usize = 60;
+
+/// The speakers of a stop payload, `last_saved` or `/api/meetings/{id}/speakers`
+/// reply. A row without a usable id is skipped (it could never be edited); a
+/// label is one line, falling back to the id.
+pub fn meeting_speakers(payload: &Value) -> Vec<MeetingSpeaker> {
+    payload
+        .get("speakers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|speaker| {
+            let id = speaker.get("id")?.as_str()?;
+            if !crate::backends::meeting::valid_speaker_id(id) {
+                return None;
+            }
+            let label = speaker
+                .get("label")
+                .and_then(Value::as_str)
+                .map(|label| one_line(label, SPEAKER_LABEL_CHARS))
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| id.to_string());
+            let seconds = speaker
+                .get("seconds")
+                .and_then(Value::as_f64)
+                .filter(|s| s.is_finite() && *s >= 0.0)
+                .unwrap_or(0.0);
+            Some(MeetingSpeaker {
+                id: id.to_string(),
+                label,
+                seconds,
+            })
+        })
+        .collect()
+}
+
+/// The meeting id of a stop payload / `last_saved` that has a speaker panel:
+/// a valid sidecar id and at least one speaker. `None` for every meeting
+/// saved without speaker labels (the payload's `meeting_id` is null).
+pub fn saved_meeting_id(saved: &Value) -> Option<String> {
+    let id = saved.get("meeting_id")?.as_str()?;
+    (crate::backends::meeting::valid_meeting_id(id) && !meeting_speakers(saved).is_empty())
+        .then(|| id.to_string())
+}
+
+/// Talk time of a speaker: `"45s"`, `"4m 05s"`, `"1h 02m"`.
+pub fn speaker_talk_time(seconds: f64) -> String {
+    let total = if seconds.is_finite() && seconds > 0.0 {
+        seconds.round() as u64
+    } else {
+        0
+    };
+    let (hours, minutes, secs) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {secs:02}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Bytes of a note read to find its frontmatter `meeting_id`.
+const FRONTMATTER_BYTES: u64 = 8192;
+
+/// The `meeting_id` in a saved note's YAML frontmatter, if it is a valid
+/// sidecar id. Only the leading `---` block is read, with the line grammar
+/// the relabel code accepts (`meeting_id: "<id>"`, `'<id>'` or bare). Notes
+/// saved without speaker labels have no such line, so they never cause a
+/// speaker request.
+pub fn note_meeting_id(path: &Path) -> Option<String> {
+    let mut raw = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(FRONTMATTER_BYTES).read_to_end(&mut raw))
+        .ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    let mut lines = text.split('\n').map(|line| line.trim_end_matches('\r'));
+    if lines.next()? != "---" {
+        return None;
+    }
+    for line in lines {
+        if line == "---" {
+            return None;
+        }
+        let Some(rest) = line.strip_prefix("meeting_id:") else {
+            continue;
+        };
+        let value = rest.trim_matches([' ', '\t']);
+        let value = ['"', '\'']
+            .iter()
+            .find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q))
+            .unwrap_or(value);
+        return crate::backends::meeting::valid_meeting_id(value).then(|| value.to_string());
+    }
+    None
+}
+
+/// What the speaker panel is doing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SpeakerMode {
+    /// The list with Rename / Merge… per row.
+    #[default]
+    List,
+    /// The row of this speaker id is a name field with Save / Cancel.
+    Rename(String),
+    /// The row of this speaker id picks a speaker to merge into.
+    Merge(String),
+}
+
+/// Edit state of the one open speaker panel (pure; the page renders it).
+/// `token` is bumped by every request and every reset, so a late reply for
+/// a panel that was closed, reseeded or edited again is dropped.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpeakerEditor {
+    pub meeting_id: String,
+    pub mode: SpeakerMode,
+    pub busy: bool,
+    pub error: String,
+    pub token: u64,
+}
+
+impl SpeakerEditor {
+    /// Show `meeting_id`'s panel in list mode (dropping any other edit).
+    pub fn open(&mut self, meeting_id: &str) {
+        if self.meeting_id != meeting_id {
+            self.reset();
+            self.meeting_id = meeting_id.to_string();
+        }
+    }
+
+    /// Forget everything; replies still in flight are now stale.
+    pub fn reset(&mut self) {
+        let token = self.token.wrapping_add(1);
+        *self = SpeakerEditor {
+            token,
+            ..SpeakerEditor::default()
+        };
+    }
+
+    /// Enter a mode for `meeting_id` (ignored while a request is running).
+    pub fn begin(&mut self, meeting_id: &str, mode: SpeakerMode) -> bool {
+        if self.busy {
+            return false;
+        }
+        self.open(meeting_id);
+        self.mode = mode;
+        self.error.clear();
+        true
+    }
+
+    /// Back to the list (Cancel); ignored while busy.
+    pub fn cancel(&mut self) {
+        if !self.busy {
+            self.mode = SpeakerMode::List;
+            self.error.clear();
+        }
+    }
+
+    /// Start a request; returns its token, or `None` when one is running.
+    pub fn start(&mut self) -> Option<u64> {
+        if self.busy || self.meeting_id.is_empty() {
+            return None;
+        }
+        self.busy = true;
+        self.error.clear();
+        self.token = self.token.wrapping_add(1);
+        Some(self.token)
+    }
+
+    /// A reply arrived: `true` when it belongs to the current request.
+    /// Success returns to the list; an error stays in its mode with the
+    /// server's detail shown inline.
+    pub fn finish(&mut self, token: u64, meeting_id: &str, error: Option<&str>) -> bool {
+        if !self.busy || token != self.token || meeting_id != self.meeting_id {
+            return false;
+        }
+        self.busy = false;
+        match error {
+            None => {
+                self.mode = SpeakerMode::List;
+                self.error.clear();
+            }
+            Some(error) => self.error = one_line(error, 200),
+        }
+        true
+    }
+
+    /// The speakers a merge of `from` can go into: every other speaker.
+    pub fn merge_targets<'a>(&self, speakers: &'a [MeetingSpeaker]) -> Vec<&'a MeetingSpeaker> {
+        match &self.mode {
+            SpeakerMode::Merge(from) => speakers.iter().filter(|sp| &sp.id != from).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// One item of the merge picker: the speaker id it merges into and its title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeTarget {
+    pub id: String,
+    pub title: String,
+}
+
+/// One display title per speaker of a meeting, in panel order, that no other
+/// speaker's title (and no speaker's label) shares.
+///
+/// Two speakers both labelled "Sam" with the same rounded talk time would
+/// otherwise be two indistinguishable rows (and indistinguishable "Merge
+/// Sam…" / "Rename Sam" actions for assistive tech), so a merge source could
+/// not be told apart. A label shared by several speakers gets the speaker's
+/// unique id: `"Sam (S2)"`, then `"Sam (S2) 2"`, `"Sam (S2) 3"`… until it is
+/// free of every other title and every real label. Unique labels stay plain.
+///
+/// Titles depend on the whole panel, never on which speaker is being merged,
+/// so a speaker reads the same in its row, in action labels and as a merge
+/// target. Deterministic: the same speakers give the same titles. Titles are
+/// display only; every action still carries the speaker id.
+pub fn speaker_titles(speakers: &[MeetingSpeaker]) -> Vec<String> {
+    let shared = |label: &str| speakers.iter().filter(|sp| sp.label == label).count() > 1;
+    let is_label = |title: &str| speakers.iter().any(|sp| sp.label == title);
+    // Unique labels keep their plain title; reserve them first so a suffixed
+    // title can never take one of them.
+    let mut taken: std::collections::BTreeSet<String> = speakers
+        .iter()
+        .filter(|sp| !shared(&sp.label))
+        .map(|sp| sp.label.clone())
+        .collect();
+    speakers
+        .iter()
+        .map(|sp| {
+            if !shared(&sp.label) {
+                return sp.label.clone();
+            }
+            let base = format!("{} ({})", sp.label, sp.id);
+            let mut title = base.clone();
+            let mut n = 2;
+            while taken.contains(&title) || is_label(&title) {
+                title = format!("{base} {n}");
+                n += 1;
+            }
+            taken.insert(title.clone());
+            title
+        })
+        .collect()
+}
+
+/// The merge picker items for merging `from`: every other speaker, in panel
+/// order, titled exactly as its row is ([`speaker_titles`]), so the titles
+/// are unique.
+///
+/// An AppKit pop-up keeps one item per title (adding a title again replaces
+/// the earlier item), so two speakers both labelled "Ana" would collapse into
+/// one row and a picked index could name the wrong speaker.
+pub fn merge_target_items(speakers: &[MeetingSpeaker], from: &str) -> Vec<MergeTarget> {
+    speakers
+        .iter()
+        .zip(speaker_titles(speakers))
+        .filter(|(sp, _)| sp.id != from)
+        .map(|(sp, title)| MergeTarget {
+            id: sp.id.clone(),
+            title,
+        })
+        .collect()
+}
+
+/// The speaker a merge of `from` may go into: exactly `choice`, when it is
+/// another speaker of this meeting. Never a different, guessed speaker:
+/// a stale or invalid choice gives `None` and nothing is merged.
+pub fn resolve_merge_target(
+    speakers: &[MeetingSpeaker],
+    from: &str,
+    choice: &str,
+) -> Option<String> {
+    (choice != from && speakers.iter().any(|sp| sp.id == choice)).then(|| choice.to_string())
+}
+
+/// Shown when the merge picker's choice no longer names another speaker.
+pub const MERGE_PICK_AGAIN: &str = "Choose the speaker to merge into again.";
+
+/// Title of the merge picker's "nothing chosen" item (made unique when a
+/// speaker title happens to equal it).
+pub const MERGE_PLACEHOLDER: &str = "Choose a speaker…";
+
+/// The merge picker as drawn: its titles, the selected index, and whether
+/// that selection is a real target (only then may Merge be enabled).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergePicker {
+    pub titles: Vec<String>,
+    pub selected: usize,
+    pub chosen: bool,
+}
+
+/// Lay out the merge picker for `items` (from [`merge_target_items`]) and the
+/// current `choice`. A choice naming one of the items selects it. Any other
+/// choice (stale after a refresh, or cleared) never falls back to a real
+/// speaker: an unmapped placeholder is put first and selected, with a title
+/// no item or speaker label shares, so it can never be read back as an id.
+pub fn merge_picker(
+    items: &[MergeTarget],
+    speakers: &[MeetingSpeaker],
+    choice: &str,
+) -> MergePicker {
+    let titles: Vec<String> = items.iter().map(|item| item.title.clone()).collect();
+    if let Some(selected) = items.iter().position(|item| item.id == choice) {
+        return MergePicker {
+            titles,
+            selected,
+            chosen: true,
+        };
+    }
+    let used = |title: &str| {
+        titles.iter().any(|other| other == title) || speakers.iter().any(|sp| sp.label == title)
+    };
+    let mut placeholder = MERGE_PLACEHOLDER.to_string();
+    let mut n = 2;
+    while used(&placeholder) {
+        placeholder = format!("{MERGE_PLACEHOLDER} {n}");
+        n += 1;
+    }
+    let mut all = Vec::with_capacity(titles.len() + 1);
+    all.push(placeholder);
+    all.extend(titles);
+    MergePicker {
+        titles: all,
+        selected: 0,
+        chosen: false,
+    }
+}
+
+/// The speaker id behind the picker's selected `title`: matched by the
+/// item's own unique title, never by position. The placeholder (or any
+/// unknown title) gives an empty choice, which commits nothing.
+pub fn merge_choice_for_title(items: &[MergeTarget], title: &str) -> String {
+    items
+        .iter()
+        .find(|item| item.title == title)
+        .map(|item| item.id.clone())
+        .unwrap_or_default()
+}
+
+/// Height of the live speaker-label line wrapped to `lines` lines: one line
+/// keeps the familiar 20 pt row.
+pub fn speaker_status_height(lines: usize) -> f64 {
+    if lines <= 1 {
+        20.0
+    } else {
+        lines as f64 * 16.0 + 4.0
+    }
+}
+
+/// Speaker panel geometry (points).
+pub const SPEAKER_HEADER_H: i32 = 30;
+pub const SPEAKER_ROW_H: i32 = 40;
+pub const SPEAKER_ERROR_LINE_H: i32 = 16;
+pub const SPEAKER_PAD: i32 = 8;
+
+/// Height of a speaker panel with `rows` speakers and `error_lines` wrapped
+/// error lines; 0 without speakers (nothing is drawn).
+pub fn speaker_panel_height(rows: usize, error_lines: usize) -> i32 {
+    if rows == 0 {
+        return 0;
+    }
+    let error = if error_lines == 0 {
+        0
+    } else {
+        error_lines as i32 * SPEAKER_ERROR_LINE_H + 4
+    };
+    SPEAKER_PAD + SPEAKER_HEADER_H + rows as i32 * SPEAKER_ROW_H + error + SPEAKER_PAD
+}
+
 /// The newest saved notes shown on the Meetings page.
 pub const RECENT_NOTES_LIMIT: usize = 5;
 /// Files looked at, so a huge folder stays cheap.
@@ -3446,5 +3865,368 @@ mod meeting_tests {
             assert_eq!(note_heading(&path), expected, "{text:?}");
         }
         assert_eq!(note_heading(&tmp.path().join("missing.md")), "");
+    }
+}
+
+#[cfg(test)]
+mod speaker_tests {
+    use super::*;
+
+    const ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn live_speaker_status_is_none_unless_collecting_or_unavailable() {
+        // Flag off, older servers and unknown values keep the line unchanged.
+        for session in [
+            json!({}),
+            json!({"diarization": "off", "diarization_error": ""}),
+            json!({"diarization": "ok"}),
+            json!({"diarization": null}),
+            json!({"diarization": 3}),
+        ] {
+            assert_eq!(meeting_speaker_status(&session), None, "{session}");
+        }
+        assert_eq!(
+            meeting_speaker_status(&json!({"diarization": "collecting"})).as_deref(),
+            Some("Speaker labels: collecting")
+        );
+        assert_eq!(
+            meeting_speaker_status(&json!({"diarization": "unavailable", "diarization_error": ""}))
+                .as_deref(),
+            Some("Speaker labels: unavailable")
+        );
+        let reason = "Speaker models are not downloaded.\nRun `lf speakers download`.";
+        assert_eq!(
+            meeting_speaker_status(
+                &json!({"diarization": "unavailable", "diarization_error": reason})
+            )
+            .as_deref(),
+            Some(
+                "Speaker labels: unavailable (Speaker models are not downloaded. \
+                 Run `lf speakers download`.)"
+            )
+        );
+        let long = "x".repeat(500);
+        let line = meeting_speaker_status(
+            &json!({"diarization": "unavailable", "diarization_error": long}),
+        )
+        .unwrap();
+        assert!(line.ends_with("…)"));
+        assert_eq!(
+            line.chars().count(),
+            "Speaker labels: unavailable ()".chars().count() + SPEAKER_REASON_CHARS
+        );
+    }
+
+    #[test]
+    fn talk_time_reads_naturally() {
+        assert_eq!(speaker_talk_time(0.0), "0s");
+        assert_eq!(speaker_talk_time(-3.0), "0s");
+        assert_eq!(speaker_talk_time(f64::NAN), "0s");
+        assert_eq!(speaker_talk_time(44.6), "45s");
+        assert_eq!(speaker_talk_time(245.0), "4m 05s");
+        assert_eq!(speaker_talk_time(3720.0), "1h 02m");
+    }
+
+    #[test]
+    fn speakers_and_saved_ids_come_only_from_diarized_payloads() {
+        let saved = json!({
+            "meeting_id": ID,
+            "speakers": [
+                {"id": "S1", "label": "Speaker\n1", "name": null, "source": "others", "seconds": 12.5},
+                {"id": "../x", "label": "bad", "seconds": 1},
+                {"id": "S2", "label": "", "seconds": "x"},
+            ],
+        });
+        let speaker = |id: &str, label: &str, seconds: f64| MeetingSpeaker {
+            id: id.into(),
+            label: label.into(),
+            seconds,
+        };
+        assert_eq!(
+            meeting_speakers(&saved),
+            vec![speaker("S1", "Speaker 1", 12.5), speaker("S2", "S2", 0.0)]
+        );
+        assert_eq!(saved_meeting_id(&saved).as_deref(), Some(ID));
+        // Flag-off and channel-only saves: null id or no speakers, no panel.
+        for payload in [
+            json!({"title": "Planning", "notes_path": "/v/a.md"}),
+            json!({"meeting_id": null, "speakers": []}),
+            json!({"meeting_id": ID, "speakers": []}),
+            json!({"meeting_id": "../../etc", "speakers": [{"id": "S1"}]}),
+        ] {
+            assert_eq!(saved_meeting_id(&payload), None, "{payload}");
+        }
+    }
+
+    #[test]
+    fn note_meeting_id_reads_only_the_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upper = ID.to_uppercase();
+        let cases: [(String, Option<&str>); 9] = [
+            (
+                format!("---\ntitle: \"A\"\nmeeting_id: \"{ID}\"\nspeakers: [\"Me\"]\n---\n# A\n"),
+                Some(ID),
+            ),
+            (format!("---\r\nmeeting_id: '{ID}'\r\n---\r\n"), Some(ID)),
+            (format!("---\nmeeting_id:\t{ID}  \n---\n"), Some(ID)),
+            (
+                "---\ntitle: \"A\"\ntags: [meeting]\n---\n# A\n".into(),
+                None,
+            ),
+            (format!("---\ntitle: A\n---\nmeeting_id: \"{ID}\"\n"), None),
+            (format!("# A\nmeeting_id: \"{ID}\"\n"), None),
+            ("---\nmeeting_id: \"../../x\"\n---\n".into(), None),
+            (format!("---\nmeeting_id: \"{upper}\"\n---\n"), None),
+            (String::new(), None),
+        ];
+        for (index, (text, expected)) in cases.iter().enumerate() {
+            let path = tmp.path().join(format!("{index}.md"));
+            fs::write(&path, text).unwrap();
+            assert_eq!(note_meeting_id(&path).as_deref(), *expected, "{text:?}");
+        }
+        assert_eq!(note_meeting_id(&tmp.path().join("missing.md")), None);
+    }
+
+    fn speakers() -> Vec<MeetingSpeaker> {
+        ["me", "S1", "S2"]
+            .iter()
+            .map(|id| MeetingSpeaker {
+                id: id.to_string(),
+                label: id.to_string(),
+                seconds: 1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn editor_tokens_drop_stale_replies_and_errors_stay_inline() {
+        let other = "f".repeat(32);
+        let mut editor = SpeakerEditor::default();
+        assert_eq!(editor.start(), None, "no panel open");
+        assert!(editor.begin(ID, SpeakerMode::Rename("S1".into())));
+        let first = editor.start().unwrap();
+        // A second request and any mode change wait for the first.
+        assert_eq!(editor.start(), None);
+        assert!(!editor.begin(ID, SpeakerMode::List));
+        editor.cancel();
+        assert_eq!(editor.mode, SpeakerMode::Rename("S1".into()));
+        // Replies for another meeting or token are ignored.
+        assert!(!editor.finish(first + 1, ID, None));
+        assert!(!editor.finish(first, &other, None));
+        assert!(editor.finish(first, ID, Some("invalid speaker\nname")));
+        assert!(!editor.busy);
+        assert_eq!(editor.error, "invalid speaker name");
+        assert_eq!(editor.mode, SpeakerMode::Rename("S1".into()));
+        let second = editor.start().unwrap();
+        assert!(editor.error.is_empty());
+        assert!(editor.finish(second, ID, None));
+        assert_eq!(editor.mode, SpeakerMode::List);
+
+        // Closing (or a new save) makes an in-flight reply stale.
+        editor.begin(ID, SpeakerMode::Merge("S2".into()));
+        let third = editor.start().unwrap();
+        editor.reset();
+        assert!(!editor.finish(third, ID, None));
+        assert!(editor.meeting_id.is_empty());
+    }
+
+    fn speaker(id: &str, label: &str, seconds: f64) -> MeetingSpeaker {
+        MeetingSpeaker {
+            id: id.into(),
+            label: label.into(),
+            seconds,
+        }
+    }
+
+    #[test]
+    fn merge_picker_titles_are_unique_and_map_to_their_own_ids() {
+        // Two "Ana" rows with equal talk time and a third distinct speaker.
+        let list = vec![
+            speaker("S1", "Ana", 30.0),
+            speaker("S2", "Ana", 30.0),
+            speaker("S3", "Bo", 12.0),
+        ];
+        let items = merge_target_items(&list, "S3");
+        let pairs: Vec<(&str, &str)> = items
+            .iter()
+            .map(|item| (item.id.as_str(), item.title.as_str()))
+            .collect();
+        assert_eq!(pairs, [("S1", "Ana (S1)"), ("S2", "Ana (S2)")]);
+        // Merging one Ana: the other keeps the title its row shows, so the
+        // same person reads the same in both views; Bo stays plain.
+        let items = merge_target_items(&list, "S1");
+        let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(titles, ["Ana (S2)", "Bo"]);
+
+        // A suffixed title never takes another speaker's real label.
+        let tricky = vec![
+            speaker("S1", "Ana", 1.0),
+            speaker("S2", "Ana", 1.0),
+            speaker("S3", "Ana (S1)", 1.0),
+            speaker("S4", "Cy", 1.0),
+        ];
+        let items = merge_target_items(&tricky, "S4");
+        let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(titles, ["Ana (S1) 2", "Ana (S2)", "Ana (S1)"]);
+        let unique: std::collections::BTreeSet<&str> = titles.iter().copied().collect();
+        assert_eq!(unique.len(), titles.len());
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["S1", "S2", "S3"]);
+        // Deterministic.
+        assert_eq!(merge_target_items(&tricky, "S4"), items);
+    }
+
+    #[test]
+    fn duplicate_speaker_rows_get_unique_titles_shared_with_merge_targets() {
+        // Two "Sam" rows whose talk time rounds the same: before, both rows
+        // (and their "Merge Sam…" actions) read identically, so the merge
+        // source could not be told apart.
+        let list = vec![
+            speaker("S1", "Sam", 30.2),
+            speaker("S2", "Sam", 29.9),
+            speaker("S3", "Bo", 12.0),
+        ];
+        assert_eq!(list[0].label, list[1].label);
+        assert_eq!(
+            speaker_talk_time(list[0].seconds),
+            speaker_talk_time(list[1].seconds)
+        );
+        assert_eq!(speaker_titles(&list), ["Sam (S1)", "Sam (S2)", "Bo"]);
+
+        // Literal suffix collisions: real labels "Sam (S1)" and "Sam (S1) 2"
+        // keep their text; the duplicated Sam skips past both.
+        let tricky = vec![
+            speaker("S1", "Sam", 1.0),
+            speaker("S2", "Sam", 1.0),
+            speaker("S3", "Sam (S1)", 1.0),
+            speaker("S4", "Sam (S1) 2", 1.0),
+            speaker("S5", "Sam (S2)", 1.0),
+        ];
+        let titles = speaker_titles(&tricky);
+        assert_eq!(
+            titles,
+            [
+                "Sam (S1) 3",
+                "Sam (S2) 2",
+                "Sam (S1)",
+                "Sam (S1) 2",
+                "Sam (S2)"
+            ]
+        );
+
+        for speakers in [&list, &tricky] {
+            let titles = speaker_titles(speakers);
+            // Unique across the whole panel, one per speaker, deterministic.
+            let unique: std::collections::BTreeSet<&str> =
+                titles.iter().map(String::as_str).collect();
+            assert_eq!(unique.len(), speakers.len());
+            assert_eq!(speaker_titles(speakers), titles);
+            // Stable identity: every merge source sees each other speaker
+            // under exactly the title of that speaker's row, by id.
+            for from in speakers.iter() {
+                let items = merge_target_items(speakers, &from.id);
+                let expected: Vec<MergeTarget> = speakers
+                    .iter()
+                    .zip(&titles)
+                    .filter(|(sp, _)| sp.id != from.id)
+                    .map(|(sp, title)| MergeTarget {
+                        id: sp.id.clone(),
+                        title: title.clone(),
+                    })
+                    .collect();
+                assert_eq!(items, expected, "from {}", from.id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_merge_choice_never_falls_back_to_another_speaker() {
+        let list = vec![
+            speaker("S1", "Ana", 30.0),
+            speaker("S2", "Ana", 30.0),
+            speaker("S3", "Bo", 12.0),
+        ];
+        assert_eq!(
+            resolve_merge_target(&list, "S3", "S2").as_deref(),
+            Some("S2")
+        );
+        for stale in ["", "S3", "S9"] {
+            assert_eq!(resolve_merge_target(&list, "S3", stale), None, "{stale:?}");
+        }
+        assert_eq!(speaker_status_height(0), 20.0);
+        assert_eq!(speaker_status_height(1), 20.0);
+        assert_eq!(speaker_status_height(3), 52.0);
+    }
+
+    #[test]
+    fn a_stale_merge_pick_selects_an_unmapped_placeholder_never_another_speaker() {
+        // Merging S0 with S1 picked; a refresh then removes S1, S2 remains.
+        let before = vec![
+            speaker("S0", "Ana", 1.0),
+            speaker("S1", "Bo", 1.0),
+            speaker("S2", "Cy", 1.0),
+        ];
+        let items = merge_target_items(&before, "S0");
+        let picker = merge_picker(&items, &before, "S1");
+        assert_eq!(picker.titles, ["Bo", "Cy"]);
+        assert_eq!((picker.selected, picker.chosen), (0, true));
+        assert_eq!(merge_choice_for_title(&items, &picker.titles[0]), "S1");
+
+        let after = vec![speaker("S0", "Ana", 1.0), speaker("S2", "Cy", 1.0)];
+        let items = merge_target_items(&after, "S0");
+        for stale in ["S1", "", "S0"] {
+            let picker = merge_picker(&items, &after, stale);
+            assert_eq!(picker.titles, [MERGE_PLACEHOLDER, "Cy"], "{stale:?}");
+            assert_eq!((picker.selected, picker.chosen), (0, false));
+            // Read back, the selection is no speaker, so nothing can commit.
+            let captured = merge_choice_for_title(&items, &picker.titles[picker.selected]);
+            assert_eq!(captured, "");
+            assert_eq!(resolve_merge_target(&after, "S0", &captured), None);
+        }
+        // Only an explicit pick of S2 chooses it.
+        let picked = merge_choice_for_title(&items, "Cy");
+        let picker = merge_picker(&items, &after, &picked);
+        assert_eq!(
+            (picker.titles.len(), picker.selected, picker.chosen),
+            (1, 0, true)
+        );
+
+        // The placeholder never collides with a genuine (or suffixed) title.
+        let tricky = vec![
+            speaker("S0", "Ana", 1.0),
+            speaker("S1", MERGE_PLACEHOLDER, 1.0),
+            speaker("S2", "Choose a speaker… 2", 1.0),
+            speaker("S3", "Choose a speaker… 3", 1.0),
+        ];
+        let items = merge_target_items(&tricky, "S3");
+        let picker = merge_picker(&items, &tricky, "S9");
+        assert_eq!(picker.titles[0], "Choose a speaker… 4");
+        let unique: std::collections::BTreeSet<&String> = picker.titles.iter().collect();
+        assert_eq!(unique.len(), picker.titles.len());
+        assert_eq!(merge_choice_for_title(&items, &picker.titles[0]), "");
+    }
+
+    #[test]
+    fn merge_targets_are_the_other_speakers_and_an_empty_panel_has_no_height() {
+        let mut editor = SpeakerEditor::default();
+        let list = speakers();
+        assert!(editor.merge_targets(&list).is_empty());
+        editor.begin(ID, SpeakerMode::Merge("S1".into()));
+        let targets: Vec<&str> = editor
+            .merge_targets(&list)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(targets, ["me", "S2"]);
+        assert_eq!(speaker_panel_height(0, 3), 0);
+        assert_eq!(
+            speaker_panel_height(2, 0),
+            2 * SPEAKER_PAD + SPEAKER_HEADER_H + 2 * SPEAKER_ROW_H
+        );
+        assert_eq!(
+            speaker_panel_height(2, 2) - speaker_panel_height(2, 0),
+            2 * SPEAKER_ERROR_LINE_H + 4
+        );
     }
 }

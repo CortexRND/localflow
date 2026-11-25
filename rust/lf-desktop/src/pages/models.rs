@@ -1857,6 +1857,7 @@ impl Render for ModelsPage {
                 (Tab::Providers, "Providers & keys"),
             ],
             self.tab,
+            ui::TabDensity::Regular,
             Rc::new(move |tab, _, cx| {
                 let _ = this.update(cx, |p, cx| {
                     p.tab = tab;
