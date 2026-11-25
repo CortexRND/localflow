@@ -107,10 +107,9 @@ review and a simulated GitHub CI run as the acceptance check and native
 interactive QA waived. That decision does not mark the gates below met: gate 1
 (interactive parity review), gate 5 (interactive install/upgrade/uninstall,
 permission and Gatekeeper checks; default installers don't ship the preview)
-and gate 8 (screenshot review) remain unverified. Gate 8's captures are
-produced by the scripted Linux CI job, not by new interactive QA. Gate 7 is met
-by the owner's acceptance of keyboard-only support. Default-installer
-integration and legacy retirement still require these gates.
+remain unverified on macOS. Gate 8 is met by a reviewed capture of `main` (see
+gate 8). Gate 7 is met by the owner's acceptance of keyboard-only support.
+Default-installer integration and legacy retirement still require these gates.
 
 1. **Parity.** Every row marked Missing above that the Python Hub or `lf-hub` offers
    works in `lf-desktop`, or the owner explicitly waives it. PR 2 implemented the
@@ -302,6 +301,17 @@ integration and legacy retirement still require these gates.
 8. **UI verification.** Light and dark screenshots of every page at 1280 × 850 and
    at 960 × 640 are captured from the sandbox with
    [`gpui_screenshots.py`](../scripts/gpui_screenshots.py) and reviewed.
+   **Met** (2026-11-25): all 44 PNGs captured from `main` at `2f74708` (with
+   #148 and #152) by the command below and each one looked at. No text, control
+   or theme is cut off, overlapped or unreadable at either size or in either
+   theme; the Home Recent row ends in an ellipsis at 960 wide (#152).
+   - Noted, not blocking: at 960 wide the Settings tab row wraps "Advanced"
+     onto a second line; the Prompts subtitle shows literal backticks around
+     `lf prompts dispatch`; the capture machine had no Japanese font, so one
+     History fixture row shows empty boxes.
+   - Not covered: each page is captured in its opening state only, so Setup
+     steps 2 to 7, Meetings turned on, the other tabs of Settings and Models,
+     and anything below the fold are in no capture.
 
 ### Run gates 2 and 8 on Linux
 
