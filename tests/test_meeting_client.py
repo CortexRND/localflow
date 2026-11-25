@@ -30,6 +30,9 @@ class FakeHTTP:
     def post(self, url, **kwargs):
         return self._call("post", url, **kwargs)
 
+    def put(self, url, **kwargs):
+        return self._call("put", url, **kwargs)
+
     def _call(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
         if self.error:
@@ -230,3 +233,47 @@ def test_vault_notes_path_rejects_symlink_that_leaves_the_vault(tmp_path):
 
     assert vault_notes_path(str(vault / "link-to-program.md"), str(vault)) is None
     assert vault_notes_path(str(vault / "link-to-outside.md"), str(vault)) is None
+
+
+MID = "0123456789abcdef0123456789abcdef"
+
+
+def test_client_speaker_methods_use_api_routes():
+    http = FakeHTTP()
+    http.response = FakeResponse(data={"meeting_id": MID, "speakers": []})
+    client = MeetingClient("http://localhost:9876", "secret-token", http)
+
+    results = [
+        client.speakers(MID),
+        client.rename_speaker(MID, "S2", "Dana"),
+        client.merge_speakers(MID, "S3", "S1"),
+    ]
+
+    base = f"http://localhost:9876/api/meetings/{MID}/speakers"
+    assert [call[0:2] for call in http.calls] == [
+        ("get", base), ("put", f"{base}/S2"), ("post", f"{base}/merge"),
+    ]
+    assert "json" not in http.calls[0][2]
+    assert http.calls[1][2]["json"] == {"name": "Dana"}
+    assert http.calls[2][2]["json"] == {"from": "S3", "into": "S1"}
+    assert all(call[2]["headers"] == {"X-Localflow-Token": "secret-token"}
+               for call in http.calls)
+    assert [call[2]["timeout"] for call in http.calls] == [3, 10, 10]
+    assert results == [{"meeting_id": MID, "speakers": []}] * 3
+
+
+def test_client_speaker_ids_are_url_quoted():
+    http = FakeHTTP()
+    MeetingClient("http://localhost:9876", "t", http).rename_speaker("../x", "S 2/..", "n")
+    assert http.calls[0][1].endswith("/api/meetings/..%2Fx/speakers/S%202%2F..")
+
+
+def test_client_speaker_errors_carry_the_server_detail():
+    http = FakeHTTP()
+    http.response = FakeResponse(404, {"detail": "no speaker data for this meeting"})
+    client = MeetingClient("http://localhost:9876", "t", http)
+    for call in (lambda: client.speakers(MID),
+                 lambda: client.rename_speaker(MID, "S1", "x"),
+                 lambda: client.merge_speakers(MID, "S1", "S2")):
+        with pytest.raises(MeetingClientError, match="no speaker data for this meeting"):
+            call()

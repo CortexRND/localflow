@@ -1,6 +1,7 @@
 """HTTP client for the local meeting endpoints."""
 
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -115,3 +116,20 @@ class MeetingClient:
 
     def dismiss(self) -> None:
         self._request("post", "/meeting/dismiss")
+
+    def speakers(self, meeting_id: str) -> dict:
+        return self._request("get", f"/api/meetings/{quote(str(meeting_id), safe='')}/speakers")
+
+    def rename_speaker(self, meeting_id: str, speaker_id: str, name: str) -> dict:
+        return self._request(
+            "put",
+            f"/api/meetings/{quote(str(meeting_id), safe='')}"
+            f"/speakers/{quote(str(speaker_id), safe='')}",
+            timeout=10, json={"name": name},
+        )
+
+    def merge_speakers(self, meeting_id: str, from_id: str, into_id: str) -> dict:
+        return self._request(
+            "post", f"/api/meetings/{quote(str(meeting_id), safe='')}/speakers/merge",
+            timeout=10, json={"from": from_id, "into": into_id},
+        )
