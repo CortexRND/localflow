@@ -6,14 +6,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use lf_core::config::Config;
 use lf_core::history::HistoryStore;
+use lf_core::perf_ledger::PerfLedger;
 use lf_providers::LlmProvider;
 
 use crate::controller::{Job, JobKind};
 use crate::engine::SpeechEngine;
-use crate::pipeline::{process_job_guarded, Models, Vocabulary};
+use crate::pipeline::{process_job_guarded, Models, PerfContext, Vocabulary};
 use crate::status::write_last_text;
 
 pub type LlmFactory = Arc<dyn Fn(&Config) -> Option<Box<dyn LlmProvider>> + Send + Sync>;
@@ -25,6 +27,8 @@ static RESULT_COMMIT: Mutex<()> = Mutex::new(());
 
 pub enum WorkItem {
     Job(Job),
+    /// A job and when it was queued (the perf ledger's `queue_ms`).
+    QueuedJob(Job, Instant),
     /// The LLM group changed: rebuild the cleanup/transform client.
     ReloadLlm(Arc<Config>),
     /// The speech group changed: load the new model, keep the old on failure.
@@ -44,6 +48,9 @@ pub struct Worker {
     pub build_stt: SttFactory,
     pub deliver: Deliver,
     pub last_text_path: Option<PathBuf>,
+    /// Where job timings go (each job also honours `perf_metrics`); `None`
+    /// records nothing.
+    pub perf: Option<PerfLedger>,
 }
 
 impl Worker {
@@ -92,7 +99,12 @@ impl Worker {
                         }
                     }
                 }
-                WorkItem::Job(job) => self.process(job, llm.as_deref(), fast_llm.as_deref(), &stop),
+                WorkItem::Job(job) => {
+                    self.process_queued(job, None, llm.as_deref(), fast_llm.as_deref(), &stop)
+                }
+                WorkItem::QueuedJob(job, at) => {
+                    self.process_queued(job, Some(at), llm.as_deref(), fast_llm.as_deref(), &stop)
+                }
             }
         }
     }
@@ -103,9 +115,21 @@ impl Worker {
             .and_then(|fast| (self.build_llm)(&fast))
     }
 
+    #[cfg(test)]
     fn process(
         &self,
         job: Job,
+        llm: Option<&dyn LlmProvider>,
+        fast_llm: Option<&dyn LlmProvider>,
+        stop: &AtomicBool,
+    ) {
+        self.process_queued(job, None, llm, fast_llm, stop)
+    }
+
+    fn process_queued(
+        &self,
+        job: Job,
+        queued_at: Option<Instant>,
         llm: Option<&dyn LlmProvider>,
         fast_llm: Option<&dyn LlmProvider>,
         stop: &AtomicBool,
@@ -131,6 +155,9 @@ impl Worker {
                 &models,
                 &vocab,
                 self.history.as_ref(),
+                self.perf
+                    .as_ref()
+                    .map(|ledger| PerfContext { ledger, queued_at }),
                 || {
                     let guard = RESULT_COMMIT
                         .lock()
@@ -240,6 +267,7 @@ mod tests {
                 build_stt: Arc::new(|_| unreachable!()),
                 deliver: Arc::new(|_, _, error| assert!(!error)),
                 last_text_path: None,
+                perf: None,
             };
             let job = Job {
                 kind: JobKind::Dictate,
@@ -276,6 +304,80 @@ mod tests {
     }
 
     #[test]
+    fn queued_jobs_record_timings_but_never_text_in_the_perf_ledger() {
+        use lf_core::perf_ledger::{Kind, LlmLabels, Status, SttLabels};
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = PerfLedger::new(dir.path().join("perf").join("events.jsonl"));
+        let mut config = Config::default();
+        config.set_field("llm_model", json!("main"));
+        config.set_field("cleanup_level", json!("medium"));
+        config.set_field("model_size", json!("tiny"));
+        let config = Arc::new(config);
+        let current = Arc::new(Mutex::new(config.clone()));
+        let reader = current.clone();
+        let worker = Worker {
+            config: Arc::new(move || reader.lock().unwrap().clone()),
+            vocabulary: Arc::new(|_| Vocabulary::default()),
+            history: None,
+            speech: Arc::new(Speech {
+                text: "secret transcript words for the ledger",
+                gate: None,
+            }),
+            build_llm: Arc::new(|config| {
+                Some(Box::new(RecordingLlm(
+                    config.field_str("llm_model").unwrap().into(),
+                    Arc::default(),
+                )))
+            }),
+            build_stt: Arc::new(|_| unreachable!()),
+            deliver: Arc::new(|_, _, _| {}),
+            last_text_path: None,
+            perf: Some(ledger.clone()),
+        };
+        let job = Job {
+            kind: JobKind::Dictate,
+            audio: Some(vec![0.2; 16000]),
+            app_info: Some(crate::context::AppInfo {
+                name: "Secret App".into(),
+                bundle_id: "com.secret.app".into(),
+            }),
+            selection: String::new(),
+            preset: None,
+            clipboard_before: None,
+        };
+        let llm = (worker.build_llm)(&config);
+        let stop = AtomicBool::new(false);
+        worker.process_queued(
+            job.clone(),
+            Some(Instant::now()),
+            llm.as_deref(),
+            None,
+            &stop,
+        );
+        let mut off = (*config).clone();
+        off.set_field("perf_metrics", json!(false));
+        *current.lock().unwrap() = Arc::new(off);
+        worker.process_queued(job, Some(Instant::now()), llm.as_deref(), None, &stop);
+
+        let events = ledger.read_events();
+        assert_eq!(events.len(), 1, "perf_metrics = false records nothing");
+        let event = &events[0];
+        assert_eq!((event.kind, event.status), (Kind::Dictate, Status::Ok));
+        assert_eq!(event.audio_s, Some(1.0));
+        assert!(event.queue_ms.is_some() && event.stt_ms.is_some());
+        assert!(event.llm_ms.is_some() && event.render_ms.is_some());
+        assert!(event.total_ms.is_some());
+        assert_eq!(event.paste_ms, None);
+        assert_eq!(event.stt, Some(SttLabels::new("auto", "tiny", "auto")));
+        assert_eq!(event.llm, Some(LlmLabels::new("ollama", "main")));
+        assert!(event.chars.unwrap() > 0);
+        let raw = std::fs::read_to_string(ledger.path()).unwrap();
+        for private in ["secret", "Secret", "transcript", "com.secret"] {
+            assert!(!raw.contains(private), "{private} leaked: {raw}");
+        }
+    }
+
+    #[test]
     fn stopped_inference_cannot_overwrite_restarted_history_or_paste_last() {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("history.db");
@@ -301,6 +403,7 @@ mod tests {
                     delivered.lock().unwrap().push(text);
                 }),
                 last_text_path: Some(last.clone()),
+                perf: None,
             }
         };
         let job = Job {

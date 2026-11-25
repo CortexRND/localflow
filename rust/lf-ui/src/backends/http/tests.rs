@@ -15,6 +15,8 @@ struct FakeBackend {
     delay_ms: AtomicU64,
     calls: Mutex<Vec<Recorded>>,
     response: Mutex<Option<Value>>,
+    /// `detail` of an error status (default: the runtime's 503 text).
+    detail: Mutex<Option<String>>,
 }
 
 impl Backend for FakeBackend {
@@ -33,7 +35,11 @@ impl Backend for FakeBackend {
         ));
         let status = self.status.load(Ordering::SeqCst);
         if status >= 400 {
-            return BackendResponse::error(status, "runtime backend unavailable");
+            let detail = self.detail.lock().unwrap().clone();
+            return BackendResponse::error(
+                status,
+                detail.unwrap_or_else(|| "runtime backend unavailable".into()),
+            );
         }
         let body = self.response.lock().unwrap().clone().unwrap_or_else(|| match request.path.as_str() {
             "/prompts" => json!({"entries": if request.query.get("status").is_some_and(|s| s == "empty") { vec![] } else { vec![json!({"id":"one", "status":"pending"})] }}),
@@ -204,6 +210,122 @@ fn meeting_routes_methods_and_payloads_match_python() {
     assert!(calls[3].3.get("auto_title").is_none());
     assert_eq!(calls[4].3, json!({"notes":"draft"}));
     assert_eq!(calls[6].3, json!({"question":"What changed?"}));
+}
+
+const MEETING_ID: &str = "0123456789abcdef0123456789abcdef";
+
+#[test]
+fn speaker_routes_methods_paths_and_bodies_match_python() {
+    let server = Server::new();
+    let client = HttpMeetingClient(server.http());
+    let speakers =
+        json!({"meeting_id": MEETING_ID, "speakers": [{"id": "S1", "label": "Speaker 1"}]});
+    *server.backend.response.lock().unwrap() = Some(speakers.clone());
+    assert_eq!(client.speakers(MEETING_ID).unwrap(), Some(speakers.clone()));
+    assert_eq!(
+        client.rename_speaker(MEETING_ID, "S1", "Ana").unwrap(),
+        speakers
+    );
+    assert_eq!(
+        client.merge_speakers(MEETING_ID, "S2", "S1").unwrap(),
+        speakers
+    );
+    client.diarization_status().unwrap();
+    let calls = server.backend.calls.lock().unwrap();
+    let seen: Vec<(Method, &str, &Value)> = calls
+        .iter()
+        .map(|c| (c.0.clone(), c.1.as_str(), &c.3))
+        .collect();
+    let speakers_path = format!("/api/meetings/{MEETING_ID}/speakers");
+    let rename_path = format!("/api/meetings/{MEETING_ID}/speakers/S1");
+    let merge_path = format!("/api/meetings/{MEETING_ID}/speakers/merge");
+    assert_eq!(
+        seen,
+        vec![
+            (Method::GET, speakers_path.as_str(), &Value::Null),
+            (Method::PUT, rename_path.as_str(), &json!({"name": "Ana"})),
+            (
+                Method::POST,
+                merge_path.as_str(),
+                &json!({"from": "S2", "into": "S1"})
+            ),
+            (Method::GET, "/api/diarization/status", &Value::Null),
+        ]
+    );
+}
+
+#[test]
+fn speakers_404_is_no_data_and_other_errors_keep_the_server_detail() {
+    let server = Server::new();
+    let client = HttpMeetingClient(server.http());
+    let fail = |status: u16, detail: Option<&str>| {
+        server.backend.status.store(status, Ordering::SeqCst);
+        *server.backend.detail.lock().unwrap() = detail.map(str::to_string);
+    };
+    fail(404, Some("no speaker data for this meeting"));
+    assert_eq!(client.speakers(MEETING_ID).unwrap(), None);
+    // An edit's 404 is an error the person sees, in the server's words.
+    fail(404, Some("unknown speaker"));
+    assert_eq!(
+        client
+            .rename_speaker(MEETING_ID, "S9", "Ana")
+            .unwrap_err()
+            .0,
+        "unknown speaker"
+    );
+    fail(400, Some("invalid speaker name"));
+    assert_eq!(
+        client
+            .rename_speaker(MEETING_ID, "S1", "***")
+            .unwrap_err()
+            .0,
+        "invalid speaker name"
+    );
+    fail(409, Some("transcript is outside the meeting vault"));
+    assert_eq!(
+        client.merge_speakers(MEETING_ID, "S2", "S1").unwrap_err().0,
+        "transcript is outside the meeting vault"
+    );
+    // A transient failure is an error, never "no data" (U4 must not cache it).
+    fail(503, None);
+    assert!(client.speakers(MEETING_ID).is_err());
+    let down =
+        HttpMeetingClient(HttpTransport::new("http://127.0.0.1:0", || Ok(String::new())).unwrap());
+    assert_eq!(down.speakers(MEETING_ID).unwrap_err().0, SERVER_DOWN);
+    assert_eq!(down.diarization_status().unwrap_err().0, SERVER_DOWN);
+}
+
+#[test]
+fn hostile_speaker_ids_never_reach_the_server() {
+    let server = Server::new();
+    let client = HttpMeetingClient(server.http());
+    for id in [
+        "",
+        "..",
+        "../x",
+        "a/b",
+        "%2F",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789abcdef0123456789abcde/",
+    ] {
+        assert_eq!(client.speakers(id).unwrap(), None, "{id:?}");
+        assert_eq!(
+            client.rename_speaker(id, "S1", "Ana").unwrap_err().0,
+            "no speaker data for this meeting"
+        );
+        assert_eq!(
+            client.merge_speakers(id, "S1", "S2").unwrap_err().0,
+            "no speaker data for this meeting"
+        );
+    }
+    for sid in ["", ".", "..", "a/b", "%2F", "S 1", "?x", "#"] {
+        assert_eq!(
+            client.rename_speaker(MEETING_ID, sid, "Ana").unwrap_err().0,
+            "unknown speaker",
+            "{sid:?}"
+        );
+    }
+    assert!(server.backend.calls.lock().unwrap().is_empty());
 }
 
 #[test]

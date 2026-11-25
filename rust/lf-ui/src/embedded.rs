@@ -481,7 +481,8 @@ impl EmbeddedRuntime {
                     .with_capture(Arc::new(Capture {
                         speech: server_shared.clone(),
                         allowed: meetings.clone(),
-                    }));
+                    }))
+                    .with_perf_ledger(lf_core::perf_ledger::PerfLedger::default());
                 let watcher = meeting_watch::MeetingWatch::new(config.clone())?;
                 let backend: Arc<dyn lf_server::backend::Backend> =
                     Arc::new(backend.with_watcher(watcher.watcher.clone()));

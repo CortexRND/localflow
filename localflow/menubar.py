@@ -13,11 +13,11 @@ import requests
 import rumps
 
 from localflow.apitoken import load
-from localflow.config import load_config, save_config
+from localflow.config import ConfigError, config_path, load_config, save_config
 from localflow.history import HistoryStore
 from localflow.hub_model import dictation_state
 from localflow.inject import paste_text
-from localflow.live_config import LazyConfig
+from localflow.live_config import LazyConfig, file_signature
 from localflow.menubar_poll import REQUEST_TIMEOUT, MeetingStatusPoller
 from localflow.platform import current
 from localflow.server_url import configured_base_url
@@ -64,6 +64,9 @@ class LocalflowMenuBar(rumps.App):
         self.dismiss_item = rumps.MenuItem(
             "Dismiss detection", callback=self.dismiss
         )
+        self.speaker_labels_item = rumps.MenuItem(
+            "Speaker labels", callback=self.toggle_speaker_labels
+        )
         self.open_ui_item = rumps.MenuItem("Open web UI", callback=self.open_ui)
         self.phrases_item = rumps.MenuItem("Hot Phrases…", callback=self.open_phrases)
         self.hub_item = rumps.MenuItem("LocalFlow Hub…", callback=self.open_hub)
@@ -82,6 +85,7 @@ class LocalflowMenuBar(rumps.App):
             None,
             self.toggle_item,
             self.dismiss_item,
+            self.speaker_labels_item,
             None,
             self.open_ui_item,
             self.phrases_item,
@@ -98,6 +102,11 @@ class LocalflowMenuBar(rumps.App):
         self._shown: dict[str, str] = {}
         self._live_state = LiveStateCache()
         self._poller = MeetingStatusPoller(_fetch_status)
+        # [meetings] speaker_diarization is outside the live ALLOWLIST, so it
+        # is tracked here: one stat per tick, a reload only after a change.
+        self._speaker_signature: object = None
+        self._speaker_labels: bool | None = None
+        self.refresh_speaker_labels(force=True)
         # One main-thread timer: a stat of status.json, plus applying any
         # finished background status request (see menubar_poll).
         self.timer = rumps.Timer(self.tick, TICK_SECONDS)
@@ -115,6 +124,7 @@ class LocalflowMenuBar(rumps.App):
         if result is not None:
             self._apply_status(*result)
         self.refresh_dictation_status()
+        self.refresh_speaker_labels()
 
     def refresh(self, _timer=None) -> None:
         """Ask for a fresh server status soon (after a user action)."""
@@ -165,6 +175,22 @@ class LocalflowMenuBar(rumps.App):
             f"{title_prefix(self._live_state.state())}{self._base_icon}{suffix}",
         )
 
+    def refresh_speaker_labels(self, force: bool = False) -> None:
+        """Mirror the saved speaker_diarization flag in the checkmark."""
+        signature = file_signature(config_path())
+        if not force and signature == self._speaker_signature:
+            return
+        self._speaker_signature = signature
+        try:
+            enabled = bool(load_config().speaker_diarization)
+        except (ConfigError, OSError, ValueError):
+            # Half-written or invalid file: keep the last known state; the
+            # next write changes the signature and is read again.
+            return
+        if enabled != self._speaker_labels:
+            self._speaker_labels = enabled
+            self.speaker_labels_item.state = int(enabled)
+
     # ------------------------------------------------------------- actions ---
 
     def toggle_dictation(self, _item) -> None:
@@ -174,6 +200,19 @@ class LocalflowMenuBar(rumps.App):
         except Exception as exc:  # noqa: BLE001 - surfaced as a notification
             rumps.notification("localflow", "Couldn't change dictation", str(exc)[:120])
         self.refresh_dictation_status()
+
+    def toggle_speaker_labels(self, _item) -> None:
+        try:
+            config = load_config()
+            save_config(
+                replace(config, speaker_diarization=not config.speaker_diarization)
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a notification
+            rumps.notification(
+                "localflow", "Couldn't change speaker labels", str(exc)[:120]
+            )
+        # Show what is on disk now: the new value, or the unchanged one.
+        self.refresh_speaker_labels(force=True)
 
     def toggle_meeting(self, _item) -> None:
         try:

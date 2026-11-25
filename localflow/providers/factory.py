@@ -1,6 +1,7 @@
+import time
 from dataclasses import replace
 
-from localflow import llm_activation
+from localflow import llm_activation, perf_ledger
 from localflow.config import Config
 from localflow.providers import registry
 from localflow.providers.base import LLMProvider
@@ -71,12 +72,32 @@ def build_fast_llm(config: Config, *, builder=build_llm) -> LLMProvider | None:
 
 
 def build_stt(config: Config) -> Transcriber:
-    return Transcriber(
-        config.model_size,
-        config.language,
-        backend=config.stt_backend,
-        device=config.stt_device,
-    )
+    """Build and load the speech model, timing the load into the perf ledger
+    (`stt_load`) unless `perf_metrics` is off."""
+    started = time.monotonic()
+    transcriber = None
+    try:
+        transcriber = Transcriber(
+            config.model_size,
+            config.language,
+            backend=config.stt_backend,
+            device=config.stt_device,
+        )
+        return transcriber
+    finally:
+        elapsed = (time.monotonic() - started) * 1000
+        perf_ledger.record_for(
+            config,
+            "stt_load",
+            status="ok" if transcriber is not None else "error",
+            stt_ms=elapsed,
+            total_ms=elapsed,
+            stt=perf_ledger.SttLabels(
+                backend=str(getattr(transcriber, "backend", config.stt_backend)),
+                model=str(config.model_size),
+                provider=str(config.stt_device),
+            ),
+        )
 
 
 def build_workprompts_llm(config: Config) -> LLMProvider | None:

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Result};
 use lf_audio::{Recorder, SAMPLE_RATE};
 use lf_core::config::Config;
+use lf_core::perf_ledger::PerfLedger;
 use lf_runtime::engine::{AudioSource, Pcm, SpeechEngine};
 use lf_runtime::run::RunOptions;
 use lf_runtime::worker::SttFactory;
@@ -83,7 +84,8 @@ impl LazySpeechAdapter {
     /// not consulted.
     pub fn for_16khz_pcm(config: Config) -> Self {
         Self::with_factory(move || {
-            factory::from_config(&config, None).map(SpeechAdapter::from_spec)
+            factory::from_config(&config, None)
+                .map(|spec| SpeechAdapter::from_config_spec(&config, spec))
         })
     }
 
@@ -193,7 +195,17 @@ impl SpeechEngine for UnavailableSpeech {
 impl SpeechAdapter {
     pub fn from_config(config: &Config) -> Result<Self> {
         validate_sample_rate(config)?;
-        Ok(Self::from_spec(factory::from_config(config, None)?))
+        Ok(Self::from_config_spec(
+            config,
+            factory::from_config(config, None)?,
+        ))
+    }
+
+    /// A configured model: its loads go to the perf ledger (`stt_load`)
+    /// unless `perf_metrics` is off.
+    fn from_config_spec(config: &Config, spec: EngineSpec) -> Self {
+        let slot = SttSlot::new().with_perf_ledger(PerfLedger::for_config(config));
+        Self::with_slot(slot, spec)
     }
 
     /// The configured model from the user's HF cache only (see
@@ -204,9 +216,10 @@ impl SpeechAdapter {
 
     fn from_config_cached_at(config: &Config, cache_root: &std::path::Path) -> Result<Self> {
         validate_sample_rate(config)?;
-        Ok(Self::from_spec(factory::from_config_cached(
-            config, None, cache_root,
-        )?))
+        Ok(Self::from_config_spec(
+            config,
+            factory::from_config_cached(config, None, cache_root)?,
+        ))
     }
 
     /// Injection seam for custom engines, including offline fakes.
@@ -505,6 +518,7 @@ mod tests {
             build_stt: Arc::new(|_| unreachable!()),
             deliver: Arc::new(|_, _, _| {}),
             last_text_path: None,
+            perf: None,
         };
         let (work, queue) = std::sync::mpsc::channel();
         work.send(WorkItem::PrepareSpeech).unwrap();

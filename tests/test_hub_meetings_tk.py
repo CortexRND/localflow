@@ -30,6 +30,16 @@ TEMPLATES = {
 }
 
 
+SPEAKER_MID = "2026-11-25-1430-planning"
+
+
+def _default_speakers():
+    return [
+        {"id": "S1", "label": "Speaker 1", "seconds": 72.4, "source": "others"},
+        {"id": "S2", "label": "Speaker 2", "seconds": 45, "source": "others"},
+    ]
+
+
 class FakeMeetingClient:
     def __init__(
         self, state="idle", *, save_error=None, chat_error=None,
@@ -41,6 +51,37 @@ class FakeMeetingClient:
         self.diarization = diarization  # merged into the running session
         self.calls = []
         self.auto_titles = []  # the optional auto_title flag of each start
+        # "saved-speakers": the saved meeting's speakers, changed by rename/merge.
+        self.speakers = _default_speakers()
+        self.speaker_error = None
+
+    def _speakers_payload(self):
+        return {"meeting_id": SPEAKER_MID, "speakers": [dict(s) for s in self.speakers]}
+
+    def rename_speaker(self, meeting_id, speaker_id, name):
+        self.calls.append(("rename_speaker", meeting_id, speaker_id, name))
+        self._speaker_wait()
+        if self.speaker_error:
+            raise self.speaker_error
+        for speaker in self.speakers:
+            if speaker["id"] == speaker_id:
+                speaker["label"] = name
+        return self._speakers_payload()
+
+    def merge_speakers(self, meeting_id, from_id, into_id):
+        self.calls.append(("merge_speakers", meeting_id, from_id, into_id))
+        self._speaker_wait()
+        if self.speaker_error:
+            raise self.speaker_error
+        source = next(s for s in self.speakers if s["id"] == from_id)
+        self.speakers.remove(source)
+        for speaker in self.speakers:
+            if speaker["id"] == into_id:
+                speaker["seconds"] += source["seconds"]
+        return self._speakers_payload()
+
+    def _speaker_wait(self):
+        pass
 
     def templates(self):
         self.calls.append(("templates",))
@@ -74,6 +115,15 @@ class FakeMeetingClient:
                 "session": None,
                 "last_saved": {
                     "notes_path": "/tmp/meeting.md", "enhanced": True,
+                },
+                "chat_available": True,
+            }
+        if self.state == "saved-speakers":
+            return {
+                "session": None,
+                "last_saved": {
+                    "notes_path": "/tmp/meeting.md", "enhanced": True,
+                    **self._speakers_payload(),
                 },
                 "chat_available": True,
             }
@@ -159,6 +209,21 @@ class ManualMeetingClient(FakeMeetingClient):
 
     def complete_start(self, index, error=None):
         self.pending_starts[index].complete(error)
+
+
+class GatedSpeakerClient(FakeMeetingClient):
+    """Holds rename/merge until `release_all()`, for in-flight tests."""
+
+    def __init__(self, state="saved-speakers"):
+        super().__init__(state)
+        self.gate = threading.Event()
+
+    def _speaker_wait(self):
+        if not self.gate.wait(timeout=5):
+            raise TimeoutError("speaker request was not released")
+
+    def release_all(self):
+        self.gate.set()
 
 
 def _window(tmp_path, client):
@@ -575,3 +640,327 @@ def test_open_notes_opens_markdown_inside_the_vault(tmp_path, monkeypatch):
         assert opened == [str(note.resolve())]
     finally:
         root.destroy()
+
+
+# ----------------------------------------------------------------- speakers ---
+
+# meeting_content's children as _page_meetings builds them (includes U5's
+# unpacked diarization status label; unchanged by U3).
+MEETING_CONTENT_CLASSES = [
+    "Label", "Label", "Label", "Frame", "Frame", "Text", "Button", "Label", "Frame", "Frame",
+]
+
+
+def _close(root, window, client=None):
+    if client is not None and hasattr(client, "release_all"):
+        client.release_all()  # unblock gated worker threads
+    _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+    root.destroy()
+    gc.collect()  # finalize Tk variables on this thread
+
+
+def _speakers_window(tmp_path, client):
+    root, window = _window(tmp_path, client)
+    _pump(root, lambda: window._meeting_speakers_view is not None, timeout=5)
+    _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+    return root, window, window._meeting_speakers_view
+
+
+def _labels(view):
+    return [label.cget("text") for label in view.name_labels]
+
+
+@pytest.mark.parametrize("state", ["idle", "running", "saved"])
+def test_no_speakers_adds_no_widget(tmp_path, state):
+    client = FakeMeetingClient(state)
+    root, window = _window(tmp_path, client)
+    try:
+        _pump(root, lambda: bool(window._meeting_status_data), timeout=5)
+        _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+        assert window._meeting_speakers_view is None
+        children = window.meeting_content.winfo_children()
+        assert [child.winfo_class() for child in children] == MEETING_CONTENT_CLASSES
+        packed = window.meeting_content.pack_slaves()
+        assert all(child in children for child in packed)
+        assert not window._meeting_speakers.visible
+    finally:
+        _close(root, window, client)
+
+
+def test_saved_speakers_render_under_the_saved_row(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    client.speakers.append(
+        {"id": "S3\u202e", "label": "\u202eEvil → 😀", "seconds": 3, "source": "others"}
+    )
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        packed = window.meeting_content.pack_slaves()
+        assert packed.index(view.frame) == packed.index(window.meeting_saved_frame) + 1
+        assert view.heading.cget("text") == "Speakers"
+        labels = _labels(view)
+        assert labels[:2] == ["Speaker 1", "Speaker 2"]
+        assert "\u202e" not in labels[2] and "\\u202e" in labels[2]
+        assert [label.cget("text") for label in view.duration_labels] == ["1m 12s", "45s", "3s"]
+        assert view.error.winfo_manager() == ""
+    finally:
+        _close(root, window, client)
+
+
+def test_rename_speaker_updates_the_row(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        view.buttons[("rename", "S1")].invoke()
+        assert view.entry is not None and view.entry.get() == "Speaker 1"
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "Sarah")
+        view.buttons[("save", "S1")].invoke()
+        _pump(root, lambda: window._meeting_speakers.busy == "", timeout=5)
+        assert ("rename_speaker", SPEAKER_MID, "S1", "Sarah") in client.calls
+        assert _labels(view)[0] == "Sarah"
+        assert view.entry is None and window._meeting_speakers.mode == ""
+        assert view.error.winfo_manager() == ""
+    finally:
+        _close(root, window, client)
+
+
+def test_rename_in_flight_disables_and_ignores_stale_polls(tmp_path):
+    client = GatedSpeakerClient()
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        panel = window._meeting_speakers
+        stale = panel.ticket()
+        view.buttons[("rename", "S1")].invoke()
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "Sarah")
+        view._save()
+        assert panel.busy == "rename"
+        assert view.entry.cget("state") == "disabled"
+        assert all(button.cget("state") == "disabled" for button in view.buttons.values())
+        assert view.buttons[("save", "S1")].cget("text") == "Saving…"
+        view._save()  # second save: nothing sent
+        window._meeting_poll()  # answers with the old label while busy
+        _pump(root, lambda: window._meeting_requests_in_flight == 1, timeout=5)
+        assert panel.row("S1")["label"] == "Speaker 1"
+        assert view.entry.get() == "Sarah"  # the poll left the editor alone
+        old = client.status()
+        client.release_all()
+        _pump(root, lambda: panel.busy == "", timeout=5)
+        assert [c for c in client.calls if c[0] == "rename_speaker"] == [
+            ("rename_speaker", SPEAKER_MID, "S1", "Sarah"),
+        ]
+        assert _labels(view)[0] == "Sarah"
+        # A poll sent before the rename finished answers late: ignored.
+        window._meeting_status_received(old, None, stale)
+        assert _labels(view)[0] == "Sarah"
+        window._meeting_poll()
+        _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+        assert _labels(view)[0] == "Sarah"
+    finally:
+        _close(root, window, client)
+
+
+def test_rename_error_keeps_the_editor_then_success_clears_it(tmp_path):
+    from localflow.hub_model import speaker_error_text
+
+    client = FakeMeetingClient("saved-speakers")
+    client.speaker_error = MeetingClientError("unknown speaker")
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        panel = window._meeting_speakers
+        view.buttons[("rename", "S2")].invoke()
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "Bo")
+        view._save()
+        _pump(root, lambda: bool(panel.error), timeout=5)
+        assert view.error.cget("text") == speaker_error_text(
+            "rename", MeetingClientError("unknown speaker"),
+        )
+        assert view.error.winfo_manager() == "pack"
+        assert panel.mode == "rename" and view.entry.get() == "Bo"
+        client.speaker_error = None
+        view._save()
+        _pump(root, lambda: panel.mode == "", timeout=5)
+        assert view.error.winfo_manager() == "" and panel.error == ""
+        assert _labels(view)[1] == "Bo"
+    finally:
+        _close(root, window, client)
+
+
+def test_invalid_name_shows_an_inline_error_without_a_request(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        view.buttons[("rename", "S1")].invoke()
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "!!!")
+        view._save()
+        assert view.error.cget("text") == "Use letters or numbers in the name."
+        assert view.entry.get() == "!!!"
+        assert not any(call[0] == "rename_speaker" for call in client.calls)
+    finally:
+        _close(root, window, client)
+
+
+def test_typing_survives_polls(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        view.buttons[("rename", "S1")].invoke()
+        entry = view.entry
+        entry.delete(0, "end")
+        entry.insert(0, "Half typ")
+        for _ in range(2):
+            window._meeting_poll()
+            _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+        assert view.entry is entry and entry.winfo_exists()
+        assert entry.get() == "Half typ"
+    finally:
+        _close(root, window, client)
+
+
+def test_merge_hidden_with_one_speaker(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    client.speakers = client.speakers[:1]
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        assert ("rename", "S1") in view.buttons
+        assert ("merge", "S1") not in view.buttons
+    finally:
+        _close(root, window, client)
+
+
+def test_merge_with_two_speakers_preselects_the_target(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        view.buttons[("merge", "S2")].invoke()
+        assert view.buttons[("confirm", "S2")].cget("state") == "normal"
+        assert view.menubutton.cget("text") == "Speaker 1 · 1m 12s"
+        view.buttons[("confirm", "S2")].invoke()
+        _pump(root, lambda: len(window._meeting_speakers.rows) == 1, timeout=5)
+        assert ("merge_speakers", SPEAKER_MID, "S2", "S1") in client.calls
+        assert ("merge", "S1") not in view.buttons  # one speaker left
+    finally:
+        _close(root, window, client)
+
+
+def test_merge_with_duplicate_labels_needs_an_explicit_target(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    client.speakers = [
+        {"id": "S1", "label": "Sam", "seconds": 72.4},
+        {"id": "S2", "label": "Sam", "seconds": 45},
+        {"id": "S3", "label": "Ana", "seconds": 10},
+    ]
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        view.buttons[("merge", "S3")].invoke()
+        confirm = view.buttons[("confirm", "S3")]
+        assert confirm.cget("state") == "disabled"
+        assert view.menubutton.cget("text") == "Choose a speaker…"
+        titles = [view.menu.entrycget(i, "label") for i in range(view.menu.index("end") + 1)]
+        assert titles == ["Sam · 1m 12s · S1", "Sam · 45s · S2"]
+        view._confirm()
+        assert not any(call[0] == "merge_speakers" for call in client.calls)
+        view.menu.invoke(1)
+        confirm = view.buttons[("confirm", "S3")]
+        assert confirm.cget("state") == "normal"
+        assert view.menubutton.cget("text") == "Sam · 45s · S2"
+        confirm.invoke()
+        _pump(root, lambda: len(window._meeting_speakers.rows) == 2, timeout=5)
+        assert ("merge_speakers", SPEAKER_MID, "S3", "S2") in client.calls
+        assert window._meeting_speakers.row("S3") is None
+    finally:
+        _close(root, window, client)
+
+
+def test_new_meeting_clears_the_panel_and_drops_the_late_response(tmp_path):
+    client = GatedSpeakerClient()
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        panel = window._meeting_speakers
+        view.buttons[("rename", "S1")].invoke()
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "Sarah")
+        view._save()
+        window._meeting_toggle()  # Start: a new meeting
+        _pump(root, lambda: bool(window._meeting_status_data.get("session")), timeout=5)
+        assert window._meeting_speakers_view is None
+        assert not panel.visible and panel.busy == ""
+        client.release_all()
+        _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+        assert not panel.visible and window._meeting_speakers_view is None
+        assert panel.error == ""
+    finally:
+        _close(root, window, client)
+
+
+def test_navigation_mid_edit_keeps_the_draft(tmp_path):
+    client = FakeMeetingClient("saved-speakers")
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        view.buttons[("rename", "S1")].invoke()
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "Draft name")
+        window.show_page("Home")
+        assert window._meeting_speakers_view is None
+        assert window._meeting_speakers.draft == "Draft name"
+        window.show_page("Meetings")
+        _pump(root, lambda: window._meeting_speakers_view is not None, timeout=5)
+        assert window._meeting_speakers_view.entry.get() == "Draft name"
+    finally:
+        _close(root, window, client)
+
+
+def test_navigation_during_a_failing_request_restores_the_edit(tmp_path):
+    client = GatedSpeakerClient()
+    client.speaker_error = MeetingClientError("transcript file not found")
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        panel = window._meeting_speakers
+        view.buttons[("rename", "S1")].invoke()
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "Sarah")
+        view._save()
+        window.show_page("Home")
+        client.release_all()
+        _pump(root, lambda: panel.busy == "", timeout=5)
+        _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+        assert "moved or deleted" in panel.error
+        window.show_page("Meetings")
+        _pump(root, lambda: window._meeting_speakers_view is not None, timeout=5)
+        view = window._meeting_speakers_view
+        assert view.entry.get() == "Sarah"
+        assert view.error.winfo_manager() == "pack"
+        assert "moved or deleted" in view.error.cget("text")
+    finally:
+        _close(root, window, client)
+
+
+def test_navigation_during_a_successful_request(tmp_path):
+    client = GatedSpeakerClient()
+    root, window, view = _speakers_window(tmp_path, client)
+    try:
+        view.buttons[("rename", "S1")].invoke()
+        view.entry.delete(0, "end")
+        view.entry.insert(0, "Sarah")
+        view._save()
+        window.show_page("Home")
+        client.release_all()
+        _pump(root, lambda: window._meeting_speakers.busy == "", timeout=5)
+        window.show_page("Meetings")
+        _pump(root, lambda: window._meeting_speakers_view is not None, timeout=5)
+        view = window._meeting_speakers_view
+        assert view.entry is None and _labels(view)[0] == "Sarah"
+    finally:
+        _close(root, window, client)
+
+
+def test_speaker_panel_view_adds_no_tk_variables():
+    import inspect
+
+    from localflow.hub_tk import SpeakerPanelView
+
+    source = inspect.getsource(SpeakerPanelView)
+    for name in ("StringVar", "IntVar", "BooleanVar", "DoubleVar", "Variable("):
+        assert name not in source

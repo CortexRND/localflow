@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).parent.parent
 SOURCE = ROOT / "localflow" / "hub_mac.py"
@@ -341,3 +342,258 @@ def test_appkit_open_notes_only_opens_vault_markdown():
         isinstance(call.args[0], ast.Name) and call.args[0].id == "path"
         for call in calls
     )
+
+
+# ----------------------------------------------------------------- speakers ---
+
+SPEAKER_SELECTORS = (
+    "meetingSpeakerRename_", "meetingSpeakerMerge_", "meetingSpeakerTarget_",
+    "meetingSpeakerSave_", "meetingSpeakerConfirmMerge_", "meetingSpeakerCancel_",
+)
+SPEAKER_MID = "2026-11-25-1430"
+
+
+def _method_sources():
+    source = SOURCE.read_text(encoding="utf-8")
+    return {
+        method.name: ast.get_source_segment(source, method)
+        for method in _controller_methods()
+    }
+
+
+def _extract(names, namespace=None):
+    """Run controller methods outside AppKit; an empty namespace by default,
+    so a method reaching for a module-level name fails loudly."""
+    namespace = {} if namespace is None else namespace
+    functions = []
+    for node in _controller_methods():
+        if node.name in names:
+            node.decorator_list = []
+            functions.append(node)
+    assert {f.name for f in functions} == set(names)
+    module = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
+    exec(compile(module, "hub_mac_extract", "exec"), namespace)  # noqa: S102
+    return {name: namespace[name] for name in names}
+
+
+def _bind(controller, methods):
+    for name, function in methods.items():
+        setattr(controller, name, function.__get__(controller))
+    return controller
+
+
+def _speaker_panel(*speakers):
+    from localflow.hub_model import SpeakerPanel
+
+    panel = SpeakerPanel()
+    panel.sync({
+        "meeting_id": SPEAKER_MID,
+        "speakers": [
+            {"id": sid, "label": label, "seconds": 30}
+            for sid, label in (speakers or (("S1", "Speaker 1"), ("S2", "Speaker 2")))
+        ],
+    })
+    return panel
+
+
+class _FakeView:
+    def __init__(self, value=""):
+        self.frames = []
+        self.value = value
+
+    def setFrame_(self, frame):
+        self.frames.append(frame)
+
+    def stringValue(self):
+        return self.value
+
+
+def test_meeting_layout_inserts_the_speakers_block_after_the_saved_row():
+    layout = _method_sources()["_meeting_layout"]
+    saved = "saved_y = live_y + (108 if session else 8)"
+    chat = "chat_y = saved_y + (48 if saved else 0)"
+    speakers = "chat_y = self._meeting_layout_speakers(chat_y, width)"
+    assert saved in layout and chat in layout and speakers in layout
+    assert layout.index(saved) < layout.index(chat) < layout.index(speakers)
+    assert layout.index(speakers) < layout.index("self.meeting_chat_heading.setFrame_(")
+
+
+def test_page_meetings_builds_no_speakers_view():
+    page = _method_sources()["_page_meetings"]
+    for name in ("SPEAKERS_HEADING", "_meeting_speakers_build", "SpeakerPanel("):
+        assert name not in page
+
+
+def test_meeting_render_draws_speakers_before_layout():
+    render = _method_sources()["_meeting_render"]
+    assert "self._meeting_render_speakers(saved)" in render
+    assert render.index("self._meeting_render_speakers(saved)") < render.index(
+        "self._meeting_layout("
+    )
+
+
+def test_speaker_selectors_never_call_the_client_directly():
+    methods = {method.name: method for method in _controller_methods()}
+    sources = _method_sources()
+    for name in SPEAKER_SELECTORS:
+        assert name in methods, name
+        assert not _python_method(methods[name])
+        assert "self.meeting_client" not in sources[name]
+        assert 'if self.page != "Meetings":' in sources[name]
+    send = sources["_meeting_speaker_send"]
+    assert "threading.Thread(" in send
+    assert 'self.meeting_events.put(("speakers", (token, result), error))' in send
+
+
+def test_status_sync_uses_the_polls_own_last_saved_and_ticket():
+    event = _method_sources()["_meeting_event"]
+    assert 'panel.sync(result["last_saved"], getattr(result, "speaker_ticket", None))' in event
+    assert "panel.sync(self.meeting_last_saved" not in event
+    worker = _method_sources()["_meeting_worker"]
+    assert "panel.stamp(result, ticket)" in worker
+    assert 'getattr(self, "meeting_speakers", None)' in worker
+
+
+def test_layout_speakers_without_a_card_returns_y():
+    methods = _extract(("_meeting_layout_speakers",))
+    controller = _bind(SimpleNamespace(meeting_speakers_card=None), methods)
+    assert controller._meeting_layout_speakers(312, 600) == 312
+
+
+def test_layout_speakers_places_the_block_from_the_pure_layout():
+    from localflow.hub_model import meeting_speakers_layout
+
+    methods = _extract(
+        ("_meeting_layout_speakers",),
+        {"meeting_speakers_layout": meeting_speakers_layout, "NSMakeRect": lambda *a: a},
+    )
+    heading, card, error = _FakeView(), _FakeView(), _FakeView()
+    controller = _bind(
+        SimpleNamespace(
+            meeting_speakers=_speaker_panel(), meeting_speakers_heading=heading,
+            meeting_speakers_card=card, meeting_speakers_error_label=error,
+            _meeting_speakers_error_height=lambda _width: 0,
+        ),
+        methods,
+    )
+    assert controller._meeting_layout_speakers(300, 600) == 300 + 128
+    expected = meeting_speakers_layout(600, 300, 2)
+    assert heading.frames == [expected["heading"]]
+    assert card.frames == [expected["card"]]
+    assert error.frames == []
+    controller._meeting_speakers_error_height = lambda _width: 34
+    assert controller._meeting_layout_speakers(300, 600) == 300 + 128 + 40
+    assert error.frames == [meeting_speakers_layout(600, 300, 2, error_height=34)["error"]]
+
+
+def _event_controller(page="Meetings"):
+    methods = _extract(("_meeting_event",))
+    renders = []
+    controller = SimpleNamespace(
+        page=page, meeting_speakers=_speaker_panel(),
+        _meeting_render=lambda: renders.append(True),
+    )
+    return _bind(controller, methods), renders
+
+
+def _renamed():
+    return {"meeting_id": SPEAKER_MID, "speakers": [
+        {"id": "S1", "label": "Sarah"}, {"id": "S2", "label": "Speaker 2"},
+    ]}
+
+
+def test_speakers_event_updates_the_panel_and_renders():
+    controller, renders = _event_controller()
+    panel = controller.meeting_speakers
+    panel.begin_rename("S1")
+    _op, _args, token = panel.submit_rename("Sarah")
+    controller._meeting_event("speakers", (token - 1, _renamed()), None)
+    assert renders == [] and panel.busy == "rename"  # wrong token: nothing
+    controller._meeting_event("speakers", (token, _renamed()), None)
+    assert renders == [True]
+    assert panel.row("S1")["label"] == "Sarah" and panel.busy == ""
+
+
+def test_speakers_event_off_the_page_updates_without_rendering():
+    controller, renders = _event_controller(page="Home")
+    panel = controller.meeting_speakers
+    panel.begin_rename("S1")
+    _op, _args, token = panel.submit_rename("Sarah")
+    controller._meeting_event("speakers", (token, _renamed()), None)
+    assert renders == [] and panel.row("S1")["label"] == "Sarah"
+
+
+def test_status_event_with_a_stale_ticket_keeps_the_rows():
+    from localflow.hub_model import PolledStatus
+
+    methods = _extract(("_meeting_event",), {"time": SimpleNamespace(monotonic=lambda: 0)})
+    controller = _bind(
+        SimpleNamespace(
+            page="Home", meeting_speakers=_speaker_panel(), meeting_status={},
+            meeting_last_saved=None, meeting_session_active=False,
+            meeting_notes_dirty=False, meeting_templates=[], meeting_error="",
+        ),
+        methods,
+    )
+    panel = controller.meeting_speakers
+    stale = panel.ticket()
+    panel.begin_rename("S1")
+    _op, _args, token = panel.submit_rename("Sarah")
+    panel.finish(token, _renamed(), None)
+    old = {"session": None, "last_saved": {
+        "meeting_id": SPEAKER_MID,
+        "speakers": [{"id": "S1", "label": "Speaker 1"}, {"id": "S2", "label": "Speaker 2"}],
+    }}
+    controller._meeting_event("status", PolledStatus(old, stale), None)
+    assert panel.row("S1")["label"] == "Sarah"
+    assert controller.meeting_last_saved == old["last_saved"]  # the rest still applies
+    controller._meeting_event("status", PolledStatus(old, panel.ticket()), None)
+    assert panel.row("S1")["label"] == "Speaker 1"
+
+
+def test_meeting_speaker_save_sends_one_request():
+    methods = _extract(("meetingSpeakerSave_",))
+    sent, renders = [], []
+    panel = _speaker_panel()
+    panel.begin_rename("S2")
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", meeting_speakers=panel,
+            meeting_speaker_field=_FakeView("  Bo  "),
+            _meeting_render=lambda: renders.append(panel.busy),
+            _meeting_speaker_send=sent.append,
+        ),
+        methods,
+    )
+    controller.meetingSpeakerSave_(None)
+    assert sent == [("rename_speaker", (SPEAKER_MID, "S2", "Bo"), panel.epoch)]
+    assert renders == ["rename"]  # rendered busy before the send
+    controller.meetingSpeakerSave_(None)
+    assert len(sent) == 1
+    controller.page = "Home"
+    panel.busy = ""
+    controller.meetingSpeakerSave_(None)
+    assert len(sent) == 1
+
+
+def test_meeting_capture_state_keeps_the_rename_draft():
+    methods = _extract(("_meeting_capture_state",))
+    panel = _speaker_panel()
+    panel.begin_rename("S1")
+
+    class _Combo:
+        def indexOfSelectedItem(self):
+            return -1
+
+    controller = _bind(
+        SimpleNamespace(
+            meeting_notes=SimpleNamespace(string=lambda: "notes"),
+            meeting_title=_FakeView("Title"), meeting_title_shows_session=False,
+            meeting_template=_Combo(), meeting_templates=[],
+            meeting_speakers=panel, meeting_speaker_field=_FakeView("Half"),
+            meeting_speaker_field_id="S1",
+        ),
+        methods,
+    )
+    controller._meeting_capture_state()
+    assert panel.draft == "Half"

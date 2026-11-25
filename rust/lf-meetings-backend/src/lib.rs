@@ -11,6 +11,7 @@ pub use session::{CaptureFactory, UnavailableCapture};
 use anyhow::Result;
 use chrono::{Local, NaiveDateTime};
 use lf_ask::{Corpus, SearchOptions, Since};
+use lf_core::perf_ledger::{self, Kind, LlmLabels, PerfEvent, PerfLedger, Status};
 use lf_core::{config::Config, history::HistoryStore, home::expand_user, symbols::pycompat as py};
 use lf_meetings::{
     answer_question,
@@ -28,7 +29,7 @@ use session::SessionActor;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use validation::{Body, ResponseResult};
 
@@ -93,6 +94,7 @@ pub struct MeetingsBackend {
     transcribe_lock: Arc<Mutex<()>>,
     state: Mutex<State>,
     idle: Condvar,
+    perf: Option<PerfLedger>,
     /// Sidecars, voiceprints, their locks and forget epoch (one per process).
     speakers: Arc<SpeakerData>,
     /// The live config for gates re-checked mid-request; `None` = the request's snapshot.
@@ -111,6 +113,20 @@ const LIVE_DIARIZATION_FIELDS: [&str; 5] = [
     "speaker_recognition",
 ];
 impl MeetingsBackend {
+    /// Record a timed request (numbers and model labels only).
+    fn record_perf(&self, config: &Config, kind: Kind, ok: bool, started: Instant, llm: bool) {
+        if let Some(ledger) = &self.perf {
+            let elapsed = perf_ledger::ms(started.elapsed());
+            let event = PerfEvent {
+                llm_ms: llm.then_some(elapsed),
+                total_ms: Some(elapsed),
+                llm: llm.then(|| LlmLabels::from_config(config)),
+                ..PerfEvent::new(kind, Status::from_ok(ok))
+            };
+            ledger.record_if(config, &event);
+        }
+    }
+
     /// The capture config for a new meeting: the request's, with only the
     /// diarization fields taken from the live config (when a reader is
     /// attached) so opting in or out applies from the next meeting. An
@@ -160,10 +176,17 @@ impl MeetingsBackend {
             transcribe_lock: Arc::default(),
             state: Mutex::default(),
             idle: Condvar::new(),
+            perf: None,
             speakers: Arc::new(SpeakerData::new()),
             config_reader: None,
             model_cache: None,
         })
+    }
+    /// Time meeting summaries, meeting chat and recall into `ledger`
+    /// (each request also honours `perf_metrics`).
+    pub fn with_perf_ledger(mut self, ledger: PerfLedger) -> Self {
+        self.perf = Some(ledger);
+        self
     }
     /// Speaker data roots and state (tests use temporary roots).
     pub fn with_speaker_data(mut self, data: Arc<SpeakerData>) -> Self {
@@ -502,10 +525,18 @@ impl MeetingsBackend {
             .providers
             .llm(config)
             .unwrap_or_else(|error| Box::new(providers::FailedProvider(error.to_string())));
+        let summarize_started = Instant::now();
         let mut notes = MeetingSummarizer::new(&*llm).summarize(
             Transcript::new(&transcript, is_diarized(&finished.segments)),
             &meta.user_notes,
             Some(&template),
+        );
+        self.record_perf(
+            config,
+            Kind::MeetingSummarize,
+            true,
+            summarize_started,
+            true,
         );
         let (title, generated) = if meta.title_auto {
             generate_title(
@@ -623,11 +654,19 @@ impl MeetingsBackend {
             .transcript_path(&request.config, last.as_ref())
             .ok_or_else(|| BackendResponse::error(404, "no saved meeting transcript yet"))?;
         let transcript = read_transcript_log(&path).map_err(|_| internal())?;
+        let started = Instant::now();
         let answer = (|| -> Result<String> {
             let llm = self.providers.llm(&request.config)?;
             Ok(answer_question(&*llm, &transcript, &question, 4000)?)
-        })()
-        .map_err(|e| BackendResponse::error(502, format!("LLM error: {e}")))?;
+        })();
+        self.record_perf(
+            &request.config,
+            Kind::MeetingChat,
+            answer.is_ok(),
+            started,
+            true,
+        );
+        let answer = answer.map_err(|e| BackendResponse::error(502, format!("LLM error: {e}")))?;
         Ok(json!({"answer":answer,"log_path":path}))
     }
     fn recall(&self, request: &BackendRequest) -> ResponseResult<Value> {
@@ -650,6 +689,7 @@ impl MeetingsBackend {
             now,
             ..Default::default()
         };
+        let started = Instant::now();
         let result = (|| -> Result<Value> {
             let store = if enabled(&request.config, "history_enabled") {
                 Some(HistoryStore::open(self.history_path.clone(), None, true)?)
@@ -667,6 +707,7 @@ impl MeetingsBackend {
             };
             Ok(result.to_dict())
         })();
+        self.record_perf(&request.config, Kind::Recall, result.is_ok(), started, llm);
         result.map_err(|e| BackendResponse::error(500, format!("recall failed: {e}")))
     }
 }
@@ -862,6 +903,55 @@ fn question(request: &BackendRequest, max: usize) -> ResponseResult<String> {
     let question = body.string("question", None, None);
     body.finish()?;
     checked_question(&question, max)
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use axum::{
+        body::Bytes,
+        http::{HeaderMap, Method},
+    };
+
+    fn recall_request(config: &Config, question: &str) -> BackendRequest {
+        BackendRequest {
+            method: Method::POST,
+            path: "/api/recall".into(),
+            query: Default::default(),
+            headers: HeaderMap::new(),
+            body: Bytes::from(json!({"question": question, "llm": false}).to_string()),
+            config: config.clone(),
+        }
+    }
+
+    #[test]
+    fn recall_is_timed_into_the_ledger_without_the_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = PerfLedger::new(dir.path().join("events.jsonl"));
+        let backend = MeetingsBackend::new()
+            .unwrap()
+            .with_perf_ledger(ledger.clone());
+        let mut config = Config::default();
+        config.set_field("history_enabled", json!(false));
+        config.set_field("vault_path", json!(dir.path().join("vault")));
+        config.set_field("perf_metrics", json!(false));
+        assert!(backend.recall(&recall_request(&config, "q")).is_ok());
+        assert!(ledger.read_events().is_empty());
+        config.set_field("perf_metrics", json!(true));
+        assert!(backend
+            .recall(&recall_request(&config, "where is my secret plan"))
+            .is_ok());
+        let events = ledger.read_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            (events[0].kind, events[0].status),
+            (Kind::Recall, Status::Ok)
+        );
+        assert!(events[0].total_ms.is_some());
+        assert_eq!(events[0].llm, None);
+        let raw = std::fs::read_to_string(ledger.path()).unwrap();
+        assert!(!raw.contains("secret"), "{raw}");
+    }
 }
 
 #[cfg(test)]

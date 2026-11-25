@@ -453,6 +453,20 @@ def _delete_pinned(folder: Path, repo: str, label: str) -> int:
     return freed
 
 
+def _repo_size(folder: Path, repo: str) -> int:
+    """A speaker repo counts only its pinned files; a speech repo its whole folder."""
+    if repo in diarization_repos():
+        return _pinned_size(_pinned_files(folder, repo))
+    return folder_size(folder)
+
+
+def model_size(repo: str, cache: Path | None = None) -> int:
+    """The size `inventory` would list for `repo` (0 when it isn't a plain folder)."""
+    cache = cache if cache is not None else hf_hub_cache()
+    folder = _model_folder(cache, repo)
+    return 0 if folder is None else _repo_size(folder, repo)
+
+
 def inventory(
     config: Config,
     cache: Path | None = None,
@@ -472,10 +486,7 @@ def inventory(
         folder = _model_folder(cache, repo)
         if folder is None:
             continue
-        if repo in diarization_repos():
-            size = _pinned_size(_pinned_files(folder, repo))
-        else:
-            size = folder_size(folder)
+        size = _repo_size(folder, repo)
         if size == 0:  # an empty or leftover folder (e.g. a cancelled download)
             continue
         status = guard.status(repo) or ("Unknown use" if guard.unknown else "")
