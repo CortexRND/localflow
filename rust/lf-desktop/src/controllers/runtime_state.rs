@@ -299,7 +299,7 @@ fn classify_listener(file: &StatusFile) -> State {
     }
 }
 
-fn shortcut_line(session: Session, listening: bool, state: &State) -> (Signal, String) {
+pub(crate) fn shortcut_line(session: Session, listening: bool, state: &State) -> (Signal, String) {
     match session {
         Session::Wayland => (
             Signal::Warning,
