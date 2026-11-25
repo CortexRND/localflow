@@ -639,3 +639,45 @@ def test_slow_registry_is_bounded_by_the_finalize_timeout():
     assert time.monotonic() - t0 < 0.45
     assert result.status == "timeout" and result.segments == [a] and result.centroids == {}
     # The abandoned matcher (3 x 0.5 s) ends before the autouse thread check gives up.
+
+
+def test_gate_closed_after_the_drain_skips_recognition_entirely():
+    registry = FakeRegistry()
+    gate = {"open": True}
+    c = _new(registry=registry, recognition_allowed=lambda: gate["open"])
+    _, a = _chunk(c, "others", 0.0, np.concatenate([tone(0, 4), tone(1, 4), tone(2, 4)]))
+    gate["open"] = False  # opted out after capture, before finalize reads the gate
+    result = c.finalize([Seg(0.0, "hello", "me"), a])
+    assert result.status == "ok" and result.centroids == {} and registry.calls == []
+    assert [s.label for s in result.speakers] == ["Speaker 1", "Speaker 2", "Speaker 3"]
+
+
+def test_gate_closing_mid_match_drops_names_found_so_far():
+    gate = {"open": True}
+
+    class ClosingRegistry(FakeRegistry):
+        def match(self, vector, model_id):
+            hit = super().match(vector, model_id)
+            gate["open"] = False  # the opt-out lands during the first match
+            return hit
+
+    registry = ClosingRegistry()
+    c = _new(registry=registry, recognition_allowed=lambda: gate["open"])
+    result = _three_voice_meeting(c)
+    assert len(registry.calls) == 1  # no further registry reads after the opt-out
+    assert result.status == "ok" and result.centroids == {}
+    assert [(s.label, s.name, s.voiceprint_id) for s in result.speakers] == [
+        ("Speaker 1", None, None), ("Speaker 2", None, None), ("Speaker 3", None, None)]
+    assert [s.speaker_label for s in result.segments] == [
+        None, "Speaker 1", "Speaker 2", "Speaker 3"]
+
+
+def test_raising_gate_fails_closed():
+    registry = FakeRegistry()
+
+    def broken():
+        raise RuntimeError("config unavailable")
+
+    result = _three_voice_meeting(_new(registry=registry, recognition_allowed=broken))
+    assert registry.calls == [] and result.centroids == {}
+    assert result.speakers[0].label == "Speaker 1"

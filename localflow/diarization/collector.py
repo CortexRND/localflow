@@ -10,6 +10,8 @@ Recognition (slice B9) happens only when the server attached a ``registry`` (bot
 flags on): finalize then also computes one unit centroid per labelled speaker and asks the
 registry's ``match`` for a name. The registry is the only I/O and runs inside the finalize
 watchdog. With no registry no centroid is computed and the registry is never called.
+An optional ``recognition_allowed`` predicate (the server's live gate) is checked after the
+queue has drained and before every match; once it is False the result is anonymous.
 
 This module must not import ``localflow.meetings``, ``localflow.server``, ``sounddevice`` or
 ``sherpa_onnx``: segments are duck-typed dataclasses copied with ``dataclasses.replace``.
@@ -92,10 +94,12 @@ class DiarizationCollector:
 
     def __init__(self, diarizer, embedder, *, sample_rate: int = 16000,
                  diarize_mic: bool = False, max_speakers: int | None = None,
-                 threshold: float = DEFAULT_CLUSTER_THRESHOLD, registry=None) -> None:
+                 threshold: float = DEFAULT_CLUSTER_THRESHOLD, registry=None,
+                 recognition_allowed=None) -> None:
         self.diarizer = diarizer
         self.embedder = embedder
         self.registry = registry  # voiceprint matcher; None = recognition off
+        self.recognition_allowed = recognition_allowed  # () -> bool; None = always
         self.sample_rate = int(sample_rate)
         self.diarize_mic = bool(diarize_mic)
         self.max_speakers = _clamp_speakers(max_speakers)
@@ -285,7 +289,6 @@ class DiarizationCollector:
 
     def _finalize_work(self, segments: list) -> DiarizationResult:
         started = time.monotonic()
-        registry = self.registry
         with self._lock:
             self._closed = True
             worker = self._worker
@@ -310,6 +313,9 @@ class DiarizationCollector:
                         lost, offered)
             return DiarizationResult(STATUS_CHANNEL, list(segments), [])
 
+        # Read after the drain: an opt-out that landed while queued chunks were processed
+        # must stop recognition here, before any centroid is computed or registry read.
+        registry = self.registry if self._recognition_allowed() else None
         sources = ([SOURCE_ME] if self.diarize_mic else []) + [SOURCE_OTHERS]
         # (source, offset) -> runs; seconds per (source, cluster)
         runs_by_chunk: dict[tuple[str, float], list] = {}
@@ -365,16 +371,33 @@ class DiarizationCollector:
         centroids = {sid: centroid_of[key] for key, sid in ids.items() if key in centroid_of}
         recognised = 0
         if registry is not None and centroids:
-            speakers, final, recognised = self._recognise(registry, speakers, final, centroids)
+            named = self._recognise(registry, speakers, final, centroids)
+            if named is None:  # opted out mid-match: one coherent anonymous result
+                centroids = {}
+            else:
+                speakers, final, recognised = named
         log.info("speaker diarization: %d chunks offered, %d lost, %d speakers, "
                  "%d recognised (%.1fs)",
                  offered, lost, len(speakers), recognised, time.monotonic() - started)
         return DiarizationResult(STATUS_OK, final, speakers, centroids)
 
+    def _recognition_allowed(self) -> bool:
+        """Registry still attached and the injected gate (if any) still open."""
+        if self.registry is None:
+            return False
+        allowed = self.recognition_allowed
+        if allowed is None:
+            return True
+        try:
+            return bool(allowed())
+        except Exception:  # noqa: BLE001 - fail closed
+            return False
+
     def _recognise(self, registry, speakers: list[MeetingSpeaker], segments: list,
                    centroids: dict[str, np.ndarray]):
         """Name speakers whose centroid matches an enrolled voiceprint of this embedder.
-        Any registry error stops matching; the rest stay anonymous."""
+        Any registry error stops matching; the rest stay anonymous. None when recognition
+        was turned off meanwhile (checked before each match and once after the last)."""
         model_id = getattr(self.embedder, "id", None)
         if not isinstance(model_id, str):
             return speakers, segments, 0
@@ -383,6 +406,8 @@ class DiarizationCollector:
             vec = centroids.get(sp.id)
             if vec is None:
                 continue
+            if not self._recognition_allowed():
+                return None
             try:
                 hit = registry.match(vec, model_id)
             except Exception as exc:  # noqa: BLE001 - recognition is optional
@@ -395,6 +420,8 @@ class DiarizationCollector:
             name, vid = getattr(vp, "name", None), getattr(vp, "id", None)
             if isinstance(name, str) and name and isinstance(vid, str):
                 names[sp.id] = (name, vid)
+        if not self._recognition_allowed():
+            return None
         if not names:
             return speakers, segments, 0
         speakers = [

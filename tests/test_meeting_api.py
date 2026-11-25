@@ -1672,3 +1672,50 @@ def test_server_main_runs_uvicorn_with_the_redacting_access_log(monkeypatch, cap
     out = capsys.readouterr().out
     assert "PATCH /api/speakers/<redacted> HTTP/1.1" in out and "Zanzibar" not in out
     assert "GET /meeting/status HTTP/1.1" in out
+
+
+# ---- opt-out while finalize drains queued chunks (BUG_0003)
+
+def test_opt_out_while_finalize_drains_queued_chunks_names_nobody(rec, monkeypatch):
+    first = _saved(rec)
+    assert _enroll(rec, first).status_code == 201  # tone 0 would be "Dana Lee"
+    entered, release = threading.Event(), threading.Event()
+    block = {"on": False}
+    real_diarize = MockDiarizer.diarize
+
+    def diarize(self, audio, rate):
+        # Only the collector worker blocks (the tone transcriber also uses the mock).
+        if block["on"] and threading.current_thread().name == "localflow-diarization":
+            entered.set()
+            assert release.wait(10)
+        return real_diarize(self, audio, rate)
+
+    matched = []
+    real_match = FileSpeakerRegistry.match
+    monkeypatch.setattr(MockDiarizer, "diarize", diarize)
+    monkeypatch.setattr(FileSpeakerRegistry, "match",
+                        lambda self, v, m: matched.append(m) or real_match(self, v, m))
+    assert rec.post("/meeting/start", json={"title": "Launch sync"}).status_code == 200
+    _push(np.concatenate([tone(0, 4), tone(1, 4), tone(2, 4), tone(0, 2)]))
+    block["on"] = True
+    _push(np.concatenate([tone(2, 3), tone(1, 3)]))  # queued; the worker blocks on it
+    assert entered.wait(5)
+    box = {}
+    stopper = threading.Thread(target=lambda: box.update(stop=rec.post("/meeting/stop")))
+    stopper.start()
+    end = time.monotonic() + 5  # finalize has started and is waiting for the drain
+    while not any(t.name == "localflow-diarization-finalize" for t in threading.enumerate()):
+        assert time.monotonic() < end
+        time.sleep(0.005)
+    _file_says(speaker_recognition=False)  # the opt-out lands mid-drain
+    release.set()
+    stopper.join(30)
+    stop = box["stop"].json()
+    assert stop["diarization"] == "ok"
+    assert [(s["label"], s["name"]) for s in stop["speakers"]] == [
+        ("Speaker 1", None), ("Speaker 2", None), ("Speaker 3", None)]
+    assert "Dana Lee" not in Path(stop["log_path"]).read_text(encoding="utf-8")
+    assert all("Dana Lee" not in p for p in rec.llm.prompts[-3:])
+    assert matched == []
+    assert all(sp["centroid"] is None and sp["voiceprint_id"] is None
+               for sp in _sidecar(rec, stop["meeting_id"])["speakers"])

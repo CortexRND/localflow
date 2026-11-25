@@ -841,6 +841,8 @@ def _diarization_state(session) -> tuple[str, str]:
     error = getattr(session, "diarization_error", "") or ""
     status = getattr(session, "diarization_status", None)
     if status not in ("off", "collecting", "unavailable"):
+            # The live gate, re-read by finalize after the queue drains and before each match.
+            collector.recognition_allowed = _recognition_on
         status = "unavailable" if error else "off"
     return status, error
 
