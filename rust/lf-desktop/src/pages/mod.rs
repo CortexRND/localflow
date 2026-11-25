@@ -108,6 +108,7 @@ pub fn split(t: &Theme, list: impl IntoElement, detail: impl IntoElement) -> Div
         )
         .child(
             div()
+                .debug_selector(|| "split-detail".into())
                 .flex()
                 .flex_col()
                 .flex_1()

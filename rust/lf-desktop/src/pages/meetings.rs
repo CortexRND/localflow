@@ -21,6 +21,11 @@ use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::select::{Select, SelectEvent};
 use crate::ui::{self, Button};
 
+/// The merge picker's width: its usual size, and the narrowest it shrinks
+/// to before the Merge/Cancel actions wrap below it.
+const MERGE_SELECT_MAX: f32 = 220.;
+const MERGE_SELECT_MIN: f32 = 120.;
+
 pub struct MeetingsPage {
     pcx: PageCx,
     phase: Phase,
@@ -93,7 +98,13 @@ impl MeetingsPage {
             }
         })
         .detach();
-        let merge_select = cx.new(|cx| Select::new(cx, Vec::new(), None).width(220.));
+        // Fills its slot in the merge row (at most 220 px, less in a narrow
+        // detail pane); the menu stays 220 px wide.
+        let merge_select = cx.new(|cx| {
+            Select::new(cx, Vec::new(), None)
+                .width(MERGE_SELECT_MAX)
+                .fill()
+        });
         cx.subscribe(&merge_select, |this, _, event, cx| {
             let SelectEvent::Changed(i) = event;
             if let Some(title) = this.merge_titles.get(*i).cloned() {
@@ -726,35 +737,61 @@ impl MeetingsPage {
                     .px(ui::row_inset())
                     .py(space::s4())
                     .child(ui::label(&t, format!("Merge {title} into")))
+                    // The select shrinks (down to MERGE_SELECT_MIN) so both
+                    // actions stay on its line in a narrow pane; narrower
+                    // still, the actions wrap together onto the next line.
                     .child(
                         div()
+                            .debug_selector(|| "speaker-merge-row".into())
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(space::s4())
-                            .child(self.merge_select.clone())
                             .child(
-                                Button::new(
-                                    SharedString::from(format!("speaker-merge-go-{sid}")),
-                                    "Merge",
-                                )
-                                .destructive()
-                                .small()
-                                .busy(busy)
-                                .disabled(!picker.chosen)
-                                .tooltip(format!("Merge {title} into the chosen speaker"))
-                                .on_click(cx.listener(|this, _, _, cx| this.commit_speaker(cx))),
+                                div()
+                                    .debug_selector(|| "speaker-merge-select".into())
+                                    .flex_1()
+                                    .min_w(px(MERGE_SELECT_MIN))
+                                    .max_w(px(MERGE_SELECT_MAX))
+                                    .child(self.merge_select.clone()),
                             )
                             .child(
-                                Button::new(
-                                    SharedString::from(format!("speaker-merge-cancel-{sid}")),
-                                    "Cancel",
-                                )
-                                .ghost()
-                                .small()
-                                .disabled(busy)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.cancel_speaker_edit(cx)),
-                                ),
+                                div()
+                                    .debug_selector(|| "speaker-merge-actions".into())
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(space::s4())
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(format!("speaker-merge-go-{sid}")),
+                                            "Merge",
+                                        )
+                                        .destructive()
+                                        .small()
+                                        .busy(busy)
+                                        .disabled(!picker.chosen)
+                                        .tooltip(format!("Merge {title} into the chosen speaker"))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.commit_speaker(cx)),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(format!(
+                                                "speaker-merge-cancel-{sid}"
+                                            )),
+                                            "Cancel",
+                                        )
+                                        .ghost()
+                                        .small()
+                                        .disabled(busy)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.cancel_speaker_edit(cx)
+                                            }),
+                                        ),
+                                    ),
                             ),
                     )
                     .child(ui::supporting(&t, spk::MERGE_FINAL))
@@ -1553,5 +1590,98 @@ mod speaker_tests {
             assert!(matches!(p.phase, super::Phase::Saved { .. }));
             assert_eq!(p.speaker_panel(), None);
         });
+    }
+
+    /// Opens the post-stop merge row for S1 in a window of `width` x 640
+    /// and returns (pane, row, select slot, actions, Merge, Cancel) bounds.
+    fn merge_row_at(
+        width: f32,
+        cx: &mut TestAppContext,
+    ) -> (
+        [gpui::Bounds<gpui::Pixels>; 6],
+        Entity<MeetingsPage>,
+        &mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let (_shell, meetings, cx, dir) = open_fixture(cx);
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(640.)));
+        meetings.update(cx, |p, cx| p.start_and_stop(cx));
+        cx.run_until_parked();
+        meetings.update(cx, |p, cx| {
+            p.begin_speaker_merge(FIXTURE_SAVED_ID, "S1", cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let get = |cx: &mut VisualTestContext, s: &'static str| {
+            cx.debug_bounds(s)
+                .unwrap_or_else(|| panic!("{s} isn't on screen"))
+        };
+        let bounds = [
+            get(cx, "split-detail"),
+            get(cx, "speaker-merge-row"),
+            get(cx, "speaker-merge-select"),
+            get(cx, "speaker-merge-actions"),
+            get(cx, "button:Merge"),
+            get(cx, "button:Cancel"),
+        ];
+        (bounds, meetings, cx, dir)
+    }
+
+    fn inside(inner: gpui::Bounds<gpui::Pixels>, outer: gpui::Bounds<gpui::Pixels>) -> bool {
+        inner.left() >= outer.left()
+            && inner.top() >= outer.top()
+            && inner.right() <= outer.right()
+            && inner.bottom() <= outer.bottom()
+    }
+
+    /// #183: at 960 px the detail pane is ~283 px wide inside its padding;
+    /// a fixed 220 px picker pushed Cancel out of it. The picker now
+    /// shrinks so Merge and Cancel both sit inside the pane, on its line.
+    #[gpui::test]
+    fn the_merge_row_fits_a_960_window(cx: &mut TestAppContext) {
+        let ([pane, row, select, actions, merge, cancel], meetings, cx, _dir) =
+            merge_row_at(960., cx);
+        for (what, b) in [
+            ("row", row),
+            ("select", select),
+            ("Merge", merge),
+            ("Cancel", cancel),
+        ] {
+            assert!(inside(b, pane), "{what}: {b:?} isn't inside {pane:?}");
+        }
+        assert!(inside(merge, actions) && inside(cancel, actions));
+        assert!(merge.right() <= cancel.left(), "Merge precedes Cancel");
+        assert!(inside(actions, row), "{actions:?} vs row {row:?}");
+        // One line: the actions sit beside the picker, not under it.
+        assert!(
+            actions.left() >= select.right() && actions.top() < select.bottom(),
+            "actions {actions:?} should share the picker's line {select:?}"
+        );
+        let w = select.size.width;
+        assert!(
+            w >= gpui::px(super::MERGE_SELECT_MIN) && w < gpui::px(super::MERGE_SELECT_MAX),
+            "the picker shrinks but stays readable: {w:?}"
+        );
+        // Keyboard: the shrunk picker still takes focus and its keys.
+        let select = meetings.read_with(cx, |p, _| p.merge_select.clone());
+        let focus = cx.update(|_, cx| gpui::Focusable::focus_handle(select.read(cx), cx));
+        cx.update(|window, _| window.focus(&focus));
+        cx.dispatch_action(crate::ui::select::MenuDown);
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+        assert!(
+            cx.debug_bounds("speaker-merge-row").is_some(),
+            "the row stays open"
+        );
+    }
+
+    /// A wide window keeps the picker at its usual 220 px.
+    #[gpui::test]
+    fn the_merge_picker_keeps_its_width_when_there_is_room(cx: &mut TestAppContext) {
+        let ([pane, _, select, _, merge, cancel], _meetings, _cx, _dir) = merge_row_at(1280., cx);
+        assert_eq!(select.size.width, gpui::px(super::MERGE_SELECT_MAX));
+        assert!(inside(merge, pane) && inside(cancel, pane));
+        assert!(cancel.top() < select.bottom(), "one line");
     }
 }
