@@ -30,6 +30,7 @@ from localflow.config import (
     Config,
     ConfigError,
     apply_config_update,
+    config_path,
     config_to_dict,
     load_config,
     save_config,
@@ -844,18 +845,22 @@ def _open_system_audio():
         return None, str(exc) or type(exc).__name__
 
 
-def _open_diarization():
-    """Diarization collector per config, or (None, reason). Never raises.
-    With the flag off nothing from localflow.diarization is imported."""
-    if not _config.speaker_diarization:
+def _open_diarization(config: Config | None = None):
+    """Diarization collector per config (default: the live one), or (None, reason).
+    Never raises. With the flag off nothing from localflow.diarization is imported."""
+    if config is None:
+        config = _config
+    if not config.speaker_diarization:
         return None, ""
     try:
         from localflow.diarization.factory import build_diarization
-        collector, reason = build_diarization(_config)
+        collector, reason = build_diarization(config)
     except Exception as exc:  # noqa: BLE001 - diarization is optional
         log.warning("speaker diarization unavailable: %s", exc)
         return None, str(exc) or type(exc).__name__
-    if collector is not None and _recognition_on():
+    # Attach per the snapshot the meeting starts with. Constructing the registry does no
+    # I/O; every voiceprint read re-checks the live gate below (and in finalize/sidecar).
+    if collector is not None and config.speaker_recognition:
         try:
             collector.registry = _speaker_registry()
             # The live gate, re-read by finalize after the queue drains and before each match.
@@ -991,6 +996,28 @@ def _write_speaker_sidecar(saved, session, segments, status: str, speakers: list
         log.exception("writing meeting speaker data failed; notes still saved")
 
 
+def _refresh_speaker_flags() -> Config:
+    """Adopt the on-disk speaker flags now, ahead of the watcher's next poll, and return
+    the config this meeting starts with. Only _LIVE_SPEAKER_FLAGS are read; every other
+    setting keeps the watcher's path. A missing file (no legacy migration), an unreadable
+    or an invalid one keeps the current settings, as the watcher does. Never raises."""
+    global _config
+    with _config_lock:
+        try:
+            path = config_path()
+            fresh = load_config() if path.exists() else None
+        except (ConfigError, OSError, ValueError) as exc:
+            log.warning("config reload skipped: %s", exc)
+            fresh = None
+        if fresh is not None:
+            speaker = {name: getattr(fresh, name) for name in sorted(_LIVE_SPEAKER_FLAGS)
+                       if getattr(_config, name) != getattr(fresh, name)}
+            if speaker:
+                _config = replace(_config, **speaker)
+                log.info("settings updated without restart: %s", ", ".join(speaker))
+        return _config
+
+
 def _start_session(title: str, category: str, template: str = "",
                    user_notes: str = "", *, auto_title: bool | None = None) -> dict:
     """Claim the session slot, then open the mic. Shared by HTTP and the watcher.
@@ -1023,7 +1050,7 @@ def _start_session(title: str, category: str, template: str = "",
     _watcher.pause()  # we hold the mic now; don't self-detect
     try:
         system_audio, system_error = _open_system_audio()
-        collector, diarization_error = _open_diarization()
+        collector, diarization_error = _open_diarization(_refresh_speaker_flags())
         extra = {"diarization": collector} if collector is not None else {}
         session = MeetingSession(
             _get_transcriber(),
