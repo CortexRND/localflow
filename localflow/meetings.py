@@ -967,9 +967,11 @@ class TranscriptChanged(RuntimeError):
 _FRONT_END = re.compile(r"^---\r?$", re.MULTILINE)
 _RAW_NOTES_LINE = re.compile(r"^## My raw notes\r?$", re.MULTILINE)
 # Flow style (`speakers: [...]`) or block style (`speakers:` + `  - item` lines),
-# as Obsidian's Properties editor may rewrite it.
+# as Obsidian's Properties editor may rewrite it; blank and comment lines
+# between items belong to the list.
 _SPEAKERS_LINE = re.compile(
-    r"^speakers:(?:[ \t][^\r\n]*)?(?:\r?\n[ \t]*-(?:[ \t][^\r\n]*)?(?=\r?\n|$))*",
+    r"^speakers:(?:[ \t][^\r\n]*)?"
+    r"(?:(?:\r?\n[ \t]*(?:#[^\r\n]*)?)*\r?\n[ \t]*-(?:[ \t][^\r\n]*)?(?=\r?\n|$))*",
     re.MULTILINE,
 )
 

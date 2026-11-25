@@ -1358,6 +1358,19 @@ def test_relabel_rejects_other_meeting_id_values(tmp_path, form):
     assert saved.log_path.read_bytes() == original
 
 
+def test_relabel_replaces_block_style_speakers_with_gaps(tmp_path):
+    saved = _relabel_fixture(tmp_path)
+    _rewrite_front(saved, 'speakers: ["Me", "Speaker 1", "Speaker 2", "Speaker 2"]\n',
+                   "speakers:\n  - Me\n\n  # remote side\n  - Speaker 1\n  - Speaker 2\n"
+                   "  - Speaker 2\n")
+    assert _relabel(saved) == 2
+    text = saved.log_path.read_text(encoding="utf-8")
+    assert '\nspeakers: ["Me", "Speaker 1", "Dåna", "Speaker 2"]\ntags: [meeting, localflow]\n' \
+        in text
+    assert "  - " not in text and "# remote side" not in text
+    assert _front(saved.log_path)["speakers"] == _RELABEL_SPEAKERS
+
+
 def test_relabel_replaces_block_style_speakers(tmp_path):
     saved = _relabel_fixture(tmp_path)
     _rewrite_front(saved, 'speakers: ["Me", "Speaker 1", "Speaker 2", "Speaker 2"]\n',
