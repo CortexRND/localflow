@@ -195,6 +195,13 @@ impl MeetingSession {
         let pending = self.state.diarization.as_ref()?.collector.close()?;
         Some(SpeakerLabels(pending))
     }
+    /// True when speaker labels are attached but their backend failed to load.
+    pub fn speaker_labels_failed(&self) -> bool {
+        self.state
+            .diarization
+            .as_ref()
+            .is_some_and(|d| d.collector.load_failed())
+    }
     pub fn start(&mut self) -> Result<()> {
         if self.active {
             return Ok(());

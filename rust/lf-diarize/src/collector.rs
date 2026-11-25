@@ -265,6 +265,12 @@ impl Collector {
         accepted
     }
 
+    /// True once the worker recorded that the backend failed to load (never
+    /// blocks; the load itself runs on the worker).
+    pub fn load_failed(&self) -> bool {
+        self.shared.load_failed.load(Ordering::SeqCst)
+    }
+
     /// Records a transcribed chunk without real timings; it keeps its channel label.
     pub fn skip(&self, source: &str) {
         self.shared.count(source, true);

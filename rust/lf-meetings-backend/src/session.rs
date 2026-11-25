@@ -46,6 +46,10 @@ pub(crate) struct Snapshot {
     pub system_audio_error: String,
     pub diarization: Diarization,
 }
+/// Fixed, safe live reason once the collector's backend failed to load (no
+/// path or model detail).
+const MODEL_LOAD_FAILED: &str = "speaker label models could not be loaded";
+
 /// The live speaker-label state (`session.diarization`, `diarization_error`).
 #[derive(Clone, Debug)]
 pub(crate) struct Diarization {
@@ -202,7 +206,14 @@ impl SessionActor {
                                 segments: session.segments(),
                                 system_audio: session.system_audio_status().into(),
                                 system_audio_error: session.system_audio_error.clone(),
-                                diarization: diarization.clone(),
+                                diarization: if diarization.status == "collecting"
+                                    && session.speaker_labels_failed()
+                                {
+                                    // Live only; stop's fallback is unchanged.
+                                    Diarization::unavailable(MODEL_LOAD_FAILED.into())
+                                } else {
+                                    diarization.clone()
+                                },
                             });
                         }
                         Command::Stop(reply) => {
