@@ -78,6 +78,9 @@ impl SessionState {
                             offset_seconds: offset,
                             text: text.into(),
                             source: source.into(),
+                            end_seconds: None,
+                            speaker_id: None,
+                            speaker_label: None,
                         },
                     );
                 }

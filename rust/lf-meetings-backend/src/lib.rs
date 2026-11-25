@@ -14,9 +14,10 @@ use lf_core::{config::Config, history::HistoryStore, home::expand_user, symbols:
 use lf_meetings::{
     answer_question,
     dispatch::{self, PromptQueue, PromptTransitionError},
-    format_transcript, generate_title, latest_transcript_log, read_transcript_log, templates,
+    format_transcript, generate_title, is_diarized, latest_transcript_log, read_transcript_log,
+    templates,
     titles::{is_default_title, TITLE_TIMEOUT_SECONDS},
-    MeetingSummarizer, MeetingWatcher, ObsidianWriter, Segment, WriteNote,
+    MeetingSummarizer, MeetingWatcher, ObsidianWriter, Segment, Transcript, WriteNote,
 };
 use lf_runtime::menubar::{MeetingStatusPoller, MenuState};
 use lf_server::backend::{Backend, BackendRequest, BackendResponse, UnavailableBackend};
@@ -401,8 +402,11 @@ impl MeetingsBackend {
             .providers
             .llm(config)
             .unwrap_or_else(|error| Box::new(providers::FailedProvider(error.to_string())));
-        let mut notes =
-            MeetingSummarizer::new(&*llm).summarize(&transcript, &meta.user_notes, Some(&template));
+        let mut notes = MeetingSummarizer::new(&*llm).summarize(
+            Transcript::new(&transcript, is_diarized(&finished.segments)),
+            &meta.user_notes,
+            Some(&template),
+        );
         let (title, generated) = if meta.title_auto {
             generate_title(
                 self.providers.title(config),
