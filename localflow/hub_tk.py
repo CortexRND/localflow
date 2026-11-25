@@ -2108,9 +2108,9 @@ class PeoplePanelView:
         focus = False
         if people.active:
             self._line()
-            self._list()
-            self._line()
             self._footer()
+            self._line()
+            self._list()
             if self.entry is not None:
                 focus = self._edit_key != (people.mode, people.person_id)
         self._edit_key = (people.mode, people.person_id)
