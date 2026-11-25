@@ -69,7 +69,10 @@ pub fn token_segments(
     let mut groups = Vec::new();
     let mut first = 0;
     for (i, token) in tokens.iter().enumerate() {
-        if i + 1 == tokens.len() || token.trim().ends_with(['.', '?', '!']) {
+        let next_spaced = tokens
+            .get(i + 1)
+            .is_none_or(|next| next.starts_with(char::is_whitespace));
+        if i + 1 == tokens.len() || (token.trim().ends_with(['.', '?', '!']) && next_spaced) {
             groups.push((first, i));
             first = i + 1;
         }
@@ -174,6 +177,20 @@ mod tests {
         assert_eq!(
             token_segments(&tokens, Some(&times), Some(&[0.1]), 3.5)[2].end,
             3.5
+        );
+        let tokens: Vec<String> = [" Pi", " is", " 3", ".", "14", ".", " Next"]
+            .map(String::from)
+            .into();
+        let times = [0.0, 0.3, 0.6, 0.8, 0.9, 1.1, 1.4];
+        let n = 1.4f32 as f64;
+        assert_eq!(
+            token_segments(&tokens, Some(&times), None, 2.0),
+            [span(0.0, n, "Pi is 3.14."), span(n, 2.0, "Next")]
+        );
+        let tokens: Vec<String> = ["3", ".", "14"].map(String::from).into();
+        assert_eq!(
+            token_segments(&tokens, Some(&[0.0, 0.2, 0.3]), None, 1.0),
+            [span(0.0, 1.0, "3.14")]
         );
     }
 
