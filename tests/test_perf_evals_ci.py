@@ -399,7 +399,22 @@ def test_workflow_setup_steps(steps):
 def test_workflow_caches(steps):
     caches = {s["with"]["path"]: s["with"]["key"] for s in steps if str(s.get("uses", "")).startswith("actions/cache@v4")}
     assert caches[".hf-cache"] == "perf-hf-v1-${{ runner.os }}-${{ runner.arch }}"
-    assert caches[".perf-cache"] == "perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}"
+    assert caches[".perf-cache"] == "perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}"
+
+
+def _corpus_cache_key(job: dict) -> str:
+    (key,) = [s["with"]["key"] for s in job["steps"]
+              if str(s.get("uses", "")).startswith("actions/cache@v4") and s["with"]["path"] == ".perf-cache"]
+    return key
+
+
+def test_workflow_corpus_cache_keys_split_smoke_from_full(wf):
+    # Smoke fetches only STT clips; it must not save a partial corpus under the full-corpus key.
+    full = "perf-corpus-full-v1-${{ hashFiles('evals/perf/corpus/*.json') }}"
+    smoke = _corpus_cache_key(wf["jobs"]["smoke"])
+    assert _corpus_cache_key(wf["jobs"]["nightly"]) == full
+    assert _corpus_cache_key(wf["jobs"]["deep"]) == full
+    assert smoke != full
 
 
 def test_workflow_candidate_runs(steps):

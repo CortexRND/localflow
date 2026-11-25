@@ -91,7 +91,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .perf-cache
-          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
+          # Smoke fetches only the STT clips; keep its partial corpus under its own
+          # key so it never pins the cache that nightly/deep need in full.
+          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/stt.json') }}
 
       - name: Select suites and runtimes
         shell: bash
@@ -405,7 +407,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .perf-cache
-          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
+          key: perf-corpus-full-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
 
       - name: Select runtimes
         shell: bash
@@ -656,7 +658,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .perf-cache
-          key: perf-corpus-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
+          key: perf-corpus-full-v1-${{ hashFiles('evals/perf/corpus/*.json') }}
 
       - name: Select runtimes
         shell: bash
