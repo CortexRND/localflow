@@ -339,17 +339,23 @@ class MeetingSession:
     ``source="me"`` (mic) or ``source="others"`` (what the machine played).
     A system source that fails to open never blocks the meeting: the session
     falls back to mic-only and reports why in ``system_audio_error``.
+
+    With a ``diarization`` collector (``localflow.diarization.DiarizationCollector``)
+    each transcribed chunk is also fed to it, outside the transcription lock;
+    live segments stay Me/Others and speaker labels are applied on stop.
     """
 
     def __init__(self, transcriber, transcribe_lock: threading.Lock,
                  sample_rate: int = 16000, chunk_seconds: int = 30,
-                 system_audio=None):
+                 system_audio=None, diarization=None):
         self.transcriber = transcriber
         self.transcribe_lock = transcribe_lock
         self.sample_rate = sample_rate
         self.chunk_seconds = chunk_seconds
         self.system_audio = system_audio
         self.system_audio_error = ""
+        self.diarization = diarization
+        self.diarization_error = ""
         self.segments: list[Segment] = []
         self.started_at: datetime | None = None
         self.active = False
@@ -366,6 +372,13 @@ class MeetingSession:
         if self.system_audio is not None:
             return "on"
         return "error" if self.system_audio_error else "off"
+
+    @property
+    def diarization_status(self) -> str:
+        """'off' / 'collecting' / 'unavailable' — for the UI."""
+        if self.diarization is not None and not self.diarization_error:
+            return "collecting"
+        return "unavailable" if self.diarization_error else "off"
 
     def start(self) -> None:
         self._stream = sd.InputStream(
@@ -402,6 +415,9 @@ class MeetingSession:
         # Skip near-silent chunks — whisper hallucinates on silence.
         if len(audio) < self.sample_rate or float(np.abs(audio).max()) < 0.01:
             return
+        if self.diarization is not None:
+            self._transcribe_chunk_diarized(audio, buffer, offset)
+            return
         with self.transcribe_lock:
             text = self.transcriber.transcribe(audio)
         text = (text or "").strip()
@@ -413,6 +429,36 @@ class MeetingSession:
                 key=lambda seg: seg.offset_seconds,
             )
             log.info("segment @%.0fs (%s): %d chars", offset, buffer.source, len(text))
+
+    def _transcribe_chunk_diarized(self, audio: np.ndarray, buffer: _SourceBuffer,
+                                   offset: float) -> None:
+        """Like the plain path, plus timed text fed to the collector outside the lock."""
+        transcribe_timed = getattr(self.transcriber, "transcribe_timed", None)
+        with self.transcribe_lock:
+            if callable(transcribe_timed):
+                timed = list(transcribe_timed(audio) or [])
+            else:
+                plain = self.transcriber.transcribe(audio)
+        if not callable(transcribe_timed):
+            from localflow.diarization.types import TimedText
+
+            plain = (plain or "").strip()
+            timed = [TimedText(0.0, len(audio) / self.sample_rate, plain)] if plain else []
+        text = " ".join(s for s in ((t.text or "").strip() for t in timed) if s)
+        if not text:
+            return
+        bisect.insort(
+            self.segments, Segment(offset, text, buffer.source),
+            key=lambda seg: seg.offset_seconds,
+        )
+        log.info("segment @%.0fs (%s): %d chars", offset, buffer.source, len(text))
+        try:
+            self.diarization.feed(buffer.source, offset, audio, timed)
+        except Exception:
+            log.exception("diarization feed failed (%s)", buffer.source)
+        error = getattr(self.diarization, "error", "")
+        if isinstance(error, str) and error:
+            self.diarization_error = error
 
     def _drain_once(self) -> None:
         for buffer in (self._mic, self._others):
@@ -1093,6 +1139,7 @@ class SavedNote:
     notes_path: Path
     log_path: Path
     title: str = ""
+    meeting_id: str | None = None
 
 
 def _diarized_speakers(segments: list[Segment]) -> list[str]:
@@ -1245,4 +1292,4 @@ class ObsidianWriter:
                     pass
             raise
         log.info("wrote %s and %s", notes_path, log_path)
-        return SavedNote(notes_path, log_path, heading)
+        return SavedNote(notes_path, log_path, heading, meeting_id)

@@ -686,6 +686,7 @@ def meeting_status() -> dict:
             "user_notes": meta.get("user_notes", ""),
             "system_audio": session.system_audio_status,
             "system_audio_error": session.system_audio_error,
+            **_diarization_payload(session),
             "seconds": int(session.elapsed_seconds()),
             "segments": [
                 {"stamp": s.stamp, "text": s.text, "source": s.source}
@@ -705,6 +706,7 @@ def meeting_status() -> dict:
         "platform": _watcher.platform,
         "auto_start": _config.meeting_auto_start,
         "capture_system_audio": _config.capture_system_audio,
+        "speaker_diarization": bool(_config.speaker_diarization),
         "session": live,
         "last_saved": last_saved,
         "chat_available": _chat_transcript_path() is not None,
@@ -720,6 +722,54 @@ def _open_system_audio():
     except Exception as exc:  # noqa: BLE001 - a missing source means mic-only
         log.warning("system audio unavailable; mic only: %s", exc)
         return None, str(exc) or type(exc).__name__
+
+
+def _open_diarization():
+    """Diarization collector per config, or (None, reason). Never raises.
+    With the flag off nothing from localflow.diarization is imported."""
+    if not _config.speaker_diarization:
+        return None, ""
+    try:
+        from localflow.diarization.factory import build_diarization
+        return build_diarization(_config)
+    except Exception as exc:  # noqa: BLE001 - diarization is optional
+        log.warning("speaker diarization unavailable: %s", exc)
+        return None, str(exc) or type(exc).__name__
+
+
+def _diarization_state(session) -> tuple[str, str]:
+    """(status, error) for a session; tolerant of sessions without the attributes."""
+    error = getattr(session, "diarization_error", "") or ""
+    status = getattr(session, "diarization_status", None)
+    if status not in ("off", "collecting", "unavailable"):
+        status = "unavailable" if error else "off"
+    return status, error
+
+
+def _diarization_payload(session) -> dict:
+    status, error = _diarization_state(session)
+    return {"diarization": status, "diarization_error": error}
+
+
+def _finalize_diarization(session, segments) -> tuple[list, str, list[dict]]:
+    """(segments, status, speakers). Never raises; any problem keeps the original segments."""
+    collector = getattr(session, "diarization", None)
+    if collector is None:
+        return segments, "off", []
+    try:
+        result = collector.finalize(segments)
+        if result.status == "ok":
+            speakers = [
+                {"id": s.id, "label": s.label, "name": s.name, "source": s.source,
+                 "seconds": round(float(s.seconds), 1)}
+                for s in result.speakers
+            ]
+            return list(result.segments), "ok", speakers
+        status = result.status if result.status in ("channel", "failed", "timeout") else "failed"
+    except Exception:
+        log.exception("speaker diarization finalize failed; keeping channel labels")
+        return segments, "failed", []
+    return segments, status, []
 
 
 def _start_session(title: str, category: str, template: str = "",
@@ -754,14 +804,19 @@ def _start_session(title: str, category: str, template: str = "",
     _watcher.pause()  # we hold the mic now; don't self-detect
     try:
         system_audio, system_error = _open_system_audio()
+        collector, diarization_error = _open_diarization()
+        extra = {"diarization": collector} if collector is not None else {}
         session = MeetingSession(
             _get_transcriber(),
             _transcribe_lock,
             sample_rate=_config.sample_rate,
             chunk_seconds=_config.meeting_chunk_seconds,
             system_audio=system_audio,
+            **extra,
         )
         session.system_audio_error = system_error
+        if diarization_error:
+            session.diarization_error = diarization_error
         session.start()
     except Exception as exc:  # noqa: BLE001 - cleanup boundary: always release the slot
         _watcher.resume()
@@ -788,6 +843,7 @@ def _start_session(title: str, category: str, template: str = "",
         "template": template_id,
         "system_audio": session.system_audio_status,
         "system_audio_error": session.system_audio_error,
+        **_diarization_payload(session),
     }
 
 
@@ -941,6 +997,7 @@ async def meeting_stop() -> dict:
         if _config.sounds_enabled:
             sounds.play("stop")
         _watcher.resume()
+        segments, diarization_status, speakers = _finalize_diarization(session, segments)
         # Snapshot the summary client and config together before a reload can
         # change the provider or model for the title.
         with _config_lock:
@@ -995,6 +1052,9 @@ async def meeting_stop() -> dict:
             "segments": len(segments),
             "template": template.id,
             "enhanced": bool(user_notes.strip()),
+            "meeting_id": getattr(saved, "meeting_id", None),
+            "diarization": diarization_status,
+            "speakers": speakers,
             **extra,
         }
         with _session_lock:
