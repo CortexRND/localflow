@@ -559,11 +559,13 @@ impl MeetingsBackend {
                 None
             };
             let corpus = Corpus::from_config(&request.config, store.as_ref());
+            let speakers = enabled(&request.config, "speaker_diarization")
+                .then_some(lf_meetings::clean_speaker_name as lf_ask::SpeakerCleaner);
             let result = if llm {
                 let llm = self.providers.llm(&request.config)?;
-                lf_ask::recall(&question, &*llm, &corpus, &options)?
+                lf_ask::recall_with_speakers(&question, &*llm, &corpus, &options, speakers)?
             } else {
-                lf_ask::search(&question, &corpus, &options)?
+                lf_ask::search_with_speakers(&question, &corpus, &options, speakers)?
             };
             Ok(result.to_dict())
         })();

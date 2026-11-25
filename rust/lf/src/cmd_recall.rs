@@ -6,7 +6,7 @@ use std::cell::RefCell;
 
 use anyhow::{anyhow, Result};
 use chrono::{Local, NaiveDateTime};
-use lf_ask::{Citation, Corpus, SearchOptions, Since, NO_ANSWER};
+use lf_ask::{Citation, Corpus, SearchOptions, Since, SpeakerCleaner, NO_ANSWER};
 use lf_core::symbols::pycompat;
 use lf_core::{config, history::HistoryStore};
 use lf_providers::factory::{build_llm, BuildOptions};
@@ -43,8 +43,10 @@ pub(crate) fn run(args: RecallArgs, io: &mut Io<'_>) -> Result<()> {
         now: Local::now().naive_local(),
         sources: Vec::new(),
     };
+    let speakers = (loaded.field_bool("speaker_diarization") == Some(true))
+        .then_some(lf_meetings::clean_speaker_name as SpeakerCleaner);
     let result = if args.no_llm {
-        lf_ask::search(&question, &corpus, &options)?
+        lf_ask::search_with_speakers(&question, &corpus, &options, speakers)?
     } else {
         // `console.status(...)` draws nothing when stdout is not a terminal.
         let llm = Recording {
@@ -52,7 +54,7 @@ pub(crate) fn run(args: RecallArgs, io: &mut Io<'_>) -> Result<()> {
                 .map_err(|error| anyhow!("{error}"))?,
             error: RefCell::new(None),
         };
-        let result = lf_ask::recall(&question, &llm, &corpus, &options)?;
+        let result = lf_ask::recall_with_speakers(&question, &llm, &corpus, &options, speakers)?;
         if let Some(error) = llm.error.take() {
             // Python's `log.warning` reaches stderr through logging's last resort.
             outln!(
@@ -203,6 +205,7 @@ mod tests {
             when: "2026-11-13T09:05".into(),
             snippet: "launch pricing".into(),
             reference: String::new(),
+            speaker: None,
         };
         assert_eq!(
             format_source(&citation),
