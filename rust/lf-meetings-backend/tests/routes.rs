@@ -55,6 +55,8 @@ struct Capture {
     speaker_gate: Arc<Mutex<Option<Gate>>>,
     /// Speaker turns end this many milliseconds early (fractional talk time).
     turn_trim_ms: Arc<AtomicUsize>,
+    /// The speaker backend's `load` fails (on the collector's worker).
+    speaker_load_fail: Arc<AtomicBool>,
 }
 struct Device {
     _local: Rc<()>,
@@ -67,7 +69,7 @@ struct Device {
 }
 const BLOCK: usize = 24_000;
 /// One turn per 1.5 s block, speaker and one-hot embedding by amplitude.
-struct Speakers(Arc<Mutex<Option<Gate>>>, Arc<AtomicUsize>);
+struct Speakers(Arc<Mutex<Option<Gate>>>, Arc<AtomicUsize>, Arc<AtomicBool>);
 fn bucket(sample: f32) -> usize {
     (sample * 10.0).round() as usize
 }
@@ -76,6 +78,10 @@ impl SpeakerBackend for Speakers {
         Some("mock")
     }
     fn load(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.2.load(Ordering::SeqCst),
+            "/private/models/x.onnx missing"
+        );
         Ok(())
     }
     fn diarize(&mut self, audio: &[f32]) -> Result<Vec<SpeakerTurn>> {
@@ -206,6 +212,7 @@ impl CaptureFactory for Capture {
             Box::new(Speakers(
                 self.speaker_gate.clone(),
                 self.turn_trim_ms.clone(),
+                self.speaker_load_fail.clone(),
             )) as Box<dyn SpeakerBackend>
         }))
     }
@@ -2676,6 +2683,129 @@ async fn the_live_gate_is_rechecked_after_the_body_is_read() {
     );
     assert_eq!(response.status, 403);
     assert!(!f.dir.path().join("speakers").exists());
+}
+
+#[tokio::test]
+async fn quick_exit_waits_for_an_in_flight_final_sidecar_but_not_for_slow_work() {
+    let f = speaker_fixture(true);
+    // The sidecar write's live-gate read is the stop's only config read
+    // (recognition was off at start): block it there.
+    let slot: Arc<Mutex<Option<Gate>>> = Arc::default();
+    let (writing, release) = gate(&slot);
+    let (reader_slot, config) = (slot.clone(), f.config.clone());
+    let backend = Arc::new(
+        MeetingsBackend::new()
+            .unwrap()
+            .with_capture(f.capture.clone())
+            .with_providers(Arc::new(Providers(f.models.clone())))
+            .with_queue(PromptQueue::new(f.dir.path().join("queue.json")))
+            .with_history_path(f.dir.path().join("history.sqlite"))
+            .with_speaker_data(Arc::new(SpeakerData::with_roots(
+                f.dir.path().join("meetings"),
+                f.dir.path().join("speakers"),
+            )))
+            .with_config_reader(Arc::new(move || {
+                if let Some((entered, release)) = reader_slot.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                    release.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                Ok(config.clone())
+            })),
+    );
+    let start = request(
+        app(f.config.clone(), backend.clone()),
+        "POST",
+        "/meeting/start",
+        Some(json!({"title":"Speakers", "auto_title":false})),
+    )
+    .await;
+    assert_eq!(start.0, 200, "{}", start.1);
+    let (stopping, config) = (backend.clone(), f.config.clone());
+    let stop = std::thread::spawn(move || {
+        stopping.handle(BackendRequest {
+            method: "POST".parse().unwrap(),
+            path: "/meeting/stop".into(),
+            body: Default::default(),
+            headers: Default::default(),
+            query: Default::default(),
+            config,
+        })
+    });
+    writing.recv_timeout(Duration::from_secs(10)).unwrap();
+    // The final note is on disk; its sidecar is being written.
+    let (done, finished) = mpsc::channel();
+    let waiting = backend.clone();
+    let waiter =
+        std::thread::spawn(move || done.send(waiting.wait_for_saved_transcript()).unwrap());
+    assert!(finished.recv_timeout(Duration::from_millis(100)).is_err());
+    release.send(()).unwrap();
+    assert_eq!(
+        finished.recv_timeout(Duration::from_secs(10)).unwrap(),
+        MeetingSave::Note
+    );
+    let sidecars = fs::read_dir(f.dir.path().join("meetings")).unwrap().count();
+    assert_eq!(sidecars, 1, "the sidecar is complete when Note is reported");
+    waiter.join().unwrap();
+    assert_eq!(stop.join().unwrap().status, 200);
+
+    // Slow work after the checkpoint (here the summary) is not waited for.
+    let f = speaker_fixture(true);
+    start_meeting(&f).await;
+    let (summarizing, release) = gate(&f.models.gate);
+    let stop = stop_request(&f);
+    summarizing.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        f.backend.wait_for_saved_transcript(),
+        MeetingSave::Transcript
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        stop.join().unwrap().status,
+        500,
+        "abandoned after the quick exit"
+    );
+    assert!(!f.dir.path().join("meetings").exists());
+}
+
+#[tokio::test]
+async fn a_worker_model_load_failure_shows_live_as_unavailable() {
+    let f = speaker_fixture(true);
+    f.capture.speaker_load_fail.store(true, Ordering::SeqCst);
+    let start = request(
+        f.app(),
+        "POST",
+        "/meeting/start",
+        Some(json!({"title":"Speakers", "auto_title":false})),
+    )
+    .await;
+    // The start never waits for the model load: either state is possible here.
+    assert!(
+        matches!(
+            start.1["diarization"].as_str(),
+            Some("collecting" | "unavailable")
+        ),
+        "{}",
+        start.1
+    );
+    let mut live = Value::Null;
+    for _ in 0..500 {
+        live = request(f.app(), "GET", "/meeting/status", None).await.1["session"].clone();
+        if live["diarization"] == "unavailable" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(live["diarization"], "unavailable", "{live}");
+    assert_eq!(
+        live["diarization_error"], "speaker label models could not be loaded",
+        "a fixed reason, never the backend's message"
+    );
+    // Stop keeps its channel fallback.
+    let saved = request(f.app(), "POST", "/meeting/stop", None).await.1;
+    assert_eq!(saved["diarization"], "failed");
+    assert_eq!(saved["speakers"], json!([]));
+    let log = fs::read_to_string(saved["log_path"].as_str().unwrap()).unwrap();
+    assert!(log.contains("**Others:** sounds good, Dana owns the blog post"));
 }
 
 #[tokio::test]
