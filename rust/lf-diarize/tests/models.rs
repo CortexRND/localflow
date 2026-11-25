@@ -125,13 +125,16 @@ mod verify {
         let mut backend = SherpaBackend::new(cache);
         backend.load().unwrap();
         let tone: Vec<f32> = (0..32_000).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
-        // Segmentation may find no speech in a tone; every turn it does find is
-        // well-formed and, when long enough, embeds like the collector does.
+        // The pinned models were observed to find one turn of at least 1 s in
+        // this tone; every turn must be well-formed, and the long ones embed
+        // like the collector does.
         let seconds = tone.len() as f64 / 16_000.0;
         let whole = backend.embed(&tone).unwrap();
         assert!(!whole.is_empty() && whole.iter().all(|v| v.is_finite()));
         let turns = backend.diarize(&tone).unwrap();
         eprintln!("real turns on a {seconds}s tone: {turns:?}");
+        assert!(!turns.is_empty(), "the pinned models found no turn");
+        let mut embedded = 0;
         for turn in turns {
             // Clipped to the real audio: finite, non-empty, inside [0, duration].
             assert!(turn.start.is_finite() && turn.end.is_finite(), "{turn:?}");
@@ -143,7 +146,10 @@ mod verify {
                 let vector = backend.embed(&tone[from..to]).unwrap();
                 assert_eq!(vector.len(), whole.len());
                 assert!(vector.iter().all(|v| v.is_finite()));
+                assert!(vector.iter().any(|&v| v != 0.0), "zero embedding");
+                embedded += 1;
             }
         }
+        assert!(embedded >= 1, "no turn of at least 1 s was embedded");
     }
 }
