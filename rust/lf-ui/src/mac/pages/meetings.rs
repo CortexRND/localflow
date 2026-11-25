@@ -328,6 +328,10 @@ struct State {
     probe_queue: RefCell<std::collections::BTreeSet<String>>,
     /// The ids of the probe in flight.
     probe_ids: RefCell<Vec<String>>,
+    /// The server came back while a probe was in flight: that probe may
+    /// have failed against the old connection, so once it finishes the
+    /// recent ids still uncached are read again (once, not in a loop).
+    probe_after_reconnect: Cell<bool>,
     /// Counts applied speaker edits. A probe or status read launched before
     /// the latest edit was applied may hold older speakers: its speakers are
     /// not used (a probe's ids are read again).
@@ -400,6 +404,7 @@ impl State {
             probe_in_flight: Cell::new(false),
             probe_queue: RefCell::new(std::collections::BTreeSet::new()),
             probe_ids: RefCell::new(Vec::new()),
+            probe_after_reconnect: Cell::new(false),
             speaker_seq: Cell::new(0),
             probe_seq: Cell::new(0),
             status_seq: Cell::new(0),
@@ -991,6 +996,17 @@ impl State {
         self.probe(ids);
     }
 
+    /// The server answered again after a failed (or first) status read. A
+    /// probe still in flight may fail against the old connection, so wait for
+    /// it and read the uncached ids then; otherwise read them now.
+    fn probe_recent_after_reconnect(&self) {
+        if self.probe_in_flight.get() {
+            self.probe_after_reconnect.set(true);
+        } else {
+            self.probe_recent();
+        }
+    }
+
     /// Queue `ids` to be read (cached or not) and start a probe unless one is
     /// running; the queue is sent, in id order, when that one finishes.
     fn probe(&self, ids: Vec<String>) {
@@ -1236,6 +1252,7 @@ impl State {
             if matches!(&event.kind, EventKind::SpeakerProbe(_)) {
                 self.probe_in_flight.set(false);
                 self.probe_ids.borrow_mut().clear();
+                self.probe_after_reconnect.set(false);
             }
             return;
         }
@@ -1315,8 +1332,15 @@ impl State {
                         }
                         self.session_active.set(session.is_some());
                         *self.status.borrow_mut() = Some(result);
+                        // A connection message means the last read failed (or
+                        // none succeeded yet): recent speaker reads may have
+                        // failed with it, and nothing else asks again.
+                        let reconnected = !self.connection_message.borrow().is_empty();
                         self.connection_message.borrow_mut().clear();
                         self.retry_visible.set(false);
+                        if reconnected {
+                            self.probe_recent_after_reconnect();
+                        }
                     }
                 }
                 self.next_poll.set(Some(Instant::now() + POLL_INTERVAL));
@@ -1417,6 +1441,10 @@ impl State {
                             Err(error) => log::debug!("meeting speakers unavailable: {error}"),
                         }
                     }
+                }
+                if self.probe_after_reconnect.replace(false) {
+                    // Queues only ids still uncached (a 404 stays cached).
+                    self.probe_recent();
                 }
                 self.launch_probe();
                 self.request_rebuild();
@@ -1623,6 +1651,7 @@ impl MeetingsPage {
         state.probe_in_flight.set(false);
         state.probe_queue.borrow_mut().clear();
         state.probe_ids.borrow_mut().clear();
+        state.probe_after_reconnect.set(false);
         state.edit_on_recent.set(false);
         *state.open_recent.borrow_mut() = None;
         state.snapshot_mode.set(true);
@@ -3973,6 +4002,125 @@ mod tests {
         let calls = client.calls().len();
         page.state.reload_recent();
         assert_eq!(client.calls().len(), calls);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn reconnect_reads_uncached_recent_speakers_once_and_keeps_404s() {
+        let vault = tempfile::tempdir().unwrap();
+        let folder = vault.path().join("notes/Other");
+        std::fs::create_dir_all(&folder).unwrap();
+        let other = "f".repeat(32);
+        for (name, id) in [
+            ("2026-11-14 1000 A.md", MEETING),
+            ("2026-11-15 1000 B.md", other.as_str()),
+        ] {
+            std::fs::write(
+                folder.join(name),
+                format!("---\ntitle: \"{name}\"\nmeeting_id: \"{id}\"\n---\n# {name}\n"),
+            )
+            .unwrap();
+        }
+        let speaker_reads = |client: &FakeMeetingClient| {
+            client
+                .calls()
+                .into_iter()
+                .filter(|call| matches!(call, MeetingCall::Speakers(_)))
+                .count()
+        };
+        let client = Arc::new(FakeMeetingClient::new());
+        client.seed_speakers(MEETING, two_speakers());
+        let page = page(client.clone(), idle());
+        page.state.snapshot_mode.set(false);
+        *page.state.vault_config.borrow_mut() =
+            (vault.path().to_string_lossy().into_owned(), "notes".into());
+
+        // The first recent read and the status read both fail.
+        client.set_down(Some("offline"));
+        page.state.reload_recent();
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        assert!(page.state.retry_visible.get());
+        assert!(page.state.recent_speakers.borrow().is_empty());
+
+        // Retry succeeds: the uncached ids are read, the 404 is cached.
+        client.set_down(None);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        {
+            let cache = page.state.recent_speakers.borrow();
+            assert_eq!(
+                cache.get(MEETING).cloned().flatten().map(|s| s.len()),
+                Some(2)
+            );
+            assert_eq!(cache.get(&other), Some(&None));
+        }
+        assert!(!page.state.probe_in_flight.get());
+
+        // Another reconnect with everything cached (a 404 too) asks nothing.
+        let before = speaker_reads(&client);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        assert!(!page.state.probe_in_flight.get(), "no busy loop");
+        assert_eq!(speaker_reads(&client), before);
+
+        // Reconnect while a probe from the old connection is in flight: it
+        // waits for that probe, and its failure is read again once.
+        page.state.recent_speakers.borrow_mut().remove(MEETING);
+        let in_flight = |page: &MeetingsPage| {
+            page.state.probe_in_flight.set(true);
+            page.state.probe_seq.set(page.state.speaker_seq.get());
+            *page.state.probe_ids.borrow_mut() = vec![MEETING.into()];
+            *page.state.connection_message.borrow_mut() = "offline".into();
+        };
+        in_flight(&page);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        assert!(page.state.probe_after_reconnect.get());
+        assert_eq!(
+            speaker_reads(&client),
+            before,
+            "waits for the probe in flight"
+        );
+        page.state.apply_event(Event {
+            generation: page.state.generation.get(),
+            kind: EventKind::SpeakerProbe(vec![(
+                MEETING.into(),
+                Err(crate::backends::meeting::MeetingClientError(
+                    "offline".into(),
+                )),
+            )]),
+        });
+        assert!(
+            page.state.probe_in_flight.get(),
+            "the failed id is read again"
+        );
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        assert_eq!(speaker_reads(&client), before + 1);
+        assert!(page.state.recent_speakers.borrow().contains_key(MEETING));
+        assert!(!page.state.probe_in_flight.get());
+        assert!(!page.state.probe_after_reconnect.get());
+
+        // The same overlap where that probe succeeds: nothing is read again.
+        page.state.recent_speakers.borrow_mut().remove(MEETING);
+        in_flight(&page);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        page.state.apply_event(Event {
+            generation: page.state.generation.get(),
+            kind: EventKind::SpeakerProbe(vec![(
+                MEETING.into(),
+                Ok(Some(
+                    json!({"meeting_id": MEETING, "speakers": two_speakers()}),
+                )),
+            )]),
+        });
+        assert!(page.state.recent_speakers.borrow().contains_key(MEETING));
+        assert!(!page.state.probe_in_flight.get(), "no second read");
+        assert!(!page.state.probe_after_reconnect.get());
+        assert_eq!(speaker_reads(&client), before + 1);
         page.state.shutdown();
     }
 
