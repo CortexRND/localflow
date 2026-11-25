@@ -660,6 +660,7 @@ port = 8756
 [features]
 meetings = true                    # macOS only; forced false elsewhere
 hot_phrases = true                 # spoken trigger phrases expand into saved prompts
+perf_metrics = true                # local timings in ~/.localflow/perf/events.jsonl (numbers and model names only)
 
 [history]
 enabled = true

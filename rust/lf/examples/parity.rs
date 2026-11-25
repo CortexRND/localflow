@@ -187,10 +187,67 @@ fn rich(request: &Value) -> Result<Value> {
     }))
 }
 
+/// `lf_core::perf_ledger`: `write` appends the given event objects (parsed
+/// as a reader would), `record` appends a fresh Rust event of `kind`, `read`
+/// returns every event read back as its canonical line, `line` the canonical
+/// line of one event object, `default_path` the resolved ledger path.
+fn perf(request: &Value) -> Result<Value> {
+    use lf_core::perf_ledger::{
+        default_ledger_path, Kind, PerfEvent, PerfLedger, Status, SttLabels,
+    };
+    let parse = |value: &Value| {
+        PerfEvent::parse_line(&value.to_string()).ok_or_else(|| anyhow!("invalid event {value}"))
+    };
+    let ledger = || -> Result<PerfLedger> {
+        let mut ledger = PerfLedger::new(path(request, "path")?);
+        if let Some(max) = request.get("max_bytes").and_then(Value::as_u64) {
+            ledger = ledger.with_max_bytes(max);
+        }
+        Ok(ledger)
+    };
+    match text(request, "action")? {
+        "write" => {
+            let ledger = ledger()?;
+            for value in arg(request, "events")?.as_array().context("events")? {
+                ensure_recorded(ledger.record(&parse(value)?))?;
+            }
+            Ok(Value::Null)
+        }
+        "record" => {
+            let kind: Kind = serde_json::from_value(arg(request, "kind")?.clone())?;
+            let event = PerfEvent {
+                total_ms: Some(12.5),
+                stt: Some(SttLabels::new("auto", "base", "cpu")),
+                chars: Some(3),
+                ..PerfEvent::new(kind, Status::Ok)
+            };
+            ensure_recorded(ledger()?.record(&event))?;
+            Ok(Value::String(event.to_line()))
+        }
+        "read" => Ok(json!(ledger()?
+            .read_events()
+            .iter()
+            .map(PerfEvent::to_line)
+            .collect::<Vec<_>>())),
+        "line" => Ok(Value::String(parse(arg(request, "event")?)?.to_line())),
+        "default_path" => Ok(json!(default_ledger_path())),
+        other => bail!("unknown perf action {other:?}"),
+    }
+}
+
+fn ensure_recorded(recorded: bool) -> Result<()> {
+    if recorded {
+        Ok(())
+    } else {
+        bail!("perf ledger write failed")
+    }
+}
+
 fn handle(request: &Value) -> Result<Value> {
     let op = text(request, "op")?;
     match op {
         "rich" => rich(request),
+        "perf" => perf(request),
         "config_defaults" => Ok(config::config_to_dict(&Config::default())),
         "config_update" => Ok(config::config_to_dict(&updated_config(request)?)),
         "shortcut_normalize" => Ok(json!(lf_core::shortcuts::normalize_optional_combo(
