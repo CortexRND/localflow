@@ -1,8 +1,9 @@
-"""Speech models LocalFlow downloaded into the Hugging Face cache.
+"""Speech and speaker-label models LocalFlow downloaded into the Hugging Face cache.
 
 Used by Models & keys -> "Free up space". Only the exact repositories
-LocalFlow's speech catalog can download are ever listed or deleted (Whisper
-via faster-whisper or MLX, Parakeet); any other Hugging Face model (a 15 GB
+LocalFlow's catalogs can download are ever listed or deleted (Whisper via
+faster-whisper or MLX, Parakeet, and the speaker-label models in
+localflow.diarization.models); any other Hugging Face model (a 15 GB
 LLM, say) and every Ollama model are invisible here. Nothing is loaded,
 downloaded or initialised to build the list: it is only `stat` calls.
 
@@ -10,12 +11,19 @@ Sizes count each file once: Hugging Face stores data in `blobs/` and points
 `snapshots/<rev>/<file>` symlinks at them, so files are deduplicated by inode
 and a symlink only counts when it resolves inside the model's own folder.
 
+Speaker-label repos can be shared with files LocalFlow never fetched (the
+CAM++ repo holds many embedders), so for them only the pinned
+`snapshots/<revision>/<filename>` of each catalog model is counted and
+deleted, plus its `blobs/<sha256>` when nothing else in the folder can still
+point at it. Everything else in such a folder is left alone.
+
 Deletion refuses (re-checked at click time):
 - any model a running LocalFlow process actually loaded (stt_lease: the
   dictation app and server keep their model until restarted, even after the
   saved config changes, and `auto` can fall back from MLX at load time);
 - any model the saved config could load (both MLX and faster-whisper when
-  the MLX import can't be ruled out);
+  the MLX import can't be ruled out, and the speaker-label models while
+  `speaker_diarization` is on);
 - everything, when a plug-in backend or an unreadable lease makes the use
   unknown;
 - anything not in the catalog, and any folder that is a symlink or resolves
@@ -33,6 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from localflow.config import Config
+from localflow.diarization import models as diar_models
+from localflow.diarization.models import diarization_repos
 from localflow.providers.stt_mlx_whisper import _MLX_REPOS
 from localflow.providers.stt_parakeet import PARAKEET_REPO
 
@@ -70,7 +80,10 @@ _SIZE_LABELS = {
 
 
 def catalog() -> dict[str, str]:
-    """repo id -> display label for every speech model LocalFlow downloads."""
+    """repo id -> display label for every speech and speaker-label model LocalFlow downloads.
+
+    Speaker-label models come last.
+    """
     repos = {
         FASTER_WHISPER_REPOS[size]: f"Whisper {_SIZE_LABELS[size]}"
         for size in _FW_CATALOG
@@ -80,6 +93,7 @@ def catalog() -> dict[str, str]:
         for size in _MLX_CATALOG
     })
     repos[PARAKEET_REPO] = "Parakeet v2"
+    repos.update(diarization_repos())
     return repos
 
 
@@ -141,6 +155,21 @@ def _faster_whisper_repo(size) -> str | None:
 
 def selected_repos(config: Config, mlx_available: Callable[[], bool] = _mlx_available):
     """Repos the saved config could load (a frozenset), or UNKNOWN.
+
+    The speech model(s) from `_selected_stt_repos`, plus the speaker-label
+    models while `speaker_diarization` is on. A plug-in speech backend still
+    fails closed (UNKNOWN) whatever the flag.
+    """
+    repos = _selected_stt_repos(config, mlx_available)
+    if repos is UNKNOWN:
+        return UNKNOWN
+    if config.speaker_diarization:
+        repos = repos | frozenset(diarization_repos())
+    return repos
+
+
+def _selected_stt_repos(config: Config, mlx_available: Callable[[], bool]):
+    """Speech repos the saved config could load (a frozenset), or UNKNOWN.
 
     Mirrors stt.Transcriber without loading anything. parakeet -> Parakeet.
     auto/mlx with device auto and an MLX size tries MLX first and falls back
@@ -261,6 +290,169 @@ def _model_folder(cache: Path, repo: str) -> Path | None:
     return folder
 
 
+@dataclass(frozen=True)
+class _Pinned:
+    """One catalog speaker model's pinned snapshot file, found by `lstat` only."""
+
+    revision_dir: Path
+    pointer: Path               # snapshots/<revision>/<filename>
+    pointer_info: os.stat_result
+    blob: Path | None           # blobs/<sha256> when `pointer` links to it; None for a copy
+    blob_info: os.stat_result | None
+
+
+def _link_parts(target: str) -> list[str]:
+    """Link text split by this OS's separators: `\\` is one only on Windows."""
+    if os.altsep:
+        target = target.replace(os.altsep, os.sep)
+    return target.split(os.sep)
+
+
+def _is_pinned_link(pointer: Path, sha256: str) -> bool:
+    """The link text is exactly `../../blobs/<sha256>` (what the hub writes); never resolved."""
+    try:
+        target = os.readlink(pointer)
+    except OSError:
+        return False
+    return _link_parts(target) == ["..", "..", "blobs", sha256]
+
+
+def _pinned_files(folder: Path, repo: str) -> list[_Pinned]:
+    """The current catalog's pinned files for `repo` inside its plain `folder`.
+
+    Only plain directories are entered; a pinned name that is a link to
+    anything but `../../blobs/<sha256>` (a regular file, under a plain
+    `blobs/`), or that can't be inspected, is skipped as not ours.
+    """
+    found = []
+    snapshots, blobs = folder / "snapshots", folder / "blobs"
+    for model in diar_models.DIAR_MODELS:
+        if model.repo != repo:
+            continue
+        revision_dir = snapshots / model.revision
+        if not (diar_models._is_plain_dir(snapshots) and diar_models._is_plain_dir(revision_dir)):
+            continue
+        pointer = revision_dir / model.filename
+        try:
+            info = os.lstat(pointer)
+            if stat.S_ISREG(info.st_mode):  # copy layout (no symlinks)
+                found.append(_Pinned(revision_dir, pointer, info, None, None))
+                continue
+            if not stat.S_ISLNK(info.st_mode) or not _is_pinned_link(pointer, model.sha256):
+                continue
+            if not diar_models._is_plain_dir(blobs):
+                continue
+            blob = blobs / model.sha256
+            blob_info = os.lstat(blob)
+        except OSError:
+            continue
+        if stat.S_ISREG(blob_info.st_mode):
+            found.append(_Pinned(revision_dir, pointer, info, blob, blob_info))
+    return found
+
+
+def _pinned_size(pinned: list[_Pinned]) -> int:
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    for item in pinned:
+        info = item.blob_info if item.blob_info is not None else item.pointer_info
+        key = (info.st_dev, info.st_ino)
+        if key not in seen:
+            seen.add(key)
+            total += info.st_size
+    return total
+
+
+def _link_names(folder: Path) -> set[str] | None:
+    """Last path component of every symlink anywhere under `folder`.
+
+    None when any part can't be inspected (unreadable, or a linked or
+    junction directory): the caller then keeps every blob.
+    """
+    names: set[str] = set()
+    stack = [folder]
+    while stack:
+        current = stack.pop()
+        if not diar_models._is_plain_dir(current):
+            return None
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            return None
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    if entry.is_dir():  # a linked folder could hide links: never entered
+                        return None
+                    parts = [part for part in _link_parts(os.readlink(entry.path)) if part]
+                    if parts:
+                        names.add(os.path.normcase(parts[-1]))
+                elif entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+            except OSError:
+                return None
+    return names
+
+
+def _delete_pinned(folder: Path, repo: str, label: str) -> int:
+    """Delete only the pinned files of a speaker-label repo; returns bytes freed.
+
+    Snapshot files go first (then their revision and `snapshots/` folders if
+    left empty). A pinned blob is removed only when no link left anywhere in
+    the folder names it, it has no other hard link, and it is still the file
+    that was inspected. Refs and every other file are kept.
+    """
+    freed = 0
+    try:
+        with diar_models._LOCK:  # never race an in-process download publishing
+            pinned = _pinned_files(folder, repo)
+            if not pinned:
+                raise ModelStorageError(f"{label} isn't downloaded (or isn't a plain folder).")
+            for item in pinned:
+                try:
+                    info = os.lstat(item.pointer)
+                except FileNotFoundError:
+                    continue
+                if (info.st_dev, info.st_ino) != (
+                    item.pointer_info.st_dev, item.pointer_info.st_ino
+                ):
+                    continue  # replaced since it was inspected
+                os.unlink(item.pointer)
+                if item.blob is None and info.st_nlink == 1:
+                    freed += info.st_size
+            for item in pinned:
+                for directory in (item.revision_dir, item.revision_dir.parent):
+                    try:
+                        os.rmdir(directory)  # only succeeds when empty
+                    except OSError:
+                        pass
+            names = _link_names(folder)
+            for item in pinned:
+                inspected = item.blob_info
+                if item.blob is None or inspected is None or names is None:
+                    continue
+                if os.path.normcase(item.blob.name) in names:
+                    continue  # another snapshot (any revision) still points at it
+                try:
+                    info = os.lstat(item.blob)
+                except FileNotFoundError:
+                    continue
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or (info.st_dev, info.st_ino) != (inspected.st_dev, inspected.st_ino)
+                ):
+                    continue
+                os.unlink(item.blob)
+                freed += info.st_size
+    except OSError as exc:
+        raise ModelStorageError(
+            f"Couldn't fully delete {label} ({exc.strerror or exc}); "
+            f"freed {format_bytes(freed)}."
+        ) from exc
+    return freed
+
+
 def inventory(
     config: Config,
     cache: Path | None = None,
@@ -280,7 +472,10 @@ def inventory(
         folder = _model_folder(cache, repo)
         if folder is None:
             continue
-        size = folder_size(folder)
+        if repo in diarization_repos():
+            size = _pinned_size(_pinned_files(folder, repo))
+        else:
+            size = folder_size(folder)
         if size == 0:  # an empty or leftover folder (e.g. a cancelled download)
             continue
         status = guard.status(repo) or ("Unknown use" if guard.unknown else "")
@@ -312,6 +507,10 @@ def delete_unused(
             f"{label} is loaded by a running LocalFlow process, so it was kept."
         )
     if repo in guard.selected:
+        if repo in diarization_repos():
+            raise ModelStorageError(
+                f"{label} is used for speaker labels in your settings, so it was kept."
+            )
         raise ModelStorageError(
             f"{label} is the speech model in your settings, so it was kept."
         )
@@ -319,6 +518,8 @@ def delete_unused(
     folder = _model_folder(cache, repo)
     if folder is None:
         raise ModelStorageError(f"{label} isn't downloaded (or isn't a plain folder).")
+    if repo in diarization_repos():
+        return _delete_pinned(folder, repo, label)
     before = folder_size(folder)
     try:
         shutil.rmtree(folder)

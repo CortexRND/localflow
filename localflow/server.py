@@ -33,6 +33,7 @@ from localflow.config import (
     save_config,
 )
 from localflow.context import category_for
+from localflow.diarization import models as diar_models
 from localflow.dictionary import DictionaryStore, apply_replacements, stt_prompt
 from localflow.dispatch import (
     APPROVE_FROM,
@@ -129,6 +130,13 @@ _history: HistoryStore | None = None
 # No queue lock here on purpose: PromptQueue serialises across processes itself,
 # and status changes go through its compare-and-set. A lock here would only
 # guard the server against the server.
+# Speaker-label model download: only POST /api/diarization/download starts it,
+# and only the shutdown hook sets the cancel event.
+_diar_lock = threading.Lock()
+_diar_download = {"state": "idle", "done_bytes": 0, "total_bytes": 0, "error": None}
+_diar_cancel = threading.Event()
+_diar_thread: threading.Thread | None = None  # the last worker started, under _diar_lock
+_DIAR_SHUTDOWN_JOIN_SECONDS = 2.0
 
 
 @app.on_event("startup")
@@ -137,6 +145,18 @@ def _start_watcher() -> None:
     _api_token = load_or_create()
     if _config.meetings_enabled and _config.meeting_watch:
         _watcher.start()
+
+
+@app.on_event("shutdown")
+def _cancel_diarization_download() -> None:
+    # Ask the worker to stop and give it a bounded moment to clean up. A read
+    # stalled on the network (up to 30 s) can outlast the wait; any partial
+    # file left behind is removed by a later explicit download once it is old.
+    with _diar_lock:  # a POST holding the lock can't clear the event after this
+        _diar_cancel.set()
+        worker = _diar_thread
+    if worker is not None:
+        worker.join(timeout=_DIAR_SHUTDOWN_JOIN_SECONDS)  # not under _diar_lock
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -520,6 +540,73 @@ def api_config_update(body: dict) -> dict:
         _history = None
         result = config_to_dict(_config)
     return {**result, "restart_required": api_logic.restart_required(body)}
+
+
+def _diar_snapshot() -> dict:
+    with _diar_lock:
+        return dict(_diar_download)
+
+
+def _diar_progress(done: int, total: int) -> None:
+    with _diar_lock:
+        _diar_download.update(done_bytes=done, total_bytes=total)
+
+
+def _diar_worker() -> None:
+    from localflow.models import DownloadCancelled, friendly_download_error
+
+    state, error = "failed", "Download failed."
+    try:
+        diar_models.download_diarization_models(_diar_progress, _diar_cancel)
+        state, error = "idle", None
+    except DownloadCancelled:
+        state, error = "cancelled", None
+    except Exception as exc:  # noqa: BLE001
+        error = friendly_download_error(exc)
+    finally:  # never left "downloading", whatever was raised
+        with _diar_lock:
+            _diar_download.update(state=state, error=error)
+
+
+@app.get("/api/diarization/status")
+def api_diarization_status() -> dict:
+    # Plain def: FastAPI runs it in the threadpool, so hashing never blocks the loop.
+    # Snapshot the download first: a download finishing while the files are
+    # hashed then reads "downloading" (poll again), never "idle" and not ready.
+    download = _diar_snapshot()
+    return {
+        **diar_models.status(),
+        **diar_models.flags(_config),
+        "download": download,
+    }
+
+
+@app.post("/api/diarization/download", status_code=202)
+def api_diarization_download() -> dict:
+    global _diar_thread
+    with _diar_lock:
+        if _diar_download["state"] == "downloading":
+            return {"started": False, "download": dict(_diar_download)}
+        _diar_download.update(
+            state="downloading",
+            done_bytes=0,
+            total_bytes=sum(model.size_bytes for model in diar_models.DIAR_MODELS),
+            error=None,
+        )
+        _diar_cancel.clear()
+        snapshot = dict(_diar_download)
+        try:
+            worker = threading.Thread(
+                target=_diar_worker, name="diarization-download", daemon=True
+            )
+            worker.start()
+        except Exception as exc:  # noqa: BLE001 - e.g. RuntimeError: can't start new thread
+            log.warning("Could not start the speaker model download: %s", exc)
+            message = "Could not start the speaker model download. Try again."
+            _diar_download.update(state="failed", error=message)
+            raise HTTPException(status_code=503, detail=message) from None
+        _diar_thread = worker
+    return {"started": True, "download": snapshot}
 
 
 @app.get("/api/providers/stt")
