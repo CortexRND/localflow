@@ -1,4 +1,4 @@
-"""Deterministic gates M1-M13 over <run>/rK/results/*.json (thresholds frozen in PROTOCOL.md).
+"""Deterministic gates M1-M14 over <run>/rK/results/*.json (thresholds frozen in PROTOCOL.md).
 
 Usage: gates.py RUN_DIR [--sut PATH] [--scenarios FILE] [--output|--json FILE]
 
@@ -23,6 +23,20 @@ ABSTAIN = re.compile(r"(doesn'?t|does not|did not|didn'?t|isn'?t|wasn'?t|is not|
 WORDS = {w: i for i, w in enumerate(["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"])}
 WORDS.update({"thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000})
 THRESH = {"M5": 0.90, "M6": 0.70, "M7": 0.05, "M9": 0.80, "M10": 0.80}
+GATES = [f"M{i}" for i in range(1, 15)]
+LABEL_RE = re.compile(r"^\*\*\d\d:\d\d\*\* \*\*(Me|Others):\*\* (.*)$", re.MULTILINE)
+DIAR_LABEL_RE = re.compile(r"^\*\*\d\d:\d\d\*\* \*\*(Me|Others|Speaker \d+):\*\* (.*)$", re.MULTILINE)
+
+
+def expected_speaker_labels(s):
+    """Line index -> "Speaker k" (first-appearance rank among remote speakers); {} if not diarized."""
+    if not s.get("diarization_backend"):
+        return {}
+    rank, out = {}, {}
+    for i, ((src, _), who) in enumerate(zip(s["lines"], s["line_speakers"])):
+        if src == "others":
+            out[i] = f"Speaker {rank.setdefault(who, len(rank) + 1)}"
+    return out
 
 def norm_head(h): return re.sub(r"[^a-z0-9 ]", "", h.replace("**", "").lower()).strip()
 def headings(md): return [norm_head(m) for m in re.findall(r"^#{1,6}\s+(.+?)\s*$", md, re.MULTILINE)]
@@ -54,7 +68,7 @@ def wilson(k, n, z=1.96):
     return (round((c - r) / d, 3), round((c + r) / d, 3))
 
 def repeat_gates(files):
-    g = {k: {"k": 0, "n": 0, "fail": []} for k in [f"M{i}" for i in range(1, 14)]}
+    g = {k: {"k": 0, "n": 0, "fail": []} for k in GATES}
     def tally(key, ok, item):
         g[key]["n"] += 1; g[key]["k"] += int(bool(ok))
         if not ok: g[key]["fail"].append(item)
@@ -69,13 +83,23 @@ def repeat_gates(files):
         tally("M1", all(200 <= h["status"] < 300 for h in r["http"]) and r["notes_text"] and r["log_text"]
               and stop.get("template") == s["template"] and stop.get("enhanced") == bool(nf), sid)
         body = r["log_text"].split("\n## My raw notes\n", 1)[0]
-        got = re.findall(r"^\*\*\d\d:\d\d\*\* \*\*(Me|Others):\*\* (.*)$", body, re.MULTILINE)
+        diarized = bool(s.get("diarization_backend"))
+        got = (DIAR_LABEL_RE if diarized else LABEL_RE).findall(body)
         if s["system_audio"] == "ok":
             exp = [("Me" if a == "me" else "Others", t) for a, t in s["lines"]]
+            # Diarized: compare channels, so any non-Me label (Speaker k) counts as Others.
+            chan = [("Me" if lab == "Me" else "Others", t) for lab, t in got] if diarized else got
             for i, e in enumerate(exp):
-                tally("M2", i < len(got) and got[i] == e, f"{sid}#{i}")
-            for i in range(len(exp), len(got)):
+                tally("M2", i < len(chan) and chan[i] == e, f"{sid}#{i}")
+            for i in range(len(exp), len(chan)):
                 tally("M2", False, f"{sid}#extra{i}")
+            if diarized:
+                labels = expected_speaker_labels(s)
+                for i, label in labels.items():
+                    tally("M14", i < len(got) and got[i] == (label, s["lines"][i][1]), f"{sid}#{i}")
+                logged = sorted(str(x.get("label")) for x in stop.get("speakers") or [] if isinstance(x, dict))
+                tally("M14", stop.get("diarization") == "ok" and logged == sorted(set(labels.values())),
+                      f"{sid}:speakers")
         if nf:
             tally("M3", f"## My raw notes\n\n{nf}\n" in r["log_text"], sid)
             uh, nh, pos, ok = headings(nf), headings(md), -1, True
@@ -167,7 +191,7 @@ def evaluate(run):
     repeats = sorted(p for p in run.glob("r*/results") if p.is_dir())
     per = {p.parent.name: repeat_gates(sorted(p.glob("*.json"))) for p in repeats}
     summary = {}
-    for key in [f"M{i}" for i in range(1, 14)]:
+    for key in GATES:
         vals = [per[r][key] for r in per]
         passes = [v["pass"] for v in vals if v["pass"] is not None]
         k = sum(v["k"] for v in vals); n = sum(v["n"] for v in vals)

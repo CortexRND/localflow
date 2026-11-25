@@ -177,6 +177,42 @@
         {"q": "When will I send the security questionnaire?", "kind": "answerable", "any": ["Thursday"], "truth": "By Thursday."},
         {"q": "What did the vendor say their list price was?", "kind": "unanswerable", "truth": "The vendor's side was not captured (system audio unavailable, mic only), so the transcript does not contain the list price."}
       ]
+    },
+    {
+      "id": "launch-sync-diarized", "template": "general", "title": "Launch sync", "system_audio": "ok",
+      "diarization_backend": "mock",
+      "lines": [
+        ["me", "Let's lock the launch plan for the mobile app."],
+        ["others", "Ana here. The beta has 340 testers and crash reports dropped from 50 a day to 6."],
+        ["others", "Ben. The payments integration still fails on refunds, I need two more days."],
+        ["others", "Ana again. Then we should move the launch from Monday to Wednesday the 18th."],
+        ["me", "Agreed, the launch moves to Wednesday the 18th."],
+        ["others", "Chloe from support. I need the help center articles before launch, at least 12 of them."],
+        ["others", "Ben again. I'll have the refund fix ready by Tuesday."],
+        ["others", "Ana. I'll draft the release notes and send them to Chloe."],
+        ["me", "I'll tell the sales team about the new date today."],
+        ["others", "Chloe. Support training is on Tuesday afternoon."]
+      ],
+      "line_speakers": ["me", "Ana", "Ben", "Ana", "me", "Chloe", "Ben", "Ana", "me", "Chloe"],
+      "notes_initial": "# Launch\n- date?\n",
+      "notes_final": "# Launch\n- **new date**\n- blockers\n\n# Follow-ups\n- sales\n",
+      "user_points": [
+        {"heading": "Launch", "keywords": ["Wednesday", "18th", "18"]},
+        {"heading": "Launch", "keywords": ["refund", "payments"]},
+        {"heading": "Follow-ups", "keywords": ["sales"]}
+      ],
+      "facts": [
+        {"id": "beta-testers", "any": ["340"]},
+        {"id": "help-center", "any": ["help center", "articles"]},
+        {"id": "release-notes", "any": ["release notes"]},
+        {"id": "support-training", "any": ["training"]}
+      ],
+      "chat": [
+        {"q": "What is the new launch date?", "kind": "answerable", "any": ["Wednesday", "18"], "truth": "The launch moved from Monday to Wednesday the 18th."},
+        {"q": "Who is fixing the refund problem?", "kind": "answerable", "any": ["Ben"], "truth": "Ben will have the refund fix ready by Tuesday."},
+        {"q": "What is the marketing budget for the launch?", "kind": "unanswerable", "truth": "No marketing budget was mentioned."},
+        {"q": "Which app store rejected the build?", "kind": "unanswerable", "truth": "No app store rejection was mentioned."}
+      ]
     }
   ]
 }

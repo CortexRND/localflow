@@ -6,14 +6,14 @@
 #   --sut DIR      / SIM_SUT    LocalFlow checkout under test (default: this repo)
 #   --repeats N    / REPEATS    repeats per scenario (default 3)
 #   --python BIN   / PYTHON     interpreter with the product deps (default: python3)
-#   --scenarios "a b" / SCENARIOS  scenario ids (default: the six in scenarios.json)
+#   --scenarios "a b" / SCENARIOS  scenario ids (default: the seven in scenarios.json)
 #   SIM_LLM_URL, SIM_LLM_MODEL are passed through to driver.py.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SIM_SUT="${SIM_SUT:-$(cd "$HERE/../.." && pwd)}"
 REPEATS="${REPEATS:-3}"
 PYTHON="${PYTHON:-python3}"
-SCENARIOS="${SCENARIOS:-pricing-review eng-standup one-on-one incident-retro design-standup-nonotes vendor-call-micfallback}"
+SCENARIOS="${SCENARIOS:-pricing-review eng-standup one-on-one incident-retro design-standup-nonotes vendor-call-micfallback launch-sync-diarized}"
 OUT="${OUT:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
