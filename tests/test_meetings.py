@@ -861,8 +861,9 @@ def test_diarization_off_session_is_identical(fake_mic, tmp_path):
     ]
     assert all(s.speaker_id is None and s.end_seconds is None for s in segments)
     assert _diarization_threads() == []
-    assert saved.log_path.read_bytes() == _FLAG_OFF_LOG
-    assert saved.notes_path.read_bytes() == _FLAG_OFF_NOTES
+    # Text with universal newlines: write_text emits CRLF on Windows.
+    assert saved.log_path.read_text(encoding="utf-8") == _FLAG_OFF_LOG.decode("utf-8")
+    assert saved.notes_path.read_text(encoding="utf-8") == _FLAG_OFF_NOTES.decode("utf-8")
     assert session.diarization_status == "off"
     assert session.diarization_error == ""
     assert session.diarization is None
@@ -1018,6 +1019,39 @@ def test_live_segments_stay_channel_labelled():
             (0.0, "others", None, None, "line 0 line 1"),
             (4.0, "others", None, None, "line 2 line 0"),
         ]
+    finally:
+        collector.close()
+    _assert_worker_exited(collector)
+
+
+def test_undiarized_mic_keeps_plain_transcribe():
+    from localflow.diarization import DiarizationCollector, MockDiarizer, MockEmbedder
+    from localflow.diarization.types import TimedText
+
+    class SpySTT:
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, audio):
+            self.calls.append("transcribe")
+            return " plain  text "
+
+        def transcribe_timed(self, audio):
+            self.calls.append("transcribe_timed")
+            return [TimedText(0.0, 2.0, "timed text")]
+
+    stt = SpySTT()
+    collector = DiarizationCollector(MockDiarizer(), MockEmbedder(), diarize_mic=False)
+    try:
+        session = _diarized_session(stt, collector)
+        session._mic.append(_speech(2))
+        session._others.append(_speech(2))
+        session._drain_once()
+        assert stt.calls == ["transcribe", "transcribe_timed"]
+        assert [(s.source, s.text) for s in session.segments] == [
+            ("me", "plain  text"), ("others", "timed text"),
+        ]
+        assert collector.stats()["offered"] == 1
     finally:
         collector.close()
     _assert_worker_exited(collector)

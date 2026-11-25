@@ -415,7 +415,10 @@ class MeetingSession:
         # Skip near-silent chunks — whisper hallucinates on silence.
         if len(audio) < self.sample_rate or float(np.abs(audio).max()) < 0.01:
             return
-        if self.diarization is not None:
+        # Mic chunks the collector ignores keep plain transcribe(), so their text is unchanged.
+        if self.diarization is not None and (
+            buffer.source != SOURCE_ME or getattr(self.diarization, "diarize_mic", True)
+        ):
             self._transcribe_chunk_diarized(audio, buffer, offset)
             return
         with self.transcribe_lock:
