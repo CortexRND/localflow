@@ -2552,8 +2552,7 @@ class HubWindowController(NSObject):
         repo = repos[sender.tag()]
         label = model_storage.catalog().get(repo, repo)
         cache = getattr(self, "storage_cache", None)
-        folder = (cache or model_storage.hf_hub_cache()) / model_storage.repo_folder_name(repo)
-        size = model_storage.folder_size(folder) if folder.is_dir() else 0
+        size = model_storage.model_size(repo, cache=cache)
         alert = NSAlert.alloc().init()
         alert.setMessageText_(f"Delete {label}?")
         alert.setInformativeText_(
