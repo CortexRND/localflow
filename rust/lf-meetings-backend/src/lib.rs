@@ -1,6 +1,7 @@
 //! Optional composable runtime backend. No Python process or hardware is implicit.
 mod providers;
 mod session;
+mod speakers;
 mod validation;
 mod workprompts;
 
@@ -15,6 +16,7 @@ use lf_meetings::{
     answer_question,
     dispatch::{self, PromptQueue, PromptTransitionError},
     format_transcript, generate_title, is_diarized, latest_transcript_log, read_transcript_log,
+    speakers::SpeakerData,
     templates,
     titles::{is_default_title, TITLE_TIMEOUT_SECONDS},
     MeetingSummarizer, MeetingWatcher, ObsidianWriter, Segment, Transcript, WriteNote,
@@ -91,8 +93,49 @@ pub struct MeetingsBackend {
     transcribe_lock: Arc<Mutex<()>>,
     state: Mutex<State>,
     idle: Condvar,
+    /// Sidecars, voiceprints, their locks and forget epoch (one per process).
+    speakers: Arc<SpeakerData>,
+    /// The live config for gates re-checked mid-request; `None` = the request's snapshot.
+    config_reader: Option<ConfigReader>,
+    /// Hugging Face hub cache holding the speaker models (status only).
+    model_cache: Option<PathBuf>,
 }
+
+pub type ConfigReader = Arc<dyn Fn() -> Result<Config> + Send + Sync>;
+/// Speaker-label settings a new meeting takes from the live config.
+const LIVE_DIARIZATION_FIELDS: [&str; 5] = [
+    "speaker_diarization",
+    "diarization_backend",
+    "diarize_mic",
+    "diarization_max_speakers",
+    "speaker_recognition",
+];
 impl MeetingsBackend {
+    /// The capture config for a new meeting: the request's, with only the
+    /// diarization fields taken from the live config (when a reader is
+    /// attached) so opting in or out applies from the next meeting. An
+    /// unreadable live config means speaker labels and recognition stay off.
+    fn capture_config(&self, request: &Config) -> Config {
+        let mut config = request.clone();
+        let Some(reader) = &self.config_reader else {
+            return config;
+        };
+        match reader() {
+            Ok(live) => {
+                for field in LIVE_DIARIZATION_FIELDS {
+                    if let Some(value) = live.field(field) {
+                        config.set_field(field, value.clone());
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("could not read config; speaker labels off for this meeting");
+                config.set_field("speaker_diarization", Value::Bool(false));
+                config.set_field("speaker_recognition", Value::Bool(false));
+            }
+        }
+        config
+    }
     /// Poll the same in-process status as GET /meeting/status using live config snapshots.
     pub fn start_status_poller(
         self: &Arc<Self>,
@@ -117,7 +160,24 @@ impl MeetingsBackend {
             transcribe_lock: Arc::default(),
             state: Mutex::default(),
             idle: Condvar::new(),
+            speakers: Arc::new(SpeakerData::new()),
+            config_reader: None,
+            model_cache: None,
         })
+    }
+    /// Speaker data roots and state (tests use temporary roots).
+    pub fn with_speaker_data(mut self, data: Arc<SpeakerData>) -> Self {
+        self.speakers = data;
+        self
+    }
+    /// Re-read config for the speaker-recognition gate during slow work.
+    pub fn with_config_reader(mut self, reader: ConfigReader) -> Self {
+        self.config_reader = Some(reader);
+        self
+    }
+    pub fn with_model_cache(mut self, cache: PathBuf) -> Self {
+        self.model_cache = Some(cache);
+        self
     }
     pub fn with_inner(mut self, inner: Arc<dyn Backend>) -> Self {
         self.inner = inner;
@@ -213,7 +273,7 @@ impl MeetingsBackend {
         };
         let live = session.and_then(|s| s.snapshot()).map(|s| {
             let segments: Vec<_> = s.segments.iter().skip(s.segments.len().saturating_sub(8)).map(|s| json!({"stamp":s.stamp(),"text":s.text,"source":s.source})).collect();
-            json!({"title":meta.title,"title_auto":meta.title_auto,"category":meta.category,"template":meta.template,"user_notes":meta.user_notes,"system_audio":s.system_audio,"system_audio_error":s.system_audio_error,"seconds":s.seconds as u64,"segments":segments,"segment_count":s.segments.len()})
+            json!({"title":meta.title,"title_auto":meta.title_auto,"category":meta.category,"template":meta.template,"user_notes":meta.user_notes,"system_audio":s.system_audio,"system_audio_error":s.system_audio_error,"diarization":s.diarization.status,"diarization_error":s.diarization.error,"seconds":s.seconds as u64,"segments":segments,"segment_count":s.segments.len()})
         });
         let watch = self
             .watcher
@@ -228,7 +288,7 @@ impl MeetingsBackend {
         } else {
             &watch.error
         };
-        json!({"watching":enabled(config,"meetings_enabled") && enabled(config,"meeting_watch") && watch_error.is_empty(),"watch_error":watch_error,"mic_busy":watch.mic_busy,"detected":watch.detected,"platform":watch.platform,"auto_start":enabled(config,"meeting_auto_start"),"capture_system_audio":enabled(config,"capture_system_audio"),"session":live,"last_saved":last,"chat_available":self.transcript_path(config,last.as_ref()).is_some()})
+        json!({"watching":enabled(config,"meetings_enabled") && enabled(config,"meeting_watch") && watch_error.is_empty(),"watch_error":watch_error,"mic_busy":watch.mic_busy,"detected":watch.detected,"platform":watch.platform,"auto_start":enabled(config,"meeting_auto_start"),"capture_system_audio":enabled(config,"capture_system_audio"),"speaker_diarization":enabled(config,"speaker_diarization"),"session":live,"last_saved":last,"chat_available":self.transcript_path(config,last.as_ref()).is_some()})
     }
     fn start(&self, request: &BackendRequest) -> ResponseResult<Value> {
         let config = &request.config;
@@ -285,7 +345,7 @@ impl MeetingsBackend {
             watcher.pause();
         }
         let opened = SessionActor::open(
-            config.clone(),
+            self.capture_config(config),
             self.capture.clone(),
             self.transcribe_lock.clone(),
         );
@@ -307,7 +367,7 @@ impl MeetingsBackend {
         } else {
             template
         };
-        let response = json!({"ok":true,"category":category,"template":template,"system_audio":snapshot.system_audio,"system_audio_error":snapshot.system_audio_error});
+        let response = json!({"ok":true,"category":category,"template":template,"system_audio":snapshot.system_audio,"system_audio_error":snapshot.system_audio_error,"diarization":snapshot.diarization.status,"diarization_error":snapshot.diarization.error});
         let mut state = self.state();
         if state.closed {
             drop(state);
@@ -399,11 +459,37 @@ impl MeetingsBackend {
         // Speaker labels may wait up to their finalize timeout, so they run only
         // once the full channel-labelled transcript is durable (design §6).
         // Without that checkpoint, dropping the handle cancels them unclustered.
+        let mut diarization = "off";
+        let mut speakers: Vec<speakers::StopSpeaker> = Vec::new();
+        // Recognition is decided by this request's config and re-checked live;
+        // the forget epoch is read before any centroid exists.
+        // Opting in mid-meeting does not apply to that meeting (Python attaches
+        // the registry at start); opting out mid-meeting stops it.
+        let recognise = finished.diarization.recognition
+            && self.recognition_live(config)
+            && finished.diarization.embedder.is_some();
+        let epoch = self.speakers.forget_epoch();
         if let Some(labels) = finished.speaker_labels.take() {
             if checkpointed {
-                finished.segments = labels.apply(&finished.segments);
+                let labelled = labels.apply_detailed(&finished.segments, recognise);
+                diarization = labelled.status.as_str();
+                finished.segments = labelled.segments;
+                speakers = labelled
+                    .speakers
+                    .into_iter()
+                    .map(speakers::StopSpeaker::from)
+                    .collect::<Vec<_>>();
+                if recognise {
+                    self.recognise(
+                        config,
+                        &mut speakers,
+                        &mut finished.segments,
+                        finished.diarization.embedder,
+                    );
+                }
             } else {
                 drop(labels);
+                diarization = "failed";
                 eprintln!("speaker labels skipped: the transcript checkpoint was not saved");
             }
         }
@@ -467,9 +553,21 @@ impl MeetingsBackend {
             template: &template.id,
             generated_title: meta.title_auto,
         };
+        let public: Vec<Value> = speakers
+            .iter()
+            .map(|s| {
+                json!({"id": s.id, "label": s.label, "name": s.name, "source": s.source,
+                            "seconds": lf_meetings::speakers::py_round(s.seconds, 1)})
+            })
+            .collect();
         let saved = self
             .publish(|| {
                 let saved = writer.write(&note)?;
+                // Inside the same publication: a quick exit that sees the
+                // final note also has its speaker sidecar (best effort).
+                if let Some(id) = saved.meeting_id.as_deref().filter(|_| !speakers.is_empty()) {
+                    self.write_sidecar(config, &saved, id, &finished, diarization, speakers, epoch);
+                }
                 self.state().saved = MeetingSave::Note;
                 if let Some(recovery) = recovery {
                     remove_recovery(recovery);
@@ -478,7 +576,7 @@ impl MeetingsBackend {
             })
             .ok_or_else(internal)?
             .map_err(|_| internal())?;
-        let mut payload = json!({"title":saved.title,"title_generated":generated,"notes_path":saved.notes_path,"log_path":saved.log_path,"segments":finished.segments.len(),"template":template.id,"enhanced":!py::strip(&meta.user_notes).is_empty()});
+        let mut payload = json!({"title":saved.title,"title_generated":generated,"notes_path":saved.notes_path,"log_path":saved.log_path,"segments":finished.segments.len(),"template":template.id,"enhanced":!py::strip(&meta.user_notes).is_empty(),"meeting_id":saved.meeting_id,"diarization":diarization,"speakers":public});
         payload
             .as_object_mut()
             .unwrap()
@@ -607,7 +705,26 @@ impl Backend for MeetingsBackend {
         self.inner.shutdown(config)
     }
 
+    /// Without the server's peer check a request is never local.
     fn handle(&self, request: BackendRequest) -> BackendResponse {
+        self.handle_local(request, false)
+    }
+
+    fn download(
+        &self,
+        request: BackendRequest,
+        local: bool,
+    ) -> Result<lf_server::backend::Download, BackendResponse> {
+        if request.method == "GET" && request.path == "/api/speakers/export" {
+            return self.export(&request.config, local);
+        }
+        self.inner.download(request, local)
+    }
+
+    fn handle_local(&self, request: BackendRequest, local: bool) -> BackendResponse {
+        if let Some(response) = self.speaker_route(&request, local) {
+            return response;
+        }
         let result = match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/meeting/templates") => {
                 let templates = templates::load_templates(Some(&expanded(
@@ -684,7 +801,7 @@ impl Backend for MeetingsBackend {
                     }
                 })
             }
-            _ => return self.inner.handle(request),
+            _ => return self.inner.handle_local(request, local),
         };
         match result {
             Ok(body) => BackendResponse { status: 200, body },

@@ -9,13 +9,21 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiarModel {
     pub id: &'static str,
+    /// Shown in status output.
+    pub label: &'static str,
     pub repo: &'static str,
     /// Pinned 40-hex commit.
     pub revision: &'static str,
     pub filename: &'static str,
     pub sha256: &'static str,
     pub size_bytes: u64,
+    pub licence: &'static str,
+    /// Embedders only: cosine-similarity floor for naming a recognised speaker.
+    pub match_threshold: Option<f64>,
 }
+
+/// Whether this binary links the sherpa-onnx runtime (`extra_installed`).
+pub const RUNTIME_INSTALLED: bool = cfg!(feature = "sherpa");
 
 pub const SEGMENTATION: DiarModel = DiarModel {
     id: "pyannote-segmentation-3.0",
@@ -24,6 +32,9 @@ pub const SEGMENTATION: DiarModel = DiarModel {
     filename: "model.onnx",
     sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
     size_bytes: 5_992_913,
+    label: "Speaker labels: segmentation",
+    licence: "MIT",
+    match_threshold: None,
 };
 
 pub const EMBEDDING: DiarModel = DiarModel {
@@ -33,6 +44,10 @@ pub const EMBEDDING: DiarModel = DiarModel {
     filename: "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
     sha256: "53cab20ba8f2eb2f6e2d89ecc18e88ef3222169b61b4419cbc13666744a4574b",
     size_bytes: 28_281_165,
+    label: "Speaker labels: voice embedding",
+    licence: "Apache-2.0",
+    // Provisional and deliberately strict, as `models.py` (B10 sets the measured value).
+    match_threshold: Some(0.6),
 };
 
 pub const DIAR_MODELS: [DiarModel; 2] = [SEGMENTATION, EMBEDDING];
@@ -55,7 +70,6 @@ pub fn model_path(cache: &Path, model: &DiarModel) -> PathBuf {
 /// Accepts a regular file (copy layout) or a symlink that resolves to exactly
 /// `<folder>/blobs/<sha256>`; the repo, `snapshots` and revision folders must be
 /// plain directories. Size, then a streaming SHA-256, must match the pin.
-#[cfg(feature = "sherpa")]
 pub fn verified_path(cache: &Path, model: &DiarModel) -> Result<PathBuf, String> {
     use sha2::{Digest, Sha256};
     use std::{fs, io::Read};

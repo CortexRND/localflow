@@ -185,6 +185,26 @@
         }
       }
     },
+    "/api/diarization/status": {
+      "get": {
+        "summary": "Api Diarization Status",
+        "operationId": "api_diarization_status_api_diarization_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Diarization Status Api Diarization Status Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/providers/stt": {
       "get": {
         "summary": "Api Stt Providers",
@@ -774,6 +794,406 @@
                   "additionalProperties": true,
                   "type": "object",
                   "title": "Response Meeting Dismiss Meeting Dismiss Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/meetings/{meeting_id}/speakers": {
+      "get": {
+        "summary": "Api Meeting Speakers",
+        "description": "A saved meeting's speakers (no voiceprint data). Under /api/ so the token always applies.",
+        "operationId": "api_meeting_speakers_api_meetings__meeting_id__speakers_get",
+        "parameters": [
+          {
+            "name": "meeting_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Meeting Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Meeting Speakers Api Meetings  Meeting Id  Speakers Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/meetings/{meeting_id}/speakers/{speaker_id}": {
+      "put": {
+        "summary": "Api Meeting Speaker Rename",
+        "description": "Rename one speaker in a saved meeting's transcript and sidecar.",
+        "operationId": "api_meeting_speaker_rename_api_meetings__meeting_id__speakers__speaker_id__put",
+        "parameters": [
+          {
+            "name": "meeting_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Meeting Id"
+            }
+          },
+          {
+            "name": "speaker_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Speaker Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Meeting Speaker Rename Api Meetings  Meeting Id  Speakers  Speaker Id  Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/meetings/{meeting_id}/speakers/merge": {
+      "post": {
+        "summary": "Api Meeting Speakers Merge",
+        "description": "Merge one speaker of a saved meeting into another.",
+        "operationId": "api_meeting_speakers_merge_api_meetings__meeting_id__speakers_merge_post",
+        "parameters": [
+          {
+            "name": "meeting_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Meeting Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Meeting Speakers Merge Api Meetings  Meeting Id  Speakers Merge Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/speakers": {
+      "get": {
+        "summary": "Api Speakers",
+        "description": "Enrolled voiceprints (no vectors). 403 while speaker recognition is off.",
+        "operationId": "api_speakers_api_speakers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Speakers Api Speakers Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Api Speakers Enroll",
+        "description": "Enroll a voice: JSON ``{name, meeting_id, speaker_id}`` from a meeting saved with\nrecognition on, or multipart ``file`` + ``name`` (local only; the audio is not retained:\nit is decoded in memory, except that an M4A/MP4 needing seeking gets a short-lived private\ntemporary copy, deleted right after decoding). The gate is checked before the body is\nread.",
+        "operationId": "api_speakers_enroll_api_speakers_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "title": "Enroll From Meeting",
+                "required": [
+                  "name",
+                  "meeting_id",
+                  "speaker_id"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "title": "Name"
+                  },
+                  "meeting_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$",
+                    "title": "Meeting Id"
+                  },
+                  "speaker_id": {
+                    "type": "string",
+                    "title": "Speaker Id"
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "title": "Enroll From Audio",
+                "required": [
+                  "name",
+                  "file"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "title": "Name"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "title": "File"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Speakers Enroll Api Speakers Post"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Api Speakers Forget All",
+        "description": "Forget every voice and erase all stored voice data from meeting speaker data.",
+        "operationId": "api_speakers_forget_all_api_speakers_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Speakers Forget All Api Speakers Delete"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/speakers/export": {
+      "get": {
+        "summary": "Api Speakers Export",
+        "description": "ZIP of registry.json + <id>.npy: the only response holding vectors. Local only.",
+        "operationId": "api_speakers_export_api_speakers_export_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "headers": {
+              "Content-Disposition": {
+                "description": "attachment; filename=\"localflow-speakers.zip\"",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/speakers/{ref}": {
+      "patch": {
+        "summary": "Api Speaker Rename",
+        "description": "Rename an enrolled voice (by id or name) for later meetings; past transcripts stay.\nThe body is only read once the gate passed.",
+        "operationId": "api_speaker_rename_api_speakers__ref__patch",
+        "parameters": [
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ref"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "title": "Rename Speaker",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "title": "Name"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Speaker Rename Api Speakers  Ref  Patch"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Api Speaker Forget",
+        "description": "Forget one voice (by id or name) and erase every stored centroid from all meeting\nspeaker data. Names already in transcripts are left as they are.",
+        "operationId": "api_speaker_forget_api_speakers__ref__delete",
+        "parameters": [
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Speaker Forget Api Speakers  Ref  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }

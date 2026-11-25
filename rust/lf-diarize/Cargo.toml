@@ -9,13 +9,14 @@ description = "Meeting speaker labels: alignment, clustering and an optional she
 [features]
 default = []
 # The real backend. Off by default so a plain build links no new native library.
-sherpa = ["dep:sherpa-onnx", "dep:sha2"]
+sherpa = ["dep:sherpa-onnx"]
 
 [dependencies]
 lf-core = { path = "../lf-core" }
 anyhow.workspace = true
 log.workspace = true
-sha2 = { version = "0.10", optional = true }
+# Pure Rust and already linked by lf-meetings: read-only status checks models without the runtime.
+sha2 = "0.10"
 
 # Same target split as lf-stt, so feature unification never flips static/shared linkage.
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]

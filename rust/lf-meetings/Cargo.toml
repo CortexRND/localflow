@@ -23,6 +23,10 @@ log.workspace = true
 sha2 = "0.10"
 unicode-normalization = "0.1"
 unicode-general-category = "1"
+# The voiceprint export ZIP: deflate only, no default codecs (the version is
+# already locked through sherpa-onnx-sys); flate2's default pure-Rust backend.
+zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }
+flate2 = "1"
 cpal = { version = "0.16", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

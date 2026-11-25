@@ -13,7 +13,9 @@ pub mod sherpa;
 
 pub use align::{assign_speakers, merge_runs, SpeakerRun, GAP_TOLERANCE_S};
 pub use cluster::cluster;
-pub use collector::{Collector, Finalized, LabelledChunk, Options, PendingLabels, Status};
+pub use collector::{
+    ClusterStat, Collector, Finalized, LabelledChunk, Options, PendingLabels, Status,
+};
 pub use lf_core::transcript::TimedText;
 
 /// Capture sample rate; every backend call receives 16 kHz mono audio.
@@ -30,6 +32,11 @@ pub struct SpeakerTurn {
 /// A diarizer plus speaker embedder for one meeting, at [`SAMPLE_RATE`].
 /// Every method runs on the collector's worker thread, never under the STT lock.
 pub trait SpeakerBackend: Send {
+    /// The embedder id stored with voiceprints (`SpeakerEmbedder.id`), when known.
+    /// Speaker recognition only ever compares vectors from the same embedder.
+    fn embedder_id(&self) -> Option<&'static str> {
+        None
+    }
     /// Loads local model files only; never touches the network.
     fn load(&mut self) -> anyhow::Result<()>;
     fn diarize(&mut self, audio: &[f32]) -> anyhow::Result<Vec<SpeakerTurn>>;
