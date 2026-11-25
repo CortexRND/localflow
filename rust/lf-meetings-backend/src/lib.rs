@@ -520,9 +520,21 @@ impl MeetingsBackend {
             template: &template.id,
             generated_title: meta.title_auto,
         };
+        let public: Vec<Value> = speakers
+            .iter()
+            .map(|s| {
+                json!({"id": s.id, "label": s.label, "name": s.name, "source": s.source,
+                            "seconds": lf_meetings::speakers::py_round(s.seconds, 1)})
+            })
+            .collect();
         let saved = self
             .publish(|| {
                 let saved = writer.write(&note)?;
+                // Inside the same publication: a quick exit that sees the
+                // final note also has its speaker sidecar (best effort).
+                if let Some(id) = saved.meeting_id.as_deref().filter(|_| !speakers.is_empty()) {
+                    self.write_sidecar(config, &saved, id, &finished, diarization, speakers, epoch);
+                }
                 self.state().saved = MeetingSave::Note;
                 if let Some(recovery) = recovery {
                     remove_recovery(recovery);
@@ -531,24 +543,6 @@ impl MeetingsBackend {
             })
             .ok_or_else(internal)?
             .map_err(|_| internal())?;
-        let public: Vec<Value> = speakers
-            .iter()
-            .map(|s| {
-                json!({"id": s.id, "label": s.label, "name": s.name, "source": s.source,
-                            "seconds": lf_meetings::speakers::py_round(s.seconds, 1)})
-            })
-            .collect();
-        if let Some(meeting_id) = saved.meeting_id.as_deref().filter(|_| !speakers.is_empty()) {
-            self.write_sidecar(
-                config,
-                &saved,
-                meeting_id,
-                &finished,
-                diarization,
-                speakers,
-                epoch,
-            );
-        }
         let mut payload = json!({"title":saved.title,"title_generated":generated,"notes_path":saved.notes_path,"log_path":saved.log_path,"segments":finished.segments.len(),"template":template.id,"enhanced":!py::strip(&meta.user_notes).is_empty(),"meeting_id":saved.meeting_id,"diarization":diarization,"speakers":public});
         payload
             .as_object_mut()
