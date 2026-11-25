@@ -72,6 +72,11 @@ impl Request {
             .as_ref()
             .map(|p| format!("There's no page called “{p}”, so Home is shown."))
     }
+
+    /// Whether this requests Home as the fallback for an unknown `--page`.
+    pub fn is_unknown_home(&self) -> bool {
+        self.route == Route::Page(Page::Home) && self.unknown_page.is_some()
+    }
 }
 
 impl From<Route> for Request {
@@ -281,6 +286,13 @@ mod tests {
             Some("There's no page called “NoSuchPage”, so Home is shown.")
         );
         assert_eq!(Request::from(Route::Setup).notice(), None);
+        assert!(got.is_unknown_home());
+        assert!(!Request {
+            route: Route::Setup,
+            ..unknown.clone()
+        }
+        .is_unknown_home());
+        assert!(!Request::from(Route::Page(Page::Home)).is_unknown_home());
 
         let path = dir.path().join(lf_ui::hub_route::REQUEST_NAME);
         // Written by an older lf-desktop: no name, still routed.

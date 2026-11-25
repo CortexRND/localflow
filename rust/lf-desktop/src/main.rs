@@ -105,23 +105,29 @@ fn main() -> ExitCode {
     if let Some(n) = &notice {
         eprintln!("lf-desktop: {n}");
     }
-    // First run (no setup marker, no explicit page) opens the wizard too,
-    // with the same policy as the Hub (`hub_route::plan_initial_route`).
     let configured = lf_desktop::controllers::setup::configured(&services.root);
-    let first_run = matches!(
-        lf_ui::hub_route::plan_initial_route(configured, args.page.map(|p| p.route())),
-        Ok(lf_ui::hub_route::InitialRoute::Setup { .. })
-    );
     let status = app::run(Launch {
         services,
         page: args.page.unwrap_or(Page::Home),
-        setup: args.setup || first_run,
+        setup: opens_setup(&request, configured),
         notice,
         instance,
     });
     // Non-zero when no window opened, so `lf --gpui` falls back instead of
     // mistaking it for a hand-off (see USAGE's EXIT STATUS).
     ExitCode::from(status.exit_code())
+}
+
+/// The window starts in setup by the same policy as the Hub
+/// (`hub_route::plan_initial_route`): for an explicit Setup request, or for
+/// any page before LocalFlow is set up (no setup marker). The exception is an
+/// unknown `--page`, which shows Home with its notice.
+fn opens_setup(request: &Request, configured: bool) -> bool {
+    !request.is_unknown_home()
+        && matches!(
+            lf_ui::hub_route::plan_initial_route(configured, Some(request.route.id())),
+            Ok(lf_ui::hub_route::InitialRoute::Setup { .. })
+        )
 }
 
 /// The same-executable speech helper (`lf-desktop --speech-helper`).
@@ -171,4 +177,31 @@ fn speech_helper(env_sandbox: bool) -> Option<ExitCode> {
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unknown(route: Route) -> Request {
+        Request {
+            route,
+            unknown_page: Some("NoSuchPage".into()),
+        }
+    }
+
+    #[test]
+    fn setup_opens_on_first_run_or_when_asked_but_not_for_an_unknown_page() {
+        let home = Request::from(Route::Page(Page::Home));
+        assert!(opens_setup(&home, false), "bare first run");
+        assert!(!opens_setup(&home, true), "configured Home");
+        assert!(
+            !opens_setup(&unknown(Route::Page(Page::Home)), false),
+            "an unknown page shows Home"
+        );
+        for configured in [false, true] {
+            assert!(opens_setup(&unknown(Route::Setup), configured));
+            assert!(opens_setup(&Route::Setup.into(), configured));
+        }
+    }
 }

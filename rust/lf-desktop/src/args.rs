@@ -97,9 +97,17 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
                     out.setup = true;
                     continue;
                 }
+                // The last page wins as one value: a known page drops an
+                // earlier unknown name, and an unknown name an earlier page.
                 match Page::parse(&name) {
-                    Some(page) => out.page = Some(page),
-                    None => out.unknown_page = Some(name),
+                    Some(page) => {
+                        out.page = Some(page);
+                        out.unknown_page = None;
+                    }
+                    None => {
+                        out.page = None;
+                        out.unknown_page = Some(name);
+                    }
                 }
             }
             "--data-dir" => out.data_dir = Some(PathBuf::from(value("--data-dir")?)),
@@ -164,6 +172,24 @@ mod tests {
         assert!(p(&["--setup"]).unwrap().setup);
         let setup_page = p(&["--page", "SETUP"]).unwrap();
         assert!(setup_page.setup && setup_page.page.is_none());
+    }
+
+    #[test]
+    fn the_last_page_wins_with_its_unknown_name() {
+        let known = p(&["--page", "typo", "--page", "home"]).unwrap();
+        assert_eq!(known.page, Some(Page::Home));
+        assert_eq!(known.unknown_page, None);
+        let unknown = p(&["--page", "history", "--page", "typo"]).unwrap();
+        assert_eq!(unknown.page, None);
+        assert_eq!(unknown.unknown_page.as_deref(), Some("typo"));
+        // Setup still wins over any page, in either order.
+        for args in [
+            ["--page", "typo", "--page", "setup"],
+            ["--page", "setup", "--page", "typo"],
+        ] {
+            assert!(p(&args).unwrap().setup);
+        }
+        assert!(p(&["--setup", "--page", "typo"]).unwrap().setup);
     }
 
     #[test]
