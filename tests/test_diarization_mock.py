@@ -23,7 +23,9 @@ def silence(seconds):
 
 
 def meeting():
-    return np.concatenate([tone(0, 2), tone(1, 1.5), silence(1), tone(2, 2), tone(0, 1)])
+    return np.concatenate(
+        [tone(0, 2), tone(1, 1.5), silence(1), tone(2, 2), tone(0, 1)]
+    )
 
 
 def test_tone_index():
@@ -43,6 +45,18 @@ def test_diarize_three_lines_with_silence():
     ]
     assert MockDiarizer().diarize(silence(2), RATE) == []
     assert MockDiarizer().diarize(np.zeros(0, np.float32), RATE) == []
+
+
+def test_embed_multi_tone_uses_most_common_key():
+    emb = MockEmbedder(speaker_of={0: 0, 4: 0})
+    mixed = emb.embed(np.concatenate([tone(0, 1), tone(4, 1)]), RATE)
+    assert np.array_equal(mixed, emb.embed(tone(0, 1), RATE))
+    assert not np.array_equal(mixed, emb.embed(tone(2, 1), RATE))
+    plain = MockEmbedder()
+    tie = plain.embed(np.concatenate([tone(3, 1), tone(4, 1)]), RATE)
+    assert np.array_equal(tie, plain.embed(tone(3, 1), RATE))
+    tie = plain.embed(np.concatenate([tone(4, 1), tone(3, 1)]), RATE)
+    assert np.array_equal(tie, plain.embed(tone(4, 1), RATE))
 
 
 def test_diarize_partial_last_frame():
@@ -83,7 +97,9 @@ def test_end_to_end_cluster():
     audio = meeting()
     emb = MockEmbedder()
     turns = MockDiarizer().diarize(audio, RATE)
-    vecs = [emb.embed(audio[int(t.start * RATE) : int(t.end * RATE)], RATE) for t in turns]
+    vecs = [
+        emb.embed(audio[int(t.start * RATE) : int(t.end * RATE)], RATE) for t in turns
+    ]
     assert cluster(vecs, threshold=0.5) == [0, 1, 2, 0]
 
 
