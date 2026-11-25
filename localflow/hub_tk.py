@@ -1646,6 +1646,15 @@ class SpeakerPanelView:
         tokens = self.hub.tokens
         family = self.hub.font_family
         speaker_id = row["id"]
+        if self.panel.can_merge:
+            self._button(
+                frame, ("merge", speaker_id), "Merge",
+                lambda: self._begin("merge", speaker_id),
+            ).pack(side="right", padx=(8, 0))
+        self._button(
+            frame, ("rename", speaker_id), "Rename",
+            lambda: self._begin("rename", speaker_id),
+        ).pack(side="right")
         name = tk.Label(
             frame, text=row["label"], bg=tokens["surface"], fg=tokens["ink"],
             font=(family, 12, "bold"), anchor="w",
@@ -1658,15 +1667,6 @@ class SpeakerPanelView:
         duration.pack(side="left", padx=(10, 0))
         self.name_labels.append(name)
         self.duration_labels.append(duration)
-        if self.panel.can_merge:
-            self._button(
-                frame, ("merge", speaker_id), "Merge",
-                lambda: self._begin("merge", speaker_id),
-            ).pack(side="right", padx=(8, 0))
-        self._button(
-            frame, ("rename", speaker_id), "Rename",
-            lambda: self._begin("rename", speaker_id),
-        ).pack(side="right")
 
     def _rename_row(self, frame, row):
         panel = self.panel
