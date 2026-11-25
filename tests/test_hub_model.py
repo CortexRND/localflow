@@ -1377,3 +1377,25 @@ def test_speaker_row_frames_fit_without_overlaps(width, mode, can_merge):
         for i, a in enumerate(items):
             for b in items[i + 1:]:
                 assert not _speaker_overlaps(a, b), (a, b)
+
+
+def test_speaker_name_error_normalizes_decomposed_accents_before_length_check():
+    # 30 NFD "e\u0301" pairs = 60 codepoints raw, 30 characters after NFKC.
+    nfd = "e\u0301" * 30
+    assert len(nfd) > hub_model.SPEAKER_NAME_MAX
+    assert hub_model.speaker_name_error(nfd) is None
+    assert hub_model.speaker_name_error("e\u0301" * 41) is not None
+
+
+def test_speaker_row_meta_adds_id_only_when_labels_collide():
+    rows = hub_model.speaker_rows({
+        "meeting_id": "m1",
+        "speakers": [
+            {"id": "spk_1", "label": "Alex", "seconds": 65},
+            {"id": "spk_2", "label": "alex", "seconds": 65},
+            {"id": "spk_3", "label": "Priya", "seconds": 12},
+        ],
+    })
+    assert hub_model.speaker_row_meta(rows, rows[0]) == "1m 5s · spk_1"
+    assert hub_model.speaker_row_meta(rows, rows[1]) == "1m 5s · spk_2"
+    assert hub_model.speaker_row_meta(rows, rows[2]) == "12s"

@@ -18,6 +18,7 @@ from localflow.hub_model import (
     SPEAKERS_HEADING,
     SpeakerPanel,
     dictation_state,
+    speaker_row_meta,
 )
 from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, vault_notes_path
@@ -1651,8 +1652,8 @@ class SpeakerPanelView:
         )
         name.pack(side="left")
         duration = tk.Label(
-            frame, text=row["duration"], bg=tokens["surface"], fg=tokens["muted"],
-            font=(family, 11),
+            frame, text=speaker_row_meta(self.panel.rows, row),
+            bg=tokens["surface"], fg=tokens["muted"], font=(family, 11),
         )
         duration.pack(side="left", padx=(10, 0))
         self.name_labels.append(name)
@@ -1699,12 +1700,6 @@ class SpeakerPanelView:
         confirm.pack(side="right", padx=(12, 0))
         if not panel.into_id:
             confirm.configure(state="disabled")
-        prompt = tk.Label(
-            frame, text=f"Merge {row['label']} into", bg=tokens["surface"],
-            fg=tokens["ink"], font=(family, 12), anchor="w",
-        )
-        prompt.pack(side="left")
-        self.name_labels.append(prompt)
         choices = panel.choices()
         chosen = next(
             (choice["title"] for choice in choices if choice["id"] == panel.into_id),
@@ -1723,9 +1718,15 @@ class SpeakerPanelView:
                 command=lambda speaker_id=choice["id"]: self._choose(speaker_id),
             )
         menubutton.configure(menu=menu)
-        menubutton.pack(side="left", padx=(10, 0))
+        menubutton.pack(side="right", padx=(10, 0))
         self.menubutton = menubutton
         self.menu = menu
+        prompt = tk.Label(
+            frame, text=f"Merge {row['label']} into", bg=tokens["surface"],
+            fg=tokens["ink"], font=(family, 12), anchor="w",
+        )
+        prompt.pack(side="left", fill="x", expand=True)
+        self.name_labels.append(prompt)
 
     # ----------------------------------------------------------- callbacks ---
 

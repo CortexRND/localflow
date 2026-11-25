@@ -463,6 +463,14 @@ def merge_target_choices(rows, source_id) -> list[dict]:
     return choices
 
 
+def speaker_row_meta(rows, row) -> str:
+    """Secondary text for one speaker row: talk time, plus id when names collide."""
+    key = row["label"].casefold()
+    if sum(1 for item in rows if item["label"].casefold() == key) > 1:
+        return f"{row['duration']} · {row['id_text']}"
+    return row["duration"]
+
+
 def speaker_name_error(name, current_label: str = "") -> str | None:
     """Why `name` can't be a speaker name, or None. Mirrors the server's rules."""
     text = " ".join(str(name or "").split())
@@ -474,7 +482,7 @@ def speaker_name_error(name, current_label: str = "") -> str | None:
         for ch in normalized
     ):
         return "Use letters or numbers in the name."
-    if len(text) > SPEAKER_NAME_MAX:
+    if len(normalized) > SPEAKER_NAME_MAX:
         return f"Keep the name to {SPEAKER_NAME_MAX} characters or fewer."
     return None
 

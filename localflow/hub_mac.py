@@ -73,6 +73,7 @@ from localflow.hub_model import (
     sidebar_label,
     sidebar_title,
     speaker_row_frames,
+    speaker_row_meta,
     stat_layout,
     style_row_frames,
     style_update,
@@ -2480,7 +2481,7 @@ class HubWindowController(NSObject):
         )
         card.addSubview_(name)
         duration = _label(
-            row["duration"], *frames["duration"][:3], 11, "muted",
+            speaker_row_meta(self.meeting_speakers.rows, row), *frames["duration"][:3], 11, "muted",
             palette=self.tokens, height=frames["duration"][3],
         )
         duration.setAlignment_(AppKit.NSTextAlignmentRight)
