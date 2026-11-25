@@ -448,3 +448,19 @@ def test_export_writes_nothing_unless_the_server_answered_2xx(local, tmp_path, m
     result = run("export", str(tmp_path / "out"))
     assert result.exit_code == 1 and "export refused" in result.output
     assert not (tmp_path / "out").exists()
+
+
+def test_list_uses_the_servers_embedder_over_the_cli_config(monkeypatch):
+    from localflow.diarization import factory, sherpa
+
+    monkeypatch.setattr(factory, "build_embedder", lambda c: pytest.fail("model loaded"))
+    monkeypatch.setattr(sherpa.SherpaEmbedder, "load", lambda self: pytest.fail("loaded"))
+    _config(monkeypatch, diarization_backend="mock")  # the CLI's own config disagrees
+    served = {**LISTED, "embedder": "3dspeaker-campplus-zh-en-16k-advanced"}
+    monkeypatch.setattr(cli_module, "_get", lambda path, timeout=5: served)
+    lines = run("list").output.splitlines()
+    assert lines[0].endswith("\tmock\tneeds re-enrollment (different voice model)")
+    assert lines[1].endswith("advanced")
+    monkeypatch.setattr(cli_module, "_get", lambda path, timeout=5: {**LISTED, "embedder": None})
+    assert all(ln.endswith("needs re-enrollment (different voice model)")
+               for ln in run("list").output.splitlines())

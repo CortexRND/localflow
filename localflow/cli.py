@@ -2061,9 +2061,12 @@ def speakers_list(as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(out))
         return
-    from localflow.diarization.registry import embedder_id_for_backend
+    if "embedder" in out:  # the server's own voice model is authoritative
+        current_model = out["embedder"]
+    else:
+        from localflow.diarization.registry import embedder_id_for_backend
 
-    current_model = embedder_id_for_backend(load_config().diarization_backend)
+        current_model = embedder_id_for_backend(load_config().diarization_backend)
     rows = out.get("speakers") or []
     if not rows:
         click.echo("no enrolled speakers")

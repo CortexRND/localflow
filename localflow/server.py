@@ -1657,9 +1657,12 @@ def _enroll_from_audio(name: str, data: bytes):
 def api_speakers() -> dict:
     """Enrolled voiceprints (no vectors). 403 while speaker recognition is off."""
     _require_recognition()
-    from localflow.diarization.registry import public
+    from localflow.diarization.registry import embedder_id_for_backend, public
     with _registry_errors():
-        return {"speakers": [public(vp) for vp in _speaker_registry().list()]}
+        return {"speakers": [public(vp) for vp in _speaker_registry().list()],
+                # The embedder this server's config uses (no model load): a voice with
+                # another model_id is inert here and needs re-enrollment.
+                "embedder": embedder_id_for_backend(_config.diarization_backend)}
 
 
 @app.post("/api/speakers", status_code=201)

@@ -1075,7 +1075,7 @@ def test_enrolled_speaker_is_named_in_the_next_meeting(rec):
     assert set(vp) == {"id", "name", "created", "samples", "model_id"}
     assert (vp["name"], vp["samples"], vp["model_id"]) == ("Dana Lee", 1, "mock")
     assert _sidecar(rec, first["meeting_id"])["speakers"][0]["voiceprint_id"] == vp["id"]
-    assert rec.get("/api/speakers").json() == {"speakers": [vp]}
+    assert rec.get("/api/speakers").json() == {"speakers": [vp], "embedder": "mock"}
 
     rec.llm.prompts.clear()
     _, status, stop = _three_speaker_api_meeting(rec)
@@ -1239,7 +1239,7 @@ def test_forget_one_erases_every_stored_centroid(rec, ref):
     assert _sidecar(rec, second["meeting_id"])["speakers"][0]["label"] == "Dana Lee"
     assert _vault_bytes(rec) == vault  # transcripts and notes are left alone
     assert not (rec.voices / f"{vp['id']}.npy").exists()
-    assert rec.get("/api/speakers").json() == {"speakers": []}
+    assert rec.get("/api/speakers").json() == {"speakers": [], "embedder": "mock"}
     assert rec.delete(f"/api/speakers/{vp['id']}").status_code == 404
 
 
@@ -1546,7 +1546,7 @@ def test_config_file_turning_a_speaker_flag_off_closes_the_gate_now(rec, flag):
 def test_config_file_turning_recognition_on_opens_the_gate(diar, voices):
     assert diar.get("/api/speakers").status_code == 403
     _file_says(speaker_recognition=True)
-    assert diar.get("/api/speakers").json() == {"speakers": []}
+    assert diar.get("/api/speakers").json() == {"speakers": [], "embedder": "mock"}
     stop = _saved(diar)
     assert all(sp["centroid"] for sp in _sidecar(diar, stop["meeting_id"])["speakers"])
 
@@ -1609,7 +1609,8 @@ def test_rename_route_returns_the_renamed_voiceprint(rec):
     resp = rec.patch("/api/speakers/Dana Lee", json={"name": " Lee\n"})
     assert resp.status_code == 200
     assert resp.json() == {**vp, "name": "Lee"}
-    assert rec.get("/api/speakers").json() == {"speakers": [{**vp, "name": "Lee"}]}
+    assert rec.get("/api/speakers").json() == {"speakers": [{**vp, "name": "Lee"}],
+                                               "embedder": "mock"}
 
 
 # ---- access log: no enrolled names or ids in request lines
@@ -1871,3 +1872,19 @@ def test_transcribe_keeps_its_pipe_and_dictation_limit(client, monkeypatch):
     with pytest.raises(server.HTTPException):
         server._decode_audio(b"x")
     assert calls == [(0, None, None)]  # no seekable retry; same max_seconds as before
+
+
+# ---- the server's own embedder id in the list envelope (ANALYSIS_0002)
+
+@pytest.mark.parametrize("backend,expected", [
+    ("mock", "mock"), ("sherpa-onnx", "3dspeaker-campplus-zh-en-16k-advanced"),
+])
+def test_speaker_list_reports_the_servers_embedder_without_loading_it(
+        rec, monkeypatch, backend, expected):
+    from localflow.diarization import factory, sherpa
+
+    monkeypatch.setattr(factory, "build_embedder", lambda c: pytest.fail("model loaded"))
+    monkeypatch.setattr(sherpa.SherpaEmbedder, "load", lambda self: pytest.fail("loaded"))
+    monkeypatch.setattr(server._config, "diarization_backend", backend)
+    out = rec.get("/api/speakers").json()
+    assert out == {"speakers": [], "embedder": expected}
