@@ -28,6 +28,13 @@ use serde_json::{json, Value};
 pub const NAME_NEEDED: &str = "Type a name first.";
 /// Under the merge picker: the servers keep no undo for a merge.
 pub const MERGE_FINAL: &str = "Merging can't be undone.";
+/// The servers' speaker-name cap (`lf_meetings::MAX_SPEAKER_NAME_CHARS`,
+/// Python `meetings.MAX_SPEAKER_NAME_CHARS`, `hub_model.SPEAKER_NAME_MAX`):
+/// the rename field holds no more, so a longer name is never cut silently.
+/// Restated because `lf-meetings` is only linked with the `runtime` feature.
+/// The count is of raw characters; the server counts after NFKC, so a rare
+/// expanding compatibility character (`㎒` -> `MHz`) can still be cut there.
+pub const MAX_SPEAKER_NAME_CHARS: usize = 40;
 
 /// One speaker edit as sent to the server.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -115,7 +115,7 @@ impl MeetingsPage {
         let speaker_name = cx.new(|cx| {
             TextInput::new(cx, "Speaker name")
                 .label("Speaker name")
-                .max_chars(60)
+                .max_chars(spk::MAX_SPEAKER_NAME_CHARS)
         });
         cx.subscribe(&speaker_name, |this, _, e, cx| match e {
             InputEvent::Submit => this.commit_speaker(cx),
@@ -1440,6 +1440,34 @@ mod speaker_tests {
             );
             assert!(!p.speakers.editor.busy);
         });
+    }
+
+    /// The rename field holds exactly the servers' 40 characters: longer
+    /// typing stops there, so what is sent is what the server keeps.
+    #[gpui::test]
+    fn a_rename_is_capped_at_the_server_name_limit(cx: &mut TestAppContext) {
+        assert_eq!(crate::controllers::speakers::MAX_SPEAKER_NAME_CHARS, 40);
+        let (shell, meetings, cx, _dir) = open_fixture(cx);
+        meetings.update(cx, |p, cx| p.open_first_recent_speakers(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            meetings.update(cx, |p, cx| {
+                p.begin_speaker_rename(FIXTURE_RECENT_ID, "S1", String::new(), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_input(&"x".repeat(50));
+        let typed = meetings.read_with(cx, |p, cx| p.speaker_name.read(cx).text().to_string());
+        assert_eq!(typed, "x".repeat(40));
+        meetings.update(cx, |p, cx| p.commit_speaker(cx));
+        cx.run_until_parked();
+        assert!(fake(&shell, cx)
+            .calls()
+            .contains(&MeetingCall::RenameSpeaker {
+                meeting_id: FIXTURE_RECENT_ID.into(),
+                speaker_id: "S1".into(),
+                name: "x".repeat(40),
+            }));
     }
 
     /// The fixture: a stop saved with speakers shows the post-stop panel.
