@@ -1043,3 +1043,359 @@ def test_remove_failure_is_friendly_and_keeps_drafts(controller, store):
     controller.removeDictionary_(_Sender(0))
     assert controller.page_errors["Dictionary"] == hub_model.DICTIONARY_SAVE_FAILED
     assert controller.word_field.value == "draft"
+
+
+# ----------------------------------------------------------------- speakers ---
+
+SPEAKER_MID = "2026-11-25-1430"
+SPEAKER_BODY_MIN = HUB_MIN_WIDTH - HUB_CONTENT_X - 2 * 16
+SPEAKER_BODY_WIDE = 1280 - HUB_CONTENT_X - 2 * 16
+
+
+def _speakers_saved(*speakers, meeting_id=SPEAKER_MID):
+    return {
+        "meeting_id": meeting_id,
+        "notes_path": "/vault/Meetings/n.md",
+        "speakers": [
+            {"id": sid, "label": label, "seconds": seconds, "source": "others"}
+            for sid, label, seconds in speakers
+        ],
+    }
+
+
+TWO_SPEAKERS = (("S1", "Speaker 1", 72.4), ("S2", "Speaker 2", 45))
+
+
+@pytest.mark.parametrize(
+    "seconds, text",
+    [
+        (0, "0s"), (0.3, "<1s"), (0.5, "1s"), (45, "45s"), (59.6, "1m 0s"),
+        (72.4, "1m 12s"), (120, "2m 0s"), (3599.7, "1h 0m"), (3725, "1h 2m"),
+        (-3, "0s"), (None, "0s"), ("9", "0s"), (True, "0s"),
+        (float("nan"), "0s"), (float("inf"), "0s"),
+    ],
+)
+def test_format_speaker_duration(seconds, text):
+    assert hub_model.format_speaker_duration(seconds) == text
+
+
+def test_sanitize_speaker_label():
+    sanitize = hub_model.sanitize_speaker_label
+    assert sanitize("  Sarah \t Chen  ") == "Sarah Chen"
+    assert sanitize("José") == "José"
+    assert sanitize("O'Neil-Smith Jr.") == "O'Neil-Smith Jr."
+    hostile = sanitize("\u202eevil\nline → 😀")
+    assert "\u202e" not in hostile and "\n" not in hostile
+    assert "→" not in hostile and "😀" not in hostile
+    assert "\\u202e" in hostile
+    long = sanitize("x" * 100)
+    assert long.endswith("…") and len(long) == hub_model.SPEAKER_LABEL_MAX + 1
+    assert sanitize(None) == hub_model.SPEAKER_FALLBACK_LABEL
+    assert sanitize(42) == hub_model.SPEAKER_FALLBACK_LABEL
+    assert sanitize("   ") == hub_model.SPEAKER_FALLBACK_LABEL
+
+
+def test_speaker_rows_rejects_anything_without_speakers():
+    rows = hub_model.speaker_rows
+    assert rows(None) == []
+    assert rows("x") == []
+    assert rows({"speakers": [{"id": "S1"}]}) == []
+    assert rows({"meeting_id": "", "speakers": [{"id": "S1"}]}) == []
+    assert rows({"meeting_id": 5, "speakers": [{"id": "S1"}]}) == []
+    assert rows({"meeting_id": SPEAKER_MID}) == []
+    assert rows({"meeting_id": SPEAKER_MID, "speakers": []}) == []
+    assert rows({"meeting_id": SPEAKER_MID, "speakers": {"id": "S1"}}) == []
+    assert hub_model.speaker_meeting_id({"meeting_id": SPEAKER_MID, "speakers": []}) == ""
+
+
+def test_speaker_rows_parses_and_bounds_entries():
+    saved = {
+        "meeting_id": SPEAKER_MID,
+        "speakers": [
+            "junk", None, {"label": "no id"}, {"id": ""}, {"id": 7},
+            {"id": "S1\u202e", "label": "Ana", "seconds": 72.4, "source": "others"},
+            {"id": "S1\u202e", "label": "Duplicate", "seconds": 1},
+            {"id": "S2", "label": None, "seconds": "bad", "source": 3},
+        ] + [{"id": f"X{i}", "label": f"X{i}", "seconds": i} for i in range(50)],
+    }
+    rows = hub_model.speaker_rows(saved)
+    assert len(rows) == hub_model.SPEAKER_ROWS_MAX
+    first, second = rows[0], rows[1]
+    assert first["id"] == "S1\u202e"  # sent back verbatim
+    assert first["id_text"] == "S1\\u202e"
+    assert first["label"] == "Ana"
+    assert first["duration"] == "1m 12s" and first["seconds"] == 72.4
+    assert first["source"] == "others"
+    assert second["label"] == hub_model.SPEAKER_FALLBACK_LABEL
+    assert second["duration"] == "0s" and second["seconds"] == 0.0
+    assert second["source"] == ""
+    assert [row["id"] for row in rows].count("S1\u202e") == 1
+    assert hub_model.speaker_meeting_id(saved) == SPEAKER_MID
+
+
+def _rows(*speakers):
+    return hub_model.speaker_rows(_speakers_saved(*speakers))
+
+
+def test_merge_target_choices_are_unique_and_disambiguated():
+    rows = _rows(("S1", "Sam", 10), ("S2", "sam", 20), ("S3", "Ana", 30), ("S4", "Bo", 40))
+    choices = hub_model.merge_target_choices(rows, "S4")
+    assert [c["id"] for c in choices] == ["S1", "S2", "S3"]
+    assert choices[0]["title"] == "Sam · 10s · S1"
+    assert choices[1]["title"] == "sam · 20s · S2"
+    assert choices[2]["title"] == "Ana · 30s"
+    assert len(hub_model.merge_target_choices(rows, "nope")) == 4
+    # Same label, duration and capped id text: a counter keeps the titles unique.
+    long_id = "x" * 30
+    twins = _rows((long_id + "a", "Sam", 10), (long_id + "b", "Sam", 10), ("C", "Zed", 1))
+    assert twins[0]["id_text"] == twins[1]["id_text"]
+    titles = [c["title"] for c in hub_model.merge_target_choices(twins, "C")]
+    assert len(set(titles)) == 2
+    assert titles[1] == titles[0] + " (2)"
+
+
+def test_speaker_name_error():
+    error = hub_model.speaker_name_error
+    assert error("") == "Type a name first."
+    assert error("   ") == "Type a name first."
+    assert error(None) == "Type a name first."
+    assert error("!!!") == "Use letters or numbers in the name."
+    assert error("x" * 41) == "Keep the name to 40 characters or fewer."
+    assert error("x" * 40) is None
+    assert error("Sarah") is None
+    assert error("  José   García ") is None
+    assert error("R2-D2!") is None  # punctuation the server strips is allowed
+
+
+def test_speaker_name_rules_match_the_server():
+    meetings = pytest.importorskip("localflow.meetings")
+    assert hub_model.SPEAKER_NAME_MAX == meetings.MAX_SPEAKER_NAME_CHARS
+    for name in (
+        "Sarah", "  José ", "!!!", "O'Neil", "李雷", "１２", "-.-", "😀", "a😀",
+        "Ⅻ", "²", "...", "Dr. Who", "\u202e", "x\u0301", "\u0301",
+    ):
+        accepted = hub_model.speaker_name_error(name) is None
+        assert accepted == (meetings.clean_speaker_name(name) is not None), name
+
+
+def test_speaker_error_text():
+    from localflow.meeting_client import SERVER_DOWN
+
+    text = hub_model.speaker_error_text
+    assert text("rename", "invalid speaker name") == (
+        "Couldn't rename the speaker: That name can't be used. Use letters or numbers."
+    )
+    assert text("merge", "unknown speaker").endswith(
+        "That speaker is no longer in this meeting. The list will refresh."
+    )
+    assert "no longer available" in text("rename", "no speaker data for this meeting")
+    assert "moved or deleted" in text("merge", "transcript file not found")
+    assert text("rename", SERVER_DOWN) == f"Couldn't rename the speaker: {SERVER_DOWN}"
+    odd = text("merge", "bad\n\u202e" + "y" * 400)
+    assert "\n" not in odd and "\u202e" not in odd and odd.endswith("…")
+    assert len(odd) < hub_model.SPEAKER_ERROR_MAX + 40
+
+
+def _panel(*speakers):
+    panel = hub_model.SpeakerPanel()
+    panel.sync(_speakers_saved(*(speakers or TWO_SPEAKERS)))
+    return panel
+
+
+def test_panel_sync_adopts_resets_and_clears():
+    panel = hub_model.SpeakerPanel()
+    assert not panel.visible
+    assert panel.sync(None) is False
+    assert panel.sync({"meeting_id": SPEAKER_MID, "speakers": []}) is False
+    assert panel.sync(_speakers_saved(*TWO_SPEAKERS)) is True
+    assert panel.visible and panel.can_merge and panel.meeting_id == SPEAKER_MID
+    revision = panel.revision
+    assert panel.sync(_speakers_saved(*TWO_SPEAKERS)) is False
+    assert panel.revision == revision
+    panel.begin_rename("S1")
+    assert panel.sync(_speakers_saved(("A", "Other", 3), meeting_id="other")) is True
+    assert panel.meeting_id == "other" and panel.mode == "" and panel.draft == ""
+    assert panel.sync(None) is True
+    assert not panel.visible and panel.meeting_id == ""
+
+
+def test_panel_rename_happy_path():
+    panel = _panel()
+    panel.begin_rename("S1")
+    assert panel.mode == "rename" and panel.draft == "Speaker 1"
+    request = panel.submit_rename("  Sarah  ")
+    assert request == ("rename_speaker", (SPEAKER_MID, "S1", "Sarah"), panel.epoch)
+    assert panel.busy == "rename"
+    assert panel.submit_rename("Sarah") is None  # double submit
+    result = {"meeting_id": SPEAKER_MID, "speakers": [
+        {"id": "S1", "label": "Sarah", "seconds": 72.4}, {"id": "S2", "label": "Speaker 2"},
+    ]}
+    assert panel.finish(request[2], result, None) is True
+    assert panel.busy == "" and panel.mode == "" and panel.error == ""
+    assert panel.row("S1")["label"] == "Sarah"
+
+
+def test_panel_rename_errors_and_no_ops():
+    panel = _panel()
+    panel.begin_rename("S1")
+    assert panel.submit_rename("!!!") is None
+    assert panel.error == "Use letters or numbers in the name."
+    assert panel.mode == "rename" and panel.draft == "!!!"
+    request = panel.submit_rename("Sarah")
+    assert panel.finish(request[2], None, RuntimeError("invalid speaker name")) is True
+    assert panel.error.startswith("Couldn't rename the speaker: That name can't be used")
+    assert panel.mode == "rename" and panel.draft == "Sarah" and panel.busy == ""
+    # Same name: closes the editor, no request.
+    assert panel.submit_rename(" Speaker  1 ") is None
+    assert panel.mode == "" and panel.error == ""
+
+
+def test_panel_merge():
+    single = _panel(("S1", "Solo", 4))
+    single.begin_merge("S1")
+    assert single.mode == "" and not single.can_merge
+    two = _panel()
+    two.begin_merge("S1")
+    assert two.into_id == "S2"  # the only choice is preselected
+    three = _panel(*TWO_SPEAKERS, ("S3", "Speaker 3", 5))
+    three.begin_merge("S1")
+    assert three.into_id == "" and three.submit_merge() is None
+    three.choose_target("S1")  # not a choice
+    assert three.into_id == ""
+    three.choose_target("S3")
+    request = three.submit_merge()
+    assert request == ("merge_speakers", (SPEAKER_MID, "S1", "S3"), three.epoch)
+    result = {"speakers": [{"id": "S2", "label": "Speaker 2"}, {"id": "S3", "label": "Speaker 3"}]}
+    assert three.finish(request[2], result, None)
+    assert three.row("S1") is None and three.mode == ""
+
+
+def test_panel_ignores_stale_polls():
+    panel = _panel()
+    before = panel.ticket()
+    panel.begin_rename("S1")
+    request = panel.submit_rename("Sarah")
+    during = panel.ticket()
+    old = _speakers_saved(*TWO_SPEAKERS)
+    assert panel.sync(old, during) is False  # busy
+    renamed = {"speakers": [{"id": "S1", "label": "Sarah"}, {"id": "S2", "label": "Speaker 2"}]}
+    panel.finish(request[2], renamed, None)
+    assert panel.sync(old, before) is False
+    assert panel.sync(old, during) is False
+    assert panel.row("S1")["label"] == "Sarah"
+    after = panel.ticket()
+    assert panel.sync(old, after) is True
+    assert panel.row("S1")["label"] == "Speaker 1"
+
+
+def test_panel_new_meeting_while_busy_drops_the_old_response():
+    panel = _panel()
+    panel.begin_rename("S1")
+    request = panel.submit_rename("Sarah")
+    assert panel.sync(None) is True
+    assert panel.busy == "" and not panel.visible
+    assert panel.finish(request[2], {"speakers": [{"id": "S1", "label": "Sarah"}]}, None) is False
+    assert not panel.visible
+
+
+def test_panel_draft_and_vanishing_speaker():
+    panel = _panel()
+    panel.begin_rename("S2")
+    revision = panel.revision
+    panel.set_draft("Typed")
+    assert panel.draft == "Typed" and panel.revision == revision
+    panel.set_draft("Other row", "S1")  # a stale field for another row
+    assert panel.draft == "Typed"
+    assert panel.sync(_speakers_saved(("S1", "Speaker 1", 72.4))) is True
+    assert panel.mode == "" and panel.draft == ""
+    revision = panel.revision
+    panel.cancel()
+    assert panel.revision == revision  # nothing open: no bump
+
+
+def test_panel_finish_without_usable_speakers_keeps_rows():
+    for result in ({"meeting_id": "other", "speakers": [{"id": "S1"}]}, {"speakers": []}, None):
+        panel = _panel()
+        panel.begin_rename("S1")
+        request = panel.submit_rename("Sarah")
+        assert panel.finish(request[2], result, None) is True
+        assert panel.error == hub_model.SPEAKER_NO_UPDATE
+        assert [row["label"] for row in panel.rows] == ["Speaker 1", "Speaker 2"]
+        assert panel.finish(request[2], result, None) is False  # token used
+
+
+def test_panel_stamp():
+    panel = hub_model.SpeakerPanel()
+    stamped = panel.stamp({"session": None}, 3)
+    assert isinstance(stamped, hub_model.PolledStatus)
+    assert stamped == {"session": None} and stamped.speaker_ticket == 3
+    assert panel.stamp(None, 3) is None
+    assert panel.stamp([], 3) == []
+
+
+def _speaker_overlaps(a, b):
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+
+def test_meeting_speakers_layout():
+    assert hub_model.meeting_speakers_layout(600, 300, 0) == {"bottom": 300}
+    for count in (1, 2, 5):
+        frames = hub_model.meeting_speakers_layout(600, 300, count)
+        assert frames["bottom"] == 300 + 40 + 44 * count
+        assert frames["heading"] == (0, 300, 400, 22)
+        assert frames["card"] == (0, 328, 600, 44 * count)
+        assert "error" not in frames
+    frames = hub_model.meeting_speakers_layout(600, 300, 2, error_height=34)
+    assert frames["bottom"] == 300 + 40 + 88 + 6 + 34
+    assert frames["error"] == (0, 300 + 28 + 88 + 6, 600, 34)
+
+
+SPEAKER_ROW_KEYS = {
+    ("", True): {"rename", "merge", "duration", "name"},
+    ("", False): {"rename", "duration", "name"},
+    ("rename", True): {"field", "save", "cancel"},
+    ("merge", True): {"prompt", "picker", "confirm", "cancel"},
+}
+
+
+@pytest.mark.parametrize("width", [SPEAKER_BODY_MIN, SPEAKER_BODY_WIDE])
+@pytest.mark.parametrize("mode, can_merge", list(SPEAKER_ROW_KEYS))
+def test_speaker_row_frames_fit_without_overlaps(width, mode, can_merge):
+    for index in (0, 3):
+        frames = hub_model.speaker_row_frames(width, index, mode, can_merge=can_merge)
+        divider = frames.pop("divider")
+        assert divider == (12, index * 44 + 43, width - 24, 1)
+        y0 = index * 44
+        assert set(frames) == SPEAKER_ROW_KEYS[(mode, can_merge)]
+        for key, (x, y, w, h) in frames.items():
+            assert w > 0 and h > 0, key
+            assert 0 <= x and x + w <= width, key
+            assert y0 <= y and y + h <= y0 + 44, key
+        items = list(frames.values())
+        for i, a in enumerate(items):
+            for b in items[i + 1:]:
+                assert not _speaker_overlaps(a, b), (a, b)
+
+
+def test_speaker_name_error_normalizes_decomposed_accents_before_length_check():
+    # 30 NFD "e\u0301" pairs = 60 codepoints raw, 30 characters after NFKC.
+    nfd = "e\u0301" * 30
+    assert len(nfd) > hub_model.SPEAKER_NAME_MAX
+    assert hub_model.speaker_name_error(nfd) is None
+    assert hub_model.speaker_name_error("e\u0301" * 41) is not None
+
+
+def test_speaker_row_meta_adds_id_only_when_labels_collide():
+    rows = hub_model.speaker_rows({
+        "meeting_id": "m1",
+        "speakers": [
+            {"id": "spk_1", "label": "Alex", "seconds": 65},
+            {"id": "spk_2", "label": "alex", "seconds": 65},
+            {"id": "spk_3", "label": "Priya", "seconds": 12},
+        ],
+    })
+    assert hub_model.speaker_row_meta(rows, rows[0]) == "1m 5s · spk_1"
+    assert hub_model.speaker_row_meta(rows, rows[1]) == "1m 5s · spk_2"
+    assert hub_model.speaker_row_meta(rows, rows[2]) == "12s"

@@ -3,7 +3,9 @@
 //! in-memory fake.
 //!
 //! Only the methods the Hub uses are in the trait: `status`, `templates`,
-//! `start`, `save_notes`, `stop`, `chat`, `dismiss`. Payloads are the server's
+//! `start`, `save_notes`, `stop`, `chat`, `dismiss`, plus the speaker-label
+//! routes (`speakers`, `rename_speaker`, `merge_speakers`,
+//! `diarization_status`) with defaults for older clients. Payloads are the server's
 //! JSON objects ([`serde_json::Value`]), read by `hub_model` helpers such as
 //! `meeting_capture_status` and `saved_notes_message`. The real HTTP client is
 //! a platform-layer concern (no network in this crate).
@@ -75,6 +77,61 @@ pub trait MeetingClient: Send + Sync {
     fn chat(&self, question: &str) -> MeetingResult<Value>;
     /// `POST /meeting/dismiss`.
     fn dismiss(&self) -> MeetingResult<()>;
+
+    // Speaker labels. Default bodies keep every existing implementer (the
+    // GPUI preview's clients included) compiling and honest: a client without
+    // these routes has no speaker data and cannot edit or check any.
+
+    /// `GET /api/meetings/{meeting_id}/speakers`:
+    /// `{"meeting_id", "speakers": [{id, label, name, source, seconds}]}`.
+    /// `Ok(None)` when the meeting has no speaker data (the server's 404).
+    fn speakers(&self, _meeting_id: &str) -> MeetingResult<Option<Value>> {
+        Ok(None)
+    }
+    /// `PUT /api/meetings/{meeting_id}/speakers/{speaker_id}` with `{name}`;
+    /// returns the same shape as [`MeetingClient::speakers`].
+    fn rename_speaker(
+        &self,
+        _meeting_id: &str,
+        _speaker_id: &str,
+        _name: &str,
+    ) -> MeetingResult<Value> {
+        Err(MeetingClientError(SPEAKERS_UNAVAILABLE.into()))
+    }
+    /// `POST /api/meetings/{meeting_id}/speakers/merge` with `{from, into}`.
+    fn merge_speakers(&self, _meeting_id: &str, _from: &str, _into: &str) -> MeetingResult<Value> {
+        Err(MeetingClientError(SPEAKERS_UNAVAILABLE.into()))
+    }
+    /// `GET /api/diarization/status`: `{models_ready, reason, extra_installed,
+    /// models, speaker_diarization, diarize_mic, speaker_recognition, download}`.
+    fn diarization_status(&self) -> MeetingResult<Value> {
+        Err(MeetingClientError(SPEAKERS_UNAVAILABLE.into()))
+    }
+}
+
+/// Shown when a client has no speaker-label routes.
+pub const SPEAKERS_UNAVAILABLE: &str =
+    "Speaker labels aren't available from this LocalFlow server.";
+/// The servers' 404 details for the meeting speaker routes.
+pub const NO_SPEAKER_DATA: &str = "no speaker data for this meeting";
+pub const UNKNOWN_SPEAKER: &str = "unknown speaker";
+pub const INVALID_SPEAKER_NAME: &str = "invalid speaker name";
+pub const MERGE_NEEDS_TWO: &str = "from and into must be two different speaker ids";
+
+/// `store.valid_meeting_id`: 32 lowercase hex characters (a compact UUID).
+/// Anything else never names a sidecar, so it is never put in a URL.
+pub fn valid_meeting_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A speaker id safe to put in one URL path segment (`S1`, `me`, ...): 1–64
+/// of `[A-Za-z0-9_-]`. The servers mint short ids like these; anything else
+/// is not a speaker of any sidecar.
+pub fn valid_speaker_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// The resolved notes file if it is an existing `.md` file inside the vault,
@@ -153,10 +210,27 @@ pub enum MeetingCall {
     Stop,
     Chat(String),
     Dismiss,
+    Speakers(String),
+    RenameSpeaker {
+        meeting_id: String,
+        speaker_id: String,
+        name: String,
+    },
+    MergeSpeakers {
+        meeting_id: String,
+        from: String,
+        into: String,
+    },
+    DiarizationStatus,
 }
 
 #[derive(Default)]
 struct FakeState {
+    /// meeting id -> public speakers (`[{id, label, name, source, seconds}]`).
+    speakers: std::collections::BTreeMap<String, Vec<Value>>,
+    /// Speakers the next `stop` saves: `(meeting_id, speakers)`.
+    stop_speakers: Option<(String, Vec<Value>)>,
+    diarization_status: Option<Value>,
     session: Option<serde_json::Map<String, Value>>,
     last_saved: Option<Value>,
     templates: Vec<Value>,
@@ -242,6 +316,41 @@ impl FakeMeetingClient {
     /// Seed the "last saved" record.
     pub fn set_last_saved(&self, saved: Option<Value>) {
         self.lock().last_saved = saved;
+    }
+
+    /// Give a saved meeting speaker data (its sidecar). `speakers` are the
+    /// public rows `{id, label, name, source, seconds}`.
+    pub fn seed_speakers(&self, meeting_id: &str, speakers: Vec<Value>) {
+        self.lock()
+            .speakers
+            .insert(meeting_id.to_string(), speakers);
+    }
+
+    /// Make the next `stop` a diarized save: its payload gains `meeting_id`,
+    /// `diarization: "ok"` and `speakers`, and the meeting gets speaker data.
+    /// Unseeded, `stop` returns exactly the payload it always did.
+    pub fn seed_stop_speakers(&self, meeting_id: &str, speakers: Vec<Value>) {
+        self.lock().stop_speakers = Some((meeting_id.to_string(), speakers));
+    }
+
+    /// The `/api/diarization/status` body (`None`: not ready, nothing installed).
+    pub fn set_diarization_status(&self, status: Option<Value>) {
+        self.lock().diarization_status = status;
+    }
+
+    /// Mirror an edit into `last_saved` the way both servers do.
+    fn sync_last_saved(state: &mut FakeState, meeting_id: &str) {
+        let speakers = state.speakers.get(meeting_id).cloned().unwrap_or_default();
+        if let Some(saved) = state.last_saved.as_mut() {
+            if saved.get("meeting_id").and_then(Value::as_str) == Some(meeting_id) {
+                saved["speakers"] = Value::Array(speakers);
+            }
+        }
+    }
+
+    fn speakers_payload(state: &FakeState, meeting_id: &str) -> Option<Value> {
+        let speakers = state.speakers.get(meeting_id)?;
+        Some(json!({"meeting_id": meeting_id, "speakers": speakers}))
     }
 
     fn check(state: &FakeState) -> MeetingResult<()> {
@@ -383,7 +492,7 @@ impl MeetingClient for FakeMeetingClient {
             .get("segment_count")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let saved = json!({
+        let mut saved = json!({
             "title": title,
             "title_generated": false,
             "notes_path": state.saved_notes_path,
@@ -392,6 +501,12 @@ impl MeetingClient for FakeMeetingClient {
             "template": text("template"),
             "enhanced": !text("user_notes").py_strip().is_empty(),
         });
+        if let Some((meeting_id, speakers)) = state.stop_speakers.take() {
+            saved["meeting_id"] = Value::String(meeting_id.clone());
+            saved["diarization"] = Value::String("ok".into());
+            saved["speakers"] = Value::Array(speakers.clone());
+            state.speakers.insert(meeting_id, speakers);
+        }
         state.last_saved = Some(saved.clone());
         Ok(saved)
     }
@@ -423,6 +538,96 @@ impl MeetingClient for FakeMeetingClient {
         let mut state = self.lock();
         state.calls.push(MeetingCall::Dismiss);
         Self::check(&state)
+    }
+
+    fn speakers(&self, meeting_id: &str) -> MeetingResult<Option<Value>> {
+        let mut state = self.lock();
+        state.calls.push(MeetingCall::Speakers(meeting_id.into()));
+        Self::check(&state)?;
+        Ok(Self::speakers_payload(&state, meeting_id))
+    }
+
+    fn rename_speaker(
+        &self,
+        meeting_id: &str,
+        speaker_id: &str,
+        name: &str,
+    ) -> MeetingResult<Value> {
+        let mut state = self.lock();
+        state.calls.push(MeetingCall::RenameSpeaker {
+            meeting_id: meeting_id.into(),
+            speaker_id: speaker_id.into(),
+            name: name.into(),
+        });
+        Self::check(&state)?;
+        // `clean_speaker_name`, simplified: words joined by one space.
+        let name = name.py_split().join(" ");
+        if name.is_empty() {
+            return Err(MeetingClientError(INVALID_SPEAKER_NAME.into()));
+        }
+        let Some(speakers) = state.speakers.get_mut(meeting_id) else {
+            return Err(MeetingClientError(NO_SPEAKER_DATA.into()));
+        };
+        let Some(speaker) = speakers
+            .iter_mut()
+            .find(|sp| sp.get("id").and_then(Value::as_str) == Some(speaker_id))
+        else {
+            return Err(MeetingClientError(UNKNOWN_SPEAKER.into()));
+        };
+        speaker["label"] = Value::String(name.clone());
+        speaker["name"] = Value::String(name);
+        Self::sync_last_saved(&mut state, meeting_id);
+        Ok(Self::speakers_payload(&state, meeting_id).unwrap_or_default())
+    }
+
+    fn merge_speakers(&self, meeting_id: &str, from: &str, into: &str) -> MeetingResult<Value> {
+        let mut state = self.lock();
+        state.calls.push(MeetingCall::MergeSpeakers {
+            meeting_id: meeting_id.into(),
+            from: from.into(),
+            into: into.into(),
+        });
+        Self::check(&state)?;
+        if from.is_empty() || into.is_empty() || from == into {
+            return Err(MeetingClientError(MERGE_NEEDS_TWO.into()));
+        }
+        let Some(speakers) = state.speakers.get_mut(meeting_id) else {
+            return Err(MeetingClientError(NO_SPEAKER_DATA.into()));
+        };
+        let position = |id: &str| {
+            speakers
+                .iter()
+                .position(|sp| sp.get("id").and_then(Value::as_str) == Some(id))
+        };
+        let (Some(source), Some(target)) = (position(from), position(into)) else {
+            return Err(MeetingClientError(UNKNOWN_SPEAKER.into()));
+        };
+        let seconds = |sp: &Value| sp.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
+        let total = seconds(&speakers[target]) + seconds(&speakers[source]);
+        speakers[target]["seconds"] = json!((total * 10.0).round() / 10.0);
+        speakers.remove(source);
+        Self::sync_last_saved(&mut state, meeting_id);
+        Ok(Self::speakers_payload(&state, meeting_id).unwrap_or_default())
+    }
+
+    fn diarization_status(&self) -> MeetingResult<Value> {
+        let mut state = self.lock();
+        state.calls.push(MeetingCall::DiarizationStatus);
+        Self::check(&state)?;
+        // Unset: a fresh install (runtime present, models not downloaded),
+        // the same readiness the Settings snapshots are seeded with.
+        Ok(state.diarization_status.clone().unwrap_or_else(|| {
+            json!({
+                "models_ready": false,
+                "reason": "Speaker models are not downloaded. Run `lf speakers download`.",
+                "extra_installed": true,
+                "models": [],
+                "speaker_diarization": false,
+                "diarize_mic": false,
+                "speaker_recognition": false,
+                "download": {"state": "idle", "done_bytes": 0, "total_bytes": 0, "error": null},
+            })
+        }))
     }
 }
 
@@ -582,6 +787,186 @@ mod tests {
         client.set_down(None);
         assert_eq!(client.templates().unwrap()["default"], "general");
         assert_eq!(client.calls().len(), 4);
+    }
+
+    const MEETING: &str = "0123456789abcdef0123456789abcdef";
+
+    fn two_speakers() -> Vec<Value> {
+        vec![
+            json!({"id": "me", "label": "Me", "name": null, "source": "me", "seconds": 61.0}),
+            json!({"id": "S1", "label": "Speaker 1", "name": null, "source": "others", "seconds": 120.4}),
+            json!({"id": "S2", "label": "Speaker 2", "name": null, "source": "others", "seconds": 30.25}),
+        ]
+    }
+
+    #[test]
+    fn unseeded_stop_payload_has_no_speaker_fields() {
+        let client = FakeMeetingClient::new();
+        client.start("T", "", "", "", None).unwrap();
+        let saved = client.stop().unwrap();
+        let mut keys: Vec<&str> = saved
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "enhanced",
+                "log_path",
+                "notes_path",
+                "segments",
+                "template",
+                "title",
+                "title_generated"
+            ]
+        );
+        // No sidecar: the speakers route is the server's 404.
+        assert_eq!(client.speakers(MEETING).unwrap(), None);
+    }
+
+    #[test]
+    fn a_diarized_stop_carries_speakers_and_edits_follow_the_server_rules() {
+        let client = FakeMeetingClient::new();
+        client.start("T", "", "", "", None).unwrap();
+        client.seed_stop_speakers(MEETING, two_speakers());
+        let saved = client.stop().unwrap();
+        assert_eq!(saved["meeting_id"], MEETING);
+        assert_eq!(saved["diarization"], "ok");
+        assert_eq!(saved["speakers"].as_array().unwrap().len(), 3);
+        let listed = client.speakers(MEETING).unwrap().unwrap();
+        assert_eq!(listed["meeting_id"], MEETING);
+        assert_eq!(listed["speakers"], saved["speakers"]);
+
+        assert_eq!(
+            client.rename_speaker(MEETING, "S1", " \t ").unwrap_err().0,
+            INVALID_SPEAKER_NAME
+        );
+        assert_eq!(
+            client.rename_speaker(MEETING, "S9", "Ana").unwrap_err().0,
+            UNKNOWN_SPEAKER
+        );
+        assert_eq!(
+            client
+                .rename_speaker("f".repeat(32).as_str(), "S1", "Ana")
+                .unwrap_err()
+                .0,
+            NO_SPEAKER_DATA
+        );
+        let renamed = client
+            .rename_speaker(MEETING, "S1", "  Ana   Lima ")
+            .unwrap();
+        assert_eq!(renamed["speakers"][1]["label"], "Ana Lima");
+        assert_eq!(renamed["speakers"][1]["name"], "Ana Lima");
+        // Both servers update `last_saved.speakers`, so a poll stays consistent.
+        assert_eq!(
+            client.status().unwrap()["last_saved"]["speakers"],
+            renamed["speakers"]
+        );
+
+        assert_eq!(
+            client.merge_speakers(MEETING, "S1", "S1").unwrap_err().0,
+            MERGE_NEEDS_TWO
+        );
+        assert_eq!(
+            client.merge_speakers(MEETING, "S2", "S7").unwrap_err().0,
+            UNKNOWN_SPEAKER
+        );
+        let merged = client.merge_speakers(MEETING, "S2", "S1").unwrap();
+        let speakers = merged["speakers"].as_array().unwrap();
+        assert_eq!(speakers.len(), 2);
+        assert_eq!(speakers[1]["seconds"], 150.7);
+        assert_eq!(
+            client.status().unwrap()["last_saved"]["speakers"],
+            merged["speakers"]
+        );
+    }
+
+    #[test]
+    fn speaker_routes_report_a_down_server_and_default_status() {
+        let client = FakeMeetingClient::new();
+        let status = client.diarization_status().unwrap();
+        assert_eq!(status["models_ready"], false);
+        assert!(status["reason"]
+            .as_str()
+            .unwrap()
+            .contains("lf speakers download"));
+        client.set_diarization_status(Some(json!({"models_ready": true, "extra_installed": true})));
+        assert_eq!(client.diarization_status().unwrap()["models_ready"], true);
+        client.set_down(Some(SERVER_DOWN));
+        assert_eq!(client.speakers(MEETING).unwrap_err().0, SERVER_DOWN);
+        assert_eq!(client.diarization_status().unwrap_err().0, SERVER_DOWN);
+        assert_eq!(client.calls().last(), Some(&MeetingCall::DiarizationStatus));
+    }
+
+    #[test]
+    fn default_speaker_methods_keep_old_clients_honest() {
+        struct Plain;
+        impl MeetingClient for Plain {
+            fn status(&self) -> MeetingResult<Value> {
+                Ok(json!({}))
+            }
+            fn templates(&self) -> MeetingResult<Value> {
+                Ok(json!({}))
+            }
+            fn start(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Option<bool>,
+            ) -> MeetingResult<Value> {
+                Ok(json!({}))
+            }
+            fn save_notes(&self, _: &str) -> MeetingResult<Value> {
+                Ok(json!({}))
+            }
+            fn stop(&self) -> MeetingResult<Value> {
+                Ok(json!({}))
+            }
+            fn chat(&self, _: &str) -> MeetingResult<Value> {
+                Ok(json!({}))
+            }
+            fn dismiss(&self) -> MeetingResult<()> {
+                Ok(())
+            }
+        }
+        assert_eq!(Plain.speakers(MEETING).unwrap(), None);
+        assert_eq!(
+            Plain.rename_speaker(MEETING, "S1", "A").unwrap_err().0,
+            SPEAKERS_UNAVAILABLE
+        );
+        assert_eq!(
+            Plain.merge_speakers(MEETING, "S1", "S2").unwrap_err().0,
+            SPEAKERS_UNAVAILABLE
+        );
+        assert_eq!(
+            Plain.diarization_status().unwrap_err().0,
+            SPEAKERS_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn meeting_and_speaker_ids_are_validated_for_urls() {
+        assert!(valid_meeting_id(MEETING));
+        for bad in [
+            "",
+            "../x",
+            "0123456789ABCDEF0123456789ABCDEF",
+            &"a".repeat(33),
+            "0123456789abcdef0123456789abcde/",
+        ] {
+            assert!(!valid_meeting_id(bad), "{bad:?}");
+        }
+        for good in ["S1", "me", "spk_2-a", &"a".repeat(64)] {
+            assert!(valid_speaker_id(good), "{good:?}");
+        }
+        for bad in ["", ".", "..", "a/b", "%2F", "S 1", "é", &"a".repeat(65)] {
+            assert!(!valid_speaker_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

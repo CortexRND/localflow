@@ -343,6 +343,7 @@ impl HelperSpeechEngine {
             "language",
             "stt_device",
             "sample_rate",
+            "perf_metrics",
         ]
         .into_iter()
         .filter_map(|key| {

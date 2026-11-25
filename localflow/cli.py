@@ -29,7 +29,7 @@ from rich.table import Table
 from rich.text import Text
 
 from localflow import api as api_logic
-from localflow import desktop_launch, provider_keys
+from localflow import desktop_launch, perf_ledger, provider_keys
 from localflow import recall as recall_module
 from localflow.apitoken import read as read_api_token
 from localflow.config import (
@@ -455,6 +455,33 @@ def stats_command() -> None:
             "Top apps: "
             + ", ".join(f"{name} ({count})" for name, count in stats["top_apps"])
         )
+
+
+@cli.command("perf")
+@click.option(
+    "--window",
+    type=click.Choice(list(perf_ledger.WINDOWS)),
+    default=perf_ledger.DEFAULT_WINDOW,
+    help="Time window to summarize.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the raw summary JSON.")
+@click.option("--clear", is_flag=True, help="Delete the local perf ledger.")
+def perf_command(window: str, as_json: bool, clear: bool) -> None:
+    """Show local speed metrics from the perf ledger."""
+    ledger = perf_ledger.PerfLedger()
+    if clear:
+        try:
+            ledger.clear()
+        except OSError as exc:
+            raise click.ClickException(f"could not clear the perf ledger: {exc}") from exc
+        click.echo("Cleared the perf ledger.")
+        return
+    summary = perf_ledger.summarize(ledger, window=window)
+    if as_json:
+        click.echo(json.dumps(summary, indent=2))
+        return
+    for line in perf_ledger.render_summary(summary):
+        click.echo(line)
 
 
 @cli.command("hub")

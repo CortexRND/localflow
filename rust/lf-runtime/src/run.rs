@@ -31,6 +31,7 @@ use crate::singleinstance::{acquire_at, lock_file_path, SingleInstance};
 use crate::status::{last_text_path, read_last_text, status_path, ListenerFact, StatusReporter};
 use crate::warmup::LlmWarmer;
 use crate::worker::{LlmFactory, SttFactory, VocabularyFn, WorkItem, Worker};
+use lf_core::perf_ledger::PerfLedger;
 
 pub struct RunOptions {
     pub audio: Box<dyn AudioSource>,
@@ -58,6 +59,8 @@ struct RuntimePaths {
     status: PathBuf,
     last_text: PathBuf,
     history: Option<PathBuf>,
+    /// The perf ledger file; `None` records nothing.
+    perf: Option<PathBuf>,
 }
 
 impl RuntimePaths {
@@ -69,6 +72,7 @@ impl RuntimePaths {
             status: status_path(),
             last_text: last_text_path(),
             history: None,
+            perf: Some(lf_core::perf_ledger::default_ledger_path()),
         })
     }
 }
@@ -259,7 +263,11 @@ fn start_at(
         Arc::new(move || toggle_dictation(&toggle_path).map_err(|e| e.to_string()))
     });
     let prepare = Mutex::new(work_tx.clone());
-    let warmer = LlmWarmer::ollama();
+    let perf_ledger = paths.perf.clone().map(PerfLedger::new);
+    let mut warmer = LlmWarmer::ollama();
+    if let Some(ledger) = &perf_ledger {
+        warmer = warmer.with_perf_ledger(ledger.clone());
+    }
     let deps = ControllerDeps {
         audio: options.audio,
         jobs: job_sink(work_tx.clone()),
@@ -346,6 +354,7 @@ fn start_at(
             )
         }),
         last_text_path: Some(paths.last_text),
+        perf: perf_ledger,
     };
     let worker_stop = handle.stop.clone();
     let (finished, done) = std::sync::mpsc::channel();
@@ -590,6 +599,7 @@ mod tests {
             status: root.join("status"),
             last_text: root.join("last-text"),
             history: Some(root.join("history.sqlite")),
+            perf: Some(root.join("perf").join("events.jsonl")),
         }
     }
     fn options(audio: Box<dyn AudioSource>) -> RunOptions {

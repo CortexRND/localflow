@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Result};
+use lf_core::perf_ledger::{self, Kind, PerfEvent, PerfLedger, Status, SttLabels};
 use serde::{Deserialize, Serialize};
 
 use crate::stt_lease::{self, LeaseGuard};
@@ -56,6 +57,8 @@ pub struct SttSlot {
     lease: Option<LeaseGuard>,
     lease_root: Option<PathBuf>,
     scoped_leases: bool,
+    /// Model loads are recorded here (`stt_load`); `None` records nothing.
+    perf: Option<PerfLedger>,
 }
 
 impl SttSlot {
@@ -68,7 +71,14 @@ impl SttSlot {
             spec: None,
             lease: None,
             scoped_leases: false,
+            perf: None,
         }
+    }
+
+    /// Record every model load in `ledger` (a disabled ledger records nothing).
+    pub fn with_perf_ledger(mut self, ledger: PerfLedger) -> Self {
+        self.perf = Some(ledger).filter(PerfLedger::is_enabled);
+        self
     }
 
     /// Independent runtime snapshots may coexist while a replacement loads.
@@ -104,7 +114,24 @@ impl SttSlot {
             let _loading =
                 stt_lease::record(backend, &spec.model_size, self.lease_root.as_deref(), true)
                     .ok_or_else(|| anyhow!("could not protect the speech model while loading"))?;
-            if let Err(error) = spec.engine.load() {
+            let started = std::time::Instant::now();
+            let loaded = spec.engine.load();
+            if let Some(ledger) = &self.perf {
+                let wall_ms = perf_ledger::ms(started.elapsed());
+                let info = loaded.as_ref().ok();
+                let event = PerfEvent {
+                    stt_ms: Some(info.map_or(wall_ms, |i| i.load_ms)),
+                    total_ms: Some(wall_ms),
+                    stt: Some(SttLabels::new(
+                        &spec.backend,
+                        &spec.model_size,
+                        info.map_or("", |i| i.provider.as_str()),
+                    )),
+                    ..PerfEvent::new(Kind::SttLoad, Status::from_ok(loaded.is_ok()))
+                };
+                ledger.record(&event);
+            }
+            if let Err(error) = loaded {
                 spec.engine.unload();
                 return Err(error);
             }
@@ -214,6 +241,36 @@ mod tests {
             }),
         }
     }
+    #[test]
+    fn model_loads_are_recorded_in_the_perf_ledger() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = PerfLedger::new(root.path().join("perf.jsonl"));
+        let counts = Arc::new(Mutex::new(Counts::default()));
+        let mut slot =
+            SttSlot::with_lease_root(root.path().into()).with_perf_ledger(ledger.clone());
+        slot.select(spec("base", &counts, true));
+        assert!(slot.load().is_err());
+        slot.select(spec("small", &counts, false));
+        slot.load().unwrap();
+        slot.load().unwrap(); // already loaded: not a new load
+        let events = ledger.read_events();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.kind == Kind::SttLoad));
+        assert_eq!(events[0].status, Status::Error);
+        assert_eq!(events[1].status, Status::Ok);
+        assert_eq!(
+            events[1].stt,
+            Some(SttLabels::new("faster-whisper", "small", ""))
+        );
+        assert!(events[1].stt_ms.is_some() && events[1].total_ms.is_some());
+
+        let disabled = PerfLedger::new(root.path().join("off.jsonl")).with_enabled(false);
+        let mut slot = SttSlot::with_lease_root(root.path().into()).with_perf_ledger(disabled);
+        slot.select(spec("tiny", &counts, false));
+        slot.load().unwrap();
+        assert!(!root.path().join("off.jsonl").exists());
+    }
+
     #[test]
     fn lazy_load_switch_release_and_drop_do_not_leak() {
         let root = tempfile::tempdir().unwrap();

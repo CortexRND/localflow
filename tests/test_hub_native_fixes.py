@@ -19,7 +19,9 @@ import pytest
 
 from localflow import hot_phrases_editor as hpe
 from localflow import hub_model
+from localflow import model_storage as ms
 from localflow.config import Config, ConfigError, apply_config_update
+from localflow.diarization.models import DIAR_MODELS
 from localflow.ui_tokens import (
     HUB_CONTENT_X,
     HUB_HEADER_OFFSET,
@@ -777,3 +779,37 @@ def test_failed_prompt_fixture_maps_and_wraps():
     ])[0]
     assert row["context"].endswith(hub_model.ORCA_NOT_OPEN)
     assert replace(Config(), vault_path="/tmp/x").vault_path == "/tmp/x"
+
+
+EMBEDDER = DIAR_MODELS[1]  # its HF repo also holds models LocalFlow never fetched
+
+
+@pytest.mark.parametrize(("repo", "files", "frees"), [
+    (EMBEDDER.repo, {f"snapshots/{EMBEDDER.revision}/{EMBEDDER.filename}": 3000,
+                     f"snapshots/{EMBEDDER.revision}/wespeaker.onnx": 900_000}, "3.0 KB"),
+    ("Systran/faster-whisper-base", {"snapshots/rev/model.bin": 200}, "200 bytes"),
+])
+def test_delete_model_dialog_names_the_listed_size_and_cancel_keeps_it(
+    tmp_path, repo, files, frees,
+):
+    folder = tmp_path / ms.repo_folder_name(repo)
+    for name, size in files.items():  # copy layout: plain files, no symlinks
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(b"x" * size)
+    alert, load_config = Mock(), Mock()
+    alert.runModal.return_value = 1001  # Cancel
+    namespace = {"NSAlert": Mock(), "load_config": load_config,
+                 "AppKit": SimpleNamespace(NSAlertFirstButtonReturn=1000)}
+    namespace["NSAlert"].alloc.return_value.init.return_value = alert
+    action = _extract(("deleteSpeechModel_",), namespace)["deleteSpeechModel_"]
+    controller = SimpleNamespace(storage_repos=[repo], storage_cache=tmp_path, show_page=Mock())
+
+    action(controller, SimpleNamespace(tag=lambda: 0))
+
+    alert.setMessageText_.assert_called_once_with(f"Delete {ms.catalog()[repo]}?")
+    alert.setInformativeText_.assert_called_once_with(
+        f"This frees {frees}. LocalFlow can download it again later."
+    )
+    load_config.assert_not_called()
+    controller.show_page.assert_not_called()
+    assert {name: (folder / name).stat().st_size for name in files} == files

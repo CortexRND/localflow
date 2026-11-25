@@ -18,16 +18,19 @@ use objc2_app_kit::{
 use objc2_foundation::{NSSize, NSString};
 use serde_json::{json, Value};
 
+use crate::backends::meeting::MeetingClient;
 use crate::backends::settings_agent::{
-    editable_shortcut, ApplyResult, Change, ManualSetting, Proposal, SettingsAgent,
-    SettingsAgentError,
+    editable_shortcut, safe_text_default, ApplyResult, Change, ManualSetting, Proposal,
+    SettingsAgent, SettingsAgentError,
 };
 use crate::backends::settings_worker::{self, Completion, Outcome, Request};
 use crate::hub_settings::{
     card_text, card_title, choice_items, choice_value_at, manual_layout, model_note,
-    settings_layout, shortcut_field_text, shortcut_placeholder, skipped_text, warning_text,
+    settings_layout, shortcut_field_text, shortcut_placeholder, skipped_text, speaker_note,
+    speaker_readiness, speaker_section_layout, speaker_switches, speaker_update, warning_text,
     SettingsPageController, SettingsPageState, Status, HEADING, INTRO, MANUAL_FONT, MANUAL_INTRO,
-    MANUAL_TITLE, PAGE_FONT, PLACEHOLDER, PREVIEW_FAILED, UNDO_TITLE, WARNINGS_TITLE,
+    MANUAL_TITLE, PAGE_FONT, PLACEHOLDER, PREVIEW_FAILED, SPEAKERS_NOT_DOWNLOADED, SPEAKER_CAPTION,
+    UNDO_TITLE, WARNINGS_TITLE,
 };
 use crate::mac::actions::Timer;
 use crate::mac::page::{HubPage, HubServices, PageCtx};
@@ -123,6 +126,15 @@ struct State {
     io_busy: bool,
     io_loaded: bool,
     needs_refresh: bool,
+    // Speaker-label readiness (`GET /api/diarization/status`), fetched on a
+    // worker each time the page is shown; `None` until the first answer.
+    speaker_status: Option<Result<Value, String>>,
+    speaker_busy: bool,
+    speaker_stale: bool,
+    speaker_sender: mpsc::Sender<Result<Value, String>>,
+    speaker_receiver: mpsc::Receiver<Result<Value, String>>,
+    /// The last speaker switch write error, shown under the switches.
+    speaker_error: String,
 }
 
 type Shared = Rc<RefCell<State>>;
@@ -141,6 +153,7 @@ impl Default for SettingsPage {
 impl SettingsPage {
     pub fn new() -> Self {
         let (io_sender, io_receiver) = mpsc::channel();
+        let (speaker_sender, speaker_receiver) = mpsc::channel();
         let slot: AgentSlot = Arc::new(Mutex::new(None));
         let factory_slot = Arc::clone(&slot);
         let controller = SettingsPageController::new(Box::new(move || {
@@ -169,6 +182,12 @@ impl SettingsPage {
                 io_busy: false,
                 io_loaded: false,
                 needs_refresh: false,
+                speaker_status: None,
+                speaker_busy: false,
+                speaker_stale: false,
+                speaker_sender,
+                speaker_receiver,
+                speaker_error: String::new(),
             })),
         }
     }
@@ -415,6 +434,63 @@ fn fixture_io(agent: &SharedAgent, request: Request) -> anyhow::Result<Completio
     let (sender, receiver) = mpsc::channel();
     settings_worker::dispatch(agent.clone(), request, sender)?;
     Ok(receiver.recv_timeout(std::time::Duration::from_secs(5))?)
+}
+
+/// Ask the local server whether speaker labels can run, on a worker. Only the
+/// Settings page asks, once per showing; the answer arrives via the IO timer.
+fn start_speaker_status(state: &Shared, client: Arc<dyn MeetingClient>) {
+    let sender = {
+        let mut state = state.borrow_mut();
+        if state.speaker_busy || state.controller.closed {
+            return;
+        }
+        state.speaker_busy = true;
+        state.speaker_sender.clone()
+    };
+    let spawned = std::thread::Builder::new()
+        .name("localflow-speaker-status".into())
+        .spawn(move || {
+            let _ = sender.send(client.diarization_status().map_err(|error| error.0));
+        });
+    if let Err(error) = spawned {
+        let mut state = state.borrow_mut();
+        state.speaker_busy = false;
+        state.speaker_stale = false;
+        state.speaker_status = Some(Err(format!("couldn't start the check ({error})")));
+    }
+}
+
+fn drain_speaker_status(state: &Shared) -> bool {
+    let mut changed = false;
+    loop {
+        let result = state.borrow().speaker_receiver.try_recv();
+        let Ok(result) = result else { break };
+        let mut state = state.borrow_mut();
+        state.speaker_busy = false;
+        state.speaker_stale = false;
+        state.speaker_status = Some(result);
+        changed = true;
+    }
+    changed
+}
+
+/// Write one speaker switch straight to `[meetings]` (not an agent key, so
+/// not in its Undo), the same config path the Style page uses.
+fn speaker_toggle(state: &Shared, services: &HubServices, rebuild: &dyn Fn(), key: &str, on: bool) {
+    let blocked = {
+        let state = state.borrow();
+        state.io_busy || state.controller.state.busy() || state.controller.closed
+    };
+    if !blocked {
+        capture_views(state, true);
+        let error = match services.update_config(&speaker_update(key, on)) {
+            Ok(_) => String::new(),
+            Err(error) => safe_text_default(&format!("Couldn't save the setting: {error}")),
+        };
+        state.borrow_mut().speaker_error = error;
+    }
+    // Always redraw: a refused click puts the switch back to the saved value.
+    rebuild();
 }
 
 fn start_preview(state: &Shared, rebuild: Rc<dyn Fn()>) {
@@ -811,6 +887,19 @@ impl HubPage for SettingsPage {
             state.io_busy = false;
             state.io_loaded = true;
             state.needs_refresh = false;
+            // A fixed, offline readiness: snapshots never ask a server. A
+            // fresh install has the runtime but no downloaded models.
+            let (sender, receiver) = mpsc::channel();
+            state.speaker_sender = sender;
+            state.speaker_receiver = receiver;
+            state.speaker_busy = false;
+            state.speaker_stale = false;
+            state.speaker_error.clear();
+            state.speaker_status = Some(Ok(json!({
+                "models_ready": false,
+                "reason": SPEAKERS_NOT_DOWNLOADED,
+                "extra_installed": true,
+            })));
         }
         let agent = self.install_snapshot_agent(root)?;
         match preparation {
@@ -884,6 +973,7 @@ impl HubPage for SettingsPage {
 
     fn drain_requests(&mut self) -> usize {
         drain_io(&self.state);
+        drain_speaker_status(&self.state);
         self.state.borrow_mut().controller.preview_done();
         self.pending_requests()
     }
@@ -893,7 +983,9 @@ impl HubPage for SettingsPage {
         if state.controller.closed {
             return 0;
         }
-        usize::from(state.io_busy) + usize::from(state.controller.state.busy())
+        usize::from(state.io_busy)
+            + usize::from(state.controller.state.busy())
+            + usize::from(state.speaker_busy)
     }
 
     fn capture(&mut self) {
@@ -905,7 +997,10 @@ impl HubPage for SettingsPage {
         let mut state = self.state.borrow_mut();
         state.visible = false;
         state.needs_refresh = true;
-        if !state.io_busy {
+        // Check the speaker models again next time (keep the old answer
+        // on screen meanwhile).
+        state.speaker_stale = true;
+        if !state.io_busy && !state.speaker_busy {
             state.io_delivery = None;
         }
     }
@@ -937,16 +1032,17 @@ impl HubPage for SettingsPage {
                     return;
                 };
                 let changed = drain_io(&state);
+                let speakers_changed = drain_speaker_status(&state);
                 let visible = {
                     let state = state.borrow();
                     state.visible && !state.controller.closed
                 };
-                if changed && visible {
+                if (changed || speakers_changed) && visible {
                     rebuild();
                 }
                 let idle_hidden = {
                     let state = state.borrow();
-                    !state.visible && !state.io_busy
+                    !state.visible && !state.io_busy && !state.speaker_busy
                 };
                 if idle_hidden {
                     state.borrow_mut().io_delivery = None;
@@ -959,6 +1055,13 @@ impl HubPage for SettingsPage {
         };
         if refresh {
             start_io(&self.state, Request::Refresh);
+        }
+        let check_speakers = {
+            let state = self.state.borrow();
+            (state.speaker_status.is_none() || state.speaker_stale) && !state.speaker_busy
+        };
+        if check_speakers {
+            start_speaker_status(&self.state, ctx.services.meeting_client.clone());
         }
         {
             let mut state = self.state.borrow_mut();
@@ -975,13 +1078,37 @@ impl HubPage for SettingsPage {
             )
         };
         let manual = manual_layout(ctx.width, &rows, &page_state, &*ctx.measure);
+        // The speaker switches end the Meetings group (always the last group);
+        // without manual rows there is no group to put them in.
+        let config = ctx.services.config();
+        let speaker_diarization = config.field_bool("speaker_diarization").unwrap_or(false);
+        let diarize_mic = config.field_bool("diarize_mic").unwrap_or(false);
+        let speakers = rows
+            .last()
+            .is_some_and(|row| row.group == "Meetings")
+            .then(|| {
+                let state = self.state.borrow();
+                let readiness = speaker_readiness(state.speaker_status.as_ref());
+                let note = speaker_note(&readiness, speaker_diarization);
+                let section = speaker_section_layout(
+                    &manual,
+                    ctx.width,
+                    note.as_deref(),
+                    &state.speaker_error,
+                    &*ctx.measure,
+                );
+                (readiness, note, state.speaker_error.clone(), section)
+            });
+        let manual_height = speakers
+            .as_ref()
+            .map_or(manual.height, |(_, _, _, section)| section.height);
         let layout = settings_layout(
             ctx.width,
             top,
             &page_state,
             rows.len(),
             &*ctx.measure,
-            Some(manual.height),
+            Some(manual_height),
         );
 
         add_label(
@@ -1304,6 +1431,78 @@ impl HubPage for SettingsPage {
                 );
             }
         }
+        if let Some((readiness, note, error, section)) = &speakers {
+            add_label(
+                ctx,
+                &manual_card,
+                SPEAKER_CAPTION,
+                section.caption,
+                MANUAL_FONT,
+                "muted",
+                Weight::Regular,
+                true,
+            );
+            let busy = {
+                let state = self.state.borrow();
+                state.io_busy || state.controller.state.busy()
+            };
+            let switches = speaker_switches(speaker_diarization, diarize_mic, readiness, busy);
+            for (switch, (_, label_frame, control_frame)) in switches.iter().zip(&section.rows) {
+                add_label(
+                    ctx,
+                    &manual_card,
+                    switch.label,
+                    *label_frame,
+                    MANUAL_FONT,
+                    "ink",
+                    Weight::Regular,
+                    true,
+                );
+                let control = CobaltSwitch::new(
+                    ctx.mtm,
+                    rect_of(*control_frame),
+                    ctx.palette,
+                    switch.on,
+                    switch.label,
+                );
+                control.setEnabled(switch.enabled);
+                let weak = Rc::downgrade(&self.state);
+                let sender = control.clone();
+                let services = ctx.services.clone();
+                let rebuild = ctx.rebuild.clone();
+                let key = switch.key;
+                ctx.target.on_action(&control, move || {
+                    if let Some(state) = weak.upgrade() {
+                        speaker_toggle(&state, &services, &*rebuild, key, sender.is_on());
+                    }
+                });
+                manual_card.addSubview(&control);
+            }
+            if let (Some(frame), Some(note)) = (section.note, note.as_deref()) {
+                add_label(
+                    ctx,
+                    &manual_card,
+                    note,
+                    frame,
+                    MANUAL_FONT,
+                    "muted",
+                    Weight::Regular,
+                    true,
+                );
+            }
+            if let Some(frame) = section.error {
+                add_label(
+                    ctx,
+                    &manual_card,
+                    error,
+                    frame,
+                    MANUAL_FONT,
+                    "red",
+                    Weight::Regular,
+                    true,
+                );
+            }
+        }
         ctx.body.addSubview(&manual_card);
         self.state.borrow_mut().manual_controls = controls;
         layout.bottom
@@ -1333,6 +1532,49 @@ mod tests {
         assert_eq!(page.drain_requests(), 0);
         assert!(page.state.borrow().io_loaded);
         assert!(!page.state.borrow().io_busy);
+    }
+
+    #[test]
+    fn speaker_readiness_is_checked_off_thread_and_seeded_for_snapshots() {
+        use crate::backends::meeting::{FakeMeetingClient, MeetingCall};
+        use crate::hub_settings::SpeakerReadiness;
+
+        let page = SettingsPage::new();
+        let client = Arc::new(FakeMeetingClient::new());
+        client.set_diarization_status(Some(
+            json!({"models_ready": true, "extra_installed": true, "reason": ""}),
+        ));
+        start_speaker_status(&page.state, client.clone());
+        assert!(page.state.borrow().speaker_busy);
+        // One check at a time.
+        start_speaker_status(&page.state, client.clone());
+        let result = page
+            .state
+            .borrow()
+            .speaker_receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        page.state.borrow().speaker_sender.send(result).unwrap();
+        assert!(drain_speaker_status(&page.state));
+        assert!(!page.state.borrow().speaker_busy);
+        assert_eq!(
+            speaker_readiness(page.state.borrow().speaker_status.as_ref()),
+            SpeakerReadiness::Ready
+        );
+        assert_eq!(client.calls(), vec![MeetingCall::DiarizationStatus]);
+
+        // Snapshots never ask a server: a fixed "not downloaded" readiness.
+        let dir = tempfile::tempdir().unwrap();
+        let mut page = SettingsPage::new();
+        page.prepare_snapshot("switches", dir.path()).unwrap();
+        let state = page.state.borrow();
+        assert!(!state.speaker_busy && !state.speaker_stale);
+        assert_eq!(
+            speaker_readiness(state.speaker_status.as_ref()),
+            SpeakerReadiness::NotReady(SPEAKERS_NOT_DOWNLOADED.into())
+        );
+        drop(state);
+        assert_eq!(page.pending_requests(), 0);
     }
 
     /// Preview `changes` through the page's own controller and delivery path.

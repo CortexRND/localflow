@@ -269,6 +269,85 @@ async fn runtime_routes_forward_to_injected_backend() {
     }
 }
 
+/// The only test here that touches the perf ledger env var (process-global).
+#[tokio::test]
+async fn perf_summary_needs_the_token_reads_the_ledger_and_rejects_bad_windows() {
+    use lf_core::perf_ledger::{self, Kind, PerfEvent, PerfLedger, Status};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("perf").join("events.jsonl");
+    std::env::set_var(perf_ledger::ENV_PATH, &path);
+
+    for host in ["localhost", "127.0.0.1:8756"] {
+        assert_eq!(
+            get(app(), "/api/perf", host, None).await,
+            (401, json!({"detail": "invalid API token"}))
+        );
+        assert_eq!(
+            get(app(), "/api/perf", host, Some("wrong")).await,
+            (401, json!({"detail": "invalid API token"}))
+        );
+    }
+    assert_eq!(
+        get(app(), "/api/perf?window=7d", "remote.example", None).await,
+        (403, json!({"detail": "invalid host"}))
+    );
+
+    let (status, empty) = get(app(), "/api/perf", "localhost", Some("test-token")).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        (&empty["window"], &empty["total_events"]),
+        (&json!("7d"), &json!(0))
+    );
+    assert!(!path.exists(), "reading must not create the ledger");
+
+    let ledger = PerfLedger::new(&path);
+    for (kind, status, total) in [
+        (Kind::Dictate, Status::Ok, 120.0),
+        (Kind::Dictate, Status::Error, 5.0),
+        (Kind::SttLoad, Status::Ok, 800.0),
+    ] {
+        assert!(ledger.record(&PerfEvent {
+            total_ms: Some(total),
+            ..PerfEvent::new(kind, status)
+        }));
+    }
+    for window in ["24h", "7d", "30d"] {
+        let request = Request::builder()
+            .uri(format!("/api/perf?window={window}&token=test-token"))
+            .header("Host", "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["window"], window);
+        assert_eq!(value["total_events"], 3);
+        assert_eq!(value["by_kind"]["dictate"]["failure_rate"], 0.5);
+        assert_eq!(value["model_loads"][0]["last_ms"], 800.0);
+        // The canonical compact body (Python repr floats), not serde's own.
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            perf_ledger::summary_json(&value)
+        );
+    }
+    for bad in ["1y", "", "7D"] {
+        assert_eq!(
+            get(
+                app(),
+                &format!("/api/perf?window={bad}"),
+                "localhost",
+                Some("test-token")
+            )
+            .await,
+            (400, json!({"detail": "window must be one of 24h, 7d, 30d"})),
+            "{bad:?}"
+        );
+    }
+    std::env::remove_var(perf_ledger::ENV_PATH);
+}
+
 /// Echoes the speaker flags of the config each request was handed.
 struct Flags;
 impl Backend for Flags {

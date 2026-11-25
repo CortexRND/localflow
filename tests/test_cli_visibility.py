@@ -29,6 +29,7 @@ VISIBLE_TOP = [
     "meeting",
     "menubar",
     "open",
+    "perf",
     "prompts",
     "serve",
     "setup",

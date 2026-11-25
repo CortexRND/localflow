@@ -124,7 +124,7 @@ def compare(servers, path, method="GET", body=None, **kwargs):
 def test_public_and_auth_contract(servers):
     compare(servers, "/healthz", auth=False)
     compare(servers, "/favicon.ico", auth=False)
-    for path in ["/settings", "/api/config", "/api/status", "/api/providers/stt", "/api/providers/llm", "/api/models", "/api/secrets", "/api/autostart", "/meeting/templates", "/meeting/status", "/prompts", "/docs", "/openapi.json", "/unknown", "/%61pi/config"]:
+    for path in ["/settings", "/api/config", "/api/status", "/api/providers/stt", "/api/providers/llm", "/api/models", "/api/secrets", "/api/autostart", "/api/perf", "/meeting/templates", "/meeting/status", "/prompts", "/docs", "/openapi.json", "/unknown", "/%61pi/config"]:
         compare(servers, path, auth=False)
         compare(servers, path, auth=False, headers={"Host": "remote.example"})
         for host in ["127.0.0.1:8756/?", "127.0.0.1:8756/#"]:

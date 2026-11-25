@@ -8,6 +8,7 @@ pub mod formatting;
 pub mod history;
 pub mod home;
 pub mod hotphrases;
+pub mod perf_ledger;
 pub mod phrases_model;
 pub mod secrets;
 pub mod shortcuts;

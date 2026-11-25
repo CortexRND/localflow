@@ -12,6 +12,7 @@
 #![allow(deprecated)]
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
@@ -20,8 +21,8 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAccessibility, NSAutoresizingMaskOptions, NSBorderType, NSPopUpButton, NSScrollView,
-    NSTextAlignment, NSTextField, NSView, NSWorkspace,
+    NSAccessibility, NSAutoresizingMaskOptions, NSBorderType, NSButton, NSPopUpButton,
+    NSScrollView, NSTextAlignment, NSTextField, NSView, NSWorkspace,
 };
 use objc2_foundation::{NSRange, NSSize, NSString, NSURL};
 use serde_json::{json, Value};
@@ -30,9 +31,14 @@ use crate::backends::meeting::{
     vault_notes_path, MeetingClient, MeetingNotesWriter, MeetingResult,
 };
 use crate::hub_model::{
-    meeting_capture_status, meeting_form_layout, meeting_notes_height, note_date_label,
-    recent_notes, saved_notes_message, RecentNote, MEETING_NOTES_PLACEHOLDER, MEETING_SUBTITLE,
-    MEETING_TITLE_PLACEHOLDER, RECENT_EMPTY, RECENT_NOTES_LIMIT, RECENT_ROW_H,
+    meeting_capture_status, meeting_form_layout, meeting_notes_height, meeting_speaker_status,
+    meeting_speakers, merge_choice_for_title, merge_picker, merge_target_items, note_date_label,
+    note_meeting_id, recent_notes, resolve_merge_target, saved_meeting_id, saved_notes_message,
+    speaker_panel_height, speaker_status_height, speaker_talk_time, speaker_titles, MeetingSpeaker,
+    MergeTarget, RecentNote, SpeakerEditor, SpeakerMode, MEETING_NOTES_PLACEHOLDER,
+    MEETING_SUBTITLE, MEETING_TITLE_PLACEHOLDER, MERGE_PICK_AGAIN, RECENT_EMPTY,
+    RECENT_NOTES_LIMIT, RECENT_ROW_H, SPEAKER_ERROR_LINE_H, SPEAKER_HEADER_H, SPEAKER_PAD,
+    SPEAKER_ROW_H,
 };
 use crate::mac::actions::Timer;
 use crate::mac::page::{HubPage, PageCtx};
@@ -143,6 +149,8 @@ enum RequestKind {
     NotesStopFlush,
     Stop,
     Chat,
+    SpeakerProbe,
+    SpeakerEdit,
 }
 
 impl RequestKind {
@@ -155,8 +163,16 @@ impl RequestKind {
             Self::NotesStopFlush => "notes_stop_flush",
             Self::Stop => "stop",
             Self::Chat => "chat",
+            Self::SpeakerProbe => "speaker_probe",
+            Self::SpeakerEdit => "speaker_edit",
         }
     }
+}
+
+/// A rename or merge of one saved meeting's speakers.
+enum SpeakerChange {
+    Rename { speaker_id: String, name: String },
+    Merge { from: String, into: String },
 }
 
 enum Request {
@@ -178,6 +194,15 @@ enum Request {
         id: u64,
         question: String,
     },
+    /// Which of these meetings (ids from note frontmatter) have speaker data.
+    SpeakerProbe {
+        ids: Vec<String>,
+    },
+    SpeakerEdit {
+        token: u64,
+        meeting_id: String,
+        change: SpeakerChange,
+    },
 }
 
 enum EventKind {
@@ -197,6 +222,14 @@ enum EventKind {
         id: u64,
         result: MeetingResult<Value>,
     },
+    SpeakerProbe(Vec<(String, MeetingResult<Option<Value>>)>),
+    SpeakerEdit {
+        token: u64,
+        meeting_id: String,
+        result: MeetingResult<Value>,
+        /// After a failed edit, the meeting's speakers read again once.
+        refetch: Option<MeetingResult<Option<Value>>>,
+    },
 }
 
 struct Event {
@@ -209,6 +242,7 @@ enum FocusedEditor {
     Title,
     Notes,
     Question,
+    SpeakerName,
 }
 
 struct Controls {
@@ -217,7 +251,31 @@ struct Controls {
     notes: Retained<PlaceholderTextView>,
     notes_status: Retained<NSTextField>,
     question: Retained<NSTextField>,
+    /// The speaker rename field, while a rename is open.
+    speaker_name: Option<Retained<NSTextField>>,
+    /// The open merge's picker, its items and its Merge button.
+    merge_target: Option<MergeControl>,
     palette: Palette,
+}
+
+/// The open merge row as drawn: a pick updates it in place (no rebuild), so
+/// the focused picker keeps keyboard focus.
+struct MergeControl {
+    picker: Retained<NSPopUpButton>,
+    /// The picker's items (unique title -> speaker id).
+    items: Vec<MergeTarget>,
+    button: Retained<NSButton>,
+    /// Every picker item is its own speaker (no title collapsed).
+    complete: bool,
+}
+
+impl MergeControl {
+    fn selected_title(&self) -> String {
+        self.picker
+            .titleOfSelectedItem()
+            .map(|title| title.to_string())
+            .unwrap_or_default()
+    }
 }
 
 struct State {
@@ -271,6 +329,42 @@ struct State {
     vault_config: RefCell<(String, String)>,
     controls: RefCell<Option<Controls>>,
     focus: Cell<Option<(FocusedEditor, NSRange)>>,
+
+    // Speaker labels (U3/U4). Their requests never use `busy`, so Start, Stop
+    // and Ask stay usable while a rename or merge runs.
+    speaker_editor: RefCell<SpeakerEditor>,
+    /// Typed name of an open rename; the merge target of an open merge.
+    speaker_name_draft: RefCell<String>,
+    merge_choice: RefCell<String>,
+    /// Put the caret in the rename field on the next render.
+    focus_speaker_name: Cell<bool>,
+    /// Recent note path -> the meeting id in its frontmatter (diarized only).
+    recent_ids: RefCell<HashMap<String, String>>,
+    /// Meeting id -> its speakers, or `None` when the server has no speaker
+    /// data (404). A failed request is not cached, so it is asked again.
+    recent_speakers: RefCell<HashMap<String, Option<Vec<MeetingSpeaker>>>>,
+    probe_in_flight: Cell<bool>,
+    /// Meeting ids to read next (one probe runs at a time; an explicit
+    /// refresh waits here and is always read, cached or not).
+    probe_queue: RefCell<std::collections::BTreeSet<String>>,
+    /// The ids of the probe in flight.
+    probe_ids: RefCell<Vec<String>>,
+    /// The server came back while a probe was in flight: that probe may
+    /// have failed against the old connection, so once it finishes the
+    /// recent ids still uncached are read again (once, not in a loop).
+    probe_after_reconnect: Cell<bool>,
+    /// Counts applied speaker edits. A probe or status read launched before
+    /// the latest edit was applied may hold older speakers: its speakers are
+    /// not used (a probe's ids are read again).
+    speaker_seq: Cell<u64>,
+    probe_seq: Cell<u64>,
+    status_seq: Cell<u64>,
+    /// The open edit is on the Recent card (else the saved-notes panel).
+    edit_on_recent: Cell<bool>,
+    /// Set by the render that drew the open edit's row.
+    edit_drawn: Cell<bool>,
+    /// The meeting whose speakers are open under its Recent row.
+    open_recent: RefCell<Option<String>>,
 }
 
 impl State {
@@ -322,6 +416,22 @@ impl State {
             vault_config: RefCell::new((String::new(), String::new())),
             controls: RefCell::new(None),
             focus: Cell::new(None),
+            speaker_editor: RefCell::new(SpeakerEditor::default()),
+            speaker_name_draft: RefCell::new(String::new()),
+            merge_choice: RefCell::new(String::new()),
+            focus_speaker_name: Cell::new(false),
+            recent_ids: RefCell::new(HashMap::new()),
+            recent_speakers: RefCell::new(HashMap::new()),
+            probe_in_flight: Cell::new(false),
+            probe_queue: RefCell::new(std::collections::BTreeSet::new()),
+            probe_ids: RefCell::new(Vec::new()),
+            probe_after_reconnect: Cell::new(false),
+            speaker_seq: Cell::new(0),
+            probe_seq: Cell::new(0),
+            status_seq: Cell::new(0),
+            edit_on_recent: Cell::new(false),
+            edit_drawn: Cell::new(false),
+            open_recent: RefCell::new(None),
         }
     }
 
@@ -355,10 +465,16 @@ impl State {
         let Some(controls) = controls_ref.as_ref() else {
             return;
         };
+        let speaker_editor = controls
+            .speaker_name
+            .as_ref()
+            .and_then(|field| field.currentEditor());
         let focus = if let Some(editor) = controls.title.currentEditor() {
             Some((FocusedEditor::Title, editor.selectedRange()))
         } else if let Some(editor) = controls.question.currentEditor() {
             Some((FocusedEditor::Question, editor.selectedRange()))
+        } else if let Some(editor) = speaker_editor {
+            Some((FocusedEditor::SpeakerName, editor.selectedRange()))
         } else if controls
             .notes
             .window()
@@ -386,6 +502,15 @@ impl State {
                 *self.template_value.borrow_mut() = template.id.clone();
             }
         }
+        if let Some(field) = controls.speaker_name.as_ref() {
+            *self.speaker_name_draft.borrow_mut() = field.stringValue().to_string();
+        }
+        if let Some(merge) = controls.merge_target.as_ref() {
+            // Matched by the selected item's own (unique) title, never by a
+            // position that a collapsed or reordered menu could shift.
+            *self.merge_choice.borrow_mut() =
+                merge_choice_for_title(&merge.items, &merge.selected_title());
+        }
     }
 
     fn restore_focus(&self) {
@@ -410,10 +535,14 @@ impl State {
                         .setSelectedRange(clamp(&controls.notes.string().to_string()));
                 }
             }
-            FocusedEditor::Title | FocusedEditor::Question => {
+            FocusedEditor::Title | FocusedEditor::Question | FocusedEditor::SpeakerName => {
                 let field = match focus {
                     FocusedEditor::Title => &controls.title,
-                    _ => &controls.question,
+                    FocusedEditor::Question => &controls.question,
+                    _ => match controls.speaker_name.as_ref() {
+                        Some(field) => field,
+                        None => return,
+                    },
                 };
                 if let Some(window) = field.window() {
                     window.makeFirstResponder(Some(field));
@@ -473,13 +602,17 @@ impl State {
         let sender = self.sender.clone();
         let writer = self.writer.clone();
         let name = format!("localflow-meeting-{}", kind.name());
-        // Register every notes write before spawning, including autosaves.
-        // The process-wide registry lets application quit wait for writes from
-        // replaced Hub instances as well as the currently displayed one.
-        let notes_write =
-            matches!(&request, Request::Notes { .. }).then(crate::shutdown::register_pending_write);
+        // Register every durable write before spawning: notes (autosaves
+        // included) and speaker renames or merges. The process-wide registry
+        // lets application quit wait for writes from replaced Hub instances as
+        // well as the currently displayed one.
+        let pending_write = matches!(
+            &request,
+            Request::Notes { .. } | Request::SpeakerEdit { .. }
+        )
+        .then(crate::shutdown::register_pending_write);
         let spawned = thread::Builder::new().name(name).spawn(move || {
-            let _notes_write = notes_write;
+            let mut pending_write = pending_write;
             let event_kind = match request {
                 Request::Templates => EventKind::Templates(client.templates()),
                 Request::Status => EventKind::Status(client.status()),
@@ -501,6 +634,40 @@ impl State {
                     id,
                     result: client.chat(&question),
                 },
+                Request::SpeakerProbe { ids } => EventKind::SpeakerProbe(
+                    ids.into_iter()
+                        .map(|id| {
+                            let result = client.speakers(&id);
+                            (id, result)
+                        })
+                        .collect(),
+                ),
+                Request::SpeakerEdit {
+                    token,
+                    meeting_id,
+                    change,
+                } => {
+                    let result = match &change {
+                        SpeakerChange::Rename { speaker_id, name } => {
+                            client.rename_speaker(&meeting_id, speaker_id, name)
+                        }
+                        SpeakerChange::Merge { from, into } => {
+                            client.merge_speakers(&meeting_id, from, into)
+                        }
+                    };
+                    // The durable write is done; the refetch below is only a
+                    // read and must not hold quit back.
+                    drop(pending_write.take());
+                    // A refused edit may mean the data changed underneath
+                    // (another window, the CLI): read it again once.
+                    let refetch = result.is_err().then(|| client.speakers(&meeting_id));
+                    EventKind::SpeakerEdit {
+                        token,
+                        meeting_id,
+                        result,
+                        refetch,
+                    }
+                }
             };
             // Closing the page drops the receiver; the worker then simply ends.
             let _ = sender.send(Event {
@@ -555,6 +722,17 @@ impl State {
                     answer.error = true;
                 }
             }
+            RequestKind::SpeakerProbe => {
+                // Keep the ids for the next probe; a failed spawn caches nothing.
+                self.probe_in_flight.set(false);
+                let ids = std::mem::take(&mut *self.probe_ids.borrow_mut());
+                self.probe_queue.borrow_mut().extend(ids);
+            }
+            RequestKind::SpeakerEdit => {
+                let mut editor = self.speaker_editor.borrow_mut();
+                let (token, meeting_id) = (editor.token, editor.meeting_id.clone());
+                editor.finish(token, &meeting_id, Some(&message));
+            }
         }
         self.request_rebuild();
     }
@@ -563,6 +741,7 @@ impl State {
         if self.closed.get() || self.status_in_flight.replace(true) {
             return;
         }
+        self.status_seq.set(self.speaker_seq.get());
         self.next_poll.set(Some(Instant::now() + POLL_INTERVAL));
         self.launch(RequestKind::Status, Request::Status);
     }
@@ -805,6 +984,316 @@ impl State {
         *self.recent.borrow_mut() = notes;
         *self.recent_error.borrow_mut() = error;
         self.recent_loaded.set(true);
+        self.read_recent_ids();
+        self.probe_recent();
+    }
+
+    /// Meeting ids from the recent notes' frontmatter. Only notes saved with
+    /// speaker labels have one, so un-diarized notes never cause a request.
+    fn read_recent_ids(&self) {
+        let ids: HashMap<String, String> = self
+            .recent
+            .borrow()
+            .iter()
+            .filter_map(|note| {
+                let id = note_meeting_id(std::path::Path::new(&note.path))?;
+                Some((note.path.clone(), id))
+            })
+            .collect();
+        *self.recent_ids.borrow_mut() = ids;
+    }
+
+    /// Ask the server, off the main thread, which recent meetings have speaker
+    /// data. Answers are cached; while one probe runs a newer list waits.
+    fn probe_recent(&self) {
+        if self.closed.get() || self.snapshot_mode.get() {
+            return;
+        }
+        let ids: Vec<String> = {
+            let cache = self.recent_speakers.borrow();
+            self.recent_ids
+                .borrow()
+                .values()
+                .filter(|id| !cache.contains_key(*id))
+                .cloned()
+                .collect()
+        };
+        self.probe(ids);
+    }
+
+    /// The server answered again after a failed (or first) status read. A
+    /// probe still in flight may fail against the old connection, so wait for
+    /// it and read the uncached ids then; otherwise read them now.
+    fn probe_recent_after_reconnect(&self) {
+        if self.probe_in_flight.get() {
+            self.probe_after_reconnect.set(true);
+        } else {
+            self.probe_recent();
+        }
+    }
+
+    /// Queue `ids` to be read (cached or not) and start a probe unless one is
+    /// running; the queue is sent, in id order, when that one finishes.
+    fn probe(&self, ids: Vec<String>) {
+        if self.closed.get() || self.snapshot_mode.get() {
+            return;
+        }
+        self.probe_queue.borrow_mut().extend(ids);
+        self.launch_probe();
+    }
+
+    fn launch_probe(&self) {
+        if self.probe_in_flight.get() || self.probe_queue.borrow().is_empty() {
+            return;
+        }
+        let ids: Vec<String> = std::mem::take(&mut *self.probe_queue.borrow_mut())
+            .into_iter()
+            .collect();
+        self.probe_in_flight.set(true);
+        self.probe_seq.set(self.speaker_seq.get());
+        *self.probe_ids.borrow_mut() = ids.clone();
+        self.launch(RequestKind::SpeakerProbe, Request::SpeakerProbe { ids });
+    }
+
+    /// Drop an open rename or merge (and its drafts) whose panel is no longer
+    /// drawn, e.g. the saved panel hid when the next meeting started; it must
+    /// not reappear later, or on the other surface, with an old draft.
+    /// A running request is left to finish (its reply returns to the list).
+    fn forget_undrawn_edit(&self, drawn: bool) {
+        let stale = {
+            let editor = self.speaker_editor.borrow();
+            !drawn && !editor.busy && editor.mode != SpeakerMode::List
+        };
+        if stale {
+            self.speaker_editor.borrow_mut().cancel();
+            self.speaker_name_draft.borrow_mut().clear();
+            self.merge_choice.borrow_mut().clear();
+            self.focus_speaker_name.set(false);
+        }
+    }
+
+    /// The meeting id shown by the saved-notes speaker panel, if any.
+    fn saved_speaker_meeting(&self) -> Option<String> {
+        if self.session().is_some() {
+            return None;
+        }
+        self.last_saved.borrow().as_ref().and_then(saved_meeting_id)
+    }
+
+    /// Show or hide the speakers of a Recent meeting (its "Speakers…" row
+    /// action). Opening reads them again so the list is current.
+    fn toggle_recent_speakers(&self, meeting_id: &str) {
+        if self.closed.get() || self.speaker_editor.borrow().busy {
+            return;
+        }
+        self.capture();
+        let open = self.open_recent.borrow().clone();
+        if open.as_deref() == Some(meeting_id) {
+            *self.open_recent.borrow_mut() = None;
+            if self.speaker_editor.borrow().meeting_id == meeting_id {
+                self.speaker_editor.borrow_mut().reset();
+            }
+        } else {
+            *self.open_recent.borrow_mut() = Some(meeting_id.to_string());
+            // Always a fresh list: an edit left open on the saved panel for
+            // this meeting must not reopen here with its old draft.
+            let mut editor = self.speaker_editor.borrow_mut();
+            editor.reset();
+            editor.open(meeting_id);
+            drop(editor);
+            self.speaker_name_draft.borrow_mut().clear();
+            self.merge_choice.borrow_mut().clear();
+            self.probe(vec![meeting_id.to_string()]);
+        }
+        self.request_rebuild();
+    }
+
+    /// The speakers of `meeting_id` as currently shown.
+    fn speakers_of(&self, meeting_id: &str) -> Vec<MeetingSpeaker> {
+        if self.saved_speaker_meeting().as_deref() == Some(meeting_id) {
+            if let Some(saved) = self.last_saved.borrow().as_ref() {
+                return meeting_speakers(saved);
+            }
+        }
+        self.recent_speakers
+            .borrow()
+            .get(meeting_id)
+            .cloned()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// `on_recent`: the row is on the Recent card (else the saved panel).
+    fn begin_rename(&self, meeting_id: &str, speaker: &MeetingSpeaker, on_recent: bool) {
+        self.capture();
+        let started = self
+            .speaker_editor
+            .borrow_mut()
+            .begin(meeting_id, SpeakerMode::Rename(speaker.id.clone()));
+        if started {
+            self.edit_on_recent.set(on_recent);
+            *self.speaker_name_draft.borrow_mut() = speaker.label.clone();
+            self.focus_speaker_name.set(true);
+            self.request_rebuild();
+        }
+    }
+
+    fn begin_merge(&self, meeting_id: &str, from: &str, on_recent: bool) {
+        self.capture();
+        let started = self
+            .speaker_editor
+            .borrow_mut()
+            .begin(meeting_id, SpeakerMode::Merge(from.to_string()));
+        if started {
+            self.edit_on_recent.set(on_recent);
+            // Preselect the first picker item, so the choice is always the
+            // item shown as selected.
+            let first = merge_target_items(&self.speakers_of(meeting_id), from)
+                .into_iter()
+                .next()
+                .map(|item| item.id)
+                .unwrap_or_default();
+            *self.merge_choice.borrow_mut() = first;
+            self.request_rebuild();
+        }
+    }
+
+    /// The merge picker selected `title` (from its drawn `items`; `complete`
+    /// when no title collapsed). Stores the exact id behind it (empty for
+    /// the placeholder; commit still checks it again) and calls
+    /// `set_enabled` so Merge is on exactly for a real speaker. Updated in
+    /// place, never rebuilt, so a keyboard pick keeps focus on the picker.
+    /// Returns `false` when the picker no longer matches the open merge:
+    /// nothing is stored and the caller redraws ([`Self::redraw_merge_pick`]).
+    fn pick_merge_target(
+        &self,
+        items: &[MergeTarget],
+        complete: bool,
+        title: &str,
+        set_enabled: impl FnOnce(bool),
+    ) -> bool {
+        if self.closed.get() {
+            return true;
+        }
+        let (meeting_id, from) = {
+            let editor = self.speaker_editor.borrow();
+            match &editor.mode {
+                SpeakerMode::Merge(from) if !editor.busy => {
+                    (editor.meeting_id.clone(), from.clone())
+                }
+                _ => return false,
+            }
+        };
+        let speakers = self.speakers_of(&meeting_id);
+        if merge_target_items(&speakers, &from) != items {
+            return false;
+        }
+        let choice = merge_choice_for_title(items, title);
+        let chosen = resolve_merge_target(&speakers, &from, &choice).is_some();
+        *self.merge_choice.borrow_mut() = choice;
+        set_enabled(complete && chosen);
+        true
+    }
+
+    /// A pick on a picker that no longer matches the open merge: read it
+    /// back and redraw (the previous behaviour for every pick).
+    fn redraw_merge_pick(&self) {
+        if self.closed.get() {
+            return;
+        }
+        self.capture();
+        self.request_rebuild();
+    }
+
+    fn cancel_speaker_edit(&self) {
+        self.capture();
+        self.speaker_editor.borrow_mut().cancel();
+        self.request_rebuild();
+    }
+
+    /// Save the open rename or merge (Return in the field, Save or Merge).
+    fn commit_speaker_edit(&self) {
+        if self.closed.get() {
+            return;
+        }
+        self.capture();
+        let (meeting_id, mode) = {
+            let editor = self.speaker_editor.borrow();
+            (editor.meeting_id.clone(), editor.mode.clone())
+        };
+        let change = match mode {
+            SpeakerMode::List => return,
+            SpeakerMode::Rename(speaker_id) => SpeakerChange::Rename {
+                speaker_id,
+                name: self.speaker_name_draft.borrow().py_strip().to_string(),
+            },
+            SpeakerMode::Merge(from) => {
+                let speakers = self.speakers_of(&meeting_id);
+                let choice = self.merge_choice.borrow().clone();
+                // Exactly the picked speaker, or nothing: merging is not undoable.
+                let Some(into) = resolve_merge_target(&speakers, &from, &choice) else {
+                    self.speaker_editor.borrow_mut().error = MERGE_PICK_AGAIN.into();
+                    self.request_rebuild();
+                    return;
+                };
+                SpeakerChange::Merge { from, into }
+            }
+        };
+        let Some(token) = self.speaker_editor.borrow_mut().start() else {
+            return;
+        };
+        self.launch(
+            RequestKind::SpeakerEdit,
+            Request::SpeakerEdit {
+                token,
+                meeting_id,
+                change,
+            },
+        );
+        self.request_rebuild();
+    }
+
+    /// New speakers for `meeting_id` (an edit reply or a fresh read):
+    /// `None` means the meeting has no speaker data any more.
+    fn store_speakers(&self, meeting_id: &str, payload: Option<&Value>) {
+        let speakers = payload
+            .map(meeting_speakers)
+            .filter(|list| !list.is_empty());
+        let is_saved = self
+            .last_saved
+            .borrow()
+            .as_ref()
+            .and_then(saved_meeting_id)
+            .as_deref()
+            == Some(meeting_id);
+        if is_saved {
+            let list = payload
+                .and_then(|value| value.get("speakers"))
+                .filter(|_| speakers.is_some())
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            if let Some(saved) = self.last_saved.borrow_mut().as_mut() {
+                saved["speakers"] = list.clone();
+            }
+            if let Some(status) = self.status.borrow_mut().as_mut() {
+                if status["last_saved"]["meeting_id"].as_str() == Some(meeting_id) {
+                    status["last_saved"]["speakers"] = list;
+                }
+            }
+        }
+        // Always cached, the saved meeting included: once the next meeting
+        // starts the saved panel hides and its Recent row needs this answer.
+        self.recent_speakers
+            .borrow_mut()
+            .insert(meeting_id.to_string(), speakers.clone());
+        if speakers.is_none() {
+            if self.open_recent.borrow().as_deref() == Some(meeting_id) {
+                *self.open_recent.borrow_mut() = None;
+            }
+            if self.speaker_editor.borrow().meeting_id == meeting_id {
+                self.speaker_editor.borrow_mut().reset();
+            }
+        }
     }
 
     fn apply_event(&self, event: Event) {
@@ -813,9 +1302,20 @@ impl State {
         }
         // Template metadata is not tied to a particular recording lifecycle,
         // but a reseeded snapshot must stay isolated from every older worker.
-        let is_templates = matches!(&event.kind, EventKind::Templates(_));
+        // Speaker data belongs to a saved meeting, not to the recording
+        // lifecycle either: a Start or Stop while it loads keeps it. Edits are
+        // also matched by the editor's token and meeting id.
+        let is_templates = matches!(
+            &event.kind,
+            EventKind::Templates(_) | EventKind::SpeakerProbe(_) | EventKind::SpeakerEdit { .. }
+        );
         if event.generation != self.generation.get() && (!is_templates || self.snapshot_mode.get())
         {
+            if matches!(&event.kind, EventKind::SpeakerProbe(_)) {
+                self.probe_in_flight.set(false);
+                self.probe_ids.borrow_mut().clear();
+                self.probe_after_reconnect.set(false);
+            }
             return;
         }
         match event.kind {
@@ -852,7 +1352,22 @@ impl State {
                         *self.connection_message.borrow_mut() = error.to_string();
                         self.retry_visible.set(true);
                     }
-                    Ok(result) => {
+                    Ok(mut result) => {
+                        // Read before the latest speaker edit was applied: keep
+                        // the speakers that edit returned for the same meeting.
+                        if self.status_seq.get() != self.speaker_seq.get() {
+                            let local = self.last_saved.borrow().clone();
+                            if let Some(local) = local {
+                                let same = local.get("meeting_id").is_some_and(|id| {
+                                    !id.is_null()
+                                        && result["last_saved"].get("meeting_id") == Some(id)
+                                });
+                                if same {
+                                    result["last_saved"]["speakers"] =
+                                        local.get("speakers").cloned().unwrap_or(Value::Null);
+                                }
+                            }
+                        }
                         if let Some(saved) = result.get("last_saved").filter(|v| !v.is_null()) {
                             *self.last_saved.borrow_mut() = Some(saved.clone());
                         }
@@ -879,8 +1394,15 @@ impl State {
                         }
                         self.session_active.set(session.is_some());
                         *self.status.borrow_mut() = Some(result);
+                        // A connection message means the last read failed (or
+                        // none succeeded yet): recent speaker reads may have
+                        // failed with it, and nothing else asks again.
+                        let reconnected = !self.connection_message.borrow().is_empty();
                         self.connection_message.borrow_mut().clear();
                         self.retry_visible.set(false);
+                        if reconnected {
+                            self.probe_recent_after_reconnect();
+                        }
                     }
                 }
                 self.next_poll.set(Some(Instant::now() + POLL_INTERVAL));
@@ -961,6 +1483,61 @@ impl State {
                 {
                     item.answer = answer.0;
                     item.error = answer.1;
+                }
+                self.request_rebuild();
+            }
+            EventKind::SpeakerProbe(results) => {
+                self.probe_in_flight.set(false);
+                self.probe_ids.borrow_mut().clear();
+                if self.probe_seq.get() != self.speaker_seq.get() {
+                    // Launched before the latest edit was applied: these
+                    // reads may predate it. Read every id again instead.
+                    self.probe_queue
+                        .borrow_mut()
+                        .extend(results.into_iter().map(|(id, _)| id));
+                } else {
+                    for (meeting_id, result) in results {
+                        match result {
+                            Ok(payload) => self.store_speakers(&meeting_id, payload.as_ref()),
+                            // Transient: not cached, asked again on the next load.
+                            Err(error) => log::debug!("meeting speakers unavailable: {error}"),
+                        }
+                    }
+                }
+                if self.probe_after_reconnect.replace(false) {
+                    // Queues only ids still uncached (a 404 stays cached).
+                    self.probe_recent();
+                }
+                self.launch_probe();
+                self.request_rebuild();
+            }
+            EventKind::SpeakerEdit {
+                token,
+                meeting_id,
+                result,
+                refetch,
+            } => {
+                let error = result.as_ref().err().map(|error| error.0.clone());
+                // Any reply means the server may have changed this meeting:
+                // reads already on their way are older than it.
+                self.speaker_seq.set(self.speaker_seq.get().wrapping_add(1));
+                if !self
+                    .speaker_editor
+                    .borrow_mut()
+                    .finish(token, &meeting_id, error.as_deref())
+                {
+                    // The panel moved on (closed, reseeded, another edit), so
+                    // this reply's order against newer data is unknown: read
+                    // the meeting again rather than keep a stale cache.
+                    self.probe(vec![meeting_id]);
+                    return;
+                }
+                match (result, refetch) {
+                    (Ok(payload), _) => self.store_speakers(&meeting_id, Some(&payload)),
+                    (Err(_), Some(Ok(payload))) => {
+                        self.store_speakers(&meeting_id, payload.as_ref())
+                    }
+                    (Err(_), _) => {}
                 }
                 self.request_rebuild();
             }
@@ -1127,6 +1704,18 @@ impl MeetingsPage {
         state.stop_flush_pending.set(false);
         state.save_in_flight.set(false);
         state.save_kind.set(None);
+        state.speaker_editor.borrow_mut().reset();
+        state.speaker_name_draft.borrow_mut().clear();
+        state.merge_choice.borrow_mut().clear();
+        state.focus_speaker_name.set(false);
+        state.recent_ids.borrow_mut().clear();
+        state.recent_speakers.borrow_mut().clear();
+        state.probe_in_flight.set(false);
+        state.probe_queue.borrow_mut().clear();
+        state.probe_ids.borrow_mut().clear();
+        state.probe_after_reconnect.set(false);
+        state.edit_on_recent.set(false);
+        *state.open_recent.borrow_mut() = None;
         state.snapshot_mode.set(true);
         state.request_rebuild();
     }
@@ -1251,6 +1840,411 @@ fn add_divider(ctx: &PageCtx, parent: &NSView, y: f64, width: f64) {
     }
     hide_from_accessibility(&divider);
     parent.addSubview(&divider);
+}
+
+/// Speaker row geometry (points): Ghost row actions like Recent's "Open".
+const SPEAKER_BUTTON_W: f64 = 84.0;
+const SPEAKER_TIME_W: f64 = 72.0;
+const SPEAKER_GAP: f64 = 8.0;
+/// The Recent row action that opens a meeting's speakers.
+const SPEAKERS_ACTION_W: f64 = 112.0;
+
+/// The panel's inline error for `meeting_id` on one surface (`on_recent`),
+/// if the edit opened there failed.
+fn speaker_error(state: &State, meeting_id: &str, on_recent: bool) -> String {
+    let editor = state.speaker_editor.borrow();
+    if editor.meeting_id == meeting_id && state.edit_on_recent.get() == on_recent {
+        editor.error.clone()
+    } else {
+        String::new()
+    }
+}
+
+/// Height of `meeting_id`'s speaker panel at `width`; 0 without speakers.
+fn speaker_panel_size(
+    ctx: &PageCtx,
+    state: &State,
+    meeting_id: &str,
+    rows: usize,
+    width: f64,
+    on_recent: bool,
+) -> f64 {
+    let error = speaker_error(state, meeting_id, on_recent);
+    let inner = (width - 2.0 * f64::from(CARD_PADDING)).max(1.0);
+    let lines = if error.is_empty() {
+        0
+    } else {
+        wrap_text(&error, inner, &*ctx.measure, 12.0, Weight::Regular)
+            .len()
+            .max(1)
+    };
+    f64::from(speaker_panel_height(rows, lines))
+}
+
+/// The speaker being renamed or merged can vanish (merged elsewhere, then
+/// read again). With no row left to draw its Cancel, every row action would
+/// stay locked: drop such an edit (and its drafts) before laying out.
+fn drop_orphaned_edit(
+    state: &State,
+    meeting_id: &str,
+    speakers: &[MeetingSpeaker],
+    on_recent: bool,
+) {
+    let orphaned = {
+        let editor = state.speaker_editor.borrow();
+        let edited = match &editor.mode {
+            SpeakerMode::Rename(id) | SpeakerMode::Merge(id) => Some(id.as_str()),
+            SpeakerMode::List => None,
+        };
+        editor.meeting_id == meeting_id
+            && state.edit_on_recent.get() == on_recent
+            && edited.is_some_and(|id| !speakers.iter().any(|speaker| speaker.id == id))
+    };
+    if orphaned {
+        // Not drawn: cancelled unless a request is running (its reply
+        // returns the editor to the list, which unlocks the rows).
+        state.forget_undrawn_edit(false);
+    }
+}
+
+type SpeakerControls = (Option<Retained<NSTextField>>, Option<MergeControl>);
+
+/// Draw a saved meeting's speakers at `(x, y)` in `parent` (U3/U4): each row
+/// is the label, talk time, and Rename / Merge… row actions. Rename turns the
+/// row into a name field with Save / Cancel; Merge… into a picker of the other
+/// speakers with Merge / Cancel, so a merge always takes a second, explicit
+/// step. A failed edit's server detail is shown under the rows. `surface`
+/// draws the panel as its own card (under the saved notes); inside the Recent
+/// card it is plain rows. Returns the open field / picker for draft capture.
+#[allow(clippy::too_many_arguments)]
+fn speaker_panel(
+    ctx: &PageCtx,
+    state: &Rc<State>,
+    parent: &NSView,
+    x: f64,
+    y: f64,
+    width: f64,
+    meeting_id: &str,
+    speakers: &[MeetingSpeaker],
+    surface: bool,
+) -> SpeakerControls {
+    drop_orphaned_edit(state, meeting_id, speakers, !surface);
+    let height = speaker_panel_size(ctx, state, meeting_id, speakers.len(), width, !surface);
+    if height <= 0.0 {
+        return (None, None);
+    }
+    let mtm = ctx.mtm;
+    let palette = &ctx.palette;
+    let editor = state.speaker_editor.borrow().clone();
+    // An edit belongs to the surface it was opened on: the same meeting on
+    // the other surface shows its plain list.
+    let here = editor.meeting_id == meeting_id && state.edit_on_recent.get() == !surface;
+    if here && editor.mode != SpeakerMode::List {
+        state.edit_drawn.set(true);
+    }
+    let list = SpeakerMode::List;
+    let mode = if here { &editor.mode } else { &list };
+    let busy = here && editor.busy;
+    let locked = editor.busy || (here && editor.mode != SpeakerMode::List);
+    let inset = f64::from(CARD_PADDING);
+    let right = width - inset;
+    let panel = FlippedView::new(mtm, rect(x, y, width, height));
+    if surface {
+        style_surface(&panel, palette, &SurfaceStyle::default());
+    }
+    panel.addSubview(&label(
+        mtm,
+        "Speakers",
+        inset,
+        f64::from(SPEAKER_PAD) + 4.0,
+        (right - inset).max(1.0),
+        LabelStyle {
+            size: 13.0,
+            height: 22.0,
+            weight: Weight::Semibold,
+            ..LabelStyle::default()
+        },
+        palette,
+    ));
+    let action = |title: &str, accessibility: &str, frame: (f64, f64, f64), kind: ButtonKind| {
+        let control = button(mtm, title, frame.0, frame.1, frame.2, 28.0, kind, palette);
+        control.setAccessibilityLabel(Some(&NSString::from_str(accessibility)));
+        panel.addSubview(&control);
+        control
+    };
+    let commit = {
+        let weak = Rc::downgrade(state);
+        Rc::new(move || {
+            if let Some(state) = weak.upgrade() {
+                state.commit_speaker_edit();
+            }
+        })
+    };
+    let cancel = {
+        let weak = Rc::downgrade(state);
+        Rc::new(move || {
+            if let Some(state) = weak.upgrade() {
+                state.cancel_speaker_edit();
+            }
+        })
+    };
+    let mut name_field = None;
+    let mut merge_target = None;
+    // Unique per speaker and the same titles the merge picker shows, so two
+    // rows with one label (and their actions) can be told apart.
+    let titles = speaker_titles(speakers);
+    for (index, (speaker, title)) in speakers.iter().zip(&titles).enumerate() {
+        let row_y = f64::from(SPEAKER_PAD + SPEAKER_HEADER_H + index as i32 * SPEAKER_ROW_H);
+        let cancel_x = right - SPEAKER_BUTTON_W;
+        let commit_x = cancel_x - SPEAKER_GAP - SPEAKER_BUTTON_W;
+        match mode {
+            SpeakerMode::Rename(id) if *id == speaker.id => {
+                let field_w = (commit_x - SPEAKER_GAP - inset).max(80.0);
+                let name = field(
+                    mtm,
+                    &state.speaker_name_draft.borrow(),
+                    inset,
+                    row_y + 4.0,
+                    field_w,
+                    &format!("New name for {title}"),
+                );
+                name.setPlaceholderString(Some(&NSString::from_str(&speaker.label)));
+                name.setEditable(!busy);
+                name.setSelectable(true);
+                name.setTextColor(Some(&color("ink", palette)));
+                {
+                    let commit = commit.clone();
+                    ctx.target.on_action(&name, move || commit());
+                }
+                panel.addSubview(&name);
+                let save = action(
+                    if busy { "Saving…" } else { "Save" },
+                    &format!("Save the new name for {title}"),
+                    (commit_x, row_y + 6.0, SPEAKER_BUTTON_W),
+                    ButtonKind::Primary,
+                );
+                save.setEnabled(!busy);
+                {
+                    let commit = commit.clone();
+                    ctx.target.on_action(&save, move || commit());
+                }
+                let close = action(
+                    "Cancel",
+                    "Cancel renaming",
+                    (cancel_x, row_y + 6.0, SPEAKER_BUTTON_W),
+                    ButtonKind::Secondary,
+                );
+                close.setEnabled(!busy);
+                {
+                    let cancel = cancel.clone();
+                    ctx.target.on_action(&close, move || cancel());
+                }
+                name_field = Some(name);
+            }
+            SpeakerMode::Merge(id) if *id == speaker.id => {
+                // Unique titles: an NSPopUpButton keeps one item per title.
+                let targets = merge_target_items(speakers, &speaker.id);
+                let prompt = format!("Merge {title} into");
+                let prompt_w = ((ctx.measure)(&prompt, 13.0, Weight::Regular) + 8.0)
+                    .min(((commit_x - inset) / 2.0).max(40.0));
+                panel.addSubview(&label(
+                    mtm,
+                    &prompt,
+                    inset,
+                    row_y + 10.0,
+                    prompt_w,
+                    LabelStyle {
+                        size: 13.0,
+                        height: 20.0,
+                        ..LabelStyle::default()
+                    },
+                    palette,
+                ));
+                let picker_x = inset + prompt_w + SPEAKER_GAP;
+                // A choice that no longer names a target (e.g. removed by a
+                // refresh) selects an unmapped placeholder, never another
+                // speaker; Merge stays off until a speaker is picked.
+                let choice = state.merge_choice.borrow().clone();
+                let layout = merge_picker(&targets, speakers, &choice);
+                if !layout.chosen && !choice.is_empty() {
+                    // Invalidated (e.g. by a refresh): drop it, so only a new
+                    // explicit pick can commit.
+                    state.merge_choice.borrow_mut().clear();
+                }
+                let picker = popup(
+                    mtm,
+                    &layout.titles,
+                    layout.selected,
+                    picker_x,
+                    row_y + 4.0,
+                    (commit_x - SPEAKER_GAP - picker_x).max(80.0),
+                    &prompt,
+                );
+                picker.setEnabled(!busy);
+                {
+                    // A pick updates Merge in place (no rebuild, so focus
+                    // stays here): enabled only for a real speaker.
+                    let weak = Rc::downgrade(state);
+                    ctx.target.on_action(&picker, move || {
+                        let Some(state) = weak.upgrade() else {
+                            return;
+                        };
+                        // The controls borrow ends before any redraw.
+                        let handled = state
+                            .controls
+                            .borrow()
+                            .as_ref()
+                            .and_then(|controls| controls.merge_target.as_ref())
+                            .is_some_and(|merge| {
+                                state.pick_merge_target(
+                                    &merge.items,
+                                    merge.complete,
+                                    &merge.selected_title(),
+                                    |enabled| merge.button.setEnabled(enabled),
+                                )
+                            });
+                        if !handled {
+                            state.redraw_merge_pick();
+                        }
+                    });
+                }
+                panel.addSubview(&picker);
+                // Every item must be its own speaker; otherwise refuse to merge.
+                let complete = usize::try_from(picker.numberOfItems()) == Ok(layout.titles.len());
+                let merge = action(
+                    if busy { "Merging…" } else { "Merge" },
+                    &format!("Merge {title} into the chosen speaker"),
+                    (commit_x, row_y + 6.0, SPEAKER_BUTTON_W),
+                    ButtonKind::Primary,
+                );
+                merge.setEnabled(!busy && complete && layout.chosen);
+                {
+                    let commit = commit.clone();
+                    ctx.target.on_action(&merge, move || commit());
+                }
+                let close = action(
+                    "Cancel",
+                    "Cancel merging",
+                    (cancel_x, row_y + 6.0, SPEAKER_BUTTON_W),
+                    ButtonKind::Secondary,
+                );
+                close.setEnabled(!busy);
+                {
+                    let cancel = cancel.clone();
+                    ctx.target.on_action(&close, move || cancel());
+                }
+                merge_target = Some(MergeControl {
+                    picker,
+                    items: targets,
+                    button: merge,
+                    complete,
+                });
+            }
+            _ => {
+                let merge_x = right - SPEAKER_BUTTON_W;
+                let rename_x = merge_x - SPEAKER_GAP - SPEAKER_BUTTON_W;
+                let time_x = rename_x - SPEAKER_GAP - SPEAKER_TIME_W;
+                panel.addSubview(&label(
+                    mtm,
+                    title,
+                    inset,
+                    row_y + 10.0,
+                    (time_x - SPEAKER_GAP - inset).max(40.0),
+                    LabelStyle {
+                        size: 13.0,
+                        height: 20.0,
+                        ..LabelStyle::default()
+                    },
+                    palette,
+                ));
+                let talk = speaker_talk_time(speaker.seconds);
+                let time = label(
+                    mtm,
+                    &talk,
+                    time_x,
+                    row_y + 12.0,
+                    SPEAKER_TIME_W,
+                    LabelStyle {
+                        size: 11.0,
+                        color: "muted",
+                        height: 18.0,
+                        ..LabelStyle::default()
+                    },
+                    palette,
+                );
+                time.setAlignment(NSTextAlignment::Right);
+                time.setAccessibilityLabel(Some(&NSString::from_str(&format!(
+                    "{title} spoke for {talk}"
+                ))));
+                panel.addSubview(&time);
+                let rename = action(
+                    "Rename",
+                    &format!("Rename {title}"),
+                    (rename_x, row_y + 6.0, SPEAKER_BUTTON_W),
+                    ButtonKind::Ghost,
+                );
+                rename.setEnabled(!locked);
+                {
+                    let weak = Rc::downgrade(state);
+                    let meeting_id = meeting_id.to_string();
+                    let speaker = speaker.clone();
+                    ctx.target.on_action(&rename, move || {
+                        if let Some(state) = weak.upgrade() {
+                            state.begin_rename(&meeting_id, &speaker, !surface);
+                        }
+                    });
+                }
+                let merge = action(
+                    "Merge…",
+                    &format!("Merge {title} into another speaker"),
+                    (merge_x, row_y + 6.0, SPEAKER_BUTTON_W),
+                    ButtonKind::Ghost,
+                );
+                merge.setEnabled(!locked && speakers.len() > 1);
+                {
+                    let weak = Rc::downgrade(state);
+                    let meeting_id = meeting_id.to_string();
+                    let from = speaker.id.clone();
+                    ctx.target.on_action(&merge, move || {
+                        if let Some(state) = weak.upgrade() {
+                            state.begin_merge(&meeting_id, &from, !surface);
+                        }
+                    });
+                }
+            }
+        }
+    }
+    let error = speaker_error(state, meeting_id, !surface);
+    if !error.is_empty() {
+        let error_y =
+            f64::from(SPEAKER_PAD + SPEAKER_HEADER_H + speakers.len() as i32 * SPEAKER_ROW_H);
+        let lines = wrap_text(
+            &error,
+            (right - inset).max(1.0),
+            &*ctx.measure,
+            12.0,
+            Weight::Regular,
+        )
+        .len()
+        .max(1);
+        panel.addSubview(&label(
+            mtm,
+            &error,
+            inset,
+            error_y + 2.0,
+            (right - inset).max(1.0),
+            LabelStyle {
+                size: 12.0,
+                color: "red",
+                height: f64::from(lines as i32 * SPEAKER_ERROR_LINE_H),
+                wrap: true,
+                ..LabelStyle::default()
+            },
+            palette,
+        ));
+    }
+    parent.addSubview(&panel);
+    (name_field, merge_target)
 }
 
 impl HubPage for MeetingsPage {
@@ -1812,7 +2806,33 @@ impl HubPage for MeetingsPage {
                 palette,
             ));
         }
-        let live_y = watch_y + if watch.is_empty() { 0.0 } else { 26.0 };
+        // U5: the speaker-label state on its own line under the capture
+        // status; absent (`off`, older servers) the page is unchanged.
+        // Wrapped in full (the server's reason is capped, never clipped).
+        let speaker_line = session.and_then(meeting_speaker_status);
+        let speaker_line_h = speaker_line.as_deref().map_or(0.0, |line| {
+            speaker_status_height(
+                wrap_text(line, width.max(1.0), &*ctx.measure, 12.0, Weight::Regular).len(),
+            )
+        });
+        if let Some(line) = speaker_line.as_deref() {
+            ctx.body.addSubview(&label(
+                mtm,
+                line,
+                0.0,
+                watch_y + 20.0,
+                width,
+                LabelStyle {
+                    size: 12.0,
+                    color: "muted",
+                    height: speaker_line_h,
+                    wrap: true,
+                    ..LabelStyle::default()
+                },
+                palette,
+            ));
+        }
+        let live_y = watch_y + if watch.is_empty() { 0.0 } else { 26.0 } + speaker_line_h;
         if let Some(session) = session {
             let live = FlippedView::new(mtm, rect(0.0, live_y, width, 98.0));
             style_surface(&live, palette, &SurfaceStyle::default());
@@ -1876,9 +2896,42 @@ impl HubPage for MeetingsPage {
             ctx.body.addSubview(&open);
         }
 
+        // U3: the saved meeting's speakers, only when it was saved with
+        // speaker labels (a valid meeting id and speakers in the payload).
+        let mut speaker_name = None;
+        let mut merge_target = None;
+        state.edit_drawn.set(false);
+        let saved_meeting = state.saved_speaker_meeting();
+        let saved_panel_h = match (saved.as_ref(), saved_meeting.as_deref()) {
+            (Some(saved), Some(meeting_id)) => {
+                let speakers = meeting_speakers(saved);
+                let (name, merge) = speaker_panel(
+                    ctx,
+                    &self.state,
+                    &ctx.body,
+                    0.0,
+                    saved_y + 48.0,
+                    width,
+                    meeting_id,
+                    &speakers,
+                    true,
+                );
+                speaker_name = name;
+                merge_target = merge;
+                speaker_panel_size(ctx, state, meeting_id, speakers.len(), width, false)
+            }
+            _ => 0.0,
+        };
+
         let chat_available = session.is_none()
             && (status["chat_available"].as_bool().unwrap_or(false) || saved.is_some());
-        let chat_y = saved_y + if saved.is_some() { 48.0 } else { 0.0 };
+        let chat_y = saved_y
+            + if saved.is_some() { 48.0 } else { 0.0 }
+            + if saved_panel_h > 0.0 {
+                saved_panel_h + 12.0
+            } else {
+                0.0
+            };
         let question = field(
             mtm,
             &state.question_draft.borrow(),
@@ -1991,10 +3044,49 @@ impl HubPage for MeetingsPage {
         ));
         let recent = state.recent.borrow().clone();
         let recent_error = state.recent_error.borrow().clone();
+        // U4: a row gets "Speakers…" only once the server said its meeting
+        // has speaker data (and it isn't the saved meeting already shown
+        // above). Missing metadata, a 404 or a pending probe: no action.
+        let row_meetings: Vec<Option<String>> = {
+            let ids = state.recent_ids.borrow();
+            let cache = state.recent_speakers.borrow();
+            recent
+                .iter()
+                .map(|note| {
+                    let id = ids.get(&note.path)?;
+                    let known = cache
+                        .get(id)
+                        .is_some_and(|speakers| speakers.as_ref().is_some_and(|s| !s.is_empty()));
+                    (known && saved_meeting.as_deref() != Some(id.as_str())).then(|| id.clone())
+                })
+                .collect()
+        };
+        let any_speakers = row_meetings.iter().any(Option::is_some);
+        let open_recent = state.open_recent.borrow().clone();
+        let open_index = open_recent.as_deref().and_then(|open| {
+            row_meetings
+                .iter()
+                .position(|id| id.as_deref() == Some(open))
+        });
+        let open_speakers = open_recent
+            .as_deref()
+            .filter(|_| open_index.is_some())
+            .map(|id| state.speakers_of(id))
+            .unwrap_or_default();
+        if let (Some(id), Some(_)) = (open_recent.as_deref(), open_index) {
+            // Before sizing the card, so a dropped edit's error takes no room.
+            drop_orphaned_edit(state, id, &open_speakers, true);
+        }
+        let open_h = match (open_recent.as_deref(), open_index) {
+            (Some(id), Some(_)) => {
+                speaker_panel_size(ctx, state, id, open_speakers.len(), width, true)
+            }
+            _ => 0.0,
+        };
         let recent_height = if recent.is_empty() {
             f64::from(RECENT_ROW_H)
         } else {
-            recent.len() as f64 * f64::from(RECENT_ROW_H)
+            recent.len() as f64 * f64::from(RECENT_ROW_H) + open_h
         };
         let recent_card = FlippedView::new(mtm, rect(0.0, recent_y + 28.0, width, recent_height));
         style_surface(&recent_card, palette, &SurfaceStyle::default());
@@ -2020,10 +3112,16 @@ impl HubPage for MeetingsPage {
         } else {
             let date_width = 150.0;
             let open_width = 72.0;
+            let speakers_busy = state.speaker_editor.borrow().busy;
             for (index, note) in recent.iter().enumerate() {
-                let y = index as f64 * f64::from(RECENT_ROW_H);
+                let below_open = open_index.is_some_and(|open| index > open);
+                let y =
+                    index as f64 * f64::from(RECENT_ROW_H) + if below_open { open_h } else { 0.0 };
                 let open_x = width - f64::from(CARD_PADDING) - open_width;
-                let date_x = open_x - 12.0 - date_width;
+                let speakers_x = open_x - SPEAKER_GAP - SPEAKERS_ACTION_W;
+                // Dates line up across rows; without any speaker action the
+                // row is laid out exactly as before.
+                let date_x = if any_speakers { speakers_x } else { open_x } - 12.0 - date_width;
                 recent_card.addSubview(&label(
                     mtm,
                     &note.title,
@@ -2077,21 +3175,89 @@ impl HubPage for MeetingsPage {
                     }
                 });
                 recent_card.addSubview(&open);
-                if index + 1 < recent.len() {
+                let meeting_id = row_meetings.get(index).cloned().flatten();
+                let is_open = meeting_id.is_some() && open_index == Some(index);
+                if let Some(meeting_id) = meeting_id.as_ref() {
+                    let title = if is_open {
+                        "Hide speakers"
+                    } else {
+                        "Speakers…"
+                    };
+                    let speakers = button(
+                        mtm,
+                        title,
+                        speakers_x,
+                        y + 8.0,
+                        SPEAKERS_ACTION_W,
+                        28.0,
+                        ButtonKind::Ghost,
+                        palette,
+                    );
+                    speakers.setAccessibilityLabel(Some(&NSString::from_str(&format!(
+                        "{title}: {}",
+                        note.title
+                    ))));
+                    speakers.setEnabled(!speakers_busy);
+                    let weak = Rc::downgrade(&self.state);
+                    let meeting_id = meeting_id.clone();
+                    ctx.target.on_action(&speakers, move || {
+                        if let Some(state) = weak.upgrade() {
+                            state.toggle_recent_speakers(&meeting_id);
+                        }
+                    });
+                    recent_card.addSubview(&speakers);
+                }
+                if index + 1 < recent.len() || is_open {
                     add_divider(ctx, &recent_card, y + f64::from(RECENT_ROW_H) - 1.0, width);
+                }
+                if let (true, Some(meeting_id)) = (is_open, meeting_id.as_deref()) {
+                    let (name, merge) = speaker_panel(
+                        ctx,
+                        &self.state,
+                        &recent_card,
+                        0.0,
+                        y + f64::from(RECENT_ROW_H),
+                        width,
+                        meeting_id,
+                        &open_speakers,
+                        false,
+                    );
+                    speaker_name = speaker_name.or(name);
+                    merge_target = merge_target.or(merge);
+                    if index + 1 < recent.len() {
+                        add_divider(
+                            ctx,
+                            &recent_card,
+                            y + f64::from(RECENT_ROW_H) + open_h - 1.0,
+                            width,
+                        );
+                    }
                 }
             }
         }
         ctx.body.addSubview(&recent_card);
 
+        // An open edit whose row this render did not draw is dropped, so it
+        // cannot come back later (or on the other surface) with old drafts.
+        state.forget_undrawn_edit(state.edit_drawn.get());
+        let focus_name = state.focus_speaker_name.replace(false) && speaker_name.is_some();
         *state.controls.borrow_mut() = Some(Controls {
             title,
             template,
             notes,
             notes_status,
             question,
+            speaker_name,
+            merge_target,
             palette: ctx.palette,
         });
+        if focus_name {
+            // A rename just opened: type straight into it, name selected.
+            state.focus.set(Some((
+                FocusedEditor::SpeakerName,
+                NSRange::new(0, usize::MAX),
+            )));
+        }
         state.restore_focus();
         recent_y + 28.0 + recent_height
     }
@@ -2101,7 +3267,7 @@ impl HubPage for MeetingsPage {
 mod tests {
     use super::*;
     use crate::backends::meeting::{FakeMeetingClient, MeetingCall};
-    use crate::hub_model::RECENT_NOTES_LIMIT;
+    use crate::hub_model::{MERGE_PLACEHOLDER, RECENT_NOTES_LIMIT};
     use std::sync::{Condvar, Mutex};
 
     #[test]
@@ -2692,6 +3858,710 @@ mod tests {
         assert_ne!(page.state.status_value()["session"]["seconds"], 99);
     }
 
+    const MEETING: &str = "0123456789abcdef0123456789abcdef";
+
+    fn two_speakers() -> Vec<Value> {
+        vec![
+            json!({"id": "me", "label": "Me", "name": null, "source": "me", "seconds": 60.0}),
+            json!({"id": "S1", "label": "Speaker 1", "name": null, "source": "others", "seconds": 245.0}),
+        ]
+    }
+
+    /// Apply delivered events in order until one matches `done`.
+    fn apply_until(page: &MeetingsPage, done: impl Fn(&EventKind) -> bool) {
+        loop {
+            let event = receive(page);
+            let hit = done(&event.kind);
+            page.state.apply_event(event);
+            if hit {
+                return;
+            }
+        }
+    }
+
+    fn is_edit(kind: &EventKind) -> bool {
+        matches!(kind, EventKind::SpeakerEdit { .. })
+    }
+
+    /// Start (fake) -> diarized stop through the page, then settle.
+    fn stopped_with_speakers(client: &Arc<FakeMeetingClient>) -> MeetingsPage {
+        stopped_with(client, two_speakers())
+    }
+
+    fn stopped_with(client: &Arc<FakeMeetingClient>, speakers: Vec<Value>) -> MeetingsPage {
+        client
+            .start("Planning", "", "general", "agenda", Some(false))
+            .unwrap();
+        client.seed_stop_speakers(MEETING, speakers);
+        let page = page(client.clone(), active(31));
+        page.state.primary_action();
+        apply_until(&page, |kind| matches!(kind, EventKind::Stop(_)));
+        page
+    }
+
+    #[test]
+    fn a_saved_meeting_without_speaker_labels_has_no_panel_or_requests() {
+        let client = Arc::new(FakeMeetingClient::new());
+        client
+            .start("Planning", "", "general", "agenda", Some(false))
+            .unwrap();
+        let page = page(client.clone(), active(31));
+        page.state.primary_action();
+        apply_until(&page, |kind| matches!(kind, EventKind::Stop(_)));
+        assert!(page.state.last_saved.borrow().is_some());
+        assert_eq!(page.state.saved_speaker_meeting(), None);
+        // A live session without the field shows no speaker line.
+        assert_eq!(
+            meeting_speaker_status(&active(1).status.unwrap()["session"]),
+            None
+        );
+        assert!(!client.calls().iter().any(|call| matches!(
+            call,
+            MeetingCall::Speakers(_)
+                | MeetingCall::RenameSpeaker { .. }
+                | MeetingCall::MergeSpeakers { .. }
+                | MeetingCall::DiarizationStatus
+        )));
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn stop_speakers_fill_the_panel_and_rename_and_merge_apply() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = stopped_with_speakers(&client);
+        assert_eq!(page.state.saved_speaker_meeting().as_deref(), Some(MEETING));
+        let speakers = page.state.speakers_of(MEETING);
+        assert_eq!(speakers.len(), 2);
+
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        assert_eq!(*page.state.speaker_name_draft.borrow(), "Speaker 1");
+        *page.state.speaker_name_draft.borrow_mut() = " Ana ".into();
+        page.state.commit_speaker_edit();
+        assert!(page.state.speaker_editor.borrow().busy);
+        // Start, Stop and Ask are not blocked by a speaker edit.
+        assert!(!page.state.busy.get());
+        apply_until(&page, is_edit);
+        assert_eq!(page.state.speakers_of(MEETING)[1].label, "Ana");
+        assert_eq!(page.state.speaker_editor.borrow().mode, SpeakerMode::List);
+        assert!(client.calls().contains(&MeetingCall::RenameSpeaker {
+            meeting_id: MEETING.into(),
+            speaker_id: "S1".into(),
+            name: "Ana".into(),
+        }));
+
+        page.state.begin_merge(MEETING, "S1", false);
+        *page.state.merge_choice.borrow_mut() = "me".into();
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        let merged = page.state.speakers_of(MEETING);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "me");
+        assert_eq!(merged[0].seconds, 305.0);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn a_refused_edit_stays_inline_and_rereads_the_speakers() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = stopped_with_speakers(&client);
+        let speakers = page.state.speakers_of(MEETING);
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "   ".into();
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        let editor = page.state.speaker_editor.borrow().clone();
+        assert_eq!(editor.error, "invalid speaker name");
+        assert_eq!(editor.mode, SpeakerMode::Rename("S1".into()));
+        assert!(!editor.busy);
+        // The failed edit was followed by one fresh read of the speakers.
+        let calls = client.calls();
+        let rename = calls
+            .iter()
+            .position(|call| matches!(call, MeetingCall::RenameSpeaker { .. }))
+            .unwrap();
+        assert!(calls[rename..]
+            .iter()
+            .any(|call| matches!(call, MeetingCall::Speakers(id) if id == MEETING)));
+        // Cancel returns to the list and clears the error.
+        page.state.cancel_speaker_edit();
+        assert_eq!(page.state.speaker_editor.borrow().mode, SpeakerMode::List);
+        assert!(page.state.speaker_editor.borrow().error.is_empty());
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn a_stale_speaker_reply_is_dropped_and_start_still_runs() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = stopped_with_speakers(&client);
+        let speakers = page.state.speakers_of(MEETING);
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "Ana".into();
+        page.state.commit_speaker_edit();
+        // Closing the panel makes the in-flight reply stale.
+        page.state.speaker_editor.borrow_mut().reset();
+        apply_until(&page, is_edit);
+        assert_eq!(page.state.speakers_of(MEETING)[1].label, "Speaker 1");
+
+        // A new edit is in flight while the next meeting starts.
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "Bo".into();
+        page.state.commit_speaker_edit();
+        page.state.primary_action();
+        assert!(page.state.busy.get(), "Start ran during the speaker edit");
+        apply_until(&page, is_edit);
+        assert!(!page.state.speaker_editor.borrow().busy);
+        assert!(client
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MeetingCall::Start { .. })));
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn recent_speakers_are_probed_only_for_diarized_notes_and_404_hides_the_action() {
+        let vault = tempfile::tempdir().unwrap();
+        let folder = vault.path().join("notes/Other");
+        std::fs::create_dir_all(&folder).unwrap();
+        let other = "f".repeat(32);
+        let write = |name: &str, id: Option<&str>| {
+            let meta = id.map_or(String::new(), |id| format!("meeting_id: \"{id}\"\n"));
+            std::fs::write(
+                folder.join(name),
+                format!("---\ntitle: \"{name}\"\n{meta}---\n# {name}\n"),
+            )
+            .unwrap();
+        };
+        write("2026-11-13 1000 Plain.md", None);
+        write("2026-11-14 1000 Labelled.md", Some(MEETING));
+        write("2026-11-15 1000 Gone.md", Some(&other));
+
+        let client = Arc::new(FakeMeetingClient::new());
+        client.seed_speakers(MEETING, two_speakers());
+        let page = page(client.clone(), idle());
+        page.state.snapshot_mode.set(false);
+        *page.state.vault_config.borrow_mut() =
+            (vault.path().to_string_lossy().into_owned(), "notes".into());
+        page.state.reload_recent();
+        assert_eq!(page.state.recent.borrow().len(), 3);
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        let mut probed: Vec<String> = client
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                MeetingCall::Speakers(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        probed.sort();
+        assert_eq!(probed, [MEETING.to_string(), other.clone()]);
+        let cache = page.state.recent_speakers.borrow().clone();
+        assert_eq!(
+            cache.get(MEETING).cloned().flatten().map(|s| s.len()),
+            Some(2)
+        );
+        assert_eq!(cache.get(&other), Some(&None));
+
+        // Cached: a reload asks nothing again; a transient error is not cached.
+        page.state.recent_speakers.borrow_mut().remove(MEETING);
+        client.set_down(Some("offline"));
+        page.state.reload_recent();
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        assert!(!page.state.recent_speakers.borrow().contains_key(MEETING));
+        client.set_down(None);
+        let before = client.calls().len();
+        page.state.reload_recent();
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        assert_eq!(client.calls().len(), before + 1, "only the uncached id");
+
+        // Opening a row's speakers reads them again; closing resets the editor.
+        page.state.toggle_recent_speakers(MEETING);
+        assert_eq!(page.state.open_recent.borrow().as_deref(), Some(MEETING));
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        page.state.toggle_recent_speakers(MEETING);
+        assert_eq!(*page.state.open_recent.borrow(), None);
+
+        // Seeded snapshots never probe.
+        page.seed_snapshot(idle());
+        let calls = client.calls().len();
+        page.state.reload_recent();
+        assert_eq!(client.calls().len(), calls);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn reconnect_reads_uncached_recent_speakers_once_and_keeps_404s() {
+        let vault = tempfile::tempdir().unwrap();
+        let folder = vault.path().join("notes/Other");
+        std::fs::create_dir_all(&folder).unwrap();
+        let other = "f".repeat(32);
+        for (name, id) in [
+            ("2026-11-14 1000 A.md", MEETING),
+            ("2026-11-15 1000 B.md", other.as_str()),
+        ] {
+            std::fs::write(
+                folder.join(name),
+                format!("---\ntitle: \"{name}\"\nmeeting_id: \"{id}\"\n---\n# {name}\n"),
+            )
+            .unwrap();
+        }
+        let speaker_reads = |client: &FakeMeetingClient| {
+            client
+                .calls()
+                .into_iter()
+                .filter(|call| matches!(call, MeetingCall::Speakers(_)))
+                .count()
+        };
+        let client = Arc::new(FakeMeetingClient::new());
+        client.seed_speakers(MEETING, two_speakers());
+        let page = page(client.clone(), idle());
+        page.state.snapshot_mode.set(false);
+        *page.state.vault_config.borrow_mut() =
+            (vault.path().to_string_lossy().into_owned(), "notes".into());
+
+        // The first recent read and the status read both fail.
+        client.set_down(Some("offline"));
+        page.state.reload_recent();
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        assert!(page.state.retry_visible.get());
+        assert!(page.state.recent_speakers.borrow().is_empty());
+
+        // Retry succeeds: the uncached ids are read, the 404 is cached.
+        client.set_down(None);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        {
+            let cache = page.state.recent_speakers.borrow();
+            assert_eq!(
+                cache.get(MEETING).cloned().flatten().map(|s| s.len()),
+                Some(2)
+            );
+            assert_eq!(cache.get(&other), Some(&None));
+        }
+        assert!(!page.state.probe_in_flight.get());
+
+        // Another reconnect with everything cached (a 404 too) asks nothing.
+        let before = speaker_reads(&client);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        assert!(!page.state.probe_in_flight.get(), "no busy loop");
+        assert_eq!(speaker_reads(&client), before);
+
+        // Reconnect while a probe from the old connection is in flight: it
+        // waits for that probe, and its failure is read again once.
+        page.state.recent_speakers.borrow_mut().remove(MEETING);
+        let in_flight = |page: &MeetingsPage| {
+            page.state.probe_in_flight.set(true);
+            page.state.probe_seq.set(page.state.speaker_seq.get());
+            *page.state.probe_ids.borrow_mut() = vec![MEETING.into()];
+            *page.state.connection_message.borrow_mut() = "offline".into();
+        };
+        in_flight(&page);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        assert!(page.state.probe_after_reconnect.get());
+        assert_eq!(
+            speaker_reads(&client),
+            before,
+            "waits for the probe in flight"
+        );
+        page.state.apply_event(Event {
+            generation: page.state.generation.get(),
+            kind: EventKind::SpeakerProbe(vec![(
+                MEETING.into(),
+                Err(crate::backends::meeting::MeetingClientError(
+                    "offline".into(),
+                )),
+            )]),
+        });
+        assert!(
+            page.state.probe_in_flight.get(),
+            "the failed id is read again"
+        );
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        assert_eq!(speaker_reads(&client), before + 1);
+        assert!(page.state.recent_speakers.borrow().contains_key(MEETING));
+        assert!(!page.state.probe_in_flight.get());
+        assert!(!page.state.probe_after_reconnect.get());
+
+        // The same overlap where that probe succeeds: nothing is read again.
+        page.state.recent_speakers.borrow_mut().remove(MEETING);
+        in_flight(&page);
+        page.state.retry();
+        apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        page.state.apply_event(Event {
+            generation: page.state.generation.get(),
+            kind: EventKind::SpeakerProbe(vec![(
+                MEETING.into(),
+                Ok(Some(
+                    json!({"meeting_id": MEETING, "speakers": two_speakers()}),
+                )),
+            )]),
+        });
+        assert!(page.state.recent_speakers.borrow().contains_key(MEETING));
+        assert!(!page.state.probe_in_flight.get(), "no second read");
+        assert!(!page.state.probe_after_reconnect.get());
+        assert_eq!(speaker_reads(&client), before + 1);
+        page.state.shutdown();
+    }
+
+    fn merge_calls(client: &FakeMeetingClient) -> Vec<(String, String)> {
+        client
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                MeetingCall::MergeSpeakers { from, into, .. } => Some((from, into)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repeated_labels_merge_into_the_picked_speaker_and_a_stale_pick_merges_nothing() {
+        // Two "Ana" rows with equal talk time, and a third distinct speaker.
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = stopped_with(
+            &client,
+            vec![
+                json!({"id": "S1", "label": "Ana", "name": "Ana", "source": "others", "seconds": 30.0}),
+                json!({"id": "S2", "label": "Ana", "name": "Ana", "source": "others", "seconds": 30.0}),
+                json!({"id": "S3", "label": "Bo", "name": null, "source": "others", "seconds": 12.0}),
+            ],
+        );
+        let items = merge_target_items(&page.state.speakers_of(MEETING), "S3");
+        let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(titles, ["Ana (S1)", "Ana (S2)"]);
+        // The rows (and their action labels) use the same unique titles, so
+        // either Ana can be told apart as a merge source, and reads the same
+        // as a merge target from any other row.
+        let rows = speaker_titles(&page.state.speakers_of(MEETING));
+        assert_eq!(rows, ["Ana (S1)", "Ana (S2)", "Bo"]);
+        let from_first = merge_target_items(&page.state.speakers_of(MEETING), "S1");
+        let from_first: Vec<&str> = from_first.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(from_first, ["Ana (S2)", "Bo"]);
+
+        // The picker opens on its first item, and the choice is that item.
+        page.state.begin_merge(MEETING, "S3", false);
+        assert_eq!(*page.state.merge_choice.borrow(), "S1");
+        // The person picks the second Ana: exactly S2 is merged into.
+        *page.state.merge_choice.borrow_mut() = "S2".into();
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        assert_eq!(merge_calls(&client), [("S3".to_string(), "S2".to_string())]);
+        let left: Vec<String> = page
+            .state
+            .speakers_of(MEETING)
+            .into_iter()
+            .map(|speaker| speaker.id)
+            .collect();
+        assert_eq!(left, ["S1", "S2"]);
+
+        // A stale or invalid choice is refused, never redirected elsewhere.
+        for stale in ["S9", "S1", ""] {
+            page.state.begin_merge(MEETING, "S1", false);
+            *page.state.merge_choice.borrow_mut() = stale.into();
+            page.state.commit_speaker_edit();
+            let editor = page.state.speaker_editor.borrow().clone();
+            assert!(!editor.busy, "{stale:?}");
+            assert_eq!(editor.error, MERGE_PICK_AGAIN);
+            assert_eq!(editor.mode, SpeakerMode::Merge("S1".into()));
+            page.state.cancel_speaker_edit();
+        }
+        assert_eq!(merge_calls(&client).len(), 1);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn a_pick_removed_by_a_refresh_needs_a_new_explicit_pick_before_merging() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let speaker = |id: &str, label: &str| json!({"id": id, "label": label, "name": null, "source": "others", "seconds": 10.0});
+        let page = stopped_with(
+            &client,
+            vec![
+                speaker("S0", "Ana"),
+                speaker("S1", "Bo"),
+                speaker("S2", "Cy"),
+            ],
+        );
+        page.state.begin_merge(MEETING, "S0", false);
+        *page.state.merge_choice.borrow_mut() = "S1".into();
+        // A refresh removes S1; S2 is still available.
+        page.state.store_speakers(
+            MEETING,
+            Some(&json!({"speakers": [speaker("S0", "Ana"), speaker("S2", "Cy")]})),
+        );
+        // Drawn exactly as the panel draws it, then read back as capture does.
+        let speakers = page.state.speakers_of(MEETING);
+        let targets = merge_target_items(&speakers, "S0");
+        let choice = page.state.merge_choice.borrow().clone();
+        let layout = merge_picker(&targets, &speakers, &choice);
+        assert!(!layout.chosen, "Merge must stay disabled");
+        assert_ne!(layout.titles[layout.selected], "Cy");
+        *page.state.merge_choice.borrow_mut() =
+            merge_choice_for_title(&targets, &layout.titles[layout.selected]);
+        page.state.commit_speaker_edit();
+        let editor = page.state.speaker_editor.borrow().clone();
+        assert!(!editor.busy);
+        assert_eq!(editor.error, MERGE_PICK_AGAIN);
+        assert!(merge_calls(&client).is_empty(), "S2 was never picked");
+
+        // The person now picks S2 explicitly: exactly S2 is merged into.
+        *page.state.merge_choice.borrow_mut() = merge_choice_for_title(&targets, "Cy");
+        let layout = merge_picker(&targets, &speakers, &page.state.merge_choice.borrow());
+        assert!(layout.chosen);
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        assert_eq!(merge_calls(&client), [("S0".to_string(), "S2".to_string())]);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn a_merge_pick_updates_in_place_without_a_rebuild_so_the_picker_keeps_focus() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let speaker = |id: &str, label: &str| json!({"id": id, "label": label, "name": null, "source": "others", "seconds": 10.0});
+        let page = stopped_with(
+            &client,
+            vec![
+                speaker("S0", "Ana"),
+                speaker("S1", "Bo"),
+                speaker("S2", "Bo"),
+            ],
+        );
+        let rebuilds = Rc::new(Cell::new(0));
+        {
+            let rebuilds = rebuilds.clone();
+            *page.state.rebuild.borrow_mut() = Some(Rc::new(move || {
+                rebuilds.set(rebuilds.get() + 1);
+            }));
+        }
+        page.state.visible.set(true);
+        page.state.begin_merge(MEETING, "S0", false);
+        let before = rebuilds.get();
+        // Drawn exactly as the panel draws it.
+        let speakers = page.state.speakers_of(MEETING);
+        let targets = merge_target_items(&speakers, "S0");
+        let layout = merge_picker(&targets, &speakers, &page.state.merge_choice.borrow());
+        // The picker's action as the popup callback runs it: whether it was
+        // handled in place, and what Merge was set to (`None`: untouched).
+        let pick = |items: &[MergeTarget], complete: bool, title: &str| {
+            let enabled = Cell::new(None);
+            let set = |on: bool| enabled.set(Some(on));
+            let handled = page.state.pick_merge_target(items, complete, title, set);
+            (handled, enabled.get())
+        };
+
+        // Picking the second "Bo" stores exactly its id and enables Merge,
+        // with no rebuild (a rebuild recreates the picker and drops focus).
+        assert_eq!(pick(&targets, true, "Bo (S2)"), (true, Some(true)));
+        assert_eq!(*page.state.merge_choice.borrow(), "S2");
+        // An unmapped title (a placeholder) picks nothing and disables Merge.
+        assert_eq!(pick(&targets, true, MERGE_PLACEHOLDER), (true, Some(false)));
+        assert_eq!(*page.state.merge_choice.borrow(), "");
+        // A picker whose titles collapsed never enables Merge.
+        assert_eq!(
+            pick(&targets, false, &layout.titles[0]),
+            (true, Some(false))
+        );
+        assert_eq!(rebuilds.get(), before, "a pick must not rebuild the page");
+
+        // A picker drawn for speakers no longer shown is not trusted: nothing
+        // is stored or enabled, and the callback redraws instead.
+        page.state.store_speakers(
+            MEETING,
+            Some(&json!({"speakers": [speaker("S0", "Ana"), speaker("S1", "Bo")]})),
+        );
+        *page.state.merge_choice.borrow_mut() = "S1".into();
+        let before = rebuilds.get();
+        assert_eq!(pick(&targets, true, "Bo (S2)"), (false, None));
+        assert_eq!(*page.state.merge_choice.borrow(), "S1");
+        assert_eq!(rebuilds.get(), before);
+        page.state.redraw_merge_pick();
+        assert_eq!(rebuilds.get(), before + 1);
+
+        // The in-place pick is what commit merges, and commit still re-checks.
+        let fresh = merge_target_items(&page.state.speakers_of(MEETING), "S0");
+        assert_eq!(pick(&fresh, true, "Bo"), (true, Some(true)));
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        assert_eq!(merge_calls(&client), [("S0".to_string(), "S1".to_string())]);
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn the_saved_meeting_is_cached_for_its_recent_row_during_the_next_meeting() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = stopped_with_speakers(&client);
+        page.state.snapshot_mode.set(false);
+        assert_eq!(page.state.saved_speaker_meeting().as_deref(), Some(MEETING));
+        // A probe of the saved meeting's id is cached, not skipped.
+        page.state.probe(vec![MEETING.into()]);
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        let cached = page.state.recent_speakers.borrow().get(MEETING).cloned();
+        assert_eq!(cached.flatten().map(|list| list.len()), Some(2));
+        // And so is an edit's reply.
+        page.state.recent_speakers.borrow_mut().clear();
+        let speakers = page.state.speakers_of(MEETING);
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "Ana".into();
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        let cached = page.state.recent_speakers.borrow().get(MEETING).cloned();
+        assert_eq!(cached.flatten().unwrap()[1].label, "Ana");
+        // The next meeting starts: the saved panel hides, the Recent row
+        // still has the answer it needs for its "Speakers…" action.
+        page.state.primary_action();
+        apply_until(&page, |kind| matches!(kind, EventKind::Start { .. }));
+        // An older status read may still be queued (dropped by generation).
+        for _ in 0..4 {
+            if page.state.session().is_some() {
+                break;
+            }
+            apply_until(&page, |kind| matches!(kind, EventKind::Status(_)));
+        }
+        assert!(page.state.session().is_some());
+        assert_eq!(page.state.saved_speaker_meeting(), None);
+        assert_eq!(page.state.speakers_of(MEETING)[1].label, "Ana");
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn reads_started_before_an_edit_never_overwrite_it() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = stopped_with_speakers(&client);
+        page.state.snapshot_mode.set(false);
+        let generation = page.state.generation.get();
+        let old = json!({"meeting_id": MEETING, "speakers": two_speakers()});
+
+        // A probe in flight when an edit is applied: its (older) answer is
+        // not used, and the id is read again.
+        page.state.probe_in_flight.set(true);
+        page.state.probe_seq.set(page.state.speaker_seq.get());
+        *page.state.probe_ids.borrow_mut() = vec![MEETING.into()];
+        let speakers = page.state.speakers_of(MEETING);
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "Ana".into();
+        page.state.commit_speaker_edit();
+        apply_until(&page, is_edit);
+        assert_eq!(page.state.speakers_of(MEETING)[1].label, "Ana");
+        let reads = |client: &FakeMeetingClient| {
+            client
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, MeetingCall::Speakers(_)))
+                .count()
+        };
+        let before = reads(&client);
+        page.state.apply_event(Event {
+            generation,
+            kind: EventKind::SpeakerProbe(vec![(MEETING.into(), Ok(Some(old.clone())))]),
+        });
+        let cached = page.state.recent_speakers.borrow().get(MEETING).cloned();
+        assert_ne!(
+            cached.flatten().map(|list| list[1].label.clone()),
+            Some("Speaker 1".into())
+        );
+        assert!(page.state.probe_in_flight.get(), "the id is read again");
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        assert_eq!(reads(&client), before + 1);
+        let cached = page.state.recent_speakers.borrow().get(MEETING).cloned();
+        assert_eq!(cached.flatten().unwrap()[1].label, "Ana");
+
+        // A status read from before the edit keeps the edited speakers.
+        page.state
+            .status_seq
+            .set(page.state.speaker_seq.get().wrapping_sub(1));
+        let mut stale_status = client.status().unwrap();
+        stale_status["last_saved"]["speakers"] = json!(two_speakers());
+        page.state.apply_event(Event {
+            generation,
+            kind: EventKind::Status(Ok(stale_status)),
+        });
+        assert_eq!(page.state.speakers_of(MEETING)[1].label, "Ana");
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn an_explicit_refresh_queued_behind_a_probe_reads_its_cached_id() {
+        let client = Arc::new(FakeMeetingClient::new());
+        client.seed_speakers(MEETING, two_speakers());
+        let page = page(client.clone(), idle());
+        page.state.snapshot_mode.set(false);
+        page.state
+            .recent_speakers
+            .borrow_mut()
+            .insert(MEETING.into(), Some(Vec::new()));
+        // Another probe is running when the row's speakers are opened.
+        page.state.probe_in_flight.set(true);
+        page.state.probe_seq.set(page.state.speaker_seq.get());
+        page.state.toggle_recent_speakers(MEETING);
+        assert!(page.state.probe_queue.borrow().contains(MEETING));
+        assert!(!client
+            .calls()
+            .contains(&MeetingCall::Speakers(MEETING.into())));
+        let other = "f".repeat(32);
+        page.state.apply_event(Event {
+            generation: page.state.generation.get(),
+            kind: EventKind::SpeakerProbe(vec![(other, Ok(None))]),
+        });
+        // The queued id is read although it was cached.
+        apply_until(&page, |kind| matches!(kind, EventKind::SpeakerProbe(_)));
+        assert!(client
+            .calls()
+            .contains(&MeetingCall::Speakers(MEETING.into())));
+        let cached = page.state.recent_speakers.borrow().get(MEETING).cloned();
+        assert_eq!(cached.flatten().map(|list| list.len()), Some(2));
+        page.state.shutdown();
+    }
+
+    #[test]
+    fn an_edit_never_reopens_with_an_old_draft_on_another_surface() {
+        let client = Arc::new(FakeMeetingClient::new());
+        let page = stopped_with_speakers(&client);
+        let speakers = page.state.speakers_of(MEETING);
+        // A rename left open on the saved panel…
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "half typed".into();
+        // …is not carried into the Recent panel of the same meeting.
+        page.state.toggle_recent_speakers(MEETING);
+        assert_eq!(page.state.speaker_editor.borrow().mode, SpeakerMode::List);
+        assert!(page.state.speaker_name_draft.borrow().is_empty());
+
+        // An open edit whose row was not drawn (its panel hid) is dropped.
+        page.state.begin_merge(MEETING, "S1", true);
+        page.state.forget_undrawn_edit(true);
+        assert_eq!(
+            page.state.speaker_editor.borrow().mode,
+            SpeakerMode::Merge("S1".into())
+        );
+        page.state.forget_undrawn_edit(false);
+        assert_eq!(page.state.speaker_editor.borrow().mode, SpeakerMode::List);
+        assert!(page.state.merge_choice.borrow().is_empty());
+
+        // The renamed speaker vanished (merged by the CLI, then read again):
+        // the edit is dropped before layout, so no row action stays locked.
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        let remaining = [speakers[0].clone()];
+        // Only the matching surface's edit is touched.
+        drop_orphaned_edit(&page.state, MEETING, &remaining, true);
+        assert_eq!(
+            page.state.speaker_editor.borrow().mode,
+            SpeakerMode::Rename("S1".into())
+        );
+        drop_orphaned_edit(&page.state, MEETING, &speakers, false);
+        assert_eq!(
+            page.state.speaker_editor.borrow().mode,
+            SpeakerMode::Rename("S1".into())
+        );
+        drop_orphaned_edit(&page.state, MEETING, &remaining, false);
+        let editor = page.state.speaker_editor.borrow().clone();
+        assert_eq!(editor.mode, SpeakerMode::List);
+        assert!(!editor.busy && editor.error.is_empty());
+        assert!(page.state.speaker_name_draft.borrow().is_empty());
+        page.state.shutdown();
+    }
+
     #[test]
     fn shutdown_includes_inflight_autosave_and_waits_for_newest_text() {
         let _writes = crate::shutdown::TestWrites::new();
@@ -2751,5 +4621,146 @@ mod tests {
             client.status().unwrap()["session"]["user_notes"],
             "newest text at quit"
         );
+    }
+
+    /// A one-shot latch: `wait` blocks until `open`.
+    #[derive(Default)]
+    struct Gate(Mutex<bool>, Condvar);
+
+    impl Gate {
+        fn open(&self) {
+            *self.0.lock().unwrap() = true;
+            self.1.notify_all();
+        }
+
+        fn wait(&self) {
+            let mut open = self.0.lock().unwrap();
+            while !*open {
+                open = self.1.wait(open).unwrap();
+            }
+        }
+    }
+
+    /// Blocks the rename until released and then refuses it; the refetch on
+    /// the same worker thread blocks on a second gate.
+    struct BlockingSpeakerEditClient {
+        inner: FakeMeetingClient,
+        rename_started: mpsc::Sender<()>,
+        release_rename: Gate,
+        edit_thread: Mutex<Option<thread::ThreadId>>,
+        refetch_started: mpsc::Sender<()>,
+        release_refetch: Gate,
+    }
+
+    impl MeetingClient for BlockingSpeakerEditClient {
+        fn status(&self) -> MeetingResult<Value> {
+            self.inner.status()
+        }
+
+        fn templates(&self) -> MeetingResult<Value> {
+            self.inner.templates()
+        }
+
+        fn start(
+            &self,
+            title: &str,
+            category: &str,
+            template: &str,
+            user_notes: &str,
+            auto_title: Option<bool>,
+        ) -> MeetingResult<Value> {
+            self.inner
+                .start(title, category, template, user_notes, auto_title)
+        }
+
+        fn save_notes(&self, notes: &str) -> MeetingResult<Value> {
+            self.inner.save_notes(notes)
+        }
+
+        fn stop(&self) -> MeetingResult<Value> {
+            self.inner.stop()
+        }
+
+        fn chat(&self, question: &str) -> MeetingResult<Value> {
+            self.inner.chat(question)
+        }
+
+        fn dismiss(&self) -> MeetingResult<()> {
+            self.inner.dismiss()
+        }
+
+        fn speakers(&self, meeting_id: &str) -> MeetingResult<Option<Value>> {
+            if *self.edit_thread.lock().unwrap() == Some(thread::current().id()) {
+                self.refetch_started.send(()).unwrap();
+                self.release_refetch.wait();
+            }
+            self.inner.speakers(meeting_id)
+        }
+
+        fn rename_speaker(
+            &self,
+            _meeting_id: &str,
+            _speaker_id: &str,
+            _name: &str,
+        ) -> MeetingResult<Value> {
+            *self.edit_thread.lock().unwrap() = Some(thread::current().id());
+            self.rename_started.send(()).unwrap();
+            self.release_rename.wait();
+            Err(crate::backends::meeting::MeetingClientError(
+                "speaker changed underneath".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn speaker_edit_is_a_pending_write_until_the_durable_call_returns() {
+        let _writes = crate::shutdown::TestWrites::new();
+        let (rename_tx, rename_started) = mpsc::channel();
+        let (refetch_tx, refetch_started) = mpsc::channel();
+        let client = Arc::new(BlockingSpeakerEditClient {
+            inner: FakeMeetingClient::new(),
+            rename_started: rename_tx,
+            release_rename: Gate::default(),
+            edit_thread: Mutex::new(None),
+            refetch_started: refetch_tx,
+            release_refetch: Gate::default(),
+        });
+        client
+            .inner
+            .start("Planning", "", "general", "agenda", Some(false))
+            .unwrap();
+        client.inner.seed_stop_speakers(MEETING, two_speakers());
+        let page = page(client.clone(), active(31));
+        page.state.primary_action();
+        apply_until(&page, |kind| matches!(kind, EventKind::Stop(_)));
+        assert!(crate::shutdown::wait_for_pending_writes(Duration::ZERO));
+
+        let speakers = page.state.speakers_of(MEETING);
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "Ana".into();
+        page.state.commit_speaker_edit();
+        rename_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("rename did not enter the client");
+        // Quit must wait while the rename is in the client.
+        assert!(
+            !crate::shutdown::wait_for_pending_writes(Duration::from_millis(50)),
+            "an in-flight speaker edit was not a pending write"
+        );
+
+        client.release_rename.open();
+        refetch_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("refused edit did not refetch");
+        // The durable call returned: the follow-up read does not hold quit.
+        assert!(
+            crate::shutdown::wait_for_pending_writes(Duration::from_secs(2)),
+            "the refetch after a refused edit extended the quit barrier"
+        );
+
+        client.release_refetch.open();
+        apply_until(&page, is_edit);
+        assert!(!page.state.speaker_editor.borrow().busy);
+        page.state.shutdown();
     }
 }

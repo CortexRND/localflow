@@ -197,7 +197,7 @@ pub fn job_sink(work: Sender<WorkItem>) -> crate::controller::JobSink {
         let _ = work
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .send(WorkItem::Job(job));
+            .send(WorkItem::QueuedJob(job, std::time::Instant::now()));
     })
 }
 
