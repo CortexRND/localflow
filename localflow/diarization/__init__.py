@@ -28,6 +28,7 @@ from .types import (
 if TYPE_CHECKING:
     from .align import GAP_TOLERANCE_S, SpeakerRun, assign_speakers, merge_runs
     from .mock import MockDiarizer, MockEmbedder, tone_index
+    from .sherpa import SherpaDiarizer, SherpaEmbedder, load_sherpa_backends
 
 _LAZY = {
     "GAP_TOLERANCE_S": "align",
@@ -37,6 +38,9 @@ _LAZY = {
     "MockDiarizer": "mock",
     "MockEmbedder": "mock",
     "tone_index": "mock",
+    "SherpaDiarizer": "sherpa",
+    "SherpaEmbedder": "sherpa",
+    "load_sherpa_backends": "sherpa",
 }
 
 __all__ = [
@@ -48,6 +52,8 @@ __all__ = [
     "MeetingSpeaker",
     "MockDiarizer",
     "MockEmbedder",
+    "SherpaDiarizer",
+    "SherpaEmbedder",
     "SpeakerEmbedder",
     "SpeakerRegistry",
     "SpeakerRun",
@@ -57,6 +63,7 @@ __all__ = [
     "Voiceprint",
     "assign_speakers",
     "cluster",
+    "load_sherpa_backends",
     "merge_runs",
     "tone_index",
 ]
