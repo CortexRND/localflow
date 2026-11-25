@@ -472,15 +472,19 @@ pub fn manual_layout(
 // not settings-agent keys (the agent's allowlist and its model tool schema
 // stay as they are), so they are written straight to the config like the
 // Style page does, and they are not in the agent's Undo history: the caption
-// says so, keeping the panel's "Undo works for these too" honest.
+// says so, keeping the panel's "Undo works for these too" honest. A Python
+// server only reloads `speaker_diarization` from disk for new meetings; it
+// keeps `diarize_mic` from startup, so the caption says that one needs a
+// server restart there.
 
 /// `(config field, label)` of the switches, in page order.
 pub const SPEAKER_SWITCHES: [(&str, &str); 2] = [
     ("speaker_diarization", "Speaker labels"),
     ("diarize_mic", "Label speakers on my microphone"),
 ];
-pub const SPEAKER_CAPTION: &str =
-    "Speaker labels start with your next meeting. Changes here aren't part of Undo.";
+pub const SPEAKER_CAPTION: &str = "Speaker labels start with your next meeting. \
+     On the Python server, the microphone setting needs a server restart. \
+     Changes here aren't part of Undo.";
 pub const SPEAKERS_CHECKING: &str = "Checking the speaker models…";
 pub const SPEAKERS_NO_RUNTIME: &str =
     "This LocalFlow server can't label speakers: its speaker-label runtime isn't installed.";
@@ -2281,6 +2285,31 @@ mod tests {
                 let bottom = frames.last().map(|f| f.1 + f.3).unwrap();
                 assert!(section.height >= bottom + CARD_PAD);
             }
+        }
+    }
+
+    #[test]
+    fn speaker_caption_notes_the_python_mic_restart_and_wraps_in_full() {
+        assert!(SPEAKER_CAPTION.contains("microphone setting needs a server restart"));
+        assert!(SPEAKER_CAPTION.contains("aren't part of Undo"));
+        let agent = agent();
+        let rows = rows_with(&agent);
+        let state = SettingsPageState::new();
+        for width in [MIN_CONTENT, WIDE_CONTENT] {
+            let manual = manual_layout(width, &rows, &state, &measure);
+            let section = speaker_section_layout(&manual, width, None, "", &measure);
+            let inner = width - 2.0 * CARD_PAD;
+            let full = wrapped_height(
+                SPEAKER_CAPTION,
+                inner,
+                &measure,
+                MANUAL_FONT,
+                Weight::Regular,
+            );
+            assert_eq!(section.caption.2, inner);
+            assert_eq!(section.caption.3, full, "caption is clipped at {width}");
+            let first_row = section.rows[0].1;
+            assert!(section.caption.1 + section.caption.3 <= first_row.1);
         }
     }
 
