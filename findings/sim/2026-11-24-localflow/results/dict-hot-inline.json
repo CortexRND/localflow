@@ -1,0 +1,65 @@
+{
+ "cell": "dict-hot-inline",
+ "suite": "dictation",
+ "kind": "hotphrase",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T09:59:35",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "entries": [
+  {
+   "trigger": "my sig",
+   "text": "Best regards, Devin",
+   "enabled": true
+  },
+  {
+   "trigger": "pr review full",
+   "text": "FULL",
+   "enabled": true
+  },
+  {
+   "trigger": "pr review",
+   "text": "SHORT",
+   "enabled": true
+  }
+ ],
+ "conflict": "HotPhraseConflict",
+ "entries_after_conflict": 3,
+ "enabled": [
+  [
+   "my sig",
+   "Best regards, Devin"
+  ],
+  [
+   "pr review full",
+   "FULL"
+  ],
+  [
+   "pr review",
+   "SHORT"
+  ]
+ ],
+ "outputs": [
+  {
+   "mode": "expand",
+   "text": "thanks for the help my sig",
+   "output": "thanks for the help Best regards, Devin"
+  },
+  {
+   "mode": "expand",
+   "text": "run pr review full now",
+   "output": "run FULL now"
+  },
+  {
+   "mode": "expand",
+   "text": "run pr review now",
+   "output": "run SHORT now"
+  }
+ ],
+ "finished": "2026-11-24T09:59:35"
+}

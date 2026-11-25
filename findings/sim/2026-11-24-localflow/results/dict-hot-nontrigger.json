@@ -1,0 +1,45 @@
+{
+ "cell": "dict-hot-nontrigger",
+ "suite": "dictation",
+ "kind": "hotphrase",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T09:59:35",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "entries": [
+  {
+   "trigger": "sig",
+   "text": "SIGNATURE",
+   "enabled": true
+  }
+ ],
+ "enabled": [
+  [
+   "sig",
+   "SIGNATURE"
+  ]
+ ],
+ "outputs": [
+  {
+   "mode": "expand",
+   "text": "signal the team about the design",
+   "output": "signal the team about the design"
+  },
+  {
+   "mode": "render",
+   "text": "the sigma value looks significant",
+   "output": "the sigma value looks significant"
+  },
+  {
+   "mode": "expand",
+   "text": "add my sig here",
+   "output": "add my SIGNATURE here"
+  }
+ ],
+ "finished": "2026-11-24T09:59:35"
+}

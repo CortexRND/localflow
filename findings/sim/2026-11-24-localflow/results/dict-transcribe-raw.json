@@ -1,0 +1,48 @@
+{
+ "cell": "dict-transcribe-raw",
+ "suite": "dictation",
+ "kind": "transcribe",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T09:59:37",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "status": 200,
+ "body": {
+  "text": "The quarterly numbers are ready.",
+  "ms": 47
+ },
+ "decode": "ffmpeg",
+ "transcriber_calls": [
+  {
+   "samples": 16000,
+   "prompt": null
+  }
+ ],
+ "history": [
+  {
+   "kind": "dictate",
+   "app_name": "phone",
+   "category": "other",
+   "raw_text": "The quarterly numbers are ready.",
+   "final_text": "The quarterly numbers are ready.",
+   "status": "ok",
+   "words": 5,
+   "duration_s": 1.0
+  }
+ ],
+ "history_path_isolated": true,
+ "llm_calls": [],
+ "http": [
+  {
+   "call": "POST /transcribe?clean=0",
+   "status": 200,
+   "secs": 0.05
+  }
+ ],
+ "finished": "2026-11-24T09:59:37"
+}

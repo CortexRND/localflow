@@ -1,0 +1,110 @@
+{
+ "cell": "set-change-warning",
+ "suite": "settings_api",
+ "kind": "change_warning",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:54",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "results": [
+  {
+   "name": "requested-level",
+   "request": "set cleanup to medium",
+   "warning": "",
+   "line": "Cleanup level: Light \u2192 Medium",
+   "warnings_for": []
+  },
+  {
+   "name": "requested-switch-off",
+   "request": "turn off sounds",
+   "warning": "Check: turns Sounds off.",
+   "line": "Sounds: On \u2192 Off",
+   "warnings_for": [
+    "Sounds: On \u2192 Off \u2014 Check: turns Sounds off."
+   ]
+  },
+  {
+   "name": "unrequested-switch-off",
+   "request": "turn off sounds",
+   "warning": "Check: turns Work prompts off; your request doesn't seem to mention this.",
+   "line": "Work prompts: On \u2192 Off",
+   "warnings_for": [
+    "Work prompts: On \u2192 Off \u2014 Check: turns Work prompts off; your request doesn't seem to mention this."
+   ]
+  },
+  {
+   "name": "unrequested-style",
+   "request": "set cleanup to medium",
+   "warning": "Check: your request doesn't seem to mention this.",
+   "line": "Email style: Formal \u2192 Casual",
+   "warnings_for": [
+    "Email style: Formal \u2192 Casual \u2014 Check: your request doesn't seem to mention this."
+   ]
+  },
+  {
+   "name": "shortcut-change",
+   "request": "change my dictation key to right option",
+   "warning": "Check: changes a keyboard shortcut.",
+   "line": "Dictation shortcut: Hold Left Option \u2192 Hold Right Option",
+   "warnings_for": [
+    "Dictation shortcut: Hold Left Option \u2192 Hold Right Option \u2014 Check: changes a keyboard shortcut."
+   ]
+  },
+  {
+   "name": "cleanup-none",
+   "request": "set cleanup level to none",
+   "warning": "Check: turns Cleanup off.",
+   "line": "Cleanup level: Light \u2192 None",
+   "warnings_for": [
+    "Cleanup level: Light \u2192 None \u2014 Check: turns Cleanup off."
+   ]
+  },
+  {
+   "name": "requested-word",
+   "request": "add Qdrant to my dictionary",
+   "warning": "",
+   "line": "Dictionary: \u2014 \u2192 add \u201cQdrant\u201d",
+   "warnings_for": []
+  },
+  {
+   "name": "unrequested-word",
+   "request": "add Qdrant to my dictionary",
+   "warning": "Check: your request doesn't seem to mention this.",
+   "line": "Dictionary: \u2014 \u2192 add \u201cKubernetes\u201d",
+   "warnings_for": [
+    "Dictionary: \u2014 \u2192 add \u201cKubernetes\u201d \u2014 Check: your request doesn't seem to mention this."
+   ]
+  },
+  {
+   "name": "requested-replacement",
+   "request": "replace post gres with PostgreSQL",
+   "warning": "",
+   "line": "Replacement: \u201cpost gres\u201d \u2192 \u201cPostgreSQL\u201d",
+   "warnings_for": []
+  },
+  {
+   "name": "forged-object",
+   "request": "anything",
+   "warning": "Not valid: preview again.",
+   "line": "A change that isn't valid (preview again)",
+   "warnings_for": [
+    "A change that isn't valid (preview again) \u2014 Not valid: preview again."
+   ]
+  },
+  {
+   "name": "non-allowlisted-key",
+   "request": "change the server port",
+   "warning": "Not valid: preview again.",
+   "line": "A change that isn't valid (preview again)",
+   "warnings_for": [
+    "A change that isn't valid (preview again) \u2014 Not valid: preview again."
+   ]
+  }
+ ],
+ "finished": "2026-11-24T10:01:54"
+}

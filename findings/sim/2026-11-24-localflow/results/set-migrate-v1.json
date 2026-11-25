@@ -1,0 +1,175 @@
+{
+ "cell": "set-migrate-v1",
+ "suite": "settings_api",
+ "kind": "migrate",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:53",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "cases": [
+  {
+   "name": "full",
+   "migrated": {
+    "config_version": 2,
+    "llm": {
+     "base_url": "http://127.0.0.1:11434",
+     "model": "gemma4:4b"
+    },
+    "stt": {
+     "provider": "mlx-whisper",
+     "model": "small"
+    },
+    "hotkey": {
+     "key": "alt_r"
+    },
+    "cleanup": {
+     "level": "medium"
+    },
+    "meetings": {
+     "vault_path": "~/vault"
+    }
+   },
+   "key": "fw-SIM-FAKE-0000-not-a-real-key",
+   "key_in_migrated": false,
+   "config_fields": {
+    "llm_base_url": "http://127.0.0.1:11434",
+    "llm_model": "gemma4:4b",
+    "stt_backend": "mlx-whisper",
+    "model_size": "small",
+    "hotkey": "alt_r",
+    "cleanup_level": "medium",
+    "vault_path": "~/vault"
+   },
+   "legacy": {
+    "returned_config": true,
+    "target_written": true,
+    "key_in_target": false,
+    "target": {
+     "config_version": 2,
+     "stt": {
+      "provider": "mlx-whisper",
+      "model": "small",
+      "device": "auto"
+     },
+     "llm": {
+      "provider": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "gemma4:4b",
+      "fast_model": "",
+      "api_key_ref": "",
+      "cleanup_enabled": true,
+      "cleanup_timeout": 120,
+      "num_ctx": 8192
+     },
+     "cleanup": {
+      "level": "medium",
+      "styles_enabled": true,
+      "style_work": "formal",
+      "style_email": "formal",
+      "style_personal": "casual",
+      "style_other": "formal",
+      "app_overrides": []
+     },
+     "hotkey": {
+      "key": "alt_r",
+      "sounds": true,
+      "paste_last": "<ctrl>+<shift>+v",
+      "command": "alt_r",
+      "polish": "<ctrl>+<alt>+1",
+      "prompt": "<ctrl>+<alt>+2",
+      "dictation_toggle": ""
+     },
+     "paste": {
+      "method": "auto"
+     },
+     "dictation": {
+      "enabled": true,
+      "spoken_symbols": true,
+      "spoken_punctuation": true,
+      "silence_threshold_dbfs": -50.0,
+      "command_names": [],
+      "skills_dirs": [
+       "~/.claude/skills",
+       "~/.agents/skills"
+      ],
+      "sample_rate": 16000,
+      "input_device": "",
+      "max_recording_seconds": 1200,
+      "pause_media": false
+     },
+     "server": {
+      "host": "127.0.0.1",
+      "port": 8756
+     },
+     "features": {
+      "meetings": false,
+      "hot_phrases": true
+     },
+     "history": {
+      "enabled": true,
+      "keep_audio_clips": 5
+     },
+     "meetings": {
+      "vault_path": "~/vault",
+      "notes_folder": "notes/meetings",
+      "logs_folder": "notes/transcripts",
+      "watch": true,
+      "chunk_seconds": 30,
+      "min_busy_seconds": 12,
+      "auto_start": true,
+      "work_prompts": true,
+      "fireworks_model": "accounts/fireworks/models/kimi-k3",
+      "prompts_dir": "~/projs/prompts/meetings",
+      "orca_repo": "",
+      "orca_agent": "claude",
+      "capture_system_audio": false,
+      "system_audio_device": "",
+      "default_template": "general",
+      "templates_dir": "~/.localflow/meeting_templates"
+     },
+     "setup": {
+      "version": 0
+     }
+    },
+    "legacy_left_in_place": true,
+    "env_key_unchanged": true
+   }
+  },
+  {
+   "name": "no-key",
+   "migrated": {
+    "config_version": 2,
+    "stt": {
+     "provider": "faster-whisper"
+    },
+    "server": {
+     "port": 9000
+    },
+    "history": {
+     "enabled": false
+    },
+    "hotkey": {
+     "sounds": false
+    },
+    "llm": {
+     "provider": "ollama"
+    }
+   },
+   "key": null,
+   "key_in_migrated": false,
+   "config_fields": {
+    "stt_backend": "faster-whisper",
+    "server_port": 9000,
+    "history_enabled": false,
+    "sounds_enabled": false,
+    "llm_provider": "ollama"
+   }
+  }
+ ],
+ "finished": "2026-11-24T10:01:53"
+}
