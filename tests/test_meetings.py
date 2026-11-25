@@ -1328,8 +1328,16 @@ def test_relabel_keeps_an_older_transcript_older(tmp_path):
     os.utime(old.log_path, ns=(base, base))
     os.utime(newer.log_path, ns=(base + 60_000_000_000, base + 60_000_000_000))
     assert latest_transcript_log(tmp_path / "logs") == newer.log_path
-    assert _relabel(old) == 2
-    assert old.log_path.stat().st_mtime_ns == base + 2_000_000_000
+    step = 2_000_000_000
+    seen = [base]
+    for i in range(6):
+        names = ("Dåna", "Speaker 2") if i % 2 == 0 else ("Speaker 2", "Dåna")
+        current = old.log_path.stat().st_mtime_ns
+        assert _relabel(old, old=names[1], new=names[0]) == 2
+        mtime = old.log_path.stat().st_mtime_ns
+        assert abs(mtime - current) == step
+        seen.append(mtime)
+    assert max(seen) - min(seen) <= step
     assert latest_transcript_log(tmp_path / "logs") == newer.log_path
 
 

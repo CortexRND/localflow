@@ -1028,8 +1028,9 @@ def relabel_transcript(path: Path, lines, old: str, new: str, *,
                        speakers: list[str] | None = None,
                        meeting_id: str | None = None) -> int:
     """Rewrite a saved transcript's speaker labels in place (atomic, mode kept,
-    mtime nudged by 2 s: enough for whole-second sync tools to see the
-    change, too little to jump ahead of a newer transcript).
+    mtime moved by 2 s, alternating up and down so repeated edits stay
+    within 2 s of the original: whole-second sync tools see every change,
+    and the file never overtakes a newer transcript).
 
     ``lines``: see ``_relabel_text``. Raises TranscriptChanged when the file
     is not this meeting's, its lines no longer match, or it changed while
@@ -1056,7 +1057,9 @@ def relabel_transcript(path: Path, lines, old: str, new: str, *,
             os.chmod(tmp, before.st_mode & 0o7777)
         except OSError:
             pass
-        os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+        step = 2_000_000_000
+        sign = 1 if (before.st_mtime_ns // step) % 2 == 0 else -1
+        os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns + sign * step))
         now = os.stat(path)
         if (now.st_size, now.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
             raise TranscriptChanged("transcript changed while it was being rewritten")
