@@ -1,6 +1,8 @@
 import hmac
 import html
+import json
 import logging
+import re
 import secrets
 import subprocess
 import threading
@@ -13,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -143,10 +145,27 @@ _diar_thread: threading.Thread | None = None  # the last worker started, under _
 _DIAR_SHUTDOWN_JOIN_SECONDS = 2.0
 
 
+def _enrollment_staging_root() -> Path:
+    """Where enrollment audio is staged (the voiceprint folder); a seam for tests."""
+    from localflow.diarization.staging import default_root
+    return default_root()
+
+
+def _sweep_enrollment_staging() -> None:
+    """Delete staged enrollment audio a killed server left behind, whatever the speaker
+    flags are now. Imports no registry or model code, creates nothing, never raises."""
+    try:
+        from localflow.diarization.staging import sweep
+        sweep(_enrollment_staging_root())
+    except Exception as exc:  # noqa: BLE001 - startup must not fail on this
+        log.warning("checking for abandoned enrollment audio failed (%s)", type(exc).__name__)
+
+
 @app.on_event("startup")
 def _start_watcher() -> None:
     global _api_token
     _api_token = load_or_create()
+    _sweep_enrollment_staging()
     if _config.meetings_enabled and _config.meeting_watch:
         _watcher.start()
 
@@ -404,14 +423,24 @@ def _decode_audio(data: bytes) -> np.ndarray:
 _FFMPEG_INPUT_FORMATS = "matroska,webm,ogg,mov,mp4,m4a,wav,mp3,aac,flac,caf"
 
 
-def _run_ffmpeg(data: bytes, max_seconds: int = 1200) -> subprocess.CompletedProcess:
+def _run_ffmpeg(data: bytes, max_seconds: int = 1200, *,
+                source: str | None = None) -> subprocess.CompletedProcess:
+    """Decode ``data`` from stdin; or, with ``source``, that one local ISO BMFF (M4A/MP4)
+    file: only the file protocol, the mov demuxer forced and external data references off."""
+    if source is None:
+        input_args = ["-protocol_whitelist", "pipe",
+                      "-format_whitelist", _FFMPEG_INPUT_FORMATS,
+                      "-i", "pipe:0"]
+    else:
+        input_args = ["-protocol_whitelist", "file",
+                      "-format_whitelist", _FFMPEG_INPUT_FORMATS,
+                      "-f", "mov", "-enable_drefs", "0",
+                      "-i", f"file:{source}"]
     return subprocess.run(
         [
             "ffmpeg",
             "-nostdin",
-            "-protocol_whitelist", "pipe",
-            "-format_whitelist", _FFMPEG_INPUT_FORMATS,
-            "-i", "pipe:0",
+            *input_args,
             "-t", str(max(1, int(max_seconds))),
             "-f", "f32le",
             "-ac", "1",
@@ -822,10 +851,18 @@ def _open_diarization():
         return None, ""
     try:
         from localflow.diarization.factory import build_diarization
-        return build_diarization(_config)
+        collector, reason = build_diarization(_config)
     except Exception as exc:  # noqa: BLE001 - diarization is optional
         log.warning("speaker diarization unavailable: %s", exc)
         return None, str(exc) or type(exc).__name__
+    if collector is not None and _recognition_on():
+        try:
+            collector.registry = _speaker_registry()
+            # The live gate, re-read by finalize after the queue drains and before each match.
+            collector.recognition_allowed = _recognition_on
+        except Exception as exc:  # noqa: BLE001 - labels still work without names
+            log.warning("speaker recognition unavailable (%s)", type(exc).__name__)
+    return collector, reason
 
 
 def _diarization_state(session) -> tuple[str, str]:
@@ -853,12 +890,41 @@ def _close_diarization(session) -> None:
         log.exception("closing speaker diarization failed")
 
 
-def _finalize_diarization(session, segments) -> tuple[list, str, list[dict]]:
-    """(segments, status, speakers). Never raises; any problem keeps the original segments."""
+def _recognition_on() -> bool:
+    """The one gate for every voiceprint read or write (design §4): both flags on."""
+    return bool(_config.speaker_diarization and _config.speaker_recognition)
+
+
+def _speaker_registry():
+    """The voiceprint registry; imported on first use only (recognition on)."""
+    from localflow.diarization.registry import FileSpeakerRegistry
+    return FileSpeakerRegistry(meetings=_meeting_store())
+
+
+def _require_recognition() -> None:
+    if not _recognition_on():
+        raise HTTPException(status_code=403, detail="speaker recognition is off")
+
+
+def _finalize_diarization(session, segments) -> tuple[list, str, list[dict], dict, int | None]:
+    """(segments, status, public speakers, private voice data, forget epoch).
+
+    ``private`` maps speaker id to ``{"voiceprint_id", "centroid"}`` and is only non-empty
+    when recognition was on through finalize; ``epoch`` is the registry's forget epoch read
+    before finalize (None without recognition). Never raises; any problem keeps the original
+    segments.
+    """
     collector = getattr(session, "diarization", None)
     if collector is None:
-        return segments, "off", []
+        return segments, "off", [], {}, None
+    epoch = None
     try:
+        if getattr(collector, "registry", None) is not None:
+            if _recognition_on():
+                from localflow.diarization.registry import forget_epoch
+                epoch = forget_epoch()
+            else:  # turned off during the meeting: no voiceprint reads from here on
+                collector.registry = None
         result = collector.finalize(segments)
         if result.status == "ok":
             speakers = [
@@ -866,12 +932,21 @@ def _finalize_diarization(session, segments) -> tuple[list, str, list[dict]]:
                  "seconds": round(float(s.seconds), 1)}
                 for s in result.speakers
             ]
-            return list(result.segments), "ok", speakers
+            private: dict = {}
+            centroids = getattr(result, "centroids", None) or {}
+            if epoch is not None and centroids:
+                links = {s.id: s.voiceprint_id for s in result.speakers}
+                private = {
+                    sid: {"voiceprint_id": links.get(sid),
+                          "centroid": [round(float(x), 6) for x in vec]}
+                    for sid, vec in centroids.items() if sid in links
+                }
+            return list(result.segments), "ok", speakers, private, epoch
         status = result.status if result.status in ("channel", "failed", "timeout") else "failed"
     except Exception:
         log.exception("speaker diarization finalize failed; keeping channel labels")
-        return segments, "failed", []
-    return segments, status, []
+        return segments, "failed", [], {}, None
+    return segments, status, [], {}, None
 
 
 def _meeting_store():
@@ -880,8 +955,13 @@ def _meeting_store():
     return MeetingSpeakerStore()
 
 
-def _write_speaker_sidecar(saved, session, segments, status: str, speakers: list[dict]) -> None:
-    """Persist the saved meeting's speaker record. Never raises; the save already succeeded."""
+def _write_speaker_sidecar(saved, session, segments, status: str, speakers: list[dict],
+                           private: dict | None = None, epoch: int | None = None) -> None:
+    """Persist the saved meeting's speaker record. Never raises; the save already succeeded.
+
+    Voice data (``private``) is stored only if recognition is still on and no forget ran
+    since finalize; the check and the save share the sidecar lock that forget holds.
+    """
     try:
         from localflow.diarization.store import build_record
         rendered = {s.speaker_id: s.speaker for s in reversed(segments) if s.speaker_id is not None}
@@ -890,17 +970,23 @@ def _write_speaker_sidecar(saved, session, segments, status: str, speakers: list
                            "id", None)
         if not isinstance(embedder, str):
             embedder = None
-        record = build_record(
-            meeting_id=saved.meeting_id,
-            log_path=str(saved.log_path),
-            notes_path=str(saved.notes_path),
-            started_at=session.started_at.isoformat(timespec="seconds"),
-            embedder=embedder,
-            status=status,
-            speakers=speakers,
-            segments=segments,
-        )
-        _meeting_store().save(record)
+        store = _meeting_store()
+        with store.lock:
+            if private and epoch is not None and _recognition_on():
+                from localflow.diarization.registry import forget_epoch
+                if forget_epoch() == epoch:
+                    speakers = [{**sp, **private.get(sp["id"], {})} for sp in speakers]
+            record = build_record(
+                meeting_id=saved.meeting_id,
+                log_path=str(saved.log_path),
+                notes_path=str(saved.notes_path),
+                started_at=session.started_at.isoformat(timespec="seconds"),
+                embedder=embedder,
+                status=status,
+                speakers=speakers,
+                segments=segments,
+            )
+            store.save(record)
     except Exception:
         log.exception("writing meeting speaker data failed; notes still saved")
 
@@ -1132,7 +1218,8 @@ async def meeting_stop() -> dict:
             if _config.sounds_enabled:
                 sounds.play("stop")
             _watcher.resume()
-            segments, diarization_status, speakers = _finalize_diarization(session, segments)
+            segments, diarization_status, speakers, private, epoch = _finalize_diarization(
+                session, segments)
             finalized = True
         finally:
             if not finalized:  # capture shutdown failed: don't leave the worker running
@@ -1184,7 +1271,8 @@ async def meeting_stop() -> dict:
             generated_title=auto_title,
         )
         if getattr(saved, "meeting_id", None) and speakers:
-            _write_speaker_sidecar(saved, session, segments, diarization_status, speakers)
+            _write_speaker_sidecar(saved, session, segments, diarization_status, speakers,
+                                   private, epoch)
         payload = {
             "title": saved.title,
             "title_generated": title_from_model,
@@ -1337,6 +1425,355 @@ def api_meeting_speakers_merge(meeting_id: str, body: dict) -> dict:
                                    speaker_lines(record, from_id), source["label"], new)
 
 
+# ---- enrolled voiceprints (slice B9). Every route needs the token (/api/) AND both
+# speaker flags: with recognition off nothing here reads or writes voice data, the
+# forget routes included; turning recognition off deletes nothing. Raw enrollment audio
+# and the export (the only response holding vectors) are additionally loopback-only.
+
+MAX_SPEAKER_JSON_BYTES = 64 * 1024
+# Headers a reverse proxy (tailscale serve, nginx, ...) adds; their presence means the
+# loopback peer is relaying someone else.
+_PROXY_HEADERS = ("forwarded", "via", "x-real-ip", "true-client-ip", "cf-connecting-ip")
+_PROXY_HEADER_PREFIXES = ("x-forwarded-", "x-original-", "tailscale-")
+
+
+def _peer_is_loopback(host: object) -> bool:
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(str(host))
+    except ValueError:
+        return False  # TestClient's default "testclient", a hostname, or nothing
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return (mapped or ip).is_loopback
+
+
+def _host_header_is_loopback(host_header: str) -> bool:
+    """``localhost`` or any loopback IP literal (127.0.0.0/8, ::1, IPv4-mapped), judged
+    like the peer; the shared ``_host_is_loopback`` used by the token middleware is unchanged."""
+    try:
+        host = urlparse(f"//{host_header}").hostname
+    except ValueError:
+        return False
+    return (host or "").lower() == "localhost" or _peer_is_loopback(host)
+
+
+def _request_is_local(request: Request) -> bool:
+    """True only for a direct request from this computer: loopback peer, loopback Host,
+    and no proxy/forwarding headers (a local proxy makes every peer look like loopback)."""
+    if not _peer_is_loopback(request.client.host if request.client else None):
+        return False
+    if not _host_header_is_loopback(request.headers.get("Host", "")):
+        return False
+    names = {k.decode("latin-1").lower() for k, _ in request.headers.raw}
+    return not any(n in _PROXY_HEADERS or n.startswith(_PROXY_HEADER_PREFIXES) for n in names)
+
+
+def _require_local(request: Request, what: str) -> None:
+    if not _request_is_local(request):
+        raise HTTPException(status_code=403, detail=f"{what} is only available on this computer")
+
+
+@contextmanager
+def _registry_errors():
+    """Map registry errors to safe HTTP errors (fixed messages; never a name or a vector)."""
+    from localflow.diarization import registry as reg
+    try:
+        yield
+    except reg.InvalidName:
+        raise HTTPException(status_code=400, detail="invalid speaker name") from None
+    except reg.UnknownVoiceprint:
+        raise HTTPException(status_code=404, detail="unknown speaker") from None
+    except (reg.AmbiguousName, reg.EnrollmentInterrupted, reg.RegistryUnreadable) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except (reg.BadVector, reg.UnsupportedModel) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except reg.ErasureIncomplete as exc:
+        parts = [f"voice data in {exc.failed} meeting file(s)"] if exc.failed else []
+        if getattr(exc, "audio_failed", 0):
+            parts.append(f"{exc.audio_failed} voice-data file(s)")
+        raise HTTPException(
+            status_code=500,
+            detail=f"forgot {exc.forgotten} speaker(s), but {' and '.join(parts)} "
+                   "could not be erased",
+        ) from None
+    except (reg.RegistryError, OSError) as exc:
+        log.warning("speaker registry error (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="speaker registry error") from None
+
+
+async def _bounded_body(request: Request, limit: int) -> bytes:
+    """The request body, refusing (413) more than ``limit`` bytes before reading them."""
+    try:
+        declared = int(request.headers.get("Content-Length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > limit:
+        raise HTTPException(status_code=413, detail="upload too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise HTTPException(status_code=413, detail="upload too large")
+    return bytes(body)
+
+
+async def _json_object(request: Request) -> dict:
+    """A bounded JSON object body (400 otherwise)."""
+    try:
+        body = json.loads(await _bounded_body(request, MAX_SPEAKER_JSON_BYTES))
+    except (ValueError, RecursionError):
+        raise HTTPException(status_code=400, detail="invalid JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected a JSON object")
+    return body
+
+
+async def _enroll_upload(request: Request) -> tuple[object, bytes]:
+    """(name field, audio bytes) from a bounded multipart body, parsed in memory only:
+    the spool limit exceeds the body cap, so no temporary file is ever written."""
+    from starlette.datastructures import Headers, UploadFile
+    from starlette.formparsers import MultiPartException, MultiPartParser
+
+    body = await _bounded_body(request, MAX_UPLOAD_BYTES + 64 * 1024)
+
+    class _InMemoryParser(MultiPartParser):
+        spool_max_size = len(body) + 1
+
+    async def stream():
+        yield body
+
+    try:
+        form = await _InMemoryParser(Headers(scope=request.scope), stream(), max_files=1,
+                                     max_fields=1, max_part_size=1024).parse()
+    except MultiPartException:
+        raise HTTPException(status_code=400, detail="invalid upload") from None
+    try:
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile):
+            raise HTTPException(status_code=400, detail="missing audio file")
+        data = await upload.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="upload too large")
+        return form.get("name"), data
+    finally:
+        await form.close()
+
+
+def _enroll_from_meeting(body: dict):
+    from localflow.diarization.store import find_speaker
+    _require_recognition()  # recheck: the gate may have closed while the body was read
+    name = clean_speaker_name(body.get("name"))
+    if name is None:
+        raise HTTPException(status_code=400, detail="invalid speaker name")
+    meeting_id, speaker_id = body.get("meeting_id"), body.get("speaker_id")
+    if not (isinstance(meeting_id, str) and isinstance(speaker_id, str)):
+        raise HTTPException(status_code=400, detail="meeting_id and speaker_id are required")
+    registry = _speaker_registry()
+    store = _meeting_store()
+    with store.lock:  # forget takes the same lock first: no enrollment from erased data
+        record = _speaker_record(store, meeting_id)
+        speaker = find_speaker(record, speaker_id)
+        if speaker is None:
+            raise HTTPException(status_code=404, detail="unknown speaker")
+        centroid, embedder = speaker.get("centroid"), record.get("embedder")
+        if not isinstance(embedder, str) or not centroid:
+            raise HTTPException(status_code=409, detail="this meeting has no stored voice data")
+        _require_recognition()  # last check right before voice data is stored
+        with _registry_errors():
+            vp = registry.enroll(name, [np.asarray(centroid, dtype=np.float32)], embedder)
+        speaker["voiceprint_id"] = vp.id
+        try:
+            store.save(record)
+        except Exception as exc:  # noqa: BLE001 - the voiceprint exists; the link is optional
+            log.warning("linking the meeting speaker failed (%s)", type(exc).__name__)
+    return vp
+
+
+# Enrollment clips have their own bound, independent of dictation's max_recording_seconds
+# (0 = unlimited there): the longest `lf speakers enroll --record`. Longer is refused, never cut.
+ENROLL_MAX_SECONDS = 300
+
+
+def _run_ffmpeg_seekable(data: bytes, max_seconds: int,
+                         expected_epoch: int | None = None) -> subprocess.CompletedProcess:
+    """Decode an ISO BMFF clip from a private staged copy in the voiceprint folder (0600 in
+    0700), deleted as soon as ffmpeg exits: an M4A/MP4 with its index after the audio needs
+    seeking. A copy a killed server leaves is swept at startup and by forget --all."""
+    _require_recognition()  # an opt-out during the pipe attempt: never write raw audio
+    with _speaker_registry().staged_audio(data, expected_epoch=expected_epoch) as path:
+        return _run_ffmpeg(b"", max_seconds, source=path)
+
+
+_BMFF_PADDING_BOXES = (b"free", b"skip", b"wide")
+
+
+def _is_iso_bmff(data: bytes) -> bool:
+    """True for ISO BMFF (M4A/MP4) bytes: an ``ftyp`` box first, after at most a few
+    free/skip/wide padding boxes."""
+    offset = 0
+    for _ in range(4):
+        if len(data) < offset + 8:
+            return False
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        kind = data[offset + 4:offset + 8]
+        if kind == b"ftyp":
+            return 16 <= size <= len(data) - offset  # major brand + minor version at least
+        if kind not in _BMFF_PADDING_BOXES or size < 8:
+            return False
+        offset += size
+    return False
+
+
+def _decode_enrollment_audio(data: bytes, *, expected_epoch: int | None = None) -> np.ndarray:
+    """16 kHz mono float32 of an enrollment clip, at most ENROLL_MAX_SECONDS long.
+
+    Tries the stdin pipe first, as /transcribe does. Only an ISO BMFF (M4A/MP4) clip that
+    yields no audio there (its index can follow the audio) is retried from a seekable
+    staged copy; nothing else ever touches disk. ``expected_epoch``: the forget epoch read
+    before decoding; a forget since then refuses to stage. Errors are fixed messages.
+    """
+    limit = ENROLL_MAX_SECONDS + 1  # decode one second past the bound to detect overflow
+    try:
+        proc = _run_ffmpeg(data, limit)
+        if not proc.stdout and _is_iso_bmff(data):
+            proc = _run_ffmpeg_seekable(data, limit, expected_epoch)
+    except FileNotFoundError:
+        raise HTTPException(status_code=500,
+                            detail="ffmpeg not installed (brew install ffmpeg)") from None
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=400, detail="audio decode timed out") from None
+    if proc.returncode != 0 or not proc.stdout:
+        raise HTTPException(status_code=400, detail="could not decode the audio")
+    audio = np.frombuffer(proc.stdout, dtype=np.float32)
+    if audio.size > ENROLL_MAX_SECONDS * 16000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"recording is longer than {ENROLL_MAX_SECONDS} seconds; use a shorter clip")
+    return audio
+
+
+def _enroll_from_audio(name: str, data: bytes):
+    """Decode, embed and enroll. The audio is not retained; only an M4A/MP4 that needs seeking
+    is briefly copied to a private temporary file (see _run_ffmpeg_seekable)."""
+    from localflow.diarization.factory import build_embedder
+    from localflow.diarization.registry import forget_epoch
+    from localflow.diarization.types import DiarizationUnavailable
+    epoch = forget_epoch()  # a forget during the slow work below voids this enrollment
+    with _registry_errors():  # staging refusals/failures: fixed 409/500 messages
+        audio = _decode_enrollment_audio(data, expected_epoch=epoch)
+    del data
+    if audio.size == 0:
+        raise HTTPException(status_code=400, detail="decoded audio is empty")
+    if rms_dbfs(audio) < _config.silence_threshold_dbfs:
+        raise HTTPException(status_code=400, detail="no speech detected")
+    try:
+        embedder = build_embedder(_config)
+        vector = embedder.embed(audio, 16000)
+    except DiarizationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc) or "voice model unavailable") \
+            from None
+    except Exception as exc:  # noqa: BLE001 - backend failure; no audio detail in the log
+        log.warning("speaker enrollment embedding failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="could not analyse the audio") from None
+    del audio
+    _require_recognition()  # still on after the slow part
+    with _registry_errors():
+        return _speaker_registry().enroll(name, [vector], embedder.id, expected_epoch=epoch)
+
+
+@app.get("/api/speakers")
+def api_speakers() -> dict:
+    """Enrolled voiceprints (no vectors). 403 while speaker recognition is off."""
+    _require_recognition()
+    from localflow.diarization.registry import embedder_id_for_backend, public
+    with _registry_errors():
+        return {"speakers": [public(vp) for vp in _speaker_registry().list()],
+                # The embedder this server's config uses (no model load): a voice with
+                # another model_id is inert here and needs re-enrollment.
+                "embedder": embedder_id_for_backend(_config.diarization_backend)}
+
+
+@app.post("/api/speakers", status_code=201)
+async def api_speakers_enroll(request: Request) -> dict:
+    """Enroll a voice: JSON ``{name, meeting_id, speaker_id}`` from a meeting saved with
+    recognition on, or multipart ``file`` + ``name`` (local only; the audio is not retained:
+    it is decoded in memory, except that an M4A/MP4 needing seeking gets a short-lived private
+    temporary copy, deleted right after decoding). The gate is checked before the body is
+    read."""
+    _require_recognition()
+    from localflow.diarization.registry import public
+    content_type = request.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if content_type == "application/json":
+        vp = await run_in_threadpool(_enroll_from_meeting, await _json_object(request))
+    elif content_type == "multipart/form-data":
+        _require_local(request, "enrolling from audio")
+        raw_name, data = await _enroll_upload(request)
+        name = clean_speaker_name(raw_name)
+        if name is None:
+            raise HTTPException(status_code=400, detail="invalid speaker name")
+        vp = await run_in_threadpool(_enroll_from_audio, name, data)
+    else:
+        raise HTTPException(status_code=415, detail="send JSON or a multipart audio upload")
+    return public(vp)
+
+
+@app.get("/api/speakers/export")
+def api_speakers_export(request: Request) -> Response:
+    """ZIP of registry.json + <id>.npy: the only response holding vectors. Local only."""
+    _require_recognition()
+    _require_local(request, "export")
+    with _registry_errors():
+        data = _speaker_registry().export_zip()
+    return Response(content=data, media_type="application/zip", headers={
+        **_NO_STORE, "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": 'attachment; filename="localflow-speakers.zip"',
+    })
+
+
+def _rename_voiceprint(ref: str, body: dict) -> dict:
+    from dataclasses import replace as replace_voiceprint
+
+    from localflow.diarization.registry import public
+    _require_recognition()  # recheck: the gate may have closed while the body was read
+    name = clean_speaker_name(body.get("name"))
+    if name is None:
+        raise HTTPException(status_code=400, detail="invalid speaker name")
+    registry = _speaker_registry()
+    # Lookup + write under one registry lock, so no rename/forget can slip in between;
+    # the reply is built from that same lookup (rename() itself returns None).
+    with _registry_errors(), registry.lock:
+        vp = registry.find(ref)
+        registry.rename(vp.id, name)
+    return public(replace_voiceprint(vp, name=name))
+
+
+@app.patch("/api/speakers/{ref}")
+async def api_speaker_rename(ref: str, request: Request) -> dict:
+    """Rename an enrolled voice (by id or name) for later meetings; past transcripts stay.
+    The body is only read once the gate passed."""
+    _require_recognition()
+    body = await _json_object(request)
+    return await run_in_threadpool(_rename_voiceprint, ref, body)
+
+
+@app.delete("/api/speakers/{ref}")
+def api_speaker_forget(ref: str) -> dict:
+    """Forget one voice (by id or name) and erase every stored centroid from all meeting
+    speaker data. Names already in transcripts are left as they are."""
+    _require_recognition()
+    registry = _speaker_registry()
+    with _registry_errors():
+        return {"forgotten": registry.forget(registry.find(ref).id)}
+
+
+@app.delete("/api/speakers")
+def api_speakers_forget_all() -> dict:
+    """Forget every voice and erase all stored voice data from meeting speaker data."""
+    _require_recognition()
+    with _registry_errors():
+        return {"forgotten": _speaker_registry().forget(None)}
+
+
 # Prompts are reviewed here but dispatched from the CLI only — no run endpoint.
 # The approve/reject rules live in localflow.dispatch so the native hub applies
 # exactly the same guards and compare-and-set.
@@ -1397,6 +1834,9 @@ def _release_stale_transcriber() -> bool:
     return True
 
 
+_LIVE_SPEAKER_FLAGS = frozenset({"speaker_diarization", "speaker_recognition"})
+
+
 def _apply_live_config(fresh: Config) -> None:
     """ConfigWatcher callback: adopt live settings edited by another process
     (Hub Settings, Models & keys, `lf tweak`, `lf config set`).
@@ -1412,7 +1852,16 @@ def _apply_live_config(fresh: Config) -> None:
         # Saves write the file's own features.meetings back (config_toml);
         # track the file's current value even when nothing live changed.
         _config = replace(_config, _file_meetings_enabled=fresh._file_meetings_enabled)
-        merged, changed = merge_live(_config, fresh, reloaded=RUNTIME_FIELDS)
+        merged, changed = merge_live(_config, fresh,
+                                     reloaded=RUNTIME_FIELDS | _LIVE_SPEAKER_FLAGS)
+        # The speaker flags gate voiceprint I/O, so turning one off on disk must stop it
+        # now: adopt both here (not via live_config). A running meeting keeps the collector
+        # it started with; finalize detaches the registry and the sidecar write rechecks.
+        speaker = {name: getattr(fresh, name) for name in sorted(_LIVE_SPEAKER_FLAGS)
+                   if getattr(merged, name) != getattr(fresh, name)}
+        if speaker:
+            merged = replace(merged, **speaker)
+            changed = changed | frozenset(speaker)
         groups = runtime_changes(merged, fresh)
         if not changed and not groups:
             return
@@ -1437,6 +1886,39 @@ def _apply_live_config(fresh: Config) -> None:
     log.info("settings updated without restart: %s", ", ".join(names))
 
 
+# /api/speakers/{ref} carries an enrolled name or voiceprint id in the URL; the access log
+# must not keep it. Matches the route after any root_path, percent-encoded or not.
+_SPEAKER_PATH_RE = re.compile(r"/api/speakers(?=[/?]|$)", re.IGNORECASE)
+_REDACTED_SPEAKER_PATH = "/api/speakers/<redacted>"
+
+
+class _SpeakerPathFilter(logging.Filter):
+    """Redacts /api/speakers paths (any suffix or query) in uvicorn access records;
+    every other request line is logged unchanged."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            from urllib.parse import unquote
+            path = args[2]
+            if _SPEAKER_PATH_RE.search(unquote(path)) and path != "/api/speakers":
+                record.args = (*args[:2], _REDACTED_SPEAKER_PATH, *args[3:])
+        return True
+
+
+def _uvicorn_log_config() -> dict:
+    """uvicorn's default logging config plus the speaker-path redaction on access logs."""
+    import copy
+
+    from uvicorn.config import LOGGING_CONFIG
+    config = copy.deepcopy(LOGGING_CONFIG)
+    config.setdefault("filters", {})["localflow_speaker_paths"] = {"()": _SpeakerPathFilter}
+    config["handlers"]["access"].setdefault("filters", []).append("localflow_speaker_paths")
+    config["loggers"]["uvicorn.access"].setdefault("filters", []).append(
+        "localflow_speaker_paths")
+    return config
+
+
 def main() -> None:
     import uvicorn
 
@@ -1444,7 +1926,8 @@ def main() -> None:
     # Started here, not in the startup hook, so tests driving the app through
     # TestClient never watch the real config file.
     ConfigWatcher(_apply_live_config, on_tick=_release_stale_transcriber).start()
-    uvicorn.run(app, host=_config.server_host, port=_config.server_port)
+    uvicorn.run(app, host=_config.server_host, port=_config.server_port,
+                log_config=_uvicorn_log_config())
 
 
 if __name__ == "__main__":
