@@ -14,8 +14,10 @@ from localflow.config import apply_config_update, load_config, save_config
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
 from localflow.hub_model import dictation_state
+from localflow.hub_settings import DIARIZATION_KEYS, diarization_disabled_reason
 from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, vault_notes_path
+from localflow.settings_agent import LABELS as SETTING_LABELS
 from localflow.ui_tokens import (
     CARD_GAP,
     CARD_PADDING,
@@ -29,6 +31,8 @@ from localflow.ui_tokens import (
 )
 
 PAGES = ("Home", "Meetings", "History", "Dictionary", "Style", "Models")
+# The speaker-label switches on the Meetings page (same labels as Settings).
+SPEAKER_TOGGLES = tuple((key, SETTING_LABELS[key]) for key in DIARIZATION_KEYS)
 
 
 def _one_line(text, limit):
@@ -69,6 +73,7 @@ class HubWindow:
         self._meeting_templates = []
         self._meeting_template = ""
         self._meeting_status_data = {}
+        self._meeting_diar_status = None
         self._meeting_session_active = False
         self._meeting_last_saved = None
         self._meeting_chat = []
@@ -967,6 +972,37 @@ class HubWindow:
             font=(self.font_family, 12), anchor="w",
         )
         self.meeting_template_menu.pack(fill="x", pady=(0, 12))
+        tk.Label(
+            self.meeting_setup, text="Speakers", bg=self.tokens["paper"],
+            fg=self.tokens["ink"], font=(self.font_family, 11, "bold"),
+        ).pack(anchor="w", pady=(0, 5))
+        self.meeting_speaker_vars = {}
+        self.meeting_speaker_checks = {}
+        for key, label in SPEAKER_TOGGLES:
+            var = tk.BooleanVar(value=bool(getattr(self.config, key, False)))
+            check = tk.Checkbutton(
+                self.meeting_setup, text=label, variable=var,
+                command=lambda key=key: self._meeting_set_speaker_flag(key),
+                bg=self.tokens["paper"], fg=self.tokens["ink"],
+                disabledforeground=self.tokens["muted"],
+                activebackground=self.tokens["paper"],
+                activeforeground=self.tokens["ink"],
+                selectcolor=self.tokens["surface"], highlightthickness=0,
+                font=(self.font_family, 12), anchor="w",
+            )
+            check.pack(fill="x", pady=(0, 2))
+            self.meeting_speaker_vars[key] = var
+            self.meeting_speaker_checks[key] = check
+        self.meeting_speaker_reason = tk.Label(
+            self.meeting_setup, text="", bg=self.tokens["paper"],
+            fg=self.tokens["muted"], font=(self.font_family, 11),
+            anchor="w", justify="left", wraplength=720,
+        )
+        self.meeting_speaker_spacer = tk.Frame(
+            self.meeting_setup, bg=self.tokens["paper"], height=10,
+        )
+        self.meeting_speaker_spacer.pack(fill="x")
+        self._meeting_render_speakers()
         self.meeting_setup.pack(fill="x")
 
         notes_heading = tk.Frame(self.meeting_content, bg=self.tokens["paper"])
@@ -1048,13 +1084,59 @@ class HubWindow:
         if self._meeting_error_message:
             self._meeting_show_error(self._meeting_error_message)
         self._meeting_request("templates", self._meeting_templates_loaded)
+        self._meeting_request_diarization()
         self._meeting_poll()
 
     def _meeting_retry(self):
         self.meeting_down.pack_forget()
         self.meeting_content.pack(fill="both", expand=True)
         self._meeting_request("templates", self._meeting_templates_loaded)
+        self._meeting_request_diarization()
         self._meeting_poll()
+
+    def _meeting_request_diarization(self):
+        # Older clients (and test fakes) have no diarization_status: then the
+        # speaker switches simply stay enabled.
+        if callable(getattr(self.meeting_client, "diarization_status", None)):
+            self._meeting_request("diarization_status", self._meeting_diar_received)
+
+    def _meeting_diar_received(self, result, error):
+        # Unknown (server down, older server) is not "not ready".
+        self._meeting_diar_status = None if error else result
+        if self.page == "Meetings":
+            self._meeting_render_speakers()
+
+    def _meeting_render_speakers(self):
+        if not hasattr(self, "meeting_speaker_checks"):
+            return
+        reason = diarization_disabled_reason(self._meeting_diar_status)
+        for key, check in self.meeting_speaker_checks.items():
+            # Already on stays usable, so it can always be turned off.
+            off = not self.meeting_speaker_vars[key].get()
+            check.configure(state="disabled" if reason and off else "normal")
+        if reason:
+            self.meeting_speaker_reason.configure(text=reason)
+            self.meeting_speaker_reason.pack(
+                fill="x", pady=(2, 0), before=self.meeting_speaker_spacer,
+            )
+        else:
+            self.meeting_speaker_reason.configure(text="")
+            self.meeting_speaker_reason.pack_forget()
+
+    def _meeting_set_speaker_flag(self, key):
+        var = self.meeting_speaker_vars[key]
+        value = bool(var.get())
+        try:
+            fresh = load_config()
+            updated = apply_config_update(fresh, {"meetings": {key: value}})
+            save_config(updated)
+            self.config = updated
+            if hasattr(self, "meeting_error"):
+                self.meeting_error.configure(text="")
+        except Exception as exc:  # noqa: BLE001
+            var.set(not value)
+            self._meeting_show_error(exc)
+        self._meeting_render_speakers()
 
     def _meeting_templates_loaded(self, result, error):
         if error:

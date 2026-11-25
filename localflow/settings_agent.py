@@ -107,6 +107,8 @@ ALLOWLIST = (
     "meeting_watch",
     "meeting_auto_start",
     "capture_system_audio",
+    "speaker_diarization",
+    "diarize_mic",
     "meeting_default_template",
     "work_prompts",
 )
@@ -153,15 +155,19 @@ LABELS = {
     "meeting_watch": "Meeting detection",
     "meeting_auto_start": "Auto-start meetings",
     "capture_system_audio": "Capture system audio",
+    "speaker_diarization": "Speaker labels",
+    "diarize_mic": "Label speakers on my microphone",
     "meeting_default_template": "Default meeting template",
     "work_prompts": "Work prompts",
 }
 
 # When a change is felt. Everything is picked up by the running app/server
-# without a restart (see live_config); these two are read when a meeting
+# without a restart (see live_config); these are read when a meeting
 # starts, so they apply from the next meeting on.
 NOTES = {
     "capture_system_audio": "From the next meeting",
+    "speaker_diarization": "From the next meeting",
+    "diarize_mic": "From the next meeting",
     "meeting_default_template": "From the next meeting",
 }
 
@@ -214,6 +220,8 @@ MANUAL_GROUPS = (
             "meeting_watch",
             "meeting_auto_start",
             "capture_system_audio",
+            "speaker_diarization",
+            "diarize_mic",
             "meeting_default_template",
             "work_prompts",
         ),
@@ -232,6 +240,8 @@ _BOOL_KEYS = frozenset(
         "meeting_watch",
         "meeting_auto_start",
         "capture_system_audio",
+        "speaker_diarization",
+        "diarize_mic",
         "work_prompts",
     }
 )
@@ -411,6 +421,8 @@ _INTENT_WORDS = {
                            "automatically start", "start meetings automatically",
                            "start automatically"),
     "capture_system_audio": ("system audio", "capture audio", "other participants"),
+    "speaker_diarization": ("speaker label", "diarization", "diarisation", "who spoke"),
+    "diarize_mic": ("my microphone", "my mic", "microphone speakers"),
     "meeting_default_template": ("template",),
     "work_prompts": ("work prompt",),
 }

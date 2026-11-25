@@ -86,6 +86,10 @@ class MeetingClient:
     def status(self) -> dict:
         return self._request("get", "/meeting/status", timeout=3)
 
+    def diarization_status(self) -> dict:
+        """Whether speaker labels can run (runtime extra installed, models ready)."""
+        return self._request("get", "/api/diarization/status", timeout=3)
+
     def templates(self) -> dict:
         return self._request("get", "/meeting/templates")
 

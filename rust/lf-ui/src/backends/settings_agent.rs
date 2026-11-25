@@ -29,7 +29,7 @@ use unicode_normalization::UnicodeNormalization;
 // ------------------------------------------------------------- constants ---
 
 /// The exact config fields the agent may change.
-pub const ALLOWLIST: [&str; 24] = [
+pub const ALLOWLIST: [&str; 26] = [
     "dictation_enabled",
     "dictation_toggle_hotkey",
     "sounds_enabled",
@@ -52,6 +52,8 @@ pub const ALLOWLIST: [&str; 24] = [
     "meeting_watch",
     "meeting_auto_start",
     "capture_system_audio",
+    "speaker_diarization",
+    "diarize_mic",
     "meeting_default_template",
     "work_prompts",
 ];
@@ -86,6 +88,8 @@ pub fn label(key: &str) -> Option<&'static str> {
         "meeting_watch" => "Meeting detection",
         "meeting_auto_start" => "Auto-start meetings",
         "capture_system_audio" => "Capture system audio",
+        "speaker_diarization" => "Speaker labels",
+        "diarize_mic" => "Label speakers on my microphone",
         "meeting_default_template" => "Default meeting template",
         "work_prompts" => "Work prompts",
         _ => return None,
@@ -99,7 +103,10 @@ fn label_of(key: &str) -> &str {
 /// `NOTES[key]`: when a change is felt (`""` for "immediately").
 pub fn note(key: &str) -> &'static str {
     match key {
-        "capture_system_audio" | "meeting_default_template" => "From the next meeting",
+        "capture_system_audio"
+        | "speaker_diarization"
+        | "diarize_mic"
+        | "meeting_default_template" => "From the next meeting",
         _ => "",
     }
 }
@@ -158,6 +165,8 @@ pub const MANUAL_GROUPS: [(&str, &[&str]); 4] = [
             "meeting_watch",
             "meeting_auto_start",
             "capture_system_audio",
+            "speaker_diarization",
+            "diarize_mic",
             "meeting_default_template",
             "work_prompts",
         ],
@@ -165,7 +174,7 @@ pub const MANUAL_GROUPS: [(&str, &[&str]); 4] = [
 ];
 
 /// Keys shown as an On/Off switch.
-pub const BOOL_KEYS: [&str; 11] = [
+pub const BOOL_KEYS: [&str; 13] = [
     "dictation_enabled",
     "sounds_enabled",
     "cleanup_enabled",
@@ -176,6 +185,8 @@ pub const BOOL_KEYS: [&str; 11] = [
     "meeting_watch",
     "meeting_auto_start",
     "capture_system_audio",
+    "speaker_diarization",
+    "diarize_mic",
     "work_prompts",
 ];
 /// The writing styles a style popup offers.
@@ -743,6 +754,8 @@ fn intent_words(key: &str) -> &'static [&'static str] {
             "start automatically",
         ],
         "capture_system_audio" => &["system audio", "capture audio", "other participants"],
+        "speaker_diarization" => &["speaker label", "diarization", "diarisation", "who spoke"],
+        "diarize_mic" => &["my microphone", "my mic", "microphone speakers"],
         "meeting_default_template" => &["template"],
         "work_prompts" => &["work prompt"],
         _ => &[],
@@ -1350,7 +1363,7 @@ mod tests {
             .flat_map(|(_, k)| k.iter().copied())
             .collect();
         let unique: BTreeSet<&str> = keys.iter().copied().collect();
-        assert_eq!(keys.len(), 24);
+        assert_eq!(keys.len(), 26);
         assert_eq!(unique, ALLOWLIST.iter().copied().collect());
         assert_eq!(
             MANUAL_GROUPS.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
@@ -1460,6 +1473,46 @@ mod tests {
     }
 
     #[test]
+    fn speaker_label_switches_have_labels_notes_and_warnings() {
+        assert_eq!(label("speaker_diarization"), Some("Speaker labels"));
+        assert_eq!(
+            label("diarize_mic"),
+            Some("Label speakers on my microphone")
+        );
+        for key in ["speaker_diarization", "diarize_mic"] {
+            assert_eq!(note(key), "From the next meeting");
+            assert_eq!(control_kind(key), "switch");
+        }
+        let meetings = MANUAL_GROUPS
+            .iter()
+            .find(|(name, _)| *name == "Meetings")
+            .unwrap()
+            .1;
+        let at = meetings
+            .iter()
+            .position(|k| *k == "capture_system_audio")
+            .unwrap();
+        assert_eq!(meetings[at + 1], "speaker_diarization");
+        assert_eq!(meetings[at + 2], "diarize_mic");
+
+        let on = Change::setting("speaker_diarization", json!(false), json!(true));
+        assert_eq!(
+            on.line(),
+            "Speaker labels: Off → On (From the next meeting)"
+        );
+        assert_eq!(on.warning("turn on speaker labels"), "");
+        let mic = Change::setting("diarize_mic", json!(false), json!(true));
+        assert!(mic
+            .warning("turn on speaker labels")
+            .contains("doesn't seem"));
+        let off = Change::setting("speaker_diarization", json!(true), json!(false));
+        assert_eq!(
+            off.warning("turn off speaker labels"),
+            "Check: turns Speaker labels off."
+        );
+    }
+
+    #[test]
     fn change_lines_escape_text_and_refuse_blank_or_unchanged_entries() {
         assert_eq!(
             Change::word("a\nb → c").line(),
@@ -1544,7 +1597,7 @@ mod tests {
     #[test]
     fn sample_rows_follow_the_page_order_and_the_config() {
         let rows = FakeSettingsAgent::new().manual_settings(None).unwrap();
-        assert_eq!(rows.len(), 24);
+        assert_eq!(rows.len(), 26);
         assert_eq!(rows[0].key, "dictation_enabled");
         assert_eq!(rows[0].group, "Dictation");
         assert_eq!(rows[0].label, "Dictation");

@@ -43,6 +43,35 @@ STALE_PENDING = (
 )
 
 
+# Speaker-label switches: disabled (with a reason) while the server says the
+# diarization backend can't run.
+DIARIZATION_KEYS = ("speaker_diarization", "diarize_mic")
+DIAR_NO_RUNTIME = "Install localflow[diarization]"
+DIAR_NO_MODELS = "Download speaker models in Models & keys"
+DIAR_DOWNLOADING = "Downloading speaker models..."
+
+
+def diarization_disabled_reason(status) -> str | None:
+    """Why the speaker-label switches can't be used, from a
+    `GET /api/diarization/status` answer; None when ready or unknown (an
+    unreachable or older server is not treated as "not ready"). Server text
+    is never shown verbatim."""
+    if not isinstance(status, dict):
+        return None
+    if "extra_installed" not in status and "models_ready" not in status:
+        return None
+    if "extra_installed" in status and not status.get("extra_installed"):
+        return DIAR_NO_RUNTIME
+    if "models_ready" in status and not status.get("models_ready"):
+        download = status.get("download")
+        if isinstance(download, dict) and download.get("state") == "downloading":
+            return DIAR_DOWNLOADING
+        reason = status.get("reason")
+        shown = safe_text(reason, 200) if isinstance(reason, str) else ""
+        return shown.strip() or DIAR_NO_MODELS
+    return None
+
+
 def model_note(model: str | None) -> str:
     return f"Runs on your Mac with {safe_text(model, 120)}" if model else NOTE_UNKNOWN
 
@@ -67,6 +96,9 @@ class SettingsPageState:
     manual_drafts: dict[str, str] = field(default_factory=dict)
     manual_errors: dict[str, str] = field(default_factory=dict)
     manual_notice: str = ""
+    # Rows that can't be used right now, with a muted reason shown under them
+    # (from the server's diarization status; see set_diarization_status).
+    disabled_reasons: dict[str, str] = field(default_factory=dict)
 
     @property
     def busy(self) -> bool:
@@ -94,6 +126,17 @@ class SettingsPageState:
     def manual_draft(self, key: str, typed: str) -> None:
         """Keep a shortcut field's text across a rebuild (resize, navigation)."""
         self.manual_drafts[key] = typed[:MAX_DRAFT_CHARS]
+
+    def set_diarization_status(self, status) -> bool:
+        """Fill or clear the speaker-label rows' reason; True when it changed."""
+        reason = diarization_disabled_reason(status)
+        before = dict(self.disabled_reasons)
+        for key in DIARIZATION_KEYS:
+            if reason:
+                self.disabled_reasons[key] = reason
+            else:
+                self.disabled_reasons.pop(key, None)
+        return before != self.disabled_reasons
 
     def settings_changed(self) -> None:
         """Settings moved under the page: drop a now-stale preview or request."""
@@ -228,9 +271,11 @@ def manual_layout(width, rows, state: SettingsPageState, measure):
     row has its label on the left and its control right-aligned on the same
     line, at every supported width; a long label wraps in its column. A row
     with an error gets a wrapped error line under it, across the full width
-    (sized by `measure`), so nothing is clipped at any width.
+    (sized by `measure`), so nothing is clipped at any width. A row in
+    `state.disabled_reasons` gets its muted reason the same way, above any
+    error.
     Returns {"height", "title", "intro", "groups": [(name, frame)],
-    "rows": {key: {"label", "control", "error"?}}, "notice"?}.
+    "rows": {key: {"label", "control", "reason"?, "error"?}}, "notice"?}.
     """
     inner = width - 2 * CARD_PAD
     layout = {"groups": [], "rows": {}}
@@ -262,6 +307,11 @@ def manual_layout(width, rows, state: SettingsPageState, measure):
                         control_w, control_h),
         }
         y += line_h
+        reason = state.disabled_reasons.get(row.key)
+        if reason:
+            reason_h = _wrapped_height(reason, inner, measure)
+            frames["reason"] = (CARD_PAD, y + 2, inner, reason_h)
+            y += reason_h + 2
         error = state.manual_errors.get(row.key)
         if error:
             error_h = _wrapped_height(error, inner, measure)

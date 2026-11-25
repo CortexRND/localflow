@@ -29,6 +29,7 @@ UI thread:
 import logging
 import queue
 import threading
+import time
 
 import AppKit
 import objc
@@ -65,6 +66,7 @@ from localflow.mac_style import (
     style_input_box,
     style_surface,
 )
+from localflow.meeting_client import MeetingClientError
 from localflow.settings_agent import (
     SettingsAgent,
     SettingsAgentError,
@@ -76,6 +78,9 @@ from localflow.ui_tokens import CARD_BORDER_WIDTH
 log = logging.getLogger("localflow.hub_settings")
 
 CHOOSE_TITLE = "Choose…"
+# At most one diarization status request per this many seconds (each toggle
+# and resize rebuilds the page).
+DIARIZATION_REFRESH_S = 5.0
 
 
 class SettingsPageController(NSObject):
@@ -97,7 +102,23 @@ class SettingsPageController(NSObject):
         # user's config, dictionary and a loopback Ollama.
         factory = getattr(hub, "settings_agent_factory", None)
         self.agent_factory = factory or (lambda: SettingsAgent(dictionary=hub.dictionary))
+        # Whether the speaker-label backend can run (GET /api/diarization/status),
+        # asked off the UI thread. Tests inject a fetcher; the default reuses
+        # the Hub's meeting client (no fetcher when it has none).
+        self.diarization_fetcher = (
+            getattr(hub, "diarization_status_fetcher", None) or self._default_fetcher()
+        )
+        self.diarization_results = queue.Queue()
+        self.diarization_seq = 0
+        self.diarization_in_flight = False
+        self.diarization_fetched_at = None
         return self
+
+    @objc.python_method
+    def _default_fetcher(self):
+        client = getattr(self.hub, "meeting_client", None)
+        fetch = getattr(client, "diarization_status", None)
+        return fetch if callable(fetch) else None
 
     # ----------------------------------------------------------- lifecycle ---
 
@@ -132,6 +153,65 @@ class SettingsPageController(NSObject):
             self.manual_rows = []
         self.state.undo_lines = agent.pending_undo()
 
+    @objc.python_method
+    def _refresh_diarization(self):
+        """Ask the server whether speaker labels can run, off the UI thread.
+        Unknown (no fetcher, server down, older server) leaves rows enabled."""
+        fetch = self.diarization_fetcher
+        if fetch is None or self.diarization_in_flight or self.closed:
+            return
+        now = time.monotonic()
+        last = self.diarization_fetched_at
+        if last is not None and now - last < DIARIZATION_REFRESH_S:
+            return
+        self.diarization_in_flight = True
+        self.diarization_fetched_at = now
+        self.diarization_seq += 1
+        seq = self.diarization_seq
+
+        def work():
+            try:
+                status = fetch()
+            except MeetingClientError:
+                status = None
+            except Exception:
+                log.warning("could not read the speaker-label status", exc_info=True)
+                status = None
+            self.diarization_results.put((seq, status))
+            with objc.autorelease_pool():
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "diarizationStatusDone:", None, False
+                )
+
+        threading.Thread(
+            target=work, name="localflow-settings-diarization", daemon=True
+        ).start()
+
+    def diarizationStatusDone_(self, _ignored):
+        latest = None
+        while True:
+            try:
+                latest = self.diarization_results.get_nowait()
+            except queue.Empty:
+                break
+        if latest is None:
+            return
+        seq, status = latest
+        if seq != self.diarization_seq:
+            return
+        self.diarization_in_flight = False
+        if self.closed:
+            return
+        # Repainting renders, which never refetches inside the refresh window.
+        if self.state.set_diarization_status(status):
+            self._repaint()
+
+    @objc.python_method
+    def _row_disabled(self, row):
+        """A switch is unusable while its backend isn't ready, unless it is
+        already on: it can always be turned off."""
+        return bool(self.state.disabled_reasons.get(row.key)) and not row.value
+
     # -------------------------------------------------------------- render ---
 
     @objc.python_method
@@ -161,6 +241,7 @@ class SettingsPageController(NSObject):
     def render(self):
         hub = self.hub
         self._refresh_local()
+        self._refresh_diarization()
         state = self.state
         width = hub._content_width()
         measure = lambda text: measure_text(text, font(13))
@@ -291,6 +372,9 @@ class SettingsPageController(NSObject):
             self._label(card, row.label, frames["label"], 12, "ink", wrap=True)
             control = self._manual_control(card, row, frames["control"])
             self.manual_controls[row.key] = (row.kind, control)
+            if "reason" in frames:
+                self._label(card, self.state.disabled_reasons.get(row.key, ""),
+                            frames["reason"], 12, "muted", wrap=True)
             if "error" in frames:
                 self._label(card, self.state.manual_errors.get(row.key, ""),
                             frames["error"], 12, "red", wrap=True)
@@ -298,7 +382,8 @@ class SettingsPageController(NSObject):
 
     @objc.python_method
     def _manual_control(self, parent, row, frame):
-        """One explicit-target control, enabled and wired to its action."""
+        """One explicit-target control, wired to its action; enabled unless
+        its backend isn't ready (see _row_disabled)."""
         tokens = self.hub.tokens
         if row.kind == "switch":
             # House switch: token colours in every appearance and window state.
@@ -335,7 +420,7 @@ class SettingsPageController(NSObject):
             action = "manualShortcut:"
         control.setTarget_(self)
         control.setAction_(action)
-        control.setEnabled_(True)
+        control.setEnabled_(not self._row_disabled(row))
         control.setAccessibilityLabel_(row.label)
         parent.addSubview_(control)
         return control
@@ -432,6 +517,9 @@ class SettingsPageController(NSObject):
     def manualToggle_(self, sender):
         key = self._manual_key(sender, "switch")
         if key is None:
+            return
+        row = next((row for row in self.manual_rows if row.key == key), None)
+        if row is None or self._row_disabled(row):
             return
         self._manual_commit(key, sender.state() == AppKit.NSControlStateValueOn)
 

@@ -316,3 +316,26 @@ def test_client_voiceprint_errors_carry_the_server_detail():
 def test_client_never_uploads_audio_or_downloads_exports():
     assert not any(hasattr(MeetingClient, name)
                    for name in ("export", "enroll_audio", "upload", "export_speakers"))
+
+
+def test_client_diarization_status_uses_the_api_route():
+    http = FakeHTTP()
+    http.response = FakeResponse(data={"models_ready": True, "extra_installed": True})
+    client = MeetingClient("http://localhost:9876/", "secret-token", http)
+    assert client.diarization_status() == {"models_ready": True, "extra_installed": True}
+    method, url, kwargs = http.calls[0]
+    assert (method, url) == ("get", "http://localhost:9876/api/diarization/status")
+    assert kwargs["timeout"] == 3
+    assert kwargs["headers"] == {"X-Localflow-Token": "secret-token"}
+    assert "json" not in kwargs
+
+
+def test_client_diarization_status_maps_errors():
+    http = FakeHTTP()
+    http.response = FakeResponse(404, {"detail": "Not Found"})
+    client = MeetingClient("http://localhost:9876", "t", http)
+    with pytest.raises(MeetingClientError, match="Not Found"):
+        client.diarization_status()
+    http.error = requests.ConnectionError("refused")
+    with pytest.raises(MeetingClientError, match="server not running"):
+        client.diarization_status()
