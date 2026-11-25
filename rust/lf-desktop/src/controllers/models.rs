@@ -227,7 +227,10 @@ pub fn activate(
 /// Where cleanup text goes, in words.
 pub fn data_leaves_text(config: &Config) -> String {
     match models_layout::active_preset(config) {
-        Some(p) if !p.needs_key => "Nothing. Cleanup runs on this device through Ollama.".into(),
+        Some(p) if !p.needs_key => {
+            "Cleanup runs locally through Ollama, so your dictated text stays on this device."
+                .into()
+        }
         Some(p) => format!("Dictated text is sent to {} for cleanup and Ask.", p.label),
         None => format!(
             "Dictated text is sent to {} for cleanup and Ask.",
@@ -314,7 +317,7 @@ mod tests {
         let rows = provider_rows(&secrets, &file, &file.load().unwrap(), &|_| false);
         assert!(!rows.iter().find(|r| r.id == "openai").unwrap().has_key);
         let back = activate(&secrets, &file, "ollama", None, Some("llama3.2:3b")).unwrap();
-        assert!(data_leaves_text(&back).starts_with("Nothing"));
+        assert!(data_leaves_text(&back).contains("stays on this device"));
     }
 
     #[test]
