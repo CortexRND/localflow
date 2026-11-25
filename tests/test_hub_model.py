@@ -1667,4 +1667,8 @@ def test_recent_speakers_malformed_200_shows_retry_instead_of_hiding():
     assert state.loaded(seq2, {"meeting_id": OTHER_MID, "speakers": []}, None) is True
     assert state.state == "error"
     assert RECENT_MID not in state.hidden
+    _, _, seq3 = state.retry()
+    assert state.loaded(seq3, {"meeting_id": RECENT_MID}, None) is True
+    assert state.state == "error"
+    assert RECENT_MID not in state.hidden
 

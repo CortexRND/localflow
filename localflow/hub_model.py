@@ -948,7 +948,11 @@ class RecentSpeakers:
                 self.state = "error"
                 self.load_error = recent_speakers_error_text(error)
             return True
-        if not isinstance(result, dict) or result.get("meeting_id") not in (None, self.meeting_id):
+        if (
+            not isinstance(result, dict)
+            or result.get("meeting_id") not in (None, self.meeting_id)
+            or not isinstance(result.get("speakers"), list)
+        ):
             self.state = "error"
             self.load_error = recent_speakers_error_text("unexpected response")
             return True
