@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use chrono::NaiveDateTime;
 use lf_agent::{Change, ChatClient, SettingsAgent, Validator};
 use lf_core::{config, history::HistoryStore};
-use lf_meetings::{dispatch, titles, ObsidianWriter, Segment, WriteNote};
+use lf_meetings::{dispatch, titles, ObsidianWriter, Segment, Transcript, WriteNote};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -18,6 +18,33 @@ impl ChatClient for MockOllama {
     }
     fn chat(&self, _: &str, _: &Value) -> Result<Value> {
         Ok(json!({"message":{"tool_calls":self.0}}))
+    }
+}
+/// Records every completion call; replies "reply N" like the Python fake.
+#[derive(Default)]
+struct Recorder(std::sync::Mutex<Vec<Value>>);
+impl lf_providers::LlmProvider for Recorder {
+    fn id(&self) -> &'static str {
+        "recorder"
+    }
+    fn offline(&self) -> bool {
+        true
+    }
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: Option<i64>,
+    ) -> Result<String, lf_providers::ProviderError> {
+        let mut calls = self.0.lock().unwrap();
+        calls.push(json!([system, user, max_tokens]));
+        Ok(format!("reply {}", calls.len()))
+    }
+    fn list_models(&self) -> Result<Vec<lf_providers::ModelInfo>, lf_providers::ProviderError> {
+        Ok(vec![])
+    }
+    fn healthcheck(&self) -> lf_providers::Health {
+        lf_providers::Health::ok()
     }
 }
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -85,6 +112,26 @@ fn run(v: &Value) -> Result<Value> {
         "meetings" => {
             let segments: Vec<Segment> = serde_json::from_value(v["segments"].clone())?;
             json!({"transcript":lf_meetings::format_transcript(&segments),"media":lf_meetings::strip_remote_media(text(v,"text")),"clean":titles::clean_generated_title(text(v,"title")),"safe":titles::safe_title(text(v,"title")),"fallback":titles::fallback_title(date(v)?),"prompts":dispatch::parse_work_prompts(text(v,"prompts")),"slug":dispatch::slugify(text(v,"title"))})
+        }
+        "speakers" => {
+            let segments: Vec<Segment> = serde_json::from_value(v["segments"].clone())?;
+            let transcript = lf_meetings::format_transcript(&segments);
+            let diarized = lf_meetings::is_diarized(&segments);
+            let chunk = v["chunk"].as_u64().context("chunk")? as usize;
+            let llm = Recorder::default();
+            let summarizer = lf_meetings::MeetingSummarizer {
+                llm: &llm,
+                words_per_chunk: chunk,
+            };
+            let marked = Transcript::new(&transcript, diarized);
+            for user_notes in ["", "## Pricing\n- price?"] {
+                summarizer.summarize(marked, user_notes, None);
+            }
+            for words_per_chunk in [4000, chunk] {
+                lf_meetings::answer_question(&llm, marked, "Who spoke?", words_per_chunk)?;
+            }
+            let names = v["names"].as_array().context("names")?;
+            json!({"transcript":transcript,"diarized":diarized,"labels":segments.iter().map(|s|s.speaker()).collect::<Vec<_>>(),"clean":names.iter().map(|s|lf_meetings::clean_speaker_name(s.as_str().unwrap_or(""))).collect::<Vec<_>>(),"calls":*llm.0.lock().unwrap()})
         }
         "write" => {
             let root = Path::new(text(v, "vault"));

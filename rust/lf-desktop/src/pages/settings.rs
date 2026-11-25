@@ -752,17 +752,25 @@ impl SettingsPage {
                     },
                     None,
                 ).into_any_element());
-                out.rows.push(ui::setting_row(
-                    &t,
-                    "Launch at login",
-                    if cfg!(target_os = "macos") {
-                        "Managed with `lf agent install` / `lf agent uninstall`."
-                    } else {
-                        "Not available on Linux yet. Start LocalFlow from your session's autostart if you want it at login."
-                    },
-                    ui::token(&t, Tone::Neutral, if cfg!(target_os = "macos") { "CLI" } else { "Unavailable" }).into_any_element(),
-                    None,
-                ).into_any_element());
+                out.rows.push(
+                    ui::setting_row(
+                        &t,
+                        "Launch at login",
+                        launch_at_login_description(std::env::consts::OS),
+                        ui::token(
+                            &t,
+                            Tone::Neutral,
+                            if cfg!(target_os = "macos") {
+                                "CLI"
+                            } else {
+                                "Unavailable"
+                            },
+                        )
+                        .into_any_element(),
+                        None,
+                    )
+                    .into_any_element(),
+                );
             }
             Tab::Shortcuts => {
                 out.top.push(ui::banner(
@@ -1033,10 +1041,32 @@ impl Render for SettingsPage {
     }
 }
 
+pub(crate) fn launch_at_login_description(os: &str) -> &'static str {
+    match os {
+        "macos" => "Managed with `lf agent install` / `lf agent uninstall`.",
+        "windows" => "Not available on Windows yet. Start LocalFlow manually when you sign in.",
+        _ => "Not available on Linux yet. Start LocalFlow from your session's autostart if you want it at login.",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn launch_at_login_copy_names_the_right_platform() {
+        let windows = launch_at_login_description("windows");
+        assert!(windows.contains("Windows") && !windows.contains("Linux"));
+        assert_eq!(
+            launch_at_login_description("linux"),
+            "Not available on Linux yet. Start LocalFlow from your session's autostart if you want it at login."
+        );
+        assert_eq!(
+            launch_at_login_description("macos"),
+            "Managed with `lf agent install` / `lf agent uninstall`."
+        );
+    }
 
     #[test]
     fn spec_keys_are_unique() {

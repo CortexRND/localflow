@@ -1,7 +1,7 @@
 //! Headless layout checks for `setting_row` inside `group_rows`, laid out in
 //! the same scrolling column the pages use.
 
-use gpui::{size, Context, Render, TestAppContext};
+use gpui::{size, Bounds, Context, Render, TestAppContext};
 
 use super::*;
 use crate::pages::column;
@@ -42,7 +42,7 @@ fn cases() -> Vec<Case> {
         Case {
             name: "launch at login",
             label: "Launch at login",
-            description: "Not available on Linux yet. Start LocalFlow from your session's autostart if you want it at login.".into(),
+            description: crate::pages::settings::launch_at_login_description("linux").into(),
             control_w: 120.,
             segmented: false,
             wraps_only_at_measure: false,
@@ -253,4 +253,114 @@ fn setting_rows_fit_at_960(cx: &mut TestAppContext) {
     for case in cases() {
         check(&case, 960., cx);
     }
+}
+
+/// Home's real status row (`pages::home::status_row`) in a card, in the page
+/// column.
+struct HomeStatus {
+    tone: Tone,
+    line: String,
+}
+
+impl Render for HomeStatus {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = Theme::light();
+        let row = crate::pages::home::status_row(&t, self.tone, self.line.clone())
+            .debug_selector(|| "status-row".into())
+            .into_any_element();
+        let group = group_rows(&t, [row], row_inset());
+        let group = group.debug_selector(|| "status-group".into());
+        let content = div().flex().flex_col().child(group);
+        div()
+            .flex()
+            .size_full()
+            .child(div().flex_none().w(px(size::SIDEBAR)))
+            .child(column("column", content))
+    }
+}
+
+/// Lays the line out at `window_w` and checks it stays whole inside the row;
+/// returns the row and text bounds.
+fn check_status(
+    tone: Tone,
+    line: &str,
+    window_w: f32,
+    cx: &mut TestAppContext,
+) -> (Bounds<Pixels>, Bounds<Pixels>) {
+    let line = line.to_string();
+    let (_, cx) = cx.add_window_view(|_, _| HomeStatus { tone, line });
+    cx.simulate_resize(size(px(window_w), px(850.)));
+    cx.run_until_parked();
+    let group = cx.debug_bounds("status-group").expect("group laid out");
+    let row = cx.debug_bounds("status-row").expect("row laid out");
+    let dot = cx.debug_bounds("status-dot").expect("dot laid out");
+    let words = cx.debug_bounds("status-text").expect("text laid out");
+    let ctx = format!("status row at {window_w}px");
+    let lh = text::body().1;
+
+    // The text ends inside the row's right inset, so the group's
+    // `overflow_hidden` has nothing to clip.
+    assert!(
+        words.right() <= row.right() - row_inset(),
+        "{ctx}: text ends at {:?}, row's right inset starts at {:?}",
+        words.right(),
+        row.right() - row_inset()
+    );
+    assert!(
+        row.right() <= group.right(),
+        "{ctx}: row ends at {:?}, card at {:?}",
+        row.right(),
+        group.right()
+    );
+    // Vertically too: the row grows to hold every line plus its padding.
+    let (above, below) = (words.top() - row.top(), row.bottom() - words.bottom());
+    assert!(
+        above >= space::s3() && below >= space::s3(),
+        "{ctx}: text {words:?} doesn't sit inside the row's padding {row:?}"
+    );
+    assert!(
+        row.bottom() <= group.bottom(),
+        "{ctx}: row ends at {:?}, card at {:?}",
+        row.bottom(),
+        group.bottom()
+    );
+    // The dot is centred on the first line.
+    let dot_mid = dot.top() + dot.size.height * 0.5;
+    let first_mid = words.top() + lh * 0.5;
+    assert!(
+        dot_mid >= first_mid - px(1.) && dot_mid <= first_mid + px(1.),
+        "{ctx}: dot centre {dot_mid:?}, first line centre {first_mid:?}"
+    );
+    (row, words)
+}
+
+fn wayland_line() -> (Tone, String) {
+    use crate::controllers::runtime_state::{shortcut_line, Session, State};
+    let (signal, line) = shortcut_line(Session::Wayland, false, &State::Unknown);
+    (crate::app::signal_tone(signal), line)
+}
+
+#[gpui::test]
+fn home_wayland_shortcut_wraps_at_1280_and_960(cx: &mut TestAppContext) {
+    let (tone, line) = wayland_line();
+    for window_w in [1280., 960.] {
+        let (_, words) = check_status(tone, &line, window_w, cx);
+        assert!(
+            words.size.height >= text::body().1 * 2.,
+            "{window_w}px: text is {:?} tall, should wrap",
+            words.size.height
+        );
+    }
+}
+
+#[gpui::test]
+fn home_short_status_row_is_unchanged(cx: &mut TestAppContext) {
+    let (row, words) = check_status(Tone::Success, "Microphone: ready", 1280., cx);
+    let lh = text::body().1;
+    assert!(words.size.height < lh * 1.5, "short line wrapped");
+    assert_eq!(row.size.height, px(36.), "short row should stay 36 px");
+    // Still vertically centred in the row, as before.
+    let mid = row.top() + row.size.height * 0.5;
+    let text_mid = words.top() + words.size.height * 0.5;
+    assert!(text_mid >= mid - px(1.) && text_mid <= mid + px(1.));
 }

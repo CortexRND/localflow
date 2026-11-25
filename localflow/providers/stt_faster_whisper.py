@@ -2,6 +2,7 @@ import inspect
 
 import numpy as np
 
+from localflow.diarization.types import TimedText
 from localflow.providers.base import ModelInfo
 
 
@@ -34,16 +35,30 @@ class FasterWhisperSTT:
             self._supports_hotwords = False
         self.language = language
 
-    def transcribe(
-        self, audio: np.ndarray, *, prompt: str | None = None
-    ) -> str:
+    def _options(self, prompt: str | None) -> dict:
         options = {"language": self.language, "vad_filter": True}
         if prompt is not None:
             options["initial_prompt"] = prompt
             if self._supports_hotwords:
                 options["hotwords"] = prompt
-        segments, _info = self.model.transcribe(audio, **options)
+        return options
+
+    def transcribe(
+        self, audio: np.ndarray, *, prompt: str | None = None
+    ) -> str:
+        segments, _info = self.model.transcribe(audio, **self._options(prompt))
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+    def transcribe_timed(
+        self, audio: np.ndarray, *, prompt: str | None = None
+    ) -> list[TimedText]:
+        # VAD-filtered segment times are already on the original timeline.
+        segments, _info = self.model.transcribe(audio, **self._options(prompt))
+        return [
+            TimedText(float(s.start), float(s.end), s.text.strip())
+            for s in segments
+            if s.text.strip()
+        ]
 
     def list_models(self) -> list[ModelInfo]:
         return [

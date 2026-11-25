@@ -14,7 +14,7 @@
 # install. Your LocalFlow data (~/.localflow, config, keyring) is never touched.
 set -euo pipefail
 
-PREVIEW_RELEASE="v0.2.2"
+PREVIEW_RELEASE="v0.2.3"
 PREVIEW_ID="com.cortexrnd.localflow.desktop-preview"
 MAC_APP="LocalFlow Preview.app"
 LINUX_ROOT="localflow-preview"

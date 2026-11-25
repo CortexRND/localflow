@@ -91,6 +91,11 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "system_audio_device": "system_audio_device",
         "default_template": "meeting_default_template",
         "templates_dir": "meeting_templates_dir",
+        "speaker_diarization": "speaker_diarization",
+        "diarization_backend": "diarization_backend",
+        "diarize_mic": "diarize_mic",
+        "max_speakers": "diarization_max_speakers",
+        "speaker_recognition": "speaker_recognition",
     },
     "setup": {"version": "setup_version"},
 }
@@ -175,6 +180,12 @@ class Config:
     system_audio_device: str = ""      # e.g. "BlackHole 2ch"; empty = auto
     meeting_default_template: str = "general"
     meeting_templates_dir: str = "~/.localflow/meeting_templates"
+    # Speaker diarization, read when a meeting starts (applies to the next one).
+    speaker_diarization: bool = False
+    diarization_backend: str = "sherpa-onnx"   # sherpa-onnx | mock
+    diarize_mic: bool = False
+    diarization_max_speakers: int = 0          # 0 = auto; at most 10
+    speaker_recognition: bool = False          # ignored unless speaker_diarization
     input_device: str = ""
     setup_version: int = 0
     history_enabled: bool = True
@@ -397,6 +408,7 @@ _ENUM_VALUES = {
     "style_email": {"formal", "casual", "very_casual", "excited"},
     "style_personal": {"formal", "casual", "very_casual", "excited"},
     "style_other": {"formal", "casual", "very_casual", "excited"},
+    "diarization_backend": {"sherpa-onnx", "mock"},
 }
 
 _FIELD_TYPES = {
@@ -417,6 +429,10 @@ _FIELD_TYPES = {
     "system_audio_device": str,
     "meeting_default_template": str,
     "meeting_templates_dir": str,
+    "speaker_diarization": bool,
+    "diarize_mic": bool,
+    "diarization_max_speakers": int,
+    "speaker_recognition": bool,
 }
 
 
@@ -426,6 +442,8 @@ def _valid_field_value(field_name: str, value: object) -> bool:
         return False
     if field_name in {"max_recording_seconds", "keep_audio_clips"}:
         return value >= 0
+    if field_name == "diarization_max_speakers":
+        return 0 <= value <= 10
     if field_name == "llm_key_ref":
         # Only our own activation namespace: a config can never point the
         # LLM client at some other stored secret.

@@ -280,8 +280,11 @@ def inventory(
         folder = _model_folder(cache, repo)
         if folder is None:
             continue
+        size = folder_size(folder)
+        if size == 0:  # an empty or leftover folder (e.g. a cancelled download)
+            continue
         status = guard.status(repo) or ("Unknown use" if guard.unknown else "")
-        found.append(CachedModel(repo, label, folder, folder_size(folder), status))
+        found.append(CachedModel(repo, label, folder, size, status))
     return sorted(found, key=lambda model: (-model.size_bytes, model.label))
 
 

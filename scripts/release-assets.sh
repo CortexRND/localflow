@@ -6,7 +6,7 @@
 # <ver> is the tag without its leading "v" and must match pyproject.toml at
 # that tag. Both archives unpack into localflow-<ver>/.
 #
-# Usage: scripts/release-assets.sh <tag>        e.g. scripts/release-assets.sh v0.2.2
+# Usage: scripts/release-assets.sh <tag>        e.g. scripts/release-assets.sh v0.2.3
 # Then:  gh release create <tag> dist/release/*
 set -euo pipefail
 

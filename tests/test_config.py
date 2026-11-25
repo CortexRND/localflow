@@ -91,6 +91,11 @@ def test_v2_round_trip_for_non_default_config(isolated_config, monkeypatch):
         prompt_hotkey="<ctrl>+<alt>+2",
         pause_media_while_dictating=True,
         max_recording_seconds=600,
+        speaker_diarization=True,
+        diarization_backend="mock",
+        diarize_mic=True,
+        diarization_max_speakers=4,
+        speaker_recognition=True,
     )
 
     config.save_config(expected)
@@ -371,6 +376,28 @@ def test_config_update_drops_old_fast_model_on_endpoint_change():
         ({"cleanup": {"level": "aggressive"}}, "invalid value.*cleanup.level"),
         ({"cleanup": {"level": []}}, "invalid type for config key 'cleanup.level'"),
         ({"cleanup": {"style_work": "wild"}}, "invalid value.*cleanup.style_work"),
+        ({"meetings": {"max_speakers": -1}}, "invalid value.*meetings.max_speakers"),
+        ({"meetings": {"max_speakers": 11}}, "invalid value.*meetings.max_speakers"),
+        (
+            {"meetings": {"max_speakers": True}},
+            "invalid type for config key 'meetings.max_speakers'",
+        ),
+        (
+            {"meetings": {"max_speakers": 1.5}},
+            "invalid type for config key 'meetings.max_speakers'",
+        ),
+        (
+            {"meetings": {"speaker_diarization": 1}},
+            "invalid type for config key 'meetings.speaker_diarization'",
+        ),
+        (
+            {"meetings": {"diarization_backend": "pyannote"}},
+            "invalid value.*meetings.diarization_backend.*choose from: mock, sherpa-onnx",
+        ),
+        (
+            {"meetings": {"diarization_backend": 1}},
+            "invalid type for config key 'meetings.diarization_backend'",
+        ),
     ],
 )
 def test_apply_config_update_validates(update, message):
@@ -451,6 +478,189 @@ def test_apply_config_update_rejects_negative_history_clip_retention():
         config.apply_config_update(
             Config(), {"history": {"keep_audio_clips": -1}}
         )
+
+
+DIARIZATION_FIELDS = (
+    "speaker_diarization",
+    "diarization_backend",
+    "diarize_mic",
+    "diarization_max_speakers",
+    "speaker_recognition",
+)
+
+
+def _assert_diarization_defaults(loaded):
+    assert loaded.speaker_diarization is False
+    assert loaded.diarization_backend == "sherpa-onnx"
+    assert loaded.diarize_mic is False
+    assert loaded.diarization_max_speakers == 0
+    assert loaded.speaker_recognition is False
+
+
+def test_diarization_config_defaults_round_trip_and_update(isolated_config):
+    _assert_diarization_defaults(Config())
+
+    expected = Config(
+        speaker_diarization=True,
+        diarization_backend="mock",
+        diarize_mic=True,
+        diarization_max_speakers=10,
+        speaker_recognition=True,
+    )
+    config.save_config(expected)
+    assert config.load_config() == expected
+
+    updated = config.apply_config_update(
+        Config(),
+        {
+            "meetings": {
+                "speaker_diarization": True,
+                "diarization_backend": "mock",
+                "diarize_mic": True,
+                "max_speakers": 10,
+                "speaker_recognition": True,
+            }
+        },
+    )
+    assert updated == expected
+    zero = config.apply_config_update(expected, {"meetings": {"max_speakers": 0}})
+    assert zero.diarization_max_speakers == 0
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "[meetings]\nspeaker_diarization = 1\n",
+        '[meetings]\ndiarize_mic = "yes"\n',
+        "[meetings]\nspeaker_recognition = 0\n",
+        "[meetings]\nmax_speakers = -1\n",
+        "[meetings]\nmax_speakers = 11\n",
+        "[meetings]\nmax_speakers = true\n",
+        "[meetings]\nmax_speakers = 1.5\n",
+        '[meetings]\nmax_speakers = "3"\n',
+        '[meetings]\ndiarization_backend = "pyannote"\n',
+        "[meetings]\ndiarization_backend = 1\n",
+    ],
+)
+def test_invalid_diarization_values_default_when_loaded(isolated_config, caplog, contents):
+    isolated_config.write_text(contents, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        loaded = config.load_config()
+
+    assert "invalid config value for meetings." in caplog.text
+    assert loaded == Config()
+
+
+def test_invalid_diarization_backend_is_logged_and_defaulted(isolated_config, caplog):
+    isolated_config.write_text(
+        '[meetings]\ndiarization_backend = "pyannote"\nspeaker_diarization = true\n',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        loaded = config.load_config()
+
+    assert (
+        "invalid config value for meetings.diarization_backend: 'pyannote'; using default"
+        in caplog.text
+    )
+    assert loaded.diarization_backend == Config().diarization_backend
+    assert loaded.speaker_diarization is True
+
+
+def test_config_without_diarization_keys_loads_without_warnings(isolated_config, caplog):
+    isolated_config.write_text(
+        'config_version = 2\n\n[meetings]\ncapture_system_audio = true\ntemplates_dir = "/t"\n',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        loaded = config.load_config()
+
+    assert caplog.records == []
+    _assert_diarization_defaults(loaded)
+
+
+def test_v1_migration_gets_diarization_defaults(
+    isolated_config, monkeypatch, tmp_path, caplog
+):
+    legacy = tmp_path / "legacy.toml"
+    legacy.write_text("server_port = 9999\nmeeting_chunk_seconds = 10\n", encoding="utf-8")
+    monkeypatch.setattr(config, "legacy_config_path", lambda: legacy)
+
+    with caplog.at_level(logging.WARNING):
+        loaded = config.load_config()
+
+    assert caplog.records == []
+    _assert_diarization_defaults(loaded)
+    written = tomllib.loads(isolated_config.read_text(encoding="utf-8"))
+    assert written["config_version"] == 2
+    meetings = written["meetings"]
+    assert meetings["speaker_diarization"] is False
+    assert meetings["diarization_backend"] == "sherpa-onnx"
+    assert meetings["diarize_mic"] is False
+    assert meetings["max_speakers"] == 0
+    assert meetings["speaker_recognition"] is False
+
+
+def test_v1_migration_maps_diarization_fields():
+    from localflow import config_migrate
+
+    assert config_migrate.migrate_v1(
+        {
+            "speaker_diarization": True,
+            "diarization_backend": "mock",
+            "diarize_mic": True,
+            "diarization_max_speakers": 4,
+            "speaker_recognition": True,
+        }
+    ) == (
+        {
+            "config_version": 2,
+            "meetings": {
+                "speaker_diarization": True,
+                "diarization_backend": "mock",
+                "diarize_mic": True,
+                "max_speakers": 4,
+                "speaker_recognition": True,
+            },
+        },
+        None,
+    )
+
+
+def test_cli_config_get_set_diarization_keys(isolated_config):
+    runner = CliRunner()
+
+    def get(key):
+        result = runner.invoke(cli, ["config", "get", key])
+        assert result.exit_code == 0, result.output
+        return result.output.strip()
+
+    assert get("meetings.speaker_diarization") == "false"
+    assert get("meetings.diarization_backend") == "sherpa-onnx"
+    assert get("meetings.max_speakers") == "0"
+
+    result = runner.invoke(cli, ["config", "set", "meetings.max_speakers", "10"])
+    assert result.exit_code == 0, result.output
+    assert get("meetings.max_speakers") == "10"
+    before = isolated_config.read_bytes()
+
+    for key, value in (
+        ("meetings.max_speakers", "11"),
+        ("meetings.diarization_backend", "pyannote"),
+    ):
+        result = runner.invoke(cli, ["config", "set", key, value])
+        assert result.exit_code != 0, (key, value, result.output)
+        assert isolated_config.read_bytes() == before
+
+
+def test_diarization_keys_are_not_live_reloaded():
+    from localflow import live_config
+
+    for name in DIARIZATION_FIELDS:
+        assert name not in live_config.LIVE_FIELDS
 
 
 def test_factory_builds_ollama(isolated_config):
