@@ -6,6 +6,7 @@ or fails with LF_RUST_PARITY_REQUIRED=1. No models, microphone or real keychain.
 from __future__ import annotations
 
 import contextlib
+import http.client
 import io
 import json
 import socket
@@ -415,7 +416,20 @@ def test_speaker_routes_auth_gates_and_unknown_meetings_match_python(servers):
     for method, path in SPEAKER_ROUTES:
         compare(servers, path, method, {}, auth=False)
         compare(servers, path, method, {})
-    compare(servers, "/api/speakers", "POST", "x" * 200_000, headers={"Content-Type": "application/json"})
+    # Declare an oversized body but send none: the 403 must arrive without the
+    # server reading a body, and the client never races the close in sendall.
+    oversized = []
+    for server in servers:
+        conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        try:
+            conn.request("POST", "/api/speakers", headers={
+                "X-Localflow-Token": server.token_path.read_text().strip(),
+                "Content-Type": "application/json", "Content-Length": "200000"})
+            response = conn.getresponse()
+            oversized.append((response.status, json.loads(response.read())))
+        finally:
+            conn.close()
+    assert oversized[0] == oversized[1] and oversized[0][0] == 403, oversized
     for method, path, body in [("GET", meeting, None), ("PUT", meeting + "/S1", {"name": "Dana"}),
                                ("POST", meeting + "/merge", {"from": "S1", "into": "S2"}),
                                ("GET", "/api/meetings/not-an-id/speakers", None)]:
