@@ -2337,48 +2337,66 @@ pub struct MergeTarget {
     pub title: String,
 }
 
-/// The merge picker items for merging `from`: every other speaker, in panel
-/// order, each with a title no other item (and no speaker's label) shares.
+/// One display title per speaker of a meeting, in panel order, that no other
+/// speaker's title (and no speaker's label) shares.
 ///
-/// An AppKit pop-up keeps one item per title (adding a title again replaces
-/// the earlier item), so two speakers both labelled "Ana" would collapse into
-/// one row and a picked index could name the wrong speaker. A label shared
-/// by several targets, or one that collides with an earlier title, gets the
-/// speaker's unique id: `"Ana (S2)"`, then `"Ana (S2) 2"`, `"Ana (S2) 3"`…
-/// until it is free. Deterministic: the same speakers give the same titles.
-pub fn merge_target_items(speakers: &[MeetingSpeaker], from: &str) -> Vec<MergeTarget> {
-    let targets: Vec<&MeetingSpeaker> = speakers.iter().filter(|sp| sp.id != from).collect();
-    let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let shared = |label: &str| targets.iter().filter(|sp| sp.label == label).count() > 1;
+/// Two speakers both labelled "Sam" with the same rounded talk time would
+/// otherwise be two indistinguishable rows (and indistinguishable "Merge
+/// Sam…" / "Rename Sam" actions for assistive tech), so a merge source could
+/// not be told apart. A label shared by several speakers gets the speaker's
+/// unique id: `"Sam (S2)"`, then `"Sam (S2) 2"`, `"Sam (S2) 3"`… until it is
+/// free of every other title and every real label. Unique labels stay plain.
+///
+/// Titles depend on the whole panel, never on which speaker is being merged,
+/// so a speaker reads the same in its row, in action labels and as a merge
+/// target. Deterministic: the same speakers give the same titles. Titles are
+/// display only; every action still carries the speaker id.
+pub fn speaker_titles(speakers: &[MeetingSpeaker]) -> Vec<String> {
+    let shared = |label: &str| speakers.iter().filter(|sp| sp.label == label).count() > 1;
+    let is_label = |title: &str| speakers.iter().any(|sp| sp.label == title);
     // Unique labels keep their plain title; reserve them first so a suffixed
     // title can never take one of them.
-    for target in &targets {
-        if !shared(&target.label) {
-            taken.insert(target.label.clone());
-        }
-    }
-    let mut items = Vec::with_capacity(targets.len());
-    for target in &targets {
-        let title = if shared(&target.label) {
-            let base = format!("{} ({})", target.label, target.id);
-            let all_labels = |title: &str| speakers.iter().any(|sp| sp.label == title);
+    let mut taken: std::collections::BTreeSet<String> = speakers
+        .iter()
+        .filter(|sp| !shared(&sp.label))
+        .map(|sp| sp.label.clone())
+        .collect();
+    speakers
+        .iter()
+        .map(|sp| {
+            if !shared(&sp.label) {
+                return sp.label.clone();
+            }
+            let base = format!("{} ({})", sp.label, sp.id);
             let mut title = base.clone();
             let mut n = 2;
-            while taken.contains(&title) || all_labels(&title) {
+            while taken.contains(&title) || is_label(&title) {
                 title = format!("{base} {n}");
                 n += 1;
             }
             taken.insert(title.clone());
             title
-        } else {
-            target.label.clone()
-        };
-        items.push(MergeTarget {
-            id: target.id.clone(),
+        })
+        .collect()
+}
+
+/// The merge picker items for merging `from`: every other speaker, in panel
+/// order, titled exactly as its row is ([`speaker_titles`]), so the titles
+/// are unique.
+///
+/// An AppKit pop-up keeps one item per title (adding a title again replaces
+/// the earlier item), so two speakers both labelled "Ana" would collapse into
+/// one row and a picked index could name the wrong speaker.
+pub fn merge_target_items(speakers: &[MeetingSpeaker], from: &str) -> Vec<MergeTarget> {
+    speakers
+        .iter()
+        .zip(speaker_titles(speakers))
+        .filter(|(sp, _)| sp.id != from)
+        .map(|(sp, title)| MergeTarget {
+            id: sp.id.clone(),
             title,
-        });
-    }
-    items
+        })
+        .collect()
 }
 
 /// The speaker a merge of `from` may go into: exactly `choice`, when it is
@@ -3720,10 +3738,11 @@ mod speaker_tests {
             .map(|item| (item.id.as_str(), item.title.as_str()))
             .collect();
         assert_eq!(pairs, [("S1", "Ana (S1)"), ("S2", "Ana (S2)")]);
-        // Merging one Ana: the other keeps its plain label, Bo too.
+        // Merging one Ana: the other keeps the title its row shows, so the
+        // same person reads the same in both views; Bo stays plain.
         let items = merge_target_items(&list, "S1");
         let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
-        assert_eq!(titles, ["Ana", "Bo"]);
+        assert_eq!(titles, ["Ana (S2)", "Bo"]);
 
         // A suffixed title never takes another speaker's real label.
         let tricky = vec![
@@ -3741,6 +3760,69 @@ mod speaker_tests {
         assert_eq!(ids, ["S1", "S2", "S3"]);
         // Deterministic.
         assert_eq!(merge_target_items(&tricky, "S4"), items);
+    }
+
+    #[test]
+    fn duplicate_speaker_rows_get_unique_titles_shared_with_merge_targets() {
+        // Two "Sam" rows whose talk time rounds the same: before, both rows
+        // (and their "Merge Sam…" actions) read identically, so the merge
+        // source could not be told apart.
+        let list = vec![
+            speaker("S1", "Sam", 30.2),
+            speaker("S2", "Sam", 29.9),
+            speaker("S3", "Bo", 12.0),
+        ];
+        assert_eq!(list[0].label, list[1].label);
+        assert_eq!(
+            speaker_talk_time(list[0].seconds),
+            speaker_talk_time(list[1].seconds)
+        );
+        assert_eq!(speaker_titles(&list), ["Sam (S1)", "Sam (S2)", "Bo"]);
+
+        // Literal suffix collisions: real labels "Sam (S1)" and "Sam (S1) 2"
+        // keep their text; the duplicated Sam skips past both.
+        let tricky = vec![
+            speaker("S1", "Sam", 1.0),
+            speaker("S2", "Sam", 1.0),
+            speaker("S3", "Sam (S1)", 1.0),
+            speaker("S4", "Sam (S1) 2", 1.0),
+            speaker("S5", "Sam (S2)", 1.0),
+        ];
+        let titles = speaker_titles(&tricky);
+        assert_eq!(
+            titles,
+            [
+                "Sam (S1) 3",
+                "Sam (S2) 2",
+                "Sam (S1)",
+                "Sam (S1) 2",
+                "Sam (S2)"
+            ]
+        );
+
+        for speakers in [&list, &tricky] {
+            let titles = speaker_titles(speakers);
+            // Unique across the whole panel, one per speaker, deterministic.
+            let unique: std::collections::BTreeSet<&str> =
+                titles.iter().map(String::as_str).collect();
+            assert_eq!(unique.len(), speakers.len());
+            assert_eq!(speaker_titles(speakers), titles);
+            // Stable identity: every merge source sees each other speaker
+            // under exactly the title of that speaker's row, by id.
+            for from in speakers.iter() {
+                let items = merge_target_items(speakers, &from.id);
+                let expected: Vec<MergeTarget> = speakers
+                    .iter()
+                    .zip(&titles)
+                    .filter(|(sp, _)| sp.id != from.id)
+                    .map(|(sp, title)| MergeTarget {
+                        id: sp.id.clone(),
+                        title: title.clone(),
+                    })
+                    .collect();
+                assert_eq!(items, expected, "from {}", from.id);
+            }
+        }
     }
 
     #[test]

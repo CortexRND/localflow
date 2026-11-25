@@ -34,10 +34,11 @@ use crate::hub_model::{
     meeting_capture_status, meeting_form_layout, meeting_notes_height, meeting_speaker_status,
     meeting_speakers, merge_choice_for_title, merge_picker, merge_target_items, note_date_label,
     note_meeting_id, recent_notes, resolve_merge_target, saved_meeting_id, saved_notes_message,
-    speaker_panel_height, speaker_status_height, speaker_talk_time, MeetingSpeaker, MergeTarget,
-    RecentNote, SpeakerEditor, SpeakerMode, MEETING_NOTES_PLACEHOLDER, MEETING_SUBTITLE,
-    MEETING_TITLE_PLACEHOLDER, MERGE_PICK_AGAIN, RECENT_EMPTY, RECENT_NOTES_LIMIT, RECENT_ROW_H,
-    SPEAKER_ERROR_LINE_H, SPEAKER_HEADER_H, SPEAKER_PAD, SPEAKER_ROW_H,
+    speaker_panel_height, speaker_status_height, speaker_talk_time, speaker_titles, MeetingSpeaker,
+    MergeTarget, RecentNote, SpeakerEditor, SpeakerMode, MEETING_NOTES_PLACEHOLDER,
+    MEETING_SUBTITLE, MEETING_TITLE_PLACEHOLDER, MERGE_PICK_AGAIN, RECENT_EMPTY,
+    RECENT_NOTES_LIMIT, RECENT_ROW_H, SPEAKER_ERROR_LINE_H, SPEAKER_HEADER_H, SPEAKER_PAD,
+    SPEAKER_ROW_H,
 };
 use crate::mac::actions::Timer;
 use crate::mac::page::{HubPage, PageCtx};
@@ -1931,7 +1932,10 @@ fn speaker_panel(
     };
     let mut name_field = None;
     let mut merge_target = None;
-    for (index, speaker) in speakers.iter().enumerate() {
+    // Unique per speaker and the same titles the merge picker shows, so two
+    // rows with one label (and their actions) can be told apart.
+    let titles = speaker_titles(speakers);
+    for (index, (speaker, title)) in speakers.iter().zip(&titles).enumerate() {
         let row_y = f64::from(SPEAKER_PAD + SPEAKER_HEADER_H + index as i32 * SPEAKER_ROW_H);
         let cancel_x = right - SPEAKER_BUTTON_W;
         let commit_x = cancel_x - SPEAKER_GAP - SPEAKER_BUTTON_W;
@@ -1944,7 +1948,7 @@ fn speaker_panel(
                     inset,
                     row_y + 4.0,
                     field_w,
-                    &format!("New name for {}", speaker.label),
+                    &format!("New name for {title}"),
                 );
                 name.setPlaceholderString(Some(&NSString::from_str(&speaker.label)));
                 name.setEditable(!busy);
@@ -1957,7 +1961,7 @@ fn speaker_panel(
                 panel.addSubview(&name);
                 let save = action(
                     if busy { "Saving…" } else { "Save" },
-                    &format!("Save the new name for {}", speaker.label),
+                    &format!("Save the new name for {title}"),
                     (commit_x, row_y + 6.0, SPEAKER_BUTTON_W),
                     ButtonKind::Primary,
                 );
@@ -1982,7 +1986,7 @@ fn speaker_panel(
             SpeakerMode::Merge(id) if *id == speaker.id => {
                 // Unique titles: an NSPopUpButton keeps one item per title.
                 let targets = merge_target_items(speakers, &speaker.id);
-                let prompt = format!("Merge {} into", speaker.label);
+                let prompt = format!("Merge {title} into");
                 let prompt_w = ((ctx.measure)(&prompt, 13.0, Weight::Regular) + 8.0)
                     .min(((commit_x - inset) / 2.0).max(40.0));
                 panel.addSubview(&label(
@@ -2034,7 +2038,7 @@ fn speaker_panel(
                 let complete = usize::try_from(picker.numberOfItems()) == Ok(layout.titles.len());
                 let merge = action(
                     if busy { "Merging…" } else { "Merge" },
-                    &format!("Merge {} into the chosen speaker", speaker.label),
+                    &format!("Merge {title} into the chosen speaker"),
                     (commit_x, row_y + 6.0, SPEAKER_BUTTON_W),
                     ButtonKind::Primary,
                 );
@@ -2062,7 +2066,7 @@ fn speaker_panel(
                 let time_x = rename_x - SPEAKER_GAP - SPEAKER_TIME_W;
                 panel.addSubview(&label(
                     mtm,
-                    &speaker.label,
+                    title,
                     inset,
                     row_y + 10.0,
                     (time_x - SPEAKER_GAP - inset).max(40.0),
@@ -2090,13 +2094,12 @@ fn speaker_panel(
                 );
                 time.setAlignment(NSTextAlignment::Right);
                 time.setAccessibilityLabel(Some(&NSString::from_str(&format!(
-                    "{} spoke for {talk}",
-                    speaker.label
+                    "{title} spoke for {talk}"
                 ))));
                 panel.addSubview(&time);
                 let rename = action(
                     "Rename",
-                    &format!("Rename {}", speaker.label),
+                    &format!("Rename {title}"),
                     (rename_x, row_y + 6.0, SPEAKER_BUTTON_W),
                     ButtonKind::Ghost,
                 );
@@ -2113,7 +2116,7 @@ fn speaker_panel(
                 }
                 let merge = action(
                     "Merge…",
-                    &format!("Merge {} into another speaker", speaker.label),
+                    &format!("Merge {title} into another speaker"),
                     (merge_x, row_y + 6.0, SPEAKER_BUTTON_W),
                     ButtonKind::Ghost,
                 );
@@ -4150,6 +4153,14 @@ mod tests {
         let items = merge_target_items(&page.state.speakers_of(MEETING), "S3");
         let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
         assert_eq!(titles, ["Ana (S1)", "Ana (S2)"]);
+        // The rows (and their action labels) use the same unique titles, so
+        // either Ana can be told apart as a merge source, and reads the same
+        // as a merge target from any other row.
+        let rows = speaker_titles(&page.state.speakers_of(MEETING));
+        assert_eq!(rows, ["Ana (S1)", "Ana (S2)", "Bo"]);
+        let from_first = merge_target_items(&page.state.speakers_of(MEETING), "S1");
+        let from_first: Vec<&str> = from_first.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(from_first, ["Ana (S2)", "Bo"]);
 
         // The picker opens on its first item, and the choice is that item.
         page.state.begin_merge(MEETING, "S3", false);
