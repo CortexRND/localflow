@@ -485,11 +485,13 @@ def test_single_remote_speaker_matches_flag_off(real_session, monkeypatch):
 
 
 def test_sherpa_backend_is_reported_unavailable(client, monkeypatch):
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)
     monkeypatch.setattr(server._config, "speaker_diarization", True)
     start = client.post("/meeting/start", json={"title": "Launch sync"})
     assert start.status_code == 200
     body = start.json()
-    assert body["diarization"] == "unavailable" and "sherpa-onnx" in body["diarization_error"]
+    assert body["diarization"] == "unavailable"
+    assert "localflow[diarization]" in body["diarization_error"]
     live = client.get("/meeting/status").json()["session"]
     assert (live["diarization"], live["diarization_error"]) == (
         "unavailable", body["diarization_error"])

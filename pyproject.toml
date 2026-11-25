@@ -30,6 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 mlx = ["mlx-whisper"]
 parakeet = ["parakeet-mlx"]
+diarization = ["sherpa-onnx>=2.0.1,<3"]
 menubar = ["rumps"]
 system-audio = [
     "pyobjc-framework-ScreenCaptureKit>=10; sys_platform == 'darwin'",

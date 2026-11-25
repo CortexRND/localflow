@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     )
     from .factory import build_diarization
     from .mock import MockDiarizer, MockEmbedder, tone_index
+    from .sherpa import SherpaDiarizer, SherpaEmbedder, load_sherpa_backends
 
 _LAZY = {
     "DIAR_FINALIZE_TIMEOUT_S": "collector",
@@ -47,6 +48,9 @@ _LAZY = {
     "MockDiarizer": "mock",
     "MockEmbedder": "mock",
     "tone_index": "mock",
+    "SherpaDiarizer": "sherpa",
+    "SherpaEmbedder": "sherpa",
+    "load_sherpa_backends": "sherpa",
     "build_diarization": "factory",
 }
 
@@ -62,6 +66,8 @@ __all__ = [
     "MeetingSpeaker",
     "MockDiarizer",
     "MockEmbedder",
+    "SherpaDiarizer",
+    "SherpaEmbedder",
     "SpeakerEmbedder",
     "SpeakerRegistry",
     "SpeakerRun",
@@ -72,6 +78,7 @@ __all__ = [
     "assign_speakers",
     "build_diarization",
     "cluster",
+    "load_sherpa_backends",
     "merge_runs",
     "tone_index",
 ]

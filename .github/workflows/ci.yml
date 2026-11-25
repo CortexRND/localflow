@@ -79,5 +79,6 @@ jobs:
           tests/test_diarization_mock.py
           tests/test_diarization_store.py
           tests/test_cli_meeting_speakers.py
+          tests/test_diarization_sherpa.py
       - name: Test
         run: pytest -q
