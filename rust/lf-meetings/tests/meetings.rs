@@ -541,6 +541,16 @@ fn speaker_names_and_diarized_note() {
     s.speaker_label = Some(" Dana\n".into());
     assert_eq!(s.speaker(), "Dana");
     assert!(prompts::DIARIZED_SPEAKER_NOTE.starts_with("Transcript lines are prefixed"));
+    // Numbered speakers may be on the mic (`diarize_mic`) or the call: the
+    // diarized note never calls them remote. The channel note is Python's, verbatim.
+    let diarized = prompts::DIARIZED_SPEAKER_NOTE;
+    assert!(!diarized.contains("remote"), "{diarized}");
+    assert!(diarized.contains("\"Speaker 1\", \"Speaker 2\" and so on are distinct people"));
+    assert!(diarized.contains("microphone or on the call"));
+    assert_eq!(
+        prompts::SPEAKER_NOTE,
+        "Transcript lines may be prefixed with a speaker: \"Me\" is the user (their microphone), \"Others\" is everyone else on the call (system audio)."
+    );
     assert!(build_notes_prompt(None).contains(prompts::SPEAKER_NOTE));
     assert!(!build_notes_prompt(None).contains(prompts::DIARIZED_SPEAKER_NOTE));
 }
