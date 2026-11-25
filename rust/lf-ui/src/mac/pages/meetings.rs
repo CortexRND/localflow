@@ -585,13 +585,17 @@ impl State {
         let sender = self.sender.clone();
         let writer = self.writer.clone();
         let name = format!("localflow-meeting-{}", kind.name());
-        // Register every notes write before spawning, including autosaves.
-        // The process-wide registry lets application quit wait for writes from
-        // replaced Hub instances as well as the currently displayed one.
-        let notes_write =
-            matches!(&request, Request::Notes { .. }).then(crate::shutdown::register_pending_write);
+        // Register every durable write before spawning: notes (autosaves
+        // included) and speaker renames or merges. The process-wide registry
+        // lets application quit wait for writes from replaced Hub instances as
+        // well as the currently displayed one.
+        let pending_write = matches!(
+            &request,
+            Request::Notes { .. } | Request::SpeakerEdit { .. }
+        )
+        .then(crate::shutdown::register_pending_write);
         let spawned = thread::Builder::new().name(name).spawn(move || {
-            let _notes_write = notes_write;
+            let mut pending_write = pending_write;
             let event_kind = match request {
                 Request::Templates => EventKind::Templates(client.templates()),
                 Request::Status => EventKind::Status(client.status()),
@@ -634,6 +638,9 @@ impl State {
                             client.merge_speakers(&meeting_id, from, into)
                         }
                     };
+                    // The durable write is done; the refetch below is only a
+                    // read and must not hold quit back.
+                    drop(pending_write.take());
                     // A refused edit may mean the data changed underneath
                     // (another window, the CLI): read it again once.
                     let refetch = result.is_err().then(|| client.speakers(&meeting_id));
@@ -4469,5 +4476,146 @@ mod tests {
             client.status().unwrap()["session"]["user_notes"],
             "newest text at quit"
         );
+    }
+
+    /// A one-shot latch: `wait` blocks until `open`.
+    #[derive(Default)]
+    struct Gate(Mutex<bool>, Condvar);
+
+    impl Gate {
+        fn open(&self) {
+            *self.0.lock().unwrap() = true;
+            self.1.notify_all();
+        }
+
+        fn wait(&self) {
+            let mut open = self.0.lock().unwrap();
+            while !*open {
+                open = self.1.wait(open).unwrap();
+            }
+        }
+    }
+
+    /// Blocks the rename until released and then refuses it; the refetch on
+    /// the same worker thread blocks on a second gate.
+    struct BlockingSpeakerEditClient {
+        inner: FakeMeetingClient,
+        rename_started: mpsc::Sender<()>,
+        release_rename: Gate,
+        edit_thread: Mutex<Option<thread::ThreadId>>,
+        refetch_started: mpsc::Sender<()>,
+        release_refetch: Gate,
+    }
+
+    impl MeetingClient for BlockingSpeakerEditClient {
+        fn status(&self) -> MeetingResult<Value> {
+            self.inner.status()
+        }
+
+        fn templates(&self) -> MeetingResult<Value> {
+            self.inner.templates()
+        }
+
+        fn start(
+            &self,
+            title: &str,
+            category: &str,
+            template: &str,
+            user_notes: &str,
+            auto_title: Option<bool>,
+        ) -> MeetingResult<Value> {
+            self.inner
+                .start(title, category, template, user_notes, auto_title)
+        }
+
+        fn save_notes(&self, notes: &str) -> MeetingResult<Value> {
+            self.inner.save_notes(notes)
+        }
+
+        fn stop(&self) -> MeetingResult<Value> {
+            self.inner.stop()
+        }
+
+        fn chat(&self, question: &str) -> MeetingResult<Value> {
+            self.inner.chat(question)
+        }
+
+        fn dismiss(&self) -> MeetingResult<()> {
+            self.inner.dismiss()
+        }
+
+        fn speakers(&self, meeting_id: &str) -> MeetingResult<Option<Value>> {
+            if *self.edit_thread.lock().unwrap() == Some(thread::current().id()) {
+                self.refetch_started.send(()).unwrap();
+                self.release_refetch.wait();
+            }
+            self.inner.speakers(meeting_id)
+        }
+
+        fn rename_speaker(
+            &self,
+            _meeting_id: &str,
+            _speaker_id: &str,
+            _name: &str,
+        ) -> MeetingResult<Value> {
+            *self.edit_thread.lock().unwrap() = Some(thread::current().id());
+            self.rename_started.send(()).unwrap();
+            self.release_rename.wait();
+            Err(crate::backends::meeting::MeetingClientError(
+                "speaker changed underneath".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn speaker_edit_is_a_pending_write_until_the_durable_call_returns() {
+        let _writes = crate::shutdown::TestWrites::new();
+        let (rename_tx, rename_started) = mpsc::channel();
+        let (refetch_tx, refetch_started) = mpsc::channel();
+        let client = Arc::new(BlockingSpeakerEditClient {
+            inner: FakeMeetingClient::new(),
+            rename_started: rename_tx,
+            release_rename: Gate::default(),
+            edit_thread: Mutex::new(None),
+            refetch_started: refetch_tx,
+            release_refetch: Gate::default(),
+        });
+        client
+            .inner
+            .start("Planning", "", "general", "agenda", Some(false))
+            .unwrap();
+        client.inner.seed_stop_speakers(MEETING, two_speakers());
+        let page = page(client.clone(), active(31));
+        page.state.primary_action();
+        apply_until(&page, |kind| matches!(kind, EventKind::Stop(_)));
+        assert!(crate::shutdown::wait_for_pending_writes(Duration::ZERO));
+
+        let speakers = page.state.speakers_of(MEETING);
+        page.state.begin_rename(MEETING, &speakers[1], false);
+        *page.state.speaker_name_draft.borrow_mut() = "Ana".into();
+        page.state.commit_speaker_edit();
+        rename_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("rename did not enter the client");
+        // Quit must wait while the rename is in the client.
+        assert!(
+            !crate::shutdown::wait_for_pending_writes(Duration::from_millis(50)),
+            "an in-flight speaker edit was not a pending write"
+        );
+
+        client.release_rename.open();
+        refetch_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("refused edit did not refetch");
+        // The durable call returned: the follow-up read does not hold quit.
+        assert!(
+            crate::shutdown::wait_for_pending_writes(Duration::from_secs(2)),
+            "the refetch after a refused edit extended the quit barrier"
+        );
+
+        client.release_refetch.open();
+        apply_until(&page, is_edit);
+        assert!(!page.state.speaker_editor.borrow().busy);
+        page.state.shutdown();
     }
 }
