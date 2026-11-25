@@ -231,7 +231,12 @@ def _model_id(obj: Any, backend: str) -> str:
 
 def run_manifest(args: argparse.Namespace, loader: Loader, rss_before: int) -> dict:
     entries = parse_manifest(Path(args.manifest).read_text(encoding="utf-8"), Path(args.manifest).parent)
-    mixes = [(e["id"], load_wav(e["path"])[0]) for e in entries]
+    # Fail fast on a missing/unreadable mix before loading models, without
+    # decoding or retaining any audio (mixes are decoded one at a time below
+    # so peak RSS reflects a single mix, not the whole corpus).
+    for e in entries:
+        with open(e["path"], "rb"):
+            pass
     start = time.perf_counter()
     diarizer, embedder = loader(args)
     load_ms = (time.perf_counter() - start) * 1000.0
@@ -239,7 +244,9 @@ def run_manifest(args: argparse.Namespace, loader: Loader, rss_before: int) -> d
     peak = max(rss_loaded, _peak_sample())
     pipeline = PIPELINES[args.pipeline]
     measured = []
-    for mid, audio in mixes:
+    for entry in entries:
+        mid = entry["id"]
+        audio = load_wav(entry["path"])[0]
         seconds = audio.size / SAMPLE_RATE
         for _ in range(args.warmup):
             pipeline(diarizer, embedder, audio, args)
@@ -260,6 +267,7 @@ def run_manifest(args: argparse.Namespace, loader: Loader, rss_before: int) -> d
                       for t in turns],
             "unlabelled_turns": unlabelled,
         })
+        del audio
     return {
         "mode": "manifest", "backend": args.backend, "pipeline": args.pipeline,
         "runs": args.runs, "warmup": args.warmup, "os": _os_name(), "arch": _arch(),

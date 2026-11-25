@@ -498,6 +498,57 @@ def test_bench_loader_unavailable_exits_3(synthetic, tmp_path, capsys):
     assert "unavailable: no runtime here" in capsys.readouterr().err
 
 
+def test_bench_loads_mixes_one_at_a_time_after_models(synthetic, tmp_path, monkeypatch):
+    import weakref
+
+    import numpy as np
+
+    _, manifest = synthetic
+    (tmp_path / "syn2.wav").write_bytes((tmp_path / "syn.wav").read_bytes())
+    manifest.write_text(json.dumps({"mixes": [{"id": "a", "path": "syn.wav"}, {"id": "b", "path": "syn2.wav"}]}))
+
+    class Tracked(np.ndarray):
+        pass
+
+    events: list[str] = []
+    live: list[weakref.ref] = []
+    real_load_wav = py_diarization.load_wav
+
+    def load_wav(path):
+        # The previous mix's audio must be released before the next is decoded.
+        assert all(ref() is None for ref in live), "previous mix audio still retained"
+        events.append(f"load_wav:{Path(path).name}")
+        audio, *rest = real_load_wav(path)
+        audio = audio.view(Tracked)
+        live.append(weakref.ref(audio))
+        return (audio, *rest)
+
+    real_loader = py_diarization._default_loader
+
+    def loader(args):
+        events.append("loader")
+        return real_loader(args)
+
+    monkeypatch.setattr(py_diarization, "load_wav", load_wav)
+    rc, report = _bench(manifest, tmp_path, "--pipeline", "whole", loader=loader)
+    assert rc == 0 and [m["id"] for m in report["mixes"]] == ["a", "b"]
+    assert events == ["loader", "load_wav:syn.wav", "load_wav:syn2.wav"]
+
+
+def test_bench_missing_mix_fails_before_loading_models(synthetic, tmp_path, capsys):
+    _, manifest = synthetic
+    manifest.write_text(json.dumps({"mixes": [{"id": "a", "path": "syn.wav"}, {"id": "b", "path": "gone.wav"}]}))
+    calls: list[str] = []
+
+    def loader(_args):
+        calls.append("loader")
+        raise AssertionError("models must not load when a mix path is missing")
+
+    rc, report = _bench(manifest, tmp_path, loader=loader)
+    assert rc == 1 and report is None and calls == []
+    assert "gone.wav" in capsys.readouterr().err
+
+
 def test_bench_probe(capsys):
     assert py_diarization.main(["--probe", "--backend", "mock"]) == 0
     assert json.loads(capsys.readouterr().out) == {"available": True, "backend": "mock"}
