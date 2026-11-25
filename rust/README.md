@@ -506,6 +506,36 @@ cargo build --release -p lf-ask --example bench_search
 The example reports search-only milliseconds and citations; `time` adds
 whole-process wall time and peak RSS, including startup.
 
+### Speaker labels
+
+Rust has speaker labelling at capture time behind a build feature; the management routes
+and commands of the Python runtime (see the
+[top-level README](../README.md#speaker-labels-and-recognition-python-runtime)) are not
+ported until the R4 slice lands. What the Rust side has:
+
+* `lf-core` reads, validates and writes the five `[meetings]` keys
+  (`speaker_diarization`, `diarization_backend`, `diarize_mic`, `max_speakers`,
+  `speaker_recognition`), so a shared config file is safe in both runtimes.
+* `lf-meetings` renders speaker labels, the `meeting_id` / `speakers` transcript
+  frontmatter and the diarized prompt note as Python does.
+* `lf-diarize` ports alignment, clustering and the per-meeting collector, with a
+  sherpa-onnx backend behind its `sherpa` feature. `lf-rs serve` uses it only when
+  built with `cargo build -p lf --features diarize` (off by default), with
+  `speaker_diarization = true` and `diarization_backend = "sherpa-onnx"`; such a build
+  writes **Speaker N** labels at stop and honours `diarize_mic` and `max_speakers`. It
+  reads the verified models from the Hugging Face cache and never downloads them; fetch
+  them with the Python `lf speakers download`.
+
+The server embedded in `lf-hub` has no speaker backend, so its
+meetings stay Me/Others whatever the config says. (The `lf-desktop` preview is a front
+end; its meetings get labels only if the local server it talks to adds them.) No Rust
+server serves `/api/diarization/*`, `/api/meetings/{meeting_id}/speakers*` or
+`/api/speakers*`, and `lf-rs` has no `speakers` command and no `meeting speakers`,
+`rename-speaker` or `merge-speakers`. There is no per-meeting speaker file and no
+voiceprint registry, so nothing is renamed, merged, recognised, enrolled, forgotten or
+exported from Rust, and `speaker_recognition` has no effect. Recall citations have no
+`speaker` field.
+
 ## Standalone audio and STT
 
 `lf-audio` ports microphone capture (native sample formats/rates, channel 0,
@@ -603,6 +633,9 @@ Outside the shipped macOS `lf-hub` app this is not a full application port:
   CLI records dictation clips (`serve` captures only meeting audio), `lf-rs`
   exposes no clip command, and there is no retry-from-audio
   (`lf history retry` needs speech-to-text); no other audio codecs;
+* speaker labels: only an opt-in `lf-rs serve` build labels speakers; rename, merge,
+  recognition and their routes and commands are Python-only
+  ([Speaker labels](#speaker-labels));
 * `lf-rs` implements only the commands listed above (no `dictate`,
   `watch`, `notes`, `open`, `models`, bare `setup`,
   `history retry`, …);
