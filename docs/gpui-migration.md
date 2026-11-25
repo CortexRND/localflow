@@ -63,7 +63,7 @@ Legend:
 | History | Search (debounced, background), paging, details | Works | `HistoryStore::recent(limit, query, offset)` | `lf history`, Hub |
 | History | Copy final or original text | Works | clipboard | Hub |
 | History | Delete one, clear all (with confirmation) | Works | `HistoryStore::delete/clear` | Hub |
-| History | Retry transcription | Works in `--features runtime` builds for dictations with a saved 16 kHz clip: the shared `process_clip` pipeline (current config, this data root's dictionary/snippets/commands, the row's app context, fail-soft cleanup) with only the installed configured model (cache-only; never downloads; macOS keeps the speech helper via a cache-only load request old helpers reject). When that native model isn't downloaded (a Python-only install, e.g. faster-whisper in the Hugging Face cache) or whisper.cpp has no such size (e.g. `distil-large-v3`), a real window (never the sandbox) instead runs the Python `lf history retry <id> --json` of this install (`LOCALFLOW_PYTHON` from the `lf` launcher, else an `lf` on `PATH`, else `~/.local/bin/lf` on Unix; never `lf-rs`) offline (`HF_HUB_OFFLINE=1`) with this window's config and data directory; it prints the result without changing anything and the window commits it the same way. It times out, is killed and reaped on close, and with neither model the error names both ways out (Models & keys, or `lf models download`). Updates only that row with an atomic conditional update (refuses a deleted, cleared-and-reused or edited row); no paste, clipboard, `last.txt`, pruning or config write. One job per process; a close waits briefly for it and can't interrupt it. Default build explains the rebuild; the sandbox runs a labelled simulation (no model, provider or key). Native interaction and macOS are unverified | `lf_runtime::pipeline::process_clip`, `HistoryStore::update_if_unchanged`, `lf_stt::runtime::hub_speech_cached` | Python Hub |
+| History | Retry transcription | Works in `--features runtime` builds for dictations with a saved 16 kHz clip: the shared `process_clip` pipeline (current config, this data root's dictionary/snippets/commands, the row's app context, fail-soft cleanup) with only the installed configured model (cache-only; never downloads; macOS keeps the speech helper via a cache-only load request old helpers reject). When that native model isn't downloaded (a Python-only install, e.g. faster-whisper in the Hugging Face cache) or whisper.cpp has no such size (e.g. `distil-large-v3`), a real window (never the sandbox) instead runs the Python `lf history retry <id> --json` of this install (`LOCALFLOW_PYTHON` from the `lf` launcher, else an `lf` on `PATH`, else `~/.local/bin/lf` on Unix; never `lf-rs`) offline (`HF_HUB_OFFLINE=1`) with this window's config and data directory; it prints the result without changing anything and the window commits it the same way. It times out, is killed and reaped on close, and with neither model the error names both ways out (Models & keys, or `lf models download`). Updates only that row with an atomic conditional update (refuses a deleted, cleared-and-reused or edited row); no paste, clipboard, `last.txt`, pruning or config write. One job per process; a close waits briefly for it and can't interrupt it. Default build explains the rebuild; the sandbox runs a labelled simulation (no model, provider or key). Reviewed interactively on Linux and Windows (gate 1); macOS is unverified | `lf_runtime::pipeline::process_clip`, `HistoryStore::update_if_unchanged`, `lf_stt::runtime::hub_speech_cached` | Python Hub |
 | Dictionary | Add, edit, remove (with Undo) words and replacements | Works | `hub_model::submit_*` → `dictionary.json` | `lf dict`, Hub |
 | Dictionary | Import CSV/JSON | Works (file picker, or a typed path when no portal is available) | `DictionaryStore::import_file` | `lf dict import` |
 | Snippets | Create, edit, enable, delete with Undo, autosave, external-change reconcile, try-it preview | Works | `HotPhrasesEditor<PhrasesModel>` → `hot_phrases.json` | `lf phrases`, Hub |
@@ -115,10 +115,62 @@ integration and legacy retirement still require these gates.
 1. **Parity.** Every row marked Missing above that the Python Hub or `lf-hub` offers
    works in `lf-desktop`, or the owner explicitly waives it. PR 2 implemented the
    setup wizard, model storage, the settings assistant, key import, Test LLM, and
-   single-instance and page routing; they still need interactive review on Linux
+   single-instance and page routing; they need interactive review on Linux
    (X11 and Wayland) and macOS before this gate is met. No rows remain marked
    Missing: the tray item (Linux, Windows and macOS) and History retry (runtime
-   builds) are implemented but, like the rest, still need interactive review.
+   builds) are implemented and reviewed as below.
+
+   Reviewed interactively on 2026-11-24. Still open, so this gate isn't met:
+   macOS has had no interactive review.
+   - Linux X11: the `v0.2.3` release package (`lf-desktop 0.2.3`) on Ubuntu
+     22.04 with Mesa's software Vulkan driver, in nested X11 (Xephyr, Openbox,
+     1280 × 850), real mode with throwaway homes. All of these worked:
+     - Setup: all seven steps and Apply on a fresh home. Four unrelated config
+       values seeded beforehand, `features.meetings = true` among them, were
+       unchanged. With no microphone the trial stays open and says so.
+     - Model storage: Whisper Tiny download with progress, cancel, download
+       again, Use, a refused delete of the model in use, and a confirmed delete.
+       The stored-file card and the Delete dialog name Tiny.
+     - Settings assistant, against a local stand-in for the model: "turn off
+       dictation" previews "Dictation: On → Off", Apply changes only that key,
+       and Undo restores the file byte for byte.
+     - Key import from a `.env` by typed path (2 keys; values never shown), and
+       Test connection, which sends a request only on click.
+     - Single instance and page routing: a second launch exits 0 and the open
+       window changes page; an unknown page shows its notice in the open
+       window.
+     - Tray on a KDE Plasma host: status, Open, the dictation switch, Quit.
+     - History Retry with native whisper.cpp weights, with only the Python
+       app's faster-whisper model (through the `v0.2.3` Python app), and with
+       neither, where the row is left alone with a message. The dictation
+       count follows Retry and Delete.
+     - Closing from the title bar, three times: exit 0, no panic, no process
+       left.
+   - Linux Wayland, same package:
+     - sway 1.7 (headless): first paint, three page handoffs (the unknown-page
+       notice among them) and a keyboard action in setup each repainted
+       without a resize. Mouse input wasn't exercised there.
+     - Cage 0.1.4 (nested on X11): setup through Apply, the tray's status,
+       switch and Quit, and first paint work, but new content appeared only
+       after the Cage window was resized, and tray Open didn't restore a
+       minimized Cage window.
+     - Weston 9.0.0: `lf-desktop` panics on start with `UnsupportedVersion`
+       (exit 101).
+   - Windows (Server 2022), on packages built from the fixes before the
+     release: setup's seven steps and Apply, Models (Whisper Tiny download,
+     select, delete) and History Retry through the Python app's model, with
+     native weights, and with neither. The `v0.2.3` zip's pages, close and
+     second-launch hand-off are under gate 5.
+   - Found and not fixed:
+     - A second launch with an unknown page while setup is open leaves the
+       wizard covering Home and the notice until the wizard is closed.
+     - After a cancelled download, Models keeps a "0 bytes" stored-file card.
+     - The Weston 9.0.0 start panic above. The owner hasn't accepted it as a
+       known limit.
+   - Not reviewed: macOS; a real microphone (the trial, dictation); a real
+     model for the settings assistant; the native file picker; mouse input
+     on Wayland outside Cage; an X11 desktop with a real GPU.
+
    Known limit, accepted by the owner (Taj, 2026-11-24, answer: "Accept as known
    limit"): on a remote X11 desktop with software rendering, `lf-desktop` can open
    with a title bar and an unpainted (blank) window body. It was seen on
