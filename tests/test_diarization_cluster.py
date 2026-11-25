@@ -15,7 +15,9 @@ def _partition(labels):
 
 def _groups(rng, n_per=10, dim=32, spread=0.05):
     centers = np.eye(dim)[:3]
-    vecs = [c + spread * rng.standard_normal(dim) for c in centers for _ in range(n_per)]
+    vecs = [
+        c + spread * rng.standard_normal(dim) for c in centers for _ in range(n_per)
+    ]
     return np.array(vecs), [k for k in range(3) for _ in range(n_per)]
 
 
@@ -41,7 +43,9 @@ def test_threshold_extremes():
 def test_max_speakers_caps_clusters():
     vecs, truth = _groups(np.random.default_rng(2))
     assert len(set(cluster(vecs, threshold=-1.0, max_speakers=3))) == 3
-    assert _partition(cluster(vecs, threshold=-1.0, max_speakers=3)) == _partition(truth)
+    assert _partition(cluster(vecs, threshold=-1.0, max_speakers=3)) == _partition(
+        truth
+    )
     assert set(cluster(vecs, threshold=0.4, max_speakers=1)) == {0}
     assert _partition(cluster(vecs, threshold=0.4, max_speakers=5)) == _partition(truth)
 
@@ -73,6 +77,12 @@ def test_edge_inputs():
     assert cluster(np.array([[1.0, 0.0], [2.0, 0.0]]), threshold=0.1) == [0, 0]
     assert cluster([np.zeros(3), np.array([1.0, 0, 0])], threshold=0.99) == [0, 1]
     assert cluster([np.zeros(3), np.zeros(3)], threshold=0.99) == [0, 1]
+    v = np.array([0.3, 0.1, 0.7])
+    assert cluster([v, v.copy(), v], threshold=0) == [0, 0, 0]
+    assert cluster(np.eye(4), threshold=-1, max_speakers=2) == [0, 0, 0, 1]
+    for bad in (np.nan, np.inf, -np.inf):
+        with pytest.raises(ValueError):
+            cluster([np.ones(3), np.array([1.0, bad, 0.0])], threshold=0.5)
     with pytest.raises(ValueError):
         cluster([np.ones(3), np.ones(4)], threshold=0.5)
     with pytest.raises(ValueError):

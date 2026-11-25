@@ -6,6 +6,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
+DIST_SLACK = 1e-12
+
 
 def _as_matrix(vectors: np.ndarray | Sequence[np.ndarray]) -> np.ndarray:
     try:
@@ -13,7 +15,11 @@ def _as_matrix(vectors: np.ndarray | Sequence[np.ndarray]) -> np.ndarray:
     except ValueError as exc:
         raise ValueError(f"vectors must share one dimension: {exc}") from None
     if x.ndim != 2:
-        raise ValueError(f"expected a 2-D array or a list of 1-D vectors, got shape {x.shape}")
+        raise ValueError(
+            f"expected a 2-D array or a list of 1-D vectors, got shape {x.shape}"
+        )
+    if not np.isfinite(x).all():
+        raise ValueError("vectors must be finite (no NaN or inf)")
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     return np.divide(x, norms, out=np.zeros_like(x), where=norms > 0)
 
@@ -26,9 +32,10 @@ def cluster(
 ) -> list[int]:
     """Cluster vectors and return labels 0..k-1 numbered by first appearance.
 
-    Merges the closest pair (ties: lowest index pair) while its distance is ``<= threshold``,
-    then keeps merging until at most ``max_speakers`` clusters remain. Zero vectors have
-    distance 1 to everything else.
+    Merges the closest pair (ties: lowest index pair) while its distance is ``<= threshold``
+    (plus ``DIST_SLACK``), then keeps merging until at most ``max_speakers`` clusters remain.
+    Distances are clamped at 0; zero vectors have distance 1 to everything else. Non-finite
+    input raises ``ValueError``.
     """
     if max_speakers is not None and max_speakers < 1:
         raise ValueError("max_speakers must be >= 1")
@@ -36,7 +43,7 @@ def cluster(
         return []
     x = _as_matrix(vectors)
     n = len(x)
-    dist = 1.0 - x @ x.T
+    dist = np.maximum(1.0 - x @ x.T, 0.0)
     dist[np.tril_indices(n)] = np.inf
     sizes = np.ones(n)
     parent = np.arange(n)
@@ -46,7 +53,7 @@ def cluster(
         flat = int(np.argmin(dist))
         i, j = divmod(flat, n)
         d = dist[i, j]
-        if d > threshold and alive <= limit:
+        if d > threshold + DIST_SLACK and alive <= limit:
             break
         col_i = np.minimum(dist[:, i], dist[i, :])
         col_j = np.minimum(dist[:, j], dist[j, :])
