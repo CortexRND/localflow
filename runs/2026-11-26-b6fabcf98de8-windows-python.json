@@ -1,0 +1,2822 @@
+{
+  "cases": [
+    {
+      "case": "faster-whisper-tiny.en-cpu/parakeet-0",
+      "dims": {
+        "clip": "parakeet-0",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Well, I don't wish to see it anymore. Observe Phoebe turning away her eyes. It is certainly very like the old portrait"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 570.4806999999619
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 568.628399999966,
+          "p95": 575.5429399999684,
+          "samples": [
+            570.4806999999619,
+            561.8587000000161,
+            568.628399999966,
+            576.8084999999701,
+            564.1191999999364
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.07647994620039891
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 1.2222222222222223
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0000",
+      "dims": {
+        "clip": "6930-75918-0000",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Concorde returned to its place amidst the tents."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 434.7507999999607
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 434.7507999999607,
+          "p95": 445.79506000004585,
+          "samples": [
+            434.7507999999607,
+            428.8563999999724,
+            436.73809999995683,
+            422.82840000007127,
+            448.0593000000681
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.12403731811696453
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.125
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0007",
+      "dims": {
+        "clip": "6930-75918-0007",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "You will be frank with me. I always am"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 438.8916999999992
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 438.8916999999992,
+          "p95": 442.45697999997446,
+          "samples": [
+            438.8916999999992,
+            442.80219999996007,
+            425.09019999999964,
+            441.07610000003206,
+            433.71720000004643
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.13239568627450957
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0010",
+      "dims": {
+        "clip": "6930-75918-0010",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "I can perceive love clearly enough."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 424.9634000000242
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 421.8664999999646,
+          "p95": 424.5751400000245,
+          "samples": [
+            424.9634000000242,
+            410.5289000000312,
+            423.0221000000256,
+            417.75060000009034,
+            421.8664999999646
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.13900049423392574
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0011",
+      "dims": {
+        "clip": "6930-75918-0011",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "I am convinced of what I say, said the count."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 438.9975000000277
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 438.9975000000277,
+          "p95": 466.75015999994685,
+          "samples": [
+            438.9975000000277,
+            436.06069999998454,
+            445.9423999999217,
+            471.95209999995313,
+            426.3740000000098
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.1374014084507129
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0002",
+      "dims": {
+        "clip": "6930-75918-0002",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Congratulations, we're poured in upon the princess everywhere during her journey."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 461.10600000008617
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 465.9719999999652,
+          "p95": 466.96194000001015,
+          "samples": [
+            461.10600000008617,
+            466.0648999999921,
+            460.66529999995964,
+            467.18620000001465,
+            465.9719999999652
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.09273074626864979
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.18181818181818182
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0006",
+      "dims": {
+        "clip": "6930-75918-0006",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "This has indeed been a harassing day continued the young man his eyes fixed upon his friend"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 480.2267000000029
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 480.2267000000029,
+          "p95": 483.7829400000146,
+          "samples": [
+            480.2267000000029,
+            476.5184999999974,
+            482.2723000000906,
+            484.1605999999956,
+            479.64699999999993
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.08209003418803468
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0015",
+      "dims": {
+        "clip": "6930-75918-0015",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Thus, it is that the honor of three is saved, our country, our masters and our own."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 508.7045999999873
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 501.27599999996164,
+          "p95": 507.7184999999872,
+          "samples": [
+            508.7045999999873,
+            501.27599999996164,
+            488.16280000005463,
+            503.7740999999869,
+            495.5009999999902
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.07856990595610684
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.15789473684210525
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0004",
+      "dims": {
+        "clip": "6930-75918-0004",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "She taught her daughter, then, by her own affection for it, that love for a country where they had both been hospitably received and where a brilliant future opened for them."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 649.0470999999616
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 615.0803000000451,
+          "p95": 642.8384399999686,
+          "samples": [
+            649.0470999999616,
+            618.0037999999968,
+            611.0840999999709,
+            615.0803000000451,
+            610.5770000000348
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.05558791685495211
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.03225806451612903
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0005",
+      "dims": {
+        "clip": "6930-75918-0005",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "The Count had thrown himself back on his seat, leaning his shoulders against the partition of the tent and remained thus. His face buried in his hands, with heaving chest and restless limbs."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 622.8451000000632
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 634.3373999999358,
+          "p95": 640.6814600000416,
+          "samples": [
+            622.8451000000632,
+            641.9719000000441,
+            635.5197000000317,
+            634.3373999999358,
+            627.1944999999732
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.04820193009118053
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-tiny.en-cpu/6930-75918-0001",
+      "dims": {
+        "clip": "6930-75918-0001",
+        "engine": "faster-whisper",
+        "model": "tiny.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "The English voted to the French baskets of flowers of which they had made a plentiful provision to greet the arrival of the young princess. The French in return invited the English to a supper, which was to be given the next day."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 694.506199999978
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 688.7643000000025,
+          "p95": 703.23956000002,
+          "samples": [
+            694.506199999978,
+            688.7643000000025,
+            685.9908999999789,
+            676.6938999999184,
+            705.4229000000305
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2795.495800000026
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 141979648
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35037184
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 162181120
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.048419282952548506
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.023255813953488372
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/parakeet-0",
+      "dims": {
+        "clip": "parakeet-0",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Well, I don't wish to see it any more observed Phoebe turning away her eyes. It is certainly very likely old portrait."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 994.0695000000233
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 1010.4781000000003,
+          "p95": 1021.3381000000254,
+          "samples": [
+            994.0695000000233,
+            1005.7168999999249,
+            1010.4781000000003,
+            1016.8944999999212,
+            1022.4490000000515
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.1359082851378615
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 1.2777777777777777
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0000",
+      "dims": {
+        "clip": "6930-75918-0000",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Concorde returned to its place amidst the tents."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 848.619699999972
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 821.8813000000864,
+          "p95": 844.0773599999602,
+          "samples": [
+            848.619699999972,
+            803.5196999999243,
+            821.8813000000864,
+            801.9723999999542,
+            825.907999999913
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.2344882453637907
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.125
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0007",
+      "dims": {
+        "clip": "6930-75918-0007",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "You will be frank with me I always am"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 833.0182999999352
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 826.5039999999999,
+          "p95": 832.9679199999418,
+          "samples": [
+            833.0182999999352,
+            811.3755000000538,
+            826.5039999999999,
+            817.5488999999061,
+            832.7663999999686
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.2493224736048265
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0010",
+      "dims": {
+        "clip": "6930-75918-0010",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "I can perceive love clearly enough."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 809.4074000000546
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 801.8154000000095,
+          "p95": 812.5006000000212,
+          "samples": [
+            809.4074000000546,
+            794.2823000000772,
+            813.2739000000129,
+            801.4286000000084,
+            801.8154000000095
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.2641895881383886
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0011",
+      "dims": {
+        "clip": "6930-75918-0011",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "I am convinced of what I say, said the count."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 851.7773999999463
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 841.6446999999607,
+          "p95": 853.0574800000522,
+          "samples": [
+            851.7773999999463,
+            837.5022000000172,
+            853.3775000000787,
+            822.3739000000023,
+            841.6446999999607
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.26342557120499555
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0002",
+      "dims": {
+        "clip": "6930-75918-0002",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Congratulations were poured in upon the Princess everywhere during her journey."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 849.771799999985
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 849.771799999985,
+          "p95": 865.9728800000266,
+          "samples": [
+            849.771799999985,
+            832.8874000000042,
+            852.5448000000324,
+            837.214900000049,
+            869.3299000000252
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.16910881592039503
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0006",
+      "dims": {
+        "clip": "6930-75918-0006",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "This has indeed been a harassing day continued the young man his eyes fixed upon his friend"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 874.813500000073
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 892.4534000000222,
+          "p95": 900.8004999999912,
+          "samples": [
+            874.813500000073,
+            892.4534000000222,
+            874.9162000000297,
+            902.0252999999911,
+            895.9012999999914
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.15255613675214055
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0015",
+      "dims": {
+        "clip": "6930-75918-0015",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Thus, it is that the honor of three is saved, our country, our masters, and our own."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 940.6447999999727
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 938.5176999999203,
+          "p95": 942.8788799999893,
+          "samples": [
+            940.6447999999727,
+            938.5176999999203,
+            932.3245000000497,
+            921.3772999999037,
+            943.4373999999934
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.1471030877742822
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.15789473684210525
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0004",
+      "dims": {
+        "clip": "6930-75918-0004",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "She taught her daughter, then, by her own affection for it, that loved for a country where they had both been hospitably received and where a brilliant future opened for them."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 1087.2819999999592
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 1095.223600000054,
+          "p95": 1099.198080000042,
+          "samples": [
+            1087.2819999999592,
+            1094.002600000067,
+            1100.1531000000568,
+            1095.3779999999824,
+            1095.223600000054
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.09898089471306407
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.06451612903225806
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0005",
+      "dims": {
+        "clip": "6930-75918-0005",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "The Count had thrown himself back on his seat, leaning his shoulders against the partition of the tent and remained thus. His face buried in his hands with heaving chest and restless limbs."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 1132.8950999999279
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 1113.6306000000786,
+          "p95": 1129.6067399999401,
+          "samples": [
+            1132.8950999999279,
+            1110.9235999999783,
+            1113.6306000000786,
+            1116.4532999999892,
+            1109.3374000000722
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.08462238601824305
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-base.en-cpu/6930-75918-0001",
+      "dims": {
+        "clip": "6930-75918-0001",
+        "engine": "faster-whisper",
+        "model": "base.en",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "The English forwarded to the French baskets of flowers of which they had made a plentiful provision to greet the arrival of the young princess. The French, in return, invited the English to a supper which was to be given the next day."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 1226.375599999983
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 1230.4838000000018,
+          "p95": 1249.3769000000157,
+          "samples": [
+            1226.375599999983,
+            1231.1569000000873,
+            1230.4838000000018,
+            1225.248699999952,
+            1253.9318999999978
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2484.2519999999695
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 139894784
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 35041280
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 197296128
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.08650149736379625
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/parakeet-0",
+      "dims": {
+        "clip": "parakeet-0",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Well, I don't wish to see it anymore observed Phoebe turning away her eyes. It is certainly very like the old portrait"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5359.887800000024
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 5379.1066,
+          "p95": 5383.511959999987,
+          "samples": [
+            5359.887800000024,
+            5384.329999999977,
+            5379.1066,
+            5355.409500000064,
+            5380.239800000027
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.7234844115669132
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 1.2222222222222223
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0000",
+      "dims": {
+        "clip": "6930-75918-0000",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Concord returned to its place amidst the tents."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5205.609699999968
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 4933.026300000051,
+          "p95": 5154.013939999959,
+          "samples": [
+            5205.609699999968,
+            4875.661599999944,
+            4900.51440000002,
+            4947.630899999922,
+            4933.026300000051
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 1.407425477888745
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0007",
+      "dims": {
+        "clip": "6930-75918-0007",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "You will be frank with me. I always am"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 4899.832999999944
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 4882.342699999981,
+          "p95": 4905.436439999994,
+          "samples": [
+            4899.832999999944,
+            4906.8373000000065,
+            4851.900799999953,
+            4877.935999999977,
+            4882.342699999981
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 1.4728032277526337
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0010",
+      "dims": {
+        "clip": "6930-75918-0010",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "I can perceive love clearly enough."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5503.627900000083
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 4851.804199999833,
+          "p95": 5399.115960000063,
+          "samples": [
+            5503.627900000083,
+            4981.0681999999815,
+            4836.850400000003,
+            4846.662700000024,
+            4851.804199999833
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 1.598617528830258
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0011",
+      "dims": {
+        "clip": "6930-75918-0011",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "I am convinced of what I say,\" said the Count."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5002.326000000039
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 4933.247899999969,
+          "p95": 4989.362580000034,
+          "samples": [
+            5002.326000000039,
+            4917.721000000029,
+            4872.582799999918,
+            4933.247899999969,
+            4937.508900000012
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 1.5440525508607104
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0002",
+      "dims": {
+        "clip": "6930-75918-0002",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Congratulations were poured in upon the princess everywhere during her journey."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 4928.121800000099
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 4931.180599999834,
+          "p95": 4953.491479999957,
+          "samples": [
+            4928.121800000099,
+            4939.036199999919,
+            4931.180599999834,
+            4914.031600000044,
+            4957.1052999999665
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.9813294726367829
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0006",
+      "dims": {
+        "clip": "6930-75918-0006",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "This has indeed been a harassing day continued the young man his eyes fixed upon his friend"
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5139.715299999807
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 5139.715299999807,
+          "p95": 5172.303759999932,
+          "samples": [
+            5139.715299999807,
+            5150.050800000145,
+            5133.104199999934,
+            5132.9425000001265,
+            5177.866999999878
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.878583811965779
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0015",
+      "dims": {
+        "clip": "6930-75918-0015",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "Thus, it is that the honor of three is saved, our country, our masters, and our own."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5193.662500000073
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 5152.119200000016,
+          "p95": 5234.928099999934,
+          "samples": [
+            5193.662500000073,
+            5146.425299999919,
+            5131.031900000153,
+            5152.119200000016,
+            5245.244499999899
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.8075421943573692
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.15789473684210525
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0004",
+      "dims": {
+        "clip": "6930-75918-0004",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "She taught her daughter, then, by her own affection for it, that love for a country where they had both been hospitably received and where a brilliant future opened for them."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5571.030800000017
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 5552.753400000029,
+          "p95": 5573.356639999884,
+          "samples": [
+            5571.030800000017,
+            5552.753400000029,
+            5531.749600000012,
+            5573.93809999985,
+            5530.778000000055
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.501830402169004
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.03225806451612903
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0005",
+      "dims": {
+        "clip": "6930-75918-0005",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "The Count had thrown himself back on his seat, leaning his shoulders against the partition of the tent and remained thus, his face buried in his hands with heaving chest and restless limbs."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 5764.471299999968
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 5732.216699999981,
+          "p95": 5759.1328999999405,
+          "samples": [
+            5764.471299999968,
+            5727.23289999999,
+            5732.216699999981,
+            5737.779299999829,
+            5693.501499999911
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.43557877659574323
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "faster-whisper-small-cpu/6930-75918-0001",
+      "dims": {
+        "clip": "6930-75918-0001",
+        "engine": "faster-whisper",
+        "model": "small",
+        "provider": "cpu"
+      },
+      "error": null,
+      "evidence": {
+        "effective_provider": "cpu",
+        "transcript": "The English voted to the French baskets of flowers of which they had made a plentiful provision to greet the arrival of the young princess. The French, in return, invited the English to a supper, which was to be given the next day."
+      },
+      "metrics": {
+        "download_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 0.0
+        },
+        "first_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 6003.44280000013
+        },
+        "latency_ms": {
+          "better": "lower",
+          "median": 5991.369500000019,
+          "p95": 6014.8726399999305,
+          "samples": [
+            6003.44280000013,
+            5979.243100000076,
+            5989.3782000001465,
+            6017.730099999881,
+            5991.369500000019
+          ],
+          "unit": "ms"
+        },
+        "load_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 3880.242599999974
+        },
+        "rss_after_unload": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 61730816
+        },
+        "rss_before": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 34082816
+        },
+        "rss_loaded": {
+          "better": "lower",
+          "unit": "bytes",
+          "value": 373575680
+        },
+        "rtf": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.42118590509666215
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.023255813953488372
+        }
+      },
+      "status": "ok",
+      "suite": "stt"
+    },
+    {
+      "case": "text/python",
+      "dims": {
+        "mode": "text",
+        "runtime": "python"
+      },
+      "error": null,
+      "evidence": {
+        "mismatches": 0,
+        "n_cases": 41,
+        "passes": 10,
+        "repeat": 20,
+        "source": "py_dictation_text",
+        "warmup": 1
+      },
+      "metrics": {
+        "case_us": {
+          "better": "lower",
+          "median": 10.446,
+          "p95": 10.6118,
+          "samples": [
+            10.493,
+            10.493,
+            10.471,
+            10.421,
+            10.475,
+            10.417,
+            10.37,
+            10.709,
+            10.304,
+            10.184
+          ],
+          "unit": "us"
+        },
+        "corpus_ms": {
+          "better": "lower",
+          "median": 0.4283,
+          "p95": 0.435095,
+          "samples": [
+            0.4302,
+            0.4302,
+            0.4293,
+            0.4273,
+            0.4295,
+            0.4271,
+            0.4252,
+            0.4391,
+            0.4225,
+            0.4175
+          ],
+          "unit": "ms"
+        },
+        "exact_match_rate": {
+          "better": "higher",
+          "unit": "ratio",
+          "value": 1.0
+        }
+      },
+      "status": "ok",
+      "suite": "dictation"
+    },
+    {
+      "case": "http/python/tiny.en",
+      "dims": {
+        "mode": "http",
+        "model": "tiny.en",
+        "runtime": "python"
+      },
+      "error": null,
+      "evidence": {
+        "cold_server_ms": 1672.0,
+        "errors": 0,
+        "requests": 33,
+        "server": "lf serve",
+        "transcripts": {
+          "6930-75918-0000": "Concorde returned to its place amidst the tents.",
+          "6930-75918-0001": "The English voted to the French baskets of flowers of which they had made a plentiful provision to greet the arrival of the young princess. The French in return invited the English to a supper, which was to be given the next day.",
+          "6930-75918-0002": "Congratulations, we're poured in upon the princess everywhere during her journey.",
+          "6930-75918-0004": "She taught her daughter, then, by her own affection for it, that love for a country where they had both been hospitably received and where a brilliant future opened for them.",
+          "6930-75918-0005": "The Count had thrown himself back on his seat, leaning his shoulders against the partition of the tent and remained thus. His face buried in his hands, with heaving chest and restless limbs.",
+          "6930-75918-0006": "This has indeed been a harassing day continued the young man his eyes fixed upon his friend",
+          "6930-75918-0007": "You will be frank with me. I always am",
+          "6930-75918-0010": "I can perceive love clearly enough.",
+          "6930-75918-0011": "I am convinced of what I say, said the count.",
+          "6930-75918-0015": "Thus, it is that the honor of three is saved, our country, our masters and our own.",
+          "parakeet-0": "Well, I don't wish to see it anymore. Observe Phoebe turning away her eyes. It is certainly very like the old portrait"
+        }
+      },
+      "metrics": {
+        "client_wall_ms": {
+          "better": "lower",
+          "median": 596.3779999999999,
+          "p95": 809.39175,
+          "samples": [
+            544.577,
+            561.403,
+            540.61,
+            555.382,
+            577.081,
+            590.432,
+            624.243,
+            717.18,
+            758.509,
+            807.09,
+            666.253,
+            538.155,
+            533.436,
+            521.474,
+            544.259,
+            575.439,
+            619.77,
+            634.875,
+            733.48,
+            756.271,
+            812.205,
+            668.501,
+            554.586,
+            567.907,
+            545.523,
+            564.428,
+            564.562,
+            602.324,
+            621.374,
+            734.094,
+            754.259,
+            821.778
+          ],
+          "unit": "ms"
+        },
+        "cold_first_request_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 1681.14
+        },
+        "error_rate": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        },
+        "server_ms": {
+          "better": "lower",
+          "median": 600.5,
+          "p95": 803.75,
+          "samples": [
+            547.0,
+            562.0,
+            531.0,
+            546.0,
+            578.0,
+            593.0,
+            608.0,
+            719.0,
+            750.0,
+            797.0,
+            671.0,
+            531.0,
+            531.0,
+            530.0,
+            547.0,
+            562.0,
+            609.0,
+            640.0,
+            734.0,
+            750.0,
+            812.0,
+            672.0,
+            546.0,
+            563.0,
+            546.0,
+            562.0,
+            562.0,
+            609.0,
+            609.0,
+            719.0,
+            750.0,
+            812.0
+          ],
+          "unit": "ms"
+        },
+        "startup_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 1544.478
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.14634146341463414
+        }
+      },
+      "status": "ok",
+      "suite": "dictation"
+    },
+    {
+      "case": "http/python/base.en",
+      "dims": {
+        "mode": "http",
+        "model": "base.en",
+        "runtime": "python"
+      },
+      "error": null,
+      "evidence": {
+        "cold_server_ms": 2140.0,
+        "errors": 0,
+        "requests": 33,
+        "server": "lf serve",
+        "transcripts": {
+          "6930-75918-0000": "Concorde returned to its place amidst the tents.",
+          "6930-75918-0001": "The English forwarded to the French baskets of flowers of which they had made a plentiful provision to greet the arrival of the young princess. The French, in return, invited the English to a supper which was to be given the next day.",
+          "6930-75918-0002": "Congratulations were poured in upon the Princess everywhere during her journey.",
+          "6930-75918-0004": "She taught her daughter, then, by her own affection for it, that loved for a country where they had both been hospitably received and where a brilliant future opened for them.",
+          "6930-75918-0005": "The Count had thrown himself back on his seat, leaning his shoulders against the partition of the tent and remained thus. His face buried in his hands with heaving chest and restless limbs.",
+          "6930-75918-0006": "This has indeed been a harassing day continued the young man his eyes fixed upon his friend",
+          "6930-75918-0007": "You will be frank with me I always am",
+          "6930-75918-0010": "I can perceive love clearly enough.",
+          "6930-75918-0011": "I am convinced of what I say, said the count.",
+          "6930-75918-0015": "Thus, it is that the honor of three is saved, our country, our masters, and our own.",
+          "parakeet-0": "Well, I don't wish to see it any more observed Phoebe turning away her eyes. It is certainly very likely old portrait."
+        }
+      },
+      "metrics": {
+        "client_wall_ms": {
+          "better": "lower",
+          "median": 1014.8175,
+          "p95": 1339.8641,
+          "samples": [
+            928.403,
+            931.286,
+            899.495,
+            941.164,
+            976.85,
+            1022.597,
+            1049.727,
+            1213.328,
+            1232.962,
+            1354.089,
+            1122.672,
+            918.885,
+            925.717,
+            912.009,
+            928.124,
+            945.026,
+            1025.85,
+            1067.499,
+            1202.265,
+            1228.199,
+            1339.055,
+            1143.182,
+            922.974,
+            925.031,
+            925.15,
+            955.952,
+            936.291,
+            1007.038,
+            1058.526,
+            1204.041,
+            1242.689,
+            1340.853
+          ],
+          "unit": "ms"
+        },
+        "cold_first_request_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 2154.214
+        },
+        "error_rate": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        },
+        "server_ms": {
+          "better": "lower",
+          "median": 1007.5,
+          "p95": 1334.2,
+          "samples": [
+            922.0,
+            921.0,
+            906.0,
+            937.0,
+            968.0,
+            1015.0,
+            1046.0,
+            1219.0,
+            1234.0,
+            1343.0,
+            1108.0,
+            905.0,
+            922.0,
+            906.0,
+            921.0,
+            953.0,
+            1015.0,
+            1062.0,
+            1202.0,
+            1219.0,
+            1327.0,
+            1141.0,
+            921.0,
+            922.0,
+            922.0,
+            952.0,
+            937.0,
+            1000.0,
+            1047.0,
+            1186.0,
+            1233.0,
+            1344.0
+          ],
+          "unit": "ms"
+        },
+        "startup_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 1024.326
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.14146341463414633
+        }
+      },
+      "status": "ok",
+      "suite": "dictation"
+    },
+    {
+      "case": "http/python/small",
+      "dims": {
+        "mode": "http",
+        "model": "small",
+        "runtime": "python"
+      },
+      "error": null,
+      "evidence": {
+        "cold_server_ms": 7280.0,
+        "errors": 0,
+        "requests": 33,
+        "server": "lf serve",
+        "transcripts": {
+          "6930-75918-0000": "Concord returned to its place amidst the tents.",
+          "6930-75918-0001": "The English voted to the French baskets of flowers of which they had made a plentiful provision to greet the arrival of the young princess. The French, in return, invited the English to a supper, which was to be given the next day.",
+          "6930-75918-0002": "Congratulations were poured in upon the princess everywhere during her journey.",
+          "6930-75918-0004": "She taught her daughter, then, by her own affection for it, that love for a country where they had both been hospitably received and where a brilliant future opened for them.",
+          "6930-75918-0005": "The Count had thrown himself back on his seat, leaning his shoulders against the partition of the tent and remained thus, his face buried in his hands with heaving chest and restless limbs.",
+          "6930-75918-0006": "This has indeed been a harassing day continued the young man his eyes fixed upon his friend",
+          "6930-75918-0007": "You will be frank with me. I always am",
+          "6930-75918-0010": "I can perceive love clearly enough.",
+          "6930-75918-0011": "I am convinced of what I say,\" said the Count.",
+          "6930-75918-0015": "Thus, it is that the honor of three is saved, our country, our masters, and our own.",
+          "parakeet-0": "Well, I don't wish to see it anymore observed Phoebe turning away her eyes. It is certainly very like the old portrait"
+        }
+      },
+      "metrics": {
+        "client_wall_ms": {
+          "better": "lower",
+          "median": 5310.148,
+          "p95": 6211.2652,
+          "samples": [
+            5130.448,
+            5098.72,
+            5034.686,
+            5116.201,
+            5098.565,
+            5307.986,
+            5323.174,
+            5756.772,
+            6236.859,
+            6205.561,
+            5543.502,
+            5072.199,
+            5078.972,
+            4993.418,
+            5076.607,
+            5086.942,
+            5312.31,
+            5348.4,
+            5766.35,
+            5861.609,
+            6218.237,
+            5549.346,
+            5104.502,
+            5081.2,
+            5016.184,
+            5138.359,
+            5128.079,
+            5313.397,
+            5378.047,
+            5724.353,
+            5920.405,
+            6181.473
+          ],
+          "unit": "ms"
+        },
+        "cold_first_request_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 7299.247
+        },
+        "error_rate": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.0
+        },
+        "server_ms": {
+          "better": "lower",
+          "median": 5304.5,
+          "p95": 6200.95,
+          "samples": [
+            5125.0,
+            5094.0,
+            5046.0,
+            5109.0,
+            5094.0,
+            5297.0,
+            5327.0,
+            5750.0,
+            6219.0,
+            6187.0,
+            5531.0,
+            5062.0,
+            5077.0,
+            5000.0,
+            5078.0,
+            5077.0,
+            5312.0,
+            5344.0,
+            5765.0,
+            5859.0,
+            6218.0,
+            5531.0,
+            5109.0,
+            5077.0,
+            5015.0,
+            5140.0,
+            5125.0,
+            5312.0,
+            5375.0,
+            5719.0,
+            5922.0,
+            6172.0
+          ],
+          "unit": "ms"
+        },
+        "startup_ms": {
+          "better": "lower",
+          "unit": "ms",
+          "value": 1043.357
+        },
+        "wer": {
+          "better": "lower",
+          "unit": "ratio",
+          "value": 0.13170731707317074
+        }
+      },
+      "status": "ok",
+      "suite": "dictation"
+    }
+  ],
+  "run": {
+    "arch": "x86_64",
+    "harness": "1",
+    "id": "8356858b4b0844beb43ae1f498691886",
+    "os": "windows",
+    "ref": "main",
+    "runner": {
+      "cores": 4,
+      "cpu": "AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD",
+      "label": "windows-latest",
+      "ram_gb": 16
+    },
+    "runtime": "python",
+    "sha": "b6fabcf98de88013a29cf54e512bda7cf5483613",
+    "started_at": "2026-11-26T17:43:56Z",
+    "tier": "nightly"
+  },
+  "schema": "lf-perf-result/v1"
+}
