@@ -16,7 +16,10 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+use std::sync::OnceLock;
+
 use anyhow::{anyhow, bail, Context as _, Result};
+use regex::Regex;
 use serde_json::{json, Map, Value};
 
 #[cfg(not(windows))]
@@ -140,6 +143,29 @@ pub const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("setup", &[("version", "setup_version")]),
+    (
+        "agents",
+        &[
+            ("enabled", "agents_enabled"),
+            ("hot_commands", "agent_hot_commands"),
+            ("default_provider", "agent_default_provider"),
+            ("default_repo", "agent_default_repo"),
+            ("repos", "agent_repos"),
+            ("max_concurrent", "agent_max_concurrent"),
+            ("max_queued", "agent_max_queued"),
+            ("timeout_seconds", "agent_timeout_seconds"),
+            ("max_output_kb", "agent_max_output_kb"),
+            ("max_sessions", "agent_max_sessions"),
+            ("poll_seconds", "agent_poll_seconds"),
+            ("allow_remote", "agent_allow_remote"),
+            ("sandbox", "agent_sandbox"),
+            ("claude_bin", "agent_claude_bin"),
+            ("claude_wrapper", "agent_claude_wrapper"),
+            ("claude_permission_mode", "agent_claude_permission_mode"),
+            ("claude_model", "agent_claude_model"),
+            ("claude_stream", "agent_claude_stream"),
+        ],
+    ),
 ];
 
 /// `localflow.platform.base.PASTE_METHODS`.
@@ -162,6 +188,12 @@ pub const ENUM_VALUES: &[(&str, &[&str])] = &[
     ("style_personal", STYLE_VALUES),
     ("style_other", STYLE_VALUES),
     ("diarization_backend", &["sherpa-onnx", "mock"]),
+    ("agent_claude_wrapper", &["none", "headroom"]),
+    // No bypass mode is settable.
+    (
+        "agent_claude_permission_mode",
+        &["default", "acceptEdits", "plan"],
+    ),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -169,6 +201,7 @@ enum FieldType {
     Str,
     Bool,
     Int,
+    List,
 }
 
 /// Python `_FIELD_TYPES` (exact-type checks, `bool` is not an `int`).
@@ -194,7 +227,144 @@ const FIELD_TYPES: &[(&str, FieldType)] = &[
     ("diarize_mic", FieldType::Bool),
     ("diarization_max_speakers", FieldType::Int),
     ("speaker_recognition", FieldType::Bool),
+    ("agents_enabled", FieldType::Bool),
+    ("agent_hot_commands", FieldType::Bool),
+    ("agent_default_provider", FieldType::Str),
+    ("agent_default_repo", FieldType::Str),
+    ("agent_repos", FieldType::List),
+    ("agent_max_concurrent", FieldType::Int),
+    ("agent_max_queued", FieldType::Int),
+    ("agent_timeout_seconds", FieldType::Int),
+    ("agent_max_output_kb", FieldType::Int),
+    ("agent_max_sessions", FieldType::Int),
+    ("agent_poll_seconds", FieldType::Int),
+    ("agent_allow_remote", FieldType::Bool),
+    ("agent_sandbox", FieldType::Bool),
+    ("agent_claude_bin", FieldType::Str),
+    ("agent_claude_model", FieldType::Str),
+    ("agent_claude_stream", FieldType::Bool),
 ];
+
+/// Python `_AGENT_RANGES` (inclusive).
+const AGENT_RANGES: &[(&str, i64, i64)] = &[
+    ("agent_max_concurrent", 1, 8),
+    ("agent_max_queued", 0, 64),
+    ("agent_timeout_seconds", 10, 86400),
+    ("agent_max_output_kb", 16, 8192),
+    ("agent_max_sessions", 10, 2000),
+    ("agent_poll_seconds", 2, 300),
+];
+
+/// Python `_MAX_AGENT_REPOS`.
+const MAX_AGENT_REPOS: usize = 32;
+
+/// Python `re.match(pattern, text)` for a `^...$` pattern: `$` also matches
+/// before a single trailing newline. `pattern` is the body without anchors.
+fn py_full_match(pattern: &'static str, cache: &'static OnceLock<Regex>, text: &str) -> bool {
+    let re = cache.get_or_init(|| Regex::new(&format!(r"\A(?:{pattern})\z")).expect("valid regex"));
+    re.is_match(text)
+        || text
+            .strip_suffix('\n')
+            .is_some_and(|head| re.is_match(head))
+}
+
+fn agent_provider_ok(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    py_full_match(r"[a-z0-9][a-z0-9_.-]{0,39}", &RE, text)
+}
+
+fn agent_alias_ok(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    py_full_match(r"[a-z0-9][a-z0-9 _-]{0,39}", &RE, text)
+}
+
+fn agent_model_ok(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    py_full_match(r"[A-Za-z0-9._:\[\]-]{0,80}", &RE, text)
+}
+
+fn agent_bare_bin_ok(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    py_full_match(r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,63}", &RE, text)
+}
+
+/// Python `os.path.isabs`.
+fn py_isabs(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || (cfg!(windows) && (path.starts_with('\\') || path.starts_with('/')))
+}
+
+/// Python `os.path.isabs(os.path.expanduser(path))`; an unexpandable `~`
+/// stays as is (relative).
+fn expands_absolute(path: &str) -> bool {
+    match crate::home::expand_user(Path::new(path)) {
+        Ok(expanded) => expanded.is_absolute() || py_isabs(&expanded.to_string_lossy()),
+        Err(_) => py_isabs(path),
+    }
+}
+
+/// Python `_valid_agent_repos`.
+fn valid_agent_repos(items: &[Value]) -> bool {
+    if items.len() > MAX_AGENT_REPOS {
+        return false;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in items {
+        let Some((alias, path)) = entry.as_str().and_then(|text| text.split_once('=')) else {
+            return false;
+        };
+        let (alias, path) = (py_strip(alias), py_strip(path));
+        if !agent_alias_ok(alias)
+            || path.is_empty()
+            || path.contains(['\0', '\n', '\r'])
+            || !expands_absolute(path)
+        {
+            return false;
+        }
+        // " ".join(re.findall(r"[^\W_]+", alias.lower()))
+        let lowered = alias.to_lowercase();
+        let key = lowered
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !seen.insert(key) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Python `_valid_claude_bin`.
+fn valid_claude_bin(value: &str) -> bool {
+    if value.is_empty() || value.contains(['\0', '\n', '\r', '\t']) {
+        return false;
+    }
+    py_isabs(value) || agent_bare_bin_ok(value)
+}
+
+/// Python `agent_repo_aliases`: the stripped alias of every `alias=path` entry.
+pub fn agent_repo_aliases(repos: &Value) -> Vec<String> {
+    let Value::Array(items) = repos else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|entry| entry.split_once('='))
+        .map(|(alias, _)| py_strip(alias).to_string())
+        .collect()
+}
+
+/// Whether a non-empty `agent_default_repo` is missing from `agent_repos`.
+fn default_repo_unknown(default_repo: &Value, repos: &Value) -> bool {
+    match default_repo {
+        Value::String(text) if !text.is_empty() => {
+            !agent_repo_aliases(repos).iter().any(|alias| alias == text)
+        }
+        _ => false,
+    }
+}
 
 const DATETIME_MARKER: &str = "$__toml_datetime__";
 const FLOAT_MARKER: &str = "$__float__";
@@ -248,7 +418,7 @@ impl Config {
         } else {
             "<ctrl>+<shift>+v"
         };
-        let entries: [(&str, Value); 66] = [
+        let entries: [(&str, Value); 84] = [
             ("model_size", json!("base")),
             ("stt_backend", json!("auto")),
             ("language", Value::Null),
@@ -324,6 +494,24 @@ impl Config {
             ("setup_version", json!(0)),
             ("history_enabled", json!(true)),
             ("keep_audio_clips", json!(5)),
+            ("agents_enabled", json!(false)),
+            ("agent_hot_commands", json!(false)),
+            ("agent_default_provider", json!("claude")),
+            ("agent_default_repo", json!("")),
+            ("agent_repos", json!([])),
+            ("agent_max_concurrent", json!(2)),
+            ("agent_max_queued", json!(8)),
+            ("agent_timeout_seconds", json!(1800)),
+            ("agent_max_output_kb", json!(512)),
+            ("agent_max_sessions", json!(200)),
+            ("agent_poll_seconds", json!(10)),
+            ("agent_allow_remote", json!(false)),
+            ("agent_sandbox", json!(false)),
+            ("agent_claude_bin", json!("claude")),
+            ("agent_claude_wrapper", json!("none")),
+            ("agent_claude_permission_mode", json!("default")),
+            ("agent_claude_model", json!("")),
+            ("agent_claude_stream", json!(false)),
         ];
         Config {
             fields: entries
@@ -781,9 +969,23 @@ fn valid_field_value(field: &str, value: &Value) -> bool {
         FieldType::Str => value.is_string(),
         FieldType::Bool => value.is_boolean(),
         FieldType::Int => is_py_int(value),
+        FieldType::List => value.is_array(),
     };
     if !type_ok {
         return false;
+    }
+    if let Some((_, low, high)) = AGENT_RANGES.iter().find(|(name, _, _)| *name == field) {
+        return value.as_i64().is_some_and(|n| (*low..=*high).contains(&n));
+    }
+    match (field, value) {
+        ("agent_repos", Value::Array(items)) => return valid_agent_repos(items),
+        ("agent_default_provider", Value::String(text)) => return agent_provider_ok(text),
+        ("agent_default_repo", Value::String(text)) => {
+            return text.is_empty() || agent_alias_ok(text)
+        }
+        ("agent_claude_model", Value::String(text)) => return agent_model_ok(text),
+        ("agent_claude_bin", Value::String(text)) => return valid_claude_bin(text),
+        _ => {}
     }
     if field == "max_recording_seconds" || field == "keep_audio_clips" {
         return match value {
@@ -947,6 +1149,16 @@ fn config_from_v2_inner(
             }
             config.set_field(field, value);
         }
+    }
+    if default_repo_unknown(
+        config.field("agent_default_repo").unwrap_or(&Value::Null),
+        config.field("agent_repos").unwrap_or(&Value::Null),
+    ) {
+        warn(
+            warnings,
+            "agents.default_repo is not one of agents.repos; using no default".to_string(),
+        );
+        config.set_field("agent_default_repo", json!(""));
     }
     if !darwin {
         config.force_meetings_off();
@@ -1477,6 +1689,19 @@ pub fn apply_config_update(config: &Config, update: &Value) -> Result<Config> {
     let new_url = changes.get("llm_base_url").unwrap_or(&old_url);
     let endpoint_changed =
         !py_equal(new_provider, &old_provider) || llm_endpoint(new_url) != llm_endpoint(&old_url);
+    let default_repo = changes
+        .get("agent_default_repo")
+        .or_else(|| config.field("agent_default_repo"))
+        .unwrap_or(&Value::Null);
+    let repos = changes
+        .get("agent_repos")
+        .or_else(|| config.field("agent_repos"))
+        .unwrap_or(&Value::Null);
+    if default_repo_unknown(default_repo, repos) {
+        return Err(config_error(
+            "agents.default_repo must be one of the aliases in agents.repos",
+        ));
+    }
     if endpoint_changed {
         changes.insert("llm_key_ref".to_string(), json!(""));
         changes.entry("llm_fast_model").or_insert_with(|| json!(""));
@@ -1792,7 +2017,7 @@ mod tests {
         assert!(!win_is_fully_qualified("\\\\?\\UNC\\"));
     }
 
-    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\nfast_model = \"\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\nperf_metrics = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\nspeaker_diarization = false\ndiarization_backend = \"sherpa-onnx\"\ndiarize_mic = false\nmax_speakers = 0\nspeaker_recognition = false\n\n[setup]\nversion = 0\n";
+    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\nfast_model = \"\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\nperf_metrics = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\nspeaker_diarization = false\ndiarization_backend = \"sherpa-onnx\"\ndiarize_mic = false\nmax_speakers = 0\nspeaker_recognition = false\n\n[setup]\nversion = 0\n\n[agents]\nenabled = false\nhot_commands = false\ndefault_provider = \"claude\"\ndefault_repo = \"\"\nrepos = []\nmax_concurrent = 2\nmax_queued = 8\ntimeout_seconds = 1800\nmax_output_kb = 512\nmax_sessions = 200\npoll_seconds = 10\nallow_remote = false\nsandbox = false\nclaude_bin = \"claude\"\nclaude_wrapper = \"none\"\nclaude_permission_mode = \"default\"\nclaude_model = \"\"\nclaude_stream = false\n";
 
     const VALID_REF: &str = "llm_activation_openai_0123456789abcdef0123456789abcdef";
 
@@ -1883,12 +2108,58 @@ mod tests {
     }
 
     #[test]
+    fn agents_section_validation() {
+        let original = Config::defaults_for(false);
+        let ok = apply_config_update(
+            &original,
+            &json!({"agents": {"repos": ["lf app=/tmp/lf", "docs=~/docs"], "default_repo": "docs",
+                               "max_concurrent": 8, "claude_model": "opus[1m]"}}),
+        )
+        .unwrap();
+        assert_eq!(ok.field("agent_default_repo"), Some(&json!("docs")));
+        for bad in [
+            json!({"agents": {"repos": ["a=relative"]}}),
+            json!({"agents": {"repos": ["a-b=/x", "a b=/y"]}}),
+            json!({"agents": {"repos": ["noequals"]}}),
+            json!({"agents": {"max_concurrent": 9}}),
+            json!({"agents": {"max_queued": -1}}),
+            json!({"agents": {"default_provider": "Claude"}}),
+            json!({"agents": {"claude_bin": "bad bin"}}),
+            json!({"agents": {"claude_wrapper": "other"}}),
+            json!({"agents": {"claude_permission_mode": "bypassPermissions"}}),
+        ] {
+            assert!(apply_config_update(&original, &bad).is_err(), "{bad}");
+        }
+        let err = apply_config_update(&original, &json!({"agents": {"default_repo": "docs"}}))
+            .unwrap_err();
+        assert_eq!(
+            config_err(&err),
+            "agents.default_repo must be one of the aliases in agents.repos"
+        );
+        assert!(
+            apply_config_update(&original, &json!({"agents": {"claude_bin": "/opt/claude"}}))
+                .is_ok()
+        );
+
+        let mut data = Map::new();
+        data.insert(
+            "agents".to_string(),
+            json!({"default_repo": "gone", "repos": ["x=/x"]}),
+        );
+        let (loaded, warnings) = config_from_v2(&data, false).unwrap();
+        assert_eq!(loaded.field("agent_default_repo"), Some(&json!("")));
+        assert!(warnings
+            .iter()
+            .any(|w| w == "agents.default_repo is not one of agents.repos; using no default"));
+    }
+
+    #[test]
     fn config_table_covers_every_dataclass_field() {
         let defaults = Config::defaults_for(false);
         let names = field_names();
         let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len());
-        assert_eq!(names.len(), 66);
+        assert_eq!(names.len(), 84);
         let default_names: std::collections::BTreeSet<&str> =
             defaults.fields.keys().map(String::as_str).collect();
         assert_eq!(unique, default_names);
@@ -2701,7 +2972,7 @@ mod tests {
         let sections: Vec<&String> = serialized.as_object().unwrap().keys().collect();
         assert_eq!(sections[0], "config_version");
         assert_eq!(sections[1], "stt");
-        assert_eq!(sections.last().unwrap().as_str(), "setup");
+        assert_eq!(sections.last().unwrap().as_str(), "agents");
 
         let updated = apply_config_update(
             &original,
@@ -2850,7 +3121,7 @@ mod tests {
         assert_eq!(config_field("server.port.extra"), None);
         assert_eq!(config_field(""), None);
         let keys = valid_config_keys();
-        assert_eq!(keys.len(), 66);
+        assert_eq!(keys.len(), 84);
         assert_eq!(keys[0], "stt.provider");
         assert_eq!(
             config_field("meetings.max_speakers"),
@@ -2860,7 +3131,7 @@ mod tests {
             field_location("diarization_max_speakers"),
             Some(("meetings", "max_speakers"))
         );
-        assert_eq!(keys.last().unwrap(), "setup.version");
+        assert_eq!(keys.last().unwrap(), "agents.claude_stream");
         assert_eq!(
             field_location("pause_media_while_dictating"),
             Some(("dictation", "pause_media"))

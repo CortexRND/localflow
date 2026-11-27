@@ -12,7 +12,10 @@ from localflow.secrets import (
     set_secret,
 )
 
-SECRET_NAMES = ("llm_api_key", "fireworks_api_key", *PROVIDER_SECRET_NAMES)
+SECRET_NAMES = (
+    "llm_api_key", "fireworks_api_key", *PROVIDER_SECRET_NAMES,
+    "agent_devin_api_key", "agent_claude_api_key",
+)
 _STT_ALIASES = {"auto": "faster-whisper", "mlx": "mlx-whisper"}
 
 

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import tomllib
@@ -98,6 +99,26 @@ _SECTIONS: dict[str, dict[str, str]] = {
         "speaker_recognition": "speaker_recognition",
     },
     "setup": {"version": "setup_version"},
+    "agents": {
+        "enabled": "agents_enabled",
+        "hot_commands": "agent_hot_commands",
+        "default_provider": "agent_default_provider",
+        "default_repo": "agent_default_repo",
+        "repos": "agent_repos",
+        "max_concurrent": "agent_max_concurrent",
+        "max_queued": "agent_max_queued",
+        "timeout_seconds": "agent_timeout_seconds",
+        "max_output_kb": "agent_max_output_kb",
+        "max_sessions": "agent_max_sessions",
+        "poll_seconds": "agent_poll_seconds",
+        "allow_remote": "agent_allow_remote",
+        "sandbox": "agent_sandbox",
+        "claude_bin": "agent_claude_bin",
+        "claude_wrapper": "agent_claude_wrapper",
+        "claude_permission_mode": "agent_claude_permission_mode",
+        "claude_model": "agent_claude_model",
+        "claude_stream": "agent_claude_stream",
+    },
 }
 
 
@@ -190,6 +211,25 @@ class Config:
     setup_version: int = 0
     history_enabled: bool = True
     keep_audio_clips: int = 5
+    # Headless agent launcher ([agents]); off by default, nothing loads while off.
+    agents_enabled: bool = False
+    agent_hot_commands: bool = False
+    agent_default_provider: str = "claude"
+    agent_default_repo: str = ""
+    agent_repos: list[str] = field(default_factory=list)   # "alias=/absolute/path"
+    agent_max_concurrent: int = 2
+    agent_max_queued: int = 8
+    agent_timeout_seconds: int = 1800
+    agent_max_output_kb: int = 512
+    agent_max_sessions: int = 200
+    agent_poll_seconds: int = 10
+    agent_allow_remote: bool = False
+    agent_sandbox: bool = False
+    agent_claude_bin: str = "claude"
+    agent_claude_wrapper: str = "none"
+    agent_claude_permission_mode: str = "default"
+    agent_claude_model: str = ""
+    agent_claude_stream: bool = False
     # The file's meetings_enabled when load forced it off, saved in its place
     # until an update sets the field. An InitVar so it is not a config field
     # (fields(), ==, repr) yet survives replace().
@@ -272,6 +312,10 @@ def _config_from_v2(data: dict) -> Config:
                 )
                 continue
             setattr(config, field_name, value)
+    if config.agent_default_repo and config.agent_default_repo not in agent_repo_aliases(
+            config.agent_repos):
+        log.warning("agents.default_repo is not one of agents.repos; using no default")
+        config.agent_default_repo = ""
     if sys.platform != "darwin":
         if isinstance(config.meetings_enabled, bool):
             config._file_meetings_enabled = config.meetings_enabled
@@ -414,6 +458,9 @@ _ENUM_VALUES = {
     "style_personal": {"formal", "casual", "very_casual", "excited"},
     "style_other": {"formal", "casual", "very_casual", "excited"},
     "diarization_backend": {"sherpa-onnx", "mock"},
+    "agent_claude_wrapper": {"none", "headroom"},
+    # No bypass mode is settable.
+    "agent_claude_permission_mode": {"default", "acceptEdits", "plan"},
 }
 
 _FIELD_TYPES = {
@@ -438,13 +485,87 @@ _FIELD_TYPES = {
     "diarize_mic": bool,
     "diarization_max_speakers": int,
     "speaker_recognition": bool,
+    "agents_enabled": bool,
+    "agent_hot_commands": bool,
+    "agent_default_provider": str,
+    "agent_default_repo": str,
+    "agent_repos": list,
+    "agent_max_concurrent": int,
+    "agent_max_queued": int,
+    "agent_timeout_seconds": int,
+    "agent_max_output_kb": int,
+    "agent_max_sessions": int,
+    "agent_poll_seconds": int,
+    "agent_allow_remote": bool,
+    "agent_sandbox": bool,
+    "agent_claude_bin": str,
+    "agent_claude_model": str,
+    "agent_claude_stream": bool,
 }
+
+_AGENT_RANGES = {
+    "agent_max_concurrent": (1, 8),
+    "agent_max_queued": (0, 64),
+    "agent_timeout_seconds": (10, 86400),
+    "agent_max_output_kb": (16, 8192),
+    "agent_max_sessions": (10, 2000),
+    "agent_poll_seconds": (2, 300),
+}
+_AGENT_PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,39}$")
+_AGENT_ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,39}$")
+_AGENT_MODEL_RE = re.compile(r"^[A-Za-z0-9._:\[\]-]{0,80}$")
+_AGENT_BARE_BIN_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._+-]{0,63}$")
+_MAX_AGENT_REPOS = 32
+
+
+def _valid_agent_repos(value: list) -> bool:
+    if len(value) > _MAX_AGENT_REPOS:
+        return False
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, str) or "=" not in entry:
+            return False
+        alias, path = (part.strip() for part in entry.split("=", 1))
+        if not _AGENT_ALIAS_RE.match(alias) or not path or any(c in path for c in "\0\n\r"):
+            return False
+        if not os.path.isabs(os.path.expanduser(path)):
+            return False
+        key = " ".join(re.findall(r"[^\W_]+", alias.lower()))
+        if key in seen:
+            return False
+        seen.add(key)
+    return True
+
+
+def _valid_claude_bin(value: str) -> bool:
+    if not value or any(c in value for c in "\0\n\r\t"):
+        return False
+    if os.path.isabs(value):
+        return True
+    return bool(_AGENT_BARE_BIN_RE.match(value))
+
+
+def agent_repo_aliases(repos: list[str]) -> set[str]:
+    return {entry.split("=", 1)[0].strip() for entry in repos if "=" in entry}
 
 
 def _valid_field_value(field_name: str, value: object) -> bool:
     expected_type = _FIELD_TYPES.get(field_name)
     if expected_type is not None and type(value) is not expected_type:
         return False
+    if field_name in _AGENT_RANGES:
+        low, high = _AGENT_RANGES[field_name]
+        return low <= value <= high
+    if field_name == "agent_repos":
+        return _valid_agent_repos(value)
+    if field_name == "agent_default_provider":
+        return bool(_AGENT_PROVIDER_RE.match(value))
+    if field_name == "agent_default_repo":
+        return value == "" or bool(_AGENT_ALIAS_RE.match(value))
+    if field_name == "agent_claude_model":
+        return bool(_AGENT_MODEL_RE.match(value))
+    if field_name == "agent_claude_bin":
+        return _valid_claude_bin(value)
     if field_name in {"max_recording_seconds", "keep_audio_clips"}:
         return value >= 0
     if field_name == "diarization_max_speakers":
@@ -524,6 +645,10 @@ def apply_config_update(config: Config, update: dict) -> Config:
         or llm_activation.endpoint(changes.get("llm_base_url", config.llm_base_url))
         != llm_activation.endpoint(config.llm_base_url)
     )
+    default_repo = changes.get("agent_default_repo", config.agent_default_repo)
+    if default_repo and default_repo not in agent_repo_aliases(
+            changes.get("agent_repos", config.agent_repos)):
+        raise ConfigError("agents.default_repo must be one of the aliases in agents.repos")
     if endpoint_changed:
         changes["llm_key_ref"] = ""
         changes.setdefault("llm_fast_model", "")

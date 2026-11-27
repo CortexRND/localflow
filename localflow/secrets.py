@@ -6,7 +6,10 @@ import keyring
 log = logging.getLogger("localflow.secrets")
 
 SERVICE = "localflow"
-_LEGACY_ENV = {"fireworks_api_key": "FIREWORKS_API_KEY"}
+_LEGACY_ENV = {
+    "fireworks_api_key": "FIREWORKS_API_KEY",
+    "agent_devin_api_key": "DEVIN_API_KEY",
+}
 _keyring_warned = False
 
 

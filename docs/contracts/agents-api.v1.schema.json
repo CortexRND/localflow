@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://localflow.local/contracts/agents-api.v1.schema.json",
+  "title": "LocalFlow agents-api v1",
+  "description": "Every object returned by /api/agents/* (docs/plans/DESIGN-headless-agent-launcher.md section 6). Additive changes keep api_version 1. x-routes maps each route and status to the $defs entry its body validates against.",
+  "x-api-version": 1,
+  "x-routes": {
+    "GET /api/agents/status": {"200": "StatusResponse"},
+    "GET /api/agents/providers": {"200": "ProvidersResponse"},
+    "POST /api/agents/providers/{id}/check": {"200": "Provider", "404": "Error"},
+    "PUT /api/agents/providers/{id}/secret": {"200": "Provider", "400": "Error", "404": "Error", "503": "Error"},
+    "GET /api/agents/http-profiles": {"200": "HttpProfilesResponse"},
+    "POST /api/agents/http-profiles": {"201": "HttpProfile", "400": "Error"},
+    "PUT /api/agents/http-profiles/{id}": {"200": "HttpProfile", "400": "Error", "404": "Error"},
+    "DELETE /api/agents/http-profiles/{id}": {"200": "Deleted", "404": "Error", "409": "Error"},
+    "POST /api/agents/sessions": {"202": "SessionResponse", "200": "SessionResponse", "400": "Error", "409": "Error", "413": "Error", "429": "Error"},
+    "GET /api/agents/sessions": {"200": "SessionListResponse", "400": "Error"},
+    "GET /api/agents/sessions/{id}": {"200": "SessionResponse", "404": "Error"},
+    "POST /api/agents/sessions/{id}/cancel": {"200": "SessionResponse", "404": "Error", "409": "Error"},
+    "POST /api/agents/sessions/{id}/messages": {"202": "MessageResponse", "400": "Error", "409": "Error", "413": "Error", "502": "Error"},
+    "DELETE /api/agents/sessions/{id}": {"200": "Deleted", "404": "Error", "409": "Error"},
+    "GET /api/agents/sessions/{id}/events": {"200": "EventsResponse", "400": "Error", "404": "Error"},
+    "GET /api/agents/changes": {"200": "ChangesResponse", "400": "Error"},
+    "GET /api/agents/hot-commands": {"200": "RulesResponse"},
+    "POST /api/agents/hot-commands": {"201": "HotCommandRule", "400": "Error", "409": "Error"},
+    "PUT /api/agents/hot-commands/{id}": {"200": "HotCommandRule", "400": "Error", "404": "Error", "409": "Error"},
+    "DELETE /api/agents/hot-commands/{id}": {"200": "Deleted", "404": "Error"},
+    "POST /api/agents/hot-commands/test": {"200": "RuleTestResponse", "400": "Error", "409": "Error"}
+  },
+  "$defs": {
+    "Timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "NullableTimestamp": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "SessionId": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+    "State": {"enum": ["queued", "starting", "running", "waiting_input", "cancelling", "completed", "failed", "cancelled", "timed_out"]},
+    "Origin": {"enum": ["api", "cli", "hot_command"]},
+    "ErrorCode": {"enum": ["provider_not_ready", "spawn_failed", "exit_nonzero", "bad_output", "auth_failed", "rate_limited", "upstream_error", "network_error", "timeout", "interrupted", "cancel_failed", "internal"]},
+    "Counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "queued", "terminal"],
+      "properties": {
+        "active": {"type": "integer", "minimum": 0},
+        "queued": {"type": "integer", "minimum": 0},
+        "terminal": {"type": "integer", "minimum": 0}
+      }
+    },
+    "SessionError": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"$ref": "#/$defs/ErrorCode"},
+        "message": {"type": "string"}
+      }
+    },
+    "Usage": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["cost_usd", "duration_ms", "turns"],
+      "properties": {
+        "cost_usd": {"type": ["number", "null"]},
+        "duration_ms": {"type": ["integer", "null"]},
+        "turns": {"type": ["integer", "null"]}
+      }
+    },
+    "Session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "profile", "state", "origin", "rule_id", "title", "prompt", "repo", "cwd", "parent_id", "root_id", "external_id", "external_url", "sandbox", "created_at", "started_at", "updated_at", "finished_at", "timeout_seconds", "last_seq", "revision", "result_text", "result_truncated", "error", "usage", "cancel_requested"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SessionId"},
+        "provider": {"type": "string"},
+        "profile": {"type": "string"},
+        "state": {"$ref": "#/$defs/State"},
+        "origin": {"$ref": "#/$defs/Origin"},
+        "rule_id": {"type": "string"},
+        "title": {"type": "string", "maxLength": 120},
+        "prompt": {"type": "string", "maxLength": 20000},
+        "repo": {"type": "string"},
+        "cwd": {"type": "string"},
+        "parent_id": {"type": "string"},
+        "root_id": {"$ref": "#/$defs/SessionId"},
+        "external_id": {"type": "string"},
+        "external_url": {"type": "string"},
+        "sandbox": {"type": "boolean"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "started_at": {"$ref": "#/$defs/NullableTimestamp"},
+        "updated_at": {"$ref": "#/$defs/Timestamp"},
+        "finished_at": {"$ref": "#/$defs/NullableTimestamp"},
+        "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 86400},
+        "last_seq": {"type": "integer", "minimum": 0},
+        "revision": {"type": "integer", "minimum": 0},
+        "result_text": {"type": "string", "maxLength": 16384},
+        "result_truncated": {"type": "boolean"},
+        "error": {"$ref": "#/$defs/SessionError"},
+        "usage": {"$ref": "#/$defs/Usage"},
+        "cancel_requested": {"type": "boolean"}
+      }
+    },
+    "SessionSummary": {
+      "type": "object",
+      "description": "Session without prompt and result_text, plus result_preview (first 200 characters).",
+      "additionalProperties": false,
+      "required": ["id", "provider", "profile", "state", "origin", "rule_id", "title", "repo", "cwd", "parent_id", "root_id", "external_id", "external_url", "sandbox", "created_at", "started_at", "updated_at", "finished_at", "timeout_seconds", "last_seq", "revision", "result_preview", "result_truncated", "error", "usage", "cancel_requested"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SessionId"},
+        "provider": {"type": "string"},
+        "profile": {"type": "string"},
+        "state": {"$ref": "#/$defs/State"},
+        "origin": {"$ref": "#/$defs/Origin"},
+        "rule_id": {"type": "string"},
+        "title": {"type": "string", "maxLength": 120},
+        "repo": {"type": "string"},
+        "cwd": {"type": "string"},
+        "parent_id": {"type": "string"},
+        "root_id": {"$ref": "#/$defs/SessionId"},
+        "external_id": {"type": "string"},
+        "external_url": {"type": "string"},
+        "sandbox": {"type": "boolean"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "started_at": {"$ref": "#/$defs/NullableTimestamp"},
+        "updated_at": {"$ref": "#/$defs/Timestamp"},
+        "finished_at": {"$ref": "#/$defs/NullableTimestamp"},
+        "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 86400},
+        "last_seq": {"type": "integer", "minimum": 0},
+        "revision": {"type": "integer", "minimum": 0},
+        "result_preview": {"type": "string", "maxLength": 200},
+        "result_truncated": {"type": "boolean"},
+        "error": {"$ref": "#/$defs/SessionError"},
+        "usage": {"$ref": "#/$defs/Usage"},
+        "cancel_requested": {"type": "boolean"}
+      }
+    },
+    "Event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "ts", "type", "stream", "text", "state", "data"],
+      "properties": {
+        "seq": {"type": "integer", "minimum": 1},
+        "ts": {"$ref": "#/$defs/Timestamp"},
+        "type": {"enum": ["state", "output", "message", "error", "usage", "truncated"]},
+        "stream": {"enum": ["agent", "stderr", "user", "system"]},
+        "text": {"type": "string", "maxLength": 8192},
+        "state": {"oneOf": [{"$ref": "#/$defs/State"}, {"type": "null"}]},
+        "data": {"type": "object"}
+      }
+    },
+    "Capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "resume", "live_message", "cancel", "streaming", "needs_cwd", "reattach"],
+      "properties": {
+        "kind": {"enum": ["local_process", "cloud"]},
+        "resume": {"type": "boolean"},
+        "live_message": {"type": "boolean"},
+        "cancel": {"type": "boolean"},
+        "streaming": {"type": "boolean"},
+        "needs_cwd": {"type": "boolean"},
+        "reattach": {"type": "boolean"}
+      }
+    },
+    "Readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ready", "code", "detail", "checked"],
+      "properties": {
+        "ready": {"type": "boolean"},
+        "code": {"enum": ["ok", "disabled", "missing_binary", "missing_wrapper", "missing_secret", "missing_profile", "unreachable", "auth_failed"]},
+        "detail": {"type": "string"},
+        "checked": {"enum": ["shallow", "deep"]}
+      }
+    },
+    "Provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "profile", "label", "builtin", "capabilities", "secrets", "readiness"],
+      "properties": {
+        "id": {"type": "string"},
+        "profile": {"type": "string"},
+        "label": {"type": "string"},
+        "builtin": {"type": "boolean"},
+        "capabilities": {"$ref": "#/$defs/Capabilities"},
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "set", "required"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^agent_[a-z0-9_]{1,60}$"},
+              "set": {"type": "boolean"},
+              "required": {"type": "boolean"}
+            }
+          }
+        },
+        "readiness": {"$ref": "#/$defs/Readiness"}
+      }
+    },
+    "HttpOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+        "path": {"type": "string", "pattern": "^/"},
+        "body": {},
+        "id_path": {"type": "string"},
+        "url_path": {"type": "string"},
+        "state_path": {"type": "string"},
+        "state_map": {"type": "object", "additionalProperties": {"$ref": "#/$defs/State"}},
+        "result_path": {"type": "string"},
+        "poll_seconds": {"type": "integer", "minimum": 2, "maximum": 300}
+      }
+    },
+    "HttpProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "base_url", "enabled", "headers", "start", "created_at", "updated_at", "secret_set"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
+        "label": {"type": "string"},
+        "base_url": {"type": "string", "pattern": "^https?://"},
+        "enabled": {"type": "boolean"},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "start": {"$ref": "#/$defs/HttpOperation"},
+        "status": {"$ref": "#/$defs/HttpOperation"},
+        "message": {"$ref": "#/$defs/HttpOperation"},
+        "cancel": {"$ref": "#/$defs/HttpOperation"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "updated_at": {"$ref": "#/$defs/Timestamp"},
+        "secret_set": {"type": "boolean"}
+      }
+    },
+    "HotCommandRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "trigger", "provider", "profile", "repo", "prompt_template", "min_prompt_words", "enabled", "created_at", "updated_at"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
+        "trigger": {"type": "string", "maxLength": 60},
+        "provider": {"type": "string"},
+        "profile": {"type": "string"},
+        "repo": {"type": "string"},
+        "prompt_template": {"type": "string", "maxLength": 20000},
+        "min_prompt_words": {"type": "integer", "minimum": 0, "maximum": 50},
+        "enabled": {"type": "boolean"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "updated_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "StatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "enabled", "hot_commands", "sandbox", "allow_remote", "default_provider", "default_repo", "repos", "limits", "counts", "revision"],
+      "properties": {
+        "api_version": {"const": 1},
+        "enabled": {"type": "boolean"},
+        "hot_commands": {"type": "boolean"},
+        "sandbox": {"type": "boolean"},
+        "allow_remote": {"type": "boolean"},
+        "default_provider": {"type": "string"},
+        "default_repo": {"type": "string"},
+        "repos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["alias", "path", "exists"],
+            "properties": {
+              "alias": {"type": "string"},
+              "path": {"type": "string"},
+              "exists": {"type": "boolean"}
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_concurrent", "max_queued", "max_prompt_chars", "max_wait_seconds"],
+          "properties": {
+            "max_concurrent": {"type": "integer", "minimum": 1},
+            "max_queued": {"type": "integer", "minimum": 0},
+            "max_prompt_chars": {"type": "integer", "minimum": 1},
+            "max_wait_seconds": {"type": "integer", "minimum": 0}
+          }
+        },
+        "counts": {"$ref": "#/$defs/Counts"},
+        "revision": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ProvidersResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providers"],
+      "properties": {"providers": {"type": "array", "items": {"$ref": "#/$defs/Provider"}}}
+    },
+    "HttpProfilesResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profiles"],
+      "properties": {"profiles": {"type": "array", "items": {"$ref": "#/$defs/HttpProfile"}}}
+    },
+    "Deleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deleted"],
+      "properties": {"deleted": {"const": true}}
+    },
+    "SessionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session"],
+      "properties": {"session": {"$ref": "#/$defs/Session"}}
+    },
+    "MessageResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session", "event"],
+      "properties": {
+        "session": {"$ref": "#/$defs/Session"},
+        "event": {"$ref": "#/$defs/Event"}
+      }
+    },
+    "SessionListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions", "next_cursor", "revision", "counts"],
+      "properties": {
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/SessionSummary"}},
+        "next_cursor": {"type": ["string", "null"]},
+        "revision": {"type": "integer", "minimum": 0},
+        "counts": {"$ref": "#/$defs/Counts"}
+      }
+    },
+    "EventsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events", "next_after", "last_seq", "has_more", "state", "terminal", "waited"],
+      "properties": {
+        "events": {"type": "array", "items": {"$ref": "#/$defs/Event"}},
+        "next_after": {"type": "integer", "minimum": 0},
+        "last_seq": {"type": "integer", "minimum": 0},
+        "has_more": {"type": "boolean"},
+        "state": {"$ref": "#/$defs/State"},
+        "terminal": {"type": "boolean"},
+        "waited": {"type": "boolean"}
+      }
+    },
+    "ChangesResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "sessions", "deleted", "reset", "counts", "waited"],
+      "properties": {
+        "revision": {"type": "integer", "minimum": 0},
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/SessionSummary"}},
+        "deleted": {"type": "array", "items": {"$ref": "#/$defs/SessionId"}},
+        "reset": {"type": "boolean"},
+        "counts": {"$ref": "#/$defs/Counts"},
+        "waited": {"type": "boolean"}
+      }
+    },
+    "RulesResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rules"],
+      "properties": {"rules": {"type": "array", "items": {"$ref": "#/$defs/HotCommandRule"}}}
+    },
+    "RuleTestResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["matched", "rule_id", "provider", "profile", "repo", "prompt", "reason"],
+      "properties": {
+        "matched": {"type": "boolean"},
+        "rule_id": {"type": "string"},
+        "provider": {"type": "string"},
+        "profile": {"type": "string"},
+        "repo": {"type": "string"},
+        "prompt": {"type": "string"},
+        "reason": {"enum": ["", "too_few_words", "no_trigger", "disabled", "unknown_repo", "unknown_provider", "feature_off"]}
+      }
+    },
+    "Error": {
+      "type": "object",
+      "description": "Every non-2xx body from these routes. detail is safe to display; it never contains a secret or a prompt. 502 carries a provider error code (auth_failed, rate_limited, upstream_error, network_error) when a follow-up message is refused upstream.",
+      "additionalProperties": false,
+      "required": ["detail", "code"],
+      "properties": {
+        "detail": {"type": "string"},
+        "code": {"enum": ["validation", "local_only", "not_found", "agents_disabled", "session_conflict", "id_conflict", "rule_conflict", "provider_not_ready", "unsupported", "prompt_too_long", "queue_full", "secrets_unavailable", "internal", "auth_failed", "rate_limited", "upstream_error", "network_error"]},
+        "state": {"$ref": "#/$defs/State"},
+        "expected": {"type": "array", "items": {"$ref": "#/$defs/State"}},
+        "readiness": {"$ref": "#/$defs/Readiness"}
+      }
+    }
+  }
+}

@@ -29,7 +29,10 @@ const LOG_TARGET: &str = "localflow.secrets";
 pub const SERVICE: &str = "localflow";
 
 /// Legacy environment variables honoured after `LOCALFLOW_<NAME>`.
-const LEGACY_ENV: &[(&str, &str)] = &[("fireworks_api_key", "FIREWORKS_API_KEY")];
+const LEGACY_ENV: &[(&str, &str)] = &[
+    ("fireworks_api_key", "FIREWORKS_API_KEY"),
+    ("agent_devin_api_key", "DEVIN_API_KEY"),
+];
 
 static KEYRING_WARNED: AtomicBool = AtomicBool::new(false);
 

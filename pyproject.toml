@@ -56,6 +56,12 @@ parakeet = "localflow.providers.stt_parakeet:ParakeetSTT"
 ollama = "localflow.providers.llm_ollama:OllamaLLM"
 openai-compatible = "localflow.providers.llm_openai_compat:OpenAICompatLLM"
 
+[project.entry-points."localflow.agent_providers"]
+claude = "localflow.agents.providers.claude:ClaudeProvider"
+devin = "localflow.agents.providers.devin:DevinProvider"
+http = "localflow.agents.providers.http:HttpProvider"
+mock = "localflow.agents.providers.mock:MockProvider"
+
 [dependency-groups]
 dev = ["ruff"]
 
