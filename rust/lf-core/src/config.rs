@@ -103,6 +103,7 @@ pub const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("meetings", "meetings_enabled"),
             ("hot_phrases", "hot_phrases"),
+            ("perf_metrics", "perf_metrics"),
         ],
     ),
     (
@@ -183,6 +184,7 @@ const FIELD_TYPES: &[(&str, FieldType)] = &[
     ("pause_media_while_dictating", FieldType::Bool),
     ("max_recording_seconds", FieldType::Int),
     ("history_enabled", FieldType::Bool),
+    ("perf_metrics", FieldType::Bool),
     ("keep_audio_clips", FieldType::Int),
     ("capture_system_audio", FieldType::Bool),
     ("system_audio_device", FieldType::Str),
@@ -246,7 +248,7 @@ impl Config {
         } else {
             "<ctrl>+<shift>+v"
         };
-        let entries: [(&str, Value); 65] = [
+        let entries: [(&str, Value); 66] = [
             ("model_size", json!("base")),
             ("stt_backend", json!("auto")),
             ("language", Value::Null),
@@ -279,6 +281,7 @@ impl Config {
             ("spoken_punctuation", json!(true)),
             ("silence_threshold_dbfs", json!(-50.0)),
             ("hot_phrases", json!(true)),
+            ("perf_metrics", json!(true)),
             ("command_names", json!([])),
             (
                 "skills_dirs",
@@ -1789,7 +1792,7 @@ mod tests {
         assert!(!win_is_fully_qualified("\\\\?\\UNC\\"));
     }
 
-    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\nfast_model = \"\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\nspeaker_diarization = false\ndiarization_backend = \"sherpa-onnx\"\ndiarize_mic = false\nmax_speakers = 0\nspeaker_recognition = false\n\n[setup]\nversion = 0\n";
+    const DEFAULT_LINUX_TOML: &str = "config_version = 2\n\n[stt]\nprovider = \"auto\"\nmodel = \"base\"\ndevice = \"auto\"\n\n[llm]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434\"\nmodel = \"llama3.2:3b\"\nfast_model = \"\"\napi_key_ref = \"\"\ncleanup_enabled = true\ncleanup_timeout = 120\nnum_ctx = 8192\n\n[cleanup]\nlevel = \"light\"\nstyles_enabled = true\nstyle_work = \"formal\"\nstyle_email = \"formal\"\nstyle_personal = \"casual\"\nstyle_other = \"formal\"\napp_overrides = []\n\n[hotkey]\nkey = \"alt_l\"\nsounds = true\npaste_last = \"<ctrl>+<shift>+v\"\ncommand = \"alt_r\"\npolish = \"<ctrl>+<alt>+1\"\nprompt = \"<ctrl>+<alt>+2\"\ndictation_toggle = \"\"\n\n[paste]\nmethod = \"auto\"\n\n[dictation]\nenabled = true\nspoken_symbols = true\nspoken_punctuation = true\nsilence_threshold_dbfs = -50.0\ncommand_names = []\nskills_dirs = [\"~/.claude/skills\", \"~/.agents/skills\"]\nsample_rate = 16000\ninput_device = \"\"\nmax_recording_seconds = 1200\npause_media = false\n\n[server]\nhost = \"127.0.0.1\"\nport = 8756\n\n[features]\nmeetings = false\nhot_phrases = true\nperf_metrics = true\n\n[history]\nenabled = true\nkeep_audio_clips = 5\n\n[meetings]\nvault_path = \"~/projs\"\nnotes_folder = \"notes/meetings\"\nlogs_folder = \"notes/transcripts\"\nwatch = true\nchunk_seconds = 30\nmin_busy_seconds = 12\nauto_start = true\nwork_prompts = true\nfireworks_model = \"accounts/fireworks/models/kimi-k3\"\nprompts_dir = \"~/projs/prompts/meetings\"\norca_repo = \"\"\norca_agent = \"claude\"\ncapture_system_audio = false\nsystem_audio_device = \"\"\ndefault_template = \"general\"\ntemplates_dir = \"~/.localflow/meeting_templates\"\nspeaker_diarization = false\ndiarization_backend = \"sherpa-onnx\"\ndiarize_mic = false\nmax_speakers = 0\nspeaker_recognition = false\n\n[setup]\nversion = 0\n";
 
     const VALID_REF: &str = "llm_activation_openai_0123456789abcdef0123456789abcdef";
 
@@ -1885,7 +1888,7 @@ mod tests {
         let names = field_names();
         let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len());
-        assert_eq!(names.len(), 65);
+        assert_eq!(names.len(), 66);
         let default_names: std::collections::BTreeSet<&str> =
             defaults.fields.keys().map(String::as_str).collect();
         assert_eq!(unique, default_names);
@@ -2847,7 +2850,7 @@ mod tests {
         assert_eq!(config_field("server.port.extra"), None);
         assert_eq!(config_field(""), None);
         let keys = valid_config_keys();
-        assert_eq!(keys.len(), 65);
+        assert_eq!(keys.len(), 66);
         assert_eq!(keys[0], "stt.provider");
         assert_eq!(
             config_field("meetings.max_speakers"),

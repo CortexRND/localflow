@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lf_core::config::Config;
+use lf_core::perf_ledger::{self, Kind, LlmLabels, PerfEvent, PerfLedger, Status};
 use lf_providers::factory::{build_ollama, BuildOptions};
 
 use crate::controller::JobKind;
@@ -38,6 +39,7 @@ pub struct LlmWarmer {
     warm: WarmFn,
     interval: Duration,
     state: Arc<Mutex<WarmState>>,
+    perf: Option<PerfLedger>,
 }
 
 /// Whether a job of `kind` started under `config` will use the local Ollama
@@ -71,7 +73,14 @@ impl LlmWarmer {
             warm,
             interval,
             state: Arc::default(),
+            perf: None,
         }
+    }
+
+    /// Record each warm-up (`llm_warmup`) when `perf_metrics` is on.
+    pub fn with_perf_ledger(mut self, ledger: PerfLedger) -> Self {
+        self.perf = Some(ledger);
+        self
     }
 
     pub fn ollama() -> Self {
@@ -112,11 +121,22 @@ impl LlmWarmer {
             state.in_flight = true;
         }
         let (warm, state, config) = (self.warm.clone(), self.state.clone(), config.clone());
+        let perf = self.perf.clone();
         let spawned = std::thread::Builder::new()
             .name("localflow-llm-warmup".into())
             .spawn(move || {
                 let started = Instant::now();
                 let result = warm(&config);
+                if let Some(ledger) = &perf {
+                    let elapsed = perf_ledger::ms(started.elapsed());
+                    let event = PerfEvent {
+                        llm_ms: Some(elapsed),
+                        total_ms: Some(elapsed),
+                        llm: Some(LlmLabels::from_config(&config)),
+                        ..PerfEvent::new(Kind::LlmWarmup, Status::from_ok(result.is_ok()))
+                    };
+                    ledger.record_if(&config, &event);
+                }
                 let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
                 state.in_flight = false;
                 match result {
@@ -169,6 +189,34 @@ mod tests {
             result.clone()
         }));
         (warmer, calls)
+    }
+
+    #[test]
+    fn warm_ups_are_recorded_in_the_perf_ledger_unless_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = PerfLedger::new(dir.path().join("events.jsonl"));
+        let (warmer, _) = counting(Err("offline".into()));
+        let warmer = warmer.with_perf_ledger(ledger.clone());
+        let mut config = ollama_config();
+        config.set_field("perf_metrics", serde_json::json!(false));
+        warmer
+            .on_recording_start(JobKind::Command, &config)
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ledger.read_events().is_empty());
+        config.set_field("perf_metrics", serde_json::json!(true));
+        warmer
+            .on_recording_start(JobKind::Command, &config)
+            .unwrap()
+            .join()
+            .unwrap();
+        let events = ledger.read_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, Kind::LlmWarmup);
+        assert_eq!(events[0].status, Status::Error);
+        assert_eq!(events[0].llm, Some(LlmLabels::new("ollama", "gemma4")));
+        assert!(events[0].llm_ms.is_some());
     }
 
     #[test]

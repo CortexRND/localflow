@@ -1,0 +1,102 @@
+{
+ "cell": "set-validator",
+ "suite": "settings_api",
+ "kind": "validator",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:53",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "results": [
+  {
+   "key": "cleanup_level",
+   "value": "Medium",
+   "ok": "medium"
+  },
+  {
+   "key": "sounds_enabled",
+   "value": "off",
+   "ok": false
+  },
+  {
+   "key": "sounds_enabled",
+   "value": true,
+   "ok": true
+  },
+  {
+   "key": "style_email",
+   "value": "very casual",
+   "ok": "very_casual"
+  },
+  {
+   "key": "paste_method",
+   "value": "xdotool",
+   "ok": "xdotool"
+  },
+  {
+   "key": "meeting_default_template",
+   "value": "Standup",
+   "ok": "standup"
+  },
+  {
+   "key": "polish_hotkey",
+   "value": "off",
+   "ok": ""
+  },
+  {
+   "key": "hotkey",
+   "value": "alt_r",
+   "ok": "alt_r"
+  },
+  {
+   "key": "cleanup_level",
+   "value": "extreme",
+   "error": "choose one of: none, light, medium"
+  },
+  {
+   "key": "server_port",
+   "value": "9000",
+   "error": "'server_port' is not a setting LocalFlow can change here"
+  },
+  {
+   "key": "llm_base_url",
+   "value": "http://evil.example",
+   "error": "'llm_base_url' is not a setting LocalFlow can change here"
+  },
+  {
+   "key": "paste_method",
+   "value": "osascript",
+   "error": "on this computer choose one of: auto, clipboard, wtype, xdotool, pynput"
+  },
+  {
+   "key": "meeting_default_template",
+   "value": "nonexistent",
+   "error": "unknown template; choose one of: general, standup, one-on-one"
+  },
+  {
+   "key": "sounds_enabled",
+   "value": "maybe",
+   "error": "must be on or off"
+  },
+  {
+   "key": "hotkey",
+   "value": "off",
+   "error": "dictation needs a shortcut; it can't be turned off"
+  },
+  {
+   "key": "style_work",
+   "value": null,
+   "error": "choose one of: formal, casual, very_casual, excited"
+  },
+  {
+   "key": "cleanup_level",
+   "value": "mediummediummediummediummediummediummediummediummediummediummedium",
+   "error": "value is too long"
+  }
+ ],
+ "finished": "2026-11-24T10:01:53"
+}

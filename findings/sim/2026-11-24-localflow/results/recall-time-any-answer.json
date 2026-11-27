@@ -1,0 +1,122 @@
+{
+ "cell": "recall-time-any-answer",
+ "suite": "recall_ask",
+ "kind": "time_filter",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:39",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "now": "2026-11-24T10:01:39",
+ "seed": {
+  "dictations": 8,
+  "files": [
+   "2026-11-21 0701 Roadmap sync.md",
+   "2026-11-21 0701 Roadmap sync (transcript).md",
+   "2026-11-09 0701 Vendor security review.md",
+   "2026-11-09 0701 Vendor security review (transcript).md"
+  ]
+ },
+ "no_answer": "I couldn't find that in your history.",
+ "corpus": {
+  "dictation": 8,
+  "meeting": 2,
+  "notes": 2
+ },
+ "time_filter": "Any time",
+ "since": null,
+ "sources": null,
+ "turns": [
+  {
+   "q": "Where is the offsite venue we booked?",
+   "retrieved": [
+    {
+     "source": "dictation",
+     "title": "Mail",
+     "ts": 1791618879.0,
+     "text": "Booked the offsite venue, it is the Cedar Lodge in Tahoe for the second week of February."
+    }
+   ],
+   "stale_retrieved": 0,
+   "ask": {
+    "answer": "The offsite venue is the Cedar Lodge in Tahoe [1].",
+    "citations": [
+     {
+      "n": 1,
+      "source": "dictation",
+      "title": "Mail",
+      "app": "Mail",
+      "when": "2026-10-10T07:54",
+      "snippet": "Booked the offsite venue, it is the Cedar Lodge in Tahoe for the second week of February.",
+      "ref": "8"
+     }
+    ],
+    "error": ""
+   },
+   "api": {
+    "status": 200,
+    "answer": "The offsite venue is the Cedar Lodge in Tahoe [1].",
+    "citations": [
+     {
+      "n": 1,
+      "source": "dictation",
+      "title": "Mail",
+      "app": "Mail",
+      "when": "2026-10-10T07:54",
+      "snippet": "Booked the offsite venue, it is the Cedar Lodge in Tahoe for the second week of February.",
+      "ref": "8"
+     }
+    ]
+   },
+   "api_search": {
+    "status": 200,
+    "answer": null,
+    "citations": [
+     {
+      "n": 1,
+      "source": "dictation",
+      "title": "Mail",
+      "app": "Mail",
+      "when": "2026-10-10T07:54",
+      "snippet": "Booked the offsite venue, it is the Cedar Lodge in Tahoe for the second week of February.",
+      "ref": "8"
+     }
+    ]
+   }
+  }
+ ],
+ "model_turns": 1,
+ "llm_calls": [
+  {
+   "system": "",
+   "prompt": "Conversation so far (context only, not source evidence; old citation numbers do not apply to this question):\n\n\nYou answer questions about the user's own past dictations, meetings and notes. Use ONLY the numbered passages below. Be concise (a few sentences). Cite the passages you used like [2]. Never guess or add outside knowledge. If the passages do not contain the answer, reply with exactly: I couldn't find that in your history.\n\nPassages:\n[1] (2026-10-10 07:54 \u00b7 dictation \u00b7 Mail)\n<<<\nBooked the offsite venue, it is the Cedar Lodge in Tahoe for the second week of February.\n>>>\n\nQuestion: Where is the offsite venue we booked?\n",
+   "output": "The offsite venue is the Cedar Lodge in Tahoe [1].",
+   "secs": 0.62
+  }
+ ],
+ "api_llm_calls": [
+  {
+   "system": "",
+   "prompt": "You answer questions about the user's own past dictations, meetings and notes. Use ONLY the numbered passages below. Be concise (a few sentences). Cite the passages you used like [2]. Never guess or add outside knowledge. If the passages do not contain the answer, reply with exactly: I couldn't find that in your history.\n\nPassages:\n[1] (2026-10-10 07:54 \u00b7 dictation \u00b7 Mail)\n<<<\nBooked the offsite venue, it is the Cedar Lodge in Tahoe for the second week of February.\n>>>\n\nQuestion: Where is the offsite venue we booked?\n",
+   "output": "The offsite venue is the Cedar Lodge in Tahoe [1].",
+   "secs": 0.68
+  }
+ ],
+ "http": [
+  {
+   "call": "POST /api/recall",
+   "status": 200,
+   "secs": 0.69
+  },
+  {
+   "call": "POST /api/recall",
+   "status": 200,
+   "secs": 0.01
+  }
+ ],
+ "finished": "2026-11-24T10:01:41"
+}

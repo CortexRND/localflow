@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use lf_core::config::{self, Config};
+use lf_ui::hub_settings::{SpeakerReadiness, SPEAKER_SWITCHES};
 use serde_json::{json, Value};
 
 use crate::data::ConfigFile;
@@ -426,7 +427,95 @@ pub const SPECS: &[Spec] = &[
         "Recent recordings kept for troubleshooting.",
         Control::Choice(CLIPS),
     ),
+    // Speaker labels: last, so every earlier row keeps its index (and the
+    // Meetings tab gains them at the end of its group). Not settings-
+    // assistant keys. Both servers read them when a meeting starts; a Python
+    // server keeps `diarize_mic` from its own startup, which the copy says.
+    row(
+        Tab::Meetings,
+        "meetings",
+        "speaker_diarization",
+        SPEAKER_SWITCHES[0].1,
+        "Label who is speaking in saved meeting transcripts. Starts with your next meeting.",
+        Control::Switch,
+    ),
+    row(
+        Tab::Meetings,
+        "meetings",
+        "diarize_mic",
+        SPEAKER_SWITCHES[1].1,
+        "Also tell apart people sharing your microphone. Starts with your next meeting; a Python LocalFlow server needs a restart first.",
+        Control::Switch,
+    ),
 ];
+
+/// Whether `spec` is one of the speaker-label switches (gated by readiness).
+pub fn is_speaker_switch(spec: &Spec) -> bool {
+    spec.section == "meetings" && SPEAKER_SWITCHES.iter().any(|(key, _)| *key == spec.key)
+}
+
+/// The speaker switch `spec` as drawn for `config` and `readiness`
+/// (`None` for any other row): on can always be turned off; turning one on
+/// needs ready models, and the microphone switch needs Speaker labels on.
+pub fn speaker_switch(
+    spec: &Spec,
+    config: &Config,
+    readiness: &SpeakerReadiness,
+) -> Option<lf_ui::hub_settings::SpeakerSwitch> {
+    if !is_speaker_switch(spec) {
+        return None;
+    }
+    let on = |field: &str| config.field_bool(field).unwrap_or(false);
+    lf_ui::hub_settings::speaker_switches(
+        on("speaker_diarization"),
+        on("diarize_mic"),
+        readiness,
+        false,
+    )
+    .into_iter()
+    .find(|switch| switch.key == spec.key)
+}
+
+/// The muted line under a speaker switch. Speaker labels: why the models
+/// aren't ready (still checking, no runtime, not downloaded, or the check
+/// failed), also while it is on, since labels can't be made then. The
+/// microphone row adds only what that row needs (Speaker labels first).
+pub fn speaker_switch_note(
+    spec: &Spec,
+    config: &Config,
+    readiness: &SpeakerReadiness,
+) -> Option<String> {
+    let switch = speaker_switch(spec, config, readiness)?;
+    let labels = config.field_bool("speaker_diarization").unwrap_or(false);
+    match (spec.key, readiness) {
+        ("speaker_diarization", SpeakerReadiness::Ready) => None,
+        ("speaker_diarization", _) => lf_ui::hub_settings::speaker_note(readiness, labels),
+        (_, SpeakerReadiness::Ready) if !switch.on && !switch.enabled => {
+            lf_ui::hub_settings::speaker_note(readiness, labels)
+        }
+        _ => None,
+    }
+}
+
+/// Refuse turning a speaker switch on when it isn't available; turning one
+/// off is always allowed (never blocked by missing models or a down server).
+pub fn check_speaker_switch(
+    spec: &Spec,
+    value: &Value,
+    config: &Config,
+    readiness: &SpeakerReadiness,
+) -> Result<()> {
+    let Some(switch) = speaker_switch(spec, config, readiness) else {
+        return Ok(());
+    };
+    if value.as_bool() == Some(true) && !switch.on && !switch.enabled {
+        let labels = config.field_bool("speaker_diarization").unwrap_or(false);
+        let reason = lf_ui::hub_settings::speaker_note(readiness, labels)
+            .unwrap_or_else(|| lf_ui::hub_settings::SPEAKERS_CHECKING.to_string());
+        return Err(anyhow!("Not turned on: {reason}"));
+    }
+    Ok(())
+}
 
 pub fn specs_for(tab: Tab) -> impl Iterator<Item = &'static Spec> {
     SPECS.iter().filter(move |s| s.tab == tab)
@@ -617,6 +706,63 @@ mod tests {
             error_text(&err).contains("Toggle dictation shortcut"),
             "{err}"
         );
+    }
+
+    /// The two speaker switches: Meetings tab only, after every older row
+    /// (indices unchanged), gated by readiness for on and never for off.
+    #[test]
+    fn speaker_switches_follow_readiness_and_always_allow_off() {
+        use lf_ui::hub_settings::{speaker_readiness, SPEAKERS_MIC_NEEDS_LABELS};
+        let labels = spec("meetings", "speaker_diarization").unwrap();
+        let mic = spec("meetings", "diarize_mic").unwrap();
+        assert_eq!((labels.tab, mic.tab), (Tab::Meetings, Tab::Meetings));
+        assert!(!labels.restart && !mic.restart, "read per meeting");
+        assert_eq!(&SPECS[SPECS.len() - 2..], &[*labels, *mic]);
+        assert!(specs_for(Tab::General).all(|s| !is_speaker_switch(s)));
+        assert!(mic.description.contains("restart"));
+
+        let ready = speaker_readiness(Some(&Ok(
+            json!({"extra_installed": true, "models_ready": true}),
+        )));
+        let no_runtime = speaker_readiness(Some(&Ok(
+            json!({"extra_installed": false, "models_ready": false}),
+        )));
+        let missing = speaker_readiness(Some(&Ok(
+            json!({"extra_installed": true, "models_ready": false, "reason": ""}),
+        )));
+        let failed = speaker_readiness(Some(&Err("down".into())));
+        let checking = speaker_readiness(None);
+        let mut config = Config::defaults_for(false);
+        for blocked in [&no_runtime, &missing, &failed, &checking] {
+            assert!(check_speaker_switch(labels, &json!(true), &config, blocked).is_err());
+            assert!(speaker_switch_note(labels, &config, blocked).is_some());
+        }
+        assert!(check_speaker_switch(labels, &json!(true), &config, &ready).is_ok());
+        assert_eq!(speaker_switch_note(labels, &config, &ready), None);
+        // Mic needs labels first.
+        let err = check_speaker_switch(mic, &json!(true), &config, &ready).unwrap_err();
+        assert!(err.to_string().contains(SPEAKERS_MIC_NEEDS_LABELS), "{err}");
+        assert_eq!(
+            speaker_switch_note(mic, &config, &ready).as_deref(),
+            Some(SPEAKERS_MIC_NEEDS_LABELS)
+        );
+        config.set_field("speaker_diarization", json!(true));
+        assert!(check_speaker_switch(mic, &json!(true), &config, &ready).is_ok());
+        // On -> off is always allowed, ready or not; other rows are untouched.
+        config.set_field("diarize_mic", json!(true));
+        for any in [&ready, &no_runtime, &failed, &checking] {
+            assert!(check_speaker_switch(labels, &json!(false), &config, any).is_ok());
+            assert!(check_speaker_switch(mic, &json!(false), &config, any).is_ok());
+        }
+        let history = spec("history", "enabled").unwrap();
+        assert!(check_speaker_switch(history, &json!(true), &config, &failed).is_ok());
+
+        // Saving off writes the file even with the server down.
+        let (_d, file) = file();
+        save(&file, labels, json!(true)).unwrap();
+        save(&file, labels, json!(false)).unwrap();
+        let loaded = config::load_from(file.path()).unwrap();
+        assert_eq!(loaded.field_bool("speaker_diarization"), Some(false));
     }
 
     #[test]

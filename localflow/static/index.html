@@ -555,6 +555,47 @@
     margin-bottom: 0.4rem;
   }
 
+  /* speakers: shown by JS only when the saved meeting has diarized speakers */
+  #meetingSpeakers { display: none; margin-top: 1.25rem; }
+  #speakersList {
+    margin: 0; padding: 0; list-style: none;
+    border: 1px solid var(--fg);
+    border-radius: var(--radius-button);
+    overflow: hidden;
+  }
+  #speakersList li {
+    display: flex; align-items: center; flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    min-height: 56px;
+    padding: 0.35rem 0.5rem 0.35rem 1rem;
+    color: var(--fg);
+  }
+  #speakersList li + li { border-top: 1px solid var(--fg); }
+  .spkName {
+    flex: 1 1 8rem; min-width: 0;
+    font-family: var(--font-sans); font-weight: 600; font-size: 1rem;
+    overflow-wrap: anywhere;
+  }
+  .spkTime {
+    flex: 0 0 auto;
+    font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.03em;
+    font-variant-numeric: tabular-nums;
+  }
+  .spkActions { display: flex; gap: 0.4rem; flex: 0 0 auto; }
+  .spkEdit { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; flex: 1 1 100%; margin: 0; }
+  .spkEdit .spkName { flex: 0 1 auto; }
+  .spkInput {
+    flex: 1 1 10rem; min-width: 0; min-height: 44px; padding: 0 0.85rem;
+    font-family: var(--font-sans); font-size: 16px;   /* no iOS zoom */
+    background: transparent; color: var(--fg);
+    border: 1px solid var(--fg); border-radius: var(--radius-button);
+  }
+  #meetingSpeakers .dismissBtn { min-width: 0; padding: 0 0.95rem; }
+  #meetingSpeakers .dismissBtn.primary { background: var(--fg); color: var(--paper); }
+  #meetingSpeakers .dismissBtn:disabled {
+    border-style: dashed; cursor: not-allowed; background: transparent; color: var(--fg);
+  }
+
   /* template picker sits on its own row under title/platform */
   .meetingRow select#meetingTemplate { flex: 1 1 12rem; }
 
@@ -899,6 +940,14 @@
         <div id="meetingLive"></div>
         <div id="meetingSaved"></div>
 
+        <div id="meetingSpeakers">
+          <div class="fieldHead">
+            <span id="speakersHeading">Speakers</span>
+            <span class="fieldStatus" id="speakersStatus" role="status" aria-live="polite"></span>
+          </div>
+          <ul id="speakersList" aria-labelledby="speakersHeading"></ul>
+        </div>
+
         <form id="meetingChat" autocomplete="off">
           <div class="fieldHead">
             <label for="chatQuestion">Ask the transcript</label>
@@ -1187,6 +1236,321 @@
     return m + 'm' + String(s % 60).padStart(2, '0') + 's';
   }
 
+  // ---- meeting speakers (U7) ----
+  const meetingSpeakers = document.getElementById('meetingSpeakers');
+  const speakersList = document.getElementById('speakersList');
+  const speakersStatus = document.getElementById('speakersStatus');
+
+  let spkMeetingId = null;   // saved.meeting_id or null
+  let spkList = [];          // last rendered speakers
+  let spkKey = '';           // meeting_id + '\n' + JSON.stringify(speakers) on screen
+  let spkEdit = null;        // { id, mode: 'rename' | 'merge', value? } or null
+  let spkBusy = false;       // a PUT/POST is on the wire
+  let spkEpoch = 0;          // bumped on reset and on every successful edit
+  let spkField = null;       // the open editor's input/select
+  let spkButtons = {};       // speaker id -> { rename, merge } buttons on screen
+
+  function setSpeakersStatus(text, isErr) {
+    speakersStatus.textContent = text;
+    speakersStatus.classList.toggle('err', !!isErr);
+  }
+
+  function spkLabel(sp) {
+    return String(sp.label || sp.name || sp.id);
+  }
+
+  function spkFilter(speakers) {
+    return Array.isArray(speakers)
+      ? speakers.filter(sp => sp && typeof sp.id === 'string')
+      : [];
+  }
+
+  function spkMakeKey(mid, list) {
+    return String(mid) + '\n' + JSON.stringify(list);
+  }
+
+  function resetSpeakers() {
+    meetingSpeakers.style.display = 'none';
+    speakersList.textContent = '';
+    setSpeakersStatus('');
+    spkMeetingId = null;
+    spkList = [];
+    spkKey = '';
+    spkEdit = null;
+    spkField = null;
+    spkButtons = {};
+    spkEpoch++;
+  }
+
+  // Only entry point from showSaved(); idempotent, runs on every idle poll.
+  function syncSpeakers(saved, epoch) {
+    if (epoch !== undefined && epoch !== spkEpoch) return;   // stale poll
+    if (spkBusy) return;
+    const list = spkFilter(saved && saved.speakers);
+    if (!list.length) {
+      if (meetingSpeakers.style.display === 'block') resetSpeakers();
+      return;
+    }
+    const mid = saved.meeting_id ? String(saved.meeting_id) : null;
+    const key = spkMakeKey(mid, list);
+    if (key === spkKey) return;
+    if (spkEdit && mid === spkMeetingId) return;   // don't clobber an open editor
+    const focused = spkFocusedButton();
+    spkMeetingId = mid;
+    spkList = list;
+    spkKey = key;
+    spkEdit = null;
+    setSpeakersStatus('');
+    renderSpeakers();
+    meetingSpeakers.style.display = 'block';
+    if (focused) spkFocusButton(focused.id, focused.action);
+  }
+
+  // True when moving focus inside the block would not steal it from elsewhere.
+  function spkOwnsFocus() {
+    const a = document.activeElement;
+    return !a || a === document.body || meetingSpeakers.contains(a);
+  }
+
+  // { id, action } of the row button that currently has focus, or null.
+  function spkFocusedButton() {
+    const a = document.activeElement;
+    if (!a) return null;
+    for (const id of Object.keys(spkButtons)) {
+      for (const action of Object.keys(spkButtons[id])) {
+        if (spkButtons[id][action] === a) return { id, action };
+      }
+    }
+    return null;
+  }
+
+  function spkFocusButton(id, action) {
+    const btn = spkButtons[id] && spkButtons[id][action];
+    if (btn) btn.focus();
+  }
+
+  function spkButton(text, ariaLabel, onClick) {
+    const b = document.createElement('button');
+    b.className = 'dismissBtn';
+    b.type = 'button';
+    b.textContent = text;
+    if (ariaLabel) b.setAttribute('aria-label', ariaLabel);
+    b.disabled = spkBusy;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function spkSubmitButton(text) {
+    const b = document.createElement('button');
+    b.className = 'dismissBtn primary';
+    b.type = 'submit';
+    b.textContent = text;
+    b.disabled = spkBusy;
+    return b;
+  }
+
+  function spkEditForm(onSubmit) {
+    const form = document.createElement('form');
+    form.className = 'spkEdit';
+    form.setAttribute('autocomplete', 'off');
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      onSubmit();
+    });
+    form.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        closeEdit();
+      }
+    });
+    return form;
+  }
+
+  function spkClearError() {
+    if (speakersStatus.classList.contains('err')) setSpeakersStatus('');
+  }
+
+  function renderSpeakers() {
+    speakersList.textContent = '';
+    spkField = null;
+    spkButtons = {};
+    const canEdit = !!spkMeetingId;
+    for (const sp of spkList) {
+      const label = spkLabel(sp);
+      const li = document.createElement('li');
+      li.dataset.id = sp.id;
+      const mode = canEdit && spkEdit && spkEdit.id === sp.id ? spkEdit.mode : null;
+
+      if (mode === 'rename') {
+        const form = spkEditForm(() => submitRename(sp));
+        const input = document.createElement('input');
+        input.className = 'spkInput';
+        input.type = 'text';
+        input.setAttribute('maxlength', '40');
+        input.setAttribute('aria-label', 'New name for ' + label);
+        input.value = spkEdit.value !== undefined ? spkEdit.value : label;
+        input.disabled = spkBusy;
+        input.addEventListener('input', () => {
+          if (spkEdit) spkEdit.value = input.value;
+          spkClearError();
+        });
+        form.appendChild(input);
+        form.appendChild(spkSubmitButton(spkBusy ? 'Saving…' : 'Save'));
+        form.appendChild(spkButton('Cancel', null, closeEdit));
+        li.appendChild(form);
+        spkField = input;
+      } else if (mode === 'merge') {
+        const form = spkEditForm(() => submitMerge(sp));
+        const name = document.createElement('span');
+        name.className = 'spkName';
+        name.textContent = 'Merge ' + label + ' into';
+        const select = document.createElement('select');
+        select.className = 'spkInput';
+        select.setAttribute('aria-label', 'Merge ' + label + ' into');
+        const labelCount = {};
+        for (const other of spkList) {
+          const l = spkLabel(other);
+          labelCount[l] = (labelCount[l] || 0) + 1;
+        }
+        for (const other of spkList) {
+          if (other.id === sp.id) continue;
+          const opt = document.createElement('option');
+          opt.value = other.id;
+          const otherLabel = spkLabel(other);
+          // Same label twice: add talk time + id so the targets can be told apart.
+          opt.textContent = labelCount[otherLabel] > 1
+            ? otherLabel + ' (' + fmtSeconds(Math.round(Number(other.seconds) || 0)) + ' · ' + other.id + ')'
+            : otherLabel;
+          select.appendChild(opt);
+        }
+        if (spkEdit.value !== undefined) select.value = spkEdit.value;
+        select.disabled = spkBusy;
+        select.addEventListener('change', () => {
+          if (spkEdit) spkEdit.value = select.value;
+          spkClearError();
+        });
+        form.appendChild(name);
+        form.appendChild(select);
+        form.appendChild(spkSubmitButton(spkBusy ? 'Merging…' : 'Merge'));
+        form.appendChild(spkButton('Cancel', null, closeEdit));
+        li.appendChild(form);
+        spkField = select;
+      } else {
+        const name = document.createElement('span');
+        name.className = 'spkName';
+        name.textContent = label;
+        const time = document.createElement('span');
+        time.className = 'spkTime';
+        time.textContent = fmtSeconds(Math.round(Number(sp.seconds) || 0));
+        li.appendChild(name);
+        li.appendChild(time);
+        if (canEdit) {
+          const actions = document.createElement('div');
+          actions.className = 'spkActions';
+          const btns = {};
+          btns.rename = spkButton('Rename', 'Rename ' + label, () => openEdit(sp.id, 'rename'));
+          actions.appendChild(btns.rename);
+          if (spkList.length >= 2) {
+            btns.merge = spkButton('Merge', 'Merge ' + label + ' into another speaker',
+              () => openEdit(sp.id, 'merge'));
+            actions.appendChild(btns.merge);
+          }
+          spkButtons[sp.id] = btns;
+          li.appendChild(actions);
+        }
+      }
+      speakersList.appendChild(li);
+    }
+  }
+
+  function openEdit(id, mode) {
+    if (spkBusy || !spkMeetingId) return;
+    spkEdit = { id, mode };
+    setSpeakersStatus('');
+    renderSpeakers();
+    if (spkField) {
+      spkField.focus();
+      if (mode === 'rename' && spkField.select) spkField.select();
+    }
+  }
+
+  function closeEdit() {
+    if (spkBusy) return;
+    const prev = spkEdit;
+    spkEdit = null;
+    setSpeakersStatus('');
+    renderSpeakers();
+    if (prev) spkFocusButton(prev.id, prev.mode);
+  }
+
+  const SPK_JSON = { 'Content-Type': 'application/json' };
+
+  // focusId: the row whose Rename button gets focus after success
+  // (the renamed speaker, or the merge target that survives).
+  async function submitEdit(url, init, doneText, focusId) {
+    if (spkBusy) return;
+    spkBusy = true;
+    const epoch = spkEpoch;
+    let succeeded = false;
+    renderSpeakers();
+    try {
+      const resp = await meetingFetch(url, init);
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error((data && data.detail) || resp.statusText || 'request failed');
+      if (epoch !== spkEpoch) return;   // a new meeting started meanwhile
+      spkEpoch++;
+      spkEdit = null;
+      if (data && Array.isArray(data.speakers)) {
+        const list = spkFilter(data.speakers);
+        if (!list.length) {
+          spkBusy = false;
+          resetSpeakers();
+          return;
+        }
+        spkList = list;
+        spkKey = spkMakeKey(spkMeetingId, list);
+      }
+      setSpeakersStatus(doneText);
+      succeeded = true;
+    } catch (err) {
+      if (epoch === spkEpoch) setSpeakersStatus('Not saved — ' + err.message, true);
+    } finally {
+      spkBusy = false;
+      if (meetingSpeakers.style.display === 'block') {
+        // Check before re-rendering: never steal focus from chat/notes.
+        const mayFocus = spkOwnsFocus();
+        renderSpeakers();
+        if (mayFocus) {
+          if (succeeded) spkFocusButton(focusId, 'rename');
+          else if (spkEdit && spkField) spkField.focus();   // failed edit: keep typing
+        }
+      }
+    }
+  }
+
+  function submitRename(sp) {
+    if (spkBusy || !spkField) return;
+    const raw = spkField.value;
+    const name = raw.trim();
+    if (!name) { setSpeakersStatus('Enter a name', true); return; }
+    if (name === spkLabel(sp)) { closeEdit(); return; }
+    if (spkEdit) spkEdit.value = raw;
+    const url = `/api/meetings/${encodeURIComponent(spkMeetingId)}/speakers/${encodeURIComponent(sp.id)}`;
+    return submitEdit(url, { method: 'PUT', headers: SPK_JSON, body: JSON.stringify({ name }) }, 'Renamed', sp.id);
+  }
+
+  function submitMerge(sp) {
+    if (spkBusy || !spkField) return;
+    const into = spkField.value;
+    if (!into || into === sp.id) { setSpeakersStatus('Pick a speaker', true); return; }
+    if (spkEdit) spkEdit.value = into;
+    const url = `/api/meetings/${encodeURIComponent(spkMeetingId)}/speakers/merge`;
+    return submitEdit(url, {
+      method: 'POST', headers: SPK_JSON, body: JSON.stringify({ from: sp.id, into: into }),
+    }, 'Merged', into);
+  }
+  // ---- end meeting speakers (U7) ----
+
   function setNotesStatus(text, isErr) {
     notesStatus.textContent = text;
     notesStatus.classList.toggle('err', !!isErr);
@@ -1256,10 +1620,13 @@
   meetingNotes.addEventListener('blur', () => { if (meetingActive) saveNotes(); });
 
   function sourceLabel(s) {
+    const speaker = typeof s.speaker === 'string' ? s.speaker.trim() : '';
+    if (speaker) return s.speaker + ': ';
     return s.source === 'others' ? 'Others: ' : (s.source === 'me' ? 'Me: ' : '');
   }
 
   async function pollMeeting() {
+    const epoch = spkEpoch;
     try {
       const resp = await meetingFetch('/meeting/status');
       if (!resp.ok) return;
@@ -1279,6 +1646,8 @@
       }
       meetingActive = !!live;
       if (live) {
+        // Auto-started / other-tab meeting: drop the previous meeting's controls.
+        if (meetingSpeakers.style.display === 'block') resetSpeakers();
         // Adopt server notes once per session (e.g. an auto-started meeting, or
         // a second tab) unless the user is mid-edit here.
         const key = live.title + '|' + live.seconds;
@@ -1304,7 +1673,7 @@
         meetingBtn.textContent = 'Start meeting transcription';
         meetingBtn.classList.remove('live');
       }
-      if (st.last_saved && !live) showSaved(st.last_saved);
+      if (st.last_saved && !live) showSaved(st.last_saved, epoch);
       else if (st.chat_available && !live) {
         meetingChat.style.display = 'block';
         chatScope.textContent = 'most recent saved meeting';
@@ -1312,7 +1681,7 @@
     } catch (_) { /* server briefly away; next poll recovers */ }
   }
 
-  function showSaved(saved) {
+  function showSaved(saved, epoch) {
     meetingSaved.style.display = 'block';
     meetingSaved.textContent =
       (saved.enhanced ? 'Enhanced notes: ' : 'Saved: ') + saved.notes_path + ' (+ transcript log)';
@@ -1320,6 +1689,7 @@
       meetingChat.style.display = 'block';
       chatScope.textContent = 'last saved meeting';
     }
+    syncSpeakers(saved, epoch);
   }
 
   meetingDismiss.addEventListener('click', async () => {
@@ -1335,6 +1705,7 @@
       if (!meetingActive) {
         meetingSaved.style.display = 'none';
         meetingChat.style.display = 'none';
+        resetSpeakers();
         chatLog.textContent = '';
         const sentNotes = meetingNotes.value;
         const resp = await meetingFetch('/meeting/start', {

@@ -39,20 +39,34 @@ fn main() -> ExitCode {
         eprintln!("lf-desktop: {}", err.0);
         return ExitCode::from(2);
     }
+    let fixture = args.sandbox_fixture;
+    // A fixture scene opens its own page; `people` resolves once the config
+    // is known (it has no Hub route, so a hand-off carries the unknown name).
+    let (page, unknown_page) = match fixture {
+        Some(f) if f.page() == Page::People => (None, Some("people".to_string())),
+        Some(f) => (Some(f.page()), None),
+        None => (args.page, args.unknown_page.clone()),
+    };
     let request = Request {
-        route: if args.setup {
+        route: if args.setup && fixture.is_none() {
             Route::Setup
         } else {
-            Route::Page(args.page.unwrap_or(Page::Home))
+            Route::Page(page.unwrap_or(Page::Home))
         },
-        unknown_page: args.unknown_page.clone(),
+        unknown_page,
     };
-    let notice = request.notice();
+    let people_request = request.is_unknown_home()
+        && request
+            .unknown_page
+            .as_deref()
+            .is_some_and(Page::is_people_name);
+    let mut notice = request.notice();
     let launched = if args.sandbox {
         let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
-        launch::sandbox(
+        launch::sandbox_with(
             &dir,
             args.sandbox_reset,
+            fixture.is_some(),
             (!args.sandbox_exercise).then(|| request.clone()),
         )
     } else {
@@ -66,6 +80,15 @@ fn main() -> ExitCode {
     let (root, instance) = match launched {
         Ok(Launched::Window(root, instance)) => (*root, instance),
         Ok(Launched::HandedOff) => {
+            if people_request {
+                // The open window decides: People while speaker recognition
+                // is on there, otherwise Home with the notice.
+                eprintln!(
+                    "lf-desktop: LocalFlow is already open; sent it to People \
+                     (Home if speaker recognition is off)."
+                );
+                return ExitCode::SUCCESS;
+            }
             if let Some(n) = &notice {
                 eprintln!("lf-desktop: {n}");
             }
@@ -102,16 +125,26 @@ fn main() -> ExitCode {
             }
         };
     }
+    // `--page people` opens People only while it is turned on; otherwise it
+    // is an unknown page like any other (Home and the notice).
+    let start_page =
+        if people_request && lf_desktop::controllers::people::enabled(&services.config()) {
+            notice = None;
+            Page::People
+        } else {
+            page.unwrap_or(Page::Home)
+        };
     if let Some(n) = &notice {
         eprintln!("lf-desktop: {n}");
     }
     let configured = lf_desktop::controllers::setup::configured(&services.root);
     let status = app::run(Launch {
         services,
-        page: args.page.unwrap_or(Page::Home),
-        setup: opens_setup(&request, configured),
+        page: start_page,
+        setup: fixture.is_none() && opens_setup(&request, configured),
         notice,
         instance,
+        fixture,
     });
     // Non-zero when no window opened, so `lf --gpui` falls back instead of
     // mistaking it for a hand-off (see USAGE's EXIT STATUS).

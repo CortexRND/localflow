@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
@@ -14,3 +15,5 @@ class Job:
     selection: str = ""
     preset: str | None = None
     clipboard_before: str | None = None
+    # time.monotonic() when queued (the perf ledger's queue_ms); not compared.
+    queued_at: float | None = field(default_factory=time.monotonic, compare=False)

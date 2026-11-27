@@ -1,0 +1,480 @@
+{
+ "cell": "mcp-protocol",
+ "suite": "mcp",
+ "kind": "mcp",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:50",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "ids": {
+  "Migrate session storage to Redis": "a0e53bc4",
+  "Update deploy docs for Redis sessions": "1419025c",
+  "Audit TLS certificates": "1f0f0be4"
+ },
+ "db": "home/.localflow/history.sqlite",
+ "queue": "home/.localflow/queue.json",
+ "server_module_in_sut": true,
+ "python": {
+  "exchanges": [
+   {
+    "name": "initialize",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"lfsim\", \"version\": \"1\"}}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {\"tools\": {}}, \"serverInfo\": {\"name\": \"localflow\", \"version\": \"0.2.2\"}, \"instructions\": \"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 1,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-older-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\"}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"result\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {\"tools\": {}}, \"serverInfo\": {\"name\": \"localflow\", \"version\": \"0.2.2\"}, \"instructions\": \"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 2,
+     "result": {
+      "protocolVersion": "2024-11-05",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-unknown-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"1999-01-01\"}}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"result\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {\"tools\": {}}, \"serverInfo\": {\"name\": \"localflow\", \"version\": \"0.2.2\"}, \"instructions\": \"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 3,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialized-notification",
+    "sent": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}",
+    "raw": null,
+    "reply": null
+   },
+   {
+    "name": "ping",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"result\": {}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 4,
+     "result": {}
+    }
+   },
+   {
+    "name": "tools-list",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"tools/list\"}",
+    "raw": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"result\": {\"tools\": [{\"name\": \"search_dictations\", \"description\": \"Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Words to find; omit to list recent.\"}, \"since\": {\"type\": \"string\", \"description\": \"Start: today, yesterday, 7d, 30d or YYYY-MM-DD.\"}, \"until\": {\"type\": \"string\", \"description\": \"End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive).\"}, \"app\": {\"type\": \"string\", \"description\": \"App name substring (case-insensitive) or exact bundle id.\"}, \"kind\": {\"type\": \"string\", \"enum\": [\"dictate\", \"command\", \"transform\"]}, \"limit\": {\"type\": \"integer\", \"description\": \"Maximum results (1-50, default 10).\"}}, \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}, {\"name\": \"get_dictation\", \"description\": \"Full text of one dictation by id (from search_dictations).\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"integer\"}}, \"required\": [\"id\"], \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}, {\"name\": \"search_prompts\", \"description\": \"Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Words to find; omit to list recent.\"}, \"status\": {\"type\": \"string\", \"enum\": [\"pending\", \"approved\", \"rejected\", \"dispatched\", \"failed\"]}, \"limit\": {\"type\": \"integer\", \"description\": \"Maximum results (1-50, default 10).\"}}, \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}, {\"name\": \"get_prompt\", \"description\": \"Full body and status of one work prompt by id (from search_prompts).\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"string\"}}, \"required\": [\"id\"], \"additionalProperties\": false}, \"annotations\": {\"readOnlyHint\": true, \"openWorldHint\": false}}]}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 5,
+     "result": {
+      "tools": [
+       {
+        "name": "search_dictations",
+        "description": "Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "since": {
+           "type": "string",
+           "description": "Start: today, yesterday, 7d, 30d or YYYY-MM-DD."
+          },
+          "until": {
+           "type": "string",
+           "description": "End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive)."
+          },
+          "app": {
+           "type": "string",
+           "description": "App name substring (case-insensitive) or exact bundle id."
+          },
+          "kind": {
+           "type": "string",
+           "enum": [
+            "dictate",
+            "command",
+            "transform"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_dictation",
+        "description": "Full text of one dictation by id (from search_dictations).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "search_prompts",
+        "description": "Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "pending",
+            "approved",
+            "rejected",
+            "dispatched",
+            "failed"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_prompt",
+        "description": "Full body and status of one work prompt by id (from search_prompts).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "28ae95c2c0182d8f0a3a389db678e4f5cd0c3bd34756889ce08f279448aeb2de",
+   "home/.localflow/history.sqlite": "d156e51e4f4a633ab4696b301d17c8a44fb0f27ad8824a2b213d37e805f10c4a",
+   "home/.localflow/queue.json": "537fffe718a91dafcef8544b6da4701635e9d4fb4c3c4502c29f910e7c3f2f5a",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "5262fd650bb5f792c076f8f3d6514f5579499ec5034238d216f1e5aa3a6eedc9",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "ae502c83cfc685b899537201a4f55e8381f4ab741d474d75248aab98d4ffb93f",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "061bb58fb87e1bd28d793c8ac9b2e893399fa39d08be5e8353bab315ace7409e"
+  },
+  "hash_after": {
+   "config.toml": "28ae95c2c0182d8f0a3a389db678e4f5cd0c3bd34756889ce08f279448aeb2de",
+   "home/.localflow/history.sqlite": "d156e51e4f4a633ab4696b301d17c8a44fb0f27ad8824a2b213d37e805f10c4a",
+   "home/.localflow/queue.json": "537fffe718a91dafcef8544b6da4701635e9d4fb4c3c4502c29f910e7c3f2f5a",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "5262fd650bb5f792c076f8f3d6514f5579499ec5034238d216f1e5aa3a6eedc9",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "ae502c83cfc685b899537201a4f55e8381f4ab741d474d75248aab98d4ffb93f",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "061bb58fb87e1bd28d793c8ac9b2e893399fa39d08be5e8353bab315ace7409e"
+  },
+  "stderr_tail": ""
+ },
+ "rust": {
+  "exchanges": [
+   {
+    "name": "initialize",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"lfsim\", \"version\": \"1\"}}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"localflow\",\"version\":\"0.2.2\"},\"instructions\":\"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 1,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-older-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\"}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"localflow\",\"version\":\"0.2.2\"},\"instructions\":\"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 2,
+     "result": {
+      "protocolVersion": "2024-11-05",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialize-unknown-version",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"1999-01-01\"}}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"localflow\",\"version\":\"0.2.2\"},\"instructions\":\"Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\\nThis is the user's private local history; quote it only as needed for the task.\"}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 3,
+     "result": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+       "tools": {}
+      },
+      "serverInfo": {
+       "name": "localflow",
+       "version": "0.2.2"
+      },
+      "instructions": "Search the user's past LocalFlow dictations, spoken commands and meeting work prompts.\nThis is the user's private local history; quote it only as needed for the task."
+     }
+    }
+   },
+   {
+    "name": "initialized-notification",
+    "sent": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}",
+    "raw": null,
+    "reply": null
+   },
+   {
+    "name": "ping",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"method\": \"ping\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 4,
+     "result": {}
+    }
+   },
+   {
+    "name": "tools-list",
+    "sent": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"tools/list\"}",
+    "raw": "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"tools\":[{\"name\":\"search_dictations\",\"description\":\"Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Words to find; omit to list recent.\"},\"since\":{\"type\":\"string\",\"description\":\"Start: today, yesterday, 7d, 30d or YYYY-MM-DD.\"},\"until\":{\"type\":\"string\",\"description\":\"End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive).\"},\"app\":{\"type\":\"string\",\"description\":\"App name substring (case-insensitive) or exact bundle id.\"},\"kind\":{\"type\":\"string\",\"enum\":[\"dictate\",\"command\",\"transform\"]},\"limit\":{\"type\":\"integer\",\"description\":\"Maximum results (1-50, default 10).\"}},\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}},{\"name\":\"get_dictation\",\"description\":\"Full text of one dictation by id (from search_dictations).\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}},{\"name\":\"search_prompts\",\"description\":\"Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Words to find; omit to list recent.\"},\"status\":{\"type\":\"string\",\"enum\":[\"pending\",\"approved\",\"rejected\",\"dispatched\",\"failed\"]},\"limit\":{\"type\":\"integer\",\"description\":\"Maximum results (1-50, default 10).\"}},\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}},{\"name\":\"get_prompt\",\"description\":\"Full body and status of one work prompt by id (from search_prompts).\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false}}]}}",
+    "reply": {
+     "jsonrpc": "2.0",
+     "id": 5,
+     "result": {
+      "tools": [
+       {
+        "name": "search_dictations",
+        "description": "Search or list the user's past LocalFlow dictations, spoken commands and transforms. Without a query, returns the newest first. Quote a phrase to boost exact matches.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "since": {
+           "type": "string",
+           "description": "Start: today, yesterday, 7d, 30d or YYYY-MM-DD."
+          },
+          "until": {
+           "type": "string",
+           "description": "End: today, yesterday, 7d, 30d or YYYY-MM-DD (a named day is inclusive)."
+          },
+          "app": {
+           "type": "string",
+           "description": "App name substring (case-insensitive) or exact bundle id."
+          },
+          "kind": {
+           "type": "string",
+           "enum": [
+            "dictate",
+            "command",
+            "transform"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_dictation",
+        "description": "Full text of one dictation by id (from search_dictations).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "search_prompts",
+        "description": "Search or list meeting work prompts (title, meeting and prompt body). Without a query, returns the newest first.",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string",
+           "description": "Words to find; omit to list recent."
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "pending",
+            "approved",
+            "rejected",
+            "dispatched",
+            "failed"
+           ]
+          },
+          "limit": {
+           "type": "integer",
+           "description": "Maximum results (1-50, default 10)."
+          }
+         },
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       },
+       {
+        "name": "get_prompt",
+        "description": "Full body and status of one work prompt by id (from search_prompts).",
+        "inputSchema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "additionalProperties": false
+        },
+        "annotations": {
+         "readOnlyHint": true,
+         "openWorldHint": false
+        }
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "extra_output": "",
+  "exit_code": 0,
+  "hash_before": {
+   "config.toml": "28ae95c2c0182d8f0a3a389db678e4f5cd0c3bd34756889ce08f279448aeb2de",
+   "home/.localflow/history.sqlite": "d156e51e4f4a633ab4696b301d17c8a44fb0f27ad8824a2b213d37e805f10c4a",
+   "home/.localflow/queue.json": "537fffe718a91dafcef8544b6da4701635e9d4fb4c3c4502c29f910e7c3f2f5a",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "5262fd650bb5f792c076f8f3d6514f5579499ec5034238d216f1e5aa3a6eedc9",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "ae502c83cfc685b899537201a4f55e8381f4ab741d474d75248aab98d4ffb93f",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "061bb58fb87e1bd28d793c8ac9b2e893399fa39d08be5e8353bab315ace7409e"
+  },
+  "hash_after": {
+   "config.toml": "28ae95c2c0182d8f0a3a389db678e4f5cd0c3bd34756889ce08f279448aeb2de",
+   "home/.localflow/history.sqlite": "d156e51e4f4a633ab4696b301d17c8a44fb0f27ad8824a2b213d37e805f10c4a",
+   "home/.localflow/queue.json": "537fffe718a91dafcef8544b6da4701635e9d4fb4c3c4502c29f910e7c3f2f5a",
+   "home/.localflow/queue.json.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "prompts/2026-11-24-platform-sync/01-migrate-session-storage-to-redis.md": "5262fd650bb5f792c076f8f3d6514f5579499ec5034238d216f1e5aa3a6eedc9",
+   "prompts/2026-11-24-platform-sync/02-update-deploy-docs-for-redis-sessions.md": "ae502c83cfc685b899537201a4f55e8381f4ab741d474d75248aab98d4ffb93f",
+   "prompts/2026-11-24-platform-sync/03-audit-tls-certificates.md": "061bb58fb87e1bd28d793c8ac9b2e893399fa39d08be5e8353bab315ace7409e"
+  },
+  "stderr_tail": ""
+ },
+ "rust_bin": "localflow-mcp",
+ "finished": "2026-11-24T10:01:50"
+}

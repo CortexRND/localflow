@@ -1,0 +1,29 @@
+{
+ "cell": "dict-format-false-positive",
+ "suite": "dictation",
+ "kind": "formatting",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T09:59:35",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "outputs": [
+  {
+   "text": "I added a new line of code to the parser",
+   "output": "I added a new line of code to the parser"
+  },
+  {
+   "text": "Start a new line of thinking, then open a new paragraph of the report",
+   "output": "Start a new line of thinking, then open a new paragraph of the report"
+  },
+  {
+   "text": "the trial period ends in a comma separated list",
+   "output": "the trial period ends in a comma separated list"
+  }
+ ],
+ "finished": "2026-11-24T09:59:35"
+}

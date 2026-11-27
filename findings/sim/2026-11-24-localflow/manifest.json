@@ -1,0 +1,22 @@
+{
+ "run_id": "59fddde2-c9cf-45c3-b312-08b4d569dd50",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sim_sut": "/home/ubuntu/work/sim-sut",
+ "harness_commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "repeats": 3,
+ "suites": [
+  "dictation",
+  "meetings",
+  "recall_ask",
+  "mcp",
+  "settings_api"
+ ],
+ "llm": {
+  "provider": "openai-compatible",
+  "base_url": "https://api.fireworks.ai/inference/v1",
+  "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017"
+ },
+ "spec_version": 1,
+ "mcp_rust_bin": true,
+ "started": "2026-11-24T09:59:09"
+}

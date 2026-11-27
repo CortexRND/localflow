@@ -313,8 +313,8 @@ fn route_methods(path: &str) -> Option<&'static [&'static str]> {
         "/api/autostart" => Some(&["GET", "POST"]),
         "/openapi.json" | "/docs" | "/redoc" | "/docs/oauth2-redirect" => Some(&["GET", "HEAD"]),
         "/healthz" | "/api/status" | "/api/providers/stt" | "/api/providers/llm"
-        | "/api/models" | "/api/secrets" | "/meeting/templates" | "/meeting/status"
-        | "/prompts" => Some(&["GET"]),
+        | "/api/models" | "/api/secrets" | "/api/perf" | "/meeting/templates"
+        | "/meeting/status" | "/prompts" => Some(&["GET"]),
         "/api/launch-code" | "/api/test/llm" | "/transcribe" | "/meeting/start"
         | "/meeting/notes" | "/meeting/chat" | "/api/recall" | "/meeting/stop"
         | "/meeting/dismiss" => Some(&["POST"]),
@@ -599,6 +599,7 @@ fn dispatch(
             .into_response()
         }
         "/api/secrets" => Json(api::secrets_status(&config)).into_response(),
+        "/api/perf" => perf_summary(query.get("window").map(String::as_str)),
         "/api/autostart" if method == Method::GET => {
             Json(json!({"status": state.backend.autostart_status()})).into_response()
         }
@@ -673,6 +674,21 @@ fn dispatch(
             let response = state.backend.handle_local(request, local);
             respond(response.status, response.body)
         }
+    }
+}
+
+/// `GET /api/perf?window=24h|7d|30d`: the local perf ledger summary. The body
+/// is `perf_ledger::summary_json`, byte-identical to Python's `/api/perf`.
+fn perf_summary(window: Option<&str>) -> Response {
+    use lf_core::perf_ledger::{self, PerfLedger};
+    let window = window.unwrap_or(perf_ledger::DEFAULT_WINDOW);
+    match perf_ledger::summarize(&PerfLedger::default(), window) {
+        Ok(summary) => (
+            [(header::CONTENT_TYPE, "application/json")],
+            perf_ledger::summary_json(&summary),
+        )
+            .into_response(),
+        Err(invalid) => error(400, invalid.to_string()),
     }
 }
 

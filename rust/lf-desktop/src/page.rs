@@ -12,6 +12,10 @@ pub enum Page {
     Prompts,
     Models,
     Settings,
+    /// Read-only People (remembered voices). GPUI-only and gated by
+    /// `controllers::people::enabled`: never in [`Page::ALL`], the sidebar
+    /// order for Ctrl+1..0, or a hand-off request (it has no Hub route).
+    People,
 }
 
 /// Sidebar groups: `(group label, pages)`; `None` = ungrouped.
@@ -56,6 +60,7 @@ impl Page {
             Page::Prompts => "Prompts",
             Page::Models => "Models",
             Page::Settings => "Settings",
+            Page::People => "People",
         }
     }
 
@@ -79,6 +84,7 @@ impl Page {
             Page::Prompts => "list-checks",
             Page::Models => "cpu",
             Page::Settings => "settings",
+            Page::People => "user-round",
         }
     }
 
@@ -104,6 +110,24 @@ impl Page {
         pages.extend(NAV_FOOTER);
         pages
     }
+
+    /// The sidebar as drawn (arrow-key order): People follows Meetings only
+    /// while it is turned on.
+    pub fn visible_order(people: bool) -> Vec<Page> {
+        let mut pages = Page::sidebar_order();
+        if people {
+            if let Some(i) = pages.iter().position(|p| *p == Page::Meetings) {
+                pages.insert(i + 1, Page::People);
+            }
+        }
+        pages
+    }
+
+    /// `--page people`: parsed as an unknown name (People has no Hub route)
+    /// and resolved once the config is known.
+    pub fn is_people_name(name: &str) -> bool {
+        name.trim().eq_ignore_ascii_case("people")
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +141,15 @@ mod tests {
             assert_eq!(Page::parse(page.route()), Some(page));
         }
         assert_eq!(Page::sidebar_order().len(), 10);
+        assert!(!Page::ALL.contains(&Page::People));
+        assert!(!Page::sidebar_order().contains(&Page::People));
+        assert_eq!(Page::parse("people"), None, "no Hub route");
+        assert!(Page::is_people_name(" People "));
+        assert_eq!(Page::visible_order(false), Page::sidebar_order());
+        let shown = Page::visible_order(true);
+        let meetings = shown.iter().position(|p| *p == Page::Meetings).unwrap();
+        assert_eq!(shown[meetings + 1], Page::People);
+        assert_eq!(shown.len(), 11);
         assert_eq!(
             Page::Models.label(),
             lf_ui::hub_model::sidebar_label("Models")

@@ -4,9 +4,11 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from tkinter import filedialog, messagebox
 from tkinter import font as tkfont
 
@@ -18,11 +20,34 @@ from localflow.hub_model import (
     SPEAKERS_HEADING,
     SpeakerPanel,
     dictation_state,
+    meeting_diarization_status,
     speaker_row_meta,
 )
 from localflow.hub_settings import DIARIZATION_KEYS, diarization_disabled_reason
 from localflow.live_config import LazyConfig
-from localflow.meeting_client import MeetingClient, vault_notes_path
+from localflow.meeting_client import MeetingClient, VoiceRecording, vault_notes_path
+from localflow.people_model import (
+    CONSENT_CANCEL,
+    CONSENT_CONFIRM,
+    CONSENT_DRAFT_NOTE,
+    CONSENT_POINTS,
+    CONSENT_TITLE,
+    FORGET_ALL_PROMPT,
+    PEOPLE_EMPTY,
+    PEOPLE_HEADING,
+    PEOPLE_LOADING,
+    RECORD_STARTING,
+    RECORD_UPLOADING,
+    SAVE_FAILED,
+    STALE_BADGE,
+    TOGGLE_TITLE,
+    PeopleState,
+    can_remember,
+    forget_prompt,
+    is_generic_label,
+    recognition_update,
+    recording_status,
+)
 from localflow.settings_agent import LABELS as SETTING_LABELS
 from localflow.ui_tokens import (
     CARD_GAP,
@@ -39,6 +64,25 @@ from localflow.ui_tokens import (
 PAGES = ("Home", "Meetings", "History", "Dictionary", "Style", "Models")
 # The speaker-label switches on the Meetings page (same labels as Settings).
 SPEAKER_TOGGLES = tuple((key, SETTING_LABELS[key]) for key in DIARIZATION_KEYS)
+
+
+class _BoolState:
+    """Plain-Python toggle state paired with a tk.Checkbutton (avoids tk.Variable GC races)."""
+
+    def __init__(self, value, widget):
+        self._value = bool(value)
+        self._widget = widget
+        self.set(self._value)
+
+    def get(self):
+        return self._value
+
+    def set(self, value):
+        self._value = bool(value)
+        if self._value:
+            self._widget.select()
+        else:
+            self._widget.deselect()
 
 
 def _one_line(text, limit):
@@ -96,6 +140,12 @@ class HubWindow:
         # draws it and exists only while there are speakers to show.
         self._meeting_speakers = SpeakerPanel()
         self._meeting_speakers_view = None
+        # People (speaker recognition): drawn only while speaker_diarization
+        # or speaker_recognition is on; the capture holds mic audio in memory.
+        self._people = PeopleState()
+        self._people_view = None
+        self._people_capture = None
+        self._people_after = None  # the 1 s retry of a 403 right after consent
         self.page = "Home"
         self.page_errors: dict[str, str] = {}
         root.title("LocalFlow Hub")
@@ -890,24 +940,40 @@ class HubWindow:
             self._meeting_speakers_view.capture()
         # _clear destroys the widgets with the rest of the page.
         self._meeting_speakers_view = None
+        if self._people_view is not None:
+            self._people_view.capture()
+            self._people_view.cancel_timers()
+        self._people_cancel_capture()  # the mic never stays open off screen
+        if self._people_after is not None:
+            self.root.after_cancel(self._people_after)
+            self._people_after = None
+            if self._people.phase == "loading":
+                self._people.phase = ""
+        self._people_view = None
 
     def _meeting_request(self, operation, callback, *args):
+        """Run a client method (by name) or a callable off the UI thread."""
         self._meeting_requests_in_flight += 1
         if self._meeting_dispatch_after is None:
             self._meeting_dispatch_after = self.root.after(
                 25, self._meeting_dispatch_results
             )
+        name = getattr(operation, "__name__", "call") if callable(operation) else operation
 
         def run():
             try:
-                result = getattr(self.meeting_client, operation)(*args)
+                call = (
+                    operation if callable(operation)
+                    else getattr(self.meeting_client, operation)
+                )
+                result = call(*args)
                 error = None
             except Exception as exc:  # noqa: BLE001
                 result, error = None, exc
             self._meeting_results.put((callback, result, error))
 
         threading.Thread(
-            target=run, name=f"localflow-meeting-{operation}", daemon=True
+            target=run, name=f"localflow-meeting-{name}", daemon=True
         ).start()
 
     def _meeting_dispatch_results(self):
@@ -934,8 +1000,10 @@ class HubWindow:
             pass
 
     def _page_meetings(self):
-        # The old view went with the old page body; it is rebuilt on demand.
+        # The old views went with the old page body; they are rebuilt on demand.
         self._meeting_speakers_view = None
+        self._people_view = None
+        people_request = self._people_sync_flags(refresh=True)
         self.meeting_down = tk.Frame(self.body, bg=self.tokens["paper"])
         self.meeting_down_label = tk.Label(
             self.meeting_down, text="LocalFlow server not running.",
@@ -954,6 +1022,15 @@ class HubWindow:
             anchor="w", justify="left", wraplength=720,
         )
         self.meeting_watch.pack(fill="x", pady=(0, 12))
+        # Speaker labels: packed right under the watch line only while there
+        # is something to say, and wrapped to the page width (the window can
+        # be narrower than 720 + sidebar, which would clip a long reason).
+        self.meeting_diarization = tk.Label(
+            self.meeting_content, text="", bg=self.tokens["paper"],
+            fg=self.tokens["muted"], font=(self.font_family, 11),
+            anchor="w", justify="left", wraplength=720,
+        )
+        self.meeting_content.bind("<Configure>", self._meeting_wrap, add="+")
         self.meeting_error = tk.Label(
             self.meeting_content, text="", bg=self.tokens["paper"],
             fg=self.tokens["red"], font=(self.font_family, 12),
@@ -1001,9 +1078,8 @@ class HubWindow:
         self.meeting_speaker_vars = {}
         self.meeting_speaker_checks = {}
         for key, label in SPEAKER_TOGGLES:
-            var = tk.BooleanVar(value=bool(getattr(self.config, key, False)))
             check = tk.Checkbutton(
-                self.meeting_setup, text=label, variable=var,
+                self.meeting_setup, text=label,
                 command=lambda key=key: self._meeting_set_speaker_flag(key),
                 bg=self.tokens["paper"], fg=self.tokens["ink"],
                 disabledforeground=self.tokens["muted"],
@@ -1012,6 +1088,7 @@ class HubWindow:
                 selectcolor=self.tokens["surface"], highlightthickness=0,
                 font=(self.font_family, 12), anchor="w",
             )
+            var = _BoolState(getattr(self.config, key, False), check)
             check.pack(fill="x", pady=(0, 2))
             self.meeting_speaker_vars[key] = var
             self.meeting_speaker_checks[key] = check
@@ -1108,6 +1185,8 @@ class HubWindow:
         self._meeting_request("templates", self._meeting_templates_loaded)
         self._meeting_request_diarization()
         self._meeting_poll()
+        if people_request:
+            self._people_send(people_request)
 
     def _meeting_retry(self):
         self.meeting_down.pack_forget()
@@ -1147,7 +1226,8 @@ class HubWindow:
 
     def _meeting_set_speaker_flag(self, key):
         var = self.meeting_speaker_vars[key]
-        value = bool(var.get())
+        value = not var.get()
+        var.set(value)
         try:
             fresh = load_config()
             updated = apply_config_update(fresh, {"meetings": {key: value}})
@@ -1255,6 +1335,13 @@ class HubWindow:
         self._meeting_after = None
         self._meeting_poll()
 
+    def _meeting_wrap(self, event):
+        """Wrap the speaker-label line to the meeting page's current width."""
+        if event.width > 1:
+            self.meeting_diarization.configure(
+                wraplength=max(200, min(720, event.width)),
+            )
+
     def _meeting_render(self):
         status = self._meeting_status_data
         session = status.get("session")
@@ -1270,8 +1357,16 @@ class HubWindow:
                 watch = "mic only"
             if session.get("title"):
                 watch = f"{session['title']} · {watch}"
+            diarization = meeting_diarization_status(session)
             self.meeting_watch.configure(text=watch)
-            self.meeting_watch.pack(fill="x", pady=(0, 12))
+            self.meeting_watch.pack(fill="x", pady=(0, 2 if diarization else 12))
+            if diarization:
+                self.meeting_diarization.configure(text=diarization)
+                self.meeting_diarization.pack(
+                    fill="x", pady=(0, 12), after=self.meeting_watch,
+                )
+            else:
+                self.meeting_diarization.pack_forget()
             self.meeting_setup.pack_forget()
             self.meeting_action.configure(
                 text=(
@@ -1305,6 +1400,7 @@ class HubWindow:
                 self.meeting_watch.pack(fill="x", pady=(0, 12))
             else:
                 self.meeting_watch.pack_forget()
+            self.meeting_diarization.pack_forget()
             self.meeting_setup.pack(fill="x")
             self.meeting_action.configure(
                 text="Start meeting transcription",
@@ -1330,6 +1426,7 @@ class HubWindow:
         else:
             self.meeting_chat_frame.pack_forget()
         self._meeting_render_chat()
+        self._meeting_render_people()
 
     def _meeting_notes_changed(self, _event=None):
         if self.meeting_notes.edit_modified():
@@ -1561,8 +1658,176 @@ class HubWindow:
 
     def _meeting_speaker_done(self, token, result, error):
         # State first: a TclError below must not leave the panel busy.
-        if self._meeting_speakers.finish(token, result, error) and self.page == "Meetings":
+        panel = self._meeting_speakers
+        if not panel.finish(token, result, error):
+            return
+        people_request = None
+        if panel.last_action == "remember" and error is None:
+            # A new voice: the People list shows it.
+            people = self._people
+            if people.active and not people.busy:
+                people_request = people.load()
+        if self.page == "Meetings":
             self._meeting_render_speakers()
+            self._people_render()
+        if people_request:
+            self._people_send(people_request)
+
+    # -------------------------------------------------------------- people ---
+
+    def _people_config(self):
+        try:
+            return load_config()
+        except Exception:  # noqa: BLE001 - an unreadable file: what we were given
+            return self.config
+
+    def _people_sync_flags(self, refresh=False):
+        """Read the speaker flags (LazyConfig doesn't refresh them); a list load or None."""
+        config = self._people_config()
+        diarization = bool(getattr(config, "speaker_diarization", False))
+        recognition = bool(getattr(config, "speaker_recognition", False))
+        people = self._people
+        was_rec = bool(people.rec)
+        request = people.set_flags(diarization, recognition)
+        if was_rec and not people.rec:
+            capture, self._people_capture = self._people_capture, None
+            if capture is not None:
+                threading.Thread(
+                    target=capture.discard, name="localflow-people-discard", daemon=True,
+                ).start()
+        if request is None and refresh:
+            request = people.refresh()
+        self._meeting_speakers.set_remember(can_remember(diarization, recognition))
+        return request
+
+    def _people_shown(self):
+        return self.page == "Meetings" and self._meeting_notes_visible()
+
+    def _people_render(self):
+        if self._people_shown():
+            self._meeting_render_people()
+
+    def _meeting_render_people(self):
+        people, view = self._people, self._people_view
+        if not people.visible:
+            if view is not None:
+                view.destroy()
+                self._people_view = None
+            return
+        if view is None:
+            view = self._people_view = PeoplePanelView(
+                self, self.meeting_content, people, self._people_send,
+            )
+        # Always the last block of the page, under the chat.
+        view.frame.pack_forget()
+        view.frame.pack(fill="x", pady=(16, 0))
+        view.render()
+
+    def _people_send(self, request):
+        """Run a PeopleState request off the UI thread (capture calls on the capture)."""
+        operation, args, token = request
+        if operation == "capture_start":
+            capture = self._people_capture = VoiceRecording(self._people_config())
+            self._meeting_request(
+                capture.start,
+                lambda _result, error: self._people_rec_started(token, capture, error),
+            )
+            return
+        if operation == "capture_finish":
+            capture, self._people_capture = self._people_capture, None
+            client = self.meeting_client
+
+            def finish(name):
+                if capture is None:
+                    raise RuntimeError("no recording")
+                return capture.finish(client, name)
+
+            self._meeting_request(
+                finish,
+                lambda result, error: self._people_done(token, result, error),
+                *args,
+            )
+            return
+        done = self._people_loaded if operation == "enrolled" else self._people_done
+        self._meeting_request(
+            operation, lambda result, error: done(token, result, error), *args,
+        )
+
+    def _people_loaded(self, token, result, error):
+        outcome = self._people.loaded(token, result, error)
+        if outcome == "retry":
+            # The server adopts a consent write when its config watcher runs.
+            self._people_after = self.root.after(1000, self._people_retry_load)
+            return
+        if outcome:
+            self._people_render()
+
+    def _people_retry_load(self):
+        self._people_after = None
+        people = self._people
+        if people.phase == "loading":
+            self._people_send(("enrolled", (), people.seq))
+
+    def _people_rec_started(self, token, capture, error):
+        if not self._people.recording_started(token, error, time.monotonic()):
+            return  # cancelled first: the capture was discarded
+        if error is not None and self._people_capture is capture:
+            self._people_capture = None
+        self._people_render()
+
+    def _people_done(self, token, result, error):
+        people = self._people
+        was_forget_all = people.busy == "forget_all"
+        if not people.finish(token, result, error):
+            return
+        if was_forget_all and error is None:
+            self._meeting_speakers.clear_remembered()
+            self._meeting_render_speakers()
+        request = people.load() if people.reload else None
+        self._people_render()
+        if request:
+            self._people_send(request)
+
+    def _people_cancel_capture(self):
+        """Leave the enroll row; a capture in progress is stopped and dropped."""
+        if not self._people.cancel_recording():
+            return
+        capture, self._people_capture = self._people_capture, None
+        if capture is not None:
+            threading.Thread(
+                target=capture.discard, name="localflow-people-discard", daemon=True,
+            ).start()
+
+    def _people_toggle(self):
+        people = self._people
+        action = people.request_recognition(not people.recognition)
+        if action == "consent":
+            accepted = ConsentDialog(self).run()
+            if people.consent_result(accepted):
+                self._people_write(True)
+            else:
+                self._people_render()
+        elif action == "write":
+            self._people_write(False)
+
+    def _people_write(self, on):
+        """Save speaker_recognition (only after consent when turning it on)."""
+        people = self._people
+        try:
+            updated = apply_config_update(load_config(), recognition_update(on))
+            save_config(updated)
+        except Exception:  # noqa: BLE001 - ConfigError or an unwritable folder
+            people.recognition_save_failed(SAVE_FAILED)
+            self._people_render()
+            return
+        self.config = updated
+        request = people.recognition_saved(on)
+        sync = self._people_sync_flags()
+        request = request or sync
+        if self._people_shown():
+            self._meeting_render()
+        if request:
+            self._people_send(request)
 
     def _meeting_show_error(self, error):
         self._meeting_error_message = str(error)
@@ -1704,9 +1969,9 @@ class SpeakerPanelView:
             frame = tk.Frame(self.card, bg=tokens["surface"], padx=12, pady=6)
             frame.pack(fill="x")
             mode = panel.mode if row["id"] == panel.speaker_id else ""
-            if mode == "rename":
-                focus = self._edit_key != ("rename", row["id"])
-                self._rename_row(frame, row)
+            if mode in ("rename", "remember"):
+                focus = self._edit_key != (mode, row["id"])
+                self._rename_row(frame, row, "Remember" if mode == "remember" else "Save")
             elif mode == "merge":
                 self._merge_row(frame, row)
             else:
@@ -1743,6 +2008,16 @@ class SpeakerPanelView:
             frame, ("rename", speaker_id), "Rename",
             lambda: self._begin("rename", speaker_id),
         ).pack(side="right")
+        if self.panel.remember:
+            # Packed after Rename, so it sits to its left.
+            remembered = self.panel.is_remembered(speaker_id)
+            remember = self._button(
+                frame, ("remember", speaker_id), "Remembered" if remembered else "Remember",
+                lambda: self._begin("remember", speaker_id),
+            )
+            remember.pack(side="right", padx=(0, 8))
+            if remembered:
+                remember.configure(state="disabled")
         name = tk.Label(
             frame, text=row["label"], bg=tokens["surface"], fg=tokens["ink"],
             font=(family, 12, "bold"), anchor="w",
@@ -1756,14 +2031,18 @@ class SpeakerPanelView:
         self.name_labels.append(name)
         self.duration_labels.append(duration)
 
-    def _rename_row(self, frame, row):
+    def _rename_row(self, frame, row, save_label="Save"):
+        """The name prompt of a rename, or of a Remember (`save_label` "Remember")."""
         panel = self.panel
         self._button(frame, ("cancel", row["id"]), "Cancel", self._cancel).pack(
             side="right", padx=(8, 0),
         )
+        if panel.busy == "rename":
+            save_label = "Saving…"
+        elif panel.busy == "remember":
+            save_label = "Remembering…"
         self._button(
-            frame, ("save", row["id"]),
-            "Saving…" if panel.busy == "rename" else "Save", self._save, kind="secondary",
+            frame, ("save", row["id"]), save_label, self._save, kind="secondary",
         ).pack(side="right", padx=(12, 0))
         entry = self.hub._entry(frame)
         entry.insert(0, panel.draft)
@@ -1821,6 +2100,10 @@ class SpeakerPanelView:
     def _begin(self, mode, speaker_id):
         if mode == "rename":
             self.panel.begin_rename(speaker_id)
+        elif mode == "remember":
+            row = self.panel.row(speaker_id)
+            label = row["label"] if row is not None else ""
+            self.panel.begin_remember(speaker_id, "" if is_generic_label(label) else label)
         else:
             self.panel.begin_merge(speaker_id)
         self.render()
@@ -1836,7 +2119,10 @@ class SpeakerPanelView:
     def _save(self):
         if self.entry is None:
             return
-        request = self.panel.submit_rename(self.entry.get())
+        if self.panel.mode == "remember":
+            request = self.panel.submit_remember(self.entry.get())
+        else:
+            request = self.panel.submit_rename(self.entry.get())
         self.render()
         if request:
             self.send(request)
@@ -1846,6 +2132,447 @@ class SpeakerPanelView:
         self.render()
         if request:
             self.send(request)
+
+
+class PeoplePanelView:
+    """Draws the People block (a PeopleState) at the bottom of Meetings.
+
+    Plain widgets only (no Tk variables): names are read with Entry.get();
+    the countdown is one label updated by root.after while recording.
+    """
+
+    def __init__(self, hub, parent, people, send):
+        self.hub = hub
+        self.people = people
+        self.send = send
+        tokens = hub.tokens
+        family = hub.font_family
+        self.frame = tk.Frame(parent, bg=tokens["paper"])
+        self.heading = tk.Label(
+            self.frame, text=PEOPLE_HEADING, bg=tokens["paper"], fg=tokens["ink"],
+            font=(family, 13, "bold"),
+        )
+        self.heading.pack(anchor="w", pady=(0, 6))
+        self.card = tk.Frame(
+            self.frame, bg=tokens["surface"],
+            highlightbackground=tokens["line"], highlightthickness=1,
+        )
+        self.card.pack(fill="x")
+        self.message = tk.Label(
+            self.frame, text="", bg=tokens["paper"], fg=tokens["red"],
+            font=(family, 12), wraplength=700, justify="left", anchor="w",
+        )
+        self._tick_after = None
+        self._rendered = None
+        self._edit_key = ("", "")
+        self._reset_refs()
+
+    def _reset_refs(self):
+        self.entry = None
+        self.entry_key = None
+        self.buttons = {}
+        self.toggle = None
+        self.toggle_detail = None
+        self.status = None
+        self.name_labels = []
+        self.badges = []
+        self.meta_labels = []
+        self.list_label = None
+
+    def render(self):
+        """Show the message line; rebuild the card only when the state changed."""
+        people = self.people
+        tokens = self.hub.tokens
+        if people.message:
+            self.message.configure(
+                text=people.message,
+                fg=tokens["red"] if people.error else tokens["success"],
+            )
+            self.message.pack(fill="x", pady=(6, 0))
+        else:
+            self.message.configure(text="")
+            self.message.pack_forget()
+        if self._rendered != people.revision:
+            self.capture()
+            self._fill()
+            self._rendered = people.revision
+        self._schedule_tick()
+
+    def capture(self):
+        """Keep what is typed in the rename or enroll field in the state."""
+        if self.entry is None:
+            return
+        try:
+            text = self.entry.get()
+        except tk.TclError:
+            return
+        self.people.set_draft(text, self.entry_key)
+
+    def cancel_timers(self):
+        if self._tick_after is not None:
+            try:
+                self.hub.root.after_cancel(self._tick_after)
+            except tk.TclError:
+                pass
+            self._tick_after = None
+
+    def destroy(self):
+        self.cancel_timers()
+        self._reset_refs()
+        self.frame.destroy()
+
+    # ---------------------------------------------------------------- draw ---
+
+    def _button(self, parent, key, label, command, kind="ghost", **style):
+        button = self.hub._button(parent, label, command, kind=kind, padx=10, pady=2, **style)
+        self.buttons[key] = button
+        return button
+
+    def _line(self):
+        tk.Frame(self.card, bg=self.hub.tokens["line"], height=1).pack(fill="x")
+
+    def _row_frame(self):
+        frame = tk.Frame(self.card, bg=self.hub.tokens["surface"], padx=12, pady=6)
+        frame.pack(fill="x")
+        return frame
+
+    def _label(self, parent, text, *, size=11, color="muted", bold=False, **options):
+        tokens = self.hub.tokens
+        return tk.Label(
+            parent, text=text, bg=tokens["surface"], fg=tokens[color],
+            font=(self.hub.font_family, size, "bold" if bold else "normal"),
+            anchor="w", justify="left", **options,
+        )
+
+    def _fill(self):
+        people = self.people
+        for child in self.card.winfo_children():
+            child.destroy()
+        self._reset_refs()
+        self._toggle_row()
+        focus = False
+        if people.active:
+            self._line()
+            self._footer()
+            self._line()
+            self._list()
+            if self.entry is not None:
+                focus = self._edit_key != (people.mode, people.person_id)
+        self._edit_key = (people.mode, people.person_id)
+        if self.entry is not None and not people.busy and not people.rec:
+            self.entry.focus_set()
+            if focus:
+                self.entry.selection_range(0, "end")
+            self.entry.icursor("end")
+        if people.busy:
+            for key, button in self.buttons.items():
+                if key != "toggle":
+                    button.configure(state="disabled")
+            if self.entry is not None:
+                self.entry.configure(state="disabled")
+        elif people.rec:
+            for key, button in self.buttons.items():
+                if isinstance(key, tuple):
+                    button.configure(state="disabled")
+
+    def _toggle_row(self):
+        people = self.people
+        frame = tk.Frame(self.card, bg=self.hub.tokens["surface"], padx=12, pady=8)
+        frame.pack(fill="x")
+        # Packed before the labels, so a narrow window keeps it visible.
+        toggle = self._button(
+            frame, "toggle", "Turn Off" if people.recognition else "Turn On…",
+            self.hub._people_toggle, kind="secondary",
+        )
+        toggle.pack(side="right")
+        if not people.toggle_enabled:
+            toggle.configure(state="disabled")
+        self.toggle = toggle
+        text = tk.Frame(frame, bg=self.hub.tokens["surface"])
+        text.pack(side="left", fill="x", expand=True)
+        self._label(text, TOGGLE_TITLE, size=12, color="ink", bold=True).pack(anchor="w")
+        self.toggle_detail = self._label(text, people.toggle_detail)
+        self.toggle_detail.pack(anchor="w")
+
+    def _list(self):
+        people = self.people
+        if people.phase == "error":
+            frame = self._row_frame()
+            self._button(frame, "retry", "Retry", self._retry).pack(side="right")
+            self.list_label = self._label(
+                frame, people.load_error, size=12, color="red", wraplength=560,
+            )
+            self.list_label.pack(side="left", fill="x", expand=True)
+            return
+        if people.phase != "ready" or not people.rows:
+            frame = self._row_frame()
+            self.list_label = self._label(
+                frame, PEOPLE_LOADING if people.phase != "ready" else PEOPLE_EMPTY, size=12,
+            )
+            self.list_label.pack(side="left")
+            return
+        for index, row in enumerate(people.rows):
+            if index:
+                tk.Frame(self.card, bg=self.hub.tokens["line"], height=1).pack(fill="x")
+            frame = self._row_frame()
+            if people.mode == "rename" and people.person_id == row["id"]:
+                self._name_row(frame, row["id"], "Saving…" if people.busy == "rename" else "Save",
+                               self._save)
+            else:
+                self._person_row(frame, row)
+
+    def _person_row(self, frame, row):
+        person_id = row["id"]
+        self._button(
+            frame, ("forget", person_id), "Forget", lambda: self._forget(person_id),
+            fg=self.hub.tokens["red"],
+        ).pack(side="right", padx=(8, 0))
+        self._button(
+            frame, ("rename", person_id), "Rename", lambda: self._rename(person_id),
+        ).pack(side="right")
+        name = self._label(frame, row["name"], size=12, color="ink", bold=True)
+        name.pack(side="left")
+        self.name_labels.append(name)
+        if row["stale"]:
+            badge = self._label(frame, STALE_BADGE, size=10, color="red")
+            badge.pack(side="left", padx=(10, 0))
+            self.badges.append(badge)
+        meta = self._label(frame, row["meta"])
+        meta.pack(side="left", padx=(10, 0))
+        self.meta_labels.append(meta)
+
+    def _name_row(self, frame, key, save_label, save):
+        """An entry with a submit and a Cancel button (rename and the enroll name)."""
+        self._button(frame, ("cancel", key), "Cancel", self._cancel).pack(
+            side="right", padx=(8, 0),
+        )
+        self._button(frame, ("save", key), save_label, save, kind="secondary").pack(
+            side="right", padx=(12, 0),
+        )
+        entry = self.hub._entry(frame)
+        entry.insert(0, self.people.draft)
+        entry.pack(side="left", fill="x", expand=True, ipady=4)
+        entry.bind("<Return>", lambda _event: save())
+        entry.bind("<Escape>", lambda _event: self._cancel())
+        self.entry = entry
+        self.entry_key = key
+
+    def _footer(self):
+        people = self.people
+        frame = self._row_frame()
+        if people.rec:
+            uploading = people.rec == "uploading"
+            cancel = self._button(frame, "rec_cancel", "Cancel", self._cancel_recording)
+            cancel.pack(side="right", padx=(8, 0))
+            stop = self._button(
+                frame, "stop", "Saving…" if uploading else "Stop & save", self._stop,
+                kind="secondary",
+            )
+            stop.pack(side="right")
+            if uploading:
+                cancel.configure(state="disabled")
+            if not people.can_stop(time.monotonic()):
+                stop.configure(state="disabled")
+            self.status = self._label(frame, self._status_text(), size=12, color="ink")
+            self.status.pack(side="left", fill="x", expand=True)
+            return
+        if people.mode == "enroll":
+            self._name_row(frame, "", "Record", self._record)
+            return
+        self._button(
+            frame, "forget_all", "Forget all…", self._forget_all, fg=self.hub.tokens["red"],
+        ).pack(side="right", padx=(8, 0))
+        self._button(frame, "export", "Export…", self._export).pack(side="right")
+        self._button(frame, "enroll", "Enroll my voice", self._enroll, kind="secondary").pack(
+            side="left",
+        )
+
+    def _status_text(self):
+        people = self.people
+        if people.rec == "starting":
+            return RECORD_STARTING
+        if people.rec == "uploading":
+            return RECORD_UPLOADING
+        return recording_status(people.remaining(time.monotonic()))
+
+    # ----------------------------------------------------------- countdown ---
+
+    def _schedule_tick(self):
+        if self.people.rec == "recording" and self._tick_after is None:
+            self._tick_after = self.hub.root.after(250, self._tick)
+
+    def _tick(self):
+        self._tick_after = None
+        people = self.people
+        if people.rec != "recording" or self.status is None:
+            return
+        now = time.monotonic()
+        if people.due(now):
+            self._stop()
+            return
+        try:
+            self.status.configure(text=self._status_text())
+            stop = self.buttons.get("stop")
+            if stop is not None and people.can_stop(now):
+                stop.configure(state="normal")
+        except tk.TclError:
+            return
+        self._schedule_tick()
+
+    # ----------------------------------------------------------- callbacks ---
+
+    def _refresh(self, request=None):
+        self.render()
+        if request:
+            self.send(request)
+
+    def _retry(self):
+        self._refresh(self.people.retry())
+
+    def _rename(self, person_id):
+        self.people.begin_rename(person_id)
+        self._refresh()
+
+    def _save(self):
+        if self.entry is None:
+            return
+        self._refresh(self.people.submit_rename(self.entry.get()))
+
+    def _cancel(self):
+        self.capture()
+        self.people.cancel()
+        self._refresh()
+
+    def _forget(self, person_id):
+        row = self.people.row(person_id)
+        if row is None or self.people.busy:
+            return
+        if not messagebox.askyesno(
+            "Forget", forget_prompt(row["name"]), icon="warning", default="no",
+            parent=self.frame,
+        ):
+            return
+        self._refresh(self.people.submit_forget(person_id))
+
+    def _forget_all(self):
+        if self.people.busy:
+            return
+        if not messagebox.askyesno(
+            "Forget all", FORGET_ALL_PROMPT, icon="warning", default="no", parent=self.frame,
+        ):
+            return
+        self._refresh(self.people.submit_forget_all())
+
+    def _export(self):
+        if self.people.busy:
+            return
+        folder = filedialog.askdirectory(
+            title="Export voiceprints", mustexist=False, parent=self.frame,
+        )
+        if not folder:
+            return
+        target = Path(folder).expanduser()
+        try:
+            nonempty = target.exists() and (not target.is_dir() or any(target.iterdir()))
+        except OSError:
+            nonempty = True
+        request = self.people.submit_export(
+            str(target), self.hub._people_config().vault_path, nonempty=nonempty,
+            base_url=getattr(self.hub.meeting_client, "base_url", None),
+        )
+        self._refresh(request)
+
+    def _enroll(self):
+        self.people.begin_enroll(getattr(self.hub.meeting_client, "base_url", None))
+        self._refresh()
+
+    def _record(self):
+        if self.entry is None:
+            return
+        self._refresh(self.people.start_recording(self.entry.get()))
+
+    def _stop(self):
+        request = self.people.stop_recording(time.monotonic())
+        if request:
+            self.cancel_timers()
+        self._refresh(request)
+
+    def _cancel_recording(self):
+        self.cancel_timers()
+        self.hub._people_cancel_capture()
+        self._refresh()
+
+
+class ConsentDialog:
+    """The speaker recognition consent dialog. Cancel is the default: Return and
+    Escape both cancel, and Turn On needs a click. Plain widgets only."""
+
+    def __init__(self, hub):
+        tokens = hub.tokens
+        family = hub.font_family
+        self.hub = hub
+        self.accepted = False
+        top = self.top = tk.Toplevel(hub.root)
+        top.title(CONSENT_TITLE)
+        top.configure(bg=tokens["paper"], padx=24, pady=20)
+        top.resizable(False, False)
+        try:
+            top.transient(hub.root)
+        except tk.TclError:
+            pass
+        tk.Label(
+            top, text=CONSENT_TITLE, bg=tokens["paper"], fg=tokens["ink"],
+            font=(family, 15, "bold"), anchor="w", justify="left", wraplength=460,
+        ).pack(fill="x")
+        self.points = []
+        for point in CONSENT_POINTS:
+            label = tk.Label(
+                top, text=f"• {point}", bg=tokens["paper"], fg=tokens["ink"],
+                font=(family, 12), anchor="w", justify="left", wraplength=460,
+            )
+            label.pack(fill="x", pady=(10, 0))
+            self.points.append(label)
+        tk.Label(
+            top, text=CONSENT_DRAFT_NOTE, bg=tokens["paper"], fg=tokens["muted"],
+            font=(family, 11), anchor="w", justify="left", wraplength=460,
+        ).pack(fill="x", pady=(14, 0))
+        buttons = tk.Frame(top, bg=tokens["paper"])
+        buttons.pack(fill="x", pady=(18, 0))
+        self.cancel_button = hub._button(buttons, CONSENT_CANCEL, self.cancel, kind="secondary")
+        self.cancel_button.pack(side="right")
+        self.confirm_button = hub._button(buttons, CONSENT_CONFIRM, self.confirm, kind="primary")
+        self.confirm_button.pack(side="right", padx=(0, 8))
+        top.bind("<Return>", lambda _event: self.cancel())
+        top.bind("<Escape>", lambda _event: self.cancel())
+        top.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.cancel_button.focus_set()
+        try:
+            top.grab_set()
+        except tk.TclError:
+            pass  # not viewable yet (or another grab): still modal by wait_window
+
+    def cancel(self):
+        self.accepted = False
+        self._close()
+
+    def confirm(self):
+        self.accepted = True
+        self._close()
+
+    def _close(self):
+        try:
+            self.top.grab_release()
+            self.top.destroy()
+        except tk.TclError:
+            pass
+
+    def run(self) -> bool:
+        """Wait until the dialog closes; True only after Turn On."""
+        try:
+            self.hub.root.wait_window(self.top)
+        except tk.TclError:
+            pass
+        return self.accepted
 
 
 def main(initial_page="Home"):

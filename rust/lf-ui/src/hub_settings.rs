@@ -466,6 +466,194 @@ pub fn manual_layout(
     }
 }
 
+// --------------------------------------------------- speaker-label switches ---
+//
+// Two `[meetings]` switches shown at the end of the Meetings group. They are
+// not settings-agent keys (the agent's allowlist and its model tool schema
+// stay as they are), so they are written straight to the config like the
+// Style page does, and they are not in the agent's Undo history: the caption
+// says so, keeping the panel's "Undo works for these too" honest. A Python
+// server only reloads `speaker_diarization` from disk for new meetings; it
+// keeps `diarize_mic` from startup, so the caption says that one needs a
+// server restart there.
+
+/// `(config field, label)` of the switches, in page order.
+pub const SPEAKER_SWITCHES: [(&str, &str); 2] = [
+    ("speaker_diarization", "Speaker labels"),
+    ("diarize_mic", "Label speakers on my microphone"),
+];
+pub const SPEAKER_CAPTION: &str = "Speaker labels start with your next meeting. \
+     On the Python server, the microphone setting needs a server restart. \
+     Changes here aren't part of Undo.";
+pub const SPEAKERS_CHECKING: &str = "Checking the speaker models…";
+pub const SPEAKERS_NO_RUNTIME: &str =
+    "This LocalFlow server can't label speakers: its speaker-label runtime isn't installed.";
+/// The servers' own reason when the models are missing (`NOT_DOWNLOADED`).
+pub const SPEAKERS_NOT_DOWNLOADED: &str =
+    "Speaker models are not downloaded. Run `lf speakers download`.";
+pub const SPEAKERS_MIC_NEEDS_LABELS: &str = "Turn on Speaker labels first.";
+
+/// Whether speaker labels can be turned on, from `GET /api/diarization/status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpeakerReadiness {
+    /// The status request has not answered yet.
+    Checking,
+    Ready,
+    /// Not ready, with the reason shown under the switches.
+    NotReady(String),
+}
+
+/// Readiness from the status reply (`None`: still checking). Ready needs the
+/// runtime and every verified model; the server's own `reason` explains a
+/// missing model, and a failed request says why it could not be checked.
+pub fn speaker_readiness(status: Option<&Result<Value, String>>) -> SpeakerReadiness {
+    match status {
+        None => SpeakerReadiness::Checking,
+        Some(Err(error)) => SpeakerReadiness::NotReady(safe_text_default(&format!(
+            "Couldn't check the speaker models: {error}"
+        ))),
+        Some(Ok(status)) => {
+            let installed = status.get("extra_installed") == Some(&Value::Bool(true));
+            let models = status.get("models_ready") == Some(&Value::Bool(true));
+            if installed && models {
+                SpeakerReadiness::Ready
+            } else if !installed {
+                SpeakerReadiness::NotReady(SPEAKERS_NO_RUNTIME.into())
+            } else {
+                let reason = status
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(safe_text_default)
+                    .unwrap_or_default();
+                SpeakerReadiness::NotReady(if reason.trim().is_empty() {
+                    SPEAKERS_NOT_DOWNLOADED.into()
+                } else {
+                    reason
+                })
+            }
+        }
+    }
+}
+
+/// One speaker switch as drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeakerSwitch {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub on: bool,
+    pub enabled: bool,
+}
+
+/// The switches for the saved values. A switch that is on can always be
+/// turned off; turning one on needs ready models, and the microphone switch
+/// also needs Speaker labels on. `busy` (a settings write or preview running)
+/// disables both.
+pub fn speaker_switches(
+    speaker_diarization: bool,
+    diarize_mic: bool,
+    readiness: &SpeakerReadiness,
+    busy: bool,
+) -> [SpeakerSwitch; 2] {
+    let ready = *readiness == SpeakerReadiness::Ready;
+    let [(labels_key, labels), (mic_key, mic)] = SPEAKER_SWITCHES;
+    [
+        SpeakerSwitch {
+            key: labels_key,
+            label: labels,
+            on: speaker_diarization,
+            enabled: !busy && (speaker_diarization || ready),
+        },
+        SpeakerSwitch {
+            key: mic_key,
+            label: mic,
+            on: diarize_mic,
+            enabled: !busy && (diarize_mic || (ready && speaker_diarization)),
+        },
+    ]
+}
+
+/// The muted line under the switches, if any: why they can't be turned on.
+pub fn speaker_note(readiness: &SpeakerReadiness, speaker_diarization: bool) -> Option<String> {
+    match readiness {
+        SpeakerReadiness::Checking => Some(SPEAKERS_CHECKING.into()),
+        SpeakerReadiness::NotReady(reason) => Some(reason.clone()),
+        SpeakerReadiness::Ready if !speaker_diarization => Some(SPEAKERS_MIC_NEEDS_LABELS.into()),
+        SpeakerReadiness::Ready => None,
+    }
+}
+
+/// `{"meetings": {"<file key>": on}}`: both fields keep their file key.
+pub fn speaker_update(key: &str, on: bool) -> Value {
+    serde_json::json!({ "meetings": { key: on } })
+}
+
+/// Frames of the speaker section, relative to the manual panel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeakerSectionLayout {
+    pub caption: Rect,
+    /// `(key, label, control)` in [`SPEAKER_SWITCHES`] order.
+    pub rows: Vec<(&'static str, Rect, Rect)>,
+    pub note: Option<Rect>,
+    pub error: Option<Rect>,
+    /// The manual panel's new height with this section at its end.
+    pub height: f64,
+}
+
+/// Lays the section out after the manual rows (`manual.height` is the panel
+/// with its rows): caption, the two switch rows like any manual switch row,
+/// then the note and a write error, each wrapped in full.
+pub fn speaker_section_layout(
+    manual: &ManualLayout,
+    width: f64,
+    note: Option<&str>,
+    error: &str,
+    measure: TextMeasure<'_>,
+) -> SpeakerSectionLayout {
+    let wrap = |text: &str, w: f64| wrapped_height(text, w, measure, MANUAL_FONT, Weight::Regular);
+    let inner = width - 2.0 * CARD_PAD;
+    let mut y = manual.height - CARD_PAD;
+    let caption_h = wrap(SPEAKER_CAPTION, inner);
+    let caption = (CARD_PAD, y, inner, caption_h);
+    y += caption_h + 6.0;
+    let control_w = manual_control_width("switch", inner);
+    let label_w = inner - control_w - LABEL_GAP;
+    let mut rows = Vec::new();
+    for (key, text) in SPEAKER_SWITCHES {
+        let label_h = wrap(text, label_w).max(LINE_H);
+        let line_h = SWITCH_H.max(label_h);
+        rows.push((
+            key,
+            (CARD_PAD, y + (line_h - label_h) / 2.0, label_w, label_h),
+            (
+                CARD_PAD + inner - control_w,
+                y + (line_h - SWITCH_H) / 2.0,
+                control_w,
+                SWITCH_H,
+            ),
+        ));
+        y += line_h + MANUAL_ROW_GAP;
+    }
+    let mut note_frame = None;
+    if let Some(note) = note.filter(|note| !note.is_empty()) {
+        let h = wrap(note, inner);
+        note_frame = Some((CARD_PAD, y, inner, h));
+        y += h + 4.0;
+    }
+    let mut error_frame = None;
+    if !error.is_empty() {
+        let h = wrap(error, inner);
+        error_frame = Some((CARD_PAD, y, inner, h));
+        y += h + 4.0;
+    }
+    SpeakerSectionLayout {
+        caption,
+        rows,
+        note: note_frame,
+        error: error_frame,
+        height: y + CARD_PAD,
+    }
+}
+
 /// Frames (x, y, w, h) for every element of the Settings page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsLayout {
@@ -1971,5 +2159,198 @@ mod tests {
             (Status::Error, "couldn't save")
         );
         assert!(controller.state.proposal.is_none());
+    }
+
+    // ------------------------------------------------ speaker-label switches
+
+    /// The status body both servers return (Python `api_diarization_status`,
+    /// Rust `speakers::diarization_status` + `download`).
+    fn diarization_status(installed: bool, models: bool, reason: &str) -> Value {
+        json!({
+            "models_ready": models, "reason": reason, "extra_installed": installed,
+            "models": [], "speaker_diarization": false, "diarize_mic": false,
+            "speaker_recognition": false,
+            "download": {"state": "idle", "done_bytes": 0, "total_bytes": 0, "error": null},
+        })
+    }
+
+    #[test]
+    fn speaker_readiness_follows_the_server_capability_and_reason() {
+        assert_eq!(speaker_readiness(None), SpeakerReadiness::Checking);
+        assert_eq!(
+            speaker_readiness(Some(&Ok(diarization_status(true, true, "")))),
+            SpeakerReadiness::Ready
+        );
+        assert_eq!(
+            speaker_readiness(Some(&Ok(diarization_status(false, true, "")))),
+            SpeakerReadiness::NotReady(SPEAKERS_NO_RUNTIME.into())
+        );
+        let reason = "The speaker model cache folder isn't a plain folder.";
+        assert_eq!(
+            speaker_readiness(Some(&Ok(diarization_status(true, false, reason)))),
+            SpeakerReadiness::NotReady(reason.into())
+        );
+        assert_eq!(
+            speaker_readiness(Some(&Ok(diarization_status(true, false, " ")))),
+            SpeakerReadiness::NotReady(SPEAKERS_NOT_DOWNLOADED.into())
+        );
+        // An older server (404) or a down one: not ready, and says why.
+        assert_eq!(
+            speaker_readiness(Some(&Err("Not Found".into()))),
+            SpeakerReadiness::NotReady("Couldn't check the speaker models: Not Found".into())
+        );
+        // A reason is display text, never raw control characters.
+        let SpeakerReadiness::NotReady(shown) =
+            speaker_readiness(Some(&Ok(diarization_status(true, false, "bad\nreason"))))
+        else {
+            panic!("not ready expected");
+        };
+        assert!(!shown.contains('\n'));
+    }
+
+    #[test]
+    fn speaker_switches_can_always_be_turned_off_but_on_needs_ready_models() {
+        let ready = SpeakerReadiness::Ready;
+        let missing = SpeakerReadiness::NotReady(SPEAKERS_NOT_DOWNLOADED.into());
+        let enabled = |sd: bool, mic: bool, readiness: &SpeakerReadiness, busy: bool| {
+            let [labels, mic_switch] = speaker_switches(sd, mic, readiness, busy);
+            assert_eq!((labels.on, mic_switch.on), (sd, mic));
+            (labels.enabled, mic_switch.enabled)
+        };
+        assert_eq!(enabled(false, false, &missing, false), (false, false));
+        assert_eq!(
+            enabled(false, false, &SpeakerReadiness::Checking, false),
+            (false, false)
+        );
+        assert_eq!(enabled(true, true, &missing, false), (true, true));
+        assert_eq!(enabled(false, false, &ready, false), (true, false));
+        assert_eq!(enabled(true, false, &ready, false), (true, true));
+        assert_eq!(enabled(true, true, &ready, true), (false, false));
+        let [labels, mic] = speaker_switches(false, false, &ready, false);
+        assert_eq!(
+            (labels.key, labels.label, mic.key, mic.label),
+            (
+                "speaker_diarization",
+                "Speaker labels",
+                "diarize_mic",
+                "Label speakers on my microphone"
+            )
+        );
+        assert_eq!(speaker_note(&ready, true), None);
+        assert_eq!(
+            speaker_note(&ready, false).as_deref(),
+            Some(SPEAKERS_MIC_NEEDS_LABELS)
+        );
+        assert_eq!(
+            speaker_note(&missing, true).as_deref(),
+            Some(SPEAKERS_NOT_DOWNLOADED)
+        );
+        assert_eq!(
+            speaker_update("diarize_mic", true),
+            json!({"meetings": {"diarize_mic": true}})
+        );
+    }
+
+    #[test]
+    fn speaker_section_follows_the_manual_rows_and_never_overlaps() {
+        let agent = agent();
+        let rows = rows_with(&agent);
+        let state = SettingsPageState::new();
+        for width in [MIN_CONTENT, WIDE_CONTENT] {
+            let manual = manual_layout(width, &rows, &state, &measure);
+            let last = manual.rows.last().unwrap().1.clone();
+            for (note, error) in [
+                (None, ""),
+                (Some(SPEAKERS_NOT_DOWNLOADED), ""),
+                (
+                    Some(SPEAKERS_CHECKING),
+                    "Couldn't save the setting: disk full",
+                ),
+            ] {
+                let section = speaker_section_layout(&manual, width, note, error, &measure);
+                assert!(section.caption.1 >= last.control.1 + last.control.3);
+                let mut frames = vec![section.caption];
+                for (_, label, control) in &section.rows {
+                    assert!(label.0 + label.2 <= control.0, "label overlaps its switch");
+                    assert!(control.0 + control.2 <= width - CARD_PAD + 0.5);
+                    frames.push(*label);
+                }
+                frames.extend(section.note);
+                frames.extend(section.error);
+                for pair in frames.windows(2) {
+                    assert!(pair[0].1 + pair[0].3 <= pair[1].1, "{pair:?}");
+                }
+                assert_eq!(section.note.is_some(), note.is_some());
+                assert_eq!(section.error.is_some(), !error.is_empty());
+                let bottom = frames.last().map(|f| f.1 + f.3).unwrap();
+                assert!(section.height >= bottom + CARD_PAD);
+            }
+        }
+    }
+
+    #[test]
+    fn speaker_caption_notes_the_python_mic_restart_and_wraps_in_full() {
+        assert!(SPEAKER_CAPTION.contains("microphone setting needs a server restart"));
+        assert!(SPEAKER_CAPTION.contains("aren't part of Undo"));
+        let agent = agent();
+        let rows = rows_with(&agent);
+        let state = SettingsPageState::new();
+        for width in [MIN_CONTENT, WIDE_CONTENT] {
+            let manual = manual_layout(width, &rows, &state, &measure);
+            let section = speaker_section_layout(&manual, width, None, "", &measure);
+            let inner = width - 2.0 * CARD_PAD;
+            let full = wrapped_height(
+                SPEAKER_CAPTION,
+                inner,
+                &measure,
+                MANUAL_FONT,
+                Weight::Regular,
+            );
+            assert_eq!(section.caption.2, inner);
+            assert_eq!(section.caption.3, full, "caption is clipped at {width}");
+            let first_row = section.rows[0].1;
+            assert!(section.caption.1 + section.caption.3 <= first_row.1);
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoChat;
+
+    impl lf_agent::ChatClient for NoChat {
+        fn tags(&self, _: &str) -> anyhow::Result<Value> {
+            anyhow::bail!("no model in this test")
+        }
+        fn chat(&self, _: &str, _: &Value) -> anyhow::Result<Value> {
+            anyhow::bail!("no model in this test")
+        }
+    }
+
+    #[test]
+    fn a_speaker_switch_writes_meetings_and_survives_an_agent_write() {
+        use lf_core::config::{apply_config_update, load_from, save_config, Config};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        save_config(&Config::defaults_for(true), Some(&path)).unwrap();
+        crate::config_write::update(Some(&path), |latest| {
+            apply_config_update(latest, &speaker_update("speaker_diarization", true))
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("speaker_diarization = true"), "{text}");
+        let agent = crate::backends::settings_agent_native::NativeSettingsAgent::with_client(
+            NoChat,
+            path.clone(),
+            dir.path().join("dictionary.json"),
+            dir.path().join("undo.json"),
+        );
+        agent.set_setting("sounds_enabled", &json!(false)).unwrap();
+        let saved = load_from(&path).unwrap();
+        assert_eq!(saved.field_bool("speaker_diarization"), Some(true));
+        assert_eq!(saved.field_bool("sounds_enabled"), Some(false));
+        // Undo restores only the agent's own change.
+        agent.undo().unwrap();
+        let saved = load_from(&path).unwrap();
+        assert_eq!(saved.field_bool("speaker_diarization"), Some(true));
+        assert_eq!(saved.field_bool("sounds_enabled"), Some(true));
     }
 }
