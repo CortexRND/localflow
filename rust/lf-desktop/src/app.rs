@@ -99,6 +99,16 @@ fn is_agents_settings_request(request: &Request) -> bool {
             .is_some_and(Page::is_agents_settings_name)
 }
 
+/// Where a queued page opens, kept with the request (it would otherwise be
+/// lost behind the overlay or a dialog).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum QueuedTarget {
+    /// A deep link on the page (`agents` on Settings).
+    Tab(&'static str),
+    /// An Agents session (`agents/<id>`).
+    Session(String),
+}
+
 /// What the needs-input watcher does next.
 enum AttentionNext {
     Stop,
@@ -352,6 +362,8 @@ pub struct Shell {
     setup_visible: bool,
     /// A routed page that arrived behind the overlay or a dialog.
     queued: Option<Request>,
+    /// What that page opens on once shown (a Settings tab, a session).
+    queued_target: Option<QueuedTarget>,
     pub runtime: RuntimeView,
     probing: bool,
     pub engine: Option<Engine>,
@@ -505,6 +517,7 @@ impl Shell {
             setup_view: None,
             setup_visible: false,
             queued: None,
+            queued_target: None,
             runtime,
             probing: false,
             engine,
@@ -978,7 +991,10 @@ impl Shell {
             // Settings → Agents (General when the service doesn't support
             // agents); behind the overlay or a dialog it waits like any page.
             if self.setup_visible || self.confirm.is_some() {
-                self.queued = Some(Route::Page(Page::Settings).into());
+                self.queue(
+                    Route::Page(Page::Settings).into(),
+                    Some(QueuedTarget::Tab("agents")),
+                );
                 self.apply_queued(cx);
             } else {
                 self.navigate(Page::Settings, Some("agents"), cx);
@@ -995,7 +1011,8 @@ impl Shell {
         match request.route {
             Route::Setup if self.confirm.is_none() => self.show_setup(cx),
             _ if self.setup_visible || self.confirm.is_some() => {
-                self.queued = Some(request);
+                let target = session.clone().map(QueuedTarget::Session);
+                self.queue(request, target);
                 self.apply_queued(cx);
             }
             Route::Page(page) => {
@@ -1006,8 +1023,15 @@ impl Shell {
                     v.update(cx, |p, cx| p.open_session(id, cx));
                 }
             }
-            Route::Setup => self.queued = Some(request),
+            Route::Setup => self.queue(request, None),
         }
+    }
+
+    /// Hold the newest routed request (and where it opens) until nothing
+    /// covers the page.
+    fn queue(&mut self, request: Request, target: Option<QueuedTarget>) {
+        self.queued = Some(request);
+        self.queued_target = target;
     }
 
     /// Route the newest queued request once nothing covers the page. Behind
@@ -1026,12 +1050,26 @@ impl Shell {
         let Some(request) = self.queued.take() else {
             return;
         };
+        let target = self.queued_target.take();
         match request.route {
             Route::Page(page) => {
                 let message = request
                     .notice()
                     .unwrap_or_else(|| format!("Opened {}", page.label()));
                 self.open_routed(page, Some(message), cx);
+                match target {
+                    Some(QueuedTarget::Tab(tab)) if self.page == page => {
+                        self.deep_link(page, tab, cx)
+                    }
+                    Some(QueuedTarget::Session(id)) => {
+                        if let (Page::Agents, Some(View::Agents(v))) =
+                            (self.page, self.find(Page::Agents))
+                        {
+                            v.update(cx, |p, cx| p.open_session(id, cx));
+                        }
+                    }
+                    _ => {}
+                }
             }
             Route::Setup => self.show_setup(cx),
         }
@@ -1414,7 +1452,7 @@ impl Shell {
             // A dialog or the setup overlay is open: no navigation behind it
             // (routed requests are queued and applied when it closes).
             if self.setup_visible && self.confirm.is_none() {
-                self.queued = Some(Route::Page(page).into());
+                self.queue(Route::Page(page).into(), target.map(QueuedTarget::Tab));
             }
             return;
         }

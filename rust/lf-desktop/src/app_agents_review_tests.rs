@@ -190,3 +190,74 @@ fn a_gone_session_stops_its_events_reader(cx: &mut TestAppContext) {
     assert_eq!(fake.calls().events, reads + 1, "no retry after a 404");
 }
 
+/// Hand a request to the open window (a second launch), as it would.
+fn hand_off(
+    shell: &Entity<Shell>,
+    dir: &tempfile::TempDir,
+    unknown_page: &str,
+    cx: &mut VisualTestContext,
+) {
+    let request = crate::controllers::instance::Request {
+        route: Route::Page(Page::Home),
+        unknown_page: Some(unknown_page.into()),
+    };
+    let launched =
+        crate::launch::sandbox(&dir.path().join("sandbox"), false, Some(request)).unwrap();
+    assert!(matches!(launched, crate::launch::Launched::HandedOff));
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.poll_instance(window, cx)));
+    cx.run_until_parked();
+}
+
+fn cover_with_dialog(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    shell.update(cx, |s, cx| {
+        s.confirm = Some(Confirm {
+            title: "Delete?".into(),
+            body: "A dialog over the page".into(),
+            verb: "Delete".into(),
+            destructive: true,
+            on_confirm: Rc::new(|_, _| {}),
+        });
+        cx.notify();
+    });
+}
+
+fn dismiss_dialog(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| shell.update(cx, |s, cx| s.close_dialog(false, window, cx)));
+    cx.run_until_parked();
+}
+
+/// `agents/<id>` behind a dialog: once it closes, Agents opens on that
+/// session (not just the page).
+#[gpui::test]
+fn a_queued_session_link_keeps_its_session(cx: &mut TestAppContext) {
+    let (shell, cx, dir) = open_with(Page::History, |_| {}, cx);
+    fake(&shell, cx).set_enabled(true);
+    shell.update(cx, |s, cx| s.refresh_views(cx));
+    cx.run_until_parked();
+    cover_with_dialog(&shell, cx);
+    hand_off(&shell, &dir, &format!("agents/{CLAUDE_RUNNING}"), cx);
+    assert_eq!(shell.read_with(cx, |s, _| s.page), Page::History, "waits");
+    dismiss_dialog(&shell, cx);
+    assert_eq!(shell.read_with(cx, |s, _| s.page), Page::Agents);
+    let selected = shell.read_with(cx, |s, cx| match s.find(Page::Agents) {
+        Some(View::Agents(v)) => v.read(cx).selected(),
+        _ => None,
+    });
+    assert_eq!(selected.as_deref(), Some(CLAUDE_RUNNING));
+}
+
+/// `agents/settings` behind a dialog: Settings opens on its Agents tab.
+#[gpui::test]
+fn a_queued_settings_link_keeps_its_tab(cx: &mut TestAppContext) {
+    let (shell, cx, dir) = open_with(Page::History, |_| {}, cx);
+    cx.run_until_parked();
+    cover_with_dialog(&shell, cx);
+    hand_off(&shell, &dir, Page::AGENTS_SETTINGS, cx);
+    dismiss_dialog(&shell, cx);
+    assert_eq!(shell.read_with(cx, |s, _| s.page), Page::Settings);
+    let tab = shell.read_with(cx, |s, cx| match s.find(Page::Settings) {
+        Some(View::Settings(v)) => v.read(cx).tab(),
+        _ => panic!("Settings is open"),
+    });
+    assert_eq!(tab, crate::controllers::settings::Tab::Agents);
+}
