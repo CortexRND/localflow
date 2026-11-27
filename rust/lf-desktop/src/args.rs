@@ -33,8 +33,9 @@ OPTIONS:
                        speakers-recent, speakers-settings, speakers-people,
                        agents-page, agents-states, agents-detail,
                        agents-launcher, agents-launcher-typed,
-                       agents-launcher-secret or agents-launcher-empty (only
-                       with --sandbox and --data-dir; seeds a new or reset
+                       agents-launcher-secret, agents-launcher-empty,
+                       agents-settings or agents-settings-key (only with
+                       --sandbox and --data-dir; seeds a new or reset
                        directory only; agents-launcher* open the launcher)
     --agents-launcher  Open the agent launcher (its own small window; pressed
                        again while open, it closes). Works with the main

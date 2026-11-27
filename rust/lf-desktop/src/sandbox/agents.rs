@@ -33,6 +33,7 @@ use crate::controllers::agents::{
     self, AgentsBackend, AgentsError, Changes, Event, EventsPage, LaunchRequest, Provider, Session,
     SessionPage, Status,
 };
+use crate::controllers::agents_settings::{self, AgentSettings, SecretValue};
 
 /// The interactive agents sandbox's shared state, in the sandbox directory.
 pub const STATE_FILE: &str = "agents-sandbox.json";
@@ -74,6 +75,61 @@ struct Inner {
     calls: Calls,
     /// Shared state file (interactive agents sandbox only).
     store: Option<PathBuf>,
+    /// `[agents]` keys Settings → Agents writes (besides `enabled`).
+    settings: Settings,
+    /// Key changes answer 503 `secrets_unavailable` (tests).
+    secrets_unavailable: bool,
+    /// Every `PUT /api/config` body accepted or refused (tests only; never
+    /// persisted). Config bodies hold no secret.
+    config_bodies: Vec<Value>,
+}
+
+/// The fake's `[agents]` settings. Secrets are not here: only each
+/// provider's `secrets[].set` presence flag, in `providers`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Settings {
+    hot_commands: bool,
+    default_provider: String,
+    default_repo: String,
+    /// `(alias, path)` in order.
+    repos: Vec<(String, String)>,
+}
+
+impl Settings {
+    fn seeded() -> Self {
+        Settings {
+            hot_commands: false,
+            default_provider: "claude".into(),
+            default_repo: "acme/web".into(),
+            repos: REPOS
+                .iter()
+                .map(|alias| (alias.to_string(), format!("/srv/{alias}")))
+                .collect(),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "hot_commands": self.hot_commands, "default_provider": self.default_provider,
+            "default_repo": self.default_repo,
+            "repos": self.repos.iter().map(|(a, p)| json!([a, p])).collect::<Vec<_>>(),
+        })
+    }
+
+    fn from_value(value: &Value) -> Option<Self> {
+        Some(Settings {
+            hot_commands: value["hot_commands"].as_bool()?,
+            default_provider: value["default_provider"].as_str()?.into(),
+            default_repo: value["default_repo"].as_str()?.into(),
+            repos: serde_json::from_value(value["repos"].clone()).ok()?,
+        })
+    }
+}
+
+/// Whether a workspace folder "exists": deterministic, never the real
+/// filesystem (a path naming `missing` doesn't).
+fn folder_exists(path: &str) -> bool {
+    !path.contains("missing")
 }
 
 /// How many times each route was called.
@@ -88,6 +144,11 @@ pub struct Calls {
     pub cancel: usize,
     pub remove: usize,
     pub message: usize,
+    /// `GET /status` read for Settings → Agents.
+    pub settings: usize,
+    pub set_config: usize,
+    pub check: usize,
+    pub set_secret: usize,
 }
 
 /// The fixture scenes' "now" (2026-11-20 12:22 UTC): pinned so their clock
@@ -138,15 +199,18 @@ fn seed_providers() -> Vec<Value> {
         json!({"kind": "cloud", "resume": true, "live_message": message, "cancel": cancel,
                "streaming": message, "needs_cwd": false, "reattach": false})
     };
+    let mut claude = provider(
+        "claude",
+        "",
+        "Claude",
+        json!({"kind": "local_process", "resume": true, "live_message": true,
+               "cancel": true, "streaming": true, "needs_cwd": true, "reattach": true}),
+        "ok",
+    );
+    // Runs on this computer with its own sign-in: the key is optional.
+    claude["secrets"] = json!([{"name": "agent_claude_api_key", "set": false, "required": false}]);
     vec![
-        provider(
-            "claude",
-            "",
-            "Claude",
-            json!({"kind": "local_process", "resume": true, "live_message": true,
-                   "cancel": true, "streaming": true, "needs_cwd": true, "reattach": true}),
-            "ok",
-        ),
+        claude,
         provider("devin", "", "Devin", cloud(false, false), "ok"),
         provider("codex", "", "Codex", cloud(true, false), "ok"),
         provider(
@@ -521,6 +585,9 @@ impl Inner {
             skew: 0.0,
             calls: Calls::default(),
             store: None,
+            settings: Settings::seeded(),
+            secrets_unavailable: false,
+            config_bodies: Vec::new(),
         };
         for (id, log) in &inner.events {
             let last = log.len() as u64;
@@ -655,11 +722,188 @@ impl Inner {
         moved
     }
 
+    /// What a shared sandbox writes to its file: sessions, the settings and
+    /// the providers (whose `secrets[]` hold presence flags only; a key's
+    /// value is never kept anywhere in this fake).
     fn persisted(&self) -> Value {
         json!({
             "revision": self.revision, "sessions": self.sessions, "events": self.events,
             "deleted": self.deleted, "bodies": self.bodies, "launched": self.launched,
+            "enabled": self.enabled, "settings": self.settings.to_value(),
+            "providers": self.providers,
         })
+    }
+
+    /// `GET /status` exactly as the schema's `Status`.
+    fn status_value(&self) -> Value {
+        json!({
+            "api_version": 1, "enabled": self.enabled,
+            "hot_commands": self.settings.hot_commands,
+            "sandbox": true, "allow_remote": false,
+            "default_provider": self.settings.default_provider,
+            "default_repo": self.settings.default_repo,
+            "repos": self.settings.repos.iter().map(|(alias, path)| json!({
+                "alias": alias, "path": path, "exists": folder_exists(path),
+            })).collect::<Vec<_>>(),
+            "limits": {"max_concurrent": 4, "max_queued": 16,
+                       "max_prompt_chars": 20000, "max_wait_seconds": 25},
+            "counts": self.counts(), "revision": self.revision,
+        })
+    }
+
+    fn has_repo(&self, alias: &str) -> bool {
+        self.settings.repos.iter().any(|(a, _)| a == alias)
+    }
+
+    /// `PUT /api/config` as the service validates it (the keys Settings →
+    /// Agents writes; others are refused here). Applied all at once or not
+    /// at all.
+    fn apply_config(&mut self, patch: &Value) -> Result<(), AgentsError> {
+        use crate::controllers::agents_settings::{absolute_folder, alias_key, valid_alias};
+        let invalid = |key: &str| {
+            rejected(
+                400,
+                "validation",
+                &format!("invalid value for config key 'agents.{key}'"),
+            )
+        };
+        let Some(sections) = patch.as_object() else {
+            return Err(rejected(400, "validation", "expected a JSON object"));
+        };
+        if let Some(other) = sections.keys().find(|k| *k != "agents") {
+            return Err(rejected(
+                400,
+                "validation",
+                &format!("unknown config key '{other}'"),
+            ));
+        }
+        let Some(values) = sections.get("agents").and_then(Value::as_object) else {
+            return Err(rejected(400, "validation", "unknown config key 'agents'"));
+        };
+        let mut enabled = self.enabled;
+        let mut next = self.settings.clone();
+        for (key, value) in values {
+            match key.as_str() {
+                "enabled" => enabled = value.as_bool().ok_or_else(|| invalid(key))?,
+                "hot_commands" => {
+                    next.hot_commands = value.as_bool().ok_or_else(|| invalid(key))?
+                }
+                "default_provider" => {
+                    let id = value.as_str().ok_or_else(|| invalid(key))?;
+                    let ok = !id.is_empty()
+                        && id.len() <= 40
+                        && id.bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
+                        });
+                    if !ok {
+                        return Err(invalid(key));
+                    }
+                    next.default_provider = id.into();
+                }
+                "default_repo" => {
+                    let alias = value.as_str().ok_or_else(|| invalid(key))?;
+                    if !alias.is_empty() && !valid_alias(alias) && !self.has_repo(alias) {
+                        return Err(invalid(key));
+                    }
+                    next.default_repo = alias.into();
+                }
+                "repos" => {
+                    let entries = value.as_array().ok_or_else(|| invalid(key))?;
+                    if entries.len() > 32 {
+                        return Err(invalid(key));
+                    }
+                    let mut repos = Vec::new();
+                    let mut seen = std::collections::BTreeSet::new();
+                    for entry in entries {
+                        let (alias, path) = entry
+                            .as_str()
+                            .and_then(|e| e.split_once('='))
+                            .map(|(a, p)| (a.trim().to_string(), p.trim().to_string()))
+                            .ok_or_else(|| invalid(key))?;
+                        // The seed's mockup aliases ("acme/web") predate the
+                        // alias rule: an entry kept exactly as stored passes,
+                        // so the interactive sandbox can still remove one.
+                        let kept = self
+                            .settings
+                            .repos
+                            .iter()
+                            .any(|(a, p)| *a == alias && *p == path);
+                        if !(kept || valid_alias(&alias) && absolute_folder(&path))
+                            || !seen.insert(alias_key(&alias))
+                        {
+                            return Err(invalid(key));
+                        }
+                        repos.push((alias, path));
+                    }
+                    next.repos = repos;
+                }
+                other => {
+                    return Err(rejected(
+                        400,
+                        "validation",
+                        &format!("the sandbox doesn't change agents.{other}"),
+                    ))
+                }
+            }
+        }
+        if !next.default_repo.is_empty() && !next.repos.iter().any(|(a, _)| *a == next.default_repo)
+        {
+            return Err(rejected(
+                400,
+                "validation",
+                "agents.default_repo must be one of the aliases in agents.repos",
+            ));
+        }
+        self.enabled = enabled;
+        self.settings = next;
+        Ok(())
+    }
+
+    /// The listed provider at `(id, profile)`, or the service's 404.
+    fn provider_index(&self, id: &str, profile: &str) -> Result<usize, AgentsError> {
+        self.providers
+            .iter()
+            .position(|p| p["id"] == id && p["profile"] == profile)
+            .ok_or_else(|| {
+                rejected(
+                    404,
+                    "not_found",
+                    &format!(
+                        "unknown provider {:?}",
+                        id.chars().take(40).collect::<String>()
+                    ),
+                )
+            })
+    }
+
+    /// A key was set or removed: presence only. Readiness follows the
+    /// required keys (a provider missing one is `missing_secret`; one that
+    /// was missing a key and now has them all is `ok`); other codes stay.
+    fn set_presence(&mut self, index: usize, name: &str, set: bool) {
+        let provider = &mut self.providers[index];
+        if let Some(slots) = provider["secrets"].as_array_mut() {
+            for slot in slots.iter_mut().filter(|s| s["name"] == name) {
+                slot["set"] = json!(set);
+            }
+        }
+        let missing = provider["secrets"]
+            .as_array()
+            .is_some_and(|s| s.iter().any(|s| s["required"] == true && s["set"] != true));
+        let label = provider["label"]
+            .as_str()
+            .unwrap_or("this provider")
+            .to_string();
+        let code = provider["readiness"]["code"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if missing {
+            provider["readiness"] = json!({"ready": false, "code": "missing_secret",
+                "detail": format!("Add a {label} API key."), "checked": "shallow"});
+        } else if code == "missing_secret" {
+            provider["readiness"] =
+                json!({"ready": true, "code": "ok", "detail": "", "checked": "shallow"});
+        }
     }
 
     fn restore(&mut self, saved: &Value) {
@@ -681,6 +925,15 @@ impl Inner {
         }
         if let Ok(launched) = serde_json::from_value(saved["launched"].clone()) {
             self.launched = launched;
+        }
+        if let Some(enabled) = saved["enabled"].as_bool() {
+            self.enabled = enabled;
+        }
+        if let Some(settings) = Settings::from_value(&saved["settings"]) {
+            self.settings = settings;
+        }
+        if let Some(providers) = saved["providers"].as_array() {
+            self.providers = providers.clone();
         }
     }
 }
@@ -757,6 +1010,56 @@ impl FakeAgents {
             inner.pinned = Some(FIXTURE_NOW);
             inner.calls = calls;
         });
+    }
+
+    /// The `agents-settings*` scenes, over [`FakeAgents::use_fixture`]:
+    /// Agents on; the local agent connected with its optional key not set,
+    /// one cloud agent missing its key, one offline; two workspaces, one of
+    /// whose folders is gone. Fixture data only (nothing outside the
+    /// sandbox keys anything on these ids).
+    pub fn use_settings_fixture(&self) {
+        self.use_fixture();
+        self.with(|inner| {
+            inner.providers.retain(|p| p["profile"] == "");
+            for p in &mut inner.providers {
+                let label = p["label"].as_str().unwrap_or("").to_string();
+                match p["id"].as_str().unwrap_or("") {
+                    "devin" => {
+                        p["secrets"][0]["set"] = json!(false);
+                        p["readiness"] = json!({"ready": false, "code": "missing_secret",
+                            "detail": format!("Add a {label} API key."), "checked": "shallow"});
+                    }
+                    "codex" => {
+                        p["readiness"] = json!({"ready": false, "code": "unreachable",
+                            "detail": "", "checked": "shallow"});
+                    }
+                    _ => {}
+                }
+            }
+            inner.settings.default_repo = "localflow".into();
+            inner.settings.repos = vec![
+                ("localflow".into(), "/home/you/src/localflow".into()),
+                ("website".into(), "/home/you/src/missing/website".into()),
+            ];
+        });
+    }
+
+    /// Key changes answer 503 `secrets_unavailable` (`false`: accept).
+    #[cfg(test)]
+    pub(crate) fn secrets_unavailable(&self, on: bool) {
+        self.with(|inner| inner.secrets_unavailable = on);
+    }
+
+    /// Every `PUT /api/config` body, in order (tests).
+    #[cfg(test)]
+    pub(crate) fn config_bodies(&self) -> Vec<Value> {
+        self.with(|inner| inner.config_bodies.clone())
+    }
+
+    /// The raw `Provider` objects as the fake would answer them (tests).
+    #[cfg(test)]
+    pub(crate) fn provider_values(&self) -> Vec<Value> {
+        self.with(|inner| inner.providers.clone())
     }
 
     /// One operation on the state; a shared sandbox reads the file first
@@ -1044,7 +1347,7 @@ impl FakeAgents {
             ));
         }
         let repo = map.get("repo").and_then(Value::as_str).unwrap_or("");
-        if !repo.is_empty() && !REPOS.contains(&repo) {
+        if !repo.is_empty() && !inner.has_repo(repo) {
             return Err(rejected(400, "validation", "unknown repo"));
         }
         let is_local = provider["capabilities"]["kind"] == "local_process";
@@ -1097,19 +1400,7 @@ impl AgentsBackend for FakeAgents {
     fn status(&self) -> Result<Status, AgentsError> {
         self.read(
             |c| &mut c.status,
-            |inner| {
-                Ok(agents::parse_status(&json!({
-                    "api_version": 1, "enabled": inner.enabled, "hot_commands": false,
-                    "sandbox": true, "allow_remote": false, "default_provider": "claude",
-                    "default_repo": "acme/web",
-                    "repos": REPOS.iter().map(|alias| json!({
-                        "alias": alias, "path": format!("/srv/{alias}"), "exists": true,
-                    })).collect::<Vec<_>>(),
-                    "limits": {"max_concurrent": 4, "max_queued": 16,
-                               "max_prompt_chars": 20000, "max_wait_seconds": 25},
-                    "counts": inner.counts(), "revision": inner.revision,
-                })))
-            },
+            |inner| Ok(agents::parse_status(&inner.status_value())),
         )
     }
 
@@ -1334,6 +1625,87 @@ impl AgentsBackend for FakeAgents {
                     "has_more": newer.len() > page.len(), "state": state,
                     "terminal": terminal(state.as_str().unwrap_or("")), "waited": false,
                 })))
+            },
+        )
+    }
+
+    fn settings(&self) -> Result<AgentSettings, AgentsError> {
+        self.read(
+            |c| &mut c.settings,
+            |inner| Ok(agents_settings::parse_settings(&inner.status_value())),
+        )
+    }
+
+    fn set_config(&self, patch: &Value) -> Result<(), AgentsError> {
+        self.write(
+            |c| &mut c.set_config,
+            |inner| {
+                inner.config_bodies.push(patch.clone());
+                inner.apply_config(patch)
+            },
+        )
+    }
+
+    /// A deep check: the same readiness, marked `deep` (deterministic).
+    fn check_provider(&self, id: &str, profile: &str) -> Result<Provider, AgentsError> {
+        self.write(
+            |c| &mut c.check,
+            |inner| {
+                let i = inner.provider_index(id, profile)?;
+                let mut reply = inner.providers[i].clone();
+                reply["readiness"]["checked"] = json!("deep");
+                agents::parse_provider(&reply).ok_or(AgentsError::Offline)
+            },
+        )
+    }
+
+    /// The service's checks and codes. The value itself is only looked at
+    /// for being empty (a removal); it is never stored, copied or logged.
+    fn set_secret(
+        &self,
+        id: &str,
+        profile: &str,
+        name: &str,
+        value: &SecretValue,
+    ) -> Result<Provider, AgentsError> {
+        let set = !value.is_empty();
+        self.write(
+            |c| &mut c.set_secret,
+            |inner| {
+                let i = inner.provider_index(id, profile)?;
+                let names: Vec<String> = inner.providers[i]["secrets"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s["name"].as_str().map(str::to_owned))
+                    .collect();
+                let name = match name {
+                    "" if names.len() == 1 => names[0].clone(),
+                    "" => {
+                        return Err(rejected(
+                            400,
+                            "validation",
+                            "name is required for this provider",
+                        ))
+                    }
+                    name if names.iter().any(|n| n == name) => name.to_string(),
+                    _ => {
+                        return Err(rejected(
+                            400,
+                            "validation",
+                            "this provider does not use that secret",
+                        ))
+                    }
+                };
+                if inner.secrets_unavailable {
+                    return Err(rejected(
+                        503,
+                        "secrets_unavailable",
+                        "The keyring is unavailable; the key was not saved.",
+                    ));
+                }
+                inner.set_presence(i, &name, set);
+                agents::parse_provider(&inner.providers[i]).ok_or(AgentsError::Offline)
             },
         )
     }
@@ -1781,5 +2153,232 @@ mod tests {
         hub.use_fixture();
         assert!(hub.session("0123456789ab").is_err());
         assert_eq!(hub.now(), FIXTURE_NOW);
+    }
+
+    fn keys(value: &Value) -> Vec<&str> {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// `Status`, `Provider` and its parts are the schema's exact key sets.
+    #[test]
+    fn settings_replies_have_the_schemas_exact_shapes() {
+        let fake = FakeAgents::fixture();
+        let status = fake.with(|inner| inner.status_value());
+        let mut status_keys = keys(&status);
+        status_keys.sort_unstable();
+        assert_eq!(
+            status_keys,
+            [
+                "allow_remote",
+                "api_version",
+                "counts",
+                "default_provider",
+                "default_repo",
+                "enabled",
+                "hot_commands",
+                "limits",
+                "repos",
+                "revision",
+                "sandbox"
+            ]
+        );
+        for repo in status["repos"].as_array().unwrap() {
+            assert_eq!(keys(repo), ["alias", "path", "exists"]);
+        }
+        for p in fake.provider_values() {
+            assert_eq!(
+                keys(&p),
+                [
+                    "id",
+                    "profile",
+                    "label",
+                    "builtin",
+                    "capabilities",
+                    "secrets",
+                    "readiness"
+                ]
+            );
+            assert_eq!(
+                keys(&p["readiness"]),
+                ["ready", "code", "detail", "checked"]
+            );
+            for slot in p["secrets"].as_array().unwrap() {
+                assert_eq!(keys(slot), ["name", "set", "required"]);
+                assert!(slot["name"].as_str().unwrap().starts_with("agent_"));
+            }
+        }
+        let s = fake.settings().unwrap();
+        assert_eq!(s.repos.len(), REPOS.len());
+        assert_eq!(s.repos[0].path, "/srv/acme/web");
+        assert_eq!(fake.calls().settings, 1);
+    }
+
+    #[test]
+    fn the_settings_fixture_matches_the_scene() {
+        let fake = FakeAgents::fixture();
+        fake.use_settings_fixture();
+        let providers = fake.providers().unwrap();
+        let shown: Vec<(&str, Readiness, Option<&str>)> = providers
+            .iter()
+            .map(|p| (p.label.as_str(), p.readiness, p.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Claude", Readiness::Connected, None),
+                (
+                    "Devin",
+                    Readiness::NotConnected,
+                    Some("Add a Devin API key.")
+                ),
+                ("Codex", Readiness::Offline, None),
+            ]
+        );
+        assert!(!providers[0].secrets[0].required && !providers[0].secrets[0].set);
+        let s = fake.settings().unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.default_repo, "localflow");
+        let repos: Vec<(&str, bool)> = s
+            .repos
+            .iter()
+            .map(|r| (r.alias.as_str(), r.exists))
+            .collect();
+        assert_eq!(repos, [("localflow", true), ("website", false)]);
+    }
+
+    /// `PUT /api/config` is validated like the service and applied whole.
+    #[test]
+    fn config_writes_validate_and_apply_atomically() {
+        let fake = FakeAgents::fixture();
+        fake.use_settings_fixture();
+        fake.set_config(&json!({"agents": {"enabled": false}}))
+            .unwrap();
+        assert!(!agents::available(&fake.status()));
+        assert_eq!(agents::supported(&fake.status()), Some(true));
+        // A default outside the list is refused, and nothing changes.
+        let err = fake
+            .set_config(&json!({"agents": {"repos": ["docs=/srv/docs"]}}))
+            .unwrap_err();
+        assert_eq!(err.code(), Some("validation"));
+        assert!(err.reason().contains("default_repo"), "{}", err.reason());
+        assert_eq!(fake.settings().unwrap().repos.len(), 2);
+        // The combined body removes the default and clears it.
+        let settings = fake.settings().unwrap();
+        let patch = agents_settings::repos_remove_patch(&settings, "localflow");
+        fake.set_config(&patch).unwrap();
+        let after = fake.settings().unwrap();
+        assert_eq!(after.default_repo, "");
+        assert_eq!(after.repos.len(), 1);
+        for bad in [
+            json!({"agents": {"repos": ["Bad=/x"]}}),
+            json!({"agents": {"repos": ["docs=relative"]}}),
+            json!({"agents": {"repos": ["docs=/a", "Docs=/b"]}}),
+            json!({"agents": {"repos": ["my-x=/a", "my x=/b"]}}),
+            json!({"agents": {"enabled": "yes"}}),
+            json!({"agents": {"claude_bin": "/bin/sh"}}),
+            json!({"general": {"x": 1}}),
+        ] {
+            assert_eq!(
+                fake.set_config(&bad).unwrap_err().code(),
+                Some("validation"),
+                "{bad}"
+            );
+        }
+        fake.set_config(&json!({"agents": {"repos": ["website=/home/you/src/missing/website", "docs=~/docs"], "default_repo": "docs", "default_provider": "devin"}}))
+            .unwrap();
+        let after = fake.settings().unwrap();
+        assert_eq!(after.default_provider, "devin");
+        assert_eq!(after.default_repo, "docs");
+        assert_eq!(fake.config_bodies().len(), 11, "refused bodies too");
+        assert_eq!(fake.calls().set_config, 11);
+        // Launches follow the configured workspaces.
+        fake.set_config(&json!({"agents": {"enabled": true}}))
+            .unwrap();
+        assert!(fake
+            .launch(&request("0123456789ab", "x", "claude", Some("docs")))
+            .is_ok());
+        let err = fake
+            .launch(&request("0123456789ac", "x", "claude", Some("acme/web")))
+            .unwrap_err();
+        assert_eq!(err.code(), Some("validation"));
+    }
+
+    /// Keys: presence only. The value never reaches the stored state, the
+    /// shared file or any reply.
+    #[test]
+    fn keys_set_presence_only_and_are_never_stored() {
+        const PLANTED: &str = "sk-planted-sandbox-secret-0123456789";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let fake = FakeAgents::shared(path.clone());
+        let devin = fake
+            .set_secret("devin", "", "", &SecretValue::removal())
+            .unwrap();
+        assert_eq!(devin.readiness, Readiness::NotConnected);
+        assert_eq!(devin.code, "missing_secret");
+        assert_eq!(devin.detail.as_deref(), Some("Add a Devin API key."));
+        let devin = fake
+            .set_secret(
+                "devin",
+                "",
+                "agent_devin_api_key",
+                &SecretValue::new(PLANTED.into()),
+            )
+            .unwrap();
+        assert_eq!(devin.readiness, Readiness::Connected);
+        assert!(devin.secrets[0].set);
+        // An optional key changes presence, not readiness.
+        let claude = fake
+            .set_secret(
+                "claude",
+                "",
+                "agent_claude_api_key",
+                &SecretValue::new(PLANTED.into()),
+            )
+            .unwrap();
+        assert_eq!(claude.readiness, Readiness::Connected);
+        assert!(claude.secrets[0].set);
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&on_disk).contains("planted"));
+        assert!(!fake.stored().contains("planted"));
+        assert!(!format!("{:?}", fake.received()).contains("planted"));
+        assert!(!format!("{:?}", fake.providers().unwrap()).contains("planted"));
+        // Another window sees the presence.
+        let other = FakeAgents::shared(path);
+        assert!(other.providers().unwrap()[1].secrets[0].set);
+
+        assert_eq!(
+            fake.set_secret("devin", "", "agent_other", &SecretValue::new("x".into()))
+                .unwrap_err()
+                .code(),
+            Some("validation")
+        );
+        assert_eq!(
+            fake.set_secret("nope", "", "", &SecretValue::new("x".into()))
+                .unwrap_err()
+                .code(),
+            Some("not_found")
+        );
+        fake.secrets_unavailable(true);
+        let err = fake
+            .set_secret("devin", "", "", &SecretValue::new(PLANTED.into()))
+            .unwrap_err();
+        assert_eq!(err.code(), Some("secrets_unavailable"));
+        assert!(!format!("{err:?}").contains("planted"));
+        assert_eq!(fake.calls().set_secret, 6);
+        // A deep check answers `deep`, deterministically.
+        let checked = fake.check_provider("codex", "staging").unwrap();
+        assert!(checked.deep);
+        assert_eq!(checked.readiness, Readiness::Offline);
+        assert_eq!(
+            fake.check_provider("codex", "nope").unwrap_err().code(),
+            Some("not_found")
+        );
+        assert_eq!(fake.calls().check, 2);
     }
 }

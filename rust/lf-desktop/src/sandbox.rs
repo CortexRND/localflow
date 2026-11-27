@@ -231,10 +231,16 @@ pub enum Fixture {
     AgentsLauncherSecret,
     /// The launcher with no provider connected (mockup M5).
     AgentsLauncherEmpty,
+    /// Settings → Agents: providers in three states, two workspaces (one
+    /// folder missing).
+    AgentsSettings,
+    /// Settings → Agents with the key editor open on the cloud provider
+    /// that has no key (empty masked field, cloud disclosure).
+    AgentsSettingsKey,
 }
 
 impl Fixture {
-    pub const ALL: [Fixture; 11] = [
+    pub const ALL: [Fixture; 13] = [
         Fixture::SpeakersSaved,
         Fixture::SpeakersRecent,
         Fixture::SpeakersSettings,
@@ -246,6 +252,8 @@ impl Fixture {
         Fixture::AgentsLauncherTyped,
         Fixture::AgentsLauncherSecret,
         Fixture::AgentsLauncherEmpty,
+        Fixture::AgentsSettings,
+        Fixture::AgentsSettingsKey,
     ];
 
     /// A launcher scene: `--agents-launcher` over the agents fixture.
@@ -272,6 +280,8 @@ impl Fixture {
             Fixture::AgentsLauncherTyped => "agents-launcher-typed",
             Fixture::AgentsLauncherSecret => "agents-launcher-secret",
             Fixture::AgentsLauncherEmpty => "agents-launcher-empty",
+            Fixture::AgentsSettings => "agents-settings",
+            Fixture::AgentsSettingsKey => "agents-settings-key",
         }
     }
 
@@ -284,7 +294,9 @@ impl Fixture {
         use crate::page::Page;
         match self {
             Fixture::SpeakersSaved | Fixture::SpeakersRecent => Page::Meetings,
-            Fixture::SpeakersSettings => Page::Settings,
+            Fixture::SpeakersSettings | Fixture::AgentsSettings | Fixture::AgentsSettingsKey => {
+                Page::Settings
+            }
             Fixture::SpeakersPeople => Page::People,
             Fixture::AgentsPage
             | Fixture::AgentsStates
@@ -299,7 +311,13 @@ impl Fixture {
     /// An `agents-*` scene (its own marker and data; see
     /// [`AGENTS_FIXTURE_MARKER`]).
     pub fn is_agents(self) -> bool {
-        self.page() == crate::page::Page::Agents
+        self.page() == crate::page::Page::Agents || self.is_agents_settings()
+    }
+
+    /// A Settings → Agents scene (over
+    /// [`agents::FakeAgents::use_settings_fixture`]).
+    pub fn is_agents_settings(self) -> bool {
+        matches!(self, Fixture::AgentsSettings | Fixture::AgentsSettingsKey)
     }
 
     fn marker(self) -> &'static str {

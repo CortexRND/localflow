@@ -92,6 +92,9 @@ pub enum Spawn {
     Launcher { prefill: bool },
     /// `--page agents` (with a session to select).
     Agents { session: Option<String> },
+    /// `--page agents/settings`: the Hub on Settings → Agents (works with
+    /// Agents off; only a supporting service is needed).
+    AgentSettings,
 }
 
 impl Spawn {
@@ -112,6 +115,12 @@ impl Spawn {
                     args.push(id.clone());
                 }
                 args
+            }
+            Spawn::AgentSettings => {
+                vec![
+                    "--page".to_string(),
+                    crate::page::Page::AGENTS_SETTINGS.into(),
+                ]
             }
         }
     }
@@ -409,6 +418,10 @@ impl Launcher {
                 let now = this.backend.now();
                 if this.store.finish(generation, result, now) {
                     this.resolve();
+                    // The first frame can already have painted before this
+                    // answer lands; force the loaded rows to repaint (a
+                    // fixed-size popup may never otherwise get a resize).
+                    cx.refresh_windows();
                     // The M3 scene's one action: Enter on its seeded task.
                     if this.fixture == Some(Fixture::AgentsLauncherSecret)
                         && this.findings.is_empty()
@@ -417,6 +430,9 @@ impl Launcher {
                         this.findings = model::scan(&this.text(cx));
                     }
                     this.refresh_highlight(cx);
+                    // Readiness is the scene's state; the capture loop
+                    // retries until pixels are actually on screen.
+                    this.report_scene(cx);
                 }
             });
         })
@@ -529,6 +545,12 @@ impl Launcher {
             self.choose(menu, at, cx);
             return;
         }
+        // M5: nothing connected (the list is the empty state): Enter opens
+        // Settings → Agents; a typed task is kept as the draft.
+        if self.no_provider() && self.findings.is_empty() {
+            self.open_agent_settings(window, cx);
+            return;
+        }
         let sections = self.sections(cx);
         let item = model::find(&sections, self.highlight.as_ref()).cloned();
         match item {
@@ -549,6 +571,14 @@ impl Launcher {
             Some(Item::Launch { enabled: true, .. }) => {
                 let text = self.text(cx);
                 self.check_and_launch(text, open, window, cx);
+            }
+            // Needs sign-in: the row's own reason says where to go.
+            Some(Item::Launch {
+                enabled: false,
+                provider,
+                ..
+            }) if provider.readiness == ctl::Readiness::NeedsSignIn => {
+                self.open_agent_settings(window, cx)
             }
             _ if open && !self.typed(cx) => self.open_agents(None, window, cx),
             _ if open => {
@@ -730,6 +760,32 @@ impl Launcher {
     ) {
         if spawn(&self.root, Spawn::Agents { session }).is_err() {
             self.error = Some("LocalFlow couldn't open Agents.".into());
+            cx.notify();
+            return;
+        }
+        self.close(window, cx);
+    }
+
+    /// M5: the list is read, the service answers, and no provider is
+    /// connected or even set up.
+    fn no_provider(&self) -> bool {
+        let service_error = matches!(
+            (&self.store.error, &self.store.status),
+            (Some(e), None) if *e != AgentsError::Absent
+        );
+        self.store.loaded
+            && !service_error
+            && self
+                .store
+                .providers
+                .iter()
+                .all(|p| p.readiness == ctl::Readiness::NotConnected)
+    }
+
+    /// Open Settings → Agents in the Hub, then close (keeping a draft).
+    fn open_agent_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if spawn(&self.root, Spawn::AgentSettings).is_err() {
+            self.error = Some("LocalFlow couldn't open Agent settings.".into());
             cx.notify();
             return;
         }
@@ -1121,6 +1177,9 @@ impl Launcher {
                 )
             }
         };
+        // A row that needs sign-in is reachable too (Enter opens Agent
+        // settings); its text stays in the disabled colour.
+        let interactive = item.actionable();
         let key = item.key();
         let selector = match &key {
             Key::Launch(id, profile) => format!("launcher-launch-{id}-{profile}"),
@@ -1132,7 +1191,7 @@ impl Launcher {
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
-            .when(enabled, |d| {
+            .when(interactive, |d| {
                 d.cursor_pointer()
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered && this.menu.is_none() && !this.confirming && !this.in_flight {
@@ -1344,13 +1403,7 @@ impl Render for Launcher {
         let service_down = service_error.is_some();
         // M5: nothing connected or even set up. Offline or signed-out
         // providers are a warning over their disabled rows instead.
-        let no_provider = self.store.loaded
-            && !service_down
-            && self
-                .store
-                .providers
-                .iter()
-                .all(|p| p.readiness == ctl::Readiness::NotConnected);
+        let no_provider = !service_down && self.no_provider();
         let all_offline = self.store.loaded && !no_provider && !self.store.any_connected();
         // Chips: provider, then workspace (when workspaces are configured).
         let provider_label = self.launch_provider_name();
@@ -1468,7 +1521,14 @@ impl Render for Launcher {
                     "bot",
                     ctl::NO_PROVIDER_HEADING,
                     ctl::no_provider_body(),
-                    None,
+                    Some(
+                        Button::new("launcher-open-settings", ctl::OPEN_AGENT_SETTINGS)
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_agent_settings(window, cx)
+                            }))
+                            .into_any_element(),
+                    ),
                 )
                 .debug_selector(|| "launcher-no-provider".into())
                 .into_any_element(),
@@ -2095,12 +2155,55 @@ mod tests {
         let mut o = open_with(cx, None, |fake| fake.disconnect_all());
         o.cx.simulate_input("Do something");
         assert_eq!(read(&mut o, |l, _| l.highlight()), None);
-        o.cx.simulate_keystrokes("enter");
-        assert_eq!(o.fake.calls().launch, 0);
-        assert!(!read(&mut o, |l, _| l.is_closed()), "the draft stays");
         o.cx.update(|window, _| window.refresh());
         o.cx.run_until_parked();
         assert!(o.cx.debug_bounds("launcher-no-provider").is_some());
+        let _ = take_spawned();
+        // M5: Enter opens Settings → Agents (never a launch); the typed
+        // task is kept as the draft.
+        o.cx.simulate_keystrokes("enter");
+        assert_eq!(o.fake.calls().launch, 0);
+        assert_eq!(take_spawned(), [Spawn::AgentSettings]);
+        assert!(read(&mut o, |l, _| l.is_closed()));
+        assert_eq!(
+            drafts(&o).load(ctl::now()).map(|d| d.text).as_deref(),
+            Some("Do something"),
+            "the draft stays"
+        );
+    }
+
+    /// A provider that needs sign-in is listed disabled; Enter on it opens
+    /// Settings → Agents, never a launch.
+    #[gpui::test]
+    fn enter_on_a_signed_out_provider_opens_agent_settings(cx: &mut TestAppContext) {
+        let mut o = open_with(cx, None, |fake| {
+            for id in ["claude", "devin", "codex"] {
+                fake.set_readiness(id, "auth_failed");
+            }
+        });
+        o.cx.simulate_input("qqzzqq");
+        assert_eq!(read(&mut o, |l, _| l.highlight()), None, "never first");
+        o.cx.simulate_keystrokes("down");
+        assert!(matches!(
+            read(&mut o, |l, _| l.highlight()),
+            Some(Key::Launch(..))
+        ));
+        o.cx.simulate_keystrokes("enter");
+        assert_eq!(o.fake.calls().launch, 0);
+        assert_eq!(take_spawned(), [Spawn::AgentSettings]);
+    }
+
+    #[test]
+    fn agent_settings_spawns_the_hub_on_its_tab() {
+        assert_eq!(
+            Spawn::AgentSettings.args(),
+            ["--page".to_string(), "agents/settings".to_string()]
+        );
+        let parsed = crate::args::parse(Spawn::AgentSettings.args(), false).unwrap();
+        assert_eq!(parsed.unknown_page.as_deref(), Some("agents/settings"));
+        assert!(crate::page::Page::is_agents_settings_name(
+            parsed.unknown_page.as_deref().unwrap()
+        ));
     }
 
     #[gpui::test]

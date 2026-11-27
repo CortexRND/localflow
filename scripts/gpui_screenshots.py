@@ -24,7 +24,10 @@ SPEAKER_SURFACES = ("speakers-saved", "speakers-recent", "speakers-settings", "s
 # Opt-in Agents scenes (`--sandbox-fixture agents-*`): the in-process fake agents service
 # with its clock pinned, in their own sandbox directory (the agents fixture has its own
 # marker, so the speaker scenes and the default sandbox don't gain the Agents page).
-AGENT_SURFACES = ("agents-page", "agents-states", "agents-detail")
+# `agents-settings*` open Settings → Agents over the same fake (providers, keys, workspaces).
+AGENT_SURFACES = (
+    "agents-page", "agents-states", "agents-detail", "agents-settings", "agents-settings-key",
+)
 # Opt-in agent launcher scenes (mockups M1, M2, M3, M5): `--sandbox-fixture agents-launcher*`
 # opens the launcher's own fixed-size popup window (not the Hub), in the same agents sandbox.
 LAUNCHER_SURFACES = (

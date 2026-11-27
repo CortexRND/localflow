@@ -147,6 +147,17 @@ impl Page {
         name.eq_ignore_ascii_case("agents") || Page::agents_session(name).is_some()
     }
 
+    /// `--page agents/settings`: the hand-off for Settings → Agents.
+    pub const AGENTS_SETTINGS: &'static str = "agents/settings";
+
+    /// `agents/settings` (the launcher's and the empty states' "Open Agent
+    /// settings"): an unknown name like `agents`, resolved by the open
+    /// window once the service has answered. It needs only a service that
+    /// supports agents, not one with Agents on.
+    pub fn is_agents_settings_name(name: &str) -> bool {
+        name.trim().eq_ignore_ascii_case(Page::AGENTS_SETTINGS)
+    }
+
     /// `agents/<session id>`: the launcher's request to open Agents on one
     /// session (`--page agents --agent-session <id>`).
     pub fn agents_session(name: &str) -> Option<String> {
@@ -181,6 +192,10 @@ mod tests {
         assert!(!Page::sidebar_order().contains(&Page::Agents));
         assert_eq!(Page::parse("agents"), None, "no Hub route");
         assert!(Page::is_agents_name(" Agents "));
+        assert!(Page::is_agents_settings_name(" Agents/Settings "));
+        assert!(!Page::is_agents_name("agents/settings"), "not a session");
+        assert!(!Page::is_agents_settings_name("agents"));
+        assert_eq!(Page::parse("agents/settings"), None, "no Hub route");
         let shown = Page::visible_order(false, true);
         let prompts = shown.iter().position(|p| *p == Page::Prompts).unwrap();
         assert_eq!(shown[prompts + 1], Page::Agents);

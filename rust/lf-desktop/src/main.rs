@@ -72,11 +72,17 @@ fn main() -> ExitCode {
             .is_some_and(Page::is_people_name);
     // `--page agents` resolves once the window has asked the service
     // whether Agents is on, so no notice is decided here.
-    let agents_request = request.is_unknown_home()
+    let agents_settings = request.is_unknown_home()
         && request
             .unknown_page
             .as_deref()
-            .is_some_and(Page::is_agents_name);
+            .is_some_and(Page::is_agents_settings_name);
+    let agents_request = agents_settings
+        || request.is_unknown_home()
+            && request
+                .unknown_page
+                .as_deref()
+                .is_some_and(Page::is_agents_name);
     let mut notice = request.notice();
     let launched = if args.sandbox {
         let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
@@ -104,6 +110,10 @@ fn main() -> ExitCode {
                     "lf-desktop: LocalFlow is already open; sent it to People \
                      (Home if speaker recognition is off)."
                 );
+                return ExitCode::SUCCESS;
+            }
+            if agents_settings {
+                eprintln!("lf-desktop: LocalFlow is already open; sent it to Settings → Agents.");
                 return ExitCode::SUCCESS;
             }
             if agents_request {
@@ -175,6 +185,7 @@ fn main() -> ExitCode {
         fixture,
         agents_request,
         agent_session: args.agent_session.clone(),
+        agents_settings,
     });
     // Non-zero when no window opened, so `lf --gpui` falls back instead of
     // mistaking it for a hand-off (see USAGE's EXIT STATUS).

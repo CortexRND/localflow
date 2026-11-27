@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use crate::controllers::agents_settings::{AgentSettings, SecretValue};
 use crate::controllers::assistant::mask_secrets;
 use crate::theme::Tone;
 
@@ -333,6 +334,21 @@ impl Readiness {
     }
 }
 
+/// One secret a provider uses (`secrets[]`): its keyring name and whether a
+/// value is stored. Presence only: the API never returns a value, and
+/// nothing here could hold one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretSlot {
+    /// `agent_…` keyring name (lowercase letters, digits, `_`).
+    pub name: String,
+    pub set: bool,
+    /// The provider can't start tasks without it.
+    pub required: bool,
+}
+
+/// At most this many secret slots are kept per provider.
+pub const MAX_SECRET_SLOTS: usize = 8;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Provider {
     pub id: String,
@@ -340,6 +356,16 @@ pub struct Provider {
     pub label: String,
     pub caps: Capabilities,
     pub readiness: Readiness,
+    /// Shipped with LocalFlow (not a plug-in).
+    pub builtin: bool,
+    pub secrets: Vec<SecretSlot>,
+    /// `readiness.code` as sent (bounded; lowercase letters, digits and
+    /// `_` only), for display decisions that need more than [`Readiness`].
+    pub code: String,
+    /// `readiness.detail`: server-redacted prose, masked again here.
+    pub detail: Option<String>,
+    /// `readiness.checked == "deep"`: this answer came from a deep check.
+    pub deep: bool,
 }
 
 impl Provider {
@@ -365,18 +391,59 @@ pub fn parse_providers(reply: &Value) -> Vec<Provider> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|item| {
-            let id = text(item.get("id"), 80)?;
-            let label = text(item.get("label"), 80).unwrap_or_else(|| id.clone());
-            Some(Provider {
-                profile: text(item.get("profile"), 80).unwrap_or_default(),
-                caps: Capabilities::parse(item.get("capabilities")),
-                readiness: Readiness::parse(item.get("readiness")),
-                label,
-                id,
+        .filter_map(parse_provider)
+        .collect()
+}
+
+/// A slug from the service (`readiness.code`, a secret name): bounded, and
+/// only lowercase ASCII letters, digits and `_`; anything else is `None`.
+fn slug(value: Option<&Value>, max: usize) -> Option<String> {
+    let s = value?.as_str()?;
+    (!s.is_empty()
+        && s.len() <= max
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+    .then(|| s.to_string())
+}
+
+/// One `Provider` object (a `/providers` entry, or the reply of a check or
+/// a key change). Only the allow-listed fields are kept.
+pub fn parse_provider(item: &Value) -> Option<Provider> {
+    let id = text(item.get("id"), 80)?;
+    let label = text(item.get("label"), 80).unwrap_or_else(|| id.clone());
+    let readiness = item.get("readiness");
+    let secrets = item
+        .get("secrets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            Some(SecretSlot {
+                name: slug(s.get("name"), 64)?,
+                set: s.get("set").and_then(Value::as_bool).unwrap_or(false),
+                required: s.get("required").and_then(Value::as_bool).unwrap_or(false),
             })
         })
-        .collect()
+        .take(MAX_SECRET_SLOTS)
+        .collect();
+    Some(Provider {
+        profile: text(item.get("profile"), 80).unwrap_or_default(),
+        caps: Capabilities::parse(item.get("capabilities")),
+        readiness: Readiness::parse(readiness),
+        builtin: item
+            .get("builtin")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        secrets,
+        code: slug(readiness.and_then(|r| r.get("code")), 40).unwrap_or_default(),
+        detail: masked(readiness.and_then(|r| r.get("detail")), 200),
+        deep: readiness
+            .and_then(|r| r.get("checked"))
+            .and_then(Value::as_str)
+            == Some("deep"),
+        label,
+        id,
+    })
 }
 
 // --------------------------------------------------------------- status ---
@@ -491,6 +558,18 @@ pub fn simulated(in_process: bool, status: Option<&Status>) -> bool {
 pub fn gate(status: &Result<Status, AgentsError>) -> Option<bool> {
     match status {
         Ok(_) => Some(available(status)),
+        Err(AgentsError::Absent) => Some(false),
+        Err(AgentsError::Offline | AgentsError::Refused(_) | AgentsError::Rejected(_)) => None,
+    }
+}
+
+/// What a status probe means for Settings → Agents: `Some(true)` when the
+/// service speaks v1 (on or off: the tab is where it is turned on),
+/// `Some(false)` on a 404 or another version, `None` (keep the last
+/// answer) on a transient failure, exactly like [`gate`].
+pub fn supported(status: &Result<Status, AgentsError>) -> Option<bool> {
+    match status {
+        Ok(s) => Some(s.api_version == 1),
         Err(AgentsError::Absent) => Some(false),
         Err(AgentsError::Offline | AgentsError::Refused(_) | AgentsError::Rejected(_)) => None,
     }
@@ -772,7 +851,8 @@ fn masked(value: Option<&Value>, max: usize) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
-fn clean(raw: &str, max: usize) -> String {
+/// Single-spaced and cut to `max` characters (display text only).
+pub(crate) fn clean(raw: &str, max: usize) -> String {
     raw.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -905,6 +985,26 @@ pub trait AgentsBackend: Send + Sync {
         limit: u32,
         wait: u32,
     ) -> Result<EventsPage, AgentsError>;
+    /// `GET /api/agents/status`, read for Settings → Agents: the switches,
+    /// the defaults and the workspaces *with their paths* (the only read
+    /// that keeps a path; see [`crate::controllers::agents_settings`]).
+    fn settings(&self) -> Result<AgentSettings, AgentsError>;
+    /// `PUT /api/config` with exactly `patch` (`{"agents": {…}}`). Its
+    /// errors have no `code`: they are mapped by HTTP status.
+    fn set_config(&self, patch: &Value) -> Result<(), AgentsError>;
+    /// `POST /api/agents/providers/{id}/check` (a deep check; may take up
+    /// to the service's 20 s bound).
+    fn check_provider(&self, id: &str, profile: &str) -> Result<Provider, AgentsError>;
+    /// `PUT /api/agents/providers/{id}/secret` with `name`, `value` and,
+    /// when not empty, `profile`. An empty value removes the key. The value
+    /// goes into that one request body and nowhere else.
+    fn set_secret(
+        &self,
+        id: &str,
+        profile: &str,
+        name: &str,
+        value: &SecretValue,
+    ) -> Result<Provider, AgentsError>;
     /// Seconds since the epoch on this backend's clock (the sandbox can pin
     /// it so fixture scenes draw the same times on every run).
     fn now(&self) -> f64 {
@@ -1787,6 +1887,8 @@ pub fn this_computer() -> &'static str {
 }
 
 pub const NO_PROVIDER_HEADING: &str = "Connect an agent to get started";
+/// The no-provider empty states' action (page and launcher, design §10).
+pub const OPEN_AGENT_SETTINGS: &str = "Open Agent settings";
 
 pub fn no_provider_body() -> String {
     format!(

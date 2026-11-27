@@ -1,5 +1,11 @@
-//! `agents-api v1` over loopback HTTP: the read routes the Agents page uses
-//! (status, providers, sessions list and detail, changes).
+//! `agents-api v1` over loopback HTTP: the routes the Agents page, the
+//! launcher and Settings → Agents use (status, providers, sessions,
+//! changes, events, launch/cancel/delete/reply, provider checks and keys),
+//! plus `PUT /api/config` for the `[agents]` settings.
+//!
+//! A key's value goes into exactly one request body (`PUT …/secret`) and
+//! is never copied into an error: failures carry only the status, the
+//! envelope's code and its sanitised `detail`.
 //!
 //! Same conventions as the rest of the window: the configured server
 //! address, the API token read from the explicit token path and sent only
@@ -25,6 +31,7 @@ use crate::controllers::agents::{
     self, AgentsBackend, AgentsError, Changes, Event, EventsPage, LaunchRequest, Provider, Session,
     SessionPage, Status,
 };
+use crate::controllers::agents_settings::{self, AgentSettings, SecretValue};
 
 /// Ordinary reads.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,13 +72,23 @@ impl HttpAgents {
         query: &[(&str, String)],
         timeout: Duration,
     ) -> Result<Value, (Option<StatusCode>, AgentsError)> {
-        self.send(reqwest::Method::GET, path, query, None, timeout)
+        self.send(
+            Root::Agents,
+            reqwest::Method::GET,
+            path,
+            query,
+            None,
+            timeout,
+        )
     }
 
     /// One request. Reads fail as [`AgentsError::Refused`]; writes (any
-    /// other method) as [`AgentsError::Rejected`] with the envelope's code.
+    /// other method) as [`AgentsError::Rejected`] with the envelope's code
+    /// (`/api/config` has none: see [`config_code`]). A request body is
+    /// never copied into an error.
     fn send(
         &self,
+        root: Root,
         method: reqwest::Method,
         path: &[&str],
         query: &[(&str, String)],
@@ -84,7 +101,7 @@ impl HttpAgents {
         url.path_segments_mut()
             .map_err(|_| offline())?
             .clear()
-            .extend(["api", "agents"])
+            .extend(root.segments())
             .extend(path);
         if !query.is_empty() {
             url.query_pairs_mut()
@@ -124,19 +141,21 @@ impl HttpAgents {
         let detail = if status == StatusCode::UNAUTHORIZED {
             TOKEN.to_string()
         } else {
-            field("detail").unwrap_or_else(|| {
-                status
+            field("detail").unwrap_or_else(|| match (root, status) {
+                // FastAPI's own 422 carries a list, not a sentence.
+                (Root::Config, StatusCode::UNPROCESSABLE_ENTITY) => CONFIG_REFUSED.into(),
+                _ => status
                     .canonical_reason()
                     .unwrap_or("request failed")
-                    .to_lowercase()
+                    .to_lowercase(),
             })
         };
+        let code = match root {
+            Root::Agents => field("code").unwrap_or_else(|| "internal".into()),
+            Root::Config => config_code(status).into(),
+        };
         let error = if write {
-            AgentsError::rejected(
-                status.as_u16(),
-                &field("code").unwrap_or_else(|| "internal".into()),
-                &detail,
-            )
+            AgentsError::rejected(status.as_u16(), &code, &detail)
         } else if status == StatusCode::UNAUTHORIZED {
             AgentsError::Refused(TOKEN.into())
         } else {
@@ -155,13 +174,53 @@ impl HttpAgents {
         path: &[&str],
         body: Option<&Value>,
     ) -> Result<Value, AgentsError> {
-        self.send(method, path, &[], body, TIMEOUT)
+        self.send(Root::Agents, method, path, &[], body, TIMEOUT)
             .map_err(|(_, e)| e)
     }
 }
 
+/// Which API a request goes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Root {
+    /// `/api/agents/…` (v1 envelopes: `{detail, code}`).
+    Agents,
+    /// `/api/config` (FastAPI errors: `{detail}` only).
+    Config,
+}
+
+impl Root {
+    fn segments(self) -> &'static [&'static str] {
+        match self {
+            Root::Agents => &["api", "agents"],
+            Root::Config => &["api", "config"],
+        }
+    }
+}
+
+/// `PUT /api/config` answers errors without a `code`: name it by status.
+fn config_code(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => "validation",
+        StatusCode::FORBIDDEN => "local_only",
+        StatusCode::UNAUTHORIZED => "auth_failed",
+        _ => "internal",
+    }
+}
+
+/// `/api/config`'s own 422 (a malformed body) in words.
+const CONFIG_REFUSED: &str = "LocalFlow didn't accept that setting";
+
+/// A deep provider check. The service bounds it at 20 s itself; the client
+/// waits a little longer so that answer (not a client timeout) arrives.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(25);
+
 fn invalid() -> AgentsError {
     AgentsError::Refused("Invalid response from LocalFlow server".into())
+}
+
+/// A `Provider` reply (a check or a key change).
+fn provider_of(reply: &Value) -> Result<Provider, AgentsError> {
+    agents::parse_provider(reply).ok_or_else(invalid)
 }
 
 /// `{session}` → the session.
@@ -268,6 +327,74 @@ impl AgentsBackend for HttpAgents {
         .map(|reply| agents::parse_changes(&reply))
         .map_err(|(_, e)| e)
     }
+
+    /// The same route as [`HttpAgents::status`], read with paths.
+    fn settings(&self) -> Result<AgentSettings, AgentsError> {
+        match self.get(&["status"], &[], TIMEOUT) {
+            Ok(reply) => Ok(agents_settings::parse_settings(&reply)),
+            Err((Some(StatusCode::NOT_FOUND), _)) => Err(AgentsError::Absent),
+            Err((_, error)) => Err(error),
+        }
+    }
+
+    /// Only the status matters: the success body (the whole config) is
+    /// not read.
+    fn set_config(&self, patch: &Value) -> Result<(), AgentsError> {
+        self.send(
+            Root::Config,
+            reqwest::Method::PUT,
+            &[],
+            &[],
+            Some(patch),
+            TIMEOUT,
+        )
+        .map(|_| ())
+        .map_err(|(_, e)| e)
+    }
+
+    fn check_provider(&self, id: &str, profile: &str) -> Result<Provider, AgentsError> {
+        let body = if profile.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "profile": profile })
+        };
+        let reply = self
+            .send(
+                Root::Agents,
+                reqwest::Method::POST,
+                &["providers", id, "check"],
+                &[],
+                Some(&body),
+                CHECK_TIMEOUT,
+            )
+            .map_err(|(_, e)| e)?;
+        provider_of(&reply)
+    }
+
+    fn set_secret(
+        &self,
+        id: &str,
+        profile: &str,
+        name: &str,
+        value: &SecretValue,
+    ) -> Result<Provider, AgentsError> {
+        let mut body = serde_json::json!({ "name": name, "value": value.expose() });
+        if !profile.is_empty() {
+            body["profile"] = Value::String(profile.to_string());
+        }
+        let result = self.write(
+            reqwest::Method::PUT,
+            &["providers", id, "secret"],
+            Some(&body),
+        );
+        // Drop the body's copy of the value now, not at the end of scope.
+        if let Some(Value::String(v)) = body.get_mut("value") {
+            let mut bytes = std::mem::take(v).into_bytes();
+            bytes.fill(0);
+            std::hint::black_box(&bytes);
+        }
+        provider_of(&result?)
+    }
 }
 
 #[cfg(test)]
@@ -278,6 +405,15 @@ mod tests {
 
     /// One canned reply on a loopback port; returns the raw request.
     fn serve(status: &'static str, body: String) -> (u16, std::thread::JoinHandle<String>) {
+        serve_after(Duration::ZERO, status, body)
+    }
+
+    /// [`serve`], answering only after `delay`.
+    fn serve_after(
+        delay: Duration,
+        status: &'static str,
+        body: String,
+    ) -> (u16, std::thread::JoinHandle<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
@@ -307,6 +443,7 @@ mod tests {
                 }
             }
             let request = String::from_utf8_lossy(&raw).to_string();
+            std::thread::sleep(delay);
             let reply = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -511,6 +648,194 @@ mod tests {
             assert_eq!(e.code, code);
             assert!(!e.detail.contains("abcdefghijklmnop"), "{}", e.detail);
         }
+    }
+
+    fn provider_body(code: &str, checked: &str) -> Value {
+        json!({"id": "devin", "profile": "", "label": "Devin", "builtin": true,
+               "capabilities": {"kind": "cloud", "resume": true, "live_message": false,
+                                "cancel": false, "streaming": false, "needs_cwd": false,
+                                "reattach": false},
+               "secrets": [{"name": "agent_devin_api_key", "set": code == "ok",
+                            "required": true}],
+               "readiness": {"ready": code == "ok", "code": code, "detail": "",
+                             "checked": checked}})
+    }
+
+    #[test]
+    fn settings_routes_send_exact_methods_paths_and_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (port, handle) = serve(
+            "200 OK",
+            json!({"api_version": 1, "enabled": false, "sandbox": true,
+                   "default_provider": "claude", "default_repo": "web",
+                   "repos": [{"alias": "web", "path": "/srv/web", "exists": true}]})
+            .to_string(),
+        );
+        let settings = client(port, &dir).settings().unwrap();
+        assert!(handle
+            .join()
+            .unwrap()
+            .starts_with("GET /api/agents/status HTTP/1.1"));
+        assert!(!settings.enabled && settings.sandbox);
+        assert_eq!(settings.repos[0].path, "/srv/web");
+
+        let (port, handle) = serve("200 OK", json!({"agents": {}}).to_string());
+        let patch = json!({"agents": {"repos": ["web=/srv/web"], "default_repo": ""}});
+        client(port, &dir).set_config(&patch).unwrap();
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("PUT /api/config HTTP/1.1"), "{request}");
+        assert!(request
+            .to_lowercase()
+            .contains("x-localflow-token: tok-123"));
+        assert_eq!(body_of(&request), patch, "exactly the patch");
+
+        let (port, handle) = serve("200 OK", provider_body("ok", "deep").to_string());
+        let checked = client(port, &dir).check_provider("devin", "").unwrap();
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("POST /api/agents/providers/devin/check "));
+        assert_eq!(body_of(&request), json!({}));
+        assert!(checked.deep);
+        assert_eq!(checked.readiness, agents::Readiness::Connected);
+
+        let (port, handle) = serve("200 OK", provider_body("ok", "deep").to_string());
+        client(port, &dir).check_provider("http", "p1").unwrap();
+        assert_eq!(body_of(&handle.join().unwrap()), json!({"profile": "p1"}));
+
+        let (port, handle) = serve("200 OK", provider_body("ok", "shallow").to_string());
+        let value = SecretValue::new("sk-planted-secret-0123456789".into());
+        let saved = client(port, &dir)
+            .set_secret("devin", "", "agent_devin_api_key", &value)
+            .unwrap();
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("PUT /api/agents/providers/devin/secret "));
+        assert_eq!(
+            body_of(&request),
+            json!({"name": "agent_devin_api_key", "value": "sk-planted-secret-0123456789"}),
+            "name and value only, no empty profile"
+        );
+        assert!(!request
+            .split("\r\n\r\n")
+            .next()
+            .unwrap()
+            .contains("planted"));
+        assert!(saved.secrets[0].set);
+
+        let (port, handle) = serve("200 OK", provider_body("ok", "shallow").to_string());
+        client(port, &dir)
+            .set_secret("http", "p1", "agent_http_p1", &SecretValue::removal())
+            .unwrap();
+        assert_eq!(
+            body_of(&handle.join().unwrap()),
+            json!({"name": "agent_http_p1", "value": "", "profile": "p1"})
+        );
+    }
+
+    /// A secret never comes back out of a failed request, whatever the
+    /// service answers (the body isn't echoed into any error).
+    #[test]
+    fn a_refused_key_carries_the_code_and_never_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        for (status, body) in [
+            (
+                "503 Service Unavailable",
+                json!({"detail": "The keyring is unavailable; the key was not saved.",
+                       "code": "secrets_unavailable"}),
+            ),
+            (
+                "403 Forbidden",
+                json!({"detail": "This change is only allowed from this computer",
+                       "code": "local_only"}),
+            ),
+            (
+                "400 Bad Request",
+                json!({"detail": "echo sk-planted-secret-0123456789", "code": "validation"}),
+            ),
+            ("500 Internal Server Error", json!({"nope": true})),
+        ] {
+            let (port, handle) = serve(status, body.to_string());
+            let value = SecretValue::new("sk-planted-secret-0123456789".into());
+            let error = client(port, &dir)
+                .set_secret("devin", "", "agent_devin_api_key", &value)
+                .unwrap_err();
+            handle.join().unwrap();
+            for text in [
+                format!("{error:?}"),
+                error.message(),
+                error.reason(),
+                crate::controllers::agents_settings::key_error(&error),
+            ] {
+                assert!(!text.contains("planted-secret"), "{status}: {text}");
+            }
+            assert!(!format!("{value:?}").contains("planted"));
+        }
+        let (port, handle) = serve(
+            "503 Service Unavailable",
+            json!({"detail": "x", "code": "secrets_unavailable"}).to_string(),
+        );
+        let error = client(port, &dir)
+            .set_secret("devin", "", "a", &SecretValue::new("v".into()))
+            .unwrap_err();
+        handle.join().unwrap();
+        assert_eq!(error.code(), Some("secrets_unavailable"));
+    }
+
+    /// `/api/config` errors are FastAPI's `{detail}`: mapped by status.
+    #[test]
+    fn config_errors_map_by_status() {
+        let dir = tempfile::tempdir().unwrap();
+        for (status, body, code, detail) in [
+            (
+                "400 Bad Request",
+                json!({"detail": "invalid value for config key 'agents.repos'"}),
+                "validation",
+                "invalid value for config key 'agents.repos'",
+            ),
+            (
+                "403 Forbidden",
+                json!({"detail": "agents.claude_bin, agents.repos and agents.allow_remote can only be changed on this computer"}),
+                "local_only",
+                "agents.claude_bin, agents.repos and agents.allow_remote can only be changed on this computer",
+            ),
+            (
+                "422 Unprocessable Entity",
+                json!({"detail": [{"loc": ["body"], "msg": "field required"}]}),
+                "validation",
+                "LocalFlow didn't accept that setting",
+            ),
+            ("500 Internal Server Error", json!({}), "internal", "internal server error"),
+        ] {
+            let (port, handle) = serve(status, body.to_string());
+            let Err(AgentsError::Rejected(e)) =
+                client(port, &dir).set_config(&json!({"agents": {"enabled": true}}))
+            else {
+                panic!("{status}: expected a rejection");
+            };
+            handle.join().unwrap();
+            assert_eq!((e.code.as_str(), e.detail.as_str()), (code, detail), "{status}");
+        }
+        let (port, handle) = serve("401 Unauthorized", "{}".into());
+        let error = client(port, &dir)
+            .set_config(&json!({"agents": {}}))
+            .unwrap_err();
+        handle.join().unwrap();
+        assert!(!error.message().contains("tok-123"));
+        assert_eq!(error.code(), Some("auth_failed"));
+    }
+
+    /// A deep check may take longer than an ordinary read's 5 s.
+    #[test]
+    fn a_deep_check_waits_past_the_read_timeout() {
+        assert!(CHECK_TIMEOUT >= Duration::from_secs(20));
+        let dir = tempfile::tempdir().unwrap();
+        let (port, handle) = serve_after(
+            TIMEOUT + Duration::from_millis(600),
+            "200 OK",
+            provider_body("auth_failed", "deep").to_string(),
+        );
+        let checked = client(port, &dir).check_provider("devin", "").unwrap();
+        handle.join().unwrap();
+        assert_eq!(checked.readiness, agents::Readiness::NeedsSignIn);
+        assert!(checked.deep);
     }
 
     #[test]

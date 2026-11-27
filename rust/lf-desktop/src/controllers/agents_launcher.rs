@@ -87,6 +87,19 @@ impl Item {
         }
     }
 
+    /// Can be reached with the arrows or a click and activated with Enter:
+    /// every usable row, and a provider that needs sign-in (its reason
+    /// says "open Agent settings"; Enter does that, never a launch). It is
+    /// never the first highlight, so a launch's default row is unchanged.
+    pub fn actionable(&self) -> bool {
+        match self {
+            Item::Launch {
+                enabled, provider, ..
+            } => *enabled || provider.readiness == Readiness::NeedsSignIn,
+            _ => true,
+        }
+    }
+
     pub fn key(&self) -> Key {
         match self {
             Item::Launch { provider, .. } => {
@@ -236,17 +249,18 @@ pub fn initial(sections: &[Section], typed: bool) -> Option<Key> {
 pub fn keep(sections: &[Section], highlight: Option<&Key>, typed: bool) -> Option<Key> {
     let items = flat(sections);
     match highlight {
-        Some(key) if items.iter().any(|i| i.key() == *key && i.enabled()) => Some(key.clone()),
+        Some(key) if items.iter().any(|i| i.key() == *key && i.actionable()) => Some(key.clone()),
         _ => initial(sections, typed),
     }
 }
 
 /// `↓` / `↑`: the next usable row; `↑` from the first returns to none.
-/// Disabled rows are skipped (they can't be highlighted).
+/// Disabled rows are skipped (they can't be highlighted), except one that
+/// needs sign-in ([`Item::actionable`]).
 pub fn step(sections: &[Section], highlight: Option<&Key>, down: bool) -> Option<Key> {
     let usable: Vec<Key> = flat(sections)
         .into_iter()
-        .filter(|i| i.enabled())
+        .filter(|i| i.actionable())
         .map(Item::key)
         .collect();
     let at = highlight.and_then(|k| usable.iter().position(|u| u == k));
@@ -979,6 +993,21 @@ mod tests {
         let listed = super::sections(&signed_out, &[], "do it", &chosen(&signed_out), &[]);
         assert!(flat(&listed).iter().any(|i| matches!(i,
             Item::Launch { enabled: false, detail, .. } if detail == "Sign-in expired — open Agent settings")));
+        // It can be reached (Enter opens Agent settings) but is never the
+        // first highlight; an offline one can't be reached at all.
+        let devin = Key::Launch("devin".into(), String::new());
+        assert_ne!(initial(&listed, true), Some(devin.clone()));
+        let mut at = initial(&listed, true);
+        let mut reached = false;
+        for _ in 0..8 {
+            at = step(&listed, at.as_ref(), true);
+            reached |= at.as_ref() == Some(&devin);
+        }
+        assert!(reached, "the arrows reach the sign-in row");
+        assert_eq!(keep(&listed, Some(&devin), true), Some(devin));
+        assert!(!flat(&listed).iter().any(|i| i.actionable()
+            && !i.enabled()
+            && i.key() == Key::Launch("codex".into(), "staging".into())));
     }
 
     #[test]

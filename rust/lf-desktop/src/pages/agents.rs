@@ -1867,13 +1867,27 @@ impl AgentsPage {
         let content = if heading.is_empty() {
             div().p(space::s10()).child(ui::secondary(t, body))
         } else {
-            let action = (heading == ctl::NO_SESSIONS_HEADING).then(|| {
-                Button::new("agents-empty-new", "New task")
-                    .primary()
-                    .icon("plus")
-                    .on_click(cx.listener(|this, _, _, cx| this.new_task(None, cx)))
-                    .into_any_element()
-            });
+            let action = if heading == ctl::NO_SESSIONS_HEADING {
+                Some(
+                    Button::new("agents-empty-new", "New task")
+                        .primary()
+                        .icon("plus")
+                        .on_click(cx.listener(|this, _, _, cx| this.new_task(None, cx)))
+                        .into_any_element(),
+                )
+            } else if heading == ctl::NO_PROVIDER_HEADING {
+                let pcx = self.pcx.clone();
+                Some(
+                    Button::new("agents-empty-settings", ctl::OPEN_AGENT_SETTINGS)
+                        .primary()
+                        .on_click(move |_, _, cx| {
+                            pcx.navigate(crate::page::Page::Settings, Some("agents"), cx)
+                        })
+                        .into_any_element(),
+                )
+            } else {
+                None
+            };
             ui::empty_state(t, "bot", heading, body, action)
         };
         div()

@@ -75,6 +75,9 @@ pub struct Launch {
     pub agents_request: bool,
     /// `--agent-session`: the session a cold-start `--page agents` selects.
     pub agent_session: Option<String>,
+    /// `--page agents/settings` (with `agents_request`): Settings → Agents
+    /// once the service has answered.
+    pub agents_settings: bool,
 }
 
 /// A request for the `agents` page (an unknown name: it has no Hub route).
@@ -84,6 +87,16 @@ fn is_agents_request(request: &Request) -> bool {
             .unknown_page
             .as_deref()
             .is_some_and(Page::is_agents_name)
+}
+
+/// `agents/settings` (from the launcher or an empty state): Settings →
+/// Agents, which needs only a supporting service (Agents may be off).
+fn is_agents_settings_request(request: &Request) -> bool {
+    request.is_unknown_home()
+        && request
+            .unknown_page
+            .as_deref()
+            .is_some_and(Page::is_agents_settings_name)
 }
 
 pub struct Toast {
@@ -123,9 +136,24 @@ pub struct PageCx {
     pub engine: Rc<std::cell::RefCell<Option<OwnEngine>>>,
     /// A setup draft is waiting (Home shows Resume setup).
     pub setup_draft: Rc<std::cell::Cell<bool>>,
+    /// The agents service speaks v1, on or off (written by the shell's
+    /// status probe): Settings shows its Agents tab.
+    pub agents_supported: Rc<std::cell::Cell<bool>>,
 }
 
 impl PageCx {
+    /// Settings → Agents is offered (see [`crate::controllers::agents::supported`]).
+    pub fn agents_supported(&self) -> bool {
+        self.agents_supported.get()
+    }
+    /// `[agents]` changed at the service: ask it again, so the gate (and
+    /// the sidebar's Agents row) follows without a restart.
+    pub fn agents_changed(&self, cx: &mut App) {
+        self.with_shell(cx, |shell, cx| {
+            shell.probe_agents(cx);
+            cx.notify();
+        });
+    }
     fn with_shell(&self, cx: &mut App, f: impl FnOnce(&mut Shell, &mut Context<Shell>) + 'static) {
         let shell = self.shell.clone();
         cx.defer(move |cx| {
@@ -392,6 +420,7 @@ impl Shell {
                 engine.as_ref().map(|e: &Engine| e.state()),
             )),
             setup_draft: Rc::new(std::cell::Cell::new(false)),
+            agents_supported: Rc::new(std::cell::Cell::new(false)),
         };
         let config_mtime = mtime(&services.root.config_path);
         let mut shell = Shell {
@@ -410,6 +439,7 @@ impl Shell {
             pending_agents: launch.agents_request.then(|| Request {
                 route: Route::Page(Page::Home),
                 unknown_page: Some(match &launch.agent_session {
+                    _ if launch.agents_settings => Page::AGENTS_SETTINGS.into(),
                     Some(id) => format!("agents/{id}"),
                     None => "agents".into(),
                 }),
@@ -450,7 +480,10 @@ impl Shell {
             // A scene draws the pinned in-memory seed, never the shared
             // sandbox state another run left behind.
             if let Some(fake) = shell.cx.services.remote.sandbox_agents() {
-                fake.use_fixture();
+                match launch.fixture {
+                    Some(f) if f.is_agents_settings() => fake.use_settings_fixture(),
+                    _ => fake.use_fixture(),
+                }
             }
         }
         shell.probe_agents(cx);
@@ -485,6 +518,15 @@ impl Shell {
                 v.update(cx, |p, cx| p.open_tab("meetings", cx))
             }
             (Fixture::SpeakersPeople, Some(View::People(v))) => v.update(cx, |p, cx| p.refresh(cx)),
+            (Fixture::AgentsSettings, Some(View::Settings(v))) => {
+                v.update(cx, |p, cx| p.open_tab("agents", cx))
+            }
+            (Fixture::AgentsSettingsKey, Some(View::Settings(v))) => v.update(cx, |p, cx| {
+                p.open_tab("agents", cx);
+                if let Some(agents) = p.agents_settings() {
+                    agents.update(cx, |a, cx| a.run_key_fixture(cx));
+                }
+            }),
             (
                 Fixture::AgentsPage | Fixture::AgentsStates | Fixture::AgentsDetail,
                 Some(View::Agents(v)),
@@ -539,6 +581,11 @@ impl Shell {
     ) {
         if generation != self.agents_probe {
             return;
+        }
+        if let Some(supported) = crate::controllers::agents::supported(&status) {
+            if self.cx.agents_supported.replace(supported) != supported {
+                cx.notify();
+            }
         }
         if let Some(on) = crate::controllers::agents::gate(&status) {
             self.set_agents(on, cx);
@@ -676,8 +723,20 @@ impl Shell {
     /// [`Shell::agents_answered`]) rather than showing "no page called
     /// agents" for a page that is about to exist.
     fn route(&mut self, request: Request, cx: &mut Context<Self>) {
-        if !self.agents_known && is_agents_request(&request) {
+        let settings = is_agents_settings_request(&request);
+        if !self.agents_known && (settings || is_agents_request(&request)) {
             self.pending_agents = Some(request);
+            return;
+        }
+        if settings {
+            // Settings → Agents (General when the service doesn't support
+            // agents); behind the overlay or a dialog it waits like any page.
+            if self.setup_visible || self.confirm.is_some() {
+                self.queued = Some(Route::Page(Page::Settings).into());
+                self.apply_queued(cx);
+            } else {
+                self.navigate(Page::Settings, Some("agents"), cx);
+            }
             return;
         }
         // `--page agents --agent-session <id>` (from the launcher).
@@ -1138,6 +1197,11 @@ impl Shell {
                 v.update(cx, |p, cx| p.clear_secret(cx));
             }
         }
+        if leaving == Page::Settings && page != Page::Settings {
+            if let Some(View::Settings(v)) = self.find(Page::Settings) {
+                v.update(cx, |p, cx| p.clear_secret(cx));
+            }
+        }
         self.page = page;
         *self.cx.current_page.borrow_mut() = page;
         self.ensure_view(page, cx);
@@ -1356,6 +1420,12 @@ impl Shell {
             // Escape clears the Agents search; otherwise it passes on.
             Some(View::Agents(v)) => {
                 if !v.update(cx, |p, cx| p.escape(window, cx)) {
+                    cx.propagate();
+                }
+            }
+            // Escape closes Settings → Agents' open editor; else passes on.
+            Some(View::Settings(v)) => {
+                if !v.update(cx, |p, cx| p.escape(cx)) {
                     cx.propagate();
                 }
             }
@@ -2414,6 +2484,7 @@ pub(crate) mod focus_tests {
             fixture: None,
             agents_request,
             agent_session: None,
+            agents_settings: false,
         };
         let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(launch, cx));
         cx.update(|window, cx| {
@@ -4141,6 +4212,10 @@ pub(crate) mod focus_tests {
 /// History's Retry failure banner, laid out in a headless window: the
 /// message wraps inside the detail column instead of pushing "Try again"
 /// past the window edge.
+#[cfg(test)]
+#[path = "app_agents_settings_tests.rs"]
+mod agents_settings_tests;
+
 #[cfg(test)]
 mod history_layout_tests {
     use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};

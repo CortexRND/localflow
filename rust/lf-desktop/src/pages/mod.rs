@@ -10,6 +10,7 @@ pub mod models;
 pub mod people;
 pub mod prompts;
 pub mod settings;
+pub mod settings_agents;
 pub mod setup;
 pub mod snippets;
 pub mod style;

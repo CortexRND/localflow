@@ -16,6 +16,7 @@ use crate::controllers::models::data_leaves_text;
 use crate::controllers::runtime_state::SimulatedState;
 use crate::controllers::settings::{self as ctl, Control, Spec, Tab, SPECS};
 use crate::page::Page;
+use crate::pages::settings_agents::AgentsSettings;
 use crate::pages::{column, header, page};
 use crate::remote::Health;
 use crate::theme::{space, theme, Tone};
@@ -46,6 +47,8 @@ pub struct SettingsPage {
     /// while the Meetings tab is shown); `None` until it answers.
     speaker_status: Option<Result<Value, String>>,
     speaker_status_generation: u64,
+    /// Settings → Agents, built the first time the tab is shown.
+    agents: Option<Entity<AgentsSettings>>,
 }
 
 /// Extra rows and sections of a tab, beside its `[section] key` rows.
@@ -111,6 +114,7 @@ impl SettingsPage {
             appearance_error: appearance::queue().error(),
             speaker_status: None,
             speaker_status_generation: 0,
+            agents: None,
         };
         for (i, spec) in SPECS.iter().enumerate() {
             match spec.control {
@@ -174,7 +178,59 @@ impl SettingsPage {
         self.note_config(cx);
         self.sync(cx);
         self.load_speaker_status(cx);
+        if let Some(agents) = self.shown_agents() {
+            agents.update(cx, |a, cx| a.refresh(cx));
+        }
         cx.notify();
+    }
+
+    /// The Agents tab is on screen (Settings shown, tab selected, the
+    /// service supporting it).
+    fn agents_shown(&self) -> bool {
+        self.tab == Tab::Agents
+            && self.pcx.agents_supported()
+            && *self.pcx.current_page.borrow() == Page::Settings
+    }
+
+    fn shown_agents(&self) -> Option<Entity<AgentsSettings>> {
+        self.agents.clone().filter(|_| self.agents_shown())
+    }
+
+    /// Settings → Agents, built on first use.
+    fn agents_view(&mut self, cx: &mut Context<Self>) -> Entity<AgentsSettings> {
+        if let Some(view) = &self.agents {
+            return view.clone();
+        }
+        let pcx = self.pcx.clone();
+        let view = cx.new(|cx| AgentsSettings::new(pcx, cx));
+        self.agents = Some(view.clone());
+        view
+    }
+
+    /// Leaving Settings (or the tab): an open key editor's text is dropped.
+    pub fn clear_secret(&mut self, cx: &mut Context<Self>) {
+        if let Some(agents) = &self.agents {
+            agents.update(cx, |a, cx| a.clear_secret(cx));
+        }
+    }
+
+    /// Escape: an open editor on the Agents tab closes first; `false`
+    /// lets it pass on.
+    pub fn escape(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.shown_agents() {
+            Some(agents) => agents.update(cx, |a, cx| a.escape(cx)),
+            None => false,
+        }
+    }
+
+    /// The Agents tab's entity (fixtures and tests).
+    pub(crate) fn agents_settings(&self) -> Option<Entity<AgentsSettings>> {
+        self.agents.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tab(&self) -> Tab {
+        self.tab
     }
 
     /// Whether the speaker models are ready, from the last status reply.
@@ -218,6 +274,9 @@ impl SettingsPage {
     /// show up without leaving the tab. Asks again only while the Meetings
     /// tab is shown and the last answer was not ready; no polling.
     pub fn window_activated(&mut self, cx: &mut Context<Self>) {
+        if let Some(agents) = self.shown_agents() {
+            agents.update(cx, |a, cx| a.window_activated(cx));
+        }
         if self.speaker_readiness() == hs::SpeakerReadiness::Ready {
             return;
         }
@@ -225,8 +284,25 @@ impl SettingsPage {
     }
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        // Agents only while the service supports it; else General.
+        let tab = if tab == Tab::Agents && !self.pcx.agents_supported() {
+            Tab::General
+        } else {
+            tab
+        };
+        if self.tab == Tab::Agents && tab != Tab::Agents {
+            self.clear_secret(cx);
+        }
+        let entering = tab == Tab::Agents && self.tab != Tab::Agents;
         self.tab = tab;
         self.load_speaker_status(cx);
+        if tab == Tab::Agents {
+            let view = self.agents_view(cx);
+            // Opening the tab reads it (returning to the page is `refresh`).
+            if entering {
+                view.update(cx, |a, cx| a.refresh(cx));
+            }
+        }
         cx.notify();
     }
 
@@ -501,6 +577,7 @@ impl SettingsPage {
             "input" | "dictation" | "languages" => Tab::Dictation,
             "cleanup" => Tab::Cleanup,
             "meetings" => Tab::Meetings,
+            "agents" => Tab::Agents,
             "privacy" => Tab::Privacy,
             "advanced" => Tab::Advanced,
             _ => Tab::General,
@@ -1039,9 +1116,16 @@ impl Render for SettingsPage {
         if self.tab == Tab::Meetings && self.speaker_readiness() == hs::SpeakerReadiness::Ready {
             crate::sandbox::scene_ready(crate::sandbox::Fixture::SpeakersSettings);
         }
+        // The service stopped supporting agents while the tab was open.
+        if self.tab == Tab::Agents && !self.pcx.agents_supported() {
+            self.clear_secret(cx);
+            self.tab = Tab::General;
+        }
         let this = cx.entity().downgrade();
-        let tab_items: Vec<(Tab, &'static str)> =
-            Tab::ALL.iter().map(|t| (*t, t.label())).collect();
+        let tab_items: Vec<(Tab, &'static str)> = Tab::visible(self.pcx.agents_supported())
+            .into_iter()
+            .map(|t| (t, t.label()))
+            .collect();
         let tabs = ui::tabs(
             &t,
             "settings-tab",
@@ -1099,6 +1183,9 @@ impl Render for SettingsPage {
         }
         if !rows.is_empty() {
             tab_body = tab_body.child(ui::group_rows(&t, rows, ui::row_inset()));
+        }
+        if self.tab == Tab::Agents {
+            tab_body = tab_body.child(self.agents_view(cx));
         }
         let mut body = div()
             .flex()
