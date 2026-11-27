@@ -259,6 +259,8 @@ pub struct Services {
     pub retry: Arc<dyn RetryBackend>,
     /// The process's one History retry job and its last result.
     pub retry_jobs: RetryJobs,
+    /// A `--sandbox-fixture` sandbox (see [`Services::config`]).
+    speaker_fixture: bool,
 }
 
 /// Storage, setup, Settings assistant and History retry backends, composed
@@ -352,6 +354,7 @@ impl Services {
             )
         };
         Ok(Services {
+            speaker_fixture: crate::sandbox::has_fixture(&root),
             retry,
             retry_jobs: RetryJobs::new(),
             dictionary: DictionaryStore::new(Some(root.dictionary_path.clone())),
@@ -371,7 +374,15 @@ impl Services {
     }
 
     pub fn config(&self) -> Config {
-        self.config.borrow().clone()
+        let mut config = self.config.borrow().clone();
+        // Outside macOS every config load turns meetings off (the Python
+        // rule), so a Linux sandbox could never show a meeting. The opt-in
+        // speaker fixture (`--sandbox-fixture`) shows Meetings as on, as on
+        // macOS, in memory only; every other sandbox and real mode is as is.
+        if self.speaker_fixture && config.field_bool("meetings_enabled") != Some(true) {
+            config.set_field("meetings_enabled", Value::Bool(true));
+        }
+        config
     }
 
     pub fn is_sandbox(&self) -> bool {

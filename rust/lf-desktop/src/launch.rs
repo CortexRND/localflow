@@ -18,6 +18,17 @@ pub enum Launched {
 /// `--sandbox` (with `--data-dir` / `--sandbox-reset`). `request` is
 /// `None` for `--sandbox-exercise`, which opens no window.
 pub fn sandbox(dir: &Path, reset: bool, request: Option<Request>) -> Result<Launched, String> {
+    sandbox_with(dir, reset, false, request)
+}
+
+/// [`sandbox`], seeding the speaker-label fixture into a new (or reset)
+/// directory when `fixture` (`--sandbox-fixture`).
+pub fn sandbox_with(
+    dir: &Path,
+    reset: bool,
+    fixture: bool,
+    request: Option<Request>,
+) -> Result<Launched, String> {
     crate::sandbox::check_dir(dir).map_err(|e| format!("sandbox: {e:#}"))?;
     let inst_dir = instance::sandbox_instance_dir(dir);
     // A reset or an exercise never hands a page over: it must not run while
@@ -26,8 +37,8 @@ pub fn sandbox(dir: &Path, reset: bool, request: Option<Request>) -> Result<Laun
         .map_err(|e| format!("sandbox: {e}"))?
     {
         Claim::Owner(owner) => {
-            let root =
-                crate::sandbox::prepare(dir, reset).map_err(|e| format!("sandbox: {e:#}"))?;
+            let root = crate::sandbox::prepare_with(dir, reset, fixture)
+                .map_err(|e| format!("sandbox: {e:#}"))?;
             Ok(Launched::Window(Box::new(root), owner))
         }
         Claim::HandedOff => Ok(Launched::HandedOff),

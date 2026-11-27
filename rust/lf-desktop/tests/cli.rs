@@ -176,6 +176,45 @@ fn a_second_sandbox_launch_hands_its_page_to_the_open_window() {
 }
 
 #[test]
+fn the_speaker_fixture_is_refused_without_its_own_new_sandbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = isolated(dir.path())
+        .args(["--sandbox", "--sandbox-fixture", "speakers-saved"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--data-dir"));
+    left_untouched(dir.path());
+
+    // A sandbox seeded without the fixture is never mixed with it.
+    let sandbox = dir.path().join("sb");
+    let out = isolated(dir.path())
+        .args(["--sandbox", "--sandbox-exercise", "--data-dir"])
+        .arg(&sandbox)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = isolated(dir.path())
+        .args([
+            "--sandbox",
+            "--sandbox-fixture",
+            "speakers-saved",
+            "--data-dir",
+        ])
+        .arg(&sandbox)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("without the speaker fixture"));
+    assert!(!sandbox.join("speaker-fixture").exists());
+}
+
+#[test]
 fn sandbox_refuses_a_foreign_directory_before_opening_a_window() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("keep.txt"), "user data").unwrap();

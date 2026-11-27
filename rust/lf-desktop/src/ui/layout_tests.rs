@@ -64,6 +64,28 @@ fn cases() -> Vec<Case> {
             wraps_only_at_measure: false,
         },
         Case {
+            name: "speaker labels",
+            label: "Speaker labels",
+            description: crate::controllers::settings::spec("meetings", "speaker_diarization")
+                .unwrap()
+                .description
+                .into(),
+            control_w: 44.,
+            segmented: false,
+            wraps_only_at_measure: false,
+        },
+        Case {
+            name: "speaker labels on my microphone",
+            label: "Label speakers on my microphone",
+            description: crate::controllers::settings::spec("meetings", "diarize_mic")
+                .unwrap()
+                .description
+                .into(),
+            control_w: 44.,
+            segmented: false,
+            wraps_only_at_measure: false,
+        },
+        Case {
             name: "wraps only at 440",
             label: "Engine",
             description: NARROW_WRAP.into(),

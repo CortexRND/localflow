@@ -49,6 +49,9 @@ pub struct Select {
     disabled: bool,
     placeholder: SharedString,
     width: f32,
+    /// Opt-in: the trigger fills its container (which sets the bounds)
+    /// instead of a fixed `width`; the menu stays at least `width` wide.
+    fill: bool,
     /// Opt-in focus decoration of the trigger (see [`FocusRing`]).
     focus_ring: FocusRing,
     /// Opt-in: told of any mouse press inside the open menu (see
@@ -79,6 +82,7 @@ impl Select {
             disabled: false,
             placeholder: "Choose…".into(),
             width: 220.,
+            fill: false,
             focus_ring: FocusRing::Default,
             on_menu_pointer: None,
         }
@@ -95,6 +99,14 @@ impl Select {
 
     pub fn width(mut self, w: f32) -> Self {
         self.width = w;
+        self
+    }
+
+    /// Fill the container's width (it may shrink below `width` in a narrow
+    /// pane; a long choice ends in an ellipsis). The open menu keeps at
+    /// least `width`, so full titles stay readable there.
+    pub fn fill(mut self) -> Self {
+        self.fill = true;
         self
     }
 
@@ -261,7 +273,13 @@ impl Render for Select {
             .items_center()
             .justify_between()
             .gap(space::s4())
-            .w(px(self.width))
+            .map(|d| {
+                if self.fill {
+                    d.w_full().min_w_0()
+                } else {
+                    d.w(px(self.width))
+                }
+            })
             .h(size::control_md())
             .px(space::s5())
             .rounded(size::radius_element())
@@ -296,6 +314,7 @@ impl Render for Select {
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
+                    .when(self.fill, |d| d.text_ellipsis())
                     .child(current),
             )
             .child(icon(
@@ -382,7 +401,13 @@ impl Render for Select {
             .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .flex()
             .flex_col()
-            .flex_none()
+            .map(|d| {
+                if self.fill {
+                    d.w_full().min_w_0()
+                } else {
+                    d.flex_none()
+                }
+            })
             .child(trigger)
             .children(menu)
     }

@@ -42,6 +42,8 @@ pub struct Snapshot {
     pub detected: bool,
     /// `session.user_notes` of a running meeting (`None` when idle/offline).
     pub notes: Option<String>,
+    /// The server's `last_saved` record (speaker panel; `None` when offline).
+    pub last_saved: Option<Value>,
 }
 
 /// Keeps the notes composer and the server's `session.user_notes` in step.
@@ -236,6 +238,7 @@ pub fn poll(client: &dyn MeetingClient, with_templates: bool) -> Snapshot {
                 chat_available: false,
                 detected: false,
                 notes: None,
+                last_saved: None,
             }
         }
     };
@@ -266,6 +269,7 @@ pub fn poll(client: &dyn MeetingClient, with_templates: bool) -> Snapshot {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         notes,
+        last_saved: status.get("last_saved").filter(|s| s.is_object()).cloned(),
     }
 }
 
@@ -327,18 +331,35 @@ pub fn stop(
     ticket: u64,
     notes: &str,
 ) -> Phase {
+    stop_saved(client, writer, ticket, notes).0
+}
+
+/// [`stop`], plus the saved payload (its `meeting_id` and `speakers` feed
+/// the post-stop speaker panel).
+pub fn stop_saved(
+    client: &dyn MeetingClient,
+    writer: &MeetingNotesWriter,
+    ticket: u64,
+    notes: &str,
+) -> (Phase, Option<Value>) {
     if let Err(err) = writer.save(client, ticket, notes) {
-        return Phase::Error(format!(
-            "Couldn't save your notes before stopping: {}",
-            err.0
-        ));
+        return (
+            Phase::Error(format!(
+                "Couldn't save your notes before stopping: {}",
+                err.0
+            )),
+            None,
+        );
     }
     match client.stop() {
-        Ok(saved) => Phase::Saved {
-            message: hub_model::saved_notes_message(&saved),
-            notes_path: text(&saved, "notes_path"),
-        },
-        Err(err) => Phase::Error(err.0),
+        Ok(saved) => (
+            Phase::Saved {
+                message: hub_model::saved_notes_message(&saved),
+                notes_path: text(&saved, "notes_path"),
+            },
+            Some(saved),
+        ),
+        Err(err) => (Phase::Error(err.0), None),
     }
 }
 
@@ -755,6 +776,29 @@ mod tests {
         );
         assert_eq!(close_notes(&Phase::Idle, true, true), CloseNotes::Nothing);
         assert_eq!(close_notes(&Phase::Idle, false, false), CloseNotes::Nothing);
+    }
+
+    /// A diarized stop hands its speakers to the panel; polls carry
+    /// `last_saved` so a reopened page still shows them.
+    #[test]
+    fn a_diarized_stop_returns_its_speakers_and_polls_keep_them() {
+        let client = FakeMeetingClient::new();
+        let id = "0123456789abcdef0123456789abcdef";
+        client.seed_stop_speakers(
+            id,
+            vec![serde_json::json!({"id": "S1", "label": "Speaker 1", "seconds": 4.0})],
+        );
+        assert_eq!(poll(&client, false).last_saved, None);
+        start(&client, "", "", "");
+        let writer = MeetingNotesWriter::new();
+        let (phase, saved) = stop_saved(&client, &writer, writer.ticket(), "");
+        assert!(matches!(phase, Phase::Saved { .. }));
+        let saved = saved.unwrap();
+        assert_eq!(hub_model::saved_meeting_id(&saved).as_deref(), Some(id));
+        let polled = poll(&client, false).last_saved.unwrap();
+        assert_eq!(hub_model::meeting_speakers(&polled).len(), 1);
+        client.set_down(Some(SERVER_DOWN));
+        assert_eq!(poll(&client, false).last_saved, None);
     }
 
     #[test]

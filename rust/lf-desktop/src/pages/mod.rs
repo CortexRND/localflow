@@ -6,6 +6,7 @@ pub mod history;
 pub mod home;
 pub mod meetings;
 pub mod models;
+pub mod people;
 pub mod prompts;
 pub mod settings;
 pub mod setup;
@@ -107,6 +108,7 @@ pub fn split(t: &Theme, list: impl IntoElement, detail: impl IntoElement) -> Div
         )
         .child(
             div()
+                .debug_selector(|| "split-detail".into())
                 .flex()
                 .flex_col()
                 .flex_1()
