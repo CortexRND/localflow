@@ -40,6 +40,7 @@ use crate::controllers::agents_launcher::{Draft, DraftStore};
 use crate::controllers::history::time_label;
 use crate::launcher::{spawn, Spawn};
 use crate::page::Page;
+use crate::pages::agents_poll::{backoff, blocking, LONG_POLL, MIN_PAUSE, POLL_PAUSE};
 use crate::pages::{header, page, split};
 use crate::remote::Health;
 use crate::sandbox::Fixture;
@@ -47,17 +48,6 @@ use crate::theme::{size, space, theme, Theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::{self, Button, IconButton, Segmented};
 
-/// Pause between `/changes` reads that return at once (the sandbox, or a
-/// server that didn't hold the request).
-const POLL_PAUSE: Duration = Duration::from_secs(2);
-/// The shortest pause even after a held long-poll, so a server that
-/// answers `waited: true` at once can't spin the loop.
-const MIN_PAUSE: Duration = Duration::from_millis(250);
-/// Failures back off from [`POLL_PAUSE`], doubling, to this. Short enough
-/// that the 20 s grace period still ends in Disconnected on time.
-const MAX_BACKOFF: Duration = Duration::from_secs(10);
-/// Long-poll length asked of a real server.
-const LONG_POLL: u32 = crate::controllers::agents_client::MAX_WAIT;
 /// Events long-polls allowed at once (one is the normal case; a second
 /// covers the old one finishing after a selection change).
 const MAX_LONG_POLLS: usize = 2;
@@ -84,13 +74,6 @@ enum Detail {
     Failed(AgentsError),
 }
 
-/// The pause after `failures` failed reads in a row: 2, 4, 8, then 10 s.
-fn backoff(failures: u32) -> Duration {
-    POLL_PAUSE
-        .saturating_mul(1 << failures.saturating_sub(1).min(8))
-        .min(MAX_BACKOFF)
-}
-
 /// The Task section's text when the session's task text isn't in hand.
 fn task_placeholder(detail: &Detail) -> String {
     match detail {
@@ -102,28 +85,6 @@ fn task_placeholder(detail: &Detail) -> String {
             "LocalFlow couldn't read this task because its agent service isn't answering.".into()
         }
         Detail::Idle => "LocalFlow doesn't have this task's text.".into(),
-    }
-}
-
-/// Run a blocking read: on its own thread when it may be held (a
-/// long-poll), else on the background executor.
-async fn blocking<T: Send + 'static>(
-    cx: &mut gpui::AsyncApp,
-    held: bool,
-    f: impl FnOnce() -> Result<T, AgentsError> + Send + 'static,
-) -> Result<T, AgentsError> {
-    if !held {
-        return cx.background_executor().spawn(async move { f() }).await;
-    }
-    let (tx, rx) = async_channel::bounded(1);
-    let spawned = std::thread::Builder::new()
-        .name("agents-poll".into())
-        .spawn(move || {
-            let _ = tx.send_blocking(f());
-        });
-    match spawned {
-        Ok(_) => rx.recv().await.unwrap_or(Err(AgentsError::Offline)),
-        Err(_) => Err(AgentsError::Offline),
     }
 }
 
@@ -283,6 +244,7 @@ impl AgentsPage {
                 let now = this.now();
                 if this.store.finish(generation, result, now) {
                     this.loading = false;
+                    this.report_attention(cx);
                     this.loaded(cx);
                     cx.notify();
                 }
@@ -327,6 +289,7 @@ impl AgentsPage {
             return;
         }
         self.polling = true;
+        let gate = self.pcx.agents_changes.clone();
         cx.spawn(async move |this, cx| loop {
             let next = this
                 .update(cx, |this, _| this.next_poll())
@@ -335,9 +298,17 @@ impl AgentsPage {
                 Next::Stop => break,
                 Next::Pause(pause) => pause,
                 Next::Poll(backend, since, wait) => {
+                    // One `/changes` call per window: the shell's watcher
+                    // may still hold one from before this page was shown
+                    // (it answers as soon as anything changes).
+                    let Some(ticket) = gate.enter() else {
+                        cx.background_executor().timer(MIN_PAUSE).await;
+                        continue;
+                    };
                     // A long-poll holds its thread for up to 30 s: give it
                     // its own rather than parking a background-executor one.
                     let result = blocking(cx, wait > 0, move || backend.changes(since, wait)).await;
+                    drop(ticket);
                     match this.update(cx, |this, cx| this.polled(result, cx)) {
                         Ok(Some(pause)) => pause,
                         _ => break,
@@ -379,6 +350,7 @@ impl AgentsPage {
                 if self.store.apply_changes(changes) || never_read {
                     self.load(cx);
                 }
+                self.report_attention(cx);
                 if !self.adopt_pending_open(cx) {
                     self.follow_selected(before, cx);
                 }
@@ -404,6 +376,21 @@ impl AgentsPage {
         self.sync_reply(cx);
         cx.notify();
         pause
+    }
+
+    /// While this page is shown it is the one `/changes` reader: it feeds
+    /// the sidebar badge from its own list (the shell's watcher pauses).
+    fn report_attention(&self, cx: &mut Context<Self>) {
+        if !self.shown() {
+            return;
+        }
+        let n = self
+            .store
+            .rows(self.now())
+            .iter()
+            .filter(|r| r.state == UiState::NeedsInput)
+            .count();
+        self.pcx.set_agents_attention(n, cx);
     }
 
     /// `(revision, last_seq)` of the selected session, to see what moved.

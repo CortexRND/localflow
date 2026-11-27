@@ -260,6 +260,18 @@ impl AgentsBackend for HttpAgents {
             .map(|reply| agents::parse_session_page(&reply))
     }
 
+    fn waiting(&self) -> Result<SessionPage, AgentsError> {
+        let query = [
+            ("state", "waiting_input".to_string()),
+            (
+                "limit",
+                crate::controllers::agents_attention::PRIME_LIMIT.to_string(),
+            ),
+        ];
+        self.read(&["sessions"], &query)
+            .map(|reply| agents::parse_session_page(&reply))
+    }
+
     fn session(&self, id: &str) -> Result<Session, AgentsError> {
         session_of(&self.read(&["sessions", id], &[])?)
     }
@@ -877,6 +889,24 @@ mod tests {
                "repo": "", "prompt_template": "{prompt}", "min_prompt_words": 3,
                "enabled": enabled, "created_at": "2026-11-20T12:00:00Z",
                "updated_at": "2026-11-20T12:00:00Z"})
+    }
+
+    #[test]
+    fn the_waiting_list_is_one_filtered_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (port, handle) = serve(
+            "200 OK",
+            json!({"sessions": [{"id": "a1f3a2c80001", "state": "waiting_input"}],
+                   "next_cursor": null, "revision": 7, "counts": {}})
+            .to_string(),
+        );
+        let page = client(port, &dir).waiting().unwrap();
+        let request = handle.join().unwrap();
+        assert!(
+            request.starts_with("GET /api/agents/sessions?state=waiting_input&limit=200 "),
+            "{request}"
+        );
+        assert_eq!((page.sessions.len(), page.revision), (1, 7));
     }
 
     #[test]

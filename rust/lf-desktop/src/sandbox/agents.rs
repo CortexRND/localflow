@@ -33,6 +33,7 @@ use crate::controllers::agents::{
     self, AgentsBackend, AgentsError, Changes, Event, EventsPage, LaunchRequest, Provider, Session,
     SessionPage, Status,
 };
+use crate::controllers::agents_attention;
 use crate::controllers::agents_settings::{self, AgentSettings, SecretValue};
 use crate::controllers::agents_triggers::{self as triggers, Rule, RuleTest};
 
@@ -198,6 +199,8 @@ pub struct Calls {
     pub set_config: usize,
     pub check: usize,
     pub set_secret: usize,
+    /// `GET /sessions?state=waiting_input` (the badge's prime).
+    pub waiting: usize,
     pub rules: usize,
     pub create_rule: usize,
     pub update_rule: usize,
@@ -1863,6 +1866,27 @@ impl AgentsBackend for FakeAgents {
                 let next = (end < inner.sessions.len()).then(|| end.to_string());
                 Ok(agents::parse_session_page(&json!({
                     "sessions": sessions, "next_cursor": next,
+                    "revision": inner.revision, "counts": inner.counts(),
+                })))
+            },
+        )
+    }
+
+    /// Every `waiting_input` session, newest first.
+    fn waiting(&self) -> Result<SessionPage, AgentsError> {
+        self.read(
+            |c| &mut c.waiting,
+            |inner| {
+                let sessions: Vec<Value> = inner
+                    .sessions
+                    .iter()
+                    .rev()
+                    .filter(|s| s["state"] == "waiting_input")
+                    .take(agents_attention::PRIME_LIMIT as usize)
+                    .map(summary)
+                    .collect();
+                Ok(agents::parse_session_page(&json!({
+                    "sessions": sessions, "next_cursor": null,
                     "revision": inner.revision, "counts": inner.counts(),
                 })))
             },

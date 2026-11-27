@@ -1,6 +1,7 @@
 //! One module per navigation destination, plus the shared page frames.
 
 pub mod agents;
+pub mod agents_poll;
 pub mod ask;
 pub mod dictionary;
 pub mod history;

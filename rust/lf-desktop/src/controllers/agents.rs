@@ -966,6 +966,9 @@ pub trait AgentsBackend: Send + Sync {
     fn providers(&self) -> Result<Vec<Provider>, AgentsError>;
     /// Newest first; `before` is a `next_cursor`.
     fn sessions(&self, limit: u32, before: Option<&str>) -> Result<SessionPage, AgentsError>;
+    /// `GET /api/agents/sessions?state=waiting_input&limit=200`: every
+    /// session that needs input (the sidebar badge's prime).
+    fn waiting(&self) -> Result<SessionPage, AgentsError>;
     fn session(&self, id: &str) -> Result<Session, AgentsError>;
     /// Changes after `since`; `wait` seconds of long-poll (0..=25).
     fn changes(&self, since: u64, wait: u32) -> Result<Changes, AgentsError>;

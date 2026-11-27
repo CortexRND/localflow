@@ -99,6 +99,18 @@ fn is_agents_settings_request(request: &Request) -> bool {
             .is_some_and(Page::is_agents_settings_name)
 }
 
+/// What the needs-input watcher does next.
+enum AttentionNext {
+    Stop,
+    Pause(Duration),
+    Prime(std::sync::Arc<dyn crate::controllers::agents::AgentsBackend>),
+    Poll(
+        std::sync::Arc<dyn crate::controllers::agents::AgentsBackend>,
+        u64,
+        u32,
+    ),
+}
+
 pub struct Toast {
     pub message: SharedString,
     pub action: Option<(SharedString, ui::Action)>,
@@ -139,6 +151,9 @@ pub struct PageCx {
     /// The agents service speaks v1, on or off (written by the shell's
     /// status probe): Settings shows its Agents tab.
     pub agents_supported: Rc<std::cell::Cell<bool>>,
+    /// At most one `/changes` call open in this window (the Agents page's
+    /// list and the shell's needs-input watcher share it).
+    pub agents_changes: pages::agents_poll::ChangesGate,
 }
 
 impl PageCx {
@@ -252,6 +267,15 @@ impl PageCx {
     pub fn reprobe(&self, cx: &mut App) {
         self.with_shell(cx, |shell, cx| shell.probe_runtime(cx));
     }
+    /// The Agents page, while shown, feeds the sidebar's needs-input count.
+    pub fn set_agents_attention(&self, n: usize, cx: &mut App) {
+        self.with_shell(cx, move |shell, cx| {
+            if shell.page == Page::Agents && shell.agents_attention != n {
+                shell.agents_attention = n;
+                cx.notify();
+            }
+        });
+    }
     pub fn set_pending_prompts(&self, n: usize, cx: &mut App) {
         self.with_shell(cx, move |shell, cx| {
             if shell.pending_prompts != n {
@@ -292,6 +316,17 @@ pub struct Shell {
     agents_known: bool,
     /// A request for `agents` waiting for that first answer.
     pending_agents: Option<Request>,
+    /// Sessions that need input: the sidebar badge on Agents.
+    pub agents_attention: usize,
+    /// The needs-input watcher's model (ids only; see
+    /// [`Shell::watch_attention`]).
+    attention: crate::controllers::agents_attention::Attention,
+    /// Providers read with the last prime (the toast names one).
+    attention_providers: Vec<crate::controllers::agents::Provider>,
+    /// The watcher loop is running.
+    attention_watching: bool,
+    /// Failed watcher reads in a row (the backoff).
+    attention_failures: u32,
     toast: Option<Toast>,
     toast_gen: u64,
     pub confirm: Option<Confirm>,
@@ -421,6 +456,7 @@ impl Shell {
             )),
             setup_draft: Rc::new(std::cell::Cell::new(false)),
             agents_supported: Rc::new(std::cell::Cell::new(false)),
+            agents_changes: Default::default(),
         };
         let config_mtime = mtime(&services.root.config_path);
         let mut shell = Shell {
@@ -444,6 +480,11 @@ impl Shell {
                     None => "agents".into(),
                 }),
             }),
+            agents_attention: 0,
+            attention: Default::default(),
+            attention_providers: Vec::new(),
+            attention_watching: false,
+            attention_failures: 0,
             toast: None,
             toast_gen: 0,
             confirm: None,
@@ -610,7 +651,192 @@ impl Shell {
         if self.agents != on {
             self.agents = on;
             self.enforce_agents_gate(cx);
+            if !on {
+                // The badge goes with the page.
+                self.attention.reset();
+                self.agents_attention = 0;
+            }
             cx.notify();
+        }
+        if on {
+            self.watch_attention(cx);
+        }
+    }
+
+    // ---------------------------------------------------- agents attention ---
+
+    /// Keep the sidebar's needs-input count while Agents is on. One loop,
+    /// ids only: it primes with `GET /sessions?state=waiting_input`, then
+    /// follows `/changes` (held long-polls against a real service). While
+    /// the Agents page is shown it makes no call at all (the page is the
+    /// one `/changes` reader and feeds the count); coming back, it primes
+    /// again, quietly. A session that newly needs input after a prime
+    /// toasts once, while Agents isn't shown. It stops when the gate
+    /// closes, the service has no agents API, or the window goes away.
+    fn watch_attention(&mut self, cx: &mut Context<Self>) {
+        use crate::pages::agents_poll::blocking;
+        if self.attention_watching || !self.agents_enabled() {
+            return;
+        }
+        self.attention_watching = true;
+        let gate = self.cx.agents_changes.clone();
+        cx.spawn(async move |this, cx| loop {
+            let next = this
+                .update(cx, |shell, cx| shell.next_attention(cx))
+                .unwrap_or(AttentionNext::Stop);
+            let pause = match next {
+                AttentionNext::Stop => break,
+                AttentionNext::Pause(pause) => pause,
+                AttentionNext::Prime(backend) => {
+                    let result = blocking(cx, false, move || {
+                        Ok((backend.providers()?, backend.waiting()?))
+                    })
+                    .await;
+                    match this.update(cx, |shell, cx| shell.attention_primed(result, cx)) {
+                        Ok(Some(pause)) => pause,
+                        _ => break,
+                    }
+                }
+                AttentionNext::Poll(backend, since, wait) => {
+                    let Some(ticket) = gate.enter() else {
+                        // The page's call from before it was hidden.
+                        cx.background_executor()
+                            .timer(crate::pages::agents_poll::MIN_PAUSE)
+                            .await;
+                        continue;
+                    };
+                    let result = blocking(cx, wait > 0, move || backend.changes(since, wait)).await;
+                    drop(ticket);
+                    match this.update(cx, |shell, cx| shell.attention_polled(result, cx)) {
+                        Ok(Some(pause)) => pause,
+                        _ => break,
+                    }
+                }
+            };
+            cx.background_executor().timer(pause).await;
+        })
+        .detach();
+    }
+
+    fn next_attention(&mut self, _: &mut Context<Self>) -> AttentionNext {
+        use crate::pages::agents_poll::{LONG_POLL, POLL_PAUSE};
+        if !self.agents_enabled() || self.stopping {
+            self.attention_watching = false;
+            self.attention.reset();
+            return AttentionNext::Stop;
+        }
+        if self.page == Page::Agents {
+            // The page reads `/changes` and feeds the count; prime again
+            // (quietly) once it is left.
+            self.attention.reset();
+            return AttentionNext::Pause(POLL_PAUSE);
+        }
+        let backend = self.cx.services.remote.agents(&self.cx.services.config());
+        if !self.attention.primed() {
+            return AttentionNext::Prime(backend);
+        }
+        let wait = if backend.simulated() { 0 } else { LONG_POLL };
+        AttentionNext::Poll(backend, self.attention.revision(), wait)
+    }
+
+    fn attention_failed(
+        &mut self,
+        error: crate::controllers::agents::AgentsError,
+    ) -> Option<Duration> {
+        self.attention_failures = self.attention_failures.saturating_add(1);
+        if error == crate::controllers::agents::AgentsError::Absent {
+            self.attention_watching = false;
+            return None;
+        }
+        Some(crate::pages::agents_poll::backoff(self.attention_failures))
+    }
+
+    fn attention_primed(
+        &mut self,
+        result: Result<
+            (
+                Vec<crate::controllers::agents::Provider>,
+                crate::controllers::agents::SessionPage,
+            ),
+            crate::controllers::agents::AgentsError,
+        >,
+        cx: &mut Context<Self>,
+    ) -> Option<Duration> {
+        if self.page == Page::Agents || !self.agents_enabled() {
+            return Some(Duration::ZERO);
+        }
+        match result {
+            Ok((providers, page)) => {
+                self.attention_failures = 0;
+                self.attention.prime(&page);
+                self.attention_providers = providers;
+                self.set_attention_count(cx);
+                Some(Duration::ZERO)
+            }
+            Err(error) => self.attention_failed(error),
+        }
+    }
+
+    fn attention_polled(
+        &mut self,
+        result: Result<
+            crate::controllers::agents::Changes,
+            crate::controllers::agents::AgentsError,
+        >,
+        cx: &mut Context<Self>,
+    ) -> Option<Duration> {
+        use crate::controllers::agents_attention as model;
+        use crate::pages::agents_poll::{MIN_PAUSE, POLL_PAUSE};
+        // Shown meanwhile: the page took over (its own full read counts).
+        if self.page == Page::Agents || !self.agents_enabled() {
+            return Some(Duration::ZERO);
+        }
+        let changes = match result {
+            Ok(changes) => changes,
+            Err(error) => return self.attention_failed(error),
+        };
+        self.attention_failures = 0;
+        let newly = self.attention.apply(&changes);
+        self.set_attention_count(cx);
+        // One toast: the newest session that started waiting.
+        if let Some(session) = newly.last() {
+            let message = model::toast(session, &self.attention_providers);
+            let id = session.id.clone();
+            let shell = cx.weak_entity();
+            let open: ui::Action = Rc::new(move |_, cx| {
+                let (shell, id) = (shell.clone(), id.clone());
+                cx.defer(move |cx| {
+                    let _ = shell.update(cx, |shell, cx| shell.open_agent_session(id, cx));
+                });
+            });
+            self.toast(message.into(), Some((model::OPEN.into(), open)), cx);
+        }
+        let simulated = self
+            .cx
+            .services
+            .remote
+            .agents(&self.cx.services.config())
+            .simulated();
+        Some(if changes.waited && !simulated {
+            MIN_PAUSE
+        } else {
+            POLL_PAUSE
+        })
+    }
+
+    fn set_attention_count(&mut self, cx: &mut Context<Self>) {
+        let n = self.attention.count();
+        if self.agents_attention != n {
+            self.agents_attention = n;
+            cx.notify();
+        }
+    }
+
+    /// The toast's Open: Agents, on that session.
+    fn open_agent_session(&mut self, id: String, cx: &mut Context<Self>) {
+        self.navigate(Page::Agents, None, cx);
+        if let (Page::Agents, Some(View::Agents(v))) = (self.page, self.find(Page::Agents)) {
+            v.update(cx, |p, cx| p.open_session(id, cx));
         }
     }
 
@@ -1469,10 +1695,26 @@ impl Shell {
         let nav_item = |page: Page, cx: &mut Context<Self>| {
             let selected = self.page == page;
             let (sz, lh) = text::body();
-            let badge = (page == Page::Prompts && self.pending_prompts > 0)
-                .then(|| ui::badge(t, self.pending_prompts));
+            let badge = match page {
+                Page::Prompts if self.pending_prompts > 0 => {
+                    Some(ui::badge(t, self.pending_prompts))
+                }
+                // Needs input only (running never badges).
+                Page::Agents if self.agents_attention > 0 => {
+                    Some(ui::badge(t, self.agents_attention))
+                }
+                _ => None,
+            };
+            // The row's accessible name ("Agents, 2 needs input"); GPUI
+            // has no accessibility tree yet, so it is carried as the row's
+            // selector for now.
+            let name = (page == Page::Agents)
+                .then(|| crate::controllers::agents_attention::nav_label(self.agents_attention));
             // Selected: a soft rounded fill, heavier label, accent icon.
             ui::row_button(t, ("nav", page as u64), selected)
+                .when_some(name, |d, name| {
+                    d.debug_selector(move || format!("nav-label:{name}"))
+                })
                 .h(tsize::nav_row())
                 .items_center()
                 .gap(space::s4())
@@ -3911,11 +4153,14 @@ pub(crate) mod focus_tests {
         shell.update(cx, |shell, cx| shell.navigate(Page::Home, None, cx));
         tick(cx, 2);
         assert!(!agents.read_with(cx, |p, _| p.polling()));
+        // The page reads nothing while hidden; the shell's needs-input
+        // watcher is the one reader now (Slice C): one read per pause.
         let polls = fake.calls().changes;
         for _ in 0..4 {
             tick(cx, 2);
         }
-        assert_eq!(fake.calls().changes, polls, "no reads while hidden");
+        assert_eq!(fake.calls().changes, polls + 4, "one reader while hidden");
+        assert!(!agents.read_with(cx, |p, _| p.polling()));
         // Back: exactly one loop again.
         shell.update(cx, |shell, cx| shell.navigate(Page::Agents, None, cx));
         cx.run_until_parked();
@@ -4221,6 +4466,10 @@ pub(crate) mod focus_tests {
 #[cfg(test)]
 #[path = "app_agents_settings_tests.rs"]
 mod agents_settings_tests;
+
+#[cfg(test)]
+#[path = "app_agents_attention_tests.rs"]
+mod agents_attention_tests;
 
 #[cfg(test)]
 mod history_layout_tests {
