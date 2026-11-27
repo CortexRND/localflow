@@ -90,8 +90,19 @@ pub fn scan(text: &str) -> Vec<Finding> {
             found.push((m.range(), "a key or token"));
         }
     }
-    // A value already redacted is not a finding.
-    found.retain(|(r, _)| !text[r.start..].starts_with(REDACTED));
+    // A value already redacted is not a finding. The unquoted pattern
+    // stops before the marker's closing bracket; a longer quoted value
+    // that merely starts with the marker is still a finding.
+    found.retain(|(r, _)| {
+        let value = &text[r.clone()];
+        value != REDACTED
+            && !(value == &REDACTED[..REDACTED.len() - 1]
+                && text[r.end..].starts_with(']')
+                && match text[r.end + 1..].chars().next() {
+                    None => true,
+                    Some(ch) => ch.is_whitespace() || matches!(ch, ',' | ';' | '}' | '"' | '\''),
+                })
+    });
     // Earliest first; on overlap the first (most specific class) wins and
     // the span grows to cover both, so redaction leaves no fragment.
     found.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
@@ -237,6 +248,29 @@ mod tests {
         let task = format!("Rotate the webhook key.\nUse api_key={KEY}\nthen redeploy.");
         let found = scan(&task);
         assert_eq!(found.len(), 1, "{found:?}");
+    /// The marker only suppresses a value that is exactly the marker, not
+    /// a longer quoted value that happens to start with it.
+    #[test]
+    fn the_redaction_marker_does_not_hide_a_longer_value() {
+        let task = "Use secret=\"[redacted] password=abc horse\" here";
+        assert_eq!(scan(task).len(), 1, "the longer quoted value is a finding");
+        let redacted = redact(task);
+        assert!(
+            !redacted.contains("abc"),
+            "the nested assignment is redacted"
+        );
+        assert!(
+            !redacted.contains("horse"),
+            "the whole quoted value is redacted"
+        );
+        assert!(scan(&redacted).is_empty(), "the redacted task passes");
+        let glued = "Use password=[redacted]abc123456789abcdef here";
+        assert!(
+            !scan(glued).is_empty(),
+            "a suffix glued to the marker still scans"
+        );
+    }
+
         assert_eq!((found[0].kind, found[0].line), ("an API key", 2));
         let shown = format!("{found:?}");
         assert!(!shown.contains("4f9QxZ2m"), "the shown finding is redacted");
