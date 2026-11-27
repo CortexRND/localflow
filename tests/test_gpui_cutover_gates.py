@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import types
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,69 @@ def test_distinct_captures_have_no_duplicates(gates):
     digests = capture_digests(screenshots)
     assert len(digests) == 44
     assert screenshots.duplicate_captures(digests) == []
+
+
+def speaker_digests(screenshots):
+    return {
+        f"{name}-{theme}-{width}x{height}.png": f"{name}/{theme}/{width}"
+        for name, _ in screenshots.speaker_scenes()
+        for theme in ("light", "dark")
+        for width, height in screenshots.SIZES
+    }
+
+
+def test_speaker_scenes_add_distinct_opt_in_captures(gates):
+    _, screenshots = gates
+    pages = capture_digests(screenshots)
+    speakers = speaker_digests(screenshots)
+    assert len(pages) == 44 and len(speakers) == 16
+    assert not set(pages) & set(speakers), "old capture names are unchanged"
+    assert all(name.startswith("speakers-") for name in speakers)
+    assert screenshots.expected_captures() == 60
+    assert screenshots.duplicate_captures({**pages, **speakers}) == []
+    for name, route in screenshots.speaker_scenes():
+        assert route == ["--sandbox-fixture", name]
+        assert name not in screenshots.PAGES
+    entry = screenshots.manifest({"speakers-people-dark-960x640.png": "s"})["captures"][0]
+    assert (entry["page"], entry["theme"], entry["width"]) == ("speakers-people", "dark", 960)
+
+
+def test_a_speaker_scene_is_ready_only_on_its_own_marker(gates):
+    _, screenshots = gates
+    log = (
+        "[2026-11-24T10:00:00Z INFO  blade_graphics::hal::init] Adapter: llvmpipe\n"
+        "lf-desktop: scene ready: speakers-recent\n"
+    )
+    assert screenshots.scene_ready(log, "speakers-recent")
+    # No marker, another scene's marker, or a quoted/partial line never counts.
+    assert not screenshots.scene_ready("", "speakers-recent")
+    assert not screenshots.scene_ready(log, "speakers-saved")
+    assert not screenshots.scene_ready("note: lf-desktop: scene ready: speakers-saved\n", "speakers-saved")
+    assert not screenshots.scene_ready("lf-desktop: scene ready: speakers-saved-extra\n", "speakers-saved")
+    for name, _ in screenshots.speaker_scenes():
+        assert screenshots.scene_ready(screenshots.SCENE_READY.format(name) + "\n", name)
+
+
+def test_a_speaker_scene_without_its_marker_times_out(gates, monkeypatch):
+    _, screenshots = gates
+    clock = iter(range(0, 1000, 10))
+    fake_time = types.SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _: None)
+    monkeypatch.setattr(screenshots, "time", fake_time)
+    with pytest.raises(RuntimeError, match="scene speakers-people"):
+        screenshots.wait_for(
+            lambda: screenshots.scene_ready("lf-desktop: scene ready: speakers-saved\n", "speakers-people"),
+            "scene speakers-people to render its real view",
+            timeout=screenshots.SCENE_TIMEOUT_SECONDS,
+        )
+
+
+def test_a_speaker_scene_showing_a_plain_page_is_a_duplicate(gates):
+    _, screenshots = gates
+    digests = {**capture_digests(screenshots), **speaker_digests(screenshots)}
+    digests["speakers-settings-light-1280x850.png"] = digests["settings-light-1280x850.png"]
+    assert screenshots.duplicate_captures(digests) == [
+        ("settings-light-1280x850.png", "speakers-settings-light-1280x850.png"),
+    ]
 
 
 def test_page_rendering_home_is_a_duplicate(gates):

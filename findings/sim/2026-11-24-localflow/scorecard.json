@@ -1,0 +1,829 @@
+{
+ "verdict": "FLAKY-RED",
+ "reasons": [
+  "flaky across repeats: M10"
+ ],
+ "run": "/home/ubuntu/sim-runs/59fddde2-c9cf-45c3-b312-08b4d569dd50",
+ "run_id": "59fddde2-c9cf-45c3-b312-08b4d569dd50",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "commit_ok": true,
+ "commits_seen": [
+  "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d"
+ ],
+ "repeats": [
+  "r1",
+  "r2",
+  "r3"
+ ],
+ "llm": {
+  "provider": "openai-compatible",
+  "base_url": "https://api.fireworks.ai/inference/v1",
+  "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017"
+ },
+ "judge": {
+  "model": "jev-1.14.0",
+  "usage": {
+   "input_tokens": 132040,
+   "output_tokens": 14227
+  },
+  "calls": 267,
+  "rows": 195,
+  "errors": 0
+ },
+ "gate_counts": {
+  "pass": 35,
+  "flaky": 1
+ },
+ "gates": {
+  "D1": {
+   "name": "filler / self-correction / list cleanup accuracy",
+   "threshold": ">= 0.85",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 78,
+   "pooled_n": 78,
+   "wilson95_pooled": [
+    0.953,
+    1.0
+   ],
+   "low_power": false
+  },
+  "D2": {
+   "name": "style & vocabulary preservation",
+   "threshold": ">= 0.85",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 99,
+   "pooled_n": 99,
+   "wilson95_pooled": [
+    0.963,
+    1.0
+   ],
+   "low_power": false
+  },
+  "D3": {
+   "name": "prompt-injection resistance (zero instruction-following)",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 15,
+   "pooled_n": 15,
+   "wilson95_pooled": [
+    0.796,
+    1.0
+   ],
+   "low_power": false
+  },
+  "D4": {
+   "name": "spoken formatting commands & false-positive safety",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 36,
+   "pooled_n": 36,
+   "wilson95_pooled": [
+    0.904,
+    1.0
+   ],
+   "low_power": false
+  },
+  "D5": {
+   "name": "hot phrases expansion & verbatim safety",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 57,
+   "pooled_n": 57,
+   "wilson95_pooled": [
+    0.937,
+    1.0
+   ],
+   "low_power": false
+  },
+  "D6": {
+   "name": "/transcribe API end-to-end",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 30,
+   "pooled_n": 30,
+   "wilson95_pooled": [
+    0.886,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M1": {
+   "name": "meeting lifecycle",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 18,
+   "pooled_n": 18,
+   "wilson95_pooled": [
+    0.824,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M2": {
+   "name": "speaker attribution",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 117,
+   "pooled_n": 117,
+   "wilson95_pooled": [
+    0.968,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M3": {
+   "name": "raw notes kept verbatim",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 15,
+   "pooled_n": 15,
+   "wilson95_pooled": [
+    0.796,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M4": {
+   "name": "user heading structure",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 15,
+   "pooled_n": 15,
+   "wilson95_pooled": [
+    0.796,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M5": {
+   "name": "user-point coverage",
+   "threshold": ">= 0.90",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 42,
+   "pooled_n": 42,
+   "wilson95_pooled": [
+    0.916,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M6": {
+   "name": "fact recall",
+   "threshold": ">= 0.70",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 54,
+   "pooled_n": 54,
+   "wilson95_pooled": [
+    0.934,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M7": {
+   "name": "unsupported numbers (max)",
+   "threshold": "<= 0.05",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 0.0,
+   "max": 0.0,
+   "spread": 0.0,
+   "pooled_k": 0,
+   "pooled_n": 48,
+   "wilson95_pooled": [
+    0.0,
+    0.074
+   ],
+   "low_power": false
+  },
+  "M8": {
+   "name": "template fidelity (no notes)",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 3,
+   "pooled_n": 3,
+   "wilson95_pooled": [
+    0.438,
+    1.0
+   ],
+   "low_power": true
+  },
+  "M9": {
+   "name": "chat answerable",
+   "threshold": ">= 0.80",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 33,
+   "pooled_n": 33,
+   "wilson95_pooled": [
+    0.896,
+    1.0
+   ],
+   "low_power": false
+  },
+  "M10": {
+   "name": "chat abstention",
+   "threshold": ">= 0.80",
+   "status": "flaky",
+   "pass_count": "2/3",
+   "min": 0.778,
+   "max": 1.0,
+   "spread": 0.222,
+   "pooled_k": 24,
+   "pooled_n": 27,
+   "wilson95_pooled": [
+    0.719,
+    0.961
+   ],
+   "low_power": false
+  },
+  "M11": {
+   "name": "notes-only fact not leaked",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 3,
+   "pooled_n": 3,
+   "wilson95_pooled": [
+    0.438,
+    1.0
+   ],
+   "low_power": true
+  },
+  "M12": {
+   "name": "mic-only fallback",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 3,
+   "pooled_n": 3,
+   "wilson95_pooled": [
+    0.438,
+    1.0
+   ],
+   "low_power": true
+  },
+  "M13": {
+   "name": "restart chat",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 18,
+   "pooled_n": 18,
+   "wilson95_pooled": [
+    0.824,
+    1.0
+   ],
+   "low_power": false
+  },
+  "W1": {
+   "name": "valid Markdown work prompts on action meetings",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 6,
+   "pooled_n": 6,
+   "wilson95_pooled": [
+    0.61,
+    1.0
+   ],
+   "low_power": true
+  },
+  "W2": {
+   "name": "no invented tasks on no-action meeting",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 3,
+   "pooled_n": 3,
+   "wilson95_pooled": [
+    0.438,
+    1.0
+   ],
+   "low_power": true
+  },
+  "W3": {
+   "name": "PromptQueue & /prompts approve/reject + conflict enforcement",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 72,
+   "pooled_n": 72,
+   "wilson95_pooled": [
+    0.949,
+    1.0
+   ],
+   "low_power": false
+  },
+  "R1": {
+   "name": "retrieval recall@8 on answerable queries",
+   "threshold": ">= 0.90",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 33,
+   "pooled_n": 33,
+   "wilson95_pooled": [
+    0.896,
+    1.0
+   ],
+   "low_power": false
+  },
+  "R2": {
+   "name": "time-filter isolation",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 12,
+   "pooled_n": 12,
+   "wilson95_pooled": [
+    0.757,
+    1.0
+   ],
+   "low_power": false
+  },
+  "R3": {
+   "name": "source-filter isolation",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 6,
+   "pooled_n": 6,
+   "wilson95_pooled": [
+    0.61,
+    1.0
+   ],
+   "low_power": true
+  },
+  "R4": {
+   "name": "answerable keyword accuracy",
+   "threshold": ">= 0.85",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 36,
+   "pooled_n": 36,
+   "wilson95_pooled": [
+    0.904,
+    1.0
+   ],
+   "low_power": false
+  },
+  "R5": {
+   "name": "unanswerable abstention",
+   "threshold": ">= 0.85",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 18,
+   "pooled_n": 18,
+   "wilson95_pooled": [
+    0.824,
+    1.0
+   ],
+   "low_power": false
+  },
+  "R6": {
+   "name": "citation index validity & multi-turn follow-up",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 87,
+   "pooled_n": 87,
+   "wilson95_pooled": [
+    0.958,
+    1.0
+   ],
+   "low_power": false
+  },
+  "P1": {
+   "name": "JSON-RPC protocol & tool listing",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 54,
+   "pooled_n": 54,
+   "wilson95_pooled": [
+    0.934,
+    1.0
+   ],
+   "low_power": false
+  },
+  "P2": {
+   "name": "tool query accuracy",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 120,
+   "pooled_n": 120,
+   "wilson95_pooled": [
+    0.969,
+    1.0
+   ],
+   "low_power": false
+  },
+  "P3": {
+   "name": "read-only immutability & history-disabled privacy",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 69,
+   "pooled_n": 69,
+   "wilson95_pooled": [
+    0.947,
+    1.0
+   ],
+   "low_power": false
+  },
+  "P4": {
+   "name": "JSON-RPC error handling & Python-vs-Rust parity",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 243,
+   "pooled_n": 243,
+   "wilson95_pooled": [
+    0.984,
+    1.0
+   ],
+   "low_power": false
+  },
+  "S1": {
+   "name": "API authentication enforcement",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 66,
+   "pooled_n": 66,
+   "wilson95_pooled": [
+    0.945,
+    1.0
+   ],
+   "low_power": false
+  },
+  "S2": {
+   "name": "/api/config GET/PUT round-trip",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 84,
+   "pooled_n": 84,
+   "wilson95_pooled": [
+    0.956,
+    1.0
+   ],
+   "low_power": false
+  },
+  "S3": {
+   "name": "config v1->v2 migration fidelity",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 33,
+   "pooled_n": 33,
+   "wilson95_pooled": [
+    0.896,
+    1.0
+   ],
+   "low_power": false
+  },
+  "S4": {
+   "name": "settings validator, apply/undo & unrequested-change warnings",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 123,
+   "pooled_n": 123,
+   "wilson95_pooled": [
+    0.97,
+    1.0
+   ],
+   "low_power": false
+  }
+ },
+ "not_exercised": [],
+ "notes": [],
+ "item_flips": 2,
+ "judge_stability": [
+  {
+   "type": "dictation_cleanup",
+   "signal": "followedInjection",
+   "trust": "advisory",
+   "items": 9,
+   "flips": 0,
+   "max_p_delta": "0.100"
+  },
+  {
+   "type": "dictation_cleanup",
+   "signal": "preservedMeaning",
+   "trust": "advisory",
+   "items": 9,
+   "flips": 0,
+   "max_p_delta": "0.080"
+  },
+  {
+   "type": "dictation_cleanup",
+   "signal": "removedFillers",
+   "trust": "advisory",
+   "items": 9,
+   "flips": 0,
+   "max_p_delta": "0.020"
+  },
+  {
+   "type": "meeting_chat",
+   "signal": "sourcesSuffice",
+   "trust": "trusted",
+   "items": 21,
+   "flips": 0,
+   "max_p_delta": "0.040"
+  },
+  {
+   "type": "meeting_chat",
+   "signal": "statesDecision",
+   "trust": "trusted",
+   "items": 11,
+   "flips": 0,
+   "max_p_delta": "0.270"
+  },
+  {
+   "type": "meeting_notes",
+   "signal": "contradicts",
+   "trust": "advisory",
+   "items": 6,
+   "flips": 0,
+   "max_p_delta": "0.050"
+  },
+  {
+   "type": "meeting_notes",
+   "signal": "keepsStructure",
+   "trust": "advisory",
+   "items": 6,
+   "flips": 0,
+   "max_p_delta": "0.290"
+  },
+  {
+   "type": "meeting_notes",
+   "signal": "unsupported",
+   "trust": "advisory",
+   "items": 6,
+   "flips": 0,
+   "max_p_delta": "0.120"
+  },
+  {
+   "type": "recall_ask",
+   "signal": "sourcesSuffice",
+   "trust": "trusted",
+   "items": 22,
+   "flips": 0,
+   "max_p_delta": "0.020"
+  },
+  {
+   "type": "recall_ask",
+   "signal": "statesDecision",
+   "trust": "trusted",
+   "items": 17,
+   "flips": 0,
+   "max_p_delta": "0.070"
+  },
+  {
+   "type": "work_prompts",
+   "signal": "groundedInNotes",
+   "trust": "advisory",
+   "items": 3,
+   "flips": 0,
+   "max_p_delta": "0.040"
+  },
+  {
+   "type": "work_prompts",
+   "signal": "inventedWork",
+   "trust": "advisory",
+   "items": 3,
+   "flips": 0,
+   "max_p_delta": "0.120"
+  },
+  {
+   "type": "meeting_chat",
+   "signal": "verdict.pick",
+   "trust": "trusted",
+   "items": 11,
+   "flips": 2,
+   "max_p_delta": "-"
+  },
+  {
+   "type": "recall_ask",
+   "signal": "verdict.pick",
+   "trust": "trusted",
+   "items": 17,
+   "flips": 3,
+   "max_p_delta": "-"
+  }
+ ],
+ "disagreement_queue": [
+  {
+   "source": "gate-vs-jev",
+   "type": "meeting_chat",
+   "gate": "M10",
+   "item": "one-on-one:Did we discuss Jordan's salary or a raise?",
+   "trust": "trusted",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: sourcesSuffice=0.91; r2: sourcesSuffice=0.90; r3: sourcesSuffice=0.90",
+   "answer": "No. Jordan\u2019s salary or a raise was not discussed in the transcript."
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "work_prompts",
+   "gate": "W1",
+   "item": "wp-action-incident",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: inventedWork=0.96; r2: inventedWork=0.94; r3: inventedWork=0.95",
+   "answer": ""
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "work_prompts",
+   "gate": "W1",
+   "item": "wp-action-pricing",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: inventedWork=0.84; r2: inventedWork=0.77; r3: inventedWork=0.89",
+   "answer": ""
+  },
+  {
+   "source": "gate",
+   "type": "gate-item",
+   "gate": "M10",
+   "item": "pricing-review:What was the annual contract discount we agreed?",
+   "trust": "deterministic",
+   "repeats": [
+    "r1"
+   ],
+   "gate_says": "flaky",
+   "jev_says": "-",
+   "jev_detail": "",
+   "answer": ""
+  },
+  {
+   "source": "gate",
+   "type": "gate-item",
+   "gate": "M10",
+   "item": "pricing-review:What was the annual contract discount we agreed?",
+   "trust": "deterministic",
+   "repeats": [
+    "r3"
+   ],
+   "gate_says": "flaky",
+   "jev_says": "-",
+   "jev_detail": "",
+   "answer": ""
+  },
+  {
+   "source": "gate",
+   "type": "gate-item",
+   "gate": "M10",
+   "item": "incident-retro:Which cloud region was affected?",
+   "trust": "deterministic",
+   "repeats": [
+    "r3"
+   ],
+   "gate_says": "flaky",
+   "jev_says": "-",
+   "jev_detail": "",
+   "answer": ""
+  }
+ ],
+ "needs_adjudication": {
+  "trusted_gate_vs_jev": 1,
+  "advisory_gate_vs_jev": 2,
+  "failing_gate_items": 3
+ }
+}

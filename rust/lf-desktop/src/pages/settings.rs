@@ -42,6 +42,10 @@ pub struct SettingsPage {
     simulated: Entity<Select>,
     /// The appearance choice couldn't be stored (it still applies now).
     appearance_error: Option<String>,
+    /// `GET /api/diarization/status` for the speaker switches (read only
+    /// while the Meetings tab is shown); `None` until it answers.
+    speaker_status: Option<Result<Value, String>>,
+    speaker_status_generation: u64,
 }
 
 /// Extra rows and sections of a tab, beside its `[section] key` rows.
@@ -105,6 +109,8 @@ impl SettingsPage {
             simulated,
             // A failure from an earlier visit stays visible.
             appearance_error: appearance::queue().error(),
+            speaker_status: None,
+            speaker_status_generation: 0,
         };
         for (i, spec) in SPECS.iter().enumerate() {
             match spec.control {
@@ -167,6 +173,60 @@ impl SettingsPage {
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.note_config(cx);
         self.sync(cx);
+        self.load_speaker_status(cx);
+        cx.notify();
+    }
+
+    /// Whether the speaker models are ready, from the last status reply.
+    fn speaker_readiness(&self) -> hs::SpeakerReadiness {
+        hs::speaker_readiness(self.speaker_status.as_ref())
+    }
+
+    /// Read the speaker-label readiness in the background, only while the
+    /// Meetings tab is on screen (no other tab, and General in particular,
+    /// ever asks). The previous answer stays shown until the new one lands;
+    /// a late answer from an older request is dropped.
+    fn load_speaker_status(&mut self, cx: &mut Context<Self>) {
+        let shown = *self.pcx.current_page.borrow() == Page::Settings;
+        if !shown || self.tab != Tab::Meetings {
+            return;
+        }
+        self.speaker_status_generation = self.speaker_status_generation.wrapping_add(1);
+        let generation = self.speaker_status_generation;
+        let client = self
+            .pcx
+            .services
+            .remote
+            .meetings(&self.pcx.services.config());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.diarization_status().map_err(|e| e.0) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.speaker_status_generation == generation {
+                    this.speaker_status = Some(result);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The window came back to the front: models installed meanwhile (the
+    /// server verifies their hashes and records them only with a receipt)
+    /// show up without leaving the tab. Asks again only while the Meetings
+    /// tab is shown and the last answer was not ready; no polling.
+    pub fn window_activated(&mut self, cx: &mut Context<Self>) {
+        if self.speaker_readiness() == hs::SpeakerReadiness::Ready {
+            return;
+        }
+        self.load_speaker_status(cx);
+    }
+
+    fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.load_speaker_status(cx);
         cx.notify();
     }
 
@@ -436,7 +496,7 @@ impl SettingsPage {
     }
 
     pub fn open_tab(&mut self, target: &str, cx: &mut Context<Self>) {
-        self.tab = match target {
+        let tab = match target {
             "shortcuts" => Tab::Shortcuts,
             "input" | "dictation" | "languages" => Tab::Dictation,
             "cleanup" => Tab::Cleanup,
@@ -445,7 +505,7 @@ impl SettingsPage {
             "advanced" => Tab::Advanced,
             _ => Tab::General,
         };
-        cx.notify();
+        self.show_tab(tab, cx);
     }
 
     fn load_mics(&mut self, cx: &mut Context<Self>) {
@@ -528,6 +588,14 @@ impl SettingsPage {
 
     fn save(&mut self, i: usize, value: Value, cx: &mut Context<Self>) {
         let spec = &SPECS[i];
+        // Speaker switches: on needs ready models; off is always saved.
+        let readiness = self.speaker_readiness();
+        let config = self.pcx.services.config();
+        if let Err(err) = ctl::check_speaker_switch(spec, &value, &config, &readiness) {
+            self.errors.insert(i, err.to_string());
+            cx.notify();
+            return;
+        }
         match ctl::save(&self.pcx.services.config_file, spec, value) {
             Ok(saved) => {
                 self.pcx.services.set_cached_config(saved);
@@ -576,12 +644,16 @@ impl SettingsPage {
         let i = spec_index(spec);
         let config = self.pcx.services.config();
         let current = spec.current(&config);
+        let readiness = self.speaker_readiness();
+        let speaker = ctl::speaker_switch(spec, &config, &readiness);
         let control = match spec.control {
             Control::Switch => {
                 let on = current.as_bool().unwrap_or(false);
                 let this = cx.entity().downgrade();
                 Switch::new(("setting-switch", i as u64), on, spec.label)
-                    .disabled(spec.unavailable.is_some())
+                    .disabled(
+                        spec.unavailable.is_some() || speaker.as_ref().is_some_and(|s| !s.enabled),
+                    )
                     .on_toggle(move |on, _, cx| {
                         let _ = this.update(cx, |p, cx| p.save(i, json!(on), cx));
                     })
@@ -614,6 +686,8 @@ impl SettingsPage {
             Some((Tone::Error, SharedString::from(err.clone())))
         } else if let Some(reason) = spec.unavailable {
             Some((Tone::Neutral, reason.into()))
+        } else if let Some(note) = ctl::speaker_switch_note(spec, &config, &readiness) {
+            Some((Tone::Neutral, note.into()))
         } else if self.restart.contains(&i) {
             Some((Tone::Warning, "Restart LocalFlow to apply.".into()))
         } else if spec.restart {
@@ -961,6 +1035,10 @@ pub(crate) const TAB_DENSITY: ui::TabDensity = ui::TabDensity::Compact;
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
+        // Fixture scenes only: the speaker switches are drawn with an answer.
+        if self.tab == Tab::Meetings && self.speaker_readiness() == hs::SpeakerReadiness::Ready {
+            crate::sandbox::scene_ready(crate::sandbox::Fixture::SpeakersSettings);
+        }
         let this = cx.entity().downgrade();
         let tab_items: Vec<(Tab, &'static str)> =
             Tab::ALL.iter().map(|t| (*t, t.label())).collect();
@@ -971,10 +1049,7 @@ impl Render for SettingsPage {
             self.tab,
             TAB_DENSITY,
             Rc::new(move |tab, _, cx| {
-                let _ = this.update(cx, |p, cx| {
-                    p.tab = tab;
-                    cx.notify();
-                });
+                let _ = this.update(cx, |p, cx| p.show_tab(tab, cx));
             }),
         );
         let extra = self.render_extra(cx);
@@ -984,8 +1059,16 @@ impl Render for SettingsPage {
         if self.tab == Tab::General {
             rows.push(self.appearance_row(cx).into_any_element());
         }
+        // Speaker switches (Meetings only) open the tab in their own small
+        // section, drawn once; every other row stays in the tab's group.
+        let mut speaker_rows: Vec<gpui::AnyElement> = Vec::new();
         for spec in ctl::specs_for(self.tab) {
-            rows.push(self.render_spec(spec, cx).into_any_element());
+            let row = self.render_spec(spec, cx).into_any_element();
+            if ctl::is_speaker_switch(spec) {
+                speaker_rows.push(row);
+            } else {
+                rows.push(row);
+            }
         }
         if self.tab == Tab::Cleanup {
             let pcx = self.pcx.clone();
@@ -1005,6 +1088,15 @@ impl Render for SettingsPage {
         }
         rows.extend(extra.rows);
         let mut tab_body = div().flex().flex_col().gap(space::s5()).children(extra.top);
+        if !speaker_rows.is_empty() {
+            tab_body = tab_body.child(
+                ui::section(&t, "Speakers", None, None).child(ui::group_rows(
+                    &t,
+                    speaker_rows,
+                    ui::row_inset(),
+                )),
+            );
+        }
         if !rows.is_empty() {
             tab_body = tab_body.child(ui::group_rows(&t, rows, ui::row_inset()));
         }
@@ -1043,6 +1135,148 @@ impl Render for SettingsPage {
             ),
             column("settings-scroll", body),
         )
+    }
+}
+
+#[cfg(test)]
+mod speaker_switch_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use lf_ui::backends::meeting::{FakeMeetingClient, MeetingCall};
+
+    use super::SettingsPage;
+    use crate::app::{focus_tests::open_with, Shell, View};
+    use crate::controllers::settings::{spec, Tab};
+    use crate::page::Page;
+    use crate::remote::Remote;
+
+    fn page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {
+        shell.read_with(cx, |shell, _| match shell.view(Page::Settings) {
+            Some(View::Settings(v)) => v.clone(),
+            _ => panic!("Settings is open"),
+        })
+    }
+
+    fn client(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) -> std::sync::Arc<FakeMeetingClient> {
+        shell.read_with(cx, |shell, _| match &shell.cx.services.remote {
+            Remote::Sandbox { meetings, .. } => meetings.clone(),
+            Remote::Http { .. } => panic!("sandbox"),
+        })
+    }
+
+    fn activate(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        shell.update(cx, |s, cx| s.window_activation_changed(true, cx));
+        cx.run_until_parked();
+    }
+
+    fn status_calls(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> usize {
+        client(shell, cx)
+            .calls()
+            .iter()
+            .filter(|c| **c == MeetingCall::DiarizationStatus)
+            .count()
+    }
+
+    /// General never asks for speaker readiness; the Meetings tab does,
+    /// and refuses turning labels on until the models are ready.
+    #[gpui::test]
+    fn readiness_is_read_only_on_the_meetings_tab(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(Page::Settings, |_| {}, cx);
+        let settings = page(&shell, cx);
+        settings.update(cx, |p, cx| p.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 0, "General asks nothing");
+
+        settings.update(cx, |p, cx| p.open_tab("meetings", cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 1);
+        // The unseeded sandbox has no models: on is refused, nothing written.
+        let labels = spec("meetings", "speaker_diarization").unwrap();
+        let i = super::spec_index(labels);
+        settings.update(cx, |p, cx| {
+            assert_eq!(p.tab, Tab::Meetings);
+            p.save(i, serde_json::json!(true), cx);
+            assert!(p
+                .errors
+                .get(&i)
+                .is_some_and(|e| e.starts_with("Not turned on")));
+            assert_eq!(
+                p.pcx.services.config().field_bool("speaker_diarization"),
+                Some(false)
+            );
+            // Off is always saved.
+            p.save(i, serde_json::json!(false), cx);
+            assert!(!p.errors.contains_key(&i));
+        });
+    }
+
+    /// Coming back to the window re-checks readiness only on Settings'
+    /// Meetings tab and only until it is ready (no polling otherwise).
+    #[gpui::test]
+    fn window_activation_rechecks_readiness_until_ready(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(Page::Settings, |_| {}, cx);
+        let settings = page(&shell, cx);
+        // General: activation asks nothing.
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), 0, "General asks nothing");
+
+        settings.update(cx, |p, cx| p.open_tab("meetings", cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 1);
+        // Losing the window asks nothing.
+        shell.update(cx, |s, cx| s.window_activation_changed(false, cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 1, "deactivation asks nothing");
+
+        // Not ready: regaining the window asks again and picks up models
+        // installed meanwhile.
+        client(&shell, cx).set_diarization_status(Some(serde_json::json!({
+            "models_ready": true,
+            "extra_installed": true,
+        })));
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), 2);
+        settings.read_with(cx, |p, _| {
+            assert_eq!(
+                p.speaker_readiness(),
+                lf_ui::hub_settings::SpeakerReadiness::Ready
+            );
+        });
+
+        // Ready: further activations ask nothing.
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), 2, "ready asks nothing");
+    }
+
+    /// Activation on another page, or on another Settings tab, asks nothing
+    /// even while not ready; returning to the tab still asks (existing path).
+    #[gpui::test]
+    fn window_activation_skips_other_pages_and_tabs(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(Page::Settings, |_| {}, cx);
+        let settings = page(&shell, cx);
+        settings.update(cx, |p, cx| p.open_tab("meetings", cx));
+        cx.run_until_parked();
+        assert_eq!(status_calls(&shell, cx), 1);
+
+        shell.update(cx, |s, cx| s.navigate(Page::Home, None, cx));
+        cx.run_until_parked();
+        let before = status_calls(&shell, cx);
+        activate(&shell, cx);
+        assert_eq!(
+            status_calls(&shell, cx),
+            before,
+            "another page asks nothing"
+        );
+
+        shell.update(cx, |s, cx| s.navigate(Page::Settings, None, cx));
+        cx.run_until_parked();
+        settings.update(cx, |p, cx| p.open_tab("general", cx));
+        cx.run_until_parked();
+        let before = status_calls(&shell, cx);
+        activate(&shell, cx);
+        assert_eq!(status_calls(&shell, cx), before, "another tab asks nothing");
     }
 }
 

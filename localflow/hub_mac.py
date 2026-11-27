@@ -8,6 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 
 import AppKit
 import objc
@@ -51,21 +52,29 @@ from localflow.hub_model import (
     PROMPTS_EMPTY,
     PROMPTS_UNREADABLE,
     RECENT_EMPTY,
+    RECENT_LOADING,
     RECENT_ROW_H,
+    RECENT_SPEAKERS_DONE,
+    RECENT_SPEAKERS_TITLE,
     SPEAKER_TARGET_PLACEHOLDER,
     SPEAKERS_HEADING,
     STYLE_AUTOSAVE_HINT,
     STYLE_SAVE_FAILED,
+    RecentSpeakers,
     SpeakerPanel,
     dictation_state,
     dictionary_entries,
     home_decoration_frame,
     meeting_capture_status,
+    meeting_diarization_height,
+    meeting_diarization_status,
     meeting_form_layout,
     meeting_notes_height,
     meeting_speakers_layout,
+    mirror_speakers,
     prompt_row_layout,
     prompt_rows,
+    recent_layout,
     recent_notes,
     remove_entry,
     review_prompt,
@@ -73,6 +82,7 @@ from localflow.hub_model import (
     shortcut_rows,
     sidebar_label,
     sidebar_title,
+    speaker_error_is_stale,
     speaker_row_frames,
     speaker_row_meta,
     stat_layout,
@@ -107,7 +117,12 @@ from localflow.mac_style import (
 from localflow.mac_style import (
     style_flat_button as _style_button,
 )
-from localflow.meeting_client import MeetingClient, vault_notes_path
+from localflow.meeting_client import (
+    MeetingClient,
+    MeetingClientError,
+    VoiceRecording,
+    vault_notes_path,
+)
 from localflow.models_layout import (
     CLEANUP_LABEL,
     IMPORT_HEADER_H,
@@ -157,6 +172,34 @@ from localflow.models_layout import (
     speech_summary,
     use_button_visible,
 )
+from localflow.people_model import (
+    CONSENT_CANCEL,
+    CONSENT_CONFIRM,
+    CONSENT_DRAFT_NOTE,
+    CONSENT_POINTS,
+    CONSENT_TITLE,
+    FORGET_ALL_PROMPT,
+    PEOPLE_EMPTY,
+    PEOPLE_HEADING,
+    PEOPLE_LOADING,
+    PEOPLE_TOGGLE_H,
+    RECORD_STARTING,
+    RECORD_UPLOADING,
+    SAVE_FAILED,
+    STALE_BADGE,
+    TOGGLE_TITLE,
+    PeopleState,
+    can_remember,
+    forget_prompt,
+    is_generic_label,
+    people_footer_frames,
+    people_layout,
+    people_status_frames,
+    person_rename_frames,
+    person_row_frames,
+    recognition_update,
+    recording_status,
+)
 from localflow.phrases_model import PhrasesModel
 from localflow.platform import current
 from localflow.text_wrap import wrap_lines
@@ -187,6 +230,22 @@ PAGES = (
     "Home", "Ask", "Hot Phrases", "Dictionary", "Prompts",
     "Meetings", "History", "Style", "Models", "Settings",
 )
+
+# The selectors one speaker list's rows send: the post-stop Speakers card, and
+# the drawer under a Recent meetings row (same rows, its own SpeakerPanel).
+SPEAKER_ACTIONS = {
+    "rename": "meetingSpeakerRename:", "merge": "meetingSpeakerMerge:",
+    "target": "meetingSpeakerTarget:", "save": "meetingSpeakerSave:",
+    "confirm": "meetingSpeakerConfirmMerge:", "cancel": "meetingSpeakerCancel:",
+}
+RECENT_SPEAKER_ACTIONS = {
+    "rename": "meetingRecentSpeakerRename:", "merge": "meetingRecentSpeakerMerge:",
+    "target": "meetingRecentSpeakerTarget:", "save": "meetingRecentSpeakerSave:",
+    "confirm": "meetingRecentSpeakerConfirmMerge:", "cancel": "meetingRecentSpeakerCancel:",
+}
+# Remember (speaker recognition) is drawn only while both speaker flags are on.
+SPEAKER_ACTIONS["remember"] = "meetingSpeakerRemember:"
+RECENT_SPEAKER_ACTIONS["remember"] = "meetingRecentSpeakerRemember:"
 
 
 def _label(
@@ -322,6 +381,20 @@ class HubWindowController(NSObject):
         self.meeting_speaker_row_ids = []  # ids as drawn; a button tag indexes this
         self.meeting_speaker_choice_ids = []  # picker index -> id (None: placeholder)
         self.meeting_speaker_edit_key = ("", "")  # (mode, id) at the last fill
+        # Recent meetings: one row's speakers open in a drawer under it, with
+        # its own panel. The hidden set outlives page visits (see RecentSpeakers).
+        self.meeting_recent_speakers = RecentSpeakers()
+        self.meeting_recent_no_speakers = self.meeting_recent_speakers.hidden
+        self._meeting_recent_reset_views()
+        # People (speaker recognition): state lives here for the controller's
+        # lifetime; its views exist only while either speaker flag is on. Both
+        # speaker lists share one "remembered this session" set.
+        self.people = PeopleState()
+        self.people_capture = None  # the VoiceRecording holding mic audio in memory
+        self.people_retry_at = None  # monotonic time of the next 403 retry after consent
+        self.people_refresh_due = False  # reload the list when Meetings is entered
+        self.meeting_recent_speakers.panel.remembered = self.meeting_speakers.remembered
+        self._people_reset_views()
         self.tokens = LIGHT
         self.page = "Home"
         self.page_errors = {}
@@ -513,6 +586,8 @@ class HubWindowController(NSObject):
         entering_meetings = page == "Meetings" and self.page != "Meetings"
         if self.page == "Meetings" and hasattr(self, "meeting_notes"):
             self._meeting_capture_state()
+        if self.page == "Meetings" and page != "Meetings":
+            self._people_leave()  # the mic never stays open off screen
         # Every rebuild (resize, appearance, navigation) funnels through here,
         # so the Ask draft is read from its field before the views are torn
         # down. The controller and model themselves are never recreated.
@@ -582,6 +657,7 @@ class HubWindowController(NSObject):
             self._phrases().on_show()
         if entering_meetings:
             self._meeting_load_recent()
+            self.people_refresh_due = True
         getattr(self, f'_page_{page.lower().replace(" ", "_")}')()
         self._fit_body_height()
 
@@ -623,6 +699,12 @@ class HubWindowController(NSObject):
         if self._closed:  # shut down once, however often AppKit tells us
             return
         self._closed = True
+        try:
+            self._people_leave()
+        except Exception:
+            logging.getLogger("localflow.hub").warning(
+                "could not stop the enrollment recording on close", exc_info=True,
+            )
         try:
             self._meeting_flush_on_close()
         except Exception:
@@ -716,6 +798,10 @@ class HubWindowController(NSObject):
                 panel.set_draft(
                     field.stringValue(), getattr(self, "meeting_speaker_field_id", None),
                 )
+            field = getattr(self, "people_field", None)
+            people = getattr(self, "people", None)
+            if field is not None and people is not None:
+                people.set_draft(field.stringValue(), getattr(self, "people_field_key", None))
             return ("meetings", self.meeting_question.stringValue())
         return None
 
@@ -1628,6 +1714,10 @@ class HubWindowController(NSObject):
         self.meeting_speaker_field = None
         self.meeting_speaker_field_id = ""
         self.meeting_speaker_picker = None
+        self._meeting_recent_reset_views()
+        self._people_reset_views()
+        refresh, self.people_refresh_due = self.people_refresh_due, False
+        people_request = self._people_sync_flags(refresh=refresh)
         width = self.body.frame().size.width
         # Everything is placed relative to the standard header offset (plus any
         # error callout), never from y=0 where the page title sits.
@@ -1659,6 +1749,13 @@ class HubWindowController(NSObject):
             "", 0, 0, width, 12, "muted", palette=self.tokens, height=20,
         )
         self.body.addSubview_(self.meeting_watch)
+        # Speaker labels get their own wrapping line under the watch row; it
+        # stays hidden (and takes no room) while there is nothing to say.
+        self.meeting_diarization = _label(
+            "", 0, 0, width, 12, "muted", palette=self.tokens, height=18, wrap=True,
+        )
+        self.meeting_diarization.setHidden_(True)
+        self.body.addSubview_(self.meeting_diarization)
         self.meeting_title_label = _label(
             "Meeting title", *frames["title_label"][:3], 11,
             "ink", palette=self.tokens, height=frames["title_label"][3],
@@ -1814,6 +1911,8 @@ class HubWindowController(NSObject):
         self._meeting_render()
         self._meeting_worker("templates")
         self._meeting_poll()
+        if people_request:
+            self._people_send(people_request)
 
     @objc.python_method
     def _meeting_load_recent(self):
@@ -1826,18 +1925,45 @@ class HubWindowController(NSObject):
             getattr(self.config, "vault_path", ""),
             getattr(self.config, "notes_folder", ""),
         )
+        # An open speakers drawer whose note is gone (or changed) closes.
+        state = getattr(self, "meeting_recent_speakers", None)
+        if state is not None:
+            state.reconcile(self.meeting_recent)
+
+    @objc.python_method
+    def _meeting_recent_reset_views(self):
+        """Forget the views of the Recent meetings drawer (not the edit key)."""
+        self.meeting_recent_field = None
+        self.meeting_recent_field_id = ""  # the row the field was drawn for
+        self.meeting_recent_picker = None
+        self.meeting_recent_row_ids = []  # ids as drawn; a button tag indexes this
+        self.meeting_recent_choice_ids = []  # picker index -> id (None: placeholder)
+        if not hasattr(self, "meeting_recent_edit_key"):
+            self.meeting_recent_edit_key = ("", "")  # (mode, id) at the last fill
 
     @objc.python_method
     def _meeting_render_recent(self):
-        """Rows of the Recent meetings card: title, date and Open."""
+        """Rows of the Recent meetings card (title, date, Speakers…, Open) and
+        the speakers drawer under the open row.
+
+        Rebuilt on open/close, load and edit changes only, never by the 2s
+        poll, so a rename field being typed in is never replaced under the user.
+        """
         card = self.meeting_recent_card
+        state = self.meeting_recent_speakers
+        panel = state.panel
+        field = self.meeting_recent_field
+        if field is not None:
+            panel.set_draft(field.stringValue(), self.meeting_recent_field_id)
         for view in list(card.subviews()):
             view.removeFromSuperview()
+        self._meeting_recent_reset_views()
         width = self.body.frame().size.width
         notes = self.meeting_recent
         if not notes:
             message = self.meeting_recent_error or RECENT_EMPTY
             card.setFrame_(NSMakeRect(0, card.frame().origin.y, width, RECENT_ROW_H))
+            card.layer().setMasksToBounds_(False)
             card.addSubview_(
                 _label(
                     message, CARD_PADDING, 12, width - 2 * CARD_PADDING, 12,
@@ -1845,39 +1971,156 @@ class HubWindowController(NSObject):
                 )
             )
             return
-        card.setFrame_(
-            NSMakeRect(0, card.frame().origin.y, width, len(notes) * RECENT_ROW_H)
+        layout = recent_layout(
+            width, notes, state, error_height=self._meeting_recent_error_height(width),
         )
-        date_w = 150
-        open_w = 72
-        for index, note in enumerate(notes):
-            y = index * RECENT_ROW_H
-            open_x = width - CARD_PADDING - open_w
-            date_x = open_x - 12 - date_w
+        drawer = layout["drawer"]
+        card.setFrame_(NSMakeRect(0, card.frame().origin.y, width, layout["height"]))
+        # The drawer's tray is clipped to the card's rounded corners.
+        card.layer().setMasksToBounds_(drawer is not None)
+        controls = []
+        for index, (note, row) in enumerate(zip(notes, layout["rows"])):
+            frames = row["frames"]
+            x, y, w, h = frames["title"]
             card.addSubview_(
                 _label(
-                    note["title"], CARD_PADDING, y + 12, date_x - CARD_PADDING - 12,
-                    13, "ink", palette=self.tokens, height=20, weight="semibold",
+                    note["title"], x, y, w, 13, "ink",
+                    palette=self.tokens, height=h, weight="semibold",
                 )
             )
+            x, y, w, h = frames["date"]
             date = _label(
-                note["date_label"], date_x, y + 14, date_w, 11, "muted",
-                palette=self.tokens, height=18,
+                note["date_label"], x, y, w, 11, "muted", palette=self.tokens, height=h,
             )
             date.setAlignment_(AppKit.NSTextAlignmentRight)
             card.addSubview_(date)
+            if row["show_speakers"]:
+                x, y, w, h = frames["speakers"]
+                toggle = self._button(
+                    RECENT_SPEAKERS_DONE if row["expanded"] else RECENT_SPEAKERS_TITLE,
+                    "meetingRecentSpeakers:", x, y, index, w,
+                    parent=card, kind="ghost", height=h,
+                )
+                toggle.setAccessibilityLabel_(
+                    f"Hide speakers: {note['title']}" if row["expanded"]
+                    else f"Edit speakers: {note['title']}"
+                )
+                controls.append(toggle)
+            x, y, w, h = frames["open"]
             button = self._button(
-                "Open", "meetingOpenRecent:", open_x, y + 8, index, open_w,
-                parent=card, kind="ghost", height=28,
+                "Open", "meetingOpenRecent:", x, y, index, w,
+                parent=card, kind="ghost", height=h,
             )
             button.setAccessibilityLabel_(f"Open notes: {note['title']}")
-            if index < len(notes) - 1:
-                divider = NSView.alloc().initWithFrame_(
-                    NSMakeRect(12, y + RECENT_ROW_H - 1, width - 24, 1)
-                )
-                divider.setWantsLayer_(True)
-                divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
-                card.addSubview_(divider)
+            # Under the open row the drawer's own hairline takes the divider's place.
+            if index < len(notes) - 1 and not (row["expanded"] and drawer is not None):
+                self._meeting_divider(card, (12, row["y"] + RECENT_ROW_H - 1, width - 24, 1))
+        opened = False
+        if drawer is not None:
+            drawn, opened = self._meeting_recent_drawer(card, drawer, layout["height"])
+            controls += drawn
+        self.meeting_recent_edit_key = (panel.mode, panel.speaker_id)
+        if panel.busy:
+            for control in controls:
+                control.setEnabled_(False)
+        elif self.meeting_recent_field is not None:
+            self.window.makeFirstResponder_(self.meeting_recent_field)
+            if opened:
+                self.meeting_recent_field.selectText_(None)
+
+    @objc.python_method
+    def _meeting_recent_drawer(self, card, drawer, card_height):
+        """The recessed tray under the open Recent meetings row: (controls, opened)."""
+        state = self.meeting_recent_speakers
+        panel = state.panel
+        x, y, width, height = drawer["frame"]
+        view = FlippedView.alloc().initWithFrame_(NSMakeRect(x, y, width, height))
+        view.setWantsLayer_(True)
+        view.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
+        card.addSubview_(view)
+        self._meeting_divider(view, (0, 0, width, 1))
+        if y + height < card_height:
+            self._meeting_divider(view, (0, height - 1, width, 1))
+        if drawer["kind"] == "loading":
+            x, y, w, h = drawer["label"]
+            view.addSubview_(
+                _label(RECENT_LOADING, x, y, w, 12, "muted", palette=self.tokens, height=h)
+            )
+            return [], False
+        if drawer["kind"] == "error":
+            x, y, w, h = drawer["label"]
+            label = _label(state.load_error, x, y, w, 12, "red", palette=self.tokens, height=h)
+            label.setToolTip_(state.load_error)
+            view.addSubview_(label)
+            x, y, w, h = drawer["retry"]
+            retry = self._button(
+                "Retry", "meetingRecentSpeakersRetry:", x, y, 0, w,
+                parent=view, kind="ghost", height=h,
+            )
+            retry.setAccessibilityLabel_("Retry loading speakers")
+            return [retry], False
+        self.meeting_recent_row_ids = [row["id"] for row in panel.rows]
+        controls, refs, opened = self._meeting_speaker_rows(
+            view, panel, width, RECENT_SPEAKER_ACTIONS, self.meeting_recent_edit_key,
+        )
+        self.meeting_recent_field = refs.get("field")
+        self.meeting_recent_field_id = refs.get("field_id", "")
+        self.meeting_recent_picker = refs.get("picker")
+        self.meeting_recent_choice_ids = refs.get("choice_ids", [])
+        if drawer["error"]:
+            x, y, w, h = drawer["error"]
+            view.addSubview_(
+                _label(panel.error, x, y, w, 12, "red", palette=self.tokens, height=h, wrap=True)
+            )
+        return controls, opened
+
+    @objc.python_method
+    def _meeting_recent_error_height(self, width):
+        """Wrapped height of the drawer panel's error, 0 when there is none."""
+        state = self.meeting_recent_speakers
+        error = state.panel.error if state.state == "ready" else ""
+        if not error:
+            return 0
+        error_font = _font(12)
+        lines = wrap_lines(
+            error, width - 2 * CARD_PADDING - 8, lambda text: measure_text(text, error_font),
+        )
+        return max(1, len(lines)) * 16 + 2
+
+    @objc.python_method
+    def _meeting_recent_refresh(self):
+        """Redraw the Recent meetings card, then the page around its new height."""
+        self._meeting_render_recent()
+        self._meeting_render()
+
+    @objc.python_method
+    def _meeting_recent_send(self, request, event):
+        """Run a RecentSpeakers/drawer panel request; the answer comes back as `event`."""
+        operation, args, token = request
+        client = self.meeting_client
+
+        def run():
+            try:
+                result, error = getattr(client, operation)(*args), None
+            except Exception as exc:  # noqa: BLE001
+                result, error = None, exc
+            self.meeting_events.put((event, (token, result), error))
+
+        threading.Thread(target=run, name=f"localflow-recent-{operation}", daemon=True).start()
+
+    @objc.python_method
+    def _meeting_speakers_mirror(self, source, target, payload, error):
+        """After a successful edit in one speakers panel, show it in the other
+        when both are on the same meeting; True when `target` changed."""
+        if not mirror_speakers(source, target, payload, error):
+            return False
+        saved = getattr(self, "meeting_last_saved", None)
+        if (
+            target is getattr(self, "meeting_speakers", None) and isinstance(saved, dict)
+            and saved.get("meeting_id") == target.meeting_id
+        ):
+            self.meeting_last_saved = {**saved, "speakers": payload.get("speakers")}
+        return True
 
     @objc.python_method
     def _meeting_worker(self, operation, *args):
@@ -2047,13 +2290,93 @@ class HubWindowController(NSObject):
         # Fakes in the tests run this without a panel and with no module
         # globals: reach it through getattr and call only its methods.
         panel = getattr(self, "meeting_speakers", None)
+        recent = getattr(self, "meeting_recent_speakers", None)
+        recent_shown = self.page == "Meetings" and hasattr(self, "meeting_recent_card")
+        people = getattr(self, "people", None)
+        if operation == "people_load":
+            token, payload = result
+            outcome = people.loaded(token, payload, error) if people is not None else False
+            if outcome == "retry":
+                # Right after consent the server may not have adopted the flag yet.
+                self.people_retry_at = time.monotonic() + 1
+            elif outcome and self.page == "Meetings":
+                self._meeting_render()
+            return
+        if operation == "people_rec":
+            token, _payload = result
+            if people is None or not people.recording_started(token, error, time.monotonic()):
+                return  # cancelled first: that capture was already discarded
+            if error is not None:
+                self.people_capture = None
+            if self.page == "Meetings":
+                self._meeting_render()
+            return
+        if operation == "people":
+            token, payload = result
+            was_forget_all = people is not None and people.busy == "forget_all"
+            if people is None or not people.finish(token, payload, error):
+                return
+            if was_forget_all and error is None:
+                if panel is not None:
+                    panel.clear_remembered()
+                    self.meeting_speakers_rendered = None
+                if recent is not None:
+                    recent.panel.clear_remembered()
+            if people.reload:
+                self._people_send(people.load())
+            if was_forget_all and error is None and recent_shown:
+                self._meeting_recent_refresh()
+            elif self.page == "Meetings":
+                self._meeting_render()
+            return
         if operation == "speakers":
             token, payload = result
-            if (
-                panel is not None and panel.finish(token, payload, error)
-                and self.page == "Meetings"
-            ):
+            if panel is None or not panel.finish(token, payload, error):
+                return
+            if getattr(panel, "last_action", "") == "remember":
+                # A voiceprint, not speakers: nothing to mirror. Both lists show
+                # "Remembered" (one shared set) and People lists the new voice.
+                if error is None and people is not None and people.active and not people.busy:
+                    self._people_send(people.load())
+                if recent_shown:
+                    self._meeting_recent_refresh()
+                elif self.page == "Meetings":
+                    self._meeting_render()
+                return
+            # The same meeting open in a Recent meetings drawer shows the edit too.
+            mirrored = recent is not None and self._meeting_speakers_mirror(
+                panel, recent.panel, payload, error,
+            )
+            if mirrored and recent_shown:
+                self._meeting_recent_refresh()
+            elif self.page == "Meetings":
                 self._meeting_render()
+            return
+        if operation == "recent_speakers_load":
+            token, payload = result
+            if recent is not None and recent.loaded(token, payload, error) and recent_shown:
+                self._meeting_recent_refresh()
+            return
+        if operation == "recent_speakers":
+            token, payload = result
+            if recent is None or not recent.panel.finish(token, payload, error):
+                return
+            if getattr(recent.panel, "last_action", "") == "remember":
+                if error is None and people is not None and people.active and not people.busy:
+                    self._people_send(people.load())
+                if error is None and panel is not None and panel.meeting_id == recent.meeting_id:
+                    self.meeting_speakers_rendered = None
+                if recent_shown:
+                    self._meeting_recent_refresh()
+                return
+            if error and speaker_error_is_stale(error):
+                request = recent.reload()
+                if request is not None:
+                    self._meeting_recent_send(request, "recent_speakers_load")
+            elif panel is not None:
+                self._meeting_speakers_mirror(recent.panel, panel, payload, error)
+            if recent_shown:
+                self._meeting_recent_refresh()
             return
         if operation == "templates":
             if not error:
@@ -2185,9 +2508,18 @@ class HubWindowController(NSObject):
             )
             if view is not None
         )
+        speakers += tuple(
+            view for view in (
+                getattr(self, "people_heading", None),
+                getattr(self, "people_card", None),
+                getattr(self, "people_message", None),
+            )
+            if view is not None
+        )
         return (
             self.meeting_subtitle,
-            self.meeting_watch, self.meeting_title_label, self.meeting_title_box,
+            self.meeting_watch, self.meeting_diarization,
+            self.meeting_title_label, self.meeting_title_box,
             self.meeting_template_label, self.meeting_template_box,
             self.meeting_notes_card, self.meeting_notes_status,
             self.meeting_error_label, self.meeting_action, self.meeting_live_card,
@@ -2277,7 +2609,18 @@ class HubWindowController(NSObject):
         self.meeting_watch.setFrame_(
             NSMakeRect(action_frame.origin.x, watch_y, width, 20)
         )
-        live_y = watch_y + (26 if watch_visible else 0)
+        # The speaker-label line wraps under the 20pt watch row and pushes
+        # the rest down by its height; empty, it is hidden and takes no room.
+        diarization = self.meeting_diarization.stringValue()
+        diarization_font = _font(12)
+        diarization_h = meeting_diarization_height(
+            diarization, width, lambda text: measure_text(text, diarization_font),
+        )
+        self.meeting_diarization.setHidden_(not diarization_h)
+        self.meeting_diarization.setFrame_(
+            NSMakeRect(action_frame.origin.x, watch_y + 20, width, diarization_h)
+        )
+        live_y = watch_y + (26 if watch_visible else 0) + diarization_h
         self.meeting_live_card.setFrame_(NSMakeRect(0, live_y, width, 98))
         self.meeting_live_label.setFrame_(NSMakeRect(8, 8, width - 16, 82))
         self.meeting_live_card.setHidden_(not bool(session))
@@ -2311,6 +2654,7 @@ class HubWindowController(NSObject):
         self.meeting_recent_card.setFrame_(
             NSMakeRect(0, recent_y + 28, width, recent.size.height)
         )
+        self._people_layout(recent_y + 28 + recent.size.height + 16, width)
         self._fit_body_height()
 
     @objc.python_method
@@ -2328,6 +2672,7 @@ class HubWindowController(NSObject):
             # One plain sentence: mic vs system audio, with the raw error only
             # choosing between "allow it" (permission) and "not available".
             self.meeting_watch.setStringValue_(meeting_capture_status(session))
+            self.meeting_diarization.setStringValue_(meeting_diarization_status(session))
             self.meeting_template.setEnabled_(False)
             self._meeting_set_action_title(
                 f"Stop & save notes — {int(session.get('seconds', 0)) // 60}m"
@@ -2352,6 +2697,7 @@ class HubWindowController(NSObject):
                 else ""
             )
             self.meeting_watch.setStringValue_(watch)
+            self.meeting_diarization.setStringValue_("")
             self.meeting_template.setEnabled_(True)
             self._meeting_set_action_title("Start meeting transcription")
             self.meeting_live_label.setStringValue_("")
@@ -2364,6 +2710,7 @@ class HubWindowController(NSObject):
             # through the vault check in meetingOpenNotes_.
             self.meeting_saved_label.setStringValue_(saved_notes_message(saved))
         self._meeting_render_speakers(saved)
+        self._people_render()
         chat_available = bool(
             not session
             and (self.meeting_status.get("chat_available") or self.meeting_last_saved)
@@ -2470,33 +2817,19 @@ class HubWindowController(NSObject):
         card = self.meeting_speakers_card
         for view in list(card.subviews()):
             view.removeFromSuperview()
-        self.meeting_speaker_field = None
-        self.meeting_speaker_field_id = ""
-        self.meeting_speaker_picker = None
-        self.meeting_speaker_choice_ids = []
         width = self.body.frame().size.width
         rows = panel.rows
         card.setFrame_(
             NSMakeRect(0, card.frame().origin.y, width, len(rows) * RECENT_ROW_H)
         )
         self.meeting_speaker_row_ids = [row["id"] for row in rows]
-        controls = []
-        opened = False
-        for index, row in enumerate(rows):
-            mode = panel.mode if row["id"] == panel.speaker_id else ""
-            frames = speaker_row_frames(width, index, mode, can_merge=panel.can_merge)
-            if mode == "rename":
-                opened = self.meeting_speaker_edit_key != ("rename", row["id"])
-                controls += self._meeting_speaker_rename_row(card, index, row, frames)
-            elif mode == "merge":
-                controls += self._meeting_speaker_merge_row(card, index, row, frames)
-            else:
-                controls += self._meeting_speaker_normal_row(card, index, row, frames)
-            if index < len(rows) - 1:
-                divider = NSView.alloc().initWithFrame_(NSMakeRect(*frames["divider"]))
-                divider.setWantsLayer_(True)
-                divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
-                card.addSubview_(divider)
+        controls, refs, opened = self._meeting_speaker_rows(
+            card, panel, width, SPEAKER_ACTIONS, self.meeting_speaker_edit_key,
+        )
+        self.meeting_speaker_field = refs.get("field")
+        self.meeting_speaker_field_id = refs.get("field_id", "")
+        self.meeting_speaker_picker = refs.get("picker")
+        self.meeting_speaker_choice_ids = refs.get("choice_ids", [])
         self.meeting_speaker_edit_key = (panel.mode, panel.speaker_id)
         if panel.busy:
             for control in controls:
@@ -2507,21 +2840,65 @@ class HubWindowController(NSObject):
                 self.meeting_speaker_field.selectText_(None)
 
     @objc.python_method
-    def _meeting_speaker_normal_row(self, card, index, row, frames):
+    def _meeting_speaker_rows(self, card, panel, width, actions, edit_key):
+        """Draw `panel`'s rows into `card`: (controls, refs, opened).
+
+        `refs` holds the open edit's views (field and its row id, or picker
+        and its choice ids); `opened` is True when the rename field is new
+        since `edit_key`, so its text gets selected once.
+        """
+        controls, refs, opened = [], {}, False
+        rows = panel.rows
+        for index, row in enumerate(rows):
+            mode = panel.mode if row["id"] == panel.speaker_id else ""
+            frames = speaker_row_frames(
+                width, index, mode, can_merge=panel.can_merge, remember=panel.remember,
+            )
+            if mode in ("rename", "remember"):
+                opened = edit_key != (mode, row["id"])
+                drawn, refs = self._meeting_speaker_rename_row(
+                    card, index, row, frames, panel=panel, actions=actions,
+                )
+            elif mode == "merge":
+                drawn, refs = self._meeting_speaker_merge_row(
+                    card, index, row, frames, panel=panel, actions=actions,
+                )
+            else:
+                drawn, _refs = self._meeting_speaker_normal_row(
+                    card, index, row, frames, panel=panel, actions=actions,
+                )
+            controls += drawn
+            if index < len(rows) - 1:
+                self._meeting_divider(card, frames["divider"])
+        return controls, refs, opened
+
+    @objc.python_method
+    def _meeting_divider(self, parent, frame):
+        divider = NSView.alloc().initWithFrame_(NSMakeRect(*frame))
+        divider.setWantsLayer_(True)
+        divider.layer().setBackgroundColor_(_color("line", self.tokens).CGColor())
+        parent.addSubview_(divider)
+        return divider
+
+    @objc.python_method
+    def _meeting_speaker_normal_row(
+        self, card, index, row, frames, *, panel=None, actions=SPEAKER_ACTIONS,
+    ):
+        panel = panel if panel is not None else self.meeting_speakers
         name = _label(
             row["label"], *frames["name"][:3], 13, "ink",
             palette=self.tokens, height=frames["name"][3], weight="semibold",
         )
         card.addSubview_(name)
         duration = _label(
-            speaker_row_meta(self.meeting_speakers.rows, row), *frames["duration"][:3], 11, "muted",
+            speaker_row_meta(panel.rows, row), *frames["duration"][:3], 11, "muted",
             palette=self.tokens, height=frames["duration"][3],
         )
         duration.setAlignment_(AppKit.NSTextAlignmentRight)
         card.addSubview_(duration)
         x, y, w, h = frames["rename"]
         rename = self._button(
-            "Rename", "meetingSpeakerRename:", x, y, index, w,
+            "Rename", actions["rename"], x, y, index, w,
             parent=card, kind="ghost", height=h,
         )
         rename.setAccessibilityLabel_(f"Rename {row['label']}")
@@ -2529,38 +2906,59 @@ class HubWindowController(NSObject):
         if "merge" in frames:
             x, y, w, h = frames["merge"]
             merge = self._button(
-                "Merge", "meetingSpeakerMerge:", x, y, index, w,
+                "Merge", actions["merge"], x, y, index, w,
                 parent=card, kind="ghost", height=h,
             )
             merge.setAccessibilityLabel_(f"Merge {row['label']} into another speaker")
             controls.append(merge)
-        return controls
+        if "remember" in frames:
+            x, y, w, h = frames["remember"]
+            remembered = panel.is_remembered(row["id"])
+            remember = self._button(
+                "Remembered" if remembered else "Remember", actions["remember"],
+                x, y, index, w, parent=card, kind="ghost", height=h,
+            )
+            remember.setAccessibilityLabel_(
+                f"{row['label']}'s voice is remembered" if remembered
+                else f"Remember {row['label']}'s voice"
+            )
+            if remembered:
+                remember.setEnabled_(False)
+            else:
+                controls.append(remember)
+        return controls, {}
 
     @objc.python_method
-    def _meeting_speaker_rename_row(self, card, index, row, frames):
-        panel = self.meeting_speakers
+    def _meeting_speaker_rename_row(
+        self, card, index, row, frames, *, panel=None, actions=SPEAKER_ACTIONS,
+    ):
+        panel = panel if panel is not None else self.meeting_speakers
         x, y, w, _h = frames["field"]
-        field = self._field(panel.draft, x, y, w, parent=card, action="meetingSpeakerSave:")
+        field = self._field(panel.draft, x, y, w, parent=card, action=actions["save"])
         # Only Return or Save submit; losing focus never does.
         field.cell().setSendsActionOnEndEditing_(False)
-        field.setAccessibilityLabel_("Speaker name")
-        self.meeting_speaker_field = field
-        self.meeting_speaker_field_id = row["id"]
+        if panel.mode == "remember":
+            field.setAccessibilityLabel_("Name to remember")
+            title = "Remembering…" if panel.busy == "remember" else "Remember"
+        else:
+            field.setAccessibilityLabel_("Speaker name")
+            title = "Saving…" if panel.busy == "rename" else "Save"
         x, y, w, h = frames["save"]
         save = self._button(
-            "Saving…" if panel.busy == "rename" else "Save", "meetingSpeakerSave:",
-            x, y, index, w, parent=card, kind="secondary", height=h,
+            title, actions["save"], x, y, index, w, parent=card, kind="secondary", height=h,
         )
         x, y, w, h = frames["cancel"]
         cancel = self._button(
-            "Cancel", "meetingSpeakerCancel:", x, y, index, w,
+            "Cancel", actions["cancel"], x, y, index, w,
             parent=card, kind="ghost", height=h,
         )
-        return [field, save, cancel]
+        return [field, save, cancel], {"field": field, "field_id": row["id"]}
 
     @objc.python_method
-    def _meeting_speaker_merge_row(self, card, index, row, frames):
-        panel = self.meeting_speakers
+    def _meeting_speaker_merge_row(
+        self, card, index, row, frames, *, panel=None, actions=SPEAKER_ACTIONS,
+    ):
+        panel = panel if panel is not None else self.meeting_speakers
         card.addSubview_(
             _label(
                 f"Merge {row['label']} into", *frames["prompt"][:3], 13, "ink",
@@ -2581,24 +2979,22 @@ class HubWindowController(NSObject):
         picker.addItemsWithTitles_(titles)
         picker.selectItemAtIndex_(ids.index(panel.into_id) if panel.into_id in ids else 0)
         picker.setTarget_(self)
-        picker.setAction_("meetingSpeakerTarget:")
+        picker.setAction_(actions["target"])
         picker.setAccessibilityLabel_("Merge into")
         card.addSubview_(picker)
-        self.meeting_speaker_picker = picker
-        self.meeting_speaker_choice_ids = ids
         x, y, w, h = frames["confirm"]
         confirm = self._button(
             "Merging…" if panel.busy == "merge" else "Merge",
-            "meetingSpeakerConfirmMerge:", x, y, index, w,
+            actions["confirm"], x, y, index, w,
             parent=card, kind="secondary", height=h,
         )
         confirm.setEnabled_(bool(panel.into_id))
         x, y, w, h = frames["cancel"]
         cancel = self._button(
-            "Cancel", "meetingSpeakerCancel:", x, y, index, w,
+            "Cancel", actions["cancel"], x, y, index, w,
             parent=card, kind="ghost", height=h,
         )
-        return [picker, confirm, cancel]
+        return [picker, confirm, cancel], {"picker": picker, "choice_ids": ids}
 
     @objc.python_method
     def _meeting_speakers_error_height(self, width):
@@ -2625,6 +3021,601 @@ class HubWindowController(NSObject):
             self.meeting_speakers_error_label.setFrame_(NSMakeRect(*frames["error"]))
         return frames["bottom"]
 
+    # -------------------------------------------------------------- people ---
+
+    @objc.python_method
+    def _people_reset_views(self):
+        """Forget the People views (they went with the page body, or were removed)."""
+        self.people_heading = None
+        self.people_card = None
+        self.people_message = None
+        self.people_switch = None
+        self.people_field = None
+        self.people_field_key = None  # the person id the field was drawn for ("" = enroll)
+        self.people_row_ids = []  # ids as drawn; a button tag indexes this
+        self.people_status = None
+        self.people_stop = None
+        self.people_rendered = None  # the revision the card shows
+        if not hasattr(self, "people_edit_key"):
+            self.people_edit_key = ("", "")
+
+    @objc.python_method
+    def _people_config(self):
+        try:
+            return load_config()
+        except Exception:  # noqa: BLE001 - an unreadable file: what we were given
+            return self.config
+
+    @objc.python_method
+    def _people_sync_flags(self, refresh=False):
+        """Read both speaker flags from the file (LazyConfig doesn't refresh them).
+
+        Returns the list load to send, or None. Builds no view and sends nothing.
+        """
+        config = self._people_config()
+        diarization = bool(getattr(config, "speaker_diarization", False))
+        recognition = bool(getattr(config, "speaker_recognition", False))
+        people = self.people
+        was_rec = bool(people.rec)
+        request = people.set_flags(diarization, recognition)
+        if was_rec and not people.rec:
+            capture, self.people_capture = self.people_capture, None
+            if capture is not None:
+                threading.Thread(
+                    target=capture.discard, name="localflow-people-discard", daemon=True,
+                ).start()
+        if request is None and refresh:
+            request = people.refresh()
+        remember = can_remember(diarization, recognition)
+        self.meeting_speakers.set_remember(remember)
+        self.meeting_recent_speakers.panel.set_remember(remember)
+        return request
+
+    @objc.python_method
+    def _people_send(self, request):
+        """Run a PeopleState request off the main thread; the answer comes back as a
+        "people_load", "people_rec" or "people" event. Capture calls go to the capture."""
+        operation, args, token = request
+        event = {"enrolled": "people_load", "capture_start": "people_rec"}.get(operation, "people")
+        client = self.meeting_client
+        if operation == "capture_start":
+            capture = self.people_capture = VoiceRecording(self._people_config())
+            call = capture.start
+        elif operation == "capture_finish":
+            capture, self.people_capture = self.people_capture, None
+
+            def call(name):
+                if capture is None:
+                    raise MeetingClientError("nothing was recorded")
+                return capture.finish(client, name)
+        else:
+            def call(*call_args):
+                return getattr(client, operation)(*call_args)
+
+        def run():
+            try:
+                result, error = call(*args), None
+            except Exception as exc:  # noqa: BLE001
+                result, error = None, exc
+            self.meeting_events.put((event, (token, result), error))
+
+        threading.Thread(target=run, name=f"localflow-people-{operation}", daemon=True).start()
+
+    @objc.python_method
+    def _people_cancel_capture(self):
+        """Cancel a recording; its microphone is closed and the audio dropped."""
+        if not self.people.cancel_recording():
+            return False
+        capture, self.people_capture = self.people_capture, None
+        if capture is not None:
+            threading.Thread(
+                target=capture.discard, name="localflow-people-discard", daemon=True,
+            ).start()
+        return True
+
+    @objc.python_method
+    def _people_leave(self):
+        """Leaving Meetings or closing: no recording continues off screen."""
+        people = getattr(self, "people", None)
+        if people is not None and people.rec in ("starting", "recording"):
+            self._people_cancel_capture()
+
+    @objc.python_method
+    def _people_tick(self):
+        """The 1 s retry after consent, and the live countdown (no rebuild per tick)."""
+        people = getattr(self, "people", None)
+        if people is None:
+            return
+        now = time.monotonic()
+        if self.people_retry_at is not None and now >= self.people_retry_at:
+            self.people_retry_at = None
+            if people.phase == "loading":
+                self._people_send(("enrolled", (), people.seq))
+        if people.rec != "recording" or self.page != "Meetings":
+            return
+        if people.due(now):
+            self.peopleStop_(None)
+            return
+        if self.people_status is not None:
+            self.people_status.setStringValue_(recording_status(people.remaining(now)))
+        if self.people_stop is not None:
+            self.people_stop.setEnabled_(people.can_stop(now))
+
+    @objc.python_method
+    def _people_render(self):
+        """Show the People block, or take it out of the tree when both flags are off.
+
+        The card is rebuilt only when the state's revision moved, so neither
+        the poll nor the countdown replaces a field the user is typing in.
+        """
+        people = self.people
+        if not people.visible:
+            self._people_teardown()
+            return
+        if self.people_card is None:
+            self._people_build()
+        message = people.message
+        self.people_message.setStringValue_(message)
+        self.people_message.setTextColor_(
+            _color("red" if people.error else "success", self.tokens)
+        )
+        self.people_message.setHidden_(not message)
+        if self.people_rendered != people.revision:
+            self._people_fill()
+            self.people_rendered = people.revision
+
+    @objc.python_method
+    def _people_teardown(self):
+        """Remove the People views: hidden views would still count in _fit_body_height."""
+        for view in (self.people_heading, self.people_card, self.people_message):
+            if view is not None:
+                view.removeFromSuperview()
+        self._people_reset_views()
+
+    @objc.python_method
+    def _people_build(self):
+        width = self.body.frame().size.width
+        self.people_heading = _label(
+            PEOPLE_HEADING, 0, 0, 400, 13, "ink",
+            palette=self.tokens, height=22, weight="semibold",
+        )
+        self.body.addSubview_(self.people_heading)
+        self.people_card = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, width, PEOPLE_TOGGLE_H)
+        )
+        style_surface(self.people_card, self.tokens)
+        self.people_card.layer().setMasksToBounds_(True)
+        self.body.addSubview_(self.people_card)
+        self.people_message = _label(
+            "", 0, 0, width, 12, "red", palette=self.tokens, height=18, wrap=True,
+        )
+        self.body.addSubview_(self.people_message)
+        self.people_rendered = None
+
+    @objc.python_method
+    def _people_fill(self):
+        """Rebuild the People card: toggle row, then (recognition on) list and footer."""
+        people = self.people
+        if self.people_field is not None:
+            people.set_draft(self.people_field.stringValue(), self.people_field_key)
+        card = self.people_card
+        for view in list(card.subviews()):
+            view.removeFromSuperview()
+        width = self.body.frame().size.width
+        frames = people_layout(width, 0, people)
+        card.setFrame_(NSMakeRect(0, card.frame().origin.y, width, frames["card"][3]))
+        self.people_field = None
+        self.people_field_key = None
+        self.people_row_ids = []
+        self.people_status = None
+        self.people_stop = None
+        x, y, w, h = frames["toggle_title"]
+        card.addSubview_(
+            _label(TOGGLE_TITLE, x, y, w, 13, "ink", palette=self.tokens, height=h,
+                   weight="semibold")
+        )
+        x, y, w, h = frames["toggle_detail"]
+        card.addSubview_(
+            _label(people.toggle_detail, x, y, w, 11, "muted", palette=self.tokens, height=h)
+        )
+        switch = NSSwitch.alloc().initWithFrame_(NSMakeRect(*frames["switch"]))
+        switch.setState_(1 if people.recognition else 0)
+        switch.setAccessibilityLabel_(TOGGLE_TITLE)
+        switch.setTarget_(self)
+        switch.setAction_("peopleToggle:")
+        switch.setEnabled_(people.toggle_enabled)
+        card.addSubview_(switch)
+        self.people_switch = switch
+        controls = []
+        if people.active:
+            x, y, w, h = frames["list"]
+            self._meeting_divider(card, (0, y, width, 1))
+            listing = FlippedView.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+            card.addSubview_(listing)
+            controls += self._people_fill_list(listing, width)
+            x, y, w, h = frames["footer"]
+            footer = FlippedView.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+            footer.setWantsLayer_(True)
+            footer.layer().setBackgroundColor_(_color("paper", self.tokens).CGColor())
+            card.addSubview_(footer)
+            self._meeting_divider(footer, (0, 0, width, 1))
+            controls += self._people_fill_footer(footer, width)
+        opened = self.people_field is not None and self.people_edit_key != (
+            people.mode, people.person_id,
+        )
+        self.people_edit_key = (people.mode, people.person_id)
+        if people.busy:
+            for control in controls:
+                control.setEnabled_(False)
+        elif self.people_field is not None and not people.rec:
+            self.window.makeFirstResponder_(self.people_field)
+            if opened:
+                self.people_field.selectText_(None)
+
+    @objc.python_method
+    def _people_fill_list(self, listing, width):
+        """The list part of the card (loading, error, empty or rows): its controls."""
+        people = self.people
+        if people.phase != "ready" or not people.rows:
+            frames = people_status_frames(width)
+            if people.phase == "error":
+                x, y, w, h = frames["error"]
+                label = _label(people.load_error, x, y, w, 12, "red", palette=self.tokens,
+                               height=h)
+                label.setToolTip_(people.load_error)
+                listing.addSubview_(label)
+                x, y, w, h = frames["retry"]
+                retry = self._button(
+                    "Retry", "peopleRetry:", x, y, 0, w, parent=listing, kind="ghost", height=h,
+                )
+                retry.setAccessibilityLabel_("Retry loading people")
+                return [retry]
+            x, y, w, h = frames["label"]
+            text = PEOPLE_EMPTY if people.phase == "ready" else PEOPLE_LOADING
+            listing.addSubview_(
+                _label(text, x, y, w, 12, "muted", palette=self.tokens, height=h)
+            )
+            return []
+        controls = []
+        self.people_row_ids = [row["id"] for row in people.rows]
+        for index, row in enumerate(people.rows):
+            if people.mode == "rename" and people.person_id == row["id"]:
+                frames = person_rename_frames(width, index)
+                controls += self._people_name_row(
+                    listing, frames, index, row["id"], "Saving…" if people.busy == "rename"
+                    else "Save", "peopleSave:", "Name",
+                )
+            else:
+                controls += self._people_person_row(listing, row, index, width)
+            if index < len(people.rows) - 1:
+                self._meeting_divider(listing, person_row_frames(width, index)["divider"])
+        return controls
+
+    @objc.python_method
+    def _people_person_row(self, listing, row, index, width):
+        pill = make_pill(STALE_BADGE, ("red", "red"), self.tokens) if row["stale"] else None
+        pill_width = int(pill.frame().size.width) if pill is not None else 0
+        frames = person_row_frames(width, index, pill_width=pill_width)
+        x, y, w, h = frames["name"]
+        listing.addSubview_(
+            _label(row["name"], x, y, w, 13, "ink", palette=self.tokens, height=h,
+                   weight="semibold")
+        )
+        if pill is not None:
+            pill.setFrame_(NSMakeRect(*frames["pill"]))
+            pill.setToolTip_("Recorded with another voice model. Enroll this voice again.")
+            listing.addSubview_(pill)
+        x, y, w, h = frames["meta"]
+        meta = _label(row["meta"], x, y, w, 11, "muted", palette=self.tokens, height=h)
+        meta.setAlignment_(AppKit.NSTextAlignmentRight)
+        listing.addSubview_(meta)
+        x, y, w, h = frames["rename"]
+        rename = self._button(
+            "Rename", "peopleRename:", x, y, index, w, parent=listing, kind="ghost", height=h,
+        )
+        rename.setAccessibilityLabel_(f"Rename {row['name']}")
+        x, y, w, h = frames["forget"]
+        forget = self._button(
+            "Forget", "peopleForget:", x, y, index, w,
+            parent=listing, kind="destructive_ghost", height=h,
+        )
+        forget.setAccessibilityLabel_(f"Forget {row['name']}")
+        if self.people.rec:
+            rename.setEnabled_(False)
+            forget.setEnabled_(False)
+        return [rename, forget]
+
+    @objc.python_method
+    def _people_name_row(self, parent, frames, index, key, title, action, label):
+        """A name field with its submit and Cancel buttons (rename, enroll name)."""
+        x, y, w, _h = frames["field"]
+        field = self._field(self.people.draft, x, y, w, parent=parent, action=action)
+        field.cell().setSendsActionOnEndEditing_(False)  # only Return or the button submit
+        field.setAccessibilityLabel_(label)
+        submit_key = "save" if "save" in frames else "record"
+        x, y, w, h = frames[submit_key]
+        submit = self._button(title, action, x, y, index, w, parent=parent, kind="secondary",
+                              height=h)
+        x, y, w, h = frames["cancel"]
+        cancel = self._button("Cancel", "peopleCancel:", x, y, index, w, parent=parent,
+                              kind="ghost", height=h)
+        self.people_field = field
+        self.people_field_key = key
+        return [field, submit, cancel]
+
+    @objc.python_method
+    def _people_fill_footer(self, footer, width):
+        people = self.people
+        frames = people_footer_frames(width, people)
+        if people.rec:
+            uploading = people.rec == "uploading"
+            if people.rec == "recording":
+                text = recording_status(people.remaining(time.monotonic()))
+            else:
+                text = RECORD_UPLOADING if uploading else RECORD_STARTING
+            x, y, w, h = frames["status"]
+            self.people_status = _label(text, x, y, w, 12, "ink", palette=self.tokens, height=h)
+            footer.addSubview_(self.people_status)
+            x, y, w, h = frames["stop"]
+            stop = self._button(
+                "Saving…" if uploading else "Stop & save", "peopleStop:", x, y, 0, w,
+                parent=footer, kind="secondary", height=h,
+            )
+            stop.setEnabled_(people.can_stop(time.monotonic()))
+            self.people_stop = stop
+            x, y, w, h = frames["cancel"]
+            cancel = self._button(
+                "Cancel", "peopleCancel:", x, y, 0, w, parent=footer, kind="ghost", height=h,
+            )
+            cancel.setAccessibilityLabel_("Cancel the recording")
+            cancel.setEnabled_(not uploading)
+            return []  # enabled by the tick, never by the busy pass
+        if people.mode == "enroll":
+            return self._people_name_row(
+                footer, frames, 0, "", "Record", "peopleRecord:", "Name for your voice",
+            )
+        x, y, w, h = frames["enroll"]
+        enroll = self._button(
+            "Enroll my voice", "peopleEnroll:", x, y, 0, w, parent=footer, kind="secondary",
+            height=h,
+        )
+        x, y, w, h = frames["export"]
+        export = self._button(
+            "Export…", "peopleExport:", x, y, 0, w, parent=footer, kind="ghost", height=h,
+        )
+        export.setAccessibilityLabel_("Export voiceprints")
+        x, y, w, h = frames["forget_all"]
+        forget_all = self._button(
+            "Forget all…", "peopleForgetAll:", x, y, 0, w,
+            parent=footer, kind="destructive_ghost", height=h,
+        )
+        forget_all.setAccessibilityLabel_("Forget every enrolled voice")
+        return [enroll, export, forget_all]
+
+    @objc.python_method
+    def _people_message_height(self, width):
+        """Wrapped height of the People message, 0 when there is none."""
+        message = self.people.message
+        if not message:
+            return 0
+        message_font = _font(12)
+        lines = wrap_lines(message, width - 8, lambda text: measure_text(text, message_font))
+        return max(1, len(lines)) * 16 + 2
+
+    @objc.python_method
+    def _people_layout(self, y, width):
+        """Place the People block at y (the very bottom of Meetings), when it exists."""
+        if self.people_card is None:
+            return
+        frames = people_layout(
+            width, y, self.people, message_height=self._people_message_height(width),
+        )
+        self.people_heading.setFrame_(NSMakeRect(*frames["heading"]))
+        self.people_card.setFrame_(NSMakeRect(*frames["card"]))
+        if "message" in frames:
+            self.people_message.setFrame_(NSMakeRect(*frames["message"]))
+
+    @objc.python_method
+    def _people_consent(self):
+        """The consent sheet. Cancel is the default button (Return and Esc);
+        Turn On needs a click, and only then is anything written."""
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(CONSENT_TITLE)
+        alert.setInformativeText_("\n\n".join((*CONSENT_POINTS, CONSENT_DRAFT_NOTE)))
+        alert.setAlertStyle_(AppKit.NSAlertStyleWarning)
+        confirm = alert.addButtonWithTitle_(CONSENT_CONFIRM)
+        confirm.setKeyEquivalent_("")
+        cancel = alert.addButtonWithTitle_(CONSENT_CANCEL)
+        cancel.setKeyEquivalent_("\r")
+
+        def done(response):
+            self._people_consent_done(response == AppKit.NSAlertFirstButtonReturn)
+
+        alert.beginSheetModalForWindow_completionHandler_(self.window, done)
+
+    @objc.python_method
+    def _people_consent_done(self, accepted):
+        if self.people.consent_result(accepted):
+            self._people_write(True)
+        elif self.page == "Meetings":
+            self._meeting_render()
+
+    @objc.python_method
+    def _people_write(self, on):
+        """Save speaker_recognition (on only after consent), then redraw and load."""
+        people = self.people
+        try:
+            updated = apply_config_update(load_config(), recognition_update(on))
+            save_config(updated)
+        except (ConfigError, OSError):
+            people.recognition_save_failed(SAVE_FAILED)
+            if self.page == "Meetings":
+                self._meeting_render()
+            return
+        self.config = updated
+        request = people.recognition_saved(on)
+        request = self._people_sync_flags() or request
+        # Remember appears or goes on both speaker lists (set_remember moved
+        # their revisions), and People shows its new state.
+        if self.page == "Meetings":
+            if hasattr(self, "meeting_recent_card"):
+                self._meeting_recent_refresh()
+            else:
+                self._meeting_render()
+        if request:
+            self._people_send(request)
+
+    @objc.python_method
+    def _people_confirm(self, message, button, on_confirm):
+        """A destructive confirmation sheet; Cancel is the default button."""
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(message)
+        alert.setAlertStyle_(AppKit.NSAlertStyleWarning)
+        confirm = alert.addButtonWithTitle_(button)
+        confirm.setKeyEquivalent_("")
+        if hasattr(confirm, "setHasDestructiveAction_"):
+            confirm.setHasDestructiveAction_(True)
+        cancel = alert.addButtonWithTitle_("Cancel")
+        cancel.setKeyEquivalent_("\r")
+
+        def done(response):
+            if response == AppKit.NSAlertFirstButtonReturn and self.page == "Meetings":
+                on_confirm()
+
+        alert.beginSheetModalForWindow_completionHandler_(self.window, done)
+
+    @objc.python_method
+    def _people_submit(self, request):
+        """Render first (the busy state is on screen), then send."""
+        self._meeting_render()
+        if request:
+            self._people_send(request)
+
+    @objc.python_method
+    def _people_base_url(self):
+        """The server URL voice audio would go to (checked for loopback by the state
+        and again by the client before anything is sent)."""
+        return getattr(self.meeting_client, "base_url", None)
+
+    @objc.python_method
+    def _people_row_id(self, sender):
+        index = sender.tag()
+        ids = self.people_row_ids
+        return ids[index] if 0 <= index < len(ids) else None
+
+    def peopleToggle_(self, sender):
+        if self.page != "Meetings":
+            return
+        people = self.people
+        # The switch flips itself on click; it shows the stored value until the
+        # write (after consent) went through.
+        sender.setState_(1 if people.recognition else 0)
+        action = people.request_recognition(not people.recognition)
+        if action == "consent":
+            self._people_consent()
+        elif action == "write":
+            self._people_write(False)
+
+    def peopleRetry_(self, _sender):
+        if self.page != "Meetings":
+            return
+        self._people_submit(self.people.retry())
+
+    def peopleRename_(self, sender):
+        if self.page != "Meetings":
+            return
+        person_id = self._people_row_id(sender)
+        if person_id is None:
+            return
+        self.people.begin_rename(person_id)
+        self._meeting_render()
+
+    def peopleSave_(self, _sender):
+        if self.page != "Meetings":
+            return
+        field = self.people_field
+        if field is None or self.people.mode != "rename":
+            return
+        self._people_submit(self.people.submit_rename(str(field.stringValue())))
+
+    def peopleCancel_(self, _sender):
+        if self.page != "Meetings":
+            return
+        if self.people.rec:
+            self._people_cancel_capture()
+        else:
+            self.people.cancel()
+        self._meeting_render()
+
+    def peopleForget_(self, sender):
+        if self.page != "Meetings":
+            return
+        person_id = self._people_row_id(sender)
+        row = self.people.row(person_id) if person_id is not None else None
+        if row is None or self.people.busy:
+            return
+
+        def forget():
+            self._people_submit(self.people.submit_forget(person_id))
+
+        self._people_confirm(forget_prompt(row["name"]), "Forget", forget)
+
+    def peopleForgetAll_(self, _sender):
+        if self.page != "Meetings":
+            return
+        if self.people.busy:
+            return
+
+        def forget_all():
+            self._people_submit(self.people.submit_forget_all())
+
+        self._people_confirm(FORGET_ALL_PROMPT, "Forget all", forget_all)
+
+    def peopleExport_(self, _sender):
+        if self.page != "Meetings":
+            return
+        if self.people.busy:
+            return
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(False)
+        panel.setCanChooseDirectories_(True)
+        panel.setCanCreateDirectories_(True)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setPrompt_("Export")
+        panel.setMessage_("Choose a new or empty folder outside your Obsidian vault.")
+        if panel.runModal() != AppKit.NSModalResponseOK or panel.URL() is None:
+            return
+        target = str(panel.URL().path())
+        try:
+            folder = Path(target)
+            nonempty = folder.exists() and (not folder.is_dir() or any(folder.iterdir()))
+        except OSError:
+            nonempty = True
+        request = self.people.submit_export(
+            target, self._people_config().vault_path, nonempty=nonempty,
+            base_url=self._people_base_url(),
+        )
+        self._people_submit(request)
+
+    def peopleEnroll_(self, _sender):
+        if self.page != "Meetings":
+            return
+        self.people.begin_enroll(self._people_base_url())
+        self._meeting_render()
+
+    def peopleRecord_(self, _sender):
+        if self.page != "Meetings":
+            return
+        field = self.people_field
+        if field is None or self.people.mode != "enroll":
+            return
+        self._people_submit(self.people.start_recording(str(field.stringValue())))
+
+    def peopleStop_(self, _sender):
+        if self.page != "Meetings":
+            return
+        self._people_submit(self.people.stop_recording(time.monotonic()))
+
     def meetingTimerTick_(self, _timer):
         # The Hub's one timer also drives Hot Phrases autosave, undo expiry and
         # the external-change poll; it does nothing off that page.
@@ -2641,6 +3632,8 @@ class HubWindowController(NSObject):
             except queue.Empty:
                 break
             self._meeting_event(operation, result, error)
+        if hasattr(self, "_people_tick"):
+            self._people_tick()
         if (
             self.meeting_notes_due is not None
             and time.monotonic() >= self.meeting_notes_due
@@ -2758,6 +3751,16 @@ class HubWindowController(NSObject):
         panel = getattr(self, "meeting_speakers", None)
         if field is not None and panel is not None:
             panel.set_draft(field.stringValue(), getattr(self, "meeting_speaker_field_id", None))
+        field = getattr(self, "meeting_recent_field", None)
+        recent = getattr(self, "meeting_recent_speakers", None)
+        if field is not None and recent is not None:
+            recent.panel.set_draft(
+                field.stringValue(), getattr(self, "meeting_recent_field_id", None),
+            )
+        field = getattr(self, "people_field", None)
+        people = getattr(self, "people", None)
+        if field is not None and people is not None:
+            people.set_draft(field.stringValue(), getattr(self, "people_field_key", None))
 
     @objc.python_method
     def _meeting_speaker_row_id(self, sender):
@@ -2800,11 +3803,28 @@ class HubWindowController(NSObject):
         field = self.meeting_speaker_field
         if field is None:
             return
-        request = self.meeting_speakers.submit_rename(str(field.stringValue()))
+        panel = self.meeting_speakers
+        if panel.mode == "remember":
+            request = panel.submit_remember(str(field.stringValue()))
+        else:
+            request = panel.submit_rename(str(field.stringValue()))
         # Render first: the disabled state is on screen before the thread starts.
         self._meeting_render()
         if request:
             self._meeting_speaker_send(request)
+
+    def meetingSpeakerRemember_(self, sender):
+        if self.page != "Meetings":
+            return
+        speaker_id = self._meeting_speaker_row_id(sender)
+        row = self.meeting_speakers.row(speaker_id) if speaker_id is not None else None
+        if row is None:
+            return
+        label = row["label"]
+        self.meeting_speakers.begin_remember(
+            speaker_id, "" if is_generic_label(label) else label,
+        )
+        self._meeting_render()
 
     def meetingSpeakerConfirmMerge_(self, _sender):
         if self.page != "Meetings":
@@ -2819,6 +3839,104 @@ class HubWindowController(NSObject):
             return
         self.meeting_speakers.cancel()
         self._meeting_render()
+
+    # Recent meetings drawer: the same six edits against its own panel.
+
+    def meetingRecentSpeakers_(self, sender):
+        if self.page != "Meetings":
+            return
+        index = sender.tag()
+        if not 0 <= index < len(self.meeting_recent):
+            return
+        request = self.meeting_recent_speakers.toggle(self.meeting_recent[index])
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers_load")
+
+    def meetingRecentSpeakersRetry_(self, _sender):
+        if self.page != "Meetings":
+            return
+        request = self.meeting_recent_speakers.retry()
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers_load")
+
+    @objc.python_method
+    def _meeting_recent_row_id(self, sender):
+        index = sender.tag()
+        ids = self.meeting_recent_row_ids
+        return ids[index] if 0 <= index < len(ids) else None
+
+    def meetingRecentSpeakerRename_(self, sender):
+        if self.page != "Meetings":
+            return
+        speaker_id = self._meeting_recent_row_id(sender)
+        if speaker_id is None:
+            return
+        self.meeting_recent_speakers.panel.begin_rename(speaker_id)
+        self._meeting_recent_refresh()
+
+    def meetingRecentSpeakerMerge_(self, sender):
+        if self.page != "Meetings":
+            return
+        speaker_id = self._meeting_recent_row_id(sender)
+        if speaker_id is None:
+            return
+        self.meeting_recent_speakers.panel.begin_merge(speaker_id)
+        self._meeting_recent_refresh()
+
+    def meetingRecentSpeakerTarget_(self, sender):
+        if self.page != "Meetings":
+            return
+        index = sender.indexOfSelectedItem()
+        ids = self.meeting_recent_choice_ids
+        speaker_id = ids[index] if 0 <= index < len(ids) else None
+        if speaker_id is None:
+            return
+        self.meeting_recent_speakers.panel.choose_target(speaker_id)
+        self._meeting_recent_refresh()
+
+    def meetingRecentSpeakerSave_(self, _sender):
+        if self.page != "Meetings":
+            return
+        field = self.meeting_recent_field
+        if field is None:
+            return
+        panel = self.meeting_recent_speakers.panel
+        if panel.mode == "remember":
+            request = panel.submit_remember(str(field.stringValue()))
+        else:
+            request = panel.submit_rename(str(field.stringValue()))
+        # Render first: the disabled state is on screen before the thread starts.
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers")
+
+    def meetingRecentSpeakerRemember_(self, sender):
+        if self.page != "Meetings":
+            return
+        speaker_id = self._meeting_recent_row_id(sender)
+        panel = self.meeting_recent_speakers.panel
+        row = panel.row(speaker_id) if speaker_id is not None else None
+        if row is None:
+            return
+        label = row["label"]
+        panel.begin_remember(speaker_id, "" if is_generic_label(label) else label)
+        self._meeting_recent_refresh()
+
+    def meetingRecentSpeakerConfirmMerge_(self, _sender):
+        if self.page != "Meetings":
+            return
+        request = self.meeting_recent_speakers.panel.submit_merge()
+        self._meeting_recent_refresh()
+        if request:
+            self._meeting_recent_send(request, "recent_speakers")
+
+    def meetingRecentSpeakerCancel_(self, _sender):
+        if self.page != "Meetings":
+            return
+        self.meeting_recent_speakers.panel.cancel()
+        self._meeting_recent_refresh()
 
     def meetingOpenNotes_(self, _sender):
         saved = self.meeting_last_saved or {}
