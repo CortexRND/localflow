@@ -105,7 +105,9 @@ pub fn scan(text: &str) -> Vec<Finding> {
                 && text[r.end..].starts_with(']')
                 && match text[r.end + 1..].chars().next() {
                     None => true,
-                    Some(ch) => ch.is_whitespace() || matches!(ch, ',' | ';' | '}' | '"' | '\''),
+                    Some(ch) => {
+                        ch.is_whitespace() || matches!(ch, '&' | ',' | ';' | '}' | ']' | '"' | '\'')
+                    }
                 })
     });
     // Earliest first; on overlap the first (most specific class) wins and
@@ -285,10 +287,22 @@ mod tests {
         );
         let jsonish = "{\"password\": \"correct horse battery staple\"}";
         assert_eq!(scan(jsonish).len(), 1, "a properly quoted key still scans");
-    }
-
         let quoted = "Use 'password=\"correct horse battery staple\"' exactly";
         assert_eq!(scan(quoted).len(), 1, "a quoted assignment still scans");
+    }
+
+    /// An exact marker followed by punctuation is already redacted, not a
+    /// new finding; redacting it again must not add another bracket.
+    #[test]
+    fn an_exact_marker_before_punctuation_is_not_a_finding() {
+        for text in [
+            "password=[redacted]&then=1",
+            "password=[redacted]]",
+            "password=[redacted],",
+        ] {
+            assert!(scan(text).is_empty(), "an exact marker is not a finding");
+            assert!(redact(text) == text, "the marker is unchanged");
+        }
     }
 
     #[test]
