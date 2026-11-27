@@ -208,15 +208,15 @@ On release tags `mac-installer.yml` publishes them (see `docs/releasing.md`).
 `plutil`, `codesign` and `open`.
 
 ```bash
-scripts/install_gpui_preview.sh                    # the v0.2.3 package, checked against SHA256SUMS-gpui-preview
+scripts/install_gpui_preview.sh                    # the v0.2.4 package, checked against SHA256SUMS-gpui-preview
 scripts/install_gpui_preview.sh --release vX.Y.Z   # a later release (v0.2.3 or newer)
-scripts/install_gpui_preview.sh --archive LocalFlow-Preview-0.2.3-linux-x86_64.tar.gz \
-    --sha256 LocalFlow-Preview-0.2.3-linux-x86_64.tar.gz.sha256 --no-launch   # CI artifact or offline copy
+scripts/install_gpui_preview.sh --archive LocalFlow-Preview-0.2.4-linux-x86_64.tar.gz \
+    --sha256 LocalFlow-Preview-0.2.4-linux-x86_64.tar.gz.sha256 --no-launch   # CI artifact or offline copy
 scripts/install_gpui_preview.sh --uninstall
 ```
 
-The default download installs from the `v0.2.3` release, the first one that
-carries preview assets; earlier releases have none. Without a release, use a
+The default download installs from the `v0.2.4` release; `v0.2.3` was the
+first one that carried preview assets, and earlier releases have none. Without a release, use a
 `gpui-preview-<platform>` artifact with `--archive` and `--sha256` (a
 `.sha256` file, a `SHA256SUMS-gpui-preview` file or the digest itself).
 
@@ -372,11 +372,11 @@ export LOCALFLOW_UI=legacy    # the same for every one of these commands (rollba
   `DEFAULT_UI` back to legacy in `localflow/desktop_launch.py` and
   `rust/lf/src/desktop_launch.rs` restores the 4a behaviour exactly.
 - **Installers:** their package and bundle identities are unchanged, and none
-  ships the preview. The pinned one-liner installs the v0.2.3 release, the
-  first whose `lf` has this selector, as do source installs (`install.sh` run
-  from a checkout or with `LOCALFLOW_REF`, and the macOS `setup.sh` editable
-  install); with no preview installed it opens the legacy window as before.
-  Their final bare
+  ships the preview. The pinned one-liner installs the v0.2.4 release. v0.2.3
+  was the first release whose `lf` has this selector, and source installs
+  (`install.sh` run from a checkout or with `LOCALFLOW_REF`, and the macOS
+  `setup.sh` editable install) have it too; with no preview installed it opens
+  the legacy window as before. Their final bare
   `lf setup`, and the Linux **LocalFlow Setup** menu entry that `install.sh`
   writes (`Exec=… setup`), are setup requests, so they keep opening the legacy
   wizard by default even for preview owners. No installer pin is needed for
