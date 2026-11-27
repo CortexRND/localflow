@@ -608,6 +608,93 @@ Shortcut, Try it, Review. It is built on `lf_ui::setup_flow` (`initial_choices`,
   still open and nothing new was typed into it; an editor reopened or edited
   while the change was saving keeps its draft and shows the result.
 
+## Agents
+
+Agents starts tasks on coding agents (cloud or on this computer) through
+LocalFlow's agent service (`agents-api v1`, the Python server). Everything is
+provider-neutral: providers, their keys and their capabilities come from
+`GET /api/agents/providers`. A service without the agents API (404, or the Rust
+server) shows none of this.
+
+### Settings → Agents
+
+The **Agents** tab (after Meetings) is shown whenever the service speaks agents
+v1, on or off: it is where the feature is turned on. Every row is written
+through the service (`PUT /api/config` with `{"agents": …}`, and the agents
+routes), never straight to `config.toml`, so the window and the service never
+disagree.
+
+- **Agents** switch (`agents.enabled`). Turning it on shows the Agents page in
+  the sidebar at once; turning it off never stops running sessions.
+- **Providers:** one row per provider with its status (Connected, Not connected,
+  Needs sign-in, Offline) and the service's own detail line. **Check** runs a
+  deep check on that row only (up to 20 s; the rest of the tab stays usable).
+  **Add key…**, **Replace key…** and **Remove key…** edit the provider's keys:
+  - The key field is masked, keeps no undo history and overwrites its buffer
+    when cleared or closed. On Save the key is moved out of the field, trimmed
+    (a pasted newline is not part of the key), and sent in one request body
+    (`PUT /api/agents/providers/{id}/secret`). It is stored in your system
+    keyring by the service and never shown again. The value is never logged,
+    toasted, put in an error or written by the sandbox.
+  - If the keyring isn't available, nothing is saved and the tab says so.
+  - In `--sandbox` keys are presence flags in memory only.
+- **Defaults:** the default provider and default workspace (used when a task
+  doesn't name one).
+- **Workspaces:** `agents.repos` folders agents may work in (a name and an
+  absolute folder; **Choose…** picks one). Removing the default workspace also
+  clears the default in the same write. Removing only forgets the folder; its
+  files are untouched.
+
+Keys, workspaces and triggers can be prepared while Agents is off.
+
+### Voice triggers
+
+The **Voice triggers** section (Settings → Agents) holds hot-command rules: say a
+trigger (2 to 6 words) at the very start of dictation to start an agent instead
+of typing. Anything that doesn't match is typed as usual.
+
+- The **Voice triggers** switch (`agents.hot_commands`) needs Agents on.
+- Each trigger picks an agent, a workspace (or the default one), a task
+  (`{prompt}` is replaced by what you say after the trigger; without it the same
+  task is sent every time) and a shortest task (shorter requests are typed as
+  normal dictation). Saying "in {workspace}" right after the trigger picks a
+  workspace.
+- Saves send only the fields that changed. Overlapping triggers (including
+  Snippets triggers) are refused by the service with its reason under **Say**.
+- **Try it** tests a sentence against your *saved* triggers
+  (`POST /api/agents/hot-commands/test`); nothing is started.
+
+### Needs-input badge and toast
+
+While Agents is on, the sidebar's Agents row shows how many sessions need your
+input (running sessions never count). When another page is shown, a session
+that newly needs input shows one toast, "{Provider} needs your input", with
+**Open**. The window keeps at most one `/changes` long-poll open: the Agents page
+while it is shown, otherwise a small watcher that knows session ids only.
+Agents status is asked when the service's health or the config changes, when
+the window is activated and after writes, never on a timer.
+
+### Agent launcher shortcut
+
+The launcher is its own small window: `lf-desktop --agents-launcher` opens it
+(pressed again while open, it closes). LocalFlow doesn't register a global
+shortcut for it yet, so bind that command in your system's keyboard settings:
+
+- **macOS:** create a Shortcuts app shortcut (or an Automator Quick Action) that
+  runs the shell command `lf-desktop --agents-launcher`, then give it a key in
+  System Settings → Keyboard → Keyboard Shortcuts → Services (or Shortcuts).
+- **GNOME:** Settings → Keyboard → View and Customise Shortcuts → Custom
+  Shortcuts → **+**, with the command `lf-desktop --agents-launcher`.
+- **KDE Plasma:** System Settings → Shortcuts → Add Command.
+- **Sway / i3 / Hyprland:** `bindsym $mod+Shift+a exec lf-desktop --agents-launcher`
+  (Hyprland: `bind = SUPER SHIFT, A, exec, lf-desktop --agents-launcher`).
+- **Windows:** make a desktop shortcut to `lf-desktop.exe --agents-launcher`
+  and set its **Shortcut key** in Properties.
+
+Use the full path to `lf-desktop` if it isn't on your `PATH`. Add `--sandbox`
+(and the same `--data-dir`) to try it against the sandbox. On Wayland this is
+also the permanent answer: compositors don't let apps grab global keys.
+
 ## Settings assistant
 
 "Tell LocalFlow what to change" sits above the Settings tabs (collapsed by

@@ -1036,6 +1036,20 @@ impl AgentsSettings {
             .when_some(help, |d, h| d.child(ui::supporting(t, h)))
     }
 
+    /// A text field across the editor's width. A percentage width (`w_full`)
+    /// around the input resolves against a width-auto column and collapses;
+    /// the input instead fills a flex row (`flex_auto` + `min_w_0`), the
+    /// same pattern as the key field.
+    fn wide(selector: &'static str, input: Entity<TextInput>) -> gpui::AnyElement {
+        div()
+            .debug_selector(move || selector.into())
+            .flex()
+            .w_full()
+            .min_w_0()
+            .child(div().flex_auto().min_w_0().child(input))
+            .into_any_element()
+    }
+
     fn rule_editor_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (Some(editor), Some(loaded)) = (&self.triggers.editor, &self.loaded) else {
             return div().into_any_element();
@@ -1045,13 +1059,11 @@ impl AgentsSettings {
         let say = Self::field(
             t,
             ctl::SAY_LABEL,
-            div()
-                .w_full()
-                .child(self.triggers.say.clone())
-                .into_any_element(),
+            Self::wide("agents-rule-say", self.triggers.say.clone()),
             Some(ctl::SAY_HELP.into()),
             editor.errors.trigger.clone(),
-        );
+        )
+        .w_full();
         let agent = Self::field(
             t,
             ctl::AGENT_LABEL,
@@ -1069,13 +1081,11 @@ impl AgentsSettings {
         let task = Self::field(
             t,
             ctl::TASK_LABEL,
-            div()
-                .w_full()
-                .child(self.triggers.task.clone())
-                .into_any_element(),
+            Self::wide("agents-rule-task", self.triggers.task.clone()),
             Some(ctl::TASK_HELP.into()),
             editor.errors.task.clone(),
-        );
+        )
+        .w_full();
         let min = Self::field(
             t,
             ctl::MIN_LABEL,

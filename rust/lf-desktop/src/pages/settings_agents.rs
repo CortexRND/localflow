@@ -126,6 +126,10 @@ pub struct AgentsSettings {
     /// Fixture scene `agents-settings-key`: open the first cloud provider's
     /// missing key once providers are read.
     fixture_key: bool,
+    /// A load is in flight (a newer provider answer restarts it).
+    load_pending: bool,
+    /// Rows with a deep check running (outside the write guard).
+    checks: std::collections::HashSet<Row>,
     /// The Voice triggers section's controls and state.
     triggers: Triggers,
 }
@@ -192,6 +196,8 @@ impl AgentsSettings {
             name_input,
             folder_input,
             fixture_key: false,
+            load_pending: false,
+            checks: Default::default(),
             triggers,
         }
     }
@@ -241,6 +247,7 @@ impl AgentsSettings {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
+        self.load_pending = true;
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let backend = self.backend.clone();
@@ -268,6 +275,7 @@ impl AgentsSettings {
         if generation != self.generation {
             return;
         }
+        self.load_pending = false;
         match result {
             Ok((settings, providers, rules)) => {
                 self.loaded = Some(Loaded {
@@ -354,6 +362,11 @@ impl AgentsSettings {
         self.op.as_ref().is_some_and(|(_, r)| r == row)
     }
 
+    /// A deep check is running on this row.
+    fn checking(&self, row: &Row) -> bool {
+        self.checks.contains(row)
+    }
+
     /// `PUT /api/config` with `patch` for `row`. Success re-reads and asks
     /// the shell to re-probe the gate; a refusal shows the service's detail
     /// on the row and the control snaps back to the stored value.
@@ -368,6 +381,7 @@ impl AgentsSettings {
             return;
         };
         let backend = self.backend.clone();
+        let applied = patch.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -381,6 +395,11 @@ impl AgentsSettings {
                 this.triggers.pending_hot = None;
                 match result {
                     Ok(()) => {
+                        // Shown at once; the reload below confirms it.
+                        if let Some(loaded) = &mut this.loaded {
+                            ctl::apply_patch(&mut loaded.settings, &applied);
+                        }
+                        this.sync(cx);
                         then(this, cx);
                         this.pcx.agents_changed(cx);
                         this.pcx.config_changed(cx);
@@ -525,7 +544,13 @@ impl AgentsSettings {
             .find(|p| p.id == id && p.profile == profile)
     }
 
-    fn replace_provider(&mut self, provider: Provider) {
+    /// A provider's newer answer (a key change or a check). A load started
+    /// before it would bring the older row back: it is dropped and read
+    /// again (review: a stale load undoing Remove key).
+    fn replace_provider(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        if self.load_pending {
+            self.load(cx);
+        }
         if let Some(loaded) = &mut self.loaded {
             if let Some(slot) = loaded
                 .providers
@@ -552,9 +577,14 @@ impl AgentsSettings {
             return;
         }
         let row = Row::Provider(id.clone(), profile.clone());
-        let Some(generation) = self.begin(row.clone(), cx) else {
+        // Row-scoped (a deep check can take 20 s): only this row is busy;
+        // the rest of the tab stays usable (review M4). It doesn't take
+        // the write guard, but a row being written isn't checked.
+        if self.checks.contains(&row) || self.busy_row(&row) {
             return;
-        };
+        }
+        self.errors.remove(&row);
+        self.checks.insert(row.clone());
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -562,11 +592,11 @@ impl AgentsSettings {
                 .spawn(async move { backend.check_provider(&id, &profile) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this.finish(generation, cx) {
+                if !this.checks.remove(&row) {
                     return;
                 }
                 match result {
-                    Ok(provider) => this.replace_provider(provider),
+                    Ok(provider) => this.replace_provider(provider, cx),
                     Err(error) => {
                         this.errors.insert(row, ctl::write_error(&error));
                     }
@@ -675,14 +705,18 @@ impl AgentsSettings {
         let Some((target, instance)) = self.editor.clone() else {
             return;
         };
-        if self.key_input.read(cx).text().is_empty() || self.load_error.is_some() {
+        if self.key_input.read(cx).text().trim().is_empty() || self.load_error.is_some() {
+            return;
+        }
+        if self.checking(&target.row()) {
             return;
         }
         let Some(generation) = self.begin(target.row(), cx) else {
             return;
         };
-        let value = SecretValue::new(self.key_input.read(cx).text().to_string());
-        self.key_input.update(cx, |i, cx| i.clear(cx));
+        // Moved out of the field (no copy left there), trimmed in place: a
+        // pasted trailing newline is not part of the key.
+        let value = SecretValue::trimmed(self.key_input.update(cx, |i, cx| i.take_text(cx)));
         self.key_error = None;
         let backend = self.backend.clone();
         let (id, profile, name) = (
@@ -702,7 +736,7 @@ impl AgentsSettings {
                 let same = this.editor.as_ref().is_some_and(|(_, i)| *i == instance);
                 match result {
                     Ok(provider) => {
-                        this.replace_provider(provider);
+                        this.replace_provider(provider, cx);
                         // Only the instance this save came from, and only
                         // while nothing new was typed into it.
                         if same && this.key_input.read(cx).text().is_empty() {
@@ -758,6 +792,9 @@ impl AgentsSettings {
             return;
         }
         let row = target.row();
+        if self.checking(&row) {
+            return;
+        }
         let Some(generation) = self.begin(row.clone(), cx) else {
             return;
         };
@@ -779,7 +816,7 @@ impl AgentsSettings {
                     return;
                 }
                 match result {
-                    Ok(provider) => this.replace_provider(provider),
+                    Ok(provider) => this.replace_provider(provider, cx),
                     Err(error) => {
                         this.errors.insert(row, ctl::key_error(&error));
                     }
@@ -844,6 +881,35 @@ impl AgentsSettings {
     }
 
     #[cfg(test)]
+    pub(crate) fn checking_for_test(&self, id: &str, profile: &str) -> bool {
+        self.checking(&Row::Provider(id.into(), profile.into()))
+    }
+
+    /// A load as started (its generation), without running it: a test then
+    /// lands an old answer for it.
+    #[cfg(test)]
+    pub(crate) fn start_stale_load(&mut self) -> u64 {
+        self.load_pending = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn land_load(
+        &mut self,
+        generation: u64,
+        result: Result<(AgentSettings, Vec<Provider>, Vec<Rule>), AgentsError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.loaded(generation, result, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_key_now(&mut self, target: KeyTarget, cx: &mut Context<Self>) {
+        self.remove_key(target, cx);
+    }
+
+    #[cfg(test)]
     pub(crate) fn service_down(&self) -> bool {
         self.load_error.is_some()
     }
@@ -900,13 +966,13 @@ impl AgentsSettings {
         let (word, tone) = ctl::readiness_word(provider.readiness);
         let row = Row::Provider(provider.id.clone(), provider.profile.clone());
         let busy = self.busy_row(&row);
-        let writable = self.writable();
+        let checking = self.checking(&row);
         let check = {
             let (id, profile) = (provider.id.clone(), provider.profile.clone());
             Button::new(("agents-check", index as u64), ctl::CHECK)
                 .small()
-                .busy(busy)
-                .disabled(!writable && !busy)
+                .busy(checking)
+                .disabled(!checking && (busy || self.load_error.is_some() || self.loaded.is_none()))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.check(id.clone(), profile.clone(), cx)),
                 )
@@ -1001,7 +1067,12 @@ impl AgentsSettings {
             profile: provider.profile.clone(),
             name: slot.name.clone(),
         };
-        let disabled = !self.writable();
+        // While this row's check runs its key can't change under it.
+        let disabled = !self.writable()
+            || self.checking(&Row::Provider(
+                provider.id.clone(),
+                provider.profile.clone(),
+            ));
         let id = (index * crate::controllers::agents::MAX_SECRET_SLOTS + slot_index) as u64;
         let mut open = Button::new(
             ("agents-key-open", id),

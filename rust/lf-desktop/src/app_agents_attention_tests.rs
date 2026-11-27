@@ -128,6 +128,8 @@ fn a_reset_re_primes_without_a_toast(cx: &mut TestAppContext) {
     fake.reset_next();
     assert!(fake.set_state(CLAUDE_RUNNING, "waiting_input"));
     tick(cx, 2);
+    assert_eq!(fake.calls().waiting, primes, "the reset, not yet re-primed");
+    assert_eq!(count(&shell, cx), 1, "no flash to 0 before the re-prime");
     tick(cx, 2);
     assert_eq!(fake.calls().waiting, primes + 1, "re-primed");
     assert_eq!(count(&shell, cx), 2);

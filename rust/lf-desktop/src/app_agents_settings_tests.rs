@@ -541,3 +541,6 @@ fn settings_fixture_scenes_reach_their_end_state(cx: &mut TestAppContext) {
 
 #[path = "app_agents_triggers_tests.rs"]
 mod triggers;
+
+#[path = "app_agents_review_settings_tests.rs"]
+mod review;

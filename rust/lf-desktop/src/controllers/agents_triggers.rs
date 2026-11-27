@@ -233,9 +233,11 @@ pub fn rule_patch(old: &Rule, draft: &RuleDraft) -> Value {
     if draft.prompt_template != old.prompt_template {
         out.insert("prompt_template".into(), json!(draft.prompt_template));
     }
-    let min = draft.effective_min_words();
-    if min != old.min_prompt_words {
-        out.insert("min_prompt_words".into(), json!(min));
+    // A fixed task (no `{prompt}`) has no minimum to change: the field is
+    // left as stored (the service ignores it then), so an untouched Save
+    // sends nothing (review M6).
+    if draft.uses_prompt() && draft.min_prompt_words != old.min_prompt_words {
+        out.insert("min_prompt_words".into(), json!(draft.min_prompt_words));
     }
     Value::Object(out)
 }
@@ -709,7 +711,20 @@ mod tests {
         d.prompt_template = "Same every time".into();
         assert_eq!(
             rule_patch(&old, &d),
-            json!({"prompt_template": "Same every time", "min_prompt_words": 0})
+            json!({"prompt_template": "Same every time"}),
+            "a fixed task leaves the minimum as stored"
+        );
+        // M6: a fixed-task rule opened and saved unchanged sends nothing,
+        // even though its stored minimum isn't 0.
+        let fixed = rule(json!({"prompt_template": "Run the nightly checks",
+            "min_prompt_words": 3}));
+        assert_eq!(rule_patch(&fixed, &RuleDraft::from_rule(&fixed)), json!({}));
+        let mut touched = RuleDraft::from_rule(&fixed);
+        touched.min_prompt_words = 8;
+        assert_eq!(
+            rule_patch(&fixed, &touched),
+            json!({}),
+            "the minimum can't change while the task is fixed"
         );
         assert_eq!(enabled_patch(false), json!({"enabled": false}));
         assert_eq!(

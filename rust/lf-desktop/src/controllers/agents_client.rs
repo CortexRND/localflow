@@ -33,6 +33,7 @@ use crate::controllers::agents::{
 };
 use crate::controllers::agents_settings::{self, AgentSettings, SecretValue};
 use crate::controllers::agents_triggers::{self as triggers, Rule, RuleTest};
+use zeroize::Zeroize;
 
 /// Ordinary reads.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -400,11 +401,10 @@ impl AgentsBackend for HttpAgents {
             &["providers", id, "secret"],
             Some(&body),
         );
-        // Drop the body's copy of the value now, not at the end of scope.
+        // Zeroize the body's copy of the value now, not at the end of scope.
+        // (The serialised request reqwest built from it is outside reach.)
         if let Some(Value::String(v)) = body.get_mut("value") {
-            let mut bytes = std::mem::take(v).into_bytes();
-            bytes.fill(0);
-            std::hint::black_box(&bytes);
+            v.zeroize();
         }
         provider_of(&result?)
     }

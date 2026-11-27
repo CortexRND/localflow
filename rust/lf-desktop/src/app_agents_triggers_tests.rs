@@ -537,6 +537,23 @@ fn the_trigger_scene_and_its_layout(cx: &mut TestAppContext) {
     );
     let editor = cx.debug_bounds("agents-rule-editor").expect("editor");
     assert!(editor.top() < viewport.bottom(), "the editor is in view");
+    // Say and Task fill the editor (a collapsed, percent-width input once
+    // drew Say as a tiny square at 1280 px).
+    let wide_inputs = |cx: &mut VisualTestContext, at: &str| {
+        let editor = cx.debug_bounds("agents-rule-editor").expect("editor");
+        for selector in ["text-input-launch claude", "text-input-{prompt}"] {
+            let input = cx.debug_bounds(selector).expect(selector);
+            assert!(
+                input.size.width >= px(250.),
+                "{selector} is usable at {at}: {input:?}"
+            );
+            assert!(
+                input.left() >= editor.left() && input.right() <= editor.right(),
+                "{selector} inside the editor at {at}: {input:?} in {editor:?}"
+            );
+        }
+    };
+    wide_inputs(cx, "1280x850");
     // The same window captured at the minimum size: brought back into view.
     cx.simulate_resize(size(px(960.), px(640.)));
     for _ in 0..8 {
@@ -549,6 +566,7 @@ fn the_trigger_scene_and_its_layout(cx: &mut TestAppContext) {
         section.top() >= viewport.top() && section.top() <= viewport.top() + px(40.),
         "after a resize: {section:?} in {viewport:?}"
     );
+    wide_inputs(cx, "960x640");
     for dark in [false, true] {
         cx.update(|_, cx| cx.set_global(if dark { Theme::dark() } else { Theme::light() }));
         for (w, h) in [(1200., 760.), (960., 640.)] {

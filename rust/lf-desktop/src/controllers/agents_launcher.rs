@@ -345,6 +345,43 @@ impl Choice {
     }
 }
 
+/// The Workspace menu's entries, in order: `(alias, usable)`, with `None`
+/// for "No workspace". That entry is offered only while the service has no
+/// listed `default_repo`: v1 can't express "none" once a default is set (an
+/// omitted `repo` falls back to it at the service), so offering it would
+/// make the Sends line claim less than is used.
+pub fn workspace_options(status: Option<&agents::Status>) -> Vec<(Option<String>, bool)> {
+    let Some(status) = status else {
+        return vec![(None, true)];
+    };
+    let default_listed = status
+        .default_repo
+        .as_ref()
+        .is_some_and(|d| status.repos.iter().any(|r| r.alias == *d));
+    let mut out = Vec::new();
+    if !default_listed {
+        out.push((None, true));
+    }
+    out.extend(
+        status
+            .repos
+            .iter()
+            .map(|r| (Some(r.alias.clone()), r.exists)),
+    );
+    out
+}
+
+/// A Workspace menu entry's label.
+pub fn workspace_label(alias: Option<&str>, status: Option<&agents::Status>) -> String {
+    match alias {
+        None => "No workspace".into(),
+        Some(a) if status.and_then(|s| s.default_repo.as_deref()) == Some(a) => {
+            format!("{a} \u{00b7} default")
+        }
+        Some(a) => a.to_string(),
+    }
+}
+
 /// The provider a launch would use right now: the highlighted Launch row's,
 /// else the chosen one.
 pub fn active_provider<'a>(
@@ -1008,6 +1045,48 @@ mod tests {
         assert!(!flat(&listed).iter().any(|i| i.actionable()
             && !i.enabled()
             && i.key() == Key::Launch("codex".into(), "staging".into())));
+    }
+
+    /// H2: "No workspace" is offered only when the runtime would really use
+    /// none; with a default set, the default is the first entry and the
+    /// Sends line names it.
+    #[test]
+    fn no_workspace_is_offered_only_without_a_default() {
+        let with_default = agents::parse_status(&serde_json::json!({
+            "api_version": 1, "enabled": true, "default_repo": "web",
+            "repos": [{"alias": "web", "exists": true}, {"alias": "api", "exists": false}],
+        }));
+        assert_eq!(
+            workspace_options(Some(&with_default)),
+            [(Some("web".into()), true), (Some("api".into()), false)]
+        );
+        assert_eq!(
+            workspace_label(Some("web"), Some(&with_default)),
+            "web \u{00b7} default"
+        );
+        let mut none = with_default.clone();
+        none.default_repo = None;
+        assert_eq!(workspace_options(Some(&none))[0], (None, true));
+        assert_eq!(workspace_label(None, Some(&none)), "No workspace");
+        // A default that isn't listed can't be used either: none is real.
+        let mut stale = with_default.clone();
+        stale.default_repo = Some("gone".into());
+        assert_eq!(workspace_options(Some(&stale))[0], (None, true));
+        // The resolved choice with a default is the default, never none,
+        // so the disclosure names it.
+        let fake = FakeAgents::fixture();
+        let store = super::tests::store(&fake);
+        let choice = chosen(&store);
+        assert_eq!(choice.workspace.as_deref(), Some("acme/web"));
+        let line = sends_line(
+            choice.provider(&store),
+            &store.providers,
+            choice.workspace.as_deref(),
+            false,
+            false,
+        );
+        assert!(line.contains("acme/web"), "{line}");
+        assert!(!line.ends_with("your task only."), "{line}");
     }
 
     #[test]

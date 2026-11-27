@@ -316,6 +316,9 @@ pub struct Shell {
     agents_known: bool,
     /// A request for `agents` waiting for that first answer.
     pending_agents: Option<Request>,
+    /// The last status answer was a 404 (no agents API): not asked again
+    /// until health or the config changes.
+    agents_absent: bool,
     /// Sessions that need input: the sidebar badge on Agents.
     pub agents_attention: usize,
     /// The needs-input watcher's model (ids only; see
@@ -480,6 +483,7 @@ impl Shell {
                     None => "agents".into(),
                 }),
             }),
+            agents_absent: false,
             agents_attention: 0,
             attention: Default::default(),
             attention_providers: Vec::new(),
@@ -598,6 +602,11 @@ impl Shell {
     /// answer stands, so the page shows its own banner and Disconnected
     /// rows instead of vanishing.
     fn probe_agents(&mut self, cx: &mut Context<Self>) {
+        // This service has no agents API: ask again only once health
+        // changes (a different or restarted service), never per tick.
+        if self.agents_absent && self.agents_known {
+            return;
+        }
         self.agents_probe = self.agents_probe.wrapping_add(1);
         let generation = self.agents_probe;
         let backend = self.cx.services.remote.agents(&self.cx.services.config());
@@ -629,6 +638,7 @@ impl Shell {
         if generation != self.agents_probe {
             return;
         }
+        self.agents_absent = matches!(status, Err(crate::controllers::agents::AgentsError::Absent));
         if let Some(supported) = crate::controllers::agents::supported(&status) {
             if self.cx.agents_supported.replace(supported) != supported {
                 cx.notify();
@@ -797,7 +807,11 @@ impl Shell {
         };
         self.attention_failures = 0;
         let newly = self.attention.apply(&changes);
-        self.set_attention_count(cx);
+        // After a `reset` the model is empty until the re-prime: keep the
+        // badge as it was rather than flash it to 0 for a pause.
+        if self.attention.primed() {
+            self.set_attention_count(cx);
+        }
         // One toast: the newest session that started waiting.
         if let Some(session) = newly.last() {
             let message = model::toast(session, &self.attention_providers);
@@ -1327,6 +1341,8 @@ impl Shell {
         let now = mtime(&self.cx.services.root.config_path);
         if now != self.config_mtime {
             self.config_mtime = now;
+            // The server address may have moved: ask about agents again.
+            self.agents_absent = false;
             self.cx.services.reload_config();
             self.refresh_views(cx);
             cx.notify();
@@ -1370,14 +1386,17 @@ impl Shell {
                 .spawn(async move { remote.health(&config) })
                 .await;
             let _ = this.update(cx, |shell, cx| {
+                // Agents status is asked on transitions only (here, config
+                // changes, window activation, after writes): never on
+                // every unchanged health tick (review M1).
                 if shell.health != health {
                     *shell.cx.status.borrow_mut() = health.clone();
                     shell.health = health;
+                    // Another service (or none): "no agents API" may no
+                    // longer hold.
+                    shell.agents_absent = false;
                     shell.refresh_views(cx);
                     cx.notify();
-                } else if shell.health == Health::Online {
-                    // The agents switch can change while the service runs.
-                    shell.probe_agents(cx);
                 }
             });
             if let Some(done) = done {
@@ -1495,6 +1514,9 @@ impl Shell {
             }
             return;
         }
+        // Coming back to the window: the agents switch may have changed
+        // meanwhile (the CLI, another window).
+        self.probe_agents(cx);
         if *self.cx.current_page.borrow() != Page::Settings {
             return;
         }
@@ -2084,6 +2106,9 @@ impl Shell {
             let _ = this.update(cx, |shell, cx| {
                 use crate::controllers::engine::Stopped;
                 shell.stopping = false;
+                // A cancelled close: the needs-input watcher stopped while
+                // closing; start it again (status is no longer polled).
+                shell.watch_attention(cx);
                 // Fresh check: anything that started after the drain keeps
                 // the window open (never an obsolete snapshot).
                 let late = crate::controllers::shutdown::remaining_work(
@@ -4470,6 +4495,10 @@ mod agents_settings_tests;
 #[cfg(test)]
 #[path = "app_agents_attention_tests.rs"]
 mod agents_attention_tests;
+
+#[cfg(test)]
+#[path = "app_agents_review_tests.rs"]
+mod agents_review_tests;
 
 #[cfg(test)]
 mod history_layout_tests {

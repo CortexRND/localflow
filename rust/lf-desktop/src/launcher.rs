@@ -368,8 +368,13 @@ impl Launcher {
             &self.store,
             prefer.as_ref().map(|(id, p)| (id.as_str(), p.as_deref())),
         );
-        // A workspace picked from the menu (even "No workspace") stays.
-        if let Some(workspace) = picked {
+        // A workspace picked from the menu (even "No workspace") stays,
+        // while the menu still offers it (no "none" once a default is set).
+        if let Some(workspace) = picked.filter(|w| {
+            model::workspace_options(self.store.status.as_ref())
+                .iter()
+                .any(|(alias, _)| alias == w)
+        }) {
             self.choice.workspace = workspace;
         }
         if self.store.loaded && !self.store.providers.is_empty() {
@@ -421,7 +426,11 @@ impl Launcher {
                     // The first frame can already have painted before this
                     // answer lands; force the loaded rows to repaint (a
                     // fixed-size popup may never otherwise get a resize).
-                    cx.refresh_windows();
+                    // Screenshot scenes only (review M7): in normal use
+                    // `refresh_highlight` below notifies, which repaints.
+                    if this.fixture.is_some() {
+                        cx.refresh_windows();
+                    }
                     // The M3 scene's one action: Enter on its seeded task.
                     if this.fixture == Some(Fixture::AgentsLauncherSecret)
                         && this.findings.is_empty()
@@ -855,11 +864,13 @@ impl Launcher {
                 })
                 .collect(),
             Menu::Workspace => {
-                let mut items = vec![("No workspace".to_string(), true)];
-                if let Some(status) = &self.store.status {
-                    items.extend(status.repos.iter().map(|r| (r.alias.clone(), r.exists)));
-                }
-                items
+                let status = self.store.status.as_ref();
+                model::workspace_options(status)
+                    .into_iter()
+                    .map(|(alias, usable)| {
+                        (model::workspace_label(alias.as_deref(), status), usable)
+                    })
+                    .collect()
             }
         }
     }
@@ -879,19 +890,9 @@ impl Launcher {
                 .filter(|p| p.readiness != ctl::Readiness::NotConnected)
                 .position(|p| self.choice.is(p))
                 .unwrap_or(0),
-            Menu::Workspace => self
-                .choice
-                .workspace
-                .as_ref()
-                .and_then(|w| {
-                    self.store
-                        .status
-                        .as_ref()?
-                        .repos
-                        .iter()
-                        .position(|r| &r.alias == w)
-                        .map(|i| i + 1)
-                })
+            Menu::Workspace => model::workspace_options(self.store.status.as_ref())
+                .iter()
+                .position(|(alias, _)| *alias == self.choice.workspace)
                 .unwrap_or(0),
         };
         self.menu = if self.menu.map(|(m, _)| m) == Some(menu) {
@@ -921,18 +922,12 @@ impl Launcher {
                 }
             }
             Menu::Workspace => {
-                self.workspace_picked = true;
-                self.choice.workspace = match at {
-                    0 => None,
-                    i => self
-                        .store
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.repos.get(i - 1))
-                        .filter(|r| r.exists)
-                        .map(|r| r.alias.clone())
-                        .or(self.choice.workspace.clone()),
-                };
+                if let Some((alias, true)) =
+                    model::workspace_options(self.store.status.as_ref()).get(at)
+                {
+                    self.workspace_picked = true;
+                    self.choice.workspace = alias.clone();
+                }
             }
         }
         self.menu = None;
@@ -2518,7 +2513,11 @@ mod tests {
     /// Review M5: a local check's reason shows, before any secret choice.
     #[gpui::test]
     fn local_checks_come_before_the_secret_check(cx: &mut TestAppContext) {
-        let mut o = open(cx);
+        // No default workspace at the service: "No workspace" is real.
+        let mut o = open_with(cx, None, |fake| {
+            AgentsBackend::set_config(fake, &serde_json::json!({"agents": {"default_repo": ""}}))
+                .unwrap()
+        });
         o.cx.simulate_input("password=hunter2hunter2 for staging");
         o.cx.simulate_keystrokes("secondary-r up enter");
         assert_eq!(read(&mut o, |l, _| l.choice()).workspace, None);
@@ -2591,11 +2590,23 @@ mod tests {
             Some(Key::Launch("devin".into(), String::new())),
             "the chosen provider leads"
         );
+        // H2: the fixture's service has a default workspace (acme/web), so
+        // the menu offers no "No workspace" (v1 would use the default
+        // anyway): the first entry is the default, and it is what's sent.
+        assert_eq!(
+            read(&mut o, |l, _| l.menu_items(Menu::Workspace))[0].0,
+            "acme/web \u{00b7} default"
+        );
+        o.cx.simulate_keystrokes("secondary-r down enter");
+        assert_eq!(
+            read(&mut o, |l, _| l.choice()).workspace.as_deref(),
+            Some("acme/billing")
+        );
         o.cx.simulate_keystrokes("secondary-r up enter");
         assert_eq!(
-            read(&mut o, |l, _| l.choice()).workspace,
-            None,
-            "No workspace"
+            read(&mut o, |l, _| l.choice()).workspace.as_deref(),
+            Some("acme/web"),
+            "never none while a default is set"
         );
         o.cx.simulate_keystrokes("secondary-r escape");
         assert!(
@@ -2605,7 +2616,7 @@ mod tests {
         o.cx.simulate_keystrokes("enter");
         let body = o.fake.received().pop().unwrap();
         assert_eq!(body["provider"], "devin");
-        assert!(body.get("repo").is_none());
+        assert_eq!(body["repo"], "acme/web", "the workspace used is named");
     }
 
     #[gpui::test]

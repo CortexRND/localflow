@@ -46,6 +46,8 @@ unicode-segmentation = "1"
 log = "0.4"
 # Assistant output redaction (already in the lockfile through lf-ui).
 regex = "1"
+# Secret containment: wipes key buffers with writes the optimiser can't drop.
+zeroize = "1"
 env_logger = "0.11"
 # Appearance save completions (awaited on the UI thread, no blocking wait).
 async-channel = "2"

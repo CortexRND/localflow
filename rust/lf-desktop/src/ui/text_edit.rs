@@ -7,6 +7,7 @@
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
+use zeroize::Zeroize;
 
 /// Undo depth (snapshots).
 const UNDO_LIMIT: usize = 200;
@@ -62,6 +63,25 @@ impl EditBuffer {
     pub fn clear_undo(&mut self) {
         self.undo.clear();
         self.undo.shrink_to_fit();
+    }
+
+    /// Empty the text, zeroizing its bytes first (secret fields): the whole
+    /// allocation, spare capacity included. The allocation is kept, so the
+    /// next edit reuses it.
+    pub fn wipe(&mut self) {
+        self.text.zeroize();
+        self.selected = 0..0;
+        self.reversed = false;
+        self.clear_undo();
+    }
+
+    /// Move the text out, leaving the buffer empty (no copy stays here).
+    pub fn take(&mut self) -> String {
+        let text = std::mem::take(&mut self.text);
+        self.selected = 0..0;
+        self.reversed = false;
+        self.clear_undo();
+        text
     }
 
     pub fn undo_depth(&self) -> usize {
@@ -390,6 +410,33 @@ mod tests {
         b.select_all();
         assert!(b.insert("ab"));
         assert_eq!(b.text, "ab");
+    }
+
+    /// `wipe` empties in place (the allocation is kept for the next edit);
+    /// `take` hands the only copy out.
+    #[test]
+    fn secret_buffers_wipe_in_place_and_take_without_copying() {
+        let mut b = EditBuffer::new(false);
+        b.keep_undo = false;
+        b.text.reserve(1024);
+        b.insert("sk-secret");
+        let (ptr, cap) = (b.text.as_ptr(), b.text.capacity());
+        b.wipe();
+        assert!(b.text.is_empty() && b.selected == (0..0));
+        assert_eq!(
+            (b.text.as_ptr(), b.text.capacity()),
+            (ptr, cap),
+            "same allocation"
+        );
+        b.insert("sk-again");
+        let ptr = b.text.as_ptr();
+        let taken = b.take();
+        assert_eq!(
+            (taken.as_str(), taken.as_ptr()),
+            ("sk-again", ptr),
+            "moved, not copied"
+        );
+        assert!(b.text.is_empty() && b.undo_depth() == 0);
     }
 
     #[test]

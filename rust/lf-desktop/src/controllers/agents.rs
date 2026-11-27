@@ -1288,13 +1288,14 @@ impl Activity {
         page.has_more
     }
 
-    /// One event (a read's, or the one a sent reply returned); older or
-    /// repeated `seq`s are ignored.
+    /// One event (a read's, or the one a sent reply returned); repeated
+    /// `seq`s are ignored. The read cursor (`after`) is *not* moved here:
+    /// only a read's `next_after` ([`Activity::apply`]) does, so a reply
+    /// returned ahead of unread output can't make those events be skipped.
     pub fn push(&mut self, event: Event) {
         if self.events.iter().any(|e| e.seq == event.seq) {
             return;
         }
-        self.after = self.after.max(event.seq);
         let at = self.events.partition_point(|e| e.seq < event.seq);
         self.events.insert(at, event);
         while self.events.len() > MAX_EVENTS {
@@ -2994,6 +2995,29 @@ mod tests {
         );
         let newest: Vec<u64> = activity.newest_first().map(|e| e.seq).collect();
         assert_eq!(newest, [2, 1]);
+        // H1: a reply returned as event 7 while 3–6 are unread: the cursor
+        // stays at 2, so the next read still asks for 3–6; reading them
+        // (and the reply again) leaves no gap and no duplicate.
+        let mut gap = activity.clone();
+        gap.push(Event {
+            seq: 7,
+            stream: Stream::User,
+            ..Default::default()
+        });
+        assert_eq!(gap.after, 2, "a pushed reply doesn't move the cursor");
+        gap.apply(EventsPage {
+            events: (3..=7)
+                .map(|seq| Event {
+                    seq,
+                    ..Default::default()
+                })
+                .collect(),
+            next_after: 7,
+            ..Default::default()
+        });
+        let seqs: Vec<u64> = gap.newest_first().map(|e| e.seq).collect();
+        assert_eq!(seqs, [7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(gap.after, 7);
         for seq in 3..(MAX_EVENTS as u64 + 50) {
             activity.push(Event {
                 seq,

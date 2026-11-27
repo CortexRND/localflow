@@ -10,10 +10,14 @@
 //! provider's id; copy is chosen by `capabilities.kind` and the provider's
 //! own label.
 //!
-//! A key the user types is a [`SecretValue`]: it has no `Clone`, `Display`
-//! or `Serialize`, its `Debug` prints nothing of it, and its buffer is
-//! overwritten when it is dropped. It goes into one request body and
-//! nowhere else.
+//! A key the user types is moved out of its masked field (which keeps no
+//! copy and no undo history, and zeroizes its own buffer when cleared or
+//! dropped) into a [`SecretValue`]: no `Clone`, `Display` or `Serialize`, a
+//! `Debug` that prints nothing of it, trimmed in place, and zeroized when
+//! dropped. It goes into one request body and nowhere else. Wiping uses the
+//! `zeroize` crate (volatile writes the optimiser can't remove). Copies
+//! outside these buffers are beyond reach: the HTTP client's own buffers
+//! (the serialised request), the platform's input method and the clipboard.
 
 use std::fmt;
 use std::path::Path;
@@ -23,6 +27,7 @@ use serde_json::{json, Value};
 use crate::controllers::agents::{self, AgentsError, Kind, Provider, Readiness, SecretSlot};
 use crate::controllers::agents_launcher::provider_name;
 use crate::theme::Tone;
+use zeroize::Zeroize;
 
 // --------------------------------------------------------------- secret ---
 
@@ -32,6 +37,25 @@ pub struct SecretValue(String);
 impl SecretValue {
     pub fn new(value: String) -> Self {
         SecretValue(value)
+    }
+
+    /// `value` without leading or trailing whitespace, trimmed in place
+    /// (the dropped bytes are zeroized; no second copy is made).
+    pub fn trimmed(value: String) -> Self {
+        let trimmed = value.trim();
+        let start = trimmed.as_ptr() as usize - value.as_ptr() as usize;
+        let len = trimmed.len();
+        // The same allocation throughout: shift the key to the front, then
+        // zeroize everything after it before cutting it off.
+        let mut bytes = value.into_bytes();
+        bytes.copy_within(start..start + len, 0);
+        bytes[len..].zeroize();
+        bytes.truncate(len);
+        // `bytes[..len]` is the trimmed `&str`: valid UTF-8.
+        SecretValue(String::from_utf8(bytes).unwrap_or_else(|e| {
+            e.into_bytes().zeroize();
+            String::new()
+        }))
     }
 
     /// The empty value: `PUT …/secret` with it removes the key.
@@ -55,12 +79,11 @@ impl fmt::Debug for SecretValue {
     }
 }
 
+/// The whole allocation (spare capacity included) is zeroized before it is
+/// freed.
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        // Best effort: overwrite the buffer before it is freed.
-        let mut bytes = std::mem::take(&mut self.0).into_bytes();
-        bytes.fill(0);
-        std::hint::black_box(&bytes);
+        self.0.zeroize();
     }
 }
 
@@ -445,6 +468,44 @@ fn repos_value<'a>(entries: impl Iterator<Item = &'a RepoEntry>) -> Value {
     )
 }
 
+/// A `PUT /api/config` the service accepted, applied to what is shown, so
+/// the control doesn't show the old value until (or if a failing) reload
+/// lands (review M5). Unknown keys are ignored; a new workspace's folder
+/// is assumed present until the reload says otherwise.
+pub fn apply_patch(settings: &mut AgentSettings, patch: &Value) {
+    let Some(agents) = patch.get("agents").and_then(Value::as_object) else {
+        return;
+    };
+    for (key, value) in agents {
+        match (key.as_str(), value) {
+            ("enabled", Value::Bool(b)) => settings.enabled = *b,
+            ("hot_commands", Value::Bool(b)) => settings.hot_commands = *b,
+            ("default_provider", Value::String(s)) => settings.default_provider = s.clone(),
+            ("default_repo", Value::String(s)) => settings.default_repo = s.clone(),
+            ("repos", Value::Array(entries)) => {
+                let before = std::mem::take(&mut settings.repos);
+                settings.repos = entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(|e| e.split_once('='))
+                    .map(|(alias, path)| {
+                        let (alias, path) = (alias.trim(), path.trim());
+                        RepoEntry {
+                            alias: alias.to_string(),
+                            path: path.to_string(),
+                            exists: before
+                                .iter()
+                                .find(|r| r.alias == alias && r.path == path)
+                                .is_none_or(|r| r.exists),
+                        }
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// `PUT /api/config` turning Agents on or off.
 pub fn enabled_patch(on: bool) -> Value {
     json!({"agents": {"enabled": on}})
@@ -686,6 +747,14 @@ mod tests {
         assert_eq!(value.expose(), "sk-planted-0123456789");
         assert!(!value.is_empty());
         assert!(SecretValue::removal().is_empty());
+        // Pasted with a trailing newline (and stray spaces): trimmed.
+        let pasted = SecretValue::trimmed("  sk-planted-0123456789\n".into());
+        assert_eq!(pasted.expose(), "sk-planted-0123456789");
+        assert_eq!(
+            SecretValue::trimmed("é-key\u{3000}".into()).expose(),
+            "é-key"
+        );
+        assert!(SecretValue::trimmed(" \n\t".into()).is_empty());
     }
 
     #[test]
@@ -762,6 +831,31 @@ mod tests {
             json!({"agents": {"repos": ["my-api=/srv/a  b=c"], "default_repo": ""}}),
             "one body with both keys"
         );
+    }
+
+    /// M5: an accepted write shows at once (no snap back while reloading).
+    #[test]
+    fn an_accepted_patch_is_applied_to_what_is_shown() {
+        let mut s = settings();
+        apply_patch(&mut s, &enabled_patch(false));
+        assert!(!s.enabled);
+        apply_patch(&mut s, &default_provider_patch("devin"));
+        assert_eq!(s.default_provider, "devin");
+        let remove = repos_remove_patch(&s, "web");
+        apply_patch(&mut s, &remove);
+        assert_eq!(s.default_repo, "");
+        assert_eq!(s.repos.len(), 1);
+        assert!(!s.repos[0].exists, "a known folder keeps its state");
+        let add = repos_add_patch(&s, "docs", "/srv/docs");
+        apply_patch(&mut s, &add);
+        assert_eq!(s.repos[1].alias, "docs");
+        assert!(s.repos[1].exists, "assumed present until reloaded");
+        apply_patch(
+            &mut s,
+            &json!({"agents": {"hot_commands": true, "other": 1}}),
+        );
+        assert!(s.hot_commands);
+        apply_patch(&mut s, &json!({"general": {}}));
     }
 
     #[test]

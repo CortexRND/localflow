@@ -113,6 +113,8 @@ pub struct AgentsPage {
     activity: Option<Activity>,
     events_generation: u64,
     events_reading: bool,
+    /// Failed events reads in a row (the backoff).
+    events_failures: u32,
     reply: Entity<TextInput>,
     reply_error: Option<String>,
     sending: bool,
@@ -184,6 +186,7 @@ impl AgentsPage {
             activity: None,
             events_generation: 0,
             events_reading: false,
+            events_failures: 0,
             reply,
             reply_error: None,
             sending: false,
@@ -277,7 +280,13 @@ impl AgentsPage {
             }
         }
         if let Some(id) = self.selected.clone() {
-            self.fetch_detail(id, cx);
+            self.fetch_detail(id.clone(), cx);
+            // Back on a session that moved meanwhile (finished while the
+            // page was hidden): its Activity catches up now.
+            let read = self.activity.as_ref().map_or(0, |a| a.after);
+            if self.store.session(&id).is_some_and(|s| s.last_seq > read) {
+                self.read_events(cx);
+            }
         }
     }
 
@@ -623,7 +632,19 @@ impl AgentsPage {
             return None;
         }
         self.events_reading = false;
-        let page = result.ok()?;
+        let page = match result {
+            Ok(page) => {
+                self.events_failures = 0;
+                page
+            }
+            // Try again, backing off like `/changes` (a 404: the session
+            // went away; the list's next read says so).
+            Err(AgentsError::Absent) => return None,
+            Err(_) => {
+                self.events_failures = self.events_failures.saturating_add(1);
+                return Some(backoff(self.events_failures));
+            }
+        };
         let waited = page.waited;
         let more = self.activity.as_mut()?.apply(page);
         cx.notify();
@@ -1023,6 +1044,9 @@ impl AgentsPage {
                             a.push(event);
                         }
                         if here {
+                            // Anything written before the reply, unread
+                            // yet, is read now (the cursor didn't move).
+                            this.read_events(cx);
                             this.reply.update(cx, |r, cx| r.clear(cx));
                         } else {
                             this.reply_drafts.remove(&id);
@@ -1085,6 +1109,11 @@ impl AgentsPage {
     #[cfg(test)]
     pub(crate) fn more_open(&self) -> bool {
         self.more_open
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_events_for_test(&mut self, cx: &mut Context<Self>) {
+        self.read_events(cx);
     }
 
     #[cfg(test)]
