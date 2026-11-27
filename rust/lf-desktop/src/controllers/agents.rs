@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::controllers::agents_settings::{AgentSettings, SecretValue};
+use crate::controllers::agents_triggers::{Rule, RuleTest};
 use crate::controllers::assistant::mask_secrets;
 use crate::theme::Tone;
 
@@ -1005,6 +1006,18 @@ pub trait AgentsBackend: Send + Sync {
         name: &str,
         value: &SecretValue,
     ) -> Result<Provider, AgentsError>;
+    /// `GET /api/agents/hot-commands` (voice triggers).
+    fn rules(&self) -> Result<Vec<Rule>, AgentsError>;
+    /// `POST /api/agents/hot-commands` with exactly `body`
+    /// ([`crate::controllers::agents_triggers::create_body`]).
+    fn create_rule(&self, body: &Value) -> Result<Rule, AgentsError>;
+    /// `PUT /api/agents/hot-commands/{id}` with only the changed fields.
+    fn update_rule(&self, id: &str, patch: &Value) -> Result<Rule, AgentsError>;
+    /// `DELETE /api/agents/hot-commands/{id}`.
+    fn delete_rule(&self, id: &str) -> Result<(), AgentsError>;
+    /// `POST /api/agents/hot-commands/test` with `{"text": …}`. Nothing is
+    /// started; the reply says what would happen.
+    fn test_rule(&self, text: &str) -> Result<RuleTest, AgentsError>;
     /// Seconds since the epoch on this backend's clock (the sandbox can pin
     /// it so fixture scenes draw the same times on every run).
     fn now(&self) -> f64 {

@@ -27,6 +27,7 @@ SPEAKER_SURFACES = ("speakers-saved", "speakers-recent", "speakers-settings", "s
 # `agents-settings*` open Settings → Agents over the same fake (providers, keys, workspaces).
 AGENT_SURFACES = (
     "agents-page", "agents-states", "agents-detail", "agents-settings", "agents-settings-key",
+    "agents-settings-trigger",
 )
 # Opt-in agent launcher scenes (mockups M1, M2, M3, M5): `--sandbox-fixture agents-launcher*`
 # opens the launcher's own fixed-size popup window (not the Hub), in the same agents sandbox.

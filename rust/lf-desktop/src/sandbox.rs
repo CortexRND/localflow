@@ -237,10 +237,13 @@ pub enum Fixture {
     /// Settings → Agents with the key editor open on the cloud provider
     /// that has no key (empty masked field, cloud disclosure).
     AgentsSettingsKey,
+    /// Settings → Agents with the trigger editor open on the enabled
+    /// trigger and Try it showing a match.
+    AgentsSettingsTrigger,
 }
 
 impl Fixture {
-    pub const ALL: [Fixture; 13] = [
+    pub const ALL: [Fixture; 14] = [
         Fixture::SpeakersSaved,
         Fixture::SpeakersRecent,
         Fixture::SpeakersSettings,
@@ -254,6 +257,7 @@ impl Fixture {
         Fixture::AgentsLauncherEmpty,
         Fixture::AgentsSettings,
         Fixture::AgentsSettingsKey,
+        Fixture::AgentsSettingsTrigger,
     ];
 
     /// A launcher scene: `--agents-launcher` over the agents fixture.
@@ -282,6 +286,7 @@ impl Fixture {
             Fixture::AgentsLauncherEmpty => "agents-launcher-empty",
             Fixture::AgentsSettings => "agents-settings",
             Fixture::AgentsSettingsKey => "agents-settings-key",
+            Fixture::AgentsSettingsTrigger => "agents-settings-trigger",
         }
     }
 
@@ -294,9 +299,10 @@ impl Fixture {
         use crate::page::Page;
         match self {
             Fixture::SpeakersSaved | Fixture::SpeakersRecent => Page::Meetings,
-            Fixture::SpeakersSettings | Fixture::AgentsSettings | Fixture::AgentsSettingsKey => {
-                Page::Settings
-            }
+            Fixture::SpeakersSettings
+            | Fixture::AgentsSettings
+            | Fixture::AgentsSettingsKey
+            | Fixture::AgentsSettingsTrigger => Page::Settings,
             Fixture::SpeakersPeople => Page::People,
             Fixture::AgentsPage
             | Fixture::AgentsStates
@@ -317,7 +323,10 @@ impl Fixture {
     /// A Settings → Agents scene (over
     /// [`agents::FakeAgents::use_settings_fixture`]).
     pub fn is_agents_settings(self) -> bool {
-        matches!(self, Fixture::AgentsSettings | Fixture::AgentsSettingsKey)
+        matches!(
+            self,
+            Fixture::AgentsSettings | Fixture::AgentsSettingsKey | Fixture::AgentsSettingsTrigger
+        )
     }
 
     fn marker(self) -> &'static str {

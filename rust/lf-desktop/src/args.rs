@@ -34,7 +34,8 @@ OPTIONS:
                        agents-page, agents-states, agents-detail,
                        agents-launcher, agents-launcher-typed,
                        agents-launcher-secret, agents-launcher-empty,
-                       agents-settings or agents-settings-key (only with
+                       agents-settings, agents-settings-key or
+                       agents-settings-trigger (only with
                        --sandbox and --data-dir; seeds a new or reset
                        directory only; agents-launcher* open the launcher)
     --agents-launcher  Open the agent launcher (its own small window; pressed

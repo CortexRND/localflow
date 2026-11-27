@@ -5,6 +5,7 @@ pub mod agents_client;
 pub mod agents_launcher;
 pub mod agents_secrets;
 pub mod agents_settings;
+pub mod agents_triggers;
 pub mod ask;
 pub mod ask_agent;
 pub mod assistant;

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, ClipboardItem, Context, Entity, SharedString, Window};
+use gpui::{div, prelude::*, ClipboardItem, Context, Entity, ScrollHandle, SharedString, Window};
 use serde_json::{json, Value};
 
 use crate::app::{Confirm, PageCx};
@@ -49,6 +49,9 @@ pub struct SettingsPage {
     speaker_status_generation: u64,
     /// Settings → Agents, built the first time the tab is shown.
     agents: Option<Entity<AgentsSettings>>,
+    /// The page column's scroll position (Settings → Agents can bring its
+    /// Voice triggers section into view).
+    scroll: ScrollHandle,
 }
 
 /// Extra rows and sections of a tab, beside its `[section] key` rows.
@@ -115,6 +118,7 @@ impl SettingsPage {
             speaker_status: None,
             speaker_status_generation: 0,
             agents: None,
+            scroll: ScrollHandle::new(),
         };
         for (i, spec) in SPECS.iter().enumerate() {
             match spec.control {
@@ -202,7 +206,8 @@ impl SettingsPage {
             return view.clone();
         }
         let pcx = self.pcx.clone();
-        let view = cx.new(|cx| AgentsSettings::new(pcx, cx));
+        let scroll = self.scroll.clone();
+        let view = cx.new(|cx| AgentsSettings::new(pcx, cx).with_page_scroll(scroll));
         self.agents = Some(view.clone());
         view
     }
@@ -231,6 +236,11 @@ impl SettingsPage {
     #[cfg(test)]
     pub(crate) fn tab(&self) -> Tab {
         self.tab
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page_scroll(&self) -> ScrollHandle {
+        self.scroll.clone()
     }
 
     /// Whether the speaker models are ready, from the last status reply.
@@ -1220,7 +1230,7 @@ impl Render for SettingsPage {
                 Some("Changes save immediately to your LocalFlow config file.".into()),
                 vec![],
             ),
-            column("settings-scroll", body),
+            column("settings-scroll", body).track_scroll(&self.scroll),
         )
     }
 }

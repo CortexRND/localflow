@@ -34,6 +34,7 @@ use crate::controllers::agents::{
     SessionPage, Status,
 };
 use crate::controllers::agents_settings::{self, AgentSettings, SecretValue};
+use crate::controllers::agents_triggers::{self as triggers, Rule, RuleTest};
 
 /// The interactive agents sandbox's shared state, in the sandbox directory.
 pub const STATE_FILE: &str = "agents-sandbox.json";
@@ -82,6 +83,54 @@ struct Inner {
     /// Every `PUT /api/config` body accepted or refused (tests only; never
     /// persisted). Config bodies hold no secret.
     config_bodies: Vec<Value>,
+    /// Voice triggers: full `HotCommandRule` objects, in order.
+    rules: Vec<Value>,
+    /// The next new rule's number (its id is derived from it).
+    next_rule: u64,
+    /// Rule writes and tests answer 403 `local_only` (tests).
+    rules_local_only: bool,
+    /// Every rule body and test body "received" (tests only; never
+    /// persisted).
+    rule_bodies: Vec<Value>,
+}
+
+/// The seeded triggers: one on, one off (ids are the service's 8 hex).
+pub const RULE_LAUNCH: &str = "1a2b3c4d";
+pub const RULE_ASK: &str = "5e6f7a8b";
+
+fn rule_value(
+    id: &str,
+    trigger: &str,
+    provider: &str,
+    repo: &str,
+    enabled: bool,
+    at: &str,
+) -> Value {
+    json!({
+        "id": id, "trigger": trigger, "provider": provider, "profile": "", "repo": repo,
+        "prompt_template": "{prompt}", "min_prompt_words": 3, "enabled": enabled,
+        "created_at": at, "updated_at": at,
+    })
+}
+
+fn seed_rules(now: f64) -> Vec<Value> {
+    let at = rfc3339(now - 86_400.0);
+    vec![
+        rule_value(RULE_LAUNCH, "launch claude", "claude", "", true, &at),
+        rule_value(RULE_ASK, "ask devin", "devin", "", false, &at),
+    ]
+}
+
+/// The service's words: runs of letters and digits, lower-cased.
+fn tokens(text: &str) -> Vec<String> {
+    crate::controllers::agents_triggers::words(text)
+}
+
+/// One trigger's tokens are a prefix of the other's (the service's
+/// overlap rule).
+fn overlaps(a: &[String], b: &[String]) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long[..short.len()] == *short
 }
 
 /// The fake's `[agents]` settings. Secrets are not here: only each
@@ -149,6 +198,11 @@ pub struct Calls {
     pub set_config: usize,
     pub check: usize,
     pub set_secret: usize,
+    pub rules: usize,
+    pub create_rule: usize,
+    pub update_rule: usize,
+    pub delete_rule: usize,
+    pub test_rule: usize,
 }
 
 /// The fixture scenes' "now" (2026-11-20 12:22 UTC): pinned so their clock
@@ -588,6 +642,10 @@ impl Inner {
             settings: Settings::seeded(),
             secrets_unavailable: false,
             config_bodies: Vec::new(),
+            rules: seed_rules(now),
+            next_rule: 1,
+            rules_local_only: false,
+            rule_bodies: Vec::new(),
         };
         for (id, log) in &inner.events {
             let last = log.len() as u64;
@@ -730,8 +788,328 @@ impl Inner {
             "revision": self.revision, "sessions": self.sessions, "events": self.events,
             "deleted": self.deleted, "bodies": self.bodies, "launched": self.launched,
             "enabled": self.enabled, "settings": self.settings.to_value(),
-            "providers": self.providers,
+            "providers": self.providers, "rules": self.rules, "next_rule": self.next_rule,
         })
+    }
+
+    // ------------------------------------------------------ voice triggers ---
+
+    fn provider_listed(&self, id: &str) -> bool {
+        self.providers.iter().any(|p| p["id"] == id)
+    }
+
+    fn rule_index(&self, id: &str) -> Result<usize, AgentsError> {
+        self.rules
+            .iter()
+            .position(|r| r["id"] == id)
+            .ok_or_else(|| rejected(404, "not_found", &format!("no hot command {id}")))
+    }
+
+    /// `validate_rule` as the service runs it: fields, types and bounds.
+    /// Returns the cleaned fields.
+    fn validate_rule(
+        body: &Value,
+        partial: bool,
+    ) -> Result<serde_json::Map<String, Value>, AgentsError> {
+        use crate::controllers::agents_triggers::RULE_FIELDS;
+        let bad = |detail: &str| rejected(400, "validation", detail);
+        let Some(map) = body.as_object() else {
+            return Err(bad("expected a JSON object"));
+        };
+        let mut unknown: Vec<&str> = map
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !RULE_FIELDS.contains(k))
+            .collect();
+        if !unknown.is_empty() {
+            unknown.sort_unstable();
+            return Err(bad(&format!("unknown field(s): {}", unknown.join(", "))));
+        }
+        if !partial {
+            for required in ["trigger", "provider"] {
+                if !map.contains_key(required) {
+                    return Err(bad(&format!("{required} is required")));
+                }
+            }
+        }
+        let mut cleaned = map.clone();
+        for (name, value) in map {
+            let ok = match name.as_str() {
+                "min_prompt_words" => value.is_u64() || value.is_i64(),
+                "enabled" => value.is_boolean(),
+                _ => value.is_string(),
+            };
+            if !ok {
+                let kind = match name.as_str() {
+                    "min_prompt_words" => "integer",
+                    "enabled" => "boolean",
+                    _ => "string",
+                };
+                return Err(bad(&format!("{name} must be a {kind}")));
+            }
+        }
+        if let Some(trigger) = map.get("trigger").and_then(Value::as_str) {
+            let trigger = trigger.trim();
+            if trigger.chars().count() > 60 {
+                return Err(bad("trigger is too long (max 60 characters)"));
+            }
+            if !(2..=6).contains(&tokens(trigger).len()) {
+                return Err(bad("trigger needs 2 to 6 words"));
+            }
+            cleaned.insert("trigger".into(), json!(trigger));
+        }
+        if let Some(provider) = map.get("provider").and_then(Value::as_str) {
+            let ok = !provider.is_empty()
+                && provider.len() <= 40
+                && provider.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-')
+                });
+            if !ok {
+                return Err(bad("provider is not a valid provider id"));
+            }
+        }
+        if let Some(template) = map.get("prompt_template").and_then(Value::as_str) {
+            if template.trim().is_empty() {
+                return Err(bad("prompt_template is empty"));
+            }
+            if template.chars().count() > 20_000 {
+                return Err(bad("prompt_template is too long (max 20000)"));
+            }
+        }
+        if let Some(n) = map.get("min_prompt_words") {
+            if !n.as_i64().is_some_and(|n| (0..=50).contains(&n)) {
+                return Err(bad("min_prompt_words must be 0 to 50"));
+            }
+        }
+        Ok(cleaned)
+    }
+
+    /// `_check_refs`: the provider is known and the repo configured.
+    fn check_refs(&self, rule: &Value) -> Result<(), AgentsError> {
+        let provider = rule["provider"].as_str().unwrap_or("");
+        if !self.provider_listed(provider) {
+            return Err(rejected(
+                400,
+                "validation",
+                &format!("unknown provider '{provider}'"),
+            ));
+        }
+        let repo = rule["repo"].as_str().unwrap_or("");
+        if !repo.is_empty() && !self.has_repo(repo) {
+            return Err(rejected(
+                400,
+                "validation",
+                &format!("unknown repo '{repo}'"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Duplicates or token-prefix overlaps with another rule (409).
+    fn check_conflicts(&self, trigger: &str, exclude: Option<&str>) -> Result<(), AgentsError> {
+        let mine = tokens(trigger);
+        for rule in &self.rules {
+            if exclude.is_some_and(|id| rule["id"] == id) {
+                continue;
+            }
+            let other_text = rule["trigger"].as_str().unwrap_or("");
+            let other = tokens(other_text);
+            if !other.is_empty() && overlaps(&mine, &other) {
+                return Err(rejected(
+                    409,
+                    "rule_conflict",
+                    &format!("trigger overlaps the hot command '{other_text}'"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn local_only(&self) -> Result<(), AgentsError> {
+        if self.rules_local_only {
+            Err(rejected(
+                403,
+                "local_only",
+                "This change is only allowed from this computer (agents.allow_remote is off).",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn create_rule(&mut self, body: &Value) -> Result<Value, AgentsError> {
+        self.local_only()?;
+        let cleaned = Self::validate_rule(body, false)?;
+        let mut rule = json!({"profile": "", "repo": "", "prompt_template": "{prompt}",
+            "min_prompt_words": 3, "enabled": true});
+        for (k, v) in cleaned {
+            rule[k] = v;
+        }
+        self.check_refs(&rule)?;
+        if self.rules.len() >= 32 {
+            return Err(rejected(400, "validation", "at most 32 hot commands"));
+        }
+        self.check_conflicts(rule["trigger"].as_str().unwrap_or(""), None)?;
+        let at = rfc3339(self.now());
+        let id = format!("{:08x}", 0xc0de_0000u64 + self.next_rule);
+        self.next_rule += 1;
+        let entry = json!({
+            "id": id, "trigger": rule["trigger"], "provider": rule["provider"],
+            "profile": rule["profile"], "repo": rule["repo"],
+            "prompt_template": rule["prompt_template"],
+            "min_prompt_words": rule["min_prompt_words"], "enabled": rule["enabled"],
+            "created_at": at, "updated_at": at,
+        });
+        self.rules.push(entry.clone());
+        Ok(entry)
+    }
+
+    fn update_rule(&mut self, id: &str, patch: &Value) -> Result<Value, AgentsError> {
+        self.local_only()?;
+        let cleaned = Self::validate_rule(patch, true)?;
+        let i = self.rule_index(id)?;
+        let mut merged = self.rules[i].clone();
+        for (k, v) in &cleaned {
+            merged[k] = v.clone();
+        }
+        self.check_refs(&merged)?;
+        if let Some(trigger) = cleaned.get("trigger").and_then(Value::as_str) {
+            self.check_conflicts(trigger, Some(id))?;
+        }
+        merged["updated_at"] = json!(rfc3339(self.now()));
+        self.rules[i] = merged.clone();
+        Ok(merged)
+    }
+
+    fn delete_rule(&mut self, id: &str) -> Result<(), AgentsError> {
+        self.local_only()?;
+        let i = self.rule_index(id)?;
+        self.rules.remove(i);
+        Ok(())
+    }
+
+    /// `POST /hot-commands/test`: a small deterministic stand-in for the
+    /// service's matcher (`TRIGGER [in|on ALIAS] [to] PROMPT`, the longest
+    /// trigger first, every `reason`). A fixture only: UI tests assert how
+    /// replies are shown, not this grammar, which may drift from Python's.
+    fn test_rule(&self, body: &Value) -> Result<Value, AgentsError> {
+        self.local_only()?;
+        if !self.enabled {
+            return Err(rejected(409, "agents_disabled", "agents are turned off"));
+        }
+        let text = match body.as_object() {
+            Some(map) if map.len() == 1 => map.get("text").and_then(Value::as_str),
+            _ => None,
+        };
+        let Some(text) = text.filter(|t| t.chars().count() <= 20_000) else {
+            return Err(rejected(
+                400,
+                "validation",
+                "body must be {\"text\": \"…\"} (at most 20000 characters)",
+            ));
+        };
+        let reply =
+            |matched: bool, reason: &str, rule: Option<&Value>, repo: &str, prompt: &str| {
+                let field = |name: &str| {
+                    rule.and_then(|r| r[name].as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                json!({"matched": matched, "rule_id": field("id"), "provider": field("provider"),
+                   "profile": field("profile"), "repo": repo, "prompt": prompt,
+                   "reason": reason})
+            };
+        if !self.settings.hot_commands {
+            return Ok(reply(false, "feature_off", None, "", ""));
+        }
+        // Words with their byte offsets in `text`.
+        let mut words: Vec<(String, usize)> = Vec::new();
+        let mut start = None;
+        for (i, c) in text
+            .char_indices()
+            .chain(std::iter::once((text.len(), ' ')))
+        {
+            match (c.is_alphanumeric(), start) {
+                (true, None) => start = Some(i),
+                (false, Some(s)) => {
+                    words.push((text[s..i].to_lowercase(), s));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        let said: Vec<String> = words.iter().map(|(w, _)| w.clone()).collect();
+        let mut rules: Vec<(Vec<String>, &Value)> = self
+            .rules
+            .iter()
+            .map(|r| (tokens(r["trigger"].as_str().unwrap_or("")), r))
+            .filter(|(t, _)| t.len() >= 2)
+            .collect();
+        rules.sort_by_key(|(t, _)| std::cmp::Reverse(t.len()));
+        let mut aliases: Vec<(Vec<String>, String)> = self
+            .settings
+            .repos
+            .iter()
+            .map(|(a, _)| (tokens(a), a.clone()))
+            .filter(|(t, _)| !t.is_empty())
+            .collect();
+        aliases.sort_by_key(|(t, _)| std::cmp::Reverse(t.len()));
+        for (trigger, rule) in rules {
+            if said.len() < trigger.len() || said[..trigger.len()] != trigger[..] {
+                continue;
+            }
+            if rule["enabled"] != true {
+                return Ok(reply(false, "disabled", Some(rule), "", ""));
+            }
+            let mut index = trigger.len();
+            let mut repo = String::new();
+            if said.get(index).is_some_and(|w| w == "in" || w == "on") {
+                for (alias_tokens, alias) in &aliases {
+                    let end = index + 1 + alias_tokens.len();
+                    if said.len() >= end && said[index + 1..end] == alias_tokens[..] {
+                        repo = alias.clone();
+                        index = end;
+                        break;
+                    }
+                }
+            }
+            if said.get(index).is_some_and(|w| w == "to") {
+                index += 1;
+            }
+            let prompt = words
+                .get(index)
+                .map(|(_, at)| text[*at..].trim().to_string())
+                .unwrap_or_default();
+            let template = rule["prompt_template"].as_str().unwrap_or("{prompt}");
+            let fixed = !template.contains("{prompt}");
+            let min = if fixed {
+                0
+            } else {
+                rule["min_prompt_words"].as_u64().unwrap_or(3)
+            };
+            if !fixed && (prompt.split_whitespace().count() as u64) < min.max(1) {
+                return Ok(reply(false, "too_few_words", Some(rule), "", ""));
+            }
+            if repo.is_empty() {
+                repo = rule["repo"].as_str().unwrap_or("").to_string();
+            }
+            if repo.is_empty() {
+                repo = self.settings.default_repo.clone();
+            }
+            if !repo.is_empty() && !self.has_repo(&repo) {
+                return Ok(reply(false, "unknown_repo", Some(rule), &repo, ""));
+            }
+            if !self.provider_listed(rule["provider"].as_str().unwrap_or("")) {
+                return Ok(reply(false, "unknown_provider", Some(rule), &repo, ""));
+            }
+            let task = if fixed {
+                template.to_string()
+            } else {
+                template.replace("{prompt}", &prompt)
+            };
+            return Ok(reply(true, "", Some(rule), &repo, &task));
+        }
+        Ok(reply(false, "no_trigger", None, "", ""))
     }
 
     /// `GET /status` exactly as the schema's `Status`.
@@ -935,6 +1313,12 @@ impl Inner {
         if let Some(providers) = saved["providers"].as_array() {
             self.providers = providers.clone();
         }
+        if let Some(rules) = saved["rules"].as_array() {
+            self.rules = rules.clone();
+        }
+        if let Some(next) = saved["next_rule"].as_u64() {
+            self.next_rule = next;
+        }
     }
 }
 
@@ -1041,6 +1425,52 @@ impl FakeAgents {
                 ("localflow".into(), "/home/you/src/localflow".into()),
                 ("website".into(), "/home/you/src/missing/website".into()),
             ];
+            // Voice triggers on; "launch claude" works in localflow, "ask
+            // devin" is off and uses the default workspace.
+            inner.settings.hot_commands = true;
+            if let Some(rule) = inner.rules.iter_mut().find(|r| r["id"] == RULE_LAUNCH) {
+                rule["repo"] = json!("localflow");
+            }
+        });
+    }
+
+    /// Rule writes and tests answer 403 `local_only` (`false`: accept).
+    #[cfg(test)]
+    pub(crate) fn rules_local_only(&self, on: bool) {
+        self.with(|inner| inner.rules_local_only = on);
+    }
+
+    /// Every rule and test body, in order (tests).
+    #[cfg(test)]
+    pub(crate) fn rule_bodies(&self) -> Vec<Value> {
+        self.with(|inner| inner.rule_bodies.clone())
+    }
+
+    /// The raw rule objects (tests: schema shape).
+    #[cfg(test)]
+    pub(crate) fn rule_values(&self) -> Vec<Value> {
+        self.with(|inner| inner.rules.clone())
+    }
+
+    /// Fill the list with distinct triggers up to `n` (tests: the limit).
+    #[cfg(test)]
+    pub(crate) fn fill_rules(&self, n: usize) {
+        self.with(|inner| {
+            let words = [
+                "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+            ];
+            let mut i = 0;
+            while inner.rules.len() < n {
+                let trigger = format!("{} {}", words[i % 8], words[i / 8 % 8]);
+                i += 1;
+                if inner.check_conflicts(&trigger, None).is_ok() {
+                    let id = format!("{:08x}", 0xf000_0000u64 + i as u64);
+                    let at = rfc3339(inner.now());
+                    inner
+                        .rules
+                        .push(rule_value(&id, &trigger, "claude", "", true, &at));
+                }
+            }
         });
     }
 
@@ -1706,6 +2136,53 @@ impl AgentsBackend for FakeAgents {
                 }
                 inner.set_presence(i, &name, set);
                 agents::parse_provider(&inner.providers[i]).ok_or(AgentsError::Offline)
+            },
+        )
+    }
+
+    fn rules(&self) -> Result<Vec<Rule>, AgentsError> {
+        self.read(
+            |c| &mut c.rules,
+            |inner| Ok(triggers::parse_rules(&json!({ "rules": inner.rules }))),
+        )
+    }
+
+    fn create_rule(&self, body: &Value) -> Result<Rule, AgentsError> {
+        self.write(
+            |c| &mut c.create_rule,
+            |inner| {
+                inner.rule_bodies.push(body.clone());
+                let rule = inner.create_rule(body)?;
+                triggers::parse_rule(&rule).ok_or(AgentsError::Offline)
+            },
+        )
+    }
+
+    fn update_rule(&self, id: &str, patch: &Value) -> Result<Rule, AgentsError> {
+        self.write(
+            |c| &mut c.update_rule,
+            |inner| {
+                inner.rule_bodies.push(patch.clone());
+                let rule = inner.update_rule(id, patch)?;
+                triggers::parse_rule(&rule).ok_or(AgentsError::Offline)
+            },
+        )
+    }
+
+    fn delete_rule(&self, id: &str) -> Result<(), AgentsError> {
+        self.write(|c| &mut c.delete_rule, |inner| inner.delete_rule(id))
+    }
+
+    /// Changes nothing; counted as a write (it is a non-GET, local-only
+    /// route at the service).
+    fn test_rule(&self, text: &str) -> Result<RuleTest, AgentsError> {
+        let body = triggers::test_body(text);
+        self.write(
+            |c| &mut c.test_rule,
+            |inner| {
+                inner.rule_bodies.push(body.clone());
+                let reply = inner.test_rule(&body)?;
+                triggers::parse_rule_test(&reply).ok_or(AgentsError::Offline)
             },
         )
     }
@@ -2380,5 +2857,218 @@ mod tests {
             Some("not_found")
         );
         assert_eq!(fake.calls().check, 2);
+    }
+
+    fn new_rule(trigger: &str, provider: &str) -> Value {
+        json!({"trigger": trigger, "provider": provider, "profile": "", "repo": "",
+               "prompt_template": "{prompt}", "min_prompt_words": 3, "enabled": true})
+    }
+
+    /// `HotCommandRule` and `RuleTestResponse` are the schema's key sets.
+    #[test]
+    fn trigger_replies_have_the_schemas_exact_shapes() {
+        let fake = FakeAgents::fixture();
+        fake.set_config(&json!({"agents": {"hot_commands": true}}))
+            .unwrap();
+        fake.create_rule(&new_rule("start codex", "codex")).unwrap();
+        for rule in fake.rule_values() {
+            assert_eq!(
+                keys(&rule),
+                [
+                    "id",
+                    "trigger",
+                    "provider",
+                    "profile",
+                    "repo",
+                    "prompt_template",
+                    "min_prompt_words",
+                    "enabled",
+                    "created_at",
+                    "updated_at"
+                ]
+            );
+            assert!(triggers::is_rule_id(rule["id"].as_str().unwrap()));
+        }
+        let reply = fake.with(|inner| {
+            inner
+                .test_rule(&json!({"text": "launch claude to fix the flaky tests"}))
+                .unwrap()
+        });
+        assert_eq!(
+            keys(&reply),
+            ["matched", "rule_id", "provider", "profile", "repo", "prompt", "reason"]
+        );
+        assert_eq!(reply["matched"], true);
+        assert_eq!(reply["repo"], "acme/web", "the default workspace");
+        assert_eq!(reply["prompt"], "fix the flaky tests");
+    }
+
+    /// Writes validate, conflict and 404 like the service.
+    #[test]
+    fn trigger_writes_validate_like_the_service() {
+        let fake = FakeAgents::fixture();
+        let rules = fake.rules().unwrap();
+        let shown: Vec<(&str, bool)> = rules
+            .iter()
+            .map(|r| (r.trigger.as_str(), r.enabled))
+            .collect();
+        assert_eq!(shown, [("launch claude", true), ("ask devin", false)]);
+        let created = fake
+            .create_rule(&new_rule(" start codex ", "codex"))
+            .unwrap();
+        assert_eq!(created.trigger, "start codex", "trimmed");
+        for (body, code, detail) in [
+            (
+                new_rule("launch claude now", "claude"),
+                "rule_conflict",
+                "trigger overlaps the hot command 'launch claude'",
+            ),
+            (
+                new_rule("launch", "claude"),
+                "validation",
+                "trigger needs 2 to 6 words",
+            ),
+            (
+                new_rule("use nobody", "nobody"),
+                "validation",
+                "unknown provider 'nobody'",
+            ),
+            (
+                json!({"trigger": "x y", "provider": "claude", "id": "nope"}),
+                "validation",
+                "unknown field(s): id",
+            ),
+            (
+                json!({"trigger": "x y", "provider": "claude", "repo": "docs"}),
+                "validation",
+                "unknown repo 'docs'",
+            ),
+            (
+                json!({"trigger": "x y", "provider": "claude", "prompt_template": " "}),
+                "validation",
+                "prompt_template is empty",
+            ),
+        ] {
+            let Err(AgentsError::Rejected(e)) = fake.create_rule(&body) else {
+                panic!("{body}: expected a refusal");
+            };
+            assert_eq!(
+                (e.code.as_str(), e.detail.as_str()),
+                (code, detail),
+                "{body}"
+            );
+        }
+        // An update only checks conflicts when the trigger changes, and
+        // never against itself.
+        let updated = fake
+            .update_rule(
+                RULE_LAUNCH,
+                &json!({"trigger": "launch claude", "repo": "acme/api"}),
+            )
+            .unwrap();
+        assert_eq!(updated.repo, "acme/api");
+        assert_eq!(
+            fake.update_rule(RULE_LAUNCH, &json!({"trigger": "ask devin please"}))
+                .unwrap_err()
+                .code(),
+            Some("rule_conflict")
+        );
+        assert_eq!(
+            fake.update_rule("deadbeef", &json!({"enabled": false}))
+                .unwrap_err()
+                .code(),
+            Some("not_found")
+        );
+        fake.delete_rule(&created.id).unwrap();
+        assert_eq!(
+            fake.delete_rule(&created.id).unwrap_err().code(),
+            Some("not_found")
+        );
+        fake.fill_rules(32);
+        assert_eq!(
+            fake.create_rule(&new_rule("zulu yankee", "claude"))
+                .unwrap_err()
+                .reason(),
+            "At most 32 hot commands."
+        );
+        fake.rules_local_only(true);
+        assert_eq!(
+            fake.delete_rule(RULE_ASK).unwrap_err().code(),
+            Some("local_only")
+        );
+        let calls = fake.calls();
+        assert_eq!(
+            (
+                calls.rules,
+                calls.create_rule,
+                calls.update_rule,
+                calls.delete_rule
+            ),
+            (1, 8, 3, 3)
+        );
+    }
+
+    /// Every test `reason`, plus the disabled-Agents 409.
+    #[test]
+    fn trigger_tests_answer_every_reason() {
+        let fake = FakeAgents::fixture();
+        fake.use_settings_fixture();
+        let reason = |fake: &FakeAgents, text: &str| {
+            let r = fake.test_rule(text).unwrap();
+            (r.matched, r.reason, r.repo, r.prompt)
+        };
+        assert_eq!(
+            reason(&fake, "launch claude in localflow to fix the tests"),
+            (
+                true,
+                String::new(),
+                "localflow".into(),
+                "fix the tests".into()
+            )
+        );
+        assert_eq!(reason(&fake, "hello there").1, "no_trigger");
+        assert_eq!(reason(&fake, "launch claude fix").1, "too_few_words");
+        assert_eq!(
+            reason(&fake, "ask devin about the release plan").1,
+            "disabled"
+        );
+        fake.update_rule(RULE_ASK, &json!({"enabled": true}))
+            .unwrap();
+        fake.set_config(&json!({"agents": {"repos": ["localflow=/home/you/src/localflow"]}}))
+            .unwrap();
+        fake.with(|inner| inner.rules[1]["repo"] = json!("website"));
+        assert_eq!(
+            reason(&fake, "ask devin about the release plan").1,
+            "unknown_repo"
+        );
+        fake.with(|inner| {
+            inner.rules[1]["repo"] = json!("");
+            inner.rules[1]["provider"] = json!("gone");
+        });
+        assert_eq!(
+            reason(&fake, "ask devin about the release plan").1,
+            "unknown_provider"
+        );
+        fake.set_config(&json!({"agents": {"hot_commands": false}}))
+            .unwrap();
+        assert_eq!(reason(&fake, "launch claude to do it now").1, "feature_off");
+        fake.set_config(&json!({"agents": {"enabled": false}}))
+            .unwrap();
+        assert_eq!(
+            fake.test_rule("launch claude").unwrap_err().code(),
+            Some("agents_disabled")
+        );
+        let tests: Vec<Value> = fake
+            .rule_bodies()
+            .into_iter()
+            .filter(|b| b.get("text").is_some())
+            .collect();
+        assert_eq!(tests.len(), 8);
+        assert!(
+            tests.iter().all(|b| keys(b) == ["text"]),
+            "exactly {{text}}"
+        );
+        assert_eq!(fake.calls().test_rule, 8);
+        assert_eq!(fake.calls().launch, 0, "a test never launches");
     }
 }

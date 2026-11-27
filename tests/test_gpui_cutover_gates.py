@@ -175,8 +175,9 @@ def test_agent_scenes_add_distinct_opt_in_captures(gates):
     }
     assert [name for name, _ in screenshots.agent_scenes()] == [
         "agents-page", "agents-states", "agents-detail", "agents-settings", "agents-settings-key",
+        "agents-settings-trigger",
     ]
-    assert len(agents) == 20
+    assert len(agents) == 24
     launcher = {
         f"{name}-{theme}-{width}x{height}.png": f"{name}/{theme}/{width}"
         for name, _ in screenshots.launcher_scenes()
@@ -192,7 +193,7 @@ def test_agent_scenes_add_distinct_opt_in_captures(gates):
     earlier = set(pages) | set(speakers)
     assert not earlier & set(agents), "old capture names are unchanged"
     assert not (earlier | set(agents)) & set(launcher)
-    assert screenshots.expected_captures() == 88
+    assert screenshots.expected_captures() == 92
     assert screenshots.duplicate_captures({**pages, **speakers, **agents, **launcher}) == []
     for name, route in screenshots.agent_scenes() + screenshots.launcher_scenes():
         assert route == ["--sandbox-fixture", name]

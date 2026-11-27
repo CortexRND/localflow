@@ -527,6 +527,12 @@ impl Shell {
                     agents.update(cx, |a, cx| a.run_key_fixture(cx));
                 }
             }),
+            (Fixture::AgentsSettingsTrigger, Some(View::Settings(v))) => v.update(cx, |p, cx| {
+                p.open_tab("agents", cx);
+                if let Some(agents) = p.agents_settings() {
+                    agents.update(cx, |a, cx| a.run_trigger_fixture(cx));
+                }
+            }),
             (
                 Fixture::AgentsPage | Fixture::AgentsStates | Fixture::AgentsDetail,
                 Some(View::Agents(v)),

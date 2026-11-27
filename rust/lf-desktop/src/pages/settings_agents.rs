@@ -26,10 +26,16 @@ use gpui::{
 use crate::app::{Confirm, PageCx};
 use crate::controllers::agents::{AgentsBackend, AgentsError, Provider, SecretSlot};
 use crate::controllers::agents_settings::{self as ctl, AgentSettings, SecretValue};
+use crate::controllers::agents_triggers::Rule;
 use crate::theme::{space, theme, Theme, Tone};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::select::{Select, SelectEvent};
 use crate::ui::{self, Button, Switch};
+
+#[path = "settings_agents_triggers.rs"]
+mod triggers;
+
+pub(crate) use triggers::Triggers;
 
 /// The provider tile's edge in a row.
 const TILE: f32 = 28.;
@@ -44,6 +50,14 @@ pub(crate) enum Row {
     DefaultRepo,
     Workspace(String),
     AddWorkspace,
+    /// The Voice triggers switch (`agents.hot_commands`).
+    HotCommands,
+    /// One trigger's switch (by rule id).
+    Rule(String),
+    /// The open trigger editor's Save or Delete.
+    RuleEditor,
+    /// Try it.
+    Test,
 }
 
 /// The key editor's target: a provider and one of its secrets. Never the
@@ -65,12 +79,18 @@ impl KeyTarget {
 struct Loaded {
     settings: AgentSettings,
     providers: Vec<Provider>,
+    /// Voice triggers.
+    rules: Vec<Rule>,
 }
 
 /// Focus moved on the next frame (after the element exists).
 enum PendingFocus {
     KeyField,
     Opener,
+    /// The trigger editor's Say field.
+    SayField,
+    /// The Edit (or Add trigger) button that opened the trigger editor.
+    RuleOpener,
 }
 
 pub struct AgentsSettings {
@@ -106,6 +126,8 @@ pub struct AgentsSettings {
     /// Fixture scene `agents-settings-key`: open the first cloud provider's
     /// missing key once providers are read.
     fixture_key: bool,
+    /// The Voice triggers section's controls and state.
+    triggers: Triggers,
 }
 
 impl AgentsSettings {
@@ -145,6 +167,7 @@ impl AgentsSettings {
             .detach();
         }
         let key_input = Self::new_key_input(KEY_LABEL_DEFAULT.into(), cx);
+        let triggers = Triggers::new(cx);
         AgentsSettings {
             pcx,
             backend,
@@ -169,6 +192,7 @@ impl AgentsSettings {
             name_input,
             folder_input,
             fixture_key: false,
+            triggers,
         }
     }
 
@@ -189,6 +213,13 @@ impl AgentsSettings {
     }
 
     // ------------------------------------------------------------ loading ---
+
+    /// The Settings column this tab is drawn in (to bring a section into
+    /// view).
+    pub fn with_page_scroll(mut self, scroll: gpui::ScrollHandle) -> Self {
+        self.triggers.page_scroll = Some(scroll);
+        self
+    }
 
     /// The tab came on screen (or anything changed): read again.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -219,7 +250,8 @@ impl AgentsSettings {
                 .spawn(async move {
                     let settings = backend.settings()?;
                     let providers = backend.providers()?;
-                    Ok::<_, AgentsError>((settings, providers))
+                    let rules = backend.rules()?;
+                    Ok::<_, AgentsError>((settings, providers, rules))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| this.loaded(generation, result, cx));
@@ -230,17 +262,18 @@ impl AgentsSettings {
     fn loaded(
         &mut self,
         generation: u64,
-        result: Result<(AgentSettings, Vec<Provider>), AgentsError>,
+        result: Result<(AgentSettings, Vec<Provider>, Vec<Rule>), AgentsError>,
         cx: &mut Context<Self>,
     ) {
         if generation != self.generation {
             return;
         }
         match result {
-            Ok((settings, providers)) => {
+            Ok((settings, providers, rules)) => {
                 self.loaded = Some(Loaded {
                     settings,
                     providers,
+                    rules,
                 });
                 self.load_error = None;
             }
@@ -251,6 +284,7 @@ impl AgentsSettings {
         if self.fixture_key {
             self.open_fixture_key(cx);
         }
+        self.triggers_loaded(cx);
         cx.notify();
     }
 
@@ -344,6 +378,7 @@ impl AgentsSettings {
                     return;
                 }
                 this.pending_enabled = None;
+                this.triggers.pending_hot = None;
                 match result {
                     Ok(()) => {
                         then(this, cx);
@@ -564,6 +599,8 @@ impl AgentsSettings {
             return;
         };
         let label = ctl::key_accessible_label(&provider, slot, &self.name_of(&provider));
+        // One editor at a time: a trigger editor closes.
+        self.triggers.editor = None;
         // The old field (and anything typed into it) goes with its entity.
         self.key_input.update(cx, |i, cx| i.clear(cx));
         self.key_input = Self::new_key_input(label.into(), cx);
@@ -614,6 +651,9 @@ impl AgentsSettings {
     pub fn escape(&mut self, cx: &mut Context<Self>) -> bool {
         if self.editor.is_some() {
             self.close_editor(cx);
+            true
+        } else if self.triggers.editor.is_some() {
+            self.cancel_rule(cx);
             true
         } else {
             false
@@ -1176,12 +1216,19 @@ impl Render for AgentsSettings {
         match self.pending_focus.take() {
             Some(PendingFocus::KeyField) => self.key_input.read(cx).focus(window),
             Some(PendingFocus::Opener) => window.focus(&self.opener_focus),
+            Some(PendingFocus::SayField) => self.triggers.say.read(cx).focus(window),
+            Some(PendingFocus::RuleOpener) => window.focus(&self.triggers.opener_focus),
             None => {}
         }
         if self.loaded.is_some() {
             crate::sandbox::scene_ready(crate::sandbox::Fixture::AgentsSettings);
             if self.editor.is_some() {
                 crate::sandbox::scene_ready(crate::sandbox::Fixture::AgentsSettingsKey);
+            }
+            // The trigger scene scrolls the page to Voice triggers first,
+            // and reports only once that scrolled frame is on screen.
+            if self.trigger_scene_ready() && self.reveal_triggers(window, cx) {
+                crate::sandbox::scene_ready(crate::sandbox::Fixture::AgentsSettingsTrigger);
             }
         }
         let mut body = div()
@@ -1286,7 +1333,7 @@ impl Render for AgentsSettings {
                     .into_any_element(),
             );
         }
-        body.child(
+        body = body.child(
             ui::section(
                 &t,
                 ctl::WORKSPACES_HEADING,
@@ -1294,6 +1341,7 @@ impl Render for AgentsSettings {
                 None,
             )
             .child(ui::group_rows(&t, workspace_rows, ui::row_inset())),
-        )
+        );
+        body.child(self.render_triggers(&t, cx))
     }
 }

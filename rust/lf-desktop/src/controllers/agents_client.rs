@@ -32,6 +32,7 @@ use crate::controllers::agents::{
     SessionPage, Status,
 };
 use crate::controllers::agents_settings::{self, AgentSettings, SecretValue};
+use crate::controllers::agents_triggers::{self as triggers, Rule, RuleTest};
 
 /// Ordinary reads.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -394,6 +395,39 @@ impl AgentsBackend for HttpAgents {
             std::hint::black_box(&bytes);
         }
         provider_of(&result?)
+    }
+
+    fn rules(&self) -> Result<Vec<Rule>, AgentsError> {
+        self.read(&["hot-commands"], &[])
+            .map(|reply| triggers::parse_rules(&reply))
+    }
+
+    fn create_rule(&self, body: &Value) -> Result<Rule, AgentsError> {
+        let reply = self.write(reqwest::Method::POST, &["hot-commands"], Some(body))?;
+        triggers::parse_rule(&reply).ok_or_else(invalid)
+    }
+
+    fn update_rule(&self, id: &str, patch: &Value) -> Result<Rule, AgentsError> {
+        let reply = self.write(reqwest::Method::PUT, &["hot-commands", id], Some(patch))?;
+        triggers::parse_rule(&reply).ok_or_else(invalid)
+    }
+
+    fn delete_rule(&self, id: &str) -> Result<(), AgentsError> {
+        let reply = self.write(reqwest::Method::DELETE, &["hot-commands", id], None)?;
+        match reply.get("deleted").and_then(Value::as_bool) {
+            Some(true) => Ok(()),
+            _ => Err(invalid()),
+        }
+    }
+
+    fn test_rule(&self, text: &str) -> Result<RuleTest, AgentsError> {
+        let body = triggers::test_body(text);
+        let reply = self.write(
+            reqwest::Method::POST,
+            &["hot-commands", "test"],
+            Some(&body),
+        )?;
+        triggers::parse_rule_test(&reply).ok_or_else(invalid)
     }
 }
 
@@ -836,6 +870,101 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(checked.readiness, agents::Readiness::NeedsSignIn);
         assert!(checked.deep);
+    }
+
+    fn rule_body(id: &str, trigger: &str, enabled: bool) -> Value {
+        json!({"id": id, "trigger": trigger, "provider": "claude", "profile": "",
+               "repo": "", "prompt_template": "{prompt}", "min_prompt_words": 3,
+               "enabled": enabled, "created_at": "2026-11-20T12:00:00Z",
+               "updated_at": "2026-11-20T12:00:00Z"})
+    }
+
+    #[test]
+    fn trigger_routes_send_exact_methods_paths_and_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (port, handle) = serve(
+            "200 OK",
+            json!({"rules": [rule_body("1a2b3c4d", "launch claude", true)]}).to_string(),
+        );
+        let rules = client(port, &dir).rules().unwrap();
+        assert!(handle
+            .join()
+            .unwrap()
+            .starts_with("GET /api/agents/hot-commands HTTP/1.1"));
+        assert_eq!(rules[0].trigger, "launch claude");
+
+        let body = json!({"trigger": "ask devin", "provider": "devin", "profile": "",
+            "repo": "", "prompt_template": "{prompt}", "min_prompt_words": 3, "enabled": true});
+        let (port, handle) = serve(
+            "201 Created",
+            rule_body("2b3c4d5e", "ask devin", true).to_string(),
+        );
+        let created = client(port, &dir).create_rule(&body).unwrap();
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("POST /api/agents/hot-commands HTTP/1.1"));
+        assert_eq!(body_of(&request), body, "exactly the body");
+        assert_eq!(created.id, "2b3c4d5e");
+
+        let (port, handle) = serve(
+            "200 OK",
+            rule_body("2b3c4d5e", "ask devin", false).to_string(),
+        );
+        let updated = client(port, &dir)
+            .update_rule("2b3c4d5e", &json!({"enabled": false}))
+            .unwrap();
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("PUT /api/agents/hot-commands/2b3c4d5e "));
+        assert_eq!(body_of(&request), json!({"enabled": false}));
+        assert!(!updated.enabled);
+
+        let (port, handle) = serve("200 OK", json!({"deleted": true}).to_string());
+        client(port, &dir).delete_rule("2b3c4d5e").unwrap();
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("DELETE /api/agents/hot-commands/2b3c4d5e "));
+        assert!(request.ends_with("\r\n\r\n"), "no body: {request}");
+
+        let (port, handle) = serve(
+            "200 OK",
+            json!({"matched": true, "rule_id": "1a2b3c4d", "provider": "claude",
+                   "profile": "", "repo": "localflow", "prompt": "fix the tests",
+                   "reason": ""})
+            .to_string(),
+        );
+        let test = client(port, &dir)
+            .test_rule("launch claude in localflow to fix the tests")
+            .unwrap();
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("POST /api/agents/hot-commands/test "));
+        assert_eq!(
+            body_of(&request),
+            json!({"text": "launch claude in localflow to fix the tests"})
+        );
+        assert!(test.matched && test.repo == "localflow");
+    }
+
+    #[test]
+    fn refused_trigger_writes_carry_their_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (status, code) in [
+            ("409 Conflict", "rule_conflict"),
+            ("400 Bad Request", "validation"),
+            ("404 Not Found", "not_found"),
+            ("403 Forbidden", "local_only"),
+        ] {
+            let (port, handle) = serve(status, json!({"detail": "no", "code": code}).to_string());
+            let error = client(port, &dir)
+                .update_rule("1a2b3c4d", &json!({"trigger": "x y"}))
+                .unwrap_err();
+            handle.join().unwrap();
+            assert_eq!(error.code(), Some(code), "{status}");
+        }
+        let (port, handle) = serve(
+            "409 Conflict",
+            json!({"detail": "agents are turned off", "code": "agents_disabled"}).to_string(),
+        );
+        let error = client(port, &dir).test_rule("x").unwrap_err();
+        handle.join().unwrap();
+        assert_eq!(error.code(), Some("agents_disabled"));
     }
 
     #[test]
