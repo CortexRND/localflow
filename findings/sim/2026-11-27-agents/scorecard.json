@@ -1,0 +1,394 @@
+{
+ "verdict": "GREEN",
+ "reasons": [],
+ "run": "/home/ubuntu/sim-runs/2026-11-27-agents",
+ "run_id": "2026-11-27-agents",
+ "commit": "acde5821b6d220d4d024332755dbd4f0889ddd2d",
+ "commit_ok": true,
+ "commits_seen": [
+  "acde5821b6d220d4d024332755dbd4f0889ddd2d"
+ ],
+ "repeats": [
+  "r1",
+  "r2",
+  "r3"
+ ],
+ "llm": {
+  "provider": "openai-compatible",
+  "base_url": "https://api.fireworks.ai/inference/v1",
+  "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017"
+ },
+ "judge": {
+  "model": "jev-1.14.0",
+  "usage": {
+   "input_tokens": 45355,
+   "output_tokens": 3225
+  },
+  "calls": 84,
+  "rows": 84,
+  "errors": 0
+ },
+ "active_suites": [
+  "agents"
+ ],
+ "live": [
+  {
+   "cell": "L1-claude-live",
+   "status": "not exercised",
+   "reason": "AGENTS_LIVE unset"
+  },
+  {
+   "cell": "L2-devin-live",
+   "status": "not exercised",
+   "reason": "AGENTS_LIVE unset"
+  }
+ ],
+ "gate_counts": {
+  "pass": 8
+ },
+ "gates": {
+  "A1": {
+   "name": "agents lifecycle & state machine",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 174,
+   "pooled_n": 174,
+   "wilson95_pooled": [
+    0.978,
+    1.0
+   ],
+   "low_power": false
+  },
+  "A2": {
+   "name": "hot-command parsing & dictation seam",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 558,
+   "pooled_n": 558,
+   "wilson95_pooled": [
+    0.993,
+    1.0
+   ],
+   "low_power": false
+  },
+  "A3": {
+   "name": "agents concurrency & bounds",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 48,
+   "pooled_n": 48,
+   "wilson95_pooled": [
+    0.926,
+    1.0
+   ],
+   "low_power": false
+  },
+  "A4": {
+   "name": "agents API contract & auth",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 495,
+   "pooled_n": 495,
+   "wilson95_pooled": [
+    0.992,
+    1.0
+   ],
+   "low_power": false
+  },
+  "A5": {
+   "name": "agents secrets & redaction",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 60,
+   "pooled_n": 60,
+   "wilson95_pooled": [
+    0.94,
+    1.0
+   ],
+   "low_power": false
+  },
+  "A6": {
+   "name": "agent provider adapters (scripted boundary)",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 318,
+   "pooled_n": 318,
+   "wilson95_pooled": [
+    0.988,
+    1.0
+   ],
+   "low_power": false
+  },
+  "A7": {
+   "name": "agents idle cost & efficiency",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 24,
+   "pooled_n": 24,
+   "wilson95_pooled": [
+    0.862,
+    1.0
+   ],
+   "low_power": false
+  },
+  "A8": {
+   "name": "agents recovery & cross-process",
+   "threshold": "all",
+   "status": "pass",
+   "pass_count": "3/3",
+   "min": 1.0,
+   "max": 1.0,
+   "spread": 0.0,
+   "pooled_k": 36,
+   "pooled_n": 36,
+   "wilson95_pooled": [
+    0.904,
+    1.0
+   ],
+   "low_power": false
+  }
+ },
+ "not_exercised": [],
+ "notes": [
+  "Scoped run: only the agents suite(s) declared in manifest.json are gated.",
+  "Agents live cells L1/L2 not exercised (outside the gated matrix; never change the verdict)."
+ ],
+ "item_flips": 0,
+ "judge_stability": [
+  {
+   "type": "agent_error_helpfulness",
+   "signal": "leaksCredential",
+   "trust": "advisory",
+   "items": 8,
+   "flips": 0,
+   "max_p_delta": "0.030"
+  },
+  {
+   "type": "agent_error_helpfulness",
+   "signal": "statesCauseAndNextStep",
+   "trust": "advisory",
+   "items": 8,
+   "flips": 0,
+   "max_p_delta": "0.060"
+  },
+  {
+   "type": "agent_launch_intent",
+   "signal": "shouldLaunch",
+   "trust": "advisory",
+   "items": 9,
+   "flips": 1,
+   "max_p_delta": "0.090"
+  },
+  {
+   "type": "agent_prompt_fidelity",
+   "signal": "addedOrDropped",
+   "trust": "advisory",
+   "items": 7,
+   "flips": 0,
+   "max_p_delta": "0.070"
+  },
+  {
+   "type": "agent_prompt_fidelity",
+   "signal": "preservesTask",
+   "trust": "advisory",
+   "items": 7,
+   "flips": 0,
+   "max_p_delta": "0.040"
+  },
+  {
+   "type": "agent_result_faithfulness",
+   "signal": "inventedByTruncation",
+   "trust": "advisory",
+   "items": 4,
+   "flips": 0,
+   "max_p_delta": "0.010"
+  },
+  {
+   "type": "agent_result_faithfulness",
+   "signal": "supportedByLog",
+   "trust": "advisory",
+   "items": 4,
+   "flips": 1,
+   "max_p_delta": "0.160"
+  }
+ ],
+ "disagreement_queue": [
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_error_helpfulness",
+   "gate": "A1",
+   "item": "agents-lifecycle-state:fail",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: statesCauseAndNextStep=0.06; r2: statesCauseAndNextStep=0.05; r3: statesCauseAndNextStep=0.06",
+   "answer": "mock run failed"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_error_helpfulness",
+   "gate": "A1",
+   "item": "agents-lifecycle-state:flaky_cancel",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: statesCauseAndNextStep=0.05; r2: statesCauseAndNextStep=0.04; r3: statesCauseAndNextStep=0.04",
+   "answer": "the mock refused to stop"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_error_helpfulness",
+   "gate": "A1",
+   "item": "agents-lifecycle-state:hang",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: statesCauseAndNextStep=0.06; r2: statesCauseAndNextStep=0.07; r3: statesCauseAndNextStep=0.07",
+   "answer": "no result within 10 s"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_error_helpfulness",
+   "gate": "A1",
+   "item": "agents-lifecycle-state:terminal:ok",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: statesCauseAndNextStep=0.37; r2: statesCauseAndNextStep=0.35; r3: statesCauseAndNextStep=0.36",
+   "answer": "cannot change session 2f1115aee341 in state 'completed'; expected one of queued, starting, running, waiting_input"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_error_helpfulness",
+   "gate": "A6",
+   "item": "agents-providers-boundary:claude:mode_garbage",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: statesCauseAndNextStep=0.04; r2: statesCauseAndNextStep=0.04; r3: statesCauseAndNextStep=0.04",
+   "answer": "unreadable claude output: oops: unexpected token"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_error_helpfulness",
+   "gate": "A6",
+   "item": "agents-providers-boundary:devin:auth_failed",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: statesCauseAndNextStep=0.05; r2: statesCauseAndNextStep=0.05; r3: statesCauseAndNextStep=0.05",
+   "answer": "the service rejected the credentials (HTTP 401)"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_launch_intent",
+   "gate": "A2",
+   "item": "agents-hotcommands-seam:n01",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: shouldLaunch=0.80 launched=False; r2: shouldLaunch=0.79 launched=False; r3: shouldLaunch=0.83 launched=False",
+   "answer": "please launch claude to fix the flaky test"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_launch_intent",
+   "gate": "A2",
+   "item": "agents-hotcommands-seam:n17",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: shouldLaunch=0.61 launched=False; r2: shouldLaunch=0.70 launched=False; r3: shouldLaunch=0.62 launched=False",
+   "answer": "claude launch to fix the flaky test"
+  },
+  {
+   "source": "gate-vs-jev",
+   "type": "agent_result_faithfulness",
+   "gate": "A1",
+   "item": "agents-lifecycle-state:ok",
+   "trust": "advisory",
+   "repeats": [
+    "r1",
+    "r2",
+    "r3"
+   ],
+   "gate_says": "pass",
+   "jev_says": "problem",
+   "jev_detail": "r1: supportedByLog=0.40; r2: supportedByLog=0.31; r3: supportedByLog=0.40",
+   "answer": "done: Summarise the README of the sim repo in one sentence"
+  }
+ ],
+ "needs_adjudication": {
+  "trusted_gate_vs_jev": 0,
+  "advisory_gate_vs_jev": 9,
+  "failing_gate_items": 0
+ }
+}
