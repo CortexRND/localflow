@@ -27,7 +27,18 @@ ADVISORY_FLAGS = {  # signal -> (flagged when p is on this side of 0.5, meaning)
     "removedFillers": ("low", "fillers or repeats left in the cleaned text"),
     "groundedInNotes": ("low", "a work prompt is not supported by the notes"),
     "inventedWork": ("high", "a work prompt adds a task, owner or deadline not in the notes"),
+    # Agents JA1-JA4 (advisory until calibrated; PROTOCOL.md "Agents").
+    "preservesTask": ("low", "extracted launch prompt does not state the spoken task"),
+    "addedOrDropped": ("high", "launch prompt adds or drops part of the task"),
+    "statesCauseAndNextStep": ("low", "error message misses the cause or the next step"),
+    "leaksCredential": ("high", "error message appears to reveal a credential"),
+    "supportedByLog": ("low", "agent result not supported by the event log"),
+    "inventedByTruncation": ("high", "result preview says something the log does not, by truncation"),
 }
+# JA2 has no fixed bad side: Jev is compared with the corpus label (launch / no launch).
+INTENT_FLAG = {"expect_launch": "low", "expect_no_launch": "high"}
+ADVISORY_TYPES = ("meeting_notes", "dictation_cleanup", "work_prompts", "agent_prompt_fidelity",
+                  "agent_launch_intent", "agent_error_helpfulness", "agent_result_faithfulness")
 NOT_EXERCISED_TAG = ":not-exercised"
 
 
@@ -123,11 +134,29 @@ def signals(row: dict) -> dict[str, float]:
     return out
 
 
+def flag_side(row_type: str, kind: str, name: str) -> str:
+    if row_type == "agent_launch_intent" and name == "shouldLaunch":
+        return INTENT_FLAG.get(kind, "high")
+    return ADVISORY_FLAGS.get(name, ("high", ""))[0]
+
+
+def flag_meaning(row_type: str, kind: str, name: str) -> str:
+    if row_type == "agent_launch_intent" and name == "shouldLaunch":
+        return "Jev disagrees with the corpus label (adjudicate the label)"
+    return ADVISORY_FLAGS.get(name, ("", ""))[1]
+
+
 def jev_opinion(row: dict) -> tuple[bool | None, str]:
     """(does Jev think the product got this item right?, why) - None when Jev has no view."""
     kind, sig = row.get("kind"), signals(row)
     if row.get("error"):
         return None, "judge error"
+    if row["type"] == "agent_launch_intent":
+        p = sig.get("shouldLaunch")
+        if p is None or row.get("launched") is None:
+            return None, "no advisory answers"
+        # The product is right (in Jev's view) when what it did matches Jev's reading.
+        return bool(row["launched"]) == (p >= 0.5), f"shouldLaunch={p:.2f} launched={bool(row['launched'])}"
     if row["type"] in ("meeting_chat", "recall_ask"):
         if kind == "answerable":
             pick = (row.get("verdict") or {}).get("pick")
@@ -184,7 +213,7 @@ def jev_tables(jev: dict, gate_data: dict) -> dict:
                 sum(p >= 0.8 for p in suffice), sum(p < 0.5 for p in suffice), len(suffice),
             ])
     advisory = []
-    for kind_type in ("meeting_notes", "dictation_cleanup", "work_prompts"):
+    for kind_type in ADVISORY_TYPES:
         subset = [r for r in by_type.get(kind_type, []) if not r.get("error")]
         names = sorted({name for r in subset for name in (r.get("advisory") or {})})
         for name in names:
@@ -192,10 +221,10 @@ def jev_tables(jev: dict, gate_data: dict) -> dict:
                 ps = [signals(r)[name] for r in subset if r.get("kind") == kind and name in signals(r)]
                 if not ps:
                     continue
-                side = ADVISORY_FLAGS.get(name, ("high", ""))[0]
+                side = flag_side(kind_type, kind, name)
                 flagged = sum((p >= 0.5) if side == "high" else (p < 0.5) for p in ps)
                 advisory.append([kind_type, kind, name, len(ps), fmt(sum(ps) / len(ps)), flagged,
-                                 ADVISORY_FLAGS.get(name, ("", ""))[1]])
+                                 flag_meaning(kind_type, kind, name)])
     # Judge stability: the same item graded in each repeat (product output may differ too).
     series: dict[tuple, dict[str, float]] = defaultdict(dict)
     picks_by_item: dict[tuple, dict[str, str]] = defaultdict(dict)
@@ -237,7 +266,8 @@ def jev_tables(jev: dict, gate_data: dict) -> dict:
                 "repeats": [entry[0] for entry in disagree],
                 "gate_says": "pass" if first[1] else "fail", "jev_says": "ok" if first[2] else "problem",
                 "jev_detail": "; ".join(f"{entry[0]}: {entry[3]}" for entry in disagree),
-                "answer": str(first[4].get("answer", ""))[:300],
+                "answer": str(first[4].get("answer") or first[4].get("prompt") or first[4].get("transcript")
+                              or first[4].get("message") or first[4].get("result_text") or "")[:300],
             })
     for key, row in gate_data["summary"].items():
         if row["status"] in ("fail", "flaky"):
@@ -253,7 +283,7 @@ def jev_tables(jev: dict, gate_data: dict) -> dict:
 def calibration_summary(folder: Path) -> list[str]:
     if not folder.is_dir():
         return [("No `calibration/` directory in the run: trust levels are the protocol defaults "
-                "(answer 1.000, abstention 1.000; custom questions uncalibrated).")]
+                "(answer 1.000, abstention 1.000; custom questions and agents JA1-JA4 uncalibrated, advisory).")]
     lines = []
     for path in sorted(folder.iterdir()):
         if path.suffix == ".json":
@@ -292,6 +322,26 @@ def gate_table(gate_data: dict) -> str:
                   "Wilson 95%", "low power"], rows)
 
 
+def jev_complete(jev: dict | None, jev_items: list | None) -> bool:
+    """Whether the Jev pass ran to completion.
+
+    Either it graded at least one row, or the run had nothing to grade (deterministic-only
+    suites such as mcp / settings_api: jev_inputs.json holds 0 items) and jev ran with 0 errors."""
+    if not jev:
+        return False
+    graded_rows = [
+        r for r in jev.get("rows", [])
+        if not r.get("error") and (
+            r.get("sourcesSuffice") is not None
+            or r.get("verdict") is not None
+            or bool(r.get("advisory"))
+        )
+    ]
+    if jev.get("calls", 0) > 0 and graded_rows:
+        return True
+    return isinstance(jev_items, list) and len(jev_items) == 0 and jev.get("errors", 0) == 0
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print(__doc__)
@@ -305,16 +355,7 @@ def main() -> int:
         (run / "gates.json").write_text(json.dumps(gate_data, indent=1), encoding="utf-8")
     jev = load(run / "jev_out.json")
     tables = jev_tables(jev or {}, gate_data)
-    jev_rows = (jev or {}).get("rows", [])
-    graded_rows = [
-        r for r in jev_rows
-        if not r.get("error") and (
-            r.get("sourcesSuffice") is not None
-            or r.get("verdict") is not None
-            or bool(r.get("advisory"))
-        )
-    ]
-    has_jev = bool(jev and jev.get("calls", 0) > 0 and graded_rows)
+    has_jev = jev_complete(jev, load(run / "jev_inputs.json"))
     verdict, reasons = classify(gate_data, has_jev)
     counts = defaultdict(int)
     for row in gate_data["summary"].values():
@@ -331,6 +372,8 @@ def main() -> int:
         "llm": llm, "judge": None if jev is None else {
             "model": jev.get("model"), "usage": jev.get("usage"), "calls": jev.get("calls"),
             "rows": len(jev.get("rows", [])), "errors": len(tables["judge_errors"])},
+        "active_suites": gate_data.get("active_suites") or list(gates.SUITE_ORDER),
+        "live": gate_data.get("live", []),
         "gate_counts": dict(counts),
         "gates": {key: {k: v for k, v in row.items()} for key, row in gate_data["summary"].items()},
         "not_exercised": gate_data["not_exercised"], "notes": gate_data["notes"],
@@ -348,7 +391,8 @@ def main() -> int:
     lines = [f"# Repeatability - {scorecard['run_id']}", "",
              (f"SUT `{gate_data['pinned_commit'][:12]}` (commit invariant: {'ok' if gate_data['commit_ok'] else 'BROKEN'}; "
              f"seen {', '.join(c[:12] for c in gate_data['commits_seen']) or 'none'}), repeats: {', '.join(gate_data['repeats'])}."),
-             "A gate passes only if it passes in every repeat. `low power` marks pooled n < 10.", "",
+             "A gate passes only if it passes in every repeat. `low power` marks pooled n < 10.",
+             f"Suites gated: {', '.join(gate_data.get('active_suites') or gates.SUITE_ORDER)}.", "",
              gate_table(gate_data), "", "## Items that flipped between repeats", ""]
     lines.append(table(["gate", "item", "outcome per repeat"], flips) if flips else "None.")
     lines += ["", "## Not exercised", ""]
@@ -402,6 +446,7 @@ def main() -> int:
               f"{counts['not exercised']} not exercised. Adjudication queue: {len(trusted_queue)} trusted "
               f"gate-vs-Jev, {scorecard['needs_adjudication']['advisory_gate_vs_jev']} advisory, "
               f"{scorecard['needs_adjudication']['failing_gate_items']} failing gate items."), "",
+              f"Suites gated: {', '.join(gate_data.get('active_suites') or gates.SUITE_ORDER)}.", "",
               "## Gates", "", gate_table(gate_data), ""]
     failing = [(key, row) for key, row in gate_data["summary"].items() if row["status"] in ("fail", "flaky")]
     if failing:
@@ -429,7 +474,11 @@ def main() -> int:
     lines += [f"- {note}" for note in gate_data["notes"]]
     lines += [("- By design (see PROTOCOL.md): real microphone / STT acoustics, macOS-only AppKit / rumps / "
               "ScreenCaptureKit / osascript / MLX, the GPUI desktop app `lf-desktop`, local Ollama 3B, and the live "
-              "SettingsAgent proposal step (Ollama-only)."), "",
+              "SettingsAgent proposal step (Ollama-only).")]
+    if gate_data.get("live"):
+        lines += ["", "## Live (outside the gated matrix; never changes the verdict)", "",
+                  table(["cell", "status", "reason"], [[x["cell"], x["status"], x["reason"]] for x in gate_data["live"]])]
+    lines += ["",
               "Files: `scorecard.json`, `repeatability.md`, `jev.md`."]
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps({"verdict": verdict, "gates": dict(counts), "queue": len(queue), "out": str(out)}))

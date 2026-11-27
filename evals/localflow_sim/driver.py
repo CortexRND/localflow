@@ -38,8 +38,12 @@ SUT = Path(os.environ.get("SIM_SUT", str(Path.home() / "work/sim-sut"))).expandu
 SPEC = json.loads((HERE / "scenarios.json").read_text(encoding="utf-8"))
 SUITES = SPEC["suites"]
 LLM = SPEC["llm"]
-SUITE_ORDER = ("dictation", "meetings", "recall_ask", "mcp", "settings_api")
+SUITE_ORDER = ("dictation", "meetings", "recall_ask", "mcp", "settings_api", "agents")
 SECRET_ENV = ("FIREWORKS_API_KEY", "JEV_API_Key", "LOCALFLOW_LLM_API_KEY", "LOCALFLOW_FIREWORKS_API_KEY", "TYPESAFE_API_KEY")
+# Fake secrets planted into agents cells (agents_cells.PLANTED_ENV); a value that reaches a
+# result is scrubbed to this marker, which the A5 gate counts as a leak.
+PLANTED_ENV = ("LOCALFLOW_AGENT_DEVIN_API_KEY", "LOCALFLOW_AGENT_CLAUDE_API_KEY", "LFSIM_PLANTED_HTTP_TOKEN")
+PLANTED_MARK = "[REDACTED:planted]"
 DEFAULT_TIMEOUT = {"meetings": 1800}
 RATE = 16000
 LINE_SECONDS = 5
@@ -59,9 +63,14 @@ def suite_cells(suite: str) -> list[dict]:
     return cells
 
 
-def scrub(text: str) -> str:
+def scrub(text: str, env=None) -> str:
+    env = os.environ if env is None else env
+    for name in PLANTED_ENV:
+        value = env.get(name) or ""
+        if len(value) >= 8:
+            text = text.replace(value, PLANTED_MARK)
     for name in SECRET_ENV:
-        value = os.environ.get(name) or ""
+        value = env.get(name) or ""
         if len(value) >= 8:
             text = text.replace(value, "[REDACTED]")
     return text
@@ -100,7 +109,13 @@ fireworks_model = "{LLM["model"]}"
 prompts_dir = "{tmp / "prompts"}"
 capture_system_audio = true
 templates_dir = "{tmp / "templates"}"
-'''
+''' + (agents_toml(tmp, cell) if cell.get("kind", "").startswith("agents_") else "")
+
+
+def agents_toml(tmp: Path, cell: dict) -> str:
+    import agents_cells
+
+    return agents_cells.agents_toml(tmp, cell)
 
 
 def run_cell(suite: str, cell: dict, out_dir: Path, commit: str, dirty: bool,
@@ -127,6 +142,12 @@ def run_cell(suite: str, cell: dict, out_dir: Path, commit: str, dirty: bool,
     key = os.environ.get("FIREWORKS_API_KEY", "")
     if key:
         env["LOCALFLOW_LLM_API_KEY"] = key  # read by localflow.secrets.get_secret("llm_api_key")
+    for name in PLANTED_ENV:
+        env.pop(name, None)
+    if suite == "agents":
+        import agents_cells
+
+        env.update(agents_cells.plant())  # fresh fake secrets per cell, scrubbed from every log
     out = out_dir / f"{cell['id']}.json"
     out.unlink(missing_ok=True)
     cmd = [sys.executable, str(Path(__file__).resolve()), "--child", "--suite", suite,
@@ -148,7 +169,7 @@ def run_cell(suite: str, cell: dict, out_dir: Path, commit: str, dirty: bool,
         status = "cell error"
     logs = out_dir / "_logs"
     logs.mkdir(parents=True, exist_ok=True)
-    (logs / f"{cell['id']}.log").write_text(scrub(tail) + "\n", encoding="utf-8")
+    (logs / f"{cell['id']}.log").write_text(scrub(tail, env) + "\n", encoding="utf-8")
     if not keep_tmp:
         shutil.rmtree(tmp, ignore_errors=True)
     return {"cell": cell["id"], "suite": suite, "status": status,
@@ -978,6 +999,11 @@ def child(args: argparse.Namespace) -> int:
         "llm_model": LLM["model"], "spec_version": SPEC["version"],
     }
     try:
+        if args.suite == "agents":
+            import agents_cells
+
+            agents_cells.prepare(cell)  # temp git repo, private PATH, planted secrets
+            RUNNERS.update(agents_cells.RUNNERS)
         boot()
         import localflow
         from localflow.config import load_config
