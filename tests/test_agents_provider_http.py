@@ -10,6 +10,7 @@ from fixtures.agents.support import (
 
 from localflow.agents.models import new_short_id
 from localflow.agents.providers import http as http_provider
+from localflow.agents.providers.base import is_loopback_url
 from localflow.agents.providers.http import ProfileError, validate_profile
 
 TOKEN = "http-agent-token-0123456789"
@@ -156,3 +157,101 @@ def test_templating_never_builds_json_by_concatenation():
     values = {"prompt": '"}, "admin": true, {"', "title": "t"}
     body = http_provider.substitute({"input": "{prompt}", "list": ["{title}", 3]}, values)
     assert body == {"input": '"}, "admin": true, {"', "list": ["t", 3]}
+
+
+# -- regressions (PR #185 review) ---------------------------------------------------
+
+
+@pytest.mark.parametrize("url,loopback", [
+    ("http://127.attacker.com", False),
+    ("http://127.0.0.1.attacker.com:8080", False),
+    ("http://localhost.attacker.com", False),
+    ("http://127.0.0.1:8080", True),
+    ("http://127.9.9.9", True),
+    ("http://localhost:3000", True),
+    ("http://[::1]:8080", True),
+    ("http://10.0.0.1", False),
+])
+def test_loopback_url_needs_a_loopback_address_not_a_prefix(url, loopback):
+    assert is_loopback_url(url) is loopback
+
+
+def test_plain_http_to_a_127_dns_name_is_rejected():
+    with pytest.raises(ProfileError, match="https"):
+        validate_profile(_profile("http://127.attacker.com"))
+
+
+def test_remote_cancelled_ends_a_running_session(tmp_path, stub):
+    manager, clock = _manager(tmp_path)
+    status = {**_profile(stub.url)["status"],
+              "state_map": {"running": "running", "stopped": "cancelled"}}
+    profile = _install(manager, _profile(stub.url, headers={}, status=status))
+    stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+    stub.script("GET", "/v1/runs/r1", (200, {"status": "running"}), (200, {"status": "stopped"}))
+    session, _ = manager.launch({"prompt": "go", "provider": "http", "profile": profile["id"]})
+    clock.advance(10)
+    manager.tick()
+    assert manager.store.get(session.id).state == "running"
+    done = drive(manager, clock, session.id, step=5)
+    assert done.state == "cancelled" and done.error is None
+    assert len(stub.requests) == 3  # ended on the remote report, not at the deadline
+
+
+def test_profile_edit_does_not_change_an_active_session(tmp_path, stub):
+    manager, clock = _manager(tmp_path)
+    profile = _install(manager, _profile(stub.url, headers={}))
+    stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+    stub.script("GET", "/v1/runs/r1", (200, {"status": "running"}),
+                (200, {"status": "done", "output": {"text": "ok"}}))
+    stub.script("GET", "/v2/jobs/r1", (200, {"status": "error"}))
+    session, _ = manager.launch({"prompt": "go", "provider": "http", "profile": profile["id"]})
+    with manager.profiles.mutate() as profiles:
+        entry = next(p for p in profiles if p["id"] == profile["id"])
+        entry["status"] = {**entry["status"], "path": "/v2/jobs/{external_id}"}
+    done = drive(manager, clock, session.id, step=5)
+    assert done.state == "completed" and done.result_text == "ok"
+    assert all(r["path"].startswith("/v1/") for r in stub.requests)
+    assert session.id not in manager._session_providers  # dropped on the terminal state
+    # A new session uses the edited profile.
+    stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+    second, _ = manager.launch({"prompt": "go", "provider": "http", "profile": profile["id"]})
+    assert drive(manager, clock, second.id, step=5).state == "failed"
+    assert stub.requests[-1]["path"] == "/v2/jobs/r1"
+
+
+def test_token_is_withheld_after_an_origin_change(tmp_path, stub, monkeypatch):
+    other = StubAgentServer()
+    try:
+        manager, clock = _manager(tmp_path)
+        profile = _install(manager, _profile(stub.url))
+        with manager.profiles.mutate() as profiles:
+            entry = next(p for p in profiles if p["id"] == profile["id"])
+            entry["secret_origin"] = http_provider.origin(stub.url)
+            entry["base_url"] = other.url  # moved without setting the token again
+        monkeypatch.setenv(f"LOCALFLOW_AGENT_HTTP_{profile['id'].upper()}_TOKEN", TOKEN)
+        assert manager.readiness("http", profile["id"]).code == "missing_secret"
+        assert not http_provider.secret_bound(manager.profiles.get(profile["id"]))
+        provider = manager.provider_for("http", profile["id"])
+        assert provider._secret() == ""
+        # Setting the token again binds it to the new origin.
+        http_provider.bind_secret(manager.profiles, profile["id"])
+        assert manager.readiness("http", profile["id"]).ready
+        other.script("POST", "/v1/runs", (200, {"id": "r9"}))
+        other.script("GET", "/v1/runs/r9", (200, {"status": "done"}))
+        session, _ = manager.launch({"prompt": "go", "provider": "http",
+                                     "profile": profile["id"]})
+        drive(manager, clock, session.id, step=5)
+        assert other.requests[0]["headers"]["Authorization"] == f"Bearer {TOKEN}"
+        assert stub.requests == []
+    finally:
+        other.close()
+
+
+def test_profiles_without_a_secret_origin_keep_their_token():
+    assert http_provider.secret_bound({"id": "a", "base_url": "https://x.example.com"})
+    assert http_provider.secret_bound({"id": "a", "base_url": "https://x.example.com",
+                                       "secret_origin": "https://x.example.com:443"})
+    assert not http_provider.secret_bound({"id": "a", "base_url": "https://y.example.com",
+                                           "secret_origin": "https://x.example.com:443"})
+    assert not http_provider.secret_bound({"id": "a", "base_url": "https://y.example.com",
+                                           "secret_origin": ""})

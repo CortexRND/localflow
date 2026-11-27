@@ -61,6 +61,32 @@ def origin(base_url: str) -> str:
     return f"{parsed.scheme}://{(parsed.hostname or '').lower()}:{port}"
 
 
+def secret_bound(profile: dict | None) -> bool:
+    """Whether the profile's token (keyring or LOCALFLOW_AGENT_HTTP_<ID>_TOKEN) may be sent.
+
+    `secret_origin` records the origin the token was set for; after `base_url` moves to
+    another origin the token is withheld until it is set again. Profiles written before
+    `secret_origin` existed have no record and keep working.
+    """
+    if not profile:
+        return False
+    bound = profile.get("secret_origin")
+    if bound is None:
+        return True
+    try:
+        return bound == origin(str(profile.get("base_url") or ""))
+    except ValueError:
+        return False
+
+
+def bind_secret(profiles, profile_id: str) -> None:
+    """Record that the profile's token was just set for its current origin."""
+    with profiles.mutate() as entries:
+        for entry in entries:
+            if entry.get("id") == profile_id and isinstance(entry.get("base_url"), str):
+                entry["secret_origin"] = origin(entry["base_url"])
+
+
 def _walk_strings(value):
     if isinstance(value, str):
         yield value
@@ -229,10 +255,15 @@ class HttpProvider(AgentProvider):
             return Readiness(False, "missing_profile", "Choose an HTTP agent profile.")
         if not self.profile.get("enabled", True):
             return Readiness(False, "disabled", "This HTTP agent profile is turned off.")
-        if _needs_secret(self.profile) and not self.ctx.get_secret(
-                secret_name(self.profile["id"])):
+        if _needs_secret(self.profile) and not self._secret():
             return Readiness(False, "missing_secret", "Add the token for this HTTP agent.")
         return OK
+
+    def _secret(self) -> str:
+        profile = self.profile or {}
+        if not profile.get("id") or not secret_bound(profile):
+            return ""
+        return self.ctx.get_secret(secret_name(profile["id"]))
 
     def _values(self, session: AgentSession, message: str = "") -> dict[str, str]:
         return {"prompt": session.prompt, "title": session.title, "session_id": session.id,
@@ -248,7 +279,7 @@ class HttpProvider(AgentProvider):
             lambda m: quote(values.get(m.group(1), ""), safe="") if m.group(1) != "secret"
             else "", op["path"])
         url = profile["base_url"] + path
-        secret = self.ctx.get_secret(secret_name(profile["id"])) if profile.get("id") else ""
+        secret = self._secret()
         headers = {name: value.replace("{secret}", secret)
                    for name, value in (profile.get("headers") or {}).items()}
         body = substitute(op["body"], values) if "body" in op else None

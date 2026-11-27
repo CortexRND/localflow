@@ -181,3 +181,14 @@ def test_two_processes_never_lose_rule_writes(tmp_path):
     assert [p.wait(timeout=120) for p in procs] == [0, 0]
     entries = json.loads(path.read_text(encoding="utf-8"))
     assert len(entries) == 200 and len({e["id"] for e in entries}) == 200
+
+
+def test_unicode_line_separators_do_not_split_events(tmp_path):
+    store = AgentSessionStore(tmp_path)
+    session = store.create(_session(9))
+    texts = ["a b", "c d", "e\x85f", "g\x1ch\x1di\x1ej", "k\x0bl\x0cm"]
+    for text in texts:
+        store.append_event(session.id, "output", text=text)
+    events = [e for e in store.events(session.id) if e.type == "output"]
+    assert [e.text for e in events] == texts
+    assert AgentSessionStore(tmp_path).get(session.id).last_seq == len(texts) + 1

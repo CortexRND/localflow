@@ -107,6 +107,7 @@ States: `queued, starting, running, waiting_input, cancelling` (active) and `com
 | `waiting_input` | `running` | follow-up message sent or provider resumed |
 | `running`, `waiting_input` | `completed` \| `failed` \| `timed_out` | provider result \| error / non-zero exit \| deadline |
 | `running`, `waiting_input`, `starting` | `cancelling` | cancel on a provider that needs an async stop |
+| `running`, `waiting_input` | `cancelled` | the remote provider reports its run cancelled |
 | `cancelling` | `cancelled` \| `failed` | stop confirmed \| stop failed (`cancel_failed`; local processes are SIGKILLed first, so this is cloud-only) |
 
 `TRANSITIONS: dict[str, frozenset[str]]` in `models.py` is the single source of truth. Every write goes through `AgentSessionStore.transition(id, to, expect=<tuple>, **fields)` — a compare-and-set exactly like `PromptQueue.set_status(expect=…)`. A lost race or illegal move raises `SessionConflict(session_id, current, expected)` (same shape as `StatusConflict`) → HTTP 409.
@@ -170,7 +171,7 @@ class AgentProvider(ABC):
 - **Laziness.** `AgentManager` holds `dict[str, AgentProvider]`, filled on first `start`/deep check of that id. `GET /api/agents/providers` uses class attributes plus a shallow `readiness()` on a throwaway instance — no network, no subprocess.
 - **Execution.** `local_process`: `start()` spawns `Popen` and one reader thread that blocks on the pipe (no polling) and calls `sink.finish` at EOF. `cloud`: `start()` makes the create call; the manager's single supervisor thread calls `poll()` when due.
 - **Supervisor.** One thread `lf-agents-supervisor`, created on the first admission, sleeping on a `threading.Condition` until `min(next cloud poll, nearest timeout deadline)`; it exits as soon as no session is active. Cloud polls back off ×1.5 up to 60 s while a session's state is unchanged, reset on change.
-- **Admission.** FIFO over `queued`; a session is admitted when `count(starting|running|waiting_input|cancelling) < agents.max_concurrent`. A launch arriving with `count(queued) >= agents.max_queued` is refused (`QueueFull` → 429). Admission runs on launch, on every terminal transition, and on recovery — never on a timer.
+- **Admission.** FIFO over `queued`; a session is admitted when `count(starting|running|waiting_input|cancelling) < agents.max_concurrent`. A launch arriving when `count(queued) + count(starting|running|waiting_input|cancelling) >= agents.max_concurrent + agents.max_queued` is refused (checked and created under the manager lock) (`QueueFull` → 429). Admission runs on launch, on every terminal transition, and on recovery — never on a timer.
 
 Registry: `AGENT_BUILTINS = {"claude": "localflow.agents.providers.claude:ClaudeProvider", "devin": …, "http": …, "mock": …}`; unknown id → `KeyError("unknown agent provider 'x'; valid ids: …")`, entry points in group `localflow.agent_providers` resolved by name exactly as `llm_provider_class` does. An entry-point provider that fails to load is listed with `ready=false, code="disabled"` and never raises into a route.
 

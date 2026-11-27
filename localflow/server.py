@@ -779,10 +779,16 @@ def api_secrets() -> dict[str, bool]:
 
 
 @app.put("/api/secrets/{name}")
-def api_secret_update(name: str, body: dict) -> dict[str, bool]:
+def api_secret_update(name: str, body: dict, request: Request = None) -> dict[str, bool]:
     global _ollama, _cleaner, _prompt_gen, _summarizer
     if name not in api_logic.SECRET_NAMES:
         raise HTTPException(status_code=404, detail="unknown secret")
+    # Agent keys follow the same rule as /api/agents/providers/{id}/secret.
+    if (request is not None and name.startswith("agent_")
+            and not getattr(_config, "agent_allow_remote", False)
+            and not _request_is_local(request)):
+        raise HTTPException(status_code=403,
+                            detail="agent keys can only be changed on this computer")
     value = body.get("value", "")
     if not isinstance(value, str):
         raise HTTPException(status_code=400, detail="value must be a string")

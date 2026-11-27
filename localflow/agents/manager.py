@@ -127,11 +127,11 @@ class Sink:
         session = self._m.store.get(self.session_id)
         if session is None:
             return
-        if session.external_id == external_id and session.external_url == (url or
-                                                                            session.external_url):
+        external_id = self._m.redactor(str(external_id))[:200]
+        url = self._m.redactor(str(url))[:500] if url else session.external_url
+        if session.external_id == external_id and session.external_url == url:
             return
-        self._m.store.update(self.session_id, external_id=str(external_id)[:200],
-                             external_url=self._m.redactor(str(url or session.external_url))[:500])
+        self._m.store.update(self.session_id, external_id=external_id, external_url=url)
         self._m._notify()
 
     def state(self, to: str, **data) -> bool:
@@ -199,13 +199,18 @@ class AgentManager:
             ctx = ProviderContext(get_secret=get_secret)
         self.ctx = ctx
         self.ctx.profiles = self.profiles
-        self.redactor = Redactor(names=self.secret_names, get_secret=self.ctx.get_secret)
+        resolve = getattr(ctx.get_secret, "_lf_resolve", ctx.get_secret)
+        self.redactor = Redactor(names=self.secret_names, get_secret=resolve)
         self.ctx.redactor = self.redactor
+        self.ctx.get_secret = self._redacting_get_secret(resolve)
         self._classes = dict(provider_classes or {})
         self._providers: dict[tuple[str, str], tuple[str, AgentProvider]] = {}
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
         self._tracked: dict[str, dict] = {}
+        # The provider (and its HTTP profile) a session started with; a profile edit
+        # never changes how an active session is polled, messaged or cancelled.
+        self._session_providers: dict[str, AgentProvider] = {}
         self._supervisor: threading.Thread | None = None
         self._listeners: list[Callable[[], None]] = []
         self._closed = False
@@ -214,6 +219,20 @@ class AgentManager:
         self._clock = clock
         if recover:
             self._recover()
+
+    def _redacting_get_secret(self, resolve: Callable[[str], str]) -> Callable[[str], str]:
+        """Secrets are resolved at use time, so a key changed elsewhere (`lf agents secret
+        set` while the server runs) joins the redaction table before a provider sends it."""
+        redactor = self.redactor
+
+        def get_secret(name: str) -> str:
+            value = resolve(name) or ""
+            if value:
+                redactor.add(name, value)
+            return value
+
+        get_secret._lf_resolve = resolve
+        return get_secret
 
     # -- config / providers ---------------------------------------------------
 
@@ -265,6 +284,19 @@ class AgentManager:
             provider = self.provider_class(provider_id)(self.config, self.ctx, profile)
             self._providers[key] = (stamp, provider)
             return provider
+
+    def _session_provider(self, session: AgentSession) -> AgentProvider:
+        with self._lock:
+            provider = self._session_providers.get(session.id)
+            if provider is not None:
+                provider.config = self.config
+                return provider
+        return self.provider_for(session.effective_provider, session.profile)
+
+    def _forget(self, session_id: str) -> None:
+        with self._lock:
+            self._tracked.pop(session_id, None)
+            self._session_providers.pop(session_id, None)
 
     def readiness(self, provider_id: str, profile_id: str = "", *, deep: bool = False
                   ) -> Readiness:
@@ -338,6 +370,15 @@ class AgentManager:
                 continue
         return result
 
+    @staticmethod
+    def _inside_repos(cwd: str, repos: dict[str, Path]) -> bool:
+        try:
+            resolved = Path(cwd).resolve()
+        except (OSError, RuntimeError):
+            return False
+        return os.path.isdir(resolved) and any(
+            resolved == root or root in resolved.parents for root in repos.values())
+
     def _build_session(self, request: LaunchRequest, config) -> AgentSession:
         prompt = request.prompt
         if not prompt.strip():
@@ -397,7 +438,9 @@ class AgentManager:
             internal["resume_external_id"] = parent.external_id
             if not repo and not cwd:
                 repo, cwd = parent.repo, parent.cwd
-                if repo and repo in repos:
+                if cwd and self._inside_repos(cwd, repos):
+                    repo = ""  # keep the parent's (possibly nested) folder
+                elif repo and repo in repos:
                     cwd = ""
         if repo and cwd:
             raise ValidationError("give either repo or cwd, not both")
@@ -462,10 +505,12 @@ class AgentManager:
             readiness = self.readiness(session.effective_provider, session.profile)
             if not readiness.ready:
                 raise ProviderNotReady(readiness)
-            counts = self.store.counts()
-            running = sum(1 for s in self.store.list() if s.state in RUNNING_STATES)
-            if counts["queued"] >= config.agent_max_queued and \
-                    running >= config.agent_max_concurrent:
+            # Queued-but-not-yet-admitted sessions count too: admission runs after the
+            # lock is released, so concurrent launches must not all see a free slot.
+            sessions = self.store.list()
+            active = sum(1 for s in sessions if s.state == "queued" or
+                         s.state in RUNNING_STATES)
+            if active >= config.agent_max_concurrent + config.agent_max_queued:
                 raise QueueFull()
             created = self.store.create(session)
         log.info("agent session %s queued (provider %s, origin %s, prompt %d chars)",
@@ -532,6 +577,9 @@ class AgentManager:
         provider = None
         try:
             provider = self.provider_for(session.effective_provider, session.profile)
+            with self._lock:
+                if session_id in self._tracked:
+                    self._session_providers[session_id] = provider
             provider.start(session, sink)
         except ProviderError as exc:
             code = "spawn_failed" if exc.code == "internal" else exc.code
@@ -551,7 +599,9 @@ class AgentManager:
                 log.info("agent session %s running", session_id)
             except SessionConflict:
                 current = self.store.get(session_id) or current
-        if current.state == "cancelled" and provider is not None:
+        if current.state in ("cancelling", "cancelled", "timed_out") and provider is not None:
+            # Ended (cancel or deadline) while start() was in flight: stop the run it
+            # just created so it is not orphaned.
             self._stop_quietly(provider, current)
         caps = self.capabilities(current.effective_provider, current.profile)
         with self._lock:
@@ -612,6 +662,7 @@ class AgentManager:
     def _on_terminal(self, session_id: str) -> None:
         with self._lock:
             self._tracked.pop(session_id, None)
+            self._session_providers.pop(session_id, None)
             self._cond.notify_all()
             try:
                 removed = self.store.prune(int(self.config.agent_max_sessions))
@@ -656,7 +707,7 @@ class AgentManager:
                 self._finish(session_id, "cancelled")
                 return self.store.require(session_id)
             try:
-                self.provider_for(current.effective_provider, current.profile).cancel(current, sink)
+                self._session_provider(current).cancel(current, sink)
             except ProviderError as exc:
                 self._finish(session_id, "failed",
                              error={"code": "cancel_failed", "message": exc.message})
@@ -682,8 +733,7 @@ class AgentManager:
             raise SessionConflict(session_id, session.state, ("running", "waiting_input"))
         sink = Sink(self, session_id)
         try:
-            self.provider_for(session.effective_provider, session.profile).send_message(
-                session, text, sink)
+            self._session_provider(session).send_message(session, text, sink)
         except ProviderError as exc:
             raise UpstreamError(ProviderError(exc.code, self.redactor(exc.message))) from None
         event = self.store.append_event(session_id, "message", stream="user",
@@ -774,8 +824,7 @@ class AgentManager:
     def _expire(self, session_id: str) -> None:
         session = self.store.get(session_id)
         if session is None or not is_active(session.state):
-            with self._lock:
-                self._tracked.pop(session_id, None)
+            self._forget(session_id)
             return
         if session.state == "cancelling":
             with self._lock:
@@ -783,20 +832,19 @@ class AgentManager:
                 if tracked is not None:
                     tracked["deadline"] = self._clock() + MAX_POLL_BACKOFF
             return
+        try:
+            provider = self._session_provider(session)
+        except Exception:  # noqa: BLE001
+            provider = None
         ended = self._finish(session_id, "timed_out", error={
             "code": "timeout", "message": f"no result within {session.timeout_seconds} s"})
-        if ended:
-            try:
-                provider = self.provider_for(session.effective_provider, session.profile)
-            except Exception:  # noqa: BLE001
-                return
-            self._stop_quietly(provider, session)
+        if ended and provider is not None:
+            self._stop_quietly(provider, self.store.get(session_id) or session)
 
     def _poll(self, session_id: str) -> None:
         session = self.store.get(session_id)
         if session is None or is_terminal(session.state):
-            with self._lock:
-                self._tracked.pop(session_id, None)
+            self._forget(session_id)
             return
         with self._lock:
             tracked = self._tracked.get(session_id)
@@ -809,8 +857,7 @@ class AgentManager:
         sink = Sink(self, session_id)
         retry_after = None
         try:
-            returned = self.provider_for(session.effective_provider, session.profile).poll(
-                session, sink)
+            returned = self._session_provider(session).poll(session, sink)
             failures = 0
         except ProviderError as exc:
             returned = None

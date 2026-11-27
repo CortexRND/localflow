@@ -8,6 +8,7 @@ untrusted: it is echoed as plain text, never as Rich markup.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -80,8 +81,35 @@ def _echo_json(value) -> None:
     click.echo(json.dumps(value, indent=2, ensure_ascii=False))
 
 
+_TTY_ESCAPES = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"   # OSC … BEL / ST
+    r"|\x1b[P^_X][^\x1b]*(?:\x1b\\)?"         # DCS / PM / APC / SOS … ST
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"                # CSI
+    r"|\x1b[ -/]*[0-~]?"                        # other ESC sequences, lone ESC
+    r"|\x9b[0-?]*[ -/]*[@-~]"                   # 8-bit CSI
+    r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]"           # C0 (but \t \n), DEL, C1
+)
+
+
+def _sanitize_tty(text: str) -> str:
+    """Strip ANSI escape sequences and control characters (keeping \\n and \\t)."""
+    return _TTY_ESCAPES.sub("", text)
+
+
+def _safe(text, *, err: bool = False) -> str:
+    """Untrusted (agent/provider) text for display: sanitized when it goes to a terminal,
+    unchanged when piped."""
+    text = str(text if text is not None else "")
+    stream = sys.stderr if err else sys.stdout
+    try:
+        tty = stream.isatty()
+    except (AttributeError, ValueError):
+        tty = False
+    return _sanitize_tty(text) if tty else text
+
+
 def _one_line(text: str, limit: int = 60) -> str:
-    text = " ".join(str(text or "").split())
+    text = " ".join(_safe(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
@@ -196,12 +224,14 @@ def _print_event(event: dict, *, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(event, ensure_ascii=False))
     elif event["type"] == "output":
-        click.echo(event["text"], nl=not event["text"].endswith("\n"),
-                   err=event["stream"] == "stderr")
+        err = event["stream"] == "stderr"
+        text = _safe(event["text"], err=err)
+        click.echo(text, nl=not text.endswith("\n"), err=err)
     elif event["type"] == "state":
-        click.echo(f"[{event['ts']}] state: {event['state']}", err=True)
+        click.echo(f"[{event['ts']}] state: {_safe(event['state'], err=True)}", err=True)
     elif event["type"] in ("error", "truncated", "message"):
-        click.echo(f"[{event['ts']}] {event['type']}: {event['text']}", err=True)
+        click.echo(f"[{event['ts']}] {event['type']}: {_safe(event['text'], err=True)}",
+                   err=True)
 
 
 @agents.command("launch")
@@ -242,7 +272,8 @@ def launch_command(prompt, provider, profile, repo, cwd, resume, title, timeout,
         if as_json:
             _echo_json({"session": final})
         elif final.get("error"):
-            click.echo(f"{state}: {final['error']['code']}: {final['error']['message']}", err=True)
+            click.echo(f"{state}: {final['error']['code']}: "
+                       f"{_safe(final['error']['message'], err=True)}", err=True)
         else:
             click.echo(state, err=True)
         sys.exit(0 if state == "completed" else 1)
@@ -320,15 +351,15 @@ def show_command(session, as_json) -> None:
     for name in ("id", "state", "provider", "profile", "origin", "repo", "cwd", "title",
                  "parent_id", "external_id", "external_url", "created_at", "finished_at"):
         if data.get(name):
-            click.echo(f"{name}: {data[name]}")
+            click.echo(f"{name}: {_safe(data[name])}")
     if data.get("error"):
-        click.echo(f"error: {data['error']['code']}: {data['error']['message']}")
+        click.echo(f"error: {data['error']['code']}: {_safe(data['error']['message'])}")
     if data.get("usage"):
         click.echo("usage: " + ", ".join(f"{k}={v}" for k, v in data["usage"].items()
                                          if v is not None))
     if data.get("result_text"):
         click.echo("")
-        click.echo(data["result_text"])
+        click.echo(_safe(data["result_text"]))
 
 
 @agents.command("logs")
@@ -370,8 +401,11 @@ def send_command(session, message) -> None:
 
 
 def _active_ids() -> list[str]:
+    """Active session ids, queued ones first: cancelling a running session frees a slot
+    and would start the next queued session before `--all` reached it."""
     params = {"state": "active", "limit": 200}
-    return [s["id"] for s in _call("GET", "/api/agents/sessions", params=params)["sessions"]]
+    sessions = _call("GET", "/api/agents/sessions", params=params)["sessions"]
+    return [s["id"] for s in sorted(sessions, key=lambda s: s.get("state") != "queued")]
 
 
 @agents.command("cancel")
@@ -649,6 +683,11 @@ def secret_set(provider, profile) -> None:
         set_secret(name, value)
     except SecretsUnavailable:
         raise click.ClickException("the keyring is unavailable; the key was not saved") from None
+    if provider == "http":
+        from localflow.agents.providers.http import bind_secret
+        from localflow.agents.store import HttpProfileStore
+
+        bind_secret(HttpProfileStore(), profile)
     click.echo(f"saved {name}")
 
 

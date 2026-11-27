@@ -182,7 +182,7 @@ class AgentSessionStore:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
                 handle.seek(max(0, size - 65536))
-                lines = handle.read().splitlines()
+                lines = handle.read().split(b"\n")
         except OSError:
             return 0
         for line in reversed(lines):
@@ -432,7 +432,7 @@ class AgentSessionStore:
         with self._lock:
             path = self._event_path(session_id)
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                lines = path.read_text(encoding="utf-8").split("\n")
             except OSError:
                 return []
         events: list[AgentEvent] = []

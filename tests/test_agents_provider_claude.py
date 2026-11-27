@@ -1,5 +1,6 @@
 import os
 import signal
+import subprocess
 import sys
 
 import pytest
@@ -208,3 +209,75 @@ def test_spawn_failure_is_reported(tmp_path, env):
     done = _run(manager)
     assert done.state == "failed" and done.error["code"] == "spawn_failed"
     assert signal.SIGTERM and sys.platform  # imports used on every platform
+
+
+# -- regressions (PR #185 review) ---------------------------------------------------
+
+
+class _ExitedLeader:
+    pid = 424242
+
+    def poll(self):
+        return -15  # the group leader already exited on SIGTERM
+
+    def kill(self):
+        raise AssertionError("must signal the group, not only the leader")
+
+    terminate = kill
+
+
+def test_sigkill_reaches_the_group_after_the_leader_exited(monkeypatch):
+    from localflow.agents.providers import claude as claude_module
+
+    if sys.platform == "win32":
+        pytest.skip("process groups are POSIX")
+    sent = []
+    monkeypatch.setattr(claude_module.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    claude_module._signal_group(_ExitedLeader(), kill=False)
+    assert sent == []  # no SIGTERM to a group whose leader is gone
+    claude_module._signal_group(_ExitedLeader(), kill=True)
+    assert sent == [(424242, signal.SIGKILL)]
+
+    def gone(_pid, _sig):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(claude_module.os, "killpg", gone)
+    claude_module._signal_group(_ExitedLeader(), kill=True)  # whole group gone: quiet
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_descendants_die_when_the_leader_exits_on_sigterm(tmp_path):
+    from localflow.agents.providers import claude as claude_module
+
+    pid_file = tmp_path / "child.pid"
+    # The child writes its pid only once it ignores SIGTERM.
+    child = ("import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+             f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)")
+    leader = (f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
+              f"{child!r}]); time.sleep(60)")
+    proc = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+    try:
+        child_pid = int(wait_for(lambda: pid_file.exists() and pid_file.read_text(), timeout=10))
+        claude_module._signal_group(proc, kill=False)
+        proc.wait(timeout=10)
+        assert _pid_alive(child_pid)  # ignored SIGTERM, outlived its leader
+        claude_module._signal_group(proc, kill=True)
+        wait_for(lambda: not _pid_alive(child_pid), timeout=10)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=5)

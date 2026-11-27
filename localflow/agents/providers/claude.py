@@ -292,7 +292,8 @@ class ClaudeProvider(AgentProvider):
 
 
 def _signal_group(proc, kill: bool) -> None:
-    if proc.poll() is not None:
+    exited = proc.poll() is not None
+    if exited and (sys.platform == "win32" or not kill):
         return
     try:
         if sys.platform == "win32":
@@ -301,8 +302,17 @@ def _signal_group(proc, kill: bool) -> None:
             else:
                 proc.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
         else:
+            # SIGKILL goes to the whole group even when the leader already exited on
+            # SIGTERM: its descendants may still be running.
             os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
-    except (OSError, ProcessLookupError):
+    except (ProcessLookupError, PermissionError):
+        if exited:
+            return  # the whole group is already gone
+        try:
+            proc.kill() if kill else proc.terminate()
+        except OSError:
+            pass
+    except OSError:
         try:
             proc.kill() if kill else proc.terminate()
         except OSError:

@@ -23,8 +23,11 @@ RUNNING_STATES = ("starting", "running", "waiting_input", "cancelling")  # hold 
 TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"starting", "cancelled", "failed"}),
     "starting": frozenset({"running", "failed", "cancelled", "cancelling"}),
-    "running": frozenset({"waiting_input", "completed", "failed", "timed_out", "cancelling"}),
-    "waiting_input": frozenset({"running", "completed", "failed", "timed_out", "cancelling"}),
+    # A remote provider may report its run cancelled without a local cancel request.
+    "running": frozenset({"waiting_input", "completed", "failed", "timed_out", "cancelling",
+                          "cancelled"}),
+    "waiting_input": frozenset({"running", "completed", "failed", "timed_out", "cancelling",
+                                "cancelled"}),
     "cancelling": frozenset({"cancelled", "failed"}),
     "completed": frozenset(),
     "failed": frozenset(),

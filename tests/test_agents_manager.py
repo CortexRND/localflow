@@ -304,3 +304,109 @@ def test_delete_only_terminal(tmp_path):
     done = drive(manager, clock, _launch(manager).id)
     manager.delete(done.id)
     assert manager.store.get(done.id) is None
+
+
+# -- regressions (PR #185 review) ---------------------------------------------------
+
+
+def test_capacity_counts_sessions_not_yet_admitted(tmp_path, monkeypatch):
+    config = agents_config(tmp_path, agent_max_concurrent=1, agent_max_queued=0)
+    manager, _clock = _manager(tmp_path, config)
+    # A concurrent launch can run its check before the first one's admission.
+    monkeypatch.setattr(manager, "_admit", lambda: None)
+    _launch(manager, "slow")
+    with pytest.raises(QueueFull):
+        _launch(manager, "slow")
+    assert len(manager.store.list()) == 1
+
+
+def test_threaded_launches_never_exceed_the_queue_limit(tmp_path):
+    config = agents_config(tmp_path, agent_max_concurrent=1, agent_max_queued=1)
+    manager = make_manager(tmp_path, config, supervise=False)
+    barrier = threading.Barrier(8)
+    results = []
+
+    def go():
+        barrier.wait()
+        try:
+            results.append(_launch(manager, "hang").id)
+        except QueueFull:
+            results.append(None)
+
+    threads = [threading.Thread(target=go) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(1 for r in results if r) == 2 and len(manager.store.list()) == 2
+
+
+def test_run_created_after_the_start_deadline_is_cancelled(tmp_path):
+    cancelled = []
+    holder = {}
+
+    class LateCloud(MockProvider):
+        def start(self, session, sink):
+            clock = holder["clock"]
+            clock.advance(session.timeout_seconds + 1)
+            holder["manager"].tick()  # the deadline passes while start() is in flight
+            sink.external("run-late", "")
+
+        def cancel(self, session, sink):
+            cancelled.append(session.external_id)
+            sink.finish("cancelled")
+
+    clock = FakeClock()
+    holder["clock"] = clock
+    manager = make_manager(tmp_path, agents_config(tmp_path), supervise=False,
+                           inline_start=True, clock=clock, provider_classes={"mock": LateCloud})
+    holder["manager"] = manager
+    session = _launch(manager, "hang", timeout_seconds=10)
+    assert manager.store.get(session.id).state == "timed_out"
+    assert "run-late" in cancelled
+
+
+def test_resume_keeps_a_nested_cwd(tmp_path):
+    manager, clock = _manager(tmp_path)
+    repo = tmp_path / "repos" / "proj"
+    nested = repo / "pkg" / "sub"
+    nested.mkdir(parents=True)
+    parent = drive(manager, clock, _launch(manager, cwd=str(nested)).id)
+    assert (parent.repo, parent.cwd) == ("proj", str(nested.resolve()))
+    child = _launch(manager, resume_of=parent.id, prompt="follow-up")
+    assert (child.repo, child.cwd) == ("proj", str(nested.resolve()))
+    # A folder that no longer exists falls back to the repo root.
+    done = drive(manager, clock, child.id)
+    nested.rmdir()
+    grandchild = _launch(manager, resume_of=done.id, prompt="third")
+    assert (grandchild.repo, grandchild.cwd) == ("proj", str(repo.resolve()))
+    # An explicit repo still wins.
+    explicit = _launch(manager, resume_of=done.id, prompt="fourth", repo="proj")
+    assert explicit.cwd == str(repo.resolve())
+
+
+def test_external_ids_and_urls_are_redacted(tmp_path):
+    from localflow.agents.manager import Sink
+
+    manager, _clock = _manager(tmp_path)
+    secret = "plain-secret-value-0123456789"
+    manager.redactor.add("agent_devin_api_key", secret)
+    session = _launch(manager, "hang")
+    Sink(manager, session.id).external(f"run-{secret}", f"https://x.example/{secret}")
+    stored = manager.store.get(session.id)
+    assert secret not in stored.external_id and secret not in stored.external_url
+    assert "[redacted:agent_devin_api_key]" in stored.external_id
+    assert secret not in (manager.store.root / "sessions.json").read_text(encoding="utf-8")
+
+
+def test_a_key_set_elsewhere_is_redacted_once_a_provider_reads_it(tmp_path):
+    from localflow.secrets import set_secret
+
+    manager, clock = _manager(tmp_path)
+    secret = "cli-set-secret-0123456789"
+    set_secret("agent_devin_api_key", secret)  # e.g. `lf agents secret set` meanwhile
+    done = drive(manager, clock, _launch(manager, "secret_echo").id)
+    texts = [e.text for e in manager.store.events(done.id, limit=1000)]
+    assert done.state == "completed" and secret not in done.result_text
+    assert not any(secret in t for t in texts)
+    assert any("[redacted:agent_devin_api_key]" in t for t in texts)

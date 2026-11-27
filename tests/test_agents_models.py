@@ -58,3 +58,8 @@ def test_ids_and_timestamps():
     assert m.utc_now().endswith("Z") and "T" in m.utc_now()
     assert m.one_line_title("fix\nthe   tests " * 20).startswith("fix the tests fix")
     assert len(m.one_line_title("x" * 300)) == 80
+
+
+def test_a_remote_cancel_can_end_an_active_session():
+    for state in ("starting", "running", "waiting_input"):
+        assert "cancelled" in m.TRANSITIONS[state], state

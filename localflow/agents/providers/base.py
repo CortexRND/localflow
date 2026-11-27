@@ -153,7 +153,13 @@ def http_request(ctx: ProviderContext, method: str, url: str, *, headers: dict |
 
 
 def is_loopback_url(url: str) -> bool:
+    import ipaddress
     from urllib.parse import urlparse
 
-    host = (urlparse(url).hostname or "").lower()
-    return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
+    host = (urlparse(url).hostname or "").lower().strip("[]")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a DNS name such as 127.attacker.example is never loopback

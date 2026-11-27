@@ -303,6 +303,10 @@ async def agents_provider_secret(request: Request, provider_id: str):
             if value:
                 set_secret(name, value)
                 manager.redactor.add(name, value)
+                if provider_id == "http":
+                    from localflow.agents.providers.http import bind_secret
+
+                    bind_secret(manager.profiles, profile_id)
             else:
                 try:
                     delete_secret(name)
@@ -323,9 +327,12 @@ async def agents_provider_secret(request: Request, provider_id: str):
 
 
 def _profile_out(manager, profile: dict) -> dict:
-    from localflow.agents.providers.http import secret_name
+    from localflow.agents.providers.http import secret_bound, secret_name
 
-    return {**profile, "secret_set": bool(manager.ctx.get_secret(secret_name(profile["id"])))}
+    out = {k: v for k, v in profile.items() if k != "secret_origin"}
+    out["secret_set"] = secret_bound(profile) and bool(
+        manager.ctx.get_secret(secret_name(profile["id"])))
+    return out
 
 
 @router.get("/http-profiles")
@@ -342,7 +349,7 @@ async def agents_http_profiles(request: Request):
 @router.post("/http-profiles")
 @_guard
 async def agents_http_profile_add(request: Request):
-    from localflow.agents.providers.http import ProfileError, validate_profile
+    from localflow.agents.providers.http import ProfileError, origin, validate_profile
 
     _require_local(request)
     body = await _body(request)
@@ -356,7 +363,8 @@ async def agents_http_profile_add(request: Request):
     def run():
         manager = get_manager()
         now = utc_now()
-        entry = {"id": new_short_id(), **profile, "created_at": now, "updated_at": now}
+        entry = {"id": new_short_id(), **profile, "created_at": now, "updated_at": now,
+                 "secret_origin": origin(profile["base_url"])}
         with manager.profiles.mutate() as profiles:
             if len(profiles) >= 32:
                 raise ValidationError("at most 32 HTTP agent profiles")
@@ -399,6 +407,9 @@ async def agents_http_profile_update(request: Request, profile_id: str):
             except ProfileError as exc:
                 raise ValidationError(str(exc)) from None
             origin_changed = origin(updated["base_url"]) != origin(entry["base_url"])
+            # The token stays bound to the old origin (so neither the keyring nor an
+            # environment token is sent to the new one) until it is set again.
+            entry.setdefault("secret_origin", origin(entry["base_url"]))
             for op in ("status", "message", "cancel"):
                 entry.pop(op, None)
             entry.update(updated)
@@ -420,7 +431,7 @@ def _delete_secret_quietly(name: str) -> None:
     try:
         delete_secret(name)
     except Exception:  # noqa: BLE001 - keyring unavailable or "not found" variants
-        log.debug("no agent secret %s to remove", name)
+        log.debug("no agent secret to remove")
 
 
 @router.delete("/http-profiles/{profile_id}")

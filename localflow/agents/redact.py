@@ -59,6 +59,8 @@ class Redactor:
     def add(self, name: str, value: str) -> None:
         if value and len(value) >= MIN_SECRET_CHARS:
             with self._lock:
+                if any(v == value for v, _name in self._values):
+                    return
                 self._values = sorted(
                     [*(v for v in self._values if v[0] != value), (value, name)],
                     key=lambda item: -len(item[0]),

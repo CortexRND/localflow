@@ -435,3 +435,63 @@ def test_config_local_only_keys_and_restart(env, monkeypatch):
     # The agents routes see the new value at once (no restart).
     status = env.client.get("/api/agents/status").json()
     assert status["limits"]["max_concurrent"] == 3
+
+
+# -- regressions (PR #185 review) ---------------------------------------------------
+
+
+def _remote_client():
+    return TestClient(server.app, base_url="http://127.0.0.1:8756", client=("10.0.0.5", 1),
+                      headers={"X-Localflow-Token": TOKEN})
+
+
+def test_remote_callers_cannot_replace_agent_keys_via_api_secrets(env):
+    remote = _remote_client()
+    for name in ("agent_devin_api_key", "agent_claude_api_key"):
+        response = remote.put(f"/api/secrets/{name}", json={"value": "remote-key-0123456789"})
+        assert response.status_code == 403, name
+    assert env.keyring.values == {}
+    local = env.client.put("/api/secrets/agent_devin_api_key",
+                           json={"value": "local-key-0123456789"})
+    assert local.status_code == 200 and local.json()["agent_devin_api_key"] is True
+    env.set_config(agent_allow_remote=True)
+    allowed = remote.put("/api/secrets/agent_devin_api_key", json={"value": ""})
+    assert allowed.status_code == 200 and allowed.json()["agent_devin_api_key"] is False
+
+
+def test_env_token_is_not_sent_after_an_origin_change(env, monkeypatch):
+    route = "/api/agents/http-profiles"
+    body = {"label": "Agent", "base_url": "https://agents.example.com",
+            "headers": {"Authorization": "Bearer {secret}"},
+            "start": {"method": "POST", "path": "/runs"}}
+    profile = validate_response(env.client.post(route, json=body), "POST", route)
+    pid = profile["id"]
+    monkeypatch.setenv(f"LOCALFLOW_AGENT_HTTP_{pid.upper()}_TOKEN", "env-token-0123456789")
+    stored = env.manager.profiles.get(pid)
+    assert stored["secret_origin"] == "https://agents.example.com:443"
+    assert env.manager.readiness("http", pid).ready
+    moved = env.client.put(f"{route}/{pid}", json={"base_url": "https://evil.example.net"})
+    assert validate_response(moved, "PUT", "/api/agents/http-profiles/{id}")[
+        "secret_set"] is False
+    assert env.manager.readiness("http", pid).code == "missing_secret"
+    assert env.manager.provider_for("http", pid)._secret() == ""
+    # The token stays withheld across further moves until it is set again.
+    moved_again = env.client.put(f"{route}/{pid}", json={"base_url": "https://new.example.org"})
+    assert validate_response(moved_again, "PUT", "/api/agents/http-profiles/{id}")[
+        "secret_set"] is False
+    entry = env.client.put("/api/agents/providers/http/secret",
+                           json={"profile": pid, "value": "new-token-0123456789"})
+    assert validate_response(entry, "PUT", "/api/agents/providers/{id}/secret")[
+        "readiness"]["ready"] is True
+    assert env.manager.profiles.get(pid)["secret_origin"] == "https://new.example.org:443"
+    listed = validate_response(env.client.get(route), "GET", route)["profiles"]
+    assert listed[0]["secret_set"] is True and "secret_origin" not in listed[0]
+
+
+def test_removing_a_missing_secret_does_not_log_its_name(env, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="localflow.agents.api")
+    agents_api._delete_secret_quietly("agent_http_deadbeef_token")
+    assert caplog.records and not any("agent_http_deadbeef_token" in r.getMessage()
+                                      for r in caplog.records)
