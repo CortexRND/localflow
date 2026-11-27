@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!((found[0].kind, found[0].line), ("an API key", 2));
         let shown = format!("{found:?}");
-        assert!(!shown.contains("4f9QxZ2m"), "{shown}");
+        assert!(!shown.contains("4f9QxZ2m"), "the shown finding is redacted");
         let (title, body) = warning(&found, "your task").unwrap();
         assert_eq!(title, "Possible secret in your task");
         assert_eq!(
@@ -275,7 +275,10 @@ mod tests {
             "4f9QxZ2m",
             "Zx9Zx9",
         ] {
-            assert!(!redacted.contains(secret), "{secret} in {redacted}");
+            assert!(
+                !redacted.contains(secret),
+                "a fixture secret survived redaction"
+            );
         }
         assert!(redacted.starts_with("password: [redacted]\n"));
         assert!(scan(&redacted).is_empty(), "a redacted task passes");
@@ -289,7 +292,7 @@ mod tests {
             "Rename the token field in the schema",
             "",
         ] {
-            assert!(scan(task).is_empty(), "{task}");
+            assert!(scan(task).is_empty(), "ordinary text has no finding");
             assert_eq!(redact(task), task);
         }
     }
@@ -308,10 +311,16 @@ mod tests {
             format!("The deploy key {commit} must rotate"),
             format!("token: {commit}"),
         ] {
-            assert_eq!(scan(&task).len(), 1, "{task}");
+            assert_eq!(scan(&task).len(), 1, "the token is one finding");
             let redacted = redact(&task);
-            assert!(!redacted.contains(&hex32[..12]), "{redacted}");
-            assert!(!redacted.contains(&commit[..12]), "{redacted}");
+            assert!(
+                !redacted.contains(&hex32[..12]),
+                "the hex token is redacted"
+            );
+            assert!(
+                !redacted.contains(&commit[..12]),
+                "the commit-shaped token is redacted"
+            );
         }
         assert!(scan(&format!("Cherry-pick {commit} onto release")).is_empty());
     }

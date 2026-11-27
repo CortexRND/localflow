@@ -696,7 +696,10 @@ mod tests {
             };
             handle.join().unwrap();
             assert_eq!(e.code, code);
-            assert!(!e.detail.contains("abcdefghijklmnop"), "{}", e.detail);
+            assert!(
+                !e.detail.contains("abcdefghijklmnop"),
+                "the error detail is redacted"
+            );
         }
     }
 
@@ -814,7 +817,10 @@ mod tests {
                 error.reason(),
                 crate::controllers::agents_settings::key_error(&error),
             ] {
-                assert!(!text.contains("planted-secret"), "{status}: {text}");
+                assert!(
+                    !text.contains("planted-secret"),
+                    "the response body is redacted"
+                );
             }
             assert!(!format!("{value:?}").contains("planted"));
         }
@@ -896,12 +902,6 @@ mod tests {
     }
 
     #[test]
-    fn the_waiting_list_is_one_filtered_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let (port, handle) = serve(
-            "200 OK",
-            json!({"sessions": [{"id": "a1f3a2c80001", "state": "waiting_input"}],
-    #[test]
     fn a_gone_sessions_events_read_is_absent() {
         let dir = tempfile::tempdir().unwrap();
         let (port, handle) = serve(
@@ -924,6 +924,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_waiting_list_is_one_filtered_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (port, handle) = serve(
+            "200 OK",
+            json!({"sessions": [{"id": "a1f3a2c80001", "state": "waiting_input"}],
                    "next_cursor": null, "revision": 7, "counts": {}})
             .to_string(),
         );
@@ -1042,7 +1048,10 @@ mod tests {
         };
         handle.join().unwrap();
         assert!(detail.starts_with("provider not ready"));
-        assert!(!detail.contains("abcdefghijklmnop"), "{detail}");
+        assert!(
+            !detail.contains("abcdefghijklmnop"),
+            "the error detail is redacted"
+        );
 
         let (port, handle) = serve("401 Unauthorized", "{}".into());
         let Err(AgentsError::Refused(detail)) = client(port, &dir).sessions(1, None) else {

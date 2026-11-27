@@ -2565,12 +2565,15 @@ mod tests {
         let message = s.error.as_ref().unwrap().message.as_ref().unwrap();
         for shown in [&s.title, message] {
             assert!(shown.chars().count() <= TEXT_CHARS);
-            assert!(!shown.contains("sk-abcdefg"), "{shown}");
+            assert!(
+                !shown.contains("sk-abcdefg"),
+                "a masked secret leaked into the display"
+            );
         }
         let RuntimeState::Unrecognised(raw) = &s.runtime else {
             panic!("{:?}", s.runtime);
         };
-        assert!(!raw.contains("sk-a"), "the raw state is masked: {raw}");
+        assert!(!raw.contains("sk-a"), "the raw state is masked");
         let raw = RuntimeState::parse(Some(&json!("blocked token=hunter2hunter2")));
         assert_eq!(
             state_note(
@@ -2595,7 +2598,7 @@ mod tests {
         let mut t = session("t", "running", 1.0);
         t.title.clear();
         t.prompt = Some(format!("{} {key}", "z".repeat(TITLE_CHARS - 8)));
-        assert!(!title(&t).contains("sk-abc"), "{}", title(&t));
+        assert!(!title(&t).contains("sk-abc"), "the title is masked");
     }
 
     #[test]
@@ -2803,7 +2806,7 @@ mod tests {
             "ghp_abcdefghij",
             "abcdefghijklmnopqrstu0",
         ] {
-            assert!(!shown.contains(hidden), "{hidden} leaked: {shown}");
+            assert!(!shown.contains(hidden), "a secret leaked into the display");
         }
         assert_eq!(s.external_url, None);
         assert_eq!(s.prompt.as_deref(), Some("do the thing"));
@@ -2922,7 +2925,7 @@ mod tests {
             profile: Some("night".into()),
             repo: Some("acme/web".into()),
         };
-        assert!(is_session_id(&request.id), "{}", request.id);
+        assert!(is_session_id(&request.id), "the generated id is v1-shaped");
         let body = request.body();
         let keys: Vec<&str> = body
             .as_object()
@@ -2973,7 +2976,7 @@ mod tests {
         }));
         assert_eq!(page.events.len(), 2, "seq 0 is not an event");
         let out = &page.events[1];
-        assert!(!out.text.contains("hunter2"), "{}", out.text);
+        assert!(!out.text.contains("hunter2"), "the reply is redacted");
         assert!(
             out.text.starts_with("<b>Using</b>"),
             "kept as plain text, not markup"

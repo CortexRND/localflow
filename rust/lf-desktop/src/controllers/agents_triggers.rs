@@ -911,8 +911,7 @@ mod tests {
             "repo": "", "prompt": "use api_key=sk-abcdefghijklmnopqrstuvwxyz0123", "reason": ""}));
         assert!(
             !secret.prompt.contains("abcdefghijklmnop"),
-            "{}",
-            secret.prompt
+            "the prompt is redacted"
         );
         assert!(parse_rule_test(&json!({"reason": "x"})).is_none());
     }
