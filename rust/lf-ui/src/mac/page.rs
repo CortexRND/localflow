@@ -56,7 +56,14 @@ pub struct HubServices {
     pub page_errors: RefCell<HashMap<String, String>>,
     /// Per-page notices (`page_notices`).
     pub page_notices: RefCell<HashMap<String, String>>,
+    /// The `/api/perf` summary behind the Home "Speed" card. Unset (snapshots,
+    /// tests): no card, so Home looks exactly as before; the real Hub reads
+    /// the local perf ledger ([`crate::hub_model::load_perf_summary`]).
+    pub perf_summary: RefCell<Option<PerfSource>>,
 }
+
+/// Reads the perf summary for the given (latest) config.
+pub type PerfSource = Rc<crate::hub_model::PerfSummaryFn>;
 
 impl HubServices {
     pub fn new(
@@ -80,6 +87,7 @@ impl HubServices {
             setup_opener: RefCell::new(None),
             page_errors: RefCell::default(),
             page_notices: RefCell::default(),
+            perf_summary: RefCell::new(None),
         })
     }
 
@@ -115,6 +123,14 @@ impl HubServices {
             Some(path) => load_from(path),
             None => load_config(),
         }
+    }
+
+    /// The Home Speed card, or `None` to leave it out (no source, perf
+    /// metrics off in the latest config, or no dictations in the window).
+    pub fn speed_card(&self) -> Option<crate::hub_model::SpeedCard> {
+        let config = self.latest_config().unwrap_or_else(|_| self.config());
+        let source = self.perf_summary.borrow().clone();
+        crate::hub_model::home_speed_card(source.as_deref(), &config)
     }
 
     pub fn dictation_config(&self) -> Config {

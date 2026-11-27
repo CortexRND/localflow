@@ -430,6 +430,7 @@ fn real_services_using(
     *services.settings_agent.borrow_mut() =
         crate::backends::settings_agent_native::native_settings_agent()
             .map_err(|error| anyhow!(error.0))?;
+    *services.perf_summary.borrow_mut() = Some(Rc::new(crate::hub_model::load_perf_summary));
     Ok((services, http))
 }
 
