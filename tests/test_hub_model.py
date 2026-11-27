@@ -1399,3 +1399,429 @@ def test_speaker_row_meta_adds_id_only_when_labels_collide():
     assert hub_model.speaker_row_meta(rows, rows[0]) == "1m 5s · spk_1"
     assert hub_model.speaker_row_meta(rows, rows[1]) == "1m 5s · spk_2"
     assert hub_model.speaker_row_meta(rows, rows[2]) == "12s"
+
+
+# ------------------------------------------------- recent meetings speakers ---
+
+RECENT_MID = "0123456789abcdef0123456789abcdef"
+OTHER_MID = "fedcba9876543210fedcba9876543210"
+
+
+def _recent_note(name, meeting_id=None):
+    return {"title": name, "date_label": "Today", "path": f"/v/{name}.md",
+            "meeting_id": meeting_id}
+
+
+def _recent_payload(meeting_id=RECENT_MID, *labels):
+    labels = labels or ("Speaker 1", "Speaker 2")
+    return {"meeting_id": meeting_id, "speakers": [
+        {"id": f"S{i}", "label": label, "seconds": 30} for i, label in enumerate(labels, 1)
+    ]}
+
+
+def _speaker_panel_for(meeting_id):
+    panel = hub_model.SpeakerPanel()
+    panel.sync(_recent_payload(meeting_id))
+    return panel
+
+
+class _HttpError(Exception):
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _ready(state, note):
+    _op, _args, token = state.toggle(note)
+    assert state.loaded(token, _recent_payload(note["meeting_id"]), None)
+    assert state.state == "ready"
+    return state
+
+
+def test_recent_row_frames_keep_the_legacy_numbers_without_the_column():
+    for width in (SPEAKER_BODY_MIN, 600, 1200):
+        for y in (0, 44, 132):
+            open_x = width - 16 - 72
+            date_x = open_x - 12 - 150
+            assert hub_model.recent_row_frames(width, y) == {
+                "open": (open_x, y + 8, 72, 28),
+                "date": (date_x, y + 14, 150, 18),
+                "title": (16, y + 12, date_x - 28, 20),
+            }
+
+
+def test_recent_row_frames_with_the_speakers_column_never_overlap():
+    for width in (SPEAKER_BODY_MIN, 1200):
+        frames = hub_model.recent_row_frames(width, 44, speakers_column=True)
+        assert frames["speakers"] == (width - 16 - 72 - 8 - 96, 52, 96, 28)
+        assert frames["date"][0] + frames["date"][2] + 12 == frames["speakers"][0]
+        assert frames["title"][2] > 0
+        items = list(frames.values())
+        for i, a in enumerate(items):
+            assert 0 <= a[0] and a[0] + a[2] <= width - 16
+            for b in items[i + 1:]:
+                assert not _speaker_overlaps(a, b), (a, b)
+
+
+def test_recent_layout_without_a_drawer():
+    state = hub_model.RecentSpeakers()
+    assert hub_model.recent_layout(600, [], state) == {
+        "rows": [], "drawer": None, "height": hub_model.RECENT_ROW_H,
+    }
+    plain = [_recent_note("a"), _recent_note("b"), _recent_note("c")]
+    layout = hub_model.recent_layout(600, plain, state)
+    assert layout["height"] == 3 * 44 and layout["drawer"] is None
+    assert [row["y"] for row in layout["rows"]] == [0, 44, 88]
+    assert [row["frames"] for row in layout["rows"]] == [
+        hub_model.recent_row_frames(600, y) for y in (0, 44, 88)
+    ]
+    # One diarized note reserves the column on every row (the dates line up).
+    mixed = [_recent_note("a"), _recent_note("b", RECENT_MID)]
+    layout = hub_model.recent_layout(600, mixed, state)
+    assert all("speakers" in row["frames"] for row in layout["rows"])
+    assert [row["show_speakers"] for row in layout["rows"]] == [False, True]
+
+
+def test_recent_layout_drawer_heights_and_shift():
+    state = hub_model.RecentSpeakers()
+    notes = [_recent_note("a", RECENT_MID), _recent_note("b"), _recent_note("c")]
+    _op, _args, token = state.toggle(notes[0])
+    layout = hub_model.recent_layout(600, notes, state)
+    assert layout["drawer"]["kind"] == "loading"
+    assert layout["drawer"]["frame"] == (0, 44, 600, 44)
+    assert [row["y"] for row in layout["rows"]] == [0, 88, 132]
+    assert [row["expanded"] for row in layout["rows"]] == [True, False, False]
+    assert layout["height"] == 4 * 44
+
+    state.loaded(token, None, _HttpError("down", None))
+    layout = hub_model.recent_layout(600, notes, state)
+    assert layout["drawer"]["kind"] == "error" and layout["height"] == 4 * 44
+    assert not _speaker_overlaps(layout["drawer"]["label"], layout["drawer"]["retry"])
+
+    _op, _args, token = state.retry()
+    state.loaded(token, _recent_payload(RECENT_MID, "A", "B", "C"), None)
+    layout = hub_model.recent_layout(600, notes, state)
+    assert layout["drawer"] == {"kind": "rows", "error": None, "frame": (0, 44, 600, 3 * 44)}
+    assert [row["y"] for row in layout["rows"]] == [0, 44 + 132, 88 + 132]
+    assert layout["height"] == 3 * 44 + 132
+
+    layout = hub_model.recent_layout(600, notes, state, error_height=34)
+    assert layout["drawer"]["error"] == (16, 132 + 6, 568, 34)
+    assert layout["drawer"]["frame"][3] == 132 + 6 + 34 + 8
+    assert layout["height"] == 3 * 44 + 132 + 48
+
+
+def test_recent_speakers_open_load_and_toggle():
+    state = hub_model.RecentSpeakers()
+    note = _recent_note("a", RECENT_MID)
+    assert state.shows_button(note)
+    assert not state.shows_button(_recent_note("b"))
+    assert not state.shows_button(_recent_note("c", "not-an-id"))
+    request = state.toggle(note)
+    assert request == ("speakers", (RECENT_MID,), state.seq)
+    assert state.state == "loading" and state.is_open(note)
+    assert state.loaded(request[2], _recent_payload(), None)
+    assert state.state == "ready" and [r["id"] for r in state.panel.rows] == ["S1", "S2"]
+    assert state.panel.meeting_id == RECENT_MID
+    assert state.toggle(note) is None  # same row closes
+    assert state.state == "" and state.path == "" and not state.panel.visible
+
+
+def test_recent_speakers_switching_rows_drops_the_first_answer():
+    state = hub_model.RecentSpeakers()
+    first, second = _recent_note("a", RECENT_MID), _recent_note("b", OTHER_MID)
+    old = state.toggle(first)
+    new = state.toggle(second)
+    assert state.path == second["path"] and new[1] == (OTHER_MID,)
+    assert not state.loaded(old[2], _recent_payload(RECENT_MID), None)
+    assert state.state == "loading"
+    assert state.loaded(new[2], _recent_payload(OTHER_MID), None)
+    assert state.panel.meeting_id == OTHER_MID
+    assert not state.loaded(new[2], _recent_payload(OTHER_MID), None)  # once only
+
+
+def test_recent_speakers_404_and_empty_hide_the_button():
+    from localflow.meeting_client import MeetingClientError
+
+    state = hub_model.RecentSpeakers()
+    note = _recent_note("a", RECENT_MID)
+    _op, _args, token = state.toggle(note)
+    assert state.loaded(token, None, MeetingClientError("no speaker data", 404))
+    assert state.state == "" and state.load_error == "" and RECENT_MID in state.hidden
+    assert not state.shows_button(note) and state.toggle(note) is None
+
+    other = _recent_note("b", OTHER_MID)
+    _op, _args, token = state.toggle(other)
+    assert state.loaded(token, {"meeting_id": OTHER_MID, "speakers": []}, None)
+    assert OTHER_MID in state.hidden and state.path == ""
+
+    third = _recent_note("c", "a" * 32)
+    _op, _args, token = state.toggle(third)
+    state.loaded(token, _recent_payload(OTHER_MID), None)  # another meeting's payload
+    assert "a" * 32 not in state.hidden and state.state == "error" and not state.panel.visible
+
+
+def test_recent_speakers_other_errors_keep_the_button_and_retry():
+    state = hub_model.RecentSpeakers()
+    note = _recent_note("a", RECENT_MID)
+    assert state.retry() is None
+    _op, _args, token = state.toggle(note)
+    assert state.loaded(token, None, _HttpError("LocalFlow server not running", None))
+    assert state.state == "error" and state.shows_button(note)
+    assert state.load_error == "Couldn't load speakers: LocalFlow server not running"
+    request = state.retry()
+    assert request == ("speakers", (RECENT_MID,), state.seq) and request[2] != token
+    assert state.state == "loading" and state.load_error == ""
+    assert not state.loaded(token, _recent_payload(), None)  # the failed one is stale
+    assert state.loaded(request[2], _recent_payload(), None)
+    assert state.state == "ready"
+
+
+def test_recent_speakers_toggle_is_ignored_while_busy_and_close_drops_late_answers():
+    state = _ready(hub_model.RecentSpeakers(), _recent_note("a", RECENT_MID))
+    panel = state.panel
+    panel.begin_rename("S1")
+    _op, _args, token = panel.submit_rename("Sarah")
+    assert state.toggle(_recent_note("b", OTHER_MID)) is None
+    assert state.toggle(_recent_note("a", RECENT_MID)) is None
+    assert state.state == "ready" and panel.busy == "rename"
+    state.close()
+    assert not panel.finish(token, _recent_payload(RECENT_MID, "Sarah", "Speaker 2"), None)
+    assert not panel.visible and panel.busy == ""
+
+
+def test_recent_speakers_reconcile():
+    note = _recent_note("a", RECENT_MID)
+    state = _ready(hub_model.RecentSpeakers(), note)
+    state.reconcile([_recent_note("z"), note])
+    assert state.state == "ready"
+    state.reconcile([{**note, "meeting_id": OTHER_MID}])
+    assert state.state == "" and not state.panel.visible
+    state = _ready(hub_model.RecentSpeakers(), note)
+    state.reconcile([_recent_note("z")])
+    assert state.path == ""
+    state.reconcile([])  # nothing open: no-op
+    assert state.path == ""
+
+
+def test_speakers_not_found_and_error_text():
+    from localflow.meeting_client import MeetingClientError
+
+    assert hub_model.speakers_not_found(MeetingClientError("gone", 404))
+    assert not hub_model.speakers_not_found(MeetingClientError("boom", 500))
+    assert not hub_model.speakers_not_found(MeetingClientError("down"))
+    assert not hub_model.speakers_not_found(Exception("plain"))
+    assert hub_model.recent_speakers_error_text("a\n  b") == "Couldn't load speakers: a b"
+    prefix = "Couldn't load speakers: "
+    long_text = hub_model.recent_speakers_error_text("x" * 500)
+    assert long_text.startswith(prefix)
+    assert len(long_text) <= len(prefix) + hub_model.SPEAKER_ERROR_MAX + 1  # + "…"
+
+
+def test_mirror_speakers_only_into_the_same_meeting():
+    source = _speaker_panel_for(RECENT_MID)
+    source.begin_rename("S1")
+    _op, _args, token = source.submit_rename("Sarah")
+    payload = _recent_payload(RECENT_MID, "Sarah", "Speaker 2")
+    source.finish(token, payload, None)
+    same, other = _speaker_panel_for(RECENT_MID), _speaker_panel_for(OTHER_MID)
+    epoch = same.epoch
+    assert hub_model.mirror_speakers(source, same, payload, None)
+    assert same.row("S1")["label"] == "Sarah" and same.epoch == epoch + 1
+    assert not hub_model.mirror_speakers(source, same, payload, None)  # unchanged
+    assert not hub_model.mirror_speakers(source, other, payload, None)
+    assert other.row("S1")["label"] == "Speaker 1"
+    assert not hub_model.mirror_speakers(source, same, payload, Exception("x"))
+    busy = _speaker_panel_for(RECENT_MID)
+    busy.begin_merge("S1")
+    busy.choose_target("S2")
+    busy.submit_merge()
+    assert not hub_model.mirror_speakers(source, busy, payload, None)
+    assert busy.row("S1")["label"] == "Speaker 1"
+
+
+def test_note_head_unclosed_fence_short_file_ignores_body_meeting_id(tmp_path):
+    note = tmp_path / "2026-04-12 0930 Unclosed.md"
+    note.write_text(f"---\n# Heading\nmeeting_id: {RECENT_MID}\n", encoding="utf-8")
+    assert hub_model._note_head(note) == ("", None)
+
+
+def test_note_head_ignores_indented_yaml_separator_before_meeting_id(tmp_path):
+    note = tmp_path / "2026-04-12 0930 Block.md"
+    note.write_text(
+        f"---\nsummary: |\n  ---\nmeeting_id: {RECENT_MID}\n---\n# Standup\n",
+        encoding="utf-8",
+    )
+    assert hub_model._note_head(note) == ("Standup", RECENT_MID)
+
+
+def test_recent_speakers_malformed_200_shows_retry_instead_of_hiding():
+    note = _recent_note("a", RECENT_MID)
+    state = hub_model.RecentSpeakers()
+    _, _, seq = state.toggle(note)
+    assert state.loaded(seq, "not-a-dict", None) is True
+    assert state.state == "error"
+    assert state.load_error == hub_model.recent_speakers_error_text("unexpected response")
+    assert RECENT_MID not in state.hidden
+    _, _, seq2 = state.retry()
+    assert state.loaded(seq2, {"meeting_id": OTHER_MID, "speakers": []}, None) is True
+    assert state.state == "error"
+    assert RECENT_MID not in state.hidden
+    _, _, seq3 = state.retry()
+    assert state.loaded(seq3, {"meeting_id": RECENT_MID}, None) is True
+    assert state.state == "error"
+    assert RECENT_MID not in state.hidden
+
+
+def test_recent_speakers_reload_after_stale_speaker_error():
+    from localflow.meeting_client import MeetingClientError
+
+    note = _recent_note("a", RECENT_MID)
+    state = _ready(hub_model.RecentSpeakers(), note)
+    assert hub_model.speaker_error_is_stale(MeetingClientError("unknown speaker", 404))
+    assert not hub_model.speaker_error_is_stale(MeetingClientError("server down", 500))
+    op, args, seq = state.reload()
+    assert (op, args) == ("speakers", (RECENT_MID,))
+    assert state.state == "loading"
+    assert state.loaded(seq, _recent_payload(RECENT_MID, "Sarah", "Bob"), None) is True
+    assert state.state == "ready"
+    assert state.panel.row("S1")["label"] == "Sarah"
+
+
+# ------------------------------------------------- remember (recognition) ---
+
+def _no_overlaps(frames):
+    keys = [key for key in frames if key != "divider"]
+    for i, first in enumerate(keys):
+        ax, ay, aw, ah = frames[first]
+        assert aw > 0, first
+        for second in keys[i + 1:]:
+            bx, by, bw, bh = frames[second]
+            assert not (ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah), (
+                first, second,
+            )
+
+
+@pytest.mark.parametrize("width", [SPEAKER_BODY_MIN, 600, SPEAKER_BODY_WIDE])
+def test_speaker_row_frames_without_remember_are_unchanged(width):
+    for mode in ("", "rename", "merge"):
+        for can_merge in (True, False):
+            assert hub_model.speaker_row_frames(width, 2, mode, can_merge=can_merge) == (
+                hub_model.speaker_row_frames(width, 2, mode, can_merge=can_merge, remember=False)
+            )
+    plain = hub_model.speaker_row_frames(width, 1, "")
+    added = hub_model.speaker_row_frames(width, 1, "", remember=True)
+    assert set(added) - set(plain) == {"remember"}
+    assert added["rename"] == plain["rename"] and added["merge"] == plain["merge"]
+    assert added["remember"][0] + added["remember"][2] + 8 == plain["rename"][0]
+    assert added["name"][2] == plain["name"][2] - 108
+    _no_overlaps(added)
+    _no_overlaps(hub_model.speaker_row_frames(width, 1, "", can_merge=False, remember=True))
+    # Rename and merge rows don't change with remember on.
+    for mode in ("rename", "merge"):
+        assert hub_model.speaker_row_frames(width, 1, mode, remember=True) == (
+            hub_model.speaker_row_frames(width, 1, mode)
+        )
+
+
+@pytest.mark.parametrize("width", [SPEAKER_BODY_MIN, SPEAKER_BODY_WIDE])
+def test_remember_mode_is_the_rename_row_with_a_wider_submit(width):
+    rename = hub_model.speaker_row_frames(width, 0, "rename")
+    remember = hub_model.speaker_row_frames(width, 0, "remember")
+    assert set(remember) == set(rename)
+    assert remember["cancel"] == rename["cancel"]
+    assert remember["save"][2] == hub_model.SPEAKER_BUTTONS["remember"]
+    _no_overlaps(remember)
+
+
+def test_begin_remember_needs_the_flag_and_prefills_the_given_draft():
+    panel = _panel()
+    panel.begin_remember("S1", "")
+    assert panel.mode == ""
+    revision = panel.revision
+    panel.set_remember(True)
+    assert panel.remember and panel.revision == revision + 1
+    panel.begin_remember("S9", "")
+    assert panel.mode == ""
+    panel.begin_remember("S1", "")
+    assert panel.mode == "remember" and panel.draft == "" and panel.speaker_id == "S1"
+    panel.set_draft("Sar", "S1")
+    panel.set_draft("stale", "S2")
+    assert panel.draft == "Sar"
+    panel.begin_remember("S2", "Speaker Two")
+    assert panel.speaker_id == "S2" and panel.draft == "Speaker Two"
+
+
+def test_submit_remember_validates_and_sends_enroll():
+    panel = _panel()
+    panel.set_remember(True)
+    panel.begin_remember("S2", "")
+    assert panel.submit_remember("   ") is None and panel.error == "Type a name first."
+    request = panel.submit_remember("  Dana   Lee ")
+    assert request == ("enroll", ("Dana Lee", SPEAKER_MID, "S2"), panel.epoch)
+    assert panel.busy == "remember"
+    assert panel.submit_remember("Again") is None
+
+
+def test_finish_remember_marks_remembered_and_keeps_the_rows():
+    panel = _panel()
+    panel.set_remember(True)
+    rows = list(panel.rows)
+    panel.begin_remember("S1", "")
+    _op, _args, token = panel.submit_remember("Sarah")
+    assert panel.finish(token, {"id": "a" * 32, "name": "Sarah"}, None) is True
+    assert panel.rows == rows and panel.error == "" and panel.mode == ""
+    assert panel.is_remembered("S1") and not panel.is_remembered("S2")
+    assert panel.last_action == "remember"
+    panel.begin_remember("S1", "")
+    assert panel.mode == ""  # already remembered this session
+
+
+def test_finish_remember_error_text_keeps_the_prompt():
+    from localflow.meeting_client import MeetingClientError
+
+    panel = _panel()
+    panel.set_remember(True)
+    panel.begin_remember("S1", "")
+    _op, _args, token = panel.submit_remember("Sarah")
+    error = MeetingClientError("this meeting has no stored voice data", 409)
+    assert panel.finish(token, None, error)
+    assert panel.error == (
+        "Couldn't remember the speaker: This meeting has no stored voice data "
+        "(recognition was off when saved, or voice data was forgotten)."
+    )
+    assert panel.mode == "remember" and panel.draft == "Sarah"
+    assert not panel.is_remembered("S1")
+
+
+def test_set_remember_off_closes_an_open_remember_edit():
+    panel = _panel()
+    panel.set_remember(True)
+    panel.begin_remember("S1", "Draft")
+    panel.set_remember(False)
+    assert panel.mode == "" and panel.draft == "" and not panel.remember
+    panel.set_remember(True)
+    panel.begin_rename("S1")
+    panel.set_remember(False)
+    assert panel.mode == "rename"  # other edits stay
+
+
+def test_mirror_after_remember_never_wipes_the_other_panel():
+    source = _speaker_panel_for(RECENT_MID)
+    target = _speaker_panel_for(RECENT_MID)
+    source.set_remember(True)
+    source.begin_remember("S1", "")
+    _op, _args, token = source.submit_remember("Sarah")
+    voiceprint = {"id": "a" * 32, "name": "Sarah"}
+    source.finish(token, voiceprint, None)
+    rows, epoch = list(target.rows), target.epoch
+    assert hub_model.mirror_speakers(source, target, voiceprint, None) is False
+    assert target.rows == rows and target.epoch == epoch
+    # A later rename mirrors as before.
+    source.begin_rename("S2")
+    _op, _args, token = source.submit_rename("Bo")
+    payload = _recent_payload(RECENT_MID, "Speaker 1", "Bo")
+    source.finish(token, payload, None)
+    assert hub_model.mirror_speakers(source, target, payload, None) is True
+    assert target.row("S2")["label"] == "Bo"
+

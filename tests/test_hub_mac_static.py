@@ -564,3 +564,634 @@ def test_meeting_capture_state_keeps_the_rename_draft():
     )
     controller._meeting_capture_state()
     assert panel.draft == "Half"
+
+
+# ---------------------------------------------------- recent meetings speakers ---
+
+RECENT_SELECTORS = (
+    "meetingRecentSpeakers_", "meetingRecentSpeakersRetry_",
+    "meetingRecentSpeakerRename_", "meetingRecentSpeakerMerge_",
+    "meetingRecentSpeakerTarget_", "meetingRecentSpeakerSave_",
+    "meetingRecentSpeakerConfirmMerge_", "meetingRecentSpeakerCancel_",
+)
+RECENT_MID = "0123456789abcdef0123456789abcdef"
+OTHER_MID = "fedcba9876543210fedcba9876543210"
+RECENT_NOTE = {"title": "Sync", "date_label": "Today", "path": "/v/sync.md",
+               "meeting_id": RECENT_MID}
+
+
+def _recent_payload(meeting_id=RECENT_MID, first="Speaker 1"):
+    return {"meeting_id": meeting_id, "speakers": [
+        {"id": "S1", "label": first, "seconds": 30},
+        {"id": "S2", "label": "Speaker 2", "seconds": 30},
+    ]}
+
+
+def test_recent_speaker_selectors_never_call_the_client_directly():
+    methods = {method.name: method for method in _controller_methods()}
+    sources = _method_sources()
+    for name in RECENT_SELECTORS:
+        assert name in methods, name
+        assert not _python_method(methods[name])
+        assert "self.meeting_client" not in sources[name]
+        assert sources[name].count('if self.page != "Meetings":') == 1
+    send = sources["_meeting_recent_send"]
+    assert "threading.Thread(" in send
+    assert "self.meeting_events.put((event, (token, result), error))" in send
+    # The U3 sender is left as it was.
+    assert 'self.meeting_events.put(("speakers", (token, result), error))' in (
+        sources["_meeting_speaker_send"]
+    )
+
+
+def test_recent_card_uses_the_pure_layout_and_lazy_state():
+    sources = _method_sources()
+    render = sources["_meeting_render_recent"]
+    assert "recent_layout(" in render
+    assert "Edit speakers:" in render and "Hide speakers:" in render
+    assert '"meetingRecentSpeakers:"' in render
+    assert "self.meeting_client" not in render and "_meeting_recent_send" not in render
+    page = sources["_page_meetings"]
+    assert "self._meeting_recent_reset_views()" in page
+    # Built once with the controller, so the hidden set outlives page visits.
+    builders = [name for name, text in sources.items() if "RecentSpeakers(" in text]
+    assert len(builders) == 1 and builders[0].startswith("initWith"), builders
+    # No speakers request when Meetings opens or on the poll.
+    for name in ("_page_meetings", "_meeting_poll", "meetingTimerTick_", "_meeting_render"):
+        assert "_meeting_recent_send" not in sources[name], name
+    assert "state.reconcile(self.meeting_recent)" in sources["_meeting_load_recent"]
+    drawer = sources["_meeting_recent_drawer"]
+    assert "RECENT_SPEAKER_ACTIONS" in drawer and "self._meeting_speaker_rows(" in drawer
+    assert "SPEAKER_ACTIONS" in sources["_meeting_speakers_fill"]
+
+
+def test_recent_speaker_actions_name_existing_selectors():
+    import re as _re
+
+    source = SOURCE.read_text(encoding="utf-8")
+    names = {method.name for method in _controller_methods()}
+    for table in ("SPEAKER_ACTIONS", "RECENT_SPEAKER_ACTIONS"):
+        block = source[source.index(f"\n{table} = {{"):]
+        block = block[:block.index("}")]
+        selectors = _re.findall(r'"(meeting\w+:)"', block)
+        assert len(selectors) == 6, table
+        for selector in selectors:
+            assert selector.replace(":", "_") in names, selector
+
+
+def _recent_event_controller(page="Meetings", post_stop=None):
+    from localflow.hub_model import RecentSpeakers, SpeakerPanel, mirror_speakers
+
+    methods = _extract(
+        ("_meeting_event", "_meeting_speakers_mirror"), {"mirror_speakers": mirror_speakers},
+    )
+    refreshes, renders = [], []
+    controller = SimpleNamespace(
+        page=page, meeting_recent_speakers=RecentSpeakers(),
+        meeting_speakers=post_stop or SpeakerPanel(), meeting_recent_card=object(),
+        meeting_last_saved=None,
+        _meeting_recent_refresh=lambda: refreshes.append(True),
+        _meeting_render=lambda: renders.append(True),
+    )
+    return _bind(controller, methods), refreshes, renders
+
+
+def test_recent_load_event_renders_and_drops_stale_answers():
+    controller, refreshes, _renders = _recent_event_controller()
+    state = controller.meeting_recent_speakers
+    _op, _args, old = state.toggle(RECENT_NOTE)
+    _op, _args, token = state.toggle({**RECENT_NOTE, "path": "/v/b.md", "meeting_id": OTHER_MID})
+    controller._meeting_event("recent_speakers_load", (old, _recent_payload()), None)
+    assert refreshes == [] and state.state == "loading"
+    controller._meeting_event("recent_speakers_load", (token, _recent_payload(OTHER_MID)), None)
+    assert refreshes == [True] and state.state == "ready"
+    assert [row["id"] for row in state.panel.rows] == ["S1", "S2"]
+
+
+def test_recent_load_404_hides_the_button_without_an_error():
+    from localflow.meeting_client import MeetingClientError
+
+    controller, refreshes, _renders = _recent_event_controller()
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    controller._meeting_event(
+        "recent_speakers_load", (token, None), MeetingClientError("Not Found", 404),
+    )
+    assert refreshes == [True]
+    assert state.hidden == {RECENT_MID} and state.load_error == "" and state.state == ""
+
+
+def test_recent_load_off_the_page_updates_without_rendering():
+    controller, refreshes, renders = _recent_event_controller(page="Home")
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    controller._meeting_event("recent_speakers_load", (token, _recent_payload()), None)
+    assert refreshes == [] and renders == [] and state.state == "ready"
+
+
+def _post_stop_panel(meeting_id):
+    from localflow.hub_model import SpeakerPanel
+
+    panel = SpeakerPanel()
+    panel.sync(_recent_payload(meeting_id))
+    return panel
+
+
+def test_recent_rename_mirrors_into_the_post_stop_panel_of_the_same_meeting():
+    for meeting_id, mirrored in ((RECENT_MID, True), (OTHER_MID, False)):
+        post_stop = _post_stop_panel(meeting_id)
+        controller, refreshes, _renders = _recent_event_controller(post_stop=post_stop)
+        saved = {**_recent_payload(meeting_id), "notes_path": "/v/sync.md"}
+        controller.meeting_last_saved = saved
+        state = controller.meeting_recent_speakers
+        _op, _args, token = state.toggle(RECENT_NOTE)
+        state.loaded(token, _recent_payload(), None)
+        state.panel.begin_rename("S1")
+        _op, _args, token = state.panel.submit_rename("Sarah")
+        controller._meeting_event("recent_speakers", (token, _recent_payload(first="Sarah")), None)
+        assert refreshes == [True] and state.panel.row("S1")["label"] == "Sarah"
+        expected = "Sarah" if mirrored else "Speaker 1"
+        assert post_stop.row("S1")["label"] == expected
+        if mirrored:
+            assert controller.meeting_last_saved["speakers"][0]["label"] == "Sarah"
+            assert controller.meeting_last_saved["notes_path"] == "/v/sync.md"
+        else:
+            assert controller.meeting_last_saved is saved
+
+
+def test_post_stop_rename_mirrors_into_the_open_drawer():
+    post_stop = _post_stop_panel(RECENT_MID)
+    controller, refreshes, renders = _recent_event_controller(post_stop=post_stop)
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    post_stop.begin_rename("S1")
+    _op, _args, token = post_stop.submit_rename("Sarah")
+    controller._meeting_event("speakers", (token, _recent_payload(first="Sarah")), None)
+    assert state.panel.row("S1")["label"] == "Sarah"
+    assert refreshes == [True] and renders == []
+    # A failed rename mirrors nothing and only redraws the post-stop card.
+    post_stop.begin_rename("S2")
+    _op, _args, token = post_stop.submit_rename("Bo")
+    controller._meeting_event("speakers", (token, None), Exception("boom"))
+    assert state.panel.row("S2")["label"] == "Speaker 2"
+    assert renders == [True] and refreshes == [True]
+
+
+def test_recent_rename_after_the_drawer_closed_is_dropped():
+    controller, refreshes, _renders = _recent_event_controller()
+    state = controller.meeting_recent_speakers
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    state.panel.begin_rename("S1")
+    _op, _args, token = state.panel.submit_rename("Sarah")
+    state.close()
+    controller._meeting_event("recent_speakers", (token, _recent_payload(first="Sarah")), None)
+    assert refreshes == [] and not state.panel.visible
+
+
+def test_meeting_recent_speaker_save_sends_one_request():
+    from localflow.hub_model import RecentSpeakers
+
+    methods = _extract(("meetingRecentSpeakerSave_",))
+    state = RecentSpeakers()
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    state.panel.begin_rename("S2")
+    sent, renders = [], []
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", meeting_recent_speakers=state,
+            meeting_recent_field=_FakeView("  Bo  "),
+            _meeting_recent_refresh=lambda: renders.append(state.panel.busy),
+            _meeting_recent_send=lambda request, event: sent.append((request, event)),
+        ),
+        methods,
+    )
+    controller.meetingRecentSpeakerSave_(None)
+    assert sent == [(
+        ("rename_speaker", (RECENT_MID, "S2", "Bo"), state.panel.epoch), "recent_speakers",
+    )]
+    assert renders == ["rename"]
+    controller.meetingRecentSpeakerSave_(None)
+    assert len(sent) == 1
+
+
+def test_meeting_recent_speakers_toggle_sends_the_lazy_load():
+    from localflow.hub_model import RecentSpeakers
+
+    methods = _extract(("meetingRecentSpeakers_",))
+    state = RecentSpeakers()
+    sent, renders = [], []
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", meeting_recent_speakers=state,
+            meeting_recent=[{**RECENT_NOTE, "meeting_id": None}, RECENT_NOTE],
+            _meeting_recent_refresh=lambda: renders.append(state.state),
+            _meeting_recent_send=lambda request, event: sent.append((request, event)),
+        ),
+        methods,
+    )
+    sender = SimpleNamespace(tag=lambda: 1)
+    controller.meetingRecentSpeakers_(sender)
+    assert sent == [(("speakers", (RECENT_MID,), state.seq), "recent_speakers_load")]
+    assert renders == ["loading"]
+    controller.meetingRecentSpeakers_(sender)  # Done closes, no request
+    assert len(sent) == 1 and renders == ["loading", ""]
+    controller.meetingRecentSpeakers_(SimpleNamespace(tag=lambda: 0))  # no meeting_id
+    controller.meetingRecentSpeakers_(SimpleNamespace(tag=lambda: 7))
+    assert len(sent) == 1
+
+
+def test_meeting_capture_state_keeps_the_recent_rename_draft():
+    from localflow.hub_model import RecentSpeakers
+
+    methods = _extract(("_meeting_capture_state",))
+    state = RecentSpeakers()
+    _op, _args, token = state.toggle(RECENT_NOTE)
+    state.loaded(token, _recent_payload(), None)
+    state.panel.begin_rename("S2")
+
+    class _Combo:
+        def indexOfSelectedItem(self):
+            return -1
+
+    controller = _bind(
+        SimpleNamespace(
+            meeting_notes=SimpleNamespace(string=lambda: "notes"),
+            meeting_title=_FakeView("Title"), meeting_title_shows_session=False,
+            meeting_template=_Combo(), meeting_templates=[],
+            meeting_recent_speakers=state, meeting_recent_field=_FakeView("Hal"),
+            meeting_recent_field_id="S2",
+        ),
+        methods,
+    )
+    controller._meeting_capture_state()
+    assert state.panel.draft == "Hal"
+    # A field drawn for another row never overwrites the draft.
+    controller.meeting_recent_field_id = "S1"
+    controller.meeting_recent_field = _FakeView("Stale")
+    controller._meeting_capture_state()
+    assert state.panel.draft == "Hal"
+
+
+# ------------------------------------------------- people (recognition) ---
+
+PEOPLE_SELECTORS = (
+    "peopleToggle_", "peopleRetry_", "peopleRename_", "peopleSave_", "peopleCancel_",
+    "peopleForget_", "peopleForgetAll_", "peopleExport_", "peopleEnroll_",
+    "peopleRecord_", "peopleStop_", "meetingSpeakerRemember_",
+    "meetingRecentSpeakerRemember_",
+)
+VP = "a" * 32
+
+
+def _people(diarization=True, recognition=True, *people):
+    from localflow.people_model import PeopleState
+
+    state = PeopleState()
+    request = state.set_flags(diarization, recognition)
+    if request is not None:
+        state.loaded(request[2], {"speakers": list(people), "embedder": "e"}, None)
+    return state
+
+
+def test_people_selectors_are_guarded_and_never_call_the_client():
+    methods = {method.name: method for method in _controller_methods()}
+    sources = _method_sources()
+    for name in PEOPLE_SELECTORS:
+        assert name in methods, name
+        assert not _python_method(methods[name]), name
+        assert sources[name].count('if self.page != "Meetings":') == 1, name
+        assert "self.meeting_client" not in sources[name], name
+    send = sources["_people_send"]
+    assert "threading.Thread(" in send
+    assert "self.meeting_events.put((event, (token, result), error))" in send
+
+
+def test_remember_actions_name_existing_selectors():
+    import re as _re
+
+    source = SOURCE.read_text(encoding="utf-8")
+    names = {method.name for method in _controller_methods()}
+    for table, selector in (
+        ("SPEAKER_ACTIONS", "meetingSpeakerRemember:"),
+        ("RECENT_SPEAKER_ACTIONS", "meetingRecentSpeakerRemember:"),
+    ):
+        assert f'{table}["remember"] = "{selector}"' in source
+        assert selector.replace(":", "_") in names
+    for selector in _re.findall(r'"(people\w+:)"', source):
+        assert selector.replace(":", "_") in names, selector
+
+
+def test_page_meetings_builds_no_people_view_and_sends_after_render():
+    sources = _method_sources()
+    page = sources["_page_meetings"]
+    for name in ("PeopleState(", "_people_build", "PEOPLE_HEADING", "CobaltSwitch"):
+        assert name not in page, name
+    assert "self._people_reset_views()" in page
+    assert page.index("self._meeting_render()") < page.index("self._people_send(people_request)")
+    builders = [name for name, text in sources.items() if "PeopleState(" in text]
+    assert len(builders) == 1 and builders[0].startswith("initWith"), builders
+    render = sources["_meeting_render"]
+    assert render.index("self._meeting_render_speakers(saved)") < render.index(
+        "self._people_render()"
+    ) < render.index("self._meeting_layout(")
+    layout = sources["_meeting_layout"]
+    assert layout.index("self._people_layout(") < layout.index("self._fit_body_height()")
+
+
+def test_people_layout_without_a_card_touches_nothing():
+    methods = _extract(("_people_layout",))
+    controller = _bind(SimpleNamespace(people_card=None), methods)
+    assert controller._people_layout(400, 600) is None
+
+
+def test_people_layout_places_the_block_from_the_pure_layout():
+    from localflow.people_model import people_layout
+
+    methods = _extract(
+        ("_people_layout",), {"people_layout": people_layout, "NSMakeRect": lambda *a: a},
+    )
+    heading, card, message = _FakeView(), _FakeView(), _FakeView()
+    state = _people(True, False)
+    controller = _bind(
+        SimpleNamespace(
+            people=state, people_heading=heading, people_card=card, people_message=message,
+            _people_message_height=lambda _width: 0,
+        ),
+        methods,
+    )
+    controller._people_layout(500, 600)
+    expected = people_layout(600, 500, state)
+    assert heading.frames == [expected["heading"]] and card.frames == [expected["card"]]
+    assert message.frames == []
+
+
+def test_people_render_with_both_flags_off_builds_and_sends_nothing():
+    methods = _extract(("_people_render",))
+    calls = []
+
+    def fail():
+        raise AssertionError("built a People view")
+
+    controller = _bind(
+        SimpleNamespace(
+            people=_people(False, False), people_card=None,
+            _people_teardown=lambda: calls.append("teardown"),
+            _people_build=fail, _people_send=fail, _people_fill=fail,
+        ),
+        methods,
+    )
+    controller._people_render()
+    assert calls == ["teardown"]
+
+
+class _Switch:
+    def __init__(self):
+        self.states = []
+
+    def setState_(self, value):
+        self.states.append(value)
+
+
+def _toggle_controller(state):
+    methods = _extract(("peopleToggle_", "_people_consent_done"))
+    calls = []
+    controller = SimpleNamespace(
+        page="Meetings", people=state,
+        _people_consent=lambda: calls.append("sheet"),
+        _people_write=lambda on: calls.append(("write", on)),
+        _meeting_render=lambda: calls.append("render"),
+    )
+    return _bind(controller, methods), calls
+
+
+def test_toggle_on_writes_only_after_consent():
+    state = _people(True, False)
+    controller, calls = _toggle_controller(state)
+    switch = _Switch()
+    controller.peopleToggle_(switch)
+    assert calls == ["sheet"] and switch.states == [0]  # snapped back, nothing written
+    controller.peopleToggle_(switch)  # the sheet is already open
+    assert calls == ["sheet"]
+    controller._people_consent_done(False)
+    assert ("write", True) not in calls and not state.consent_open
+    controller.peopleToggle_(switch)
+    controller._people_consent_done(True)
+    assert calls[-1] == ("write", True)
+    assert [call for call in calls if isinstance(call, tuple)] == [("write", True)]
+
+
+def test_toggle_off_writes_without_a_sheet():
+    state = _people(True, True)
+    controller, calls = _toggle_controller(state)
+    switch = _Switch()
+    controller.peopleToggle_(switch)
+    assert calls == [("write", False)] and switch.states == [1]
+    controller.page = "Home"
+    controller.peopleToggle_(switch)
+    assert calls == [("write", False)]
+
+
+def test_people_write_saves_and_loads_after_consent(tmp_path, monkeypatch):
+    from localflow.config import Config, ConfigError, apply_config_update, save_config
+    from localflow.people_model import SAVE_FAILED, recognition_update
+
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("LOCALFLOW_CONFIG", str(path))
+    save_config(Config(speaker_diarization=True))
+    from localflow.config import load_config
+
+    methods = _extract(("_people_write",), {
+        "apply_config_update": apply_config_update, "load_config": load_config,
+        "save_config": save_config, "recognition_update": recognition_update,
+        "ConfigError": ConfigError, "SAVE_FAILED": SAVE_FAILED,
+    })
+    state = _people(True, False)
+    sent, renders = [], []
+
+    def sync():
+        config = load_config()
+        return state.set_flags(config.speaker_diarization, config.speaker_recognition)
+
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", people=state, config=None,
+            _people_sync_flags=sync, _people_send=sent.append,
+            _meeting_render=lambda: renders.append(True),
+        ),
+        methods,
+    )
+    state.request_recognition(True)
+    assert state.consent_result(True)
+    controller._people_write(True)
+    assert load_config().speaker_recognition is True
+    assert controller.config.speaker_recognition is True
+    assert sent == [("enrolled", (), state.seq)] and state.grace == 3
+    assert renders == [True]
+
+
+def _people_event_controller(page="Meetings", state=None):
+    methods = _extract(
+        ("_meeting_event",), {"time": SimpleNamespace(monotonic=lambda: 50.0)},
+    )
+    sent, renders = [], []
+    controller = SimpleNamespace(
+        page=page, people=state or _people(True, True), people_retry_at=None,
+        people_capture=object(),
+        _people_send=sent.append, _meeting_render=lambda: renders.append(True),
+    )
+    return _bind(controller, methods), sent, renders
+
+
+def test_people_load_event_renders_on_the_page_only_and_drops_stale_answers():
+    state = _people(True, True)
+    old = state.seq
+    _op, _args, token = state.load()
+    controller, _sent, renders = _people_event_controller(state=state)
+    controller._meeting_event("people_load", (old, {"speakers": []}), None)
+    assert renders == [] and state.phase == "loading"
+    controller._meeting_event("people_load", (token, {"speakers": [], "embedder": "e"}), None)
+    assert renders == [True] and state.phase == "ready"
+    _op, _args, token = state.load()
+    controller.page = "Home"
+    controller._meeting_event("people_load", (token, {"speakers": []}), None)
+    assert renders == [True] and state.phase == "ready"
+
+
+def test_people_load_403_after_consent_schedules_a_retry():
+    from localflow.meeting_client import MeetingClientError
+
+    state = _people(True, False)
+    state.request_recognition(True)
+    state.consent_result(True)
+    _op, _args, token = state.recognition_saved(True)
+    controller, sent, renders = _people_event_controller(state=state)
+    off = MeetingClientError("speaker recognition is off", 403)
+    controller._meeting_event("people_load", (token, None), off)
+    assert controller.people_retry_at == 51.0 and renders == [] and sent == []
+    assert state.phase == "loading"
+
+
+def test_people_action_success_sends_exactly_one_reload():
+    state = _people(True, True, {"id": VP, "name": "Dana", "model_id": "e", "samples": 1,
+                                 "created": "2026-11-12T00:00:00Z"})
+    controller, sent, renders = _people_event_controller(state=state)
+    _op, _args, token = state.submit_forget(VP)
+    controller._meeting_event("people", (token - 1, {}), None)
+    assert sent == [] and renders == []
+    controller._meeting_event("people", (token, {"forgotten": 1}), None)
+    assert sent == [("enrolled", (), state.seq)] and renders == [True]
+
+
+def test_people_rec_event_failure_drops_the_capture():
+    state = _people(True, True)
+    state.begin_enroll("http://127.0.0.1:8765")
+    _op, _args, token = state.start_recording("Me")
+    controller, _sent, renders = _people_event_controller(state=state)
+    controller._meeting_event("people_rec", (token, None), OSError("no mic"))
+    assert controller.people_capture is None and state.rec == "" and renders == [True]
+
+
+def test_remember_through_speakers_reloads_people_without_mirroring():
+    from localflow.hub_model import RecentSpeakers, mirror_speakers
+
+    methods = _extract(
+        ("_meeting_event", "_meeting_speakers_mirror"), {"mirror_speakers": mirror_speakers},
+    )
+    panel = _post_stop_panel(RECENT_MID)
+    recent = RecentSpeakers()
+    _op, _args, token = recent.toggle(RECENT_NOTE)
+    recent.loaded(token, _recent_payload(), None)
+    recent.panel.remembered = panel.remembered
+    sent, refreshes, renders = [], [], []
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", meeting_speakers=panel, meeting_recent_speakers=recent,
+            meeting_recent_card=object(), meeting_last_saved=None, people=_people(True, True),
+            _people_send=sent.append, _meeting_recent_refresh=lambda: refreshes.append(True),
+            _meeting_render=lambda: renders.append(True),
+        ),
+        methods,
+    )
+    panel.set_remember(True)
+    panel.begin_remember("S1", "")
+    _op, args, token = panel.submit_remember("Sarah")
+    assert args == ("Sarah", RECENT_MID, "S1")
+    controller._meeting_event("speakers", (token, {"id": VP, "name": "Sarah"}), None)
+    assert [row["label"] for row in recent.panel.rows] == ["Speaker 1", "Speaker 2"]
+    assert [row["label"] for row in panel.rows] == ["Speaker 1", "Speaker 2"]
+    assert recent.panel.is_remembered("S1")  # one shared set
+    assert sent == [("enrolled", (), controller.people.seq)] and refreshes == [True]
+
+
+def test_meeting_speaker_save_in_remember_mode_sends_one_enroll():
+    methods = _extract(("meetingSpeakerSave_",))
+    sent = []
+    panel = _speaker_panel()
+    panel.set_remember(True)
+    panel.begin_remember("S2", "")
+    controller = _bind(
+        SimpleNamespace(
+            page="Meetings", meeting_speakers=panel,
+            meeting_speaker_field=_FakeView("  Bo "),
+            _meeting_render=lambda: None, _meeting_speaker_send=sent.append,
+        ),
+        methods,
+    )
+    controller.meetingSpeakerSave_(None)
+    controller.meetingSpeakerSave_(None)
+    assert sent == [("enroll", ("Bo", SPEAKER_MID, "S2"), panel.epoch)]
+
+
+def test_people_code_uses_the_consent_sheet_and_never_prints_or_reads_the_environment():
+    sources = _method_sources()
+    consent = sources["_people_consent"]
+    assert "beginSheetModalForWindow_completionHandler_" in consent
+    assert "CONSENT_POINTS" in consent and "CONSENT_DRAFT_NOTE" in consent
+    assert 'setKeyEquivalent_("\\r")' in consent
+    assert "save_config" not in sources["peopleToggle_"]
+    assert "save_config" not in consent
+    people_code = [
+        text for name, text in sources.items()
+        if name.startswith(("_people", "people")) or name in PEOPLE_SELECTORS
+    ]
+    assert people_code
+    for text in people_code:
+        assert "print(" not in text and "os.environ" not in text and "getenv" not in text
+    model = (ROOT / "localflow" / "people_model.py").read_text(encoding="utf-8")
+    assert "print(" not in model and "os.environ" not in model
+
+
+def test_leaving_meetings_and_closing_stop_the_recording():
+    sources = _method_sources()
+    show = sources["show_page"]
+    assert 'if self.page == "Meetings" and page != "Meetings":' in show
+    assert "self._people_leave()" in show
+    assert "self._people_leave()" in sources["windowWillClose_"]
+    assert "capture.discard" in sources["_people_cancel_capture"]
+    assert "self._people_tick()" in sources["meetingTimerTick_"]
+
+
+def test_people_leave_discards_a_running_capture():
+    methods = _extract(
+        ("_people_leave", "_people_cancel_capture"),
+        {"threading": SimpleNamespace(Thread=lambda target, **_kw: SimpleNamespace(
+            start=target))},
+    )
+    discarded = []
+    state = _people(True, True)
+    state.begin_enroll("http://127.0.0.1:8765")
+    _op, _args, token = state.start_recording("Me")
+    state.recording_started(token, None, 0.0)
+    controller = _bind(
+        SimpleNamespace(
+            people=state, people_capture=SimpleNamespace(discard=lambda: discarded.append(1)),
+        ),
+        methods,
+    )
+    controller._people_leave()
+    assert discarded == [1] and controller.people_capture is None and state.rec == ""
+    controller._people_leave()
+    assert discarded == [1]
