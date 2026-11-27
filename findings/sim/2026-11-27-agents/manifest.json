@@ -1,0 +1,20 @@
+{
+ "run_id": "2026-11-27-agents",
+ "commit": "acde5821b6d220d4d024332755dbd4f0889ddd2d",
+ "sim_sut": "/home/ubuntu/work/sim-sut",
+ "harness_commit": "ac727f4cc7128e21110ef18d56b8f68fdae08abc",
+ "harness_dirty": false,
+ "repeats": 3,
+ "suites": [
+  "agents"
+ ],
+ "llm": {
+  "provider": "openai-compatible",
+  "base_url": "https://api.fireworks.ai/inference/v1",
+  "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017"
+ },
+ "spec_version": 1,
+ "mcp_rust_bin": false,
+ "agents_live": "",
+ "started": "2026-11-27T09:20:06"
+}
