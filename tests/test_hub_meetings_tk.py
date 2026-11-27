@@ -651,6 +651,146 @@ def test_open_notes_opens_markdown_inside_the_vault(tmp_path, monkeypatch):
         root.destroy()
 
 
+# ------------------------------------------------------- speaker labels ---
+
+READY = {"extra_installed": True, "models_ready": True, "reason": None}
+NO_MODELS = {"extra_installed": True, "models_ready": False,
+             "reason": "run `lf speakers download`"}
+
+
+class DiarizationClient(FakeMeetingClient):
+    def __init__(self, diarization):
+        super().__init__("idle")
+        self.diarization = diarization
+
+    def diarization_status(self):
+        self.calls.append(("diarization_status",))
+        if isinstance(self.diarization, Exception):
+            raise self.diarization
+        return self.diarization
+
+
+def _speaker_window(tmp_path, client):
+    root, window = _window(tmp_path, client)
+    _pump(root, lambda: ("diarization_status",) in client.calls
+          and window._meeting_requests_in_flight == 0)
+    return root, window
+
+
+def _saved_configs(monkeypatch, *, error=None):
+    from localflow import hub_tk
+
+    saved = []
+
+    def save(config):
+        if error:
+            raise error
+        saved.append(config)
+
+    monkeypatch.setattr(hub_tk, "load_config", Config)
+    monkeypatch.setattr(hub_tk, "save_config", save)
+    return saved
+
+
+def _destroy_tk(root, window):
+    _pump(root, lambda: window._meeting_requests_in_flight == 0, timeout=5)
+    window.meeting_speaker_vars.clear()
+    root.destroy()
+    gc.collect()
+
+
+def test_speaker_toggles_are_enabled_and_save_when_ready(tmp_path, monkeypatch):
+    saved = _saved_configs(monkeypatch)
+    root, window = _speaker_window(tmp_path, DiarizationClient(READY))
+    try:
+        checks = window.meeting_speaker_checks
+        assert set(checks) == {"speaker_diarization", "diarize_mic"}
+        assert checks["speaker_diarization"].cget("text") == "Speaker labels"
+        assert checks["diarize_mic"].cget("text") == "Label speakers on my microphone"
+        assert all(check.cget("state") == "normal" for check in checks.values())
+        assert not window.meeting_speaker_reason.winfo_manager()
+        checks["speaker_diarization"].invoke()
+        assert saved and saved[-1].speaker_diarization is True
+        assert saved[-1].diarize_mic is False
+        assert window.config.speaker_diarization is True
+    finally:
+        _destroy_tk(root, window)
+
+
+def test_speaker_toggles_are_disabled_with_a_reason_when_not_ready(tmp_path, monkeypatch):
+    saved = _saved_configs(monkeypatch)
+    root, window = _speaker_window(tmp_path, DiarizationClient(NO_MODELS))
+    try:
+        checks = window.meeting_speaker_checks
+        assert all(check.cget("state") == "disabled" for check in checks.values())
+        assert window.meeting_speaker_reason.winfo_manager() == "pack"
+        assert window.meeting_speaker_reason.cget("text") == "run `lf speakers download`"
+        checks["speaker_diarization"].invoke()  # disabled: does nothing
+        assert saved == []
+    finally:
+        _destroy_tk(root, window)
+
+
+def test_speaker_toggle_already_on_stays_usable_when_not_ready(tmp_path, monkeypatch):
+    _saved_configs(monkeypatch)
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk unavailable: {exc}")
+    root.withdraw()
+    client = DiarizationClient({"extra_installed": False, "models_ready": False})
+    window = HubWindow(
+        root, HistoryStore(tmp_path / "h.sqlite", tmp_path / "clips"),
+        DictionaryStore(tmp_path / "d.json"), Config(speaker_diarization=True),
+        meeting_client=client, initial_page="Meetings",
+    )
+    try:
+        _pump(root, lambda: ("diarization_status",) in client.calls
+              and window._meeting_requests_in_flight == 0)
+        checks = window.meeting_speaker_checks
+        assert checks["speaker_diarization"].cget("state") == "normal"
+        assert checks["diarize_mic"].cget("state") == "disabled"
+        assert window.meeting_speaker_reason.cget("text") == "Install localflow[diarization]"
+    finally:
+        _destroy_tk(root, window)
+
+
+def test_speaker_toggles_stay_enabled_when_the_status_is_unavailable(tmp_path):
+    client = DiarizationClient(MeetingClientError("server unavailable"))
+    root, window = _speaker_window(tmp_path, client)
+    try:
+        checks = window.meeting_speaker_checks
+        assert all(check.cget("state") == "normal" for check in checks.values())
+        assert not window.meeting_speaker_reason.winfo_manager()
+        assert window.meeting_error.cget("text") == ""  # no error surfaced
+    finally:
+        _destroy_tk(root, window)
+
+
+def test_plain_client_without_diarization_status_is_not_asked(tmp_path):
+    client = FakeMeetingClient("idle")
+    root, window = _window(tmp_path, client)
+    try:
+        _pump(root, lambda: bool(window._meeting_status_data)
+              and window._meeting_requests_in_flight == 0)
+        assert ("diarization_status",) not in client.calls
+        checks = window.meeting_speaker_checks
+        assert all(check.cget("state") == "normal" for check in checks.values())
+    finally:
+        _destroy_tk(root, window)
+
+
+def test_speaker_toggle_save_failure_reverts_the_switch(tmp_path, monkeypatch):
+    _saved_configs(monkeypatch, error=OSError("disk full"))
+    root, window = _speaker_window(tmp_path, DiarizationClient(READY))
+    try:
+        window.meeting_speaker_checks["diarize_mic"].invoke()
+        assert window.meeting_speaker_vars["diarize_mic"].get() is False
+        assert "disk full" in window._meeting_error_message
+    finally:
+        _destroy_tk(root, window)
+
+
 # ----------------------------------------------------------------- speakers ---
 
 # meeting_content's children as _page_meetings builds them (includes U5's

@@ -656,11 +656,14 @@ def test_cli_config_get_set_diarization_keys(isolated_config):
         assert isolated_config.read_bytes() == before
 
 
-def test_diarization_keys_are_not_live_reloaded():
+def test_only_the_speaker_label_switches_are_live_reloaded():
     from localflow import live_config
 
+    # The two Settings switches are read when a meeting starts ("From the
+    # next meeting"), like capture_system_audio; the rest need a restart.
+    live = {"speaker_diarization", "diarize_mic"}
     for name in DIARIZATION_FIELDS:
-        assert name not in live_config.LIVE_FIELDS
+        assert (name in live_config.LIVE_FIELDS) is (name in live), name
 
 
 def test_factory_builds_ollama(isolated_config):

@@ -45,7 +45,7 @@ def measure(text):
 
 def test_manual_groups_cover_every_allowlist_key_exactly_once():
     keys = [key for _group, group_keys in sa.MANUAL_GROUPS for key in group_keys]
-    assert len(keys) == len(set(keys)) == 24
+    assert len(keys) == len(set(keys)) == 26
     assert set(keys) == set(sa.ALLOWLIST)
     assert [group for group, _keys in sa.MANUAL_GROUPS] == [
         "Dictation", "Cleanup & style", "Shortcuts", "Meetings",
@@ -242,9 +242,13 @@ class SpyAgent(sa.SettingsAgent):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch, settings_mac):
+    return _make_env(tmp_path, monkeypatch, settings_mac)
+
+
+def _make_env(tmp_path, monkeypatch, settings_mac, *, fetcher=None, config=None):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config_path = tmp_path / "config.toml"
-    save_config(Config(), config_path)
+    save_config(config or Config(), config_path)
     ollama = GatedOllama([call("set_setting", key="sounds_enabled", value="off")])
     SpyAgent.used = []
 
@@ -259,6 +263,8 @@ def env(tmp_path, monkeypatch, settings_mac):
 
     hub = FakeHub(None)
     hub.settings_agent_factory = agent
+    if fetcher is not None:
+        hub.diarization_status_fetcher = fetcher
     controller = settings_mac.SettingsPageController.alloc().initWithHub_(hub)
     controller.delivered = threading.Event()
     hub.settings_page = controller
@@ -580,6 +586,233 @@ def test_switches_are_the_house_switch_with_tokens_label_and_state(env):
         assert view.label == labels[key], key
         assert view.target is env.controller and view.action == "manualToggle:", key
     assert switches["sounds_enabled"].state() == ON
+
+
+# ------------------------------------------------------ speaker labels ---
+
+SPEAKER_KEYS = ("speaker_diarization", "diarize_mic")
+NOT_READY = {"extra_installed": True, "models_ready": False,
+             "reason": "run `lf speakers download`"}
+READY = {"extra_installed": True, "models_ready": True, "reason": None}
+
+
+def test_speaker_label_switches_are_meetings_settings():
+    assert sa.LABELS["speaker_diarization"] == "Speaker labels"
+    assert sa.LABELS["diarize_mic"] == "Label speakers on my microphone"
+    meetings = dict(sa.MANUAL_GROUPS)["Meetings"]
+    at = meetings.index("capture_system_audio")
+    assert meetings[at + 1:at + 3] == SPEAKER_KEYS
+    for key in SPEAKER_KEYS:
+        assert sa.NOTES[key] == "From the next meeting"
+        assert sa.control_kind(key) == "switch"
+        assert key in sa.SAFETY_SWITCHES
+        line = sa.setting_change(key, False, True).line()
+        assert line.endswith("(From the next meeting)")
+    assert sa.setting_change("speaker_diarization", False, True).line() == (
+        "Speaker labels: Off → On (From the next meeting)"
+    )
+    off = sa.setting_change("speaker_diarization", True, False)
+    assert off.warning("turn off speaker labels") == "Check: turns Speaker labels off."
+    on = sa.setting_change("speaker_diarization", False, True)
+    mic = sa.setting_change("diarize_mic", False, True)
+    assert on.warning("turn on speaker labels") == ""
+    assert "doesn't seem" in mic.warning("turn on speaker labels")
+    assert mic.warning("label speakers on my mic too") == ""
+
+
+@pytest.mark.parametrize("status,reason", [
+    (None, None),
+    ("not a dict", None),
+    ({}, None),
+    ({"download": {"state": "idle"}}, None),
+    (READY, None),
+    ({"extra_installed": False, "models_ready": True}, hub_settings.DIAR_NO_RUNTIME),
+    ({"extra_installed": False, "models_ready": False, "reason": "x"},
+     hub_settings.DIAR_NO_RUNTIME),
+    (NOT_READY, "run `lf speakers download`"),
+    ({"extra_installed": True, "models_ready": False}, hub_settings.DIAR_NO_MODELS),
+    ({"extra_installed": True, "models_ready": False, "reason": ""},
+     hub_settings.DIAR_NO_MODELS),
+    ({"extra_installed": True, "models_ready": False, "reason": None},
+     hub_settings.DIAR_NO_MODELS),
+    ({"extra_installed": True, "models_ready": False, "reason": ["x"]},
+     hub_settings.DIAR_NO_MODELS),
+    ({"models_ready": False, "reason": "a\nb\u202e"}, "a\\u000ab\\u202e"),
+])
+def test_diarization_disabled_reason(status, reason):
+    assert hub_settings.diarization_disabled_reason(status) == reason
+
+
+def test_diarization_reason_is_bounded():
+    reason = hub_settings.diarization_disabled_reason(
+        {"models_ready": False, "reason": "x" * 1000}
+    )
+    assert len(reason) <= 201 and reason.endswith("…")
+
+
+def test_set_diarization_status_fills_and_clears_both_rows():
+    state = hub_settings.SettingsPageState()
+    assert state.set_diarization_status(None) is False
+    assert state.set_diarization_status(NOT_READY) is True
+    assert state.disabled_reasons == dict.fromkeys(SPEAKER_KEYS, "run `lf speakers download`")
+    assert state.set_diarization_status(NOT_READY) is False
+    state.clear_manual()
+    state.cancel()
+    assert state.disabled_reasons  # only the status clears it
+    assert state.set_diarization_status(READY) is True
+    assert state.disabled_reasons == {}
+
+
+@pytest.mark.parametrize("content", [MIN_CONTENT, WIDE_CONTENT])
+@pytest.mark.parametrize("with_error", [False, True])
+def test_disabled_reason_wraps_under_its_row_without_overlaps(content, with_error):
+    state = hub_settings.SettingsPageState()
+    long_reason = "Download the speaker models in Models & keys before turning this on " * 3
+    state.set_diarization_status({"models_ready": False, "reason": long_reason})
+    if with_error:
+        state.manual_failed("speaker_diarization", None, "Could not save: disk full " * 4)
+    rows = _rows()
+    width = hub_settings.manual_panel_width(content)
+    manual = hub_settings.manual_layout(width, rows, state, measure)
+    inner = width - 2 * hub_settings.CARD_PAD
+    frames = [manual["title"], manual["intro"]] + [f for _n, f in manual["groups"]]
+    for row in manual["rows"].values():
+        frames += list(row.values())
+    for x, y, w, h in frames:
+        assert x >= 0 and x + w <= width and y >= 0 and y + h <= manual["height"]
+    for first, second in itertools.combinations(frames, 2):
+        assert not overlap(first, second), (first, second)
+    for key in SPEAKER_KEYS:
+        row = manual["rows"][key]
+        rx, ry, rw, rh = row["reason"]
+        assert (rx, rw) == (hub_settings.CARD_PAD, inner)
+        _lx, ly, _lw, lh = row["label"]
+        _cx, cy, _cw, ch = row["control"]
+        assert ry >= max(ly + lh, cy + ch)
+        if content == MIN_CONTENT:
+            assert rh > hub_settings.LINE_H  # wrapped, not clipped
+        if with_error and key == "speaker_diarization":
+            assert row["error"][1] >= ry + rh
+    for key, row in manual["rows"].items():
+        if key not in SPEAKER_KEYS:
+            assert "reason" not in row
+
+
+def test_no_disabled_reasons_leaves_the_layout_unchanged():
+    rows = _rows()
+    plain = hub_settings.manual_layout(MIN_CONTENT, rows, hub_settings.SettingsPageState(),
+                                       measure)
+    state = hub_settings.SettingsPageState()
+    state.set_diarization_status(READY)
+    assert hub_settings.manual_layout(MIN_CONTENT, rows, state, measure) == plain
+
+
+class Fetcher:
+    def __init__(self, result):
+        self.result = result
+        self.calls = 0
+        self.gate = threading.Event()
+        self.gate.set()
+
+    def __call__(self):
+        self.calls += 1
+        assert self.gate.wait(2)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _status_env(tmp_path, monkeypatch, settings_mac, result, **kwargs):
+    fetcher = Fetcher(result)
+    built = _make_env(tmp_path, monkeypatch, settings_mac, fetcher=fetcher, **kwargs)
+    assert built.controller.delivered.wait(2)
+    built.controller.diarizationStatusDone_(None)
+    built.fetcher = fetcher
+    return built
+
+
+def test_not_ready_disables_the_speaker_switches_with_a_reason(
+        tmp_path, monkeypatch, settings_mac):
+    env = _status_env(tmp_path, monkeypatch, settings_mac, NOT_READY)
+    for key, (_kind, view) in env.controller.manual_controls.items():
+        assert view.enabled is (key not in SPEAKER_KEYS), key
+    assert label_texts().count("run `lf speakers download`") >= 2
+    switch = control(env, "speaker_diarization")
+    switch.setState_(ON)
+    env.controller.manualToggle_(switch)
+    assert SpyAgent.used == []
+    assert env.config().speaker_diarization is False
+
+
+def test_unavailable_status_leaves_every_switch_enabled(tmp_path, monkeypatch, settings_mac):
+    from localflow.meeting_client import MeetingClientError
+
+    env = _status_env(tmp_path, monkeypatch, settings_mac,
+                      MeetingClientError("server down"))
+    assert all(view.enabled is True for _k, view in env.controller.manual_controls.values())
+    assert env.controller.state.disabled_reasons == {}
+    assert "server down" not in " ".join(label_texts())
+
+
+def test_ready_status_lets_speaker_labels_be_turned_on(tmp_path, monkeypatch, settings_mac):
+    env = _status_env(tmp_path, monkeypatch, settings_mac, READY)
+    switch = control(env, "speaker_diarization")
+    assert switch.enabled is True
+    switch.setState_(ON)
+    env.controller.manualToggle_(switch)
+    assert SpyAgent.used == [("set_setting", "speaker_diarization", True)]
+    assert env.config().speaker_diarization is True
+    assert env.controller.state.manual_notice == (
+        "Saved: Speaker labels: Off → On (From the next meeting)"
+    )
+
+
+def test_a_switch_already_on_stays_usable_when_not_ready(tmp_path, monkeypatch, settings_mac):
+    env = _status_env(tmp_path, monkeypatch, settings_mac, NOT_READY,
+                      config=Config(speaker_diarization=True))
+    assert control(env, "speaker_diarization").enabled is True
+    assert control(env, "diarize_mic").enabled is False
+    assert "run `lf speakers download`" in label_texts()
+    switch = control(env, "speaker_diarization")
+    switch.setState_(OFF)
+    env.controller.manualToggle_(switch)
+    assert env.config().speaker_diarization is False
+    # Now off and still not ready: it can't be turned back on.
+    assert control(env, "speaker_diarization").enabled is False
+
+
+def test_late_status_after_closing_is_ignored(tmp_path, monkeypatch, settings_mac):
+    fetcher = Fetcher(NOT_READY)
+    fetcher.gate.clear()
+    env = _make_env(tmp_path, monkeypatch, settings_mac, fetcher=fetcher)
+    env.controller.shutdown()
+    rebuilds = env.hub.rebuilds
+    fetcher.gate.set()
+    assert env.controller.delivered.wait(2)
+    env.controller.diarizationStatusDone_(None)
+    assert env.controller.state.disabled_reasons == {}
+    assert env.hub.rebuilds == rebuilds
+
+
+def test_status_is_fetched_once_across_rebuilds(tmp_path, monkeypatch, settings_mac):
+    env = _status_env(tmp_path, monkeypatch, settings_mac, NOT_READY)
+    for _ in range(3):
+        env.hub._rebuild_current_page()
+    env.controller.diarizationStatusDone_(None)  # nothing queued: no-op
+    assert env.fetcher.calls == 1
+    assert control(env, "diarize_mic").enabled is False  # kept across rebuilds
+
+
+def test_default_fetcher_uses_the_hubs_meeting_client(settings_mac):
+    calls = []
+    hub = FakeHub(None)
+    hub.meeting_client = types.SimpleNamespace(
+        diarization_status=lambda: calls.append(1) or READY,
+    )
+    controller = settings_mac.SettingsPageController.alloc().initWithHub_(hub)
+    assert controller.diarization_fetcher() == READY and calls == [1]
+    assert settings_mac.SettingsPageController.alloc().initWithHub_(
+        FakeHub(None)).diarization_fetcher is None
 
 
 def test_preview_warnings_get_their_own_rows_inside_the_card():

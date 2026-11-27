@@ -37,6 +37,8 @@ pub const LIVE_FIELDS: &[&str] = &[
     "meeting_watch",
     "meeting_auto_start",
     "capture_system_audio",
+    "speaker_diarization",
+    "diarize_mic",
     "meeting_default_template",
     "work_prompts",
     DICTATION_ENABLED,
