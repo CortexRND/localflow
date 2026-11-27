@@ -635,7 +635,10 @@ fn save_sends_only_fields_changed_in_this_editor(cx: &mut TestAppContext) {
         a.save_rule(cx);
     });
     cx.run_until_parked();
-    assert_eq!(fake.rule_bodies()[before..], [json!({"provider": "devin"})]);
+    assert_eq!(
+        fake.rule_bodies()[before..],
+        [json!({"provider": "devin", "profile": ""})]
+    );
     let rule = agents.read_with(cx, |a, _| {
         a.rules_for_test()
             .iter()

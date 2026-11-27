@@ -229,10 +229,11 @@ pub fn edit_patch(baseline: &RuleDraft, draft: &RuleDraft) -> Value {
     if trigger != old.trigger.trim() {
         out.insert("trigger".into(), json!(trigger));
     }
-    if draft.provider != old.provider {
+    // The selector chooses provider and profile as one pair: send both
+    // when either changed, even if the chosen profile equals the opening
+    // value (a concurrent edit may have changed it meanwhile).
+    if draft.provider != old.provider || draft.profile != old.profile {
         out.insert("provider".into(), json!(draft.provider));
-    }
-    if draft.profile != old.profile {
         out.insert("profile".into(), json!(draft.profile));
     }
     if draft.repo != old.repo {
@@ -737,7 +738,7 @@ mod tests {
         cli.prompt_template = "Changed elsewhere: {prompt}".into();
         assert_eq!(
             edit_patch(&opened, &mine),
-            json!({"provider": "devin", "repo": "localflow"}),
+            json!({"provider": "devin", "profile": "", "repo": "localflow"}),
             "the task edited elsewhere isn't sent back"
         );
         assert!(
