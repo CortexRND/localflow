@@ -17,7 +17,7 @@
 
 use std::ops::Range;
 
-use crate::controllers::assistant::{mixed_token, secret_patterns};
+use crate::controllers::assistant::{assignment_value, mixed_token, secret_patterns};
 
 pub const REDACTED: &str = "[redacted]";
 
@@ -71,7 +71,9 @@ pub fn scan(text: &str) -> Vec<Finding> {
     let [assignment, bearer, prefixed, long] = secret_patterns();
     let mut found: Vec<(Range<usize>, &'static str)> = Vec::new();
     for c in assignment.captures_iter(text) {
-        if let (Some(name), Some(value)) = (c.get(1), c.get(2)) {
+        if let Some(name) = c.get(1) {
+            // A quoted value is one finding, spaces and all.
+            let value = assignment_value(&c);
             found.push((value.range(), kind_for_name(name.as_str())));
         }
     }
@@ -175,6 +177,60 @@ mod tests {
     use super::*;
 
     const KEY: &str = "sk-live-4f9QxZ2mT8vB7nR1kL0pY3wE";
+
+    /// Words of the quoted fixture passphrase (never printed on failure).
+    const PHRASE: [&str; 4] = ["correct", "horse", "battery", "staple"];
+
+    /// A quoted value with spaces is one credential: Redact and launch
+    /// leaves no word of it, in double or single quotes, `=` or `:`.
+    #[test]
+    fn a_quoted_value_with_spaces_is_one_finding() {
+        for task in [
+            "Log in with password=\"correct horse battery staple\" then deploy",
+            "Use api_key: 'correct horse battery staple' for staging",
+            "{\"secret\": \"correct horse battery staple\", \"user\": \"bob\"}",
+            "Set PASSWORD = \"correct horse battery staple\"\nand continue",
+        ] {
+            let findings = scan(task);
+            assert_eq!(findings.len(), 1, "one finding per quoted value");
+            let redacted = redact(task);
+            for word in PHRASE {
+                assert!(!redacted.contains(word), "a word survived redaction");
+            }
+            assert!(redacted.contains(REDACTED));
+            let masked = crate::controllers::assistant::mask_secrets(task);
+            for word in &PHRASE[..3] {
+                assert!(!masked.contains(word), "a word survived masking");
+            }
+            assert!(!masked.contains("staple"), "the last word survived masking");
+        }
+        // Quotes around the value stay; the rest of the line is untouched.
+        // (`assert!`, not `assert_eq!`: a failure never prints the value.)
+        assert!(
+            redact("password=\"correct horse battery staple\" then deploy")
+                == "password=\"[redacted]\" then deploy",
+            "the quoted value is replaced whole, quotes kept"
+        );
+        assert!(
+            redact("{\"secret\": \"correct horse battery staple\", \"user\": \"bob\"}")
+                == "{\"secret\": \"[redacted]\", \"user\": \"bob\"}",
+            "JSON-ish text keeps its shape"
+        );
+    }
+
+    /// Unquoted and unclosed values still end at the first space.
+    #[test]
+    fn unquoted_and_unclosed_values_keep_their_bounds() {
+        assert!(
+            redact("password=hunter2hunter2 for staging") == "password=[redacted] for staging",
+            "an unquoted value ends at the space"
+        );
+        assert!(
+            redact("password=\"hunter2hunter2 for staging") == "password=\"[redacted] for staging",
+            "an unclosed quote is an unquoted value"
+        );
+        assert!(scan("Rename the password field to passphrase").is_empty());
+    }
 
     #[test]
     fn findings_give_kind_and_line_but_never_the_value() {

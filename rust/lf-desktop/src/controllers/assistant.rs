@@ -35,7 +35,16 @@ pub fn mask_secrets(text: &str) -> String {
     let [assignment, bearer, prefixed, long] = secret_patterns();
     let mask = |value: &str| lf_providers::keys::mask_key(value);
     let text = assignment.replace_all(text, |c: &regex::Captures| {
-        format!("{}{}", &c[1], mask(&c[2]))
+        // Only the value is replaced; the name and any quotes stay.
+        let (whole, value) = (c.get(0).expect("match"), assignment_value(c));
+        let at = |i: usize| i - whole.start();
+        let s = whole.as_str();
+        format!(
+            "{}{}{}",
+            &s[..at(value.start())],
+            mask(value.as_str()),
+            &s[at(value.end())..]
+        )
     });
     let text = bearer.replace_all(&text, |c: &regex::Captures| {
         format!("{}{}", &c[1], mask(&c[2]))
@@ -52,6 +61,14 @@ pub fn mask_secrets(text: &str) -> String {
     .into_owned()
 }
 
+/// The value of an `assignment` match (quoted or not; never the quotes).
+pub(crate) fn assignment_value<'t>(c: &regex::Captures<'t>) -> regex::Match<'t> {
+    c.name("dq")
+        .or_else(|| c.name("sq"))
+        .or_else(|| c.name("bare"))
+        .expect("an assignment match has a value")
+}
+
 /// A long token is credential-like only when it mixes letters and digits.
 pub(crate) fn mixed_token(token: &str) -> bool {
     token.chars().any(|ch| ch.is_ascii_digit()) && token.chars().any(|ch| ch.is_ascii_alphabetic())
@@ -59,15 +76,19 @@ pub(crate) fn mixed_token(token: &str) -> bool {
 
 /// The credential-like spans [`mask_secrets`] masks, shared with the agent
 /// launcher's pre-launch check (`controllers::agents_secrets`):
-/// `[assignment, bearer, prefixed, long]`. In `assignment` and `bearer`
-/// the value is capture group 2.
+/// `[assignment, bearer, prefixed, long]`. In `assignment` the name is
+/// capture group 1 and the value is [`assignment_value`]; in `bearer` the
+/// value is capture group 2.
 pub(crate) fn secret_patterns() -> &'static [regex::Regex; 4] {
     use std::sync::OnceLock;
     static PATTERNS: OnceLock<[regex::Regex; 4]> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         [
+            // A quoted value is one value up to its closing quote, spaces
+            // included (`password="correct horse battery staple"`); an
+            // unquoted (or unclosed) one ends at whitespace or punctuation.
             regex::Regex::new(
-                r#"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|secret|client[_-]?secret|password|passwd|apikey|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*["']?)([^\s"'&,;}\]]+)"#,
+                r#"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|secret|client[_-]?secret|password|passwd|apikey|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*)(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|["']?(?P<bare>[^\s"'&,;}\]]+))"#,
             )
             .expect("static regex"),
             regex::Regex::new(r"(?i)(bearer\s+)([A-Za-z0-9._~+/=\-]{8,})").expect("static regex"),
