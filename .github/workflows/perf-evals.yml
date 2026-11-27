@@ -44,6 +44,10 @@ concurrency:
   group: perf-evals-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Cached whisper.cpp objects must run on any runner CPU (no -march=native).
+  GGML_NATIVE: "OFF"
+
 jobs:
   smoke:
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')
@@ -80,6 +84,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+          env-vars: GGML_NATIVE
 
       - name: Cache HF models
         uses: actions/cache@v4
@@ -394,6 +399,7 @@ jobs:
         with:
           workspaces: rust
           key: perf-nightly
+          env-vars: GGML_NATIVE
 
       - name: Cache HF models
         uses: actions/cache@v4
@@ -647,6 +653,7 @@ jobs:
         with:
           workspaces: rust
           key: perf-deep
+          env-vars: GGML_NATIVE
 
       - name: Cache HF models
         uses: actions/cache@v4
