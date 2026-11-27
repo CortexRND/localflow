@@ -538,7 +538,7 @@ mod tests {
     fn manual_and_current_rows_are_native_agent_data() {
         let (_dir, adapter) = setup(vec![]);
         let rows = adapter.manual_settings(None).unwrap();
-        assert_eq!(rows.len(), 24);
+        assert_eq!(rows.len(), 26);
         assert_eq!(rows[0].key, "dictation_enabled");
         assert_eq!(rows[0].label, "Dictation");
         assert_eq!(rows[0].kind, "switch");

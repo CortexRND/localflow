@@ -1611,7 +1611,7 @@ mod tests {
                 .manual_errors
                 .insert("hotkey".into(), "e ".repeat(120));
             let layout = manual_layout(width, &rows, &state, &measure);
-            assert_eq!(layout.rows.len(), 24);
+            assert_eq!(layout.rows.len(), 26);
             assert_eq!(
                 layout
                     .groups
@@ -1798,7 +1798,7 @@ mod tests {
     #[test]
     fn preview_runs_off_thread_then_apply_and_undo() {
         let (backend, mut controller) = setup();
-        assert_eq!(controller.manual_rows.len(), 24);
+        assert_eq!(controller.manual_rows.len(), 26);
         assert!(controller.state.undo_lines.is_none());
         backend.script_proposal(proposal("gemma4:e4b"));
         assert!(controller.start_preview("   ").is_none());

@@ -106,6 +106,19 @@ pub fn font(size: f64, weight: Weight) -> Retained<NSFont> {
     NSFont::systemFontOfSize_weight(size, w)
 }
 
+/// [`font`] with monospaced (tabular) digits, for numbers that change.
+pub fn tabular_font(size: f64, weight: Weight) -> Retained<NSFont> {
+    // SAFETY: immutable global constants.
+    let w = unsafe {
+        match weight {
+            Weight::Regular => NSFontWeightRegular,
+            Weight::Semibold => NSFontWeightSemibold,
+            Weight::Bold => NSFontWeightBold,
+        }
+    };
+    NSFont::monospacedDigitSystemFontOfSize_weight(size, w)
+}
+
 fn attributes(pairs: &[(&NSString, &AnyObject)]) -> Retained<NSDictionary<NSString, AnyObject>> {
     let keys: Vec<&NSString> = pairs.iter().map(|(k, _)| *k).collect();
     let values: Vec<&AnyObject> = pairs.iter().map(|(_, v)| *v).collect();

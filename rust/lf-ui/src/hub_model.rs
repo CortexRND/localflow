@@ -333,6 +333,321 @@ pub const HISTORY_CLEAR_CONFIRM: &str = "Clear all history and stored clips?";
 pub const HISTORY_RETRY_UNAVAILABLE: &str =
     "Retry needs speech-to-text, which isn't available in this build.";
 
+// -------------------------------------------------------------------- speed ---
+
+/// The Home "Speed" card reads the perf ledger summary over this window
+/// (`summarize_events(..)["dictation"]`, the same numbers as `/api/perf`).
+pub const SPEED_WINDOW: &str = "7d";
+pub const SPEED_TITLE: &str = "Speed";
+pub const SPEED_CAPTION_PREFIX: &str = "Last 7 days";
+pub const SPEED_NONE: &str = "—";
+pub const SPEED_STAGE_LABELS: [(&str, &str); 5] = [
+    ("queue_ms", "Queue"),
+    ("stt_ms", "STT"),
+    ("llm_ms", "Cleanup LLM"),
+    ("render_ms", "Render"),
+    ("paste_ms", "Paste"),
+];
+/// Labels of the card's three metrics, left to right.
+pub const SPEED_METRIC_LABELS: [&str; 3] = ["Median time", "Median RTF", "Slowest step"];
+pub const SPEED_CARD_H: i32 = 112;
+/// Extra height when the hint line is shown.
+pub const SPEED_CARD_HINT_H: i32 = 22;
+
+/// Display strings of the Home "Speed" card (`SpeedCard` in `hub_model.py`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeedCard {
+    pub count: u64,
+    pub median: String,
+    pub rtf: String,
+    pub slowest: String,
+    pub hint: Option<String>,
+    pub caption: String,
+}
+
+impl SpeedCard {
+    /// `(label, value)` of the three metrics, left to right.
+    pub fn metrics(&self) -> [(&'static str, &str); 3] {
+        [
+            (SPEED_METRIC_LABELS[0], self.median.as_str()),
+            (SPEED_METRIC_LABELS[1], self.rtf.as_str()),
+            (SPEED_METRIC_LABELS[2], self.slowest.as_str()),
+        ]
+    }
+
+    pub fn height(&self) -> i32 {
+        let hint = if self.hint.is_some() {
+            SPEED_CARD_HINT_H
+        } else {
+            0
+        };
+        SPEED_CARD_H + hint
+    }
+}
+
+/// Half away from zero for non-negative values (identical to Python's `_half_up`).
+fn half_up(value: f64) -> u64 {
+    (value + 0.5).floor() as u64
+}
+
+fn speed_number(value: Option<&Value>) -> Option<f64> {
+    value
+        .filter(|v| v.is_number())
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+fn format_speed_value(value: Option<f64>) -> String {
+    let Some(value) = value else {
+        return SPEED_NONE.into();
+    };
+    let whole = half_up(value);
+    if whole < 1000 {
+        return format!("{whole} ms");
+    }
+    let tenths = half_up(value / 100.0);
+    format!("{}.{} s", tenths / 10, tenths % 10)
+}
+
+/// `420 ms` below a second, else seconds to one decimal (`1.2 s`).
+pub fn format_speed_ms(ms: Option<&Value>) -> String {
+    format_speed_value(speed_number(ms))
+}
+
+/// Real-time factor to two decimals (`0.12×`); tiny but non-zero is `<0.01×`.
+pub fn format_rtf(rtf: Option<&Value>) -> String {
+    let Some(value) = speed_number(rtf) else {
+        return SPEED_NONE.into();
+    };
+    let hundredths = half_up(value * 100.0);
+    if hundredths == 0 && value > 0.0 {
+        return "<0.01×".into();
+    }
+    format!("{}.{:02}×", hundredths / 100, hundredths % 100)
+}
+
+pub fn speed_stage_label(stage: Option<&str>) -> &'static str {
+    stage
+        .and_then(|stage| {
+            SPEED_STAGE_LABELS
+                .iter()
+                .find(|(key, _)| *key == stage)
+                .map(|(_, label)| *label)
+        })
+        .unwrap_or(SPEED_NONE)
+}
+
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The Speed card for a `/api/perf` summary, or `None` to hide the card.
+///
+/// Hidden when perf metrics are off, the summary is missing or malformed, or
+/// the window has no timed dictation (no `median_total_ms`), so a new user
+/// never sees an empty card and empty-state Home looks as before.
+pub fn speed_card_from_summary(summary: Option<&Value>, enabled: bool) -> Option<SpeedCard> {
+    if !enabled {
+        return None;
+    }
+    let dictation = summary?.get("dictation")?.as_object()?;
+    let count = dictation
+        .get("count")
+        .filter(|v| v.is_u64() || v.is_i64())
+        .and_then(Value::as_u64)
+        .filter(|count| *count > 0)?;
+    let median = speed_number(dictation.get("median_total_ms"))?;
+    let hint = dictation
+        .get("hint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .map(sentence);
+    Some(SpeedCard {
+        count,
+        median: format_speed_value(Some(median)),
+        rtf: format_rtf(dictation.get("median_rtf")),
+        slowest: speed_stage_label(dictation.get("slowest_stage").and_then(Value::as_str)).into(),
+        hint,
+        caption: format!(
+            "{SPEED_CAPTION_PREFIX} · {count} dictation{}",
+            if count == 1 { "" } else { "s" }
+        ),
+    })
+}
+
+/// The local perf ledger's [`SPEED_WINDOW`] summary; `None` when perf
+/// metrics are off in `config` (the Hub never fails over the ledger).
+pub fn load_perf_summary(config: &Config) -> Option<Value> {
+    if !lf_core::perf_ledger::enabled(config) {
+        return None;
+    }
+    lf_core::perf_ledger::summarize(&lf_core::perf_ledger::PerfLedger::default(), SPEED_WINDOW).ok()
+}
+
+/// Reads the `/api/perf` summary for the given (latest) config.
+pub type PerfSummaryFn = dyn Fn(&Config) -> Option<Value>;
+
+/// The card for `config` from the Hub's perf `source` (`None`: no card).
+pub fn home_speed_card(source: Option<&PerfSummaryFn>, config: &Config) -> Option<SpeedCard> {
+    let enabled = lf_core::perf_ledger::enabled(config);
+    let summary = source.filter(|_| enabled).and_then(|source| source(config));
+    speed_card_from_summary(summary.as_ref(), enabled)
+}
+
+#[cfg(test)]
+mod speed_card_tests {
+    use super::*;
+
+    fn summary(dictation: Value) -> Value {
+        json!({"window": "7d", "total_events": 3, "dictation": dictation})
+    }
+
+    fn full(hint: Option<&str>) -> Value {
+        summary(json!({
+            "count": 12,
+            "median_total_ms": 420.4,
+            "p95_total_ms": 1800.0,
+            "median_rtf": 0.1234,
+            "slowest_stage": "llm_ms",
+            "budget_ms": 1500.0,
+            "hint": hint,
+        }))
+    }
+
+    #[test]
+    fn formats_milliseconds_and_seconds() {
+        let ms = |v: Value| format_speed_ms(Some(&v));
+        assert_eq!(ms(json!(420)), "420 ms");
+        assert_eq!(ms(json!(420.5)), "421 ms");
+        assert_eq!(ms(json!(0)), "0 ms");
+        assert_eq!(ms(json!(999.4)), "999 ms");
+        assert_eq!(ms(json!(999.6)), "1.0 s");
+        assert_eq!(ms(json!(1234)), "1.2 s");
+        assert_eq!(ms(json!(1250)), "1.3 s");
+        assert_eq!(ms(json!(61_049.0)), "61.0 s");
+        assert_eq!(ms(json!(-1)), SPEED_NONE);
+        assert_eq!(ms(json!("420")), SPEED_NONE);
+        assert_eq!(ms(Value::Null), SPEED_NONE);
+        assert_eq!(format_speed_ms(None), SPEED_NONE);
+    }
+
+    #[test]
+    fn formats_rtf() {
+        let rtf = |v: Value| format_rtf(Some(&v));
+        assert_eq!(rtf(json!(0.1234)), "0.12×");
+        assert_eq!(rtf(json!(0.125)), "0.13×");
+        assert_eq!(rtf(json!(1.5)), "1.50×");
+        assert_eq!(rtf(json!(0)), "0.00×");
+        assert_eq!(rtf(json!(0.001)), "<0.01×");
+        assert_eq!(rtf(Value::Null), SPEED_NONE);
+        assert_eq!(format_rtf(None), SPEED_NONE);
+    }
+
+    #[test]
+    fn stage_labels() {
+        let labels: Vec<_> = ["stt_ms", "llm_ms", "queue_ms", "render_ms", "paste_ms"]
+            .iter()
+            .map(|s| speed_stage_label(Some(s)))
+            .collect();
+        assert_eq!(labels, ["STT", "Cleanup LLM", "Queue", "Render", "Paste"]);
+        assert_eq!(speed_stage_label(Some("total_ms")), SPEED_NONE);
+        assert_eq!(speed_stage_label(None), SPEED_NONE);
+    }
+
+    #[test]
+    fn card_from_summary_with_and_without_hint() {
+        let card = speed_card_from_summary(Some(&full(Some("cleanup LLM is the slow step"))), true)
+            .unwrap();
+        assert_eq!(
+            card,
+            SpeedCard {
+                count: 12,
+                median: "420 ms".into(),
+                rtf: "0.12×".into(),
+                slowest: "Cleanup LLM".into(),
+                hint: Some("Cleanup LLM is the slow step".into()),
+                caption: "Last 7 days · 12 dictations".into(),
+            }
+        );
+        assert_eq!(
+            card.metrics(),
+            [
+                ("Median time", "420 ms"),
+                ("Median RTF", "0.12×"),
+                ("Slowest step", "Cleanup LLM"),
+            ]
+        );
+        assert_eq!(card.height(), SPEED_CARD_H + SPEED_CARD_HINT_H);
+        let quiet = speed_card_from_summary(Some(&full(None)), true).unwrap();
+        assert_eq!(quiet.hint, None);
+        assert_eq!(quiet.height(), SPEED_CARD_H);
+        let blank = speed_card_from_summary(Some(&full(Some("  "))), true).unwrap();
+        assert_eq!(blank.hint, None);
+    }
+
+    #[test]
+    fn single_dictation_without_rtf_or_stage() {
+        let card = speed_card_from_summary(
+            Some(&summary(json!({"count": 1, "median_total_ms": 1500.0,
+                "median_rtf": null, "slowest_stage": null, "hint": null}))),
+            true,
+        )
+        .unwrap();
+        assert_eq!(card.median, "1.5 s");
+        assert_eq!(card.rtf, SPEED_NONE);
+        assert_eq!(card.slowest, SPEED_NONE);
+        assert_eq!(card.caption, "Last 7 days · 1 dictation");
+    }
+
+    #[test]
+    fn hidden_when_empty_disabled_or_malformed() {
+        assert_eq!(speed_card_from_summary(Some(&full(None)), false), None);
+        assert_eq!(speed_card_from_summary(None, true), None);
+        for bad in [
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"dictation": null}),
+            summary(json!({"count": 0, "median_total_ms": null})),
+            summary(json!({"count": 3, "median_total_ms": null})),
+            summary(json!({"count": true, "median_total_ms": 400})),
+            summary(json!({"count": -1, "median_total_ms": 400})),
+            summary(json!({"count": "3", "median_total_ms": 400})),
+        ] {
+            assert_eq!(speed_card_from_summary(Some(&bad), true), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn empty_ledger_summary_hides_the_card() {
+        let summary =
+            lf_core::perf_ledger::summarize_events(&[], SPEED_WINDOW, chrono::Utc::now()).unwrap();
+        assert_eq!(speed_card_from_summary(Some(&summary), true), None);
+    }
+
+    #[test]
+    fn home_card_honours_source_and_perf_metrics() {
+        let mut config = Config::default();
+        let source = |_: &Config| Some(full(None));
+        assert!(home_speed_card(Some(&source), &config).is_some());
+        assert_eq!(home_speed_card(None, &config), None);
+        let failing = |_: &Config| None;
+        assert_eq!(home_speed_card(Some(&failing), &config), None);
+        // How the native Hub holds its source (`HubServices::perf_summary`).
+        type Source = std::rc::Rc<PerfSummaryFn>;
+        let held: Option<Source> = Some(std::rc::Rc::new(load_perf_summary));
+        config.set_field("perf_metrics", json!(false));
+        assert_eq!(home_speed_card(Some(&source), &config), None);
+        assert_eq!(home_speed_card(held.as_deref(), &config), None);
+        assert_eq!(load_perf_summary(&config), None);
+    }
+}
+
 #[cfg(test)]
 mod home_history_tests {
     use super::*;

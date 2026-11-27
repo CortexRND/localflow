@@ -75,6 +75,8 @@ pub const MANUAL_GROUPS: &[(&str, &[&str])] = &[
             "meeting_watch",
             "meeting_auto_start",
             "capture_system_audio",
+            "speaker_diarization",
+            "diarize_mic",
             "meeting_default_template",
             "work_prompts",
         ],
@@ -91,6 +93,8 @@ pub const BOOL_KEYS: &[&str] = &[
     "meeting_watch",
     "meeting_auto_start",
     "capture_system_audio",
+    "speaker_diarization",
+    "diarize_mic",
     "work_prompts",
 ];
 
@@ -118,6 +122,8 @@ pub fn label(key: &str) -> &str {
         "meeting_watch" => "Meeting detection",
         "meeting_auto_start" => "Auto-start meetings",
         "capture_system_audio" => "Capture system audio",
+        "speaker_diarization" => "Speaker labels",
+        "diarize_mic" => "Label speakers on my microphone",
         "meeting_default_template" => "Default meeting template",
         "work_prompts" => "Work prompts",
         _ => key,
@@ -293,7 +299,14 @@ impl Change {
                     display_value(key, before),
                     display_value(key, value)
                 );
-                if ["capture_system_audio", "meeting_default_template"].contains(&key.as_str()) {
+                if [
+                    "capture_system_audio",
+                    "speaker_diarization",
+                    "diarize_mic",
+                    "meeting_default_template",
+                ]
+                .contains(&key.as_str())
+                {
                     format!("{text} (From the next meeting)")
                 } else {
                     text
@@ -946,6 +959,10 @@ fn mentions(c: &Change, request: &str) -> bool {
                     "start automatically",
                 ],
                 "capture_system_audio" => &["system audio", "capture audio", "other participants"],
+                "speaker_diarization" => {
+                    &["speaker label", "diarization", "diarisation", "who spoke"]
+                }
+                "diarize_mic" => &["my microphone", "my mic", "microphone speakers"],
                 "meeting_default_template" => &["template"],
                 "work_prompts" => &["work prompt"],
                 _ => &[],

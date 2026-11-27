@@ -9,17 +9,21 @@ use std::rc::Rc;
 
 use lf_core::history::Stats;
 use objc2::DefinedClass;
-use objc2_app_kit::{NSAccessibility, NSControlStateValueOff, NSControlStateValueOn, NSSwitch};
+use objc2_app_kit::{
+    NSAccessibility, NSControlStateValueOff, NSControlStateValueOn, NSSwitch, NSTextAlignment,
+    NSView,
+};
 use objc2_foundation::NSString;
 
 use crate::hub_model::{
     dictation_state, history_empty_state, home_decoration_frame, home_stat_cards,
-    home_stats_summary, stat_layout,
+    home_stats_summary, stat_layout, SpeedCard, SPEED_TITLE,
 };
 use crate::mac::page::{HubPage, PageCtx};
 use crate::mac::pages::history::{empty_state, history_listing};
 use crate::mac::style::{
-    hide_from_accessibility, rect, rect_of, style_surface, FlippedView, HalftoneView, SurfaceStyle,
+    color, hide_from_accessibility, rect, rect_of, style_surface, tabular_font, FlippedView,
+    HalftoneView, SurfaceStyle,
 };
 use crate::mac::widgets::{label, LabelStyle};
 use crate::tokens::{Weight, SUN_TEXT};
@@ -214,6 +218,10 @@ impl HubPage for HomePage {
         ));
         cursor += 36.0;
 
+        if let Some(card) = ctx.services.speed_card() {
+            cursor += speed_card(ctx, &card, cursor);
+        }
+
         ctx.body.addSubview(&label(
             mtm,
             "Recent dictations",
@@ -259,6 +267,100 @@ impl HubPage for HomePage {
         }
         cursor + history_listing(ctx, &ctx.body, cursor, &rows, |_| None)
     }
+}
+
+/// The Speed card (`_speed_card` in `hub_mac.py`): a hairline surface with
+/// the window caption, three tabular-digit metrics and, over budget, a hint
+/// marked by a small sun dot. Returns the vertical room it took.
+fn speed_card(ctx: &PageCtx, card: &SpeedCard, top: f64) -> f64 {
+    let mtm = ctx.mtm;
+    let p = ctx.palette;
+    let width = ctx.width;
+    let height = f64::from(card.height());
+    let view = FlippedView::new(mtm, rect(0.0, top, width, height));
+    style_surface(&view, &p, &SurfaceStyle::default());
+    let small = |color: &'static str, weight: Weight| LabelStyle {
+        size: 12.0,
+        color,
+        height: 16.0,
+        weight,
+        wrap: false,
+    };
+    view.addSubview(&label(
+        mtm,
+        &SPEED_TITLE.to_uppercase(),
+        16.0,
+        14.0,
+        160.0,
+        small("muted", Weight::Semibold),
+        &p,
+    ));
+    let caption = label(
+        mtm,
+        &card.caption,
+        width - 236.0,
+        14.0,
+        220.0,
+        small("muted", Weight::Regular),
+        &p,
+    );
+    caption.setAlignment(NSTextAlignment::Right);
+    view.addSubview(&caption);
+    let column = (width - 32.0) / 3.0;
+    for (index, (title, value)) in card.metrics().iter().enumerate() {
+        let x = 16.0 + index as f64 * column;
+        view.addSubview(&label(
+            mtm,
+            title,
+            x,
+            40.0,
+            column - 12.0,
+            small("muted", Weight::Regular),
+            &p,
+        ));
+        let number = label(
+            mtm,
+            value,
+            x,
+            58.0,
+            column - 12.0,
+            LabelStyle {
+                size: 22.0,
+                height: 30.0,
+                weight: Weight::Semibold,
+                ..LabelStyle::default()
+            },
+            &p,
+        );
+        // Tabular digits: the numbers do not jiggle as they change.
+        number.setFont(Some(&tabular_font(22.0, Weight::Semibold)));
+        view.addSubview(&number);
+    }
+    if let Some(hint) = &card.hint {
+        let dot = NSView::initWithFrame(mtm.alloc::<NSView>(), rect(16.0, 104.0, 8.0, 8.0));
+        dot.setWantsLayer(true);
+        if let Some(layer) = dot.layer() {
+            layer.setCornerRadius(4.0);
+            layer.setBackgroundColor(Some(&color("sun", &p).CGColor()));
+        }
+        hide_from_accessibility(&dot);
+        view.addSubview(&dot);
+        view.addSubview(&label(
+            mtm,
+            hint,
+            32.0,
+            99.0,
+            width - 48.0,
+            LabelStyle {
+                size: 12.0,
+                height: 18.0,
+                ..LabelStyle::default()
+            },
+            &p,
+        ));
+    }
+    ctx.body.addSubview(&view);
+    height + 24.0
 }
 
 fn frame_f64(frame: (i32, i32, i32, i32)) -> (f64, f64, f64, f64) {

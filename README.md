@@ -422,8 +422,8 @@ its status (checked offline), **Download** with progress and **Cancel**, **Verif
   `max_speakers` caps the count per stream (0 = automatic, at most 10).
 - **When.** Labels are applied when the meeting stops; the live log stays Me/Others.
   Settings are read when a meeting starts. A running Python server picks up file edits to
-  `speaker_diarization` and `speaker_recognition` for the next meeting; edits to
-  `diarize_mic`, `max_speakers` and `diarization_backend` need a server restart. A Rust
+  `speaker_diarization`, `diarize_mic` and `speaker_recognition` for the next meeting; edits to
+  `max_speakers` and `diarization_backend` need a server restart. A Rust
   server reads all five keys from the file at each meeting start.
 - **If it can't run.** Models are never downloaded on their own. Without the extra or the
   models, or if labelling fails or takes longer than 20 s at stop, the meeting is saved

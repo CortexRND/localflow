@@ -1572,12 +1572,17 @@ def test_live_speaker_flags_keep_other_settings_behaviour(client, caplog):
     before = server._config
     with caplog.at_level(logging.INFO, "localflow.live_config"):
         server._apply_live_config(dataclasses.replace(
-            before, speaker_recognition=True, diarize_mic=True, server_port=1))
+            before, speaker_recognition=True, diarize_mic=True, server_port=1,
+            diarization_max_speakers=before.diarization_max_speakers + 3))
     assert server._config.speaker_recognition is True
-    assert server._config.diarize_mic is False and server._config.server_port == before.server_port
+    # A Settings switch (ALLOWLIST), so it is live like capture_system_audio.
+    assert server._config.diarize_mic is True
+    assert server._config.server_port == before.server_port
+    assert server._config.diarization_max_speakers == before.diarization_max_speakers
     restart = [r.getMessage() for r in caplog.records if "restart" in r.getMessage()]
     assert restart and "speaker_recognition" not in restart[0]
-    assert "diarize_mic" in restart[0]
+    assert "diarize_mic" not in restart[0]
+    assert "diarization_max_speakers" in restart[0] and "server_port" in restart[0]
 
 
 def _saved_on_disk(**flags):

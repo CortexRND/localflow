@@ -12,17 +12,27 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
-from localflow.config import apply_config_update, load_config, save_config
+from localflow.config import (
+    ConfigError,
+    apply_config_update,
+    config_path,
+    load_config,
+    save_config,
+)
 from localflow.dictionary import DictionaryError, DictionaryStore
 from localflow.history import HistoryStore
 from localflow.hub_model import (
     SPEAKER_TARGET_PLACEHOLDER,
     SPEAKERS_HEADING,
+    SPEED_TITLE,
     SpeakerPanel,
     dictation_state,
+    home_speed_card,
+    load_perf_summary,
     meeting_diarization_status,
     speaker_row_meta,
 )
+from localflow.hub_settings import DIARIZATION_KEYS, diarization_disabled_reason
 from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, VoiceRecording, vault_notes_path
 from localflow.models_layout import (
@@ -68,6 +78,7 @@ from localflow.people_model import (
     recognition_update,
     recording_status,
 )
+from localflow.settings_agent import LABELS as SETTING_LABELS
 from localflow.ui_tokens import (
     CARD_GAP,
     CARD_PADDING,
@@ -83,6 +94,27 @@ from localflow.ui_tokens import (
 )
 
 PAGES = ("Home", "Meetings", "History", "Dictionary", "Style", "Models")
+# The speaker-label switches on the Meetings page (same labels as Settings).
+SPEAKER_TOGGLES = tuple((key, SETTING_LABELS[key]) for key in DIARIZATION_KEYS)
+
+
+class _BoolState:
+    """Plain-Python toggle state paired with a tk.Checkbutton (avoids tk.Variable GC races)."""
+
+    def __init__(self, value, widget):
+        self._value = bool(value)
+        self._widget = widget
+        self.set(self._value)
+
+    def get(self):
+        return self._value
+
+    def set(self, value):
+        self._value = bool(value)
+        if self._value:
+            self._widget.select()
+        else:
+            self._widget.deselect()
 
 
 def _one_line(text, limit):
@@ -100,6 +132,7 @@ class HubWindow:
         theme="light",
         meeting_client=None,
         initial_page="Home",
+        perf_summary=None,
         *,
         storage_cache=None,
         speaker_backend=None,
@@ -115,6 +148,14 @@ class HubWindow:
             else HistoryStore(enabled=self.config.history_enabled)
         )
         self.dictionary = dictionary_store or DictionaryStore()
+        # `perf_summary()` returns the /api/perf summary behind the Home Speed
+        # card. Injected stores (tests, snapshots) show no card unless a source
+        # is passed; the real Hub reads the local perf ledger.
+        if perf_summary is None and history_store is None:
+            # `perf_metrics` is checked against the live config on every render.
+            perf_summary = load_perf_summary
+        self.perf_summary = perf_summary
+        self.speed_card = None
         self.meeting_client = meeting_client or MeetingClient()
         self._meeting_after = None
         self._meeting_notes_after = None
@@ -126,6 +167,7 @@ class HubWindow:
         self._meeting_templates = []
         self._meeting_template = ""
         self._meeting_status_data = {}
+        self._meeting_diar_status = None
         self._meeting_session_active = False
         self._meeting_last_saved = None
         self._meeting_chat = []
@@ -449,11 +491,12 @@ class HubWindow:
             bg=self.tokens["paper"],
             fg=self.tokens["muted"],
         ).pack(anchor="w", pady=(10, 0))
+        self._speed_card()
         tk.Label(
             self.body, text="Recent dictations", bg=self.tokens["paper"],
             fg=self.tokens["ink"], font=(self.font_family, 15, "bold"),
-        ).pack(anchor="w", pady=(24, 10))
-        rows = self.history.recent(limit=4)
+        ).pack(anchor="w", pady=(16 if self.speed_card else 24, 10))
+        rows = self.history.recent(limit=2 if self.speed_card else 4)
         if not rows:
             self._empty_state(
                 self.body, "No dictations yet",
@@ -470,6 +513,58 @@ class HubWindow:
             self._history_line(listing, row, actions=False)
             if index < len(rows) - 1:
                 tk.Frame(listing, bg=self.tokens["line"], height=1).pack(fill="x")
+
+    def _perf_config(self):
+        try:
+            return load_config() if config_path().exists() else self._live_config.get()
+        except (ConfigError, OSError, ValueError):
+            return self._live_config.get()
+
+    def _speed_card(self):
+        """The Speed card under the stats line; nothing at all without data."""
+        card = home_speed_card(self.perf_summary, self._perf_config())
+        self.speed_card = card
+        if card is None:
+            return
+        background = self.tokens["surface"]
+        surface = tk.Frame(
+            self.body, bg=background, padx=CARD_PADDING, pady=14,
+            highlightbackground=self.tokens["line"], highlightthickness=1,
+        )
+        surface.pack(fill="x", pady=(16, 0))
+        header = tk.Frame(surface, bg=background)
+        header.pack(fill="x")
+        tk.Label(
+            header, text=SPEED_TITLE.upper(), bg=background, fg=self.tokens["muted"],
+            font=(self.font_family, 11, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            header, text=card.caption, bg=background, fg=self.tokens["muted"],
+            font=(self.font_family, 11),
+        ).pack(side="right")
+        metrics = tk.Frame(surface, bg=background)
+        metrics.pack(fill="x", pady=(10, 0))
+        for label, value in card.metrics():
+            column = tk.Frame(metrics, bg=background)
+            column.pack(side="left", fill="x", expand=True)
+            tk.Label(
+                column, text=label, bg=background, fg=self.tokens["muted"],
+                font=(self.font_family, 11),
+            ).pack(anchor="w")
+            tk.Label(
+                column, text=value, bg=background, fg=self.tokens["ink"],
+                font=(self.font_family, 20, "bold"),
+            ).pack(anchor="w", pady=(2, 0))
+        if card.hint:
+            hint = tk.Frame(surface, bg=background)
+            hint.pack(fill="x", pady=(10, 0))
+            dot = tk.Canvas(hint, width=8, height=8, bg=background, highlightthickness=0)
+            dot.create_oval(0, 0, 8, 8, fill=self.tokens["sun"], outline="")
+            dot.pack(side="left", padx=(0, 8))
+            tk.Label(
+                hint, text=card.hint, bg=background, fg=self.tokens["ink"],
+                font=(self.font_family, 12),
+            ).pack(side="left")
 
     def _toggle_dictation(self):
         try:
@@ -1321,6 +1416,43 @@ class HubWindow:
             font=(self.font_family, 12), anchor="w",
         )
         self.meeting_template_menu.pack(fill="x", pady=(0, 12))
+        tk.Label(
+            self.meeting_setup, text="Speakers", bg=self.tokens["paper"],
+            fg=self.tokens["ink"], font=(self.font_family, 11, "bold"),
+        ).pack(anchor="w", pady=(0, 5))
+        live = self._live_config.get()
+        self.config = replace(
+            self.config,
+            speaker_diarization=live.speaker_diarization,
+            diarize_mic=live.diarize_mic,
+        )
+        self.meeting_speaker_vars = {}
+        self.meeting_speaker_checks = {}
+        for key, label in SPEAKER_TOGGLES:
+            check = tk.Checkbutton(
+                self.meeting_setup, text=label,
+                command=lambda key=key: self._meeting_set_speaker_flag(key),
+                bg=self.tokens["paper"], fg=self.tokens["ink"],
+                disabledforeground=self.tokens["muted"],
+                activebackground=self.tokens["paper"],
+                activeforeground=self.tokens["ink"],
+                selectcolor=self.tokens["surface"], highlightthickness=0,
+                font=(self.font_family, 12), anchor="w",
+            )
+            var = _BoolState(getattr(self.config, key, False), check)
+            check.pack(fill="x", pady=(0, 2))
+            self.meeting_speaker_vars[key] = var
+            self.meeting_speaker_checks[key] = check
+        self.meeting_speaker_reason = tk.Label(
+            self.meeting_setup, text="", bg=self.tokens["paper"],
+            fg=self.tokens["muted"], font=(self.font_family, 11),
+            anchor="w", justify="left", wraplength=720,
+        )
+        self.meeting_speaker_spacer = tk.Frame(
+            self.meeting_setup, bg=self.tokens["paper"], height=10,
+        )
+        self.meeting_speaker_spacer.pack(fill="x")
+        self._meeting_render_speaker_toggles()
         self.meeting_setup.pack(fill="x")
 
         notes_heading = tk.Frame(self.meeting_content, bg=self.tokens["paper"])
@@ -1402,6 +1534,7 @@ class HubWindow:
         if self._meeting_error_message:
             self._meeting_show_error(self._meeting_error_message)
         self._meeting_request("templates", self._meeting_templates_loaded)
+        self._meeting_request_diarization()
         self._meeting_poll()
         if people_request:
             self._people_send(people_request)
@@ -1410,7 +1543,53 @@ class HubWindow:
         self.meeting_down.pack_forget()
         self.meeting_content.pack(fill="both", expand=True)
         self._meeting_request("templates", self._meeting_templates_loaded)
+        self._meeting_request_diarization()
         self._meeting_poll()
+
+    def _meeting_request_diarization(self):
+        # Older clients (and test fakes) have no diarization_status: then the
+        # speaker switches simply stay enabled.
+        if callable(getattr(self.meeting_client, "diarization_status", None)):
+            self._meeting_request("diarization_status", self._meeting_diar_received)
+
+    def _meeting_diar_received(self, result, error):
+        # Unknown (server down, older server) is not "not ready".
+        self._meeting_diar_status = None if error else result
+        if self.page == "Meetings":
+            self._meeting_render_speaker_toggles()
+
+    def _meeting_render_speaker_toggles(self):
+        if not hasattr(self, "meeting_speaker_checks"):
+            return
+        reason = diarization_disabled_reason(self._meeting_diar_status)
+        for key, check in self.meeting_speaker_checks.items():
+            # Already on stays usable, so it can always be turned off.
+            off = not self.meeting_speaker_vars[key].get()
+            check.configure(state="disabled" if reason and off else "normal")
+        if reason:
+            self.meeting_speaker_reason.configure(text=reason)
+            self.meeting_speaker_reason.pack(
+                fill="x", pady=(2, 0), before=self.meeting_speaker_spacer,
+            )
+        else:
+            self.meeting_speaker_reason.configure(text="")
+            self.meeting_speaker_reason.pack_forget()
+
+    def _meeting_set_speaker_flag(self, key):
+        var = self.meeting_speaker_vars[key]
+        value = not var.get()
+        var.set(value)
+        try:
+            fresh = load_config()
+            updated = apply_config_update(fresh, {"meetings": {key: value}})
+            save_config(updated)
+            self.config = updated
+            if hasattr(self, "meeting_error"):
+                self.meeting_error.configure(text="")
+        except Exception as exc:  # noqa: BLE001
+            var.set(not value)
+            self._meeting_show_error(exc)
+        self._meeting_render_speaker_toggles()
 
     def _meeting_templates_loaded(self, result, error):
         if error:
