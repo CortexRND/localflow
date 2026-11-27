@@ -19,6 +19,8 @@ use serde_json::{json, Map, Value};
 
 use crate::data::{open_history, DataRoot, Services, SANDBOX_MARKER};
 
+pub mod agents;
+
 const MARKER_TEXT: &str = "This directory is a LocalFlow desktop sandbox.\n\
 It holds example data only. Nothing here is your real LocalFlow data.\n\
 Delete it at any time, or run `lf-desktop --sandbox --sandbox-reset`.\n";
@@ -183,15 +185,20 @@ pub fn check_dir(dir: &Path) -> Result<()> {
 /// The caller holds the sandbox's instance lock, so no other window uses
 /// the data being reset; the instance directory itself is kept.
 pub fn prepare(dir: &Path, reset: bool) -> Result<DataRoot> {
-    prepare_with(dir, reset, false)
+    prepare_with(dir, reset, None)
 }
 
 // ------------------------------------------------- speaker-label fixture ---
 
-/// Marks a sandbox seeded with `--sandbox-fixture` (speaker labels on, two
-/// meetings with two speakers each, two remembered voices, ready models).
-/// Only ever written beside [`SANDBOX_MARKER`] in an explicit `--data-dir`.
+/// Marks a sandbox seeded with a `speakers-*` `--sandbox-fixture` (speaker
+/// labels on, two meetings with two speakers each, two remembered voices,
+/// ready models). Only ever written beside [`SANDBOX_MARKER`] in an explicit
+/// `--data-dir`.
 pub const FIXTURE_MARKER: &str = "speaker-fixture";
+/// Marks a sandbox seeded with an `agents-*` `--sandbox-fixture`: the fake
+/// agents service is on (its clock pinned) and nothing else changes. Kept
+/// apart from [`FIXTURE_MARKER`] so the speaker scenes don't gain Agents.
+pub const AGENTS_FIXTURE_MARKER: &str = "agents-fixture";
 /// The meeting the next sandbox Stop saves with speaker labels.
 pub const FIXTURE_SAVED_ID: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 /// The Recent note saved earlier with speaker labels.
@@ -210,15 +217,47 @@ pub enum Fixture {
     SpeakersSettings,
     /// People: read the remembered voices.
     SpeakersPeople,
+    /// Agents: select the session that needs input (mockup M4).
+    AgentsPage,
+    /// Agents: one session in every state (mockup M6).
+    AgentsStates,
+    /// Agents: a running session with activity and the reply field.
+    AgentsDetail,
+    /// The launcher, empty field, seeded sessions (mockup M1).
+    AgentsLauncher,
+    /// The launcher with a typed task (mockup M2, without context).
+    AgentsLauncherTyped,
+    /// The launcher blocked on a seeded fake credential (mockup M3).
+    AgentsLauncherSecret,
+    /// The launcher with no provider connected (mockup M5).
+    AgentsLauncherEmpty,
 }
 
 impl Fixture {
-    pub const ALL: [Fixture; 4] = [
+    pub const ALL: [Fixture; 11] = [
         Fixture::SpeakersSaved,
         Fixture::SpeakersRecent,
         Fixture::SpeakersSettings,
         Fixture::SpeakersPeople,
+        Fixture::AgentsPage,
+        Fixture::AgentsStates,
+        Fixture::AgentsDetail,
+        Fixture::AgentsLauncher,
+        Fixture::AgentsLauncherTyped,
+        Fixture::AgentsLauncherSecret,
+        Fixture::AgentsLauncherEmpty,
     ];
+
+    /// A launcher scene: `--agents-launcher` over the agents fixture.
+    pub fn is_launcher(self) -> bool {
+        matches!(
+            self,
+            Fixture::AgentsLauncher
+                | Fixture::AgentsLauncherTyped
+                | Fixture::AgentsLauncherSecret
+                | Fixture::AgentsLauncherEmpty
+        )
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -226,6 +265,13 @@ impl Fixture {
             Fixture::SpeakersRecent => "speakers-recent",
             Fixture::SpeakersSettings => "speakers-settings",
             Fixture::SpeakersPeople => "speakers-people",
+            Fixture::AgentsPage => "agents-page",
+            Fixture::AgentsStates => "agents-states",
+            Fixture::AgentsDetail => "agents-detail",
+            Fixture::AgentsLauncher => "agents-launcher",
+            Fixture::AgentsLauncherTyped => "agents-launcher-typed",
+            Fixture::AgentsLauncherSecret => "agents-launcher-secret",
+            Fixture::AgentsLauncherEmpty => "agents-launcher-empty",
         }
     }
 
@@ -240,6 +286,27 @@ impl Fixture {
             Fixture::SpeakersSaved | Fixture::SpeakersRecent => Page::Meetings,
             Fixture::SpeakersSettings => Page::Settings,
             Fixture::SpeakersPeople => Page::People,
+            Fixture::AgentsPage
+            | Fixture::AgentsStates
+            | Fixture::AgentsDetail
+            | Fixture::AgentsLauncher
+            | Fixture::AgentsLauncherTyped
+            | Fixture::AgentsLauncherSecret
+            | Fixture::AgentsLauncherEmpty => Page::Agents,
+        }
+    }
+
+    /// An `agents-*` scene (its own marker and data; see
+    /// [`AGENTS_FIXTURE_MARKER`]).
+    pub fn is_agents(self) -> bool {
+        self.page() == crate::page::Page::Agents
+    }
+
+    fn marker(self) -> &'static str {
+        if self.is_agents() {
+            AGENTS_FIXTURE_MARKER
+        } else {
+            FIXTURE_MARKER
         }
     }
 }
@@ -273,6 +340,23 @@ pub fn has_fixture(root: &DataRoot) -> bool {
     root.sandbox_dir
         .as_ref()
         .is_some_and(|dir| dir.join(FIXTURE_MARKER).is_file())
+}
+
+/// Whether this sandbox was seeded for the `agents-*` scenes.
+pub fn has_agents_fixture(root: &DataRoot) -> bool {
+    root.sandbox_dir
+        .as_ref()
+        .is_some_and(|dir| dir.join(AGENTS_FIXTURE_MARKER).is_file())
+}
+
+/// Mark a freshly seeded sandbox for the `agents-*` scenes.
+pub(crate) fn add_agents_fixture(root: &DataRoot) -> Result<()> {
+    let base = root.sandbox_dir.clone().expect("sandbox root");
+    fs::write(
+        base.join(AGENTS_FIXTURE_MARKER),
+        "agents screenshot fixture\n",
+    )?;
+    Ok(())
 }
 
 /// The two speakers of each fixture meeting (distinct labels and talk time).
@@ -323,10 +407,11 @@ fn seed_fixture(root: &DataRoot) -> Result<()> {
     Ok(())
 }
 
-/// [`prepare`], optionally with the speaker fixture. The fixture only seeds
-/// a new (or reset) directory: one already seeded without it is refused,
-/// so example data is never mixed into an existing sandbox.
-pub fn prepare_with(dir: &Path, reset: bool, fixture: bool) -> Result<DataRoot> {
+/// [`prepare`], optionally with a scene's fixture (speaker or agents data).
+/// The fixture only seeds a new (or reset) directory: one already seeded
+/// without it is refused, so example data is never mixed into an existing
+/// sandbox.
+pub fn prepare_with(dir: &Path, reset: bool, fixture: Option<Fixture>) -> Result<DataRoot> {
     let marker = dir.join(SANDBOX_MARKER);
     if reset && dir.exists() {
         // Only ever delete a directory we seeded ourselves.
@@ -346,18 +431,23 @@ pub fn prepare_with(dir: &Path, reset: bool, fixture: bool) -> Result<DataRoot> 
     }
     let root = DataRoot::sandbox(dir);
     if marker.exists() {
-        anyhow::ensure!(
-            !fixture || dir.join(FIXTURE_MARKER).is_file(),
-            "{} was seeded without the speaker fixture; use a new --data-dir or --sandbox-reset",
-            dir.display()
-        );
+        if let Some(f) = fixture {
+            anyhow::ensure!(
+                dir.join(f.marker()).is_file(),
+                "{} was seeded without the {} fixture; use a new --data-dir or --sandbox-reset",
+                dir.display(),
+                if f.is_agents() { "agents" } else { "speaker" }
+            );
+        }
         return Ok(root);
     }
     check_dir(dir)?;
     fs::create_dir_all(&root.localflow_dir)?;
     seed(&root)?;
-    if fixture {
-        add_fixture(&root)?;
+    match fixture {
+        Some(f) if f.is_agents() => add_agents_fixture(&root)?,
+        Some(_) => add_fixture(&root)?,
+        None => {}
     }
     fs::write(&marker, MARKER_TEXT)?;
     Ok(root)
@@ -1997,13 +2087,18 @@ mod tests {
         assert_eq!(client.speakers(FIXTURE_RECENT_ID).unwrap(), None);
         assert!(people(&plain).is_empty());
         // A plain sandbox can't be turned into a fixture one in place.
-        let err = prepare_with(&dir.path().join("plain"), false, true).unwrap_err();
+        let speaker_scene = Some(Fixture::SpeakersSaved);
+        let err = prepare_with(&dir.path().join("plain"), false, speaker_scene).unwrap_err();
         assert!(format!("{err:#}").contains("--sandbox-reset"), "{err:#}");
         assert!(!has_fixture(&plain));
 
         let base = dir.path().join("speakers");
-        let root = prepare_with(&base, false, true).unwrap();
+        let root = prepare_with(&base, false, speaker_scene).unwrap();
         assert!(has_fixture(&root));
+        assert!(
+            !has_agents_fixture(&root),
+            "speaker scenes don't get Agents"
+        );
         let config = config::load_from(&root.config_path).unwrap();
         assert_eq!(config.field_bool("speaker_diarization"), Some(true));
         assert!(crate::controllers::people::enabled(&config));
@@ -2024,12 +2119,23 @@ mod tests {
         );
         assert_eq!(people(&root).len(), 2);
         // Relaunching with or without the fixture keeps the same data.
-        assert!(prepare_with(&base, false, true).is_ok());
+        assert!(prepare_with(&base, false, speaker_scene).is_ok());
         assert!(has_fixture(&prepare(&base, false).unwrap()));
         assert!(client
             .calls()
             .iter()
             .all(|c| !matches!(c, MeetingCall::RenameSpeaker { .. })));
+        // A speaker sandbox isn't an agents one (and the other way round).
+        let agents = Some(Fixture::AgentsPage);
+        let err = prepare_with(&base, false, agents).unwrap_err();
+        assert!(format!("{err:#}").contains("agents fixture"), "{err:#}");
+        let base = dir.path().join("agents");
+        let root = prepare_with(&base, false, agents).unwrap();
+        assert!(has_agents_fixture(&root) && !has_fixture(&root));
+        let config = config::load_from(&root.config_path).unwrap();
+        assert_eq!(config.field_bool("speaker_recognition"), Some(false));
+        assert!(prepare_with(&base, false, Some(Fixture::AgentsStates)).is_ok());
+        assert!(prepare_with(&base, false, speaker_scene).is_err());
         for fixture in Fixture::ALL {
             assert_eq!(Fixture::parse(fixture.name()), Some(fixture));
         }

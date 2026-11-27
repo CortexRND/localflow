@@ -32,20 +32,7 @@ use serde_json::{json, Value};
 /// credential-like names, `Bearer <token>`, provider-style prefixes
 /// (`sk-…`, `gsk_…`, `ghp_…`, …) and long mixed letter/digit tokens.
 pub fn mask_secrets(text: &str) -> String {
-    use std::sync::OnceLock;
-    static PATTERNS: OnceLock<[regex::Regex; 4]> = OnceLock::new();
-    let [assignment, bearer, prefixed, long] = PATTERNS.get_or_init(|| {
-        [
-            regex::Regex::new(
-                r#"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|secret|client[_-]?secret|password|passwd|apikey|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*["']?)([^\s"'&,;}\]]+)"#,
-            )
-            .expect("static regex"),
-            regex::Regex::new(r"(?i)(bearer\s+)([A-Za-z0-9._~+/=\-]{8,})").expect("static regex"),
-            regex::Regex::new(r"\b(?:sk|gsk|xai|fw|pk|rk|ghp|gho|hf|sk_live|sk_test)[-_][A-Za-z0-9_\-]{8,}")
-                .expect("static regex"),
-            regex::Regex::new(r"[A-Za-z0-9_\-]{24,}").expect("static regex"),
-        ]
-    });
+    let [assignment, bearer, prefixed, long] = secret_patterns();
     let mask = |value: &str| lf_providers::keys::mask_key(value);
     let text = assignment.replace_all(text, |c: &regex::Captures| {
         format!("{}{}", &c[1], mask(&c[2]))
@@ -56,15 +43,39 @@ pub fn mask_secrets(text: &str) -> String {
     let text = prefixed.replace_all(&text, |c: &regex::Captures| mask(&c[0]));
     long.replace_all(&text, |c: &regex::Captures| {
         let token = &c[0];
-        let mixed = token.chars().any(|ch| ch.is_ascii_digit())
-            && token.chars().any(|ch| ch.is_ascii_alphabetic());
-        if mixed {
+        if mixed_token(token) {
             mask(token)
         } else {
             token.to_string()
         }
     })
     .into_owned()
+}
+
+/// A long token is credential-like only when it mixes letters and digits.
+pub(crate) fn mixed_token(token: &str) -> bool {
+    token.chars().any(|ch| ch.is_ascii_digit()) && token.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+/// The credential-like spans [`mask_secrets`] masks, shared with the agent
+/// launcher's pre-launch check (`controllers::agents_secrets`):
+/// `[assignment, bearer, prefixed, long]`. In `assignment` and `bearer`
+/// the value is capture group 2.
+pub(crate) fn secret_patterns() -> &'static [regex::Regex; 4] {
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<[regex::Regex; 4]> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            regex::Regex::new(
+                r#"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|secret|client[_-]?secret|password|passwd|apikey|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*["']?)([^\s"'&,;}\]]+)"#,
+            )
+            .expect("static regex"),
+            regex::Regex::new(r"(?i)(bearer\s+)([A-Za-z0-9._~+/=\-]{8,})").expect("static regex"),
+            regex::Regex::new(r"\b(?:sk|gsk|xai|fw|pk|rk|ghp|gho|hf|sk_live|sk_test)[-_][A-Za-z0-9_\-]{8,}")
+                .expect("static regex"),
+            regex::Regex::new(r"[A-Za-z0-9_\-]{24,}").expect("static regex"),
+        ]
+    })
 }
 
 pub struct Assistant {

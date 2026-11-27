@@ -70,6 +70,20 @@ pub struct Launch {
     pub instance: Instance,
     /// `--sandbox-fixture`: the screenshot scene's one action after launch.
     pub fixture: Option<crate::sandbox::Fixture>,
+    /// `--page agents`: opened once the service says whether Agents is on
+    /// (Home with the unknown-page notice if it isn't). `notice` is `None`.
+    pub agents_request: bool,
+    /// `--agent-session`: the session a cold-start `--page agents` selects.
+    pub agent_session: Option<String>,
+}
+
+/// A request for the `agents` page (an unknown name: it has no Hub route).
+fn is_agents_request(request: &Request) -> bool {
+    request.is_unknown_home()
+        && request
+            .unknown_page
+            .as_deref()
+            .is_some_and(Page::is_agents_name)
 }
 
 pub struct Toast {
@@ -232,6 +246,7 @@ pub enum View {
     Models(Entity<pages::models::ModelsPage>),
     Settings(Entity<pages::settings::SettingsPage>),
     People(Entity<pages::people::PeoplePage>),
+    Agents(Entity<pages::agents::AgentsPage>),
 }
 
 pub struct Shell {
@@ -240,6 +255,15 @@ pub struct Shell {
     views: Vec<(Page, View)>,
     pub health: Health,
     pub pending_prompts: usize,
+    /// The service last reported the agents feature on (see
+    /// [`Shell::agents_enabled`]).
+    agents: bool,
+    /// The newest status probe (older replies are dropped).
+    agents_probe: u64,
+    /// A status probe has answered at least once.
+    agents_known: bool,
+    /// A request for `agents` waiting for that first answer.
+    pending_agents: Option<Request>,
     toast: Option<Toast>,
     toast_gen: u64,
     pub confirm: Option<Confirm>,
@@ -380,6 +404,16 @@ impl Shell {
                 Health::Unknown
             },
             pending_prompts: 0,
+            agents: false,
+            agents_probe: 0,
+            agents_known: false,
+            pending_agents: launch.agents_request.then(|| Request {
+                route: Route::Page(Page::Home),
+                unknown_page: Some(match &launch.agent_session {
+                    Some(id) => format!("agents/{id}"),
+                    None => "agents".into(),
+                }),
+            }),
             toast: None,
             toast_gen: 0,
             confirm: None,
@@ -412,6 +446,14 @@ impl Shell {
             shell.show_setup(cx);
         }
         shell.check_health(cx);
+        if launch.fixture.is_some_and(|f| f.is_agents()) {
+            // A scene draws the pinned in-memory seed, never the shared
+            // sandbox state another run left behind.
+            if let Some(fake) = shell.cx.services.remote.sandbox_agents() {
+                fake.use_fixture();
+            }
+        }
+        shell.probe_agents(cx);
         shell.probe_runtime(cx);
         shell.start_timers(cx);
         if let Some(fixture) = launch.fixture {
@@ -443,8 +485,94 @@ impl Shell {
                 v.update(cx, |p, cx| p.open_tab("meetings", cx))
             }
             (Fixture::SpeakersPeople, Some(View::People(v))) => v.update(cx, |p, cx| p.refresh(cx)),
+            (
+                Fixture::AgentsPage | Fixture::AgentsStates | Fixture::AgentsDetail,
+                Some(View::Agents(v)),
+            ) => v.update(cx, |p, cx| p.run_fixture(fixture, cx)),
             _ => {}
         }
+    }
+
+    /// Agents is shown (sidebar, routing, page) only while the service
+    /// reports the feature on: `GET /api/agents/status` answers v1 with
+    /// `enabled` (a 404 from an older or Rust server hides it). This is the
+    /// `[features] agents` gate of the design; the switch itself lives in
+    /// the service's config (`agents.enabled`), not in this window's.
+    pub fn agents_enabled(&self) -> bool {
+        self.agents
+    }
+
+    /// Ask the service whether Agents is on. The sandbox fake answers in
+    /// process (at once); real mode reads it in the background. Only a
+    /// decisive answer moves the gate ([`crate::controllers::agents::gate`]):
+    /// while the service is stopped or answers with an error the last
+    /// answer stands, so the page shows its own banner and Disconnected
+    /// rows instead of vanishing.
+    fn probe_agents(&mut self, cx: &mut Context<Self>) {
+        self.agents_probe = self.agents_probe.wrapping_add(1);
+        let generation = self.agents_probe;
+        let backend = self.cx.services.remote.agents(&self.cx.services.config());
+        if backend.simulated() {
+            let status = backend.status();
+            self.agents_answered(generation, status, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { backend.status() })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.agents_answered(generation, status, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// A status probe answered. A reply older than the newest probe is
+    /// dropped, so a slow "off" can't overwrite a newer "on".
+    fn agents_answered(
+        &mut self,
+        generation: u64,
+        status: Result<crate::controllers::agents::Status, crate::controllers::agents::AgentsError>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.agents_probe {
+            return;
+        }
+        if let Some(on) = crate::controllers::agents::gate(&status) {
+            self.set_agents(on, cx);
+        }
+        // The first answer of any kind settles a request for `agents` that
+        // arrived before the window knew (Agents, or Home with the notice).
+        if !self.agents_known {
+            self.agents_known = true;
+            if let Some(request) = self.pending_agents.take() {
+                self.route(request, cx);
+            }
+        }
+    }
+
+    fn set_agents(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.agents != on {
+            self.agents = on;
+            self.enforce_agents_gate(cx);
+            cx.notify();
+        }
+    }
+
+    /// The gate closed: drop the Agents view and leave the page if shown.
+    fn enforce_agents_gate(&mut self, cx: &mut Context<Self>) {
+        if self.agents {
+            return;
+        }
+        if self.page == Page::Agents {
+            self.page = Page::Home;
+            *self.cx.current_page.borrow_mut() = Page::Home;
+            self.ensure_view(Page::Home, cx);
+            cx.notify();
+        }
+        self.views.retain(|(page, _)| *page != Page::Agents);
     }
 
     /// People is shown (sidebar, routing, page) only while turned on.
@@ -462,6 +590,14 @@ impl Shell {
                 .is_some_and(Page::is_people_name);
         if people && self.people_enabled() {
             Route::Page(Page::People).into()
+        } else if is_agents_request(&request) && self.agents_enabled() {
+            Route::Page(Page::Agents).into()
+        } else if is_agents_request(&request) {
+            // Off: the notice names the page, not a session it carried.
+            Request {
+                unknown_page: Some("agents".into()),
+                ..request
+            }
         } else {
             request
         }
@@ -531,15 +667,40 @@ impl Shell {
         let Some(request) = self.instance.take_request() else {
             return;
         };
-        let request = self.resolve_people(request);
         window.activate_window();
+        self.route(request, cx);
+    }
+
+    /// Route a request. One for `agents` that arrives before the first
+    /// status probe has answered waits for it (see
+    /// [`Shell::agents_answered`]) rather than showing "no page called
+    /// agents" for a page that is about to exist.
+    fn route(&mut self, request: Request, cx: &mut Context<Self>) {
+        if !self.agents_known && is_agents_request(&request) {
+            self.pending_agents = Some(request);
+            return;
+        }
+        // `--page agents --agent-session <id>` (from the launcher).
+        let session = request
+            .unknown_page
+            .as_deref()
+            .filter(|_| is_agents_request(&request))
+            .and_then(Page::agents_session);
+        let request = self.resolve_people(request);
         match request.route {
             Route::Setup if self.confirm.is_none() => self.show_setup(cx),
             _ if self.setup_visible || self.confirm.is_some() => {
                 self.queued = Some(request);
                 self.apply_queued(cx);
             }
-            Route::Page(page) => self.open_routed(page, request.notice(), cx),
+            Route::Page(page) => {
+                self.open_routed(page, request.notice(), cx);
+                if let (Page::Agents, Some(id), Some(View::Agents(v))) =
+                    (self.page, session, self.find(Page::Agents))
+                {
+                    v.update(cx, |p, cx| p.open_session(id, cx));
+                }
+            }
             Route::Setup => self.queued = Some(request),
         }
     }
@@ -884,6 +1045,7 @@ impl Shell {
     /// Re-read config-derived state on every created page.
     pub fn refresh_views(&mut self, cx: &mut Context<Self>) {
         self.enforce_people_gate(cx);
+        self.probe_agents(cx);
         for (_, view) in &self.views {
             match view {
                 View::Home(v) => v.update(cx, |p, cx| p.refresh(cx)),
@@ -897,6 +1059,7 @@ impl Shell {
                 View::Models(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::Settings(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::People(v) => v.update(cx, |p, cx| p.refresh(cx)),
+                View::Agents(v) => v.update(cx, |p, cx| p.refresh(cx)),
             }
         }
     }
@@ -921,6 +1084,9 @@ impl Shell {
                     shell.health = health;
                     shell.refresh_views(cx);
                     cx.notify();
+                } else if shell.health == Health::Online {
+                    // The agents switch can change while the service runs.
+                    shell.probe_agents(cx);
                 }
             });
             if let Some(done) = done {
@@ -944,12 +1110,15 @@ impl Shell {
         }
         // People is only reachable while turned on (and the gate may have
         // closed since its sidebar entry was drawn).
-        let page = if page == Page::People && !self.people_enabled() {
+        let page = if (page == Page::People && !self.people_enabled())
+            || (page == Page::Agents && !self.agents_enabled())
+        {
             Page::Home
         } else {
             page
         };
         self.enforce_people_gate(cx);
+        self.enforce_agents_gate(cx);
         let leaving = self.page;
         if leaving == Page::Snippets && page != Page::Snippets {
             if let Some(View::Snippets(v)) = self.find(Page::Snippets) {
@@ -988,6 +1157,7 @@ impl Shell {
                 View::Models(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::Settings(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::People(v) => v.update(cx, |p, cx| p.refresh(cx)),
+                View::Agents(v) => v.update(cx, |p, cx| p.refresh(cx)),
             }
         }
         cx.notify();
@@ -1071,6 +1241,7 @@ impl Shell {
                 View::Settings(cx.new(|cx| pages::settings::SettingsPage::new(pcx, cx)))
             }
             Page::People => View::People(cx.new(|cx| pages::people::PeoplePage::new(pcx, cx))),
+            Page::Agents => View::Agents(cx.new(|cx| pages::agents::AgentsPage::new(pcx, cx))),
         };
         self.views.push((page, view));
     }
@@ -1128,6 +1299,7 @@ impl Shell {
             Some(View::Models(v)) => v.clone().into_any_element(),
             Some(View::Settings(v)) => v.clone().into_any_element(),
             Some(View::People(v)) => v.clone().into_any_element(),
+            Some(View::Agents(v)) => v.clone().into_any_element(),
             None => div().into_any_element(),
         }
     }
@@ -1141,6 +1313,7 @@ impl Shell {
             Some(View::History(v)) => v.update(cx, |p, cx| p.focus_search(window, cx)),
             Some(View::Snippets(v)) => v.update(cx, |p, cx| p.focus_search(window, cx)),
             Some(View::Dictionary(v)) => v.update(cx, |p, cx| p.focus_search(window, cx)),
+            Some(View::Agents(v)) => v.update(cx, |p, cx| p.focus_search(window, cx)),
             _ => {}
         }
     }
@@ -1154,6 +1327,7 @@ impl Shell {
             Some(View::Snippets(v)) => v.update(cx, |p, cx| p.new_snippet(window, cx)),
             Some(View::Dictionary(v)) => v.update(cx, |p, cx| p.focus_new_word(window, cx)),
             Some(View::Ask(v)) => v.update(cx, |p, cx| p.new_question(window, cx)),
+            Some(View::Agents(v)) => v.update(cx, |p, cx| p.new_task(None, cx)),
             _ => {}
         }
     }
@@ -1179,6 +1353,12 @@ impl Shell {
         }
         match self.find(self.page) {
             Some(View::History(v)) => v.update(cx, |p, cx| p.clear_search(window, cx)),
+            // Escape clears the Agents search; otherwise it passes on.
+            Some(View::Agents(v)) => {
+                if !v.update(cx, |p, cx| p.escape(window, cx)) {
+                    cx.propagate();
+                }
+            }
             // Escape stops a running Ask question; otherwise it passes on.
             Some(View::Ask(v)) => {
                 if !v.update(cx, |p, cx| p.escape(cx)) {
@@ -1198,7 +1378,7 @@ impl Shell {
             cx.propagate();
             return;
         }
-        let order = Page::visible_order(self.people_enabled());
+        let order = Page::visible_order(self.people_enabled(), self.agents_enabled());
         let i = order.iter().position(|p| *p == self.page).unwrap_or(0) as i32;
         let n = order.len() as i32;
         let next = order[((i + delta).rem_euclid(n)) as usize];
@@ -1209,6 +1389,7 @@ impl Shell {
 
     fn render_sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let people = self.people_enabled();
+        let agents = self.agents_enabled();
         let nav_item = |page: Page, cx: &mut Context<Self>| {
             let selected = self.page == page;
             let (sz, lh) = text::body();
@@ -1269,6 +1450,10 @@ impl Shell {
                 // People follows Meetings, only while it is turned on.
                 if *page == Page::Meetings && people {
                     groups = groups.child(nav_item(Page::People, cx));
+                }
+                // Agents follows Prompts, only while the service has it on.
+                if *page == Page::Prompts && agents {
+                    groups = groups.child(nav_item(Page::Agents, cx));
                 }
             }
         }
@@ -1947,7 +2132,7 @@ fn bind_keys(cx: &mut App) {
 }
 
 /// Prefer Figtree (if installed), then common Linux UI fonts.
-fn pick_font(cx: &App) -> SharedString {
+pub(crate) fn pick_font(cx: &App) -> SharedString {
     if cfg!(target_os = "macos") || cfg!(windows) {
         return ".SystemUIFont".into();
     }
@@ -2193,6 +2378,16 @@ pub(crate) mod focus_tests {
         prepare: impl FnOnce(&crate::data::DataRoot),
         cx: &mut TestAppContext,
     ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        open_launch(page, prepare, false, cx)
+    }
+
+    /// [`open_with`]; `agents_request` is a cold-start `--page agents`.
+    fn open_launch(
+        page: Page,
+        prepare: impl FnOnce(&crate::data::DataRoot),
+        agents_request: bool,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let launched = crate::launch::sandbox(
             &dir.path().join("sandbox"),
@@ -2217,6 +2412,8 @@ pub(crate) mod focus_tests {
             notice: None,
             instance,
             fixture: None,
+            agents_request,
+            agent_session: None,
         };
         let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(launch, cx));
         cx.update(|window, cx| {
@@ -2574,7 +2771,7 @@ pub(crate) mod focus_tests {
         shell.update(cx, |shell, cx| shell.navigate(Page::People, None, cx));
         assert_eq!(page(&shell, cx), Page::Home);
         assert!(!has_people_view(&shell, cx));
-        assert_eq!(Page::visible_order(false), Page::sidebar_order());
+        assert_eq!(Page::visible_order(false, false), Page::sidebar_order());
     }
 
     /// Both flags on: People is routable (no notice); turning the gate off
@@ -2597,6 +2794,1169 @@ pub(crate) mod focus_tests {
         cx.run_until_parked();
         assert_eq!(page(&shell, cx), Page::Home);
         assert!(!has_people_view(&shell, cx), "the list goes with the gate");
+    }
+
+    fn agents_request() -> crate::controllers::instance::Request {
+        crate::controllers::instance::Request {
+            route: Route::Page(Page::Home),
+            unknown_page: Some("agents".into()),
+        }
+    }
+
+    fn agents_fake(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) -> std::sync::Arc<crate::sandbox::agents::FakeAgents> {
+        shell.read_with(cx, |shell, _| {
+            shell
+                .cx
+                .services
+                .remote
+                .sandbox_agents()
+                .expect("sandbox agents")
+        })
+    }
+
+    /// Turn the fake service's `agents.enabled` on or off, as a real
+    /// service's status would report it on the next probe.
+    fn set_agents(shell: &Entity<Shell>, on: bool, cx: &mut VisualTestContext) {
+        agents_fake(shell, cx).set_enabled(on);
+        shell.update(cx, |shell, cx| shell.refresh_views(cx));
+        cx.run_until_parked();
+    }
+
+    fn agents_view(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) -> Option<Entity<pages::agents::AgentsPage>> {
+        shell.read_with(cx, |shell, _| match shell.find(Page::Agents) {
+            Some(View::Agents(view)) => Some(view.clone()),
+            _ => None,
+        })
+    }
+
+    /// Opens Agents with the fake service on and the list loaded.
+    fn open_agents(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Shell>,
+        Entity<pages::agents::AgentsPage>,
+        &mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let (shell, cx, dir) = open(Page::Home, cx);
+        set_agents(&shell, true, cx);
+        shell.update(cx, |shell, cx| shell.navigate(Page::Agents, None, cx));
+        cx.run_until_parked();
+        let view = agents_view(&shell, cx).expect("Agents is open");
+        (shell, view, cx, dir)
+    }
+
+    /// Off (the default sandbox, like a service without the feature): no
+    /// Agents anywhere; `agents` is an unknown page like any other.
+    #[gpui::test]
+    fn agents_is_hidden_and_unroutable_while_off(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::History, cx);
+        assert!(!shell.read_with(cx, |shell, _| shell.agents_enabled()));
+        hand_off(&shell, &dir, agents_request(), cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("There's no page called “agents”, so Home is shown.")
+        );
+        shell.update(cx, |shell, cx| shell.navigate(Page::Agents, None, cx));
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert!(agents_view(&shell, cx).is_none());
+    }
+
+    /// On: routable after Prompts; Ctrl+1..0 keep their ten destinations;
+    /// turning the feature off while the page is open goes Home and drops it.
+    #[gpui::test]
+    fn agents_follows_its_gate_and_leaves_the_shortcuts_alone(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::Home, cx);
+        set_agents(&shell, true, cx);
+        assert!(shell.read_with(cx, |shell, _| shell.agents_enabled()));
+        hand_off(&shell, &dir, agents_request(), cx);
+        assert_eq!(page(&shell, cx), Page::Agents);
+        assert_eq!(toast(&shell, cx), None);
+        for (i, expected) in Page::sidebar_order().into_iter().enumerate() {
+            let key = (i + 1) % 10;
+            cx.simulate_keystrokes(&format!("secondary-{key}"));
+            assert_eq!(page(&shell, cx), expected, "secondary-{key}");
+        }
+        shell.update(cx, |shell, cx| shell.navigate(Page::Agents, None, cx));
+        assert_eq!(page(&shell, cx), Page::Agents);
+        set_agents(&shell, false, cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert!(
+            agents_view(&shell, cx).is_none(),
+            "the list goes with the gate"
+        );
+    }
+
+    #[gpui::test]
+    fn agents_keys_move_the_selection_search_and_clear(cx: &mut TestAppContext) {
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let list = agents.read_with(cx, |p, _| p.list_focus());
+        cx.update(|window, _| window.focus(&list));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        let first = agents.read_with(cx, |p, _| p.selected());
+        assert_eq!(first.as_deref(), Some("a1f3a2c80001"), "Needs you is first");
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.selected()).as_deref(),
+            Some("b41b7e000002")
+        );
+        cx.simulate_keystrokes("up");
+        assert_eq!(agents.read_with(cx, |p, _| p.selected()), first);
+        // The detail read brings the task text.
+        cx.run_until_parked();
+        assert!(agents.read_with(cx, |p, _| p
+            .store()
+            .session("a1f3a2c80001")
+            .unwrap()
+            .prompt
+            .is_some()));
+
+        cx.simulate_keystrokes("secondary-k");
+        assert!(in_shell(&shell, cx));
+        assert!(!focused(&list, cx), "search took focus");
+        cx.simulate_input("billing");
+        let query = |cx: &mut VisualTestContext| agents.read_with(cx, |p, cx| p.search_text(cx));
+        assert_eq!(query(cx), "billing");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(query(cx), "", "Esc clears the search");
+        assert!(focused(&list, cx), "and returns to the list");
+        assert_eq!(page(&shell, cx), Page::Agents);
+    }
+
+    #[gpui::test]
+    fn agents_empty_states_follow_providers_and_sessions(cx: &mut TestAppContext) {
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        assert_eq!(agents.read_with(cx, |p, _| p.empty_heading()), None);
+        let fake = agents_fake(&shell, cx);
+        fake.clear(true);
+        agents.update(cx, |p, cx| p.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.empty_heading()),
+            Some(crate::controllers::agents::NO_SESSIONS_HEADING)
+        );
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("agents-empty").is_some(), "no split");
+        fake.clear(false);
+        agents.update(cx, |p, cx| p.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.empty_heading()),
+            Some(crate::controllers::agents::NO_PROVIDER_HEADING)
+        );
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> gpui::Bounds<gpui::Pixels> {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} isn't on screen"))
+    }
+
+    fn assert_inside(
+        inner: gpui::Bounds<gpui::Pixels>,
+        outer: gpui::Bounds<gpui::Pixels>,
+        what: &str,
+    ) {
+        assert!(
+            inner.left() >= outer.left()
+                && inner.top() >= outer.top()
+                && inner.right() <= outer.right()
+                && inner.bottom() <= outer.bottom(),
+            "{what}: {inner:?} isn't inside {outer:?}"
+        );
+    }
+
+    /// The split at the design size and the minimum window, in both
+    /// palettes: a 340 px list beside the detail, rows inside the list.
+    #[gpui::test]
+    fn agents_page_lays_out_at_both_sizes_in_both_palettes(cx: &mut TestAppContext) {
+        let (_shell, agents, cx, _dir) = open_agents(cx);
+        agents.update(cx, |p, cx| p.select_for_test("a1f3a2c80001", cx));
+        cx.run_until_parked();
+        for dark in [false, true] {
+            cx.update(|_, cx| cx.set_global(if dark { Theme::dark() } else { Theme::light() }));
+            for (w, h) in [(1200., 760.), (960., 640.)] {
+                cx.simulate_resize(size(px(w), px(h)));
+                cx.run_until_parked();
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+                let list = bounds(cx, "agents-list");
+                let detail = bounds(cx, "agents-detail");
+                // The 340 px pane less its 1 px hairline.
+                assert_eq!(list.size.width, px(crate::theme::size::LIST_PANE - 1.));
+                assert_eq!(list.left(), px(crate::theme::size::SIDEBAR));
+                assert!(detail.left() >= list.right(), "detail beside the list");
+                assert!(detail.right() <= px(w), "detail fits {w}x{h}");
+                let row = bounds(cx, "agents-row-a1f3a2c80001");
+                assert_inside(row, list, "first row");
+                assert_eq!(row.size.height, px(56.));
+                let banner = bounds(cx, "agents-state-banner");
+                assert_inside(banner, detail, "state banner");
+                let receipt = bounds(cx, "agents-receipt");
+                assert_inside(receipt, detail, "receipt");
+                // Section headings sit on one line across the pane, and the
+                // task card holds its receipt (no letter-a-line heading, no
+                // clipped card); taller content scrolls instead.
+                let card = bounds(cx, "agents-task-card");
+                assert_inside(receipt, card, "receipt in the task card");
+                let column = bounds(cx, "agents-detail-column");
+                for name in ["section-heading:Task", "section-heading:Activity"] {
+                    let heading = bounds(cx, name);
+                    assert!(heading.size.height < px(40.), "{name}: {heading:?}");
+                    assert_eq!(heading.size.width, card.size.width, "{name}");
+                }
+                assert_eq!(bounds(cx, "agents-activity").size.width, card.size.width);
+                assert!(card.size.width > px(300.), "{card:?}");
+                if h < 700. {
+                    let scroll = bounds(cx, "agents-detail-scroll");
+                    assert!(column.size.height > scroll.size.height, "it scrolls");
+                }
+            }
+        }
+    }
+
+    /// `--sandbox-fixture agents-page|agents-states`: an agents fixture
+    /// sandbox has the fake service on (its clock pinned); each scene's one
+    /// action lands its end state.
+    #[gpui::test]
+    fn agents_fixture_scenes_reach_their_end_state(cx: &mut TestAppContext) {
+        use crate::controllers::agents::{AgentsBackend, UiState};
+        use crate::sandbox::Fixture;
+        for fixture in [
+            Fixture::AgentsPage,
+            Fixture::AgentsStates,
+            Fixture::AgentsDetail,
+        ] {
+            let (shell, cx, _dir) = open_with(
+                Page::Home,
+                |root| crate::sandbox::add_agents_fixture(root).unwrap(),
+                cx,
+            );
+            assert!(shell.read_with(cx, |shell, _| shell.agents_enabled()));
+            let fake = agents_fake(&shell, cx);
+            assert_ne!(
+                fake.now(),
+                crate::sandbox::agents::FIXTURE_NOW,
+                "shared, wall clock"
+            );
+            // What a `--sandbox-fixture` launch does first (Shell::new).
+            fake.use_fixture();
+            assert_eq!(fake.now(), crate::sandbox::agents::FIXTURE_NOW);
+            assert_eq!(fixture.page(), Page::Agents);
+            shell.update(cx, |shell, cx| shell.run_fixture(fixture, cx));
+            cx.run_until_parked();
+            assert_eq!(page(&shell, cx), Page::Agents);
+            let agents = agents_view(&shell, cx).unwrap();
+            let (rows, counts) =
+                agents.read_with(cx, |p, _| (p.store().rows(fake.now()), p.store().counts));
+            match fixture {
+                Fixture::AgentsPage => {
+                    let selected = agents.read_with(cx, |p, _| p.selected());
+                    assert_eq!(selected.as_deref(), Some("a1f3a2c80001"));
+                    assert_eq!(
+                        crate::controllers::agents::support_line(&rows, counts),
+                        "2 running · 1 needs you"
+                    );
+                }
+                Fixture::AgentsDetail => {
+                    let selected = agents.read_with(cx, |p, _| p.selected());
+                    assert_eq!(
+                        selected.as_deref(),
+                        Some(crate::sandbox::agents::CLAUDE_RUNNING),
+                        "a running session that takes replies"
+                    );
+                    assert!(agents.read_with(cx, |p, _| p.activity().unwrap().len()) > 0);
+                }
+                _ => {
+                    for state in UiState::ALL {
+                        assert!(rows.iter().any(|r| r.state == state), "{state:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Filters and search narrow the list; an empty filter says so.
+    #[gpui::test]
+    fn agents_filters_narrow_the_list(cx: &mut TestAppContext) {
+        let (_shell, agents, cx, _dir) = open_agents(cx);
+        agents.update(cx, |p, cx| {
+            p.set_filter(crate::controllers::agents::Filter::Done, cx)
+        });
+        cx.run_until_parked();
+        // (Debug bounds outlive a frame, so absence is read from the page.)
+        let shown = |cx: &mut VisualTestContext| agents.read_with(cx, |p, cx| p.visible_ids(cx));
+        assert_eq!(shown(cx), ["d2c90de00004", "e5e61ab00005", "f9b3f4200006"]);
+        agents.update(cx, |p, cx| {
+            p.set_filter(crate::controllers::agents::Filter::NeedsYou, cx)
+        });
+        assert_eq!(shown(cx), ["a1f3a2c80001"]);
+        agents.update(cx, |p, cx| {
+            p.set_filter(crate::controllers::agents::Filter::Active, cx)
+        });
+        assert_eq!(shown(cx).len(), 5, "needs you and running groups");
+        // Search narrows within the filter; nothing matching says so.
+        cx.update(|window, cx| agents.update(cx, |p, cx| p.focus_search(window, cx)));
+        cx.simulate_input("codex");
+        assert_eq!(shown(cx), ["c77ad1900003", "a1d08c600007"]);
+        cx.simulate_input(" zebra");
+        assert!(shown(cx).is_empty());
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("button:Clear search").is_some());
+    }
+
+    fn probe(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        shell.update(cx, |shell, cx| shell.probe_agents(cx));
+        cx.run_until_parked();
+    }
+
+    /// One poll-loop turn: the loop's pause elapses and its read lands.
+    fn tick(cx: &mut VisualTestContext, secs: u64) {
+        cx.executor().advance_clock(Duration::from_secs(secs));
+        cx.run_until_parked();
+    }
+
+    /// Review H1: a transient status failure (nothing answering, a 401/5xx,
+    /// a malformed body) keeps Agents open with its own banner; only "no
+    /// agents API" (404) or a parsed "off" closes it and goes Home.
+    #[gpui::test]
+    fn a_failing_status_probe_keeps_agents_open(cx: &mut TestAppContext) {
+        use crate::controllers::agents::AgentsError;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        for error in [
+            AgentsError::Refused("the service didn't accept LocalFlow's API token.".into()),
+            AgentsError::Refused("Invalid response from LocalFlow server".into()),
+            AgentsError::Offline,
+        ] {
+            fake.fail(Some(error.clone()));
+            probe(&shell, cx);
+            assert_eq!(page(&shell, cx), Page::Agents, "{error:?}");
+            assert!(shell.read_with(cx, |shell, _| shell.agents_enabled()));
+            assert!(agents_view(&shell, cx).is_some(), "{error:?}: view kept");
+        }
+        // The page says what's wrong itself, and keeps its rows.
+        tick(cx, 2);
+        let (error, rows) =
+            agents.read_with(cx, |p, _| (p.store().error.clone(), p.store().is_empty()));
+        assert_eq!(error, Some(AgentsError::Offline));
+        assert!(!rows, "rows kept");
+        fake.fail(Some(AgentsError::Absent));
+        probe(&shell, cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert!(
+            agents_view(&shell, cx).is_none(),
+            "the list goes with the gate"
+        );
+    }
+
+    /// Review L4: probe answers land out of order; only the newest counts.
+    #[gpui::test]
+    fn a_late_probe_answer_never_overwrites_a_newer_one(cx: &mut TestAppContext) {
+        use crate::controllers::agents::Status;
+        let (shell, cx, _dir) = open(Page::Home, cx);
+        let status = |enabled| {
+            Ok(Status {
+                api_version: 1,
+                enabled,
+                ..Default::default()
+            })
+        };
+        shell.update(cx, |shell, cx| {
+            shell.agents_probe += 2;
+            let newest = shell.agents_probe;
+            shell.agents_answered(newest, status(true), cx);
+            shell.agents_answered(newest - 1, status(false), cx);
+            assert!(shell.agents_enabled(), "the older \"off\" is dropped");
+        });
+    }
+
+    /// Review L5: a request for `agents` before the first probe answer
+    /// waits for it: Agents when on, Home with the notice when off.
+    #[gpui::test]
+    fn an_agents_request_waits_for_the_first_probe(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::History, cx);
+        let fake = agents_fake(&shell, cx);
+        fake.set_enabled(true);
+        shell.update(cx, |shell, _| shell.agents_known = false);
+        hand_off(&shell, &dir, agents_request(), cx);
+        assert_eq!(page(&shell, cx), Page::History, "waits");
+        assert_eq!(toast(&shell, cx), None, "no premature notice");
+        probe(&shell, cx);
+        assert_eq!(page(&shell, cx), Page::Agents);
+        assert_eq!(toast(&shell, cx), None);
+
+        fake.set_enabled(false);
+        probe(&shell, cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        shell.update(cx, |shell, _| shell.agents_known = false);
+        hand_off(&shell, &dir, agents_request(), cx);
+        assert_eq!(toast(&shell, cx), None);
+        probe(&shell, cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("There's no page called “agents”, so Home is shown.")
+        );
+    }
+
+    /// Review L5, cold start: `--page agents` opens Agents when the service
+    /// has it on, else Home with the notice.
+    #[gpui::test]
+    fn a_cold_start_agents_request_opens_once_known(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_launch(
+            Page::Home,
+            |root| crate::sandbox::add_agents_fixture(root).unwrap(),
+            true,
+            cx,
+        );
+        cx.run_until_parked();
+        assert_eq!(page(&shell, cx), Page::Agents);
+        assert_eq!(toast(&shell, cx), None);
+    }
+
+    #[gpui::test]
+    fn a_cold_start_agents_request_while_off_shows_the_notice(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_launch(Page::Home, |_| {}, true, cx);
+        cx.run_until_parked();
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("There's no page called “agents”, so Home is shown.")
+        );
+    }
+
+    /// The selected row as the page draws it.
+    fn agents_row(
+        agents: &Entity<pages::agents::AgentsPage>,
+        id: &str,
+        cx: &mut VisualTestContext,
+    ) -> crate::controllers::agents::Row {
+        agents.read_with(cx, |p, _| {
+            p.store()
+                .rows(crate::controllers::agents::now())
+                .into_iter()
+                .find(|r| r.session.id == id)
+                .unwrap_or_else(|| panic!("{id} is listed"))
+        })
+    }
+
+    fn select(agents: &Entity<pages::agents::AgentsPage>, id: &str, cx: &mut VisualTestContext) {
+        agents.update(cx, |p, cx| p.select_for_test(id, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// The open confirmation's title, and its confirm action.
+    fn confirm_of(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(String, ui::Action)> {
+        shell.read_with(cx, |shell, _| {
+            shell
+                .confirm
+                .as_ref()
+                .map(|c| (c.title.to_string(), c.on_confirm.clone()))
+        })
+    }
+
+    /// Capability-gated controls (G4): present only with the capability,
+    /// and nothing is ever called without it.
+    #[gpui::test]
+    fn agents_actions_follow_capabilities(cx: &mut TestAppContext) {
+        use crate::controllers::agents::actions;
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        assert!(cx.debug_bounds("button:Stop").is_some());
+        assert!(cx.debug_bounds("button:Run again").is_some());
+        assert!(
+            cx.debug_bounds("agents-reply").is_some(),
+            "Claude takes messages"
+        );
+        let claude = actions(&agents_row(&agents, seed::CLAUDE_RUNNING, cx));
+        assert_eq!(
+            (claude.open, claude.stop, claude.reply),
+            (None, Some(true), Some(true))
+        );
+        select(&agents, seed::NEEDS_INPUT, cx);
+        assert!(cx.debug_bounds("button:Open in Devin").is_some());
+        let devin = actions(&agents_row(&agents, seed::NEEDS_INPUT, cx));
+        assert_eq!(
+            (devin.stop, devin.reply),
+            (None, None),
+            "no cancel, no messages"
+        );
+        // Asking anyway does nothing and calls nothing.
+        agents.update(cx, |p, cx| p.ask_stop_for_test(cx));
+        agents.update(cx, |p, cx| p.ask_remove_for_test(cx));
+        cx.run_until_parked();
+        assert!(confirm_of(&shell, cx).is_none());
+        let fake = agents_fake(&shell, cx);
+        let calls = fake.calls();
+        assert_eq!((calls.cancel, calls.remove, calls.message), (0, 0, 0));
+        // The question the agent paused on is quoted (from its last output).
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("agents-state-banner").is_some());
+        let question = agents.read_with(cx, |p, _| {
+            p.activity().and_then(|a| a.question().map(str::to_owned))
+        });
+        assert_eq!(
+            question.as_deref(),
+            Some("Should the v1 handler stay for one release, or be removed now?")
+        );
+    }
+
+    #[gpui::test]
+    fn stop_asks_first_then_cancels_once(cx: &mut TestAppContext) {
+        use crate::controllers::agents::{RuntimeState, UiState};
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        let fake = agents_fake(&shell, cx);
+        agents.update(cx, |p, cx| p.ask_stop_for_test(cx));
+        cx.run_until_parked();
+        let (title, confirm) = confirm_of(&shell, cx).expect("a confirmation");
+        assert_eq!(title, "Stop this session?");
+        assert_eq!(fake.calls().cancel, 0, "nothing until confirmed");
+        let cancel = shell.read_with(cx, |shell, _| shell.cancel_focus.clone());
+        lose_focus(cx);
+        assert!(focused(&cancel, cx), "focus starts on Cancel");
+        cx.update(|window, cx| confirm(window, cx));
+        cx.run_until_parked();
+        assert_eq!(fake.calls().cancel, 1);
+        let row = agents_row(&agents, seed::CLAUDE_RUNNING, cx);
+        assert_eq!(row.session.runtime, RuntimeState::Cancelling);
+        assert_eq!(row.state, UiState::Stopping);
+        assert_eq!(
+            crate::controllers::agents::actions(&row).stop,
+            Some(false),
+            "drawn, busy, not again"
+        );
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("Stopping the session…"),
+            "not \"stopped\" while it is still cancelling"
+        );
+    }
+
+    #[gpui::test]
+    fn remove_is_final_only_asks_first_and_clears_the_detail(cx: &mut TestAppContext) {
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        agents.update(cx, |p, cx| p.ask_remove_for_test(cx));
+        cx.run_until_parked();
+        assert!(
+            confirm_of(&shell, cx).is_none(),
+            "live sessions can't be removed"
+        );
+        select(&agents, seed::CLAUDE_DONE, cx);
+        agents.update(cx, |p, cx| p.ask_remove_for_test(cx));
+        cx.run_until_parked();
+        let (title, confirm) = confirm_of(&shell, cx).expect("a confirmation");
+        assert_eq!(title, "Remove from LocalFlow?");
+        let body = shell.read_with(cx, |s, _| s.confirm.as_ref().unwrap().body.to_string());
+        assert!(body.contains("from this list only"), "{body}");
+        cx.update(|window, cx| confirm(window, cx));
+        cx.run_until_parked();
+        assert_eq!(fake.calls().remove, 1);
+        assert!(agents.read_with(cx, |p, _| p.store().session(seed::CLAUDE_DONE).is_none()));
+        assert_eq!(agents.read_with(cx, |p, _| p.selected()), None);
+        assert_eq!(toast(&shell, cx).as_deref(), Some("Removed from LocalFlow"));
+    }
+
+    #[gpui::test]
+    fn a_reply_sends_only_its_text_and_a_failure_keeps_it(cx: &mut TestAppContext) {
+        use crate::controllers::agents::{AgentsError, Stream};
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        let reply = agents.read_with(cx, |p, _| p.reply_input());
+        cx.update(|window, cx| reply.read(cx).focus(window));
+        fake.fail_writes(Some(AgentsError::rejected(
+            502,
+            "rate_limited",
+            "slow down",
+        )));
+        cx.simulate_input("Use the fake clock");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.reply_error()).as_deref(),
+            Some("Couldn't send your reply. It's still in the field. Slow down.")
+        );
+        let text = |cx: &mut VisualTestContext| reply.read_with(cx, |r, _| r.text().to_string());
+        assert_eq!(text(cx), "Use the fake clock", "kept");
+        fake.fail_writes(None);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(fake.calls().message, 2);
+        assert_eq!(text(cx), "", "sent: the field is cleared");
+        assert!(
+            cx.update(|window, cx| reply.read(cx).is_focused(window)),
+            "focus kept"
+        );
+        assert_eq!(
+            fake.received().last().unwrap(),
+            &serde_json::json!({"text": "Use the fake clock"})
+        );
+        let mine = agents.read_with(cx, |p, _| {
+            p.activity()
+                .unwrap()
+                .newest_first()
+                .next()
+                .map(|e| (e.stream, e.text.clone()))
+        });
+        assert_eq!(mine, Some((Stream::User, "Use the fake clock".to_string())));
+        assert_eq!(toast(&shell, cx).as_deref(), Some("Reply sent to Claude"));
+        // A final session has no reply field.
+        let done = agents_row(&agents, seed::CLAUDE_DONE, cx);
+        assert_eq!(crate::controllers::agents::actions(&done).reply, None);
+    }
+
+    /// Activity is masked, read once and then only when the log grows,
+    /// and never while the page is hidden (no hidden polling).
+    #[gpui::test]
+    fn activity_is_masked_and_read_only_when_it_grows(cx: &mut TestAppContext) {
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        assert!(cx.debug_bounds("agents-activity").is_some());
+        let lines = |cx: &mut VisualTestContext| {
+            agents.read_with(cx, |p, _| {
+                p.activity()
+                    .unwrap()
+                    .newest_first()
+                    .map(|e| e.text.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let first = lines(cx);
+        assert_eq!(first.len(), 5);
+        assert!(
+            first.iter().all(|l| !l.contains("abcdefghijklmnop")),
+            "masked"
+        );
+        assert!(
+            first[0].contains("https://ci.example.com/runs/4821"),
+            "plain text"
+        );
+        let reads = fake.calls().events;
+        tick(cx, 2);
+        tick(cx, 2);
+        assert_eq!(fake.calls().events, reads, "nothing new, no read");
+        fake.emit(
+            seed::CLAUDE_RUNNING,
+            "Pushed branch fix-retry. key=ghp_zzzzzzzzzzzzzzzzzzzzzz00",
+        );
+        tick(cx, 2);
+        assert_eq!(fake.calls().events, reads + 1, "the log grew: one read");
+        let now = lines(cx);
+        assert_eq!(now.len(), 6);
+        assert!(now[0].starts_with("Pushed branch fix-retry.") && !now[0].contains("zzzzzz"));
+        shell.update(cx, |shell, cx| shell.navigate(Page::Home, None, cx));
+        fake.emit(seed::CLAUDE_RUNNING, "more");
+        tick(cx, 4);
+        tick(cx, 4);
+        assert_eq!(fake.calls().events, reads + 1, "hidden: nothing is read");
+    }
+
+    #[gpui::test]
+    fn results_come_from_the_detail_read(cx: &mut TestAppContext) {
+        use crate::controllers::agents::{results, Results};
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        // Before the detail: only the summary's preview.
+        let row = agents_row(&agents, seed::CLAUDE_DONE, cx);
+        assert!(matches!(results(&row), Some(Results::Preview(_))));
+        select(&agents, seed::CLAUDE_DONE, cx);
+        assert!(cx.debug_bounds("agents-results").is_some());
+        let row = agents_row(&agents, seed::CLAUDE_DONE, cx);
+        let Some(Results::Text { text, truncated }) = results(&row) else {
+            panic!("the full result");
+        };
+        assert!(text.contains("branch email-dark-tokens") && !truncated);
+        // A truncated, credential-bearing result arrives masked with its note.
+        fake.set_result(
+            seed::CLAUDE_DONE,
+            "Done. token=abcdefghijklmnopqrstuv",
+            true,
+        );
+        tick(cx, 2);
+        let row = agents_row(&agents, seed::CLAUDE_DONE, cx);
+        let Some(Results::Text { text, truncated }) = results(&row) else {
+            panic!("a result");
+        };
+        assert!(truncated && !text.contains("abcdefghijklmnop"), "{text}");
+    }
+
+    #[gpui::test]
+    fn run_again_opens_the_launcher_with_a_private_prefill(cx: &mut TestAppContext) {
+        use crate::controllers::agents_launcher::{launcher_dir, DraftStore};
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        crate::launcher::take_spawned();
+        select(&agents, seed::CLAUDE_DONE, cx);
+        agents.update(cx, |p, cx| p.run_again_for_test(cx));
+        assert_eq!(
+            crate::launcher::take_spawned(),
+            [crate::launcher::Spawn::Launcher { prefill: true }]
+        );
+        let root = shell.read_with(cx, |s, _| s.cx.services.root.clone());
+        let draft = DraftStore::new(&launcher_dir(&root))
+            .load(crate::controllers::agents::now())
+            .expect("prefill saved");
+        assert!(draft.text.starts_with("Add dark-mode tokens"));
+        assert_eq!(draft.provider, Some(("claude".into(), String::new())));
+        assert_eq!(draft.workspace.as_deref(), Some("acme/web"));
+        // Cmd/Ctrl+N: a new, empty task.
+        cx.simulate_keystrokes("secondary-n");
+        assert_eq!(
+            crate::launcher::take_spawned(),
+            [crate::launcher::Spawn::Launcher { prefill: false }]
+        );
+    }
+
+    /// The launcher's Enter on a session row: `--page agents
+    /// --agent-session <id>` hands off as `agents/<id>`.
+    #[gpui::test]
+    fn the_launcher_opens_agents_on_one_session(cx: &mut TestAppContext) {
+        use crate::sandbox::agents as seed;
+        let (shell, cx, dir) = open(Page::History, cx);
+        set_agents(&shell, true, cx);
+        hand_off(
+            &shell,
+            &dir,
+            crate::controllers::instance::Request {
+                route: Route::Page(Page::Home),
+                unknown_page: Some(format!("agents/{}", seed::CLAUDE_RUNNING)),
+            },
+            cx,
+        );
+        assert_eq!(page(&shell, cx), Page::Agents);
+        let agents = agents_view(&shell, cx).unwrap();
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.selected()).as_deref(),
+            Some(seed::CLAUDE_RUNNING)
+        );
+        let reply = agents.read_with(cx, |p, _| p.reply_input());
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| reply.read(cx).is_focused(window)),
+            "the reply field takes focus"
+        );
+        // Off: the notice names the page only.
+        set_agents(&shell, false, cx);
+        hand_off(
+            &shell,
+            &dir,
+            crate::controllers::instance::Request {
+                route: Route::Page(Page::Home),
+                unknown_page: Some(format!("agents/{}", seed::CLAUDE_RUNNING)),
+            },
+            cx,
+        );
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("There's no page called “agents”, so Home is shown.")
+        );
+    }
+
+    #[gpui::test]
+    fn enter_on_a_row_moves_into_the_detail_and_escape_returns(cx: &mut TestAppContext) {
+        use crate::sandbox::agents as seed;
+        let (_shell, agents, cx, _dir) = open_agents(cx);
+        let list = agents.read_with(cx, |p, _| p.list_focus());
+        cx.update(|window, _| window.focus(&list));
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.selected()).as_deref(),
+            Some(seed::NEEDS_INPUT)
+        );
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        crate::launcher::take_spawned();
+        cx.simulate_keystrokes("enter");
+        let run_again = agents.read_with(cx, |p, _| p.run_again_focus());
+        assert!(focused(&run_again, cx), "no reply field: the first action");
+        release(cx, "enter");
+        assert!(
+            crate::launcher::take_spawned().is_empty(),
+            "that Enter's release doesn't click Run again"
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(focused(&list, cx), "Esc returns to the list");
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        let reply = agents.read_with(cx, |p, _| p.reply_input());
+        assert!(
+            cx.update(|window, cx| reply.read(cx).is_focused(window)),
+            "reply field"
+        );
+    }
+
+    /// A key's release after a frame is drawn (GPUI clicks a focused
+    /// element on Enter's or Space's key-up; tests only send key-downs).
+    fn release(cx: &mut VisualTestContext, key: &str) {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+        });
+        cx.run_until_parked();
+    }
+
+    fn press(cx: &mut VisualTestContext, key: &str) {
+        cx.simulate_keystrokes(key);
+        release(cx, key);
+    }
+
+    /// Review H4: every action has a key path. Tab reaches Run again and
+    /// `…`; Enter opens the menu with focus on its first entry; the arrows
+    /// move; Enter on Remove from LocalFlow asks first.
+    #[gpui::test]
+    fn every_detail_action_has_a_key_path(cx: &mut TestAppContext) {
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        select(&agents, seed::CLAUDE_DONE, cx);
+        let run_again = agents.read_with(cx, |p, _| p.run_again_focus());
+        cx.update(|window, _| window.focus(&run_again));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        crate::launcher::take_spawned();
+        press(cx, "enter");
+        assert_eq!(
+            crate::launcher::take_spawned(),
+            [crate::launcher::Spawn::Launcher { prefill: true }],
+            "Run again by Enter"
+        );
+        cx.simulate_keystrokes("tab");
+        let more = agents.read_with(cx, |p, _| p.more_focus());
+        assert!(focused(&more, cx), "Tab: `…`");
+        press(cx, "enter");
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("agents-menu").is_some(), "open");
+        let entries = agents.read_with(cx, |p, _| p.menu_focus());
+        assert!(focused(&entries[1], cx), "Copy ID first (no link)");
+        cx.simulate_keystrokes("down");
+        assert!(focused(&entries[2], cx), "Remove from LocalFlow");
+        cx.simulate_keystrokes("up");
+        assert!(focused(&entries[1], cx));
+        cx.simulate_keystrokes("end");
+        press(cx, "enter");
+        let (title, _) = confirm_of(&shell, cx).expect("Remove asks first");
+        assert_eq!(title, "Remove from LocalFlow?");
+        // Esc in the menu closes it and returns to `…`.
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, _| window.focus(&more));
+        press(cx, "enter");
+        assert!(focused(&entries[1], cx));
+        assert!(agents.read_with(cx, |p, _| p.more_open()));
+        cx.simulate_keystrokes("escape");
+        assert!(focused(&more, cx), "back on `…`");
+        assert!(!agents.read_with(cx, |p, _| p.more_open()), "closed");
+    }
+
+    /// Review M1: a session launched after the list was read is selected
+    /// once `/changes` brings it; a manual pick in between wins.
+    #[gpui::test]
+    fn a_session_opened_before_it_is_listed_is_selected_on_arrival(cx: &mut TestAppContext) {
+        use crate::controllers::agents::AgentsBackend;
+        use crate::controllers::agents_launcher::request;
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        let launch = |cx: &mut VisualTestContext| {
+            let claude = agents
+                .read_with(cx, |p, _| p.store().provider("claude", "").cloned())
+                .unwrap();
+            let id = fake
+                .launch(&request(None, "A new task", &claude, Some("acme/web")))
+                .unwrap()
+                .id;
+            agents.update(cx, |p, cx| p.open_session(id.clone(), cx));
+            id
+        };
+        let id = launch(cx);
+        assert_ne!(agents.read_with(cx, |p, _| p.selected()), Some(id.clone()));
+        tick(cx, 2);
+        assert_eq!(agents.read_with(cx, |p, _| p.selected()), Some(id));
+        // A pick before it arrives: the pick stays, nothing steals focus.
+        let id = launch(cx);
+        let list = agents.read_with(cx, |p, _| p.list_focus());
+        cx.update(|window, _| window.focus(&list));
+        agents.update(cx, |p, cx| p.select_by_user_for_test(seed::CLAUDE_DONE, cx));
+        tick(cx, 2);
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.selected()).as_deref(),
+            Some(seed::CLAUDE_DONE)
+        );
+        assert!(agents.read_with(cx, |p, _| p.store().session(&id).is_some()));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(focused(&list, cx), "focus stays in the list");
+    }
+
+    /// Review L: the reply field is per session.
+    #[gpui::test]
+    fn a_reply_draft_stays_with_its_session(cx: &mut TestAppContext) {
+        use crate::controllers::agents::AgentsError;
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        let reply = agents.read_with(cx, |p, _| p.reply_input());
+        let text = |cx: &mut VisualTestContext| reply.read_with(cx, |r, _| r.text().to_string());
+        cx.update(|window, cx| reply.read(cx).focus(window));
+        cx.simulate_input("For Claude only");
+        select(&agents, seed::CLAUDE_DONE, cx);
+        assert_eq!(text(cx), "", "not shown under another session");
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        assert_eq!(text(cx), "For Claude only", "back with its session");
+        // A send that fails after the selection moved stays with its own
+        // session, and the error is a toast.
+        fake.fail_writes(Some(AgentsError::rejected(502, "rate_limited", "slow")));
+        agents.update(cx, |p, cx| {
+            p.send_reply_for_test(cx);
+            p.select_for_test(seed::CLAUDE_DONE, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(fake.calls().message, 1);
+        assert_eq!(text(cx), "");
+        assert_eq!(agents.read_with(cx, |p, _| p.reply_error()), None);
+        assert!(toast(&shell, cx)
+            .unwrap()
+            .starts_with("Couldn't send your reply"));
+        select(&agents, seed::CLAUDE_RUNNING, cx);
+        assert_eq!(text(cx), "For Claude only");
+    }
+
+    /// Review L: Run again over an unsent launcher task says it replaced it.
+    #[gpui::test]
+    fn run_again_says_when_it_replaces_an_unsent_task(cx: &mut TestAppContext) {
+        use crate::controllers::agents_launcher::{launcher_dir, Draft, DraftStore};
+        use crate::sandbox::agents as seed;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let root = shell.read_with(cx, |s, _| s.cx.services.root.clone());
+        DraftStore::new(&launcher_dir(&root)).save(&Draft {
+            text: "Something half typed".into(),
+            provider: None,
+            workspace: None,
+            saved_at: crate::controllers::agents::now(),
+        });
+        select(&agents, seed::CLAUDE_DONE, cx);
+        agents.update(cx, |p, cx| p.run_again_for_test(cx));
+        crate::launcher::take_spawned();
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("Replaced the unsent task in the launcher")
+        );
+    }
+
+    /// Review blocking test 2: the `/changes` loop. Failures keep the rows
+    /// (Disconnected after the 20 s grace) and recover; `reset` reloads the
+    /// list; the loop stops while hidden and never runs twice.
+    #[gpui::test]
+    fn the_poll_loop_rides_out_failures_resets_and_hiding(cx: &mut TestAppContext) {
+        use crate::controllers::agents::{AgentsBackend, AgentsError, UiState};
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        let state = |cx: &mut VisualTestContext| {
+            agents.read_with(cx, |p, _| {
+                p.store()
+                    .rows(fake.now())
+                    .into_iter()
+                    .find(|r| r.session.id == "b41b7e000002")
+                    .unwrap()
+                    .state
+            })
+        };
+        assert_eq!(state(cx), UiState::Running);
+        let rows = agents.read_with(cx, |p, cx| p.visible_ids(cx).len());
+
+        fake.fail(Some(AgentsError::Offline));
+        let polls = fake.calls().changes;
+        tick(cx, 2);
+        assert_eq!(fake.calls().changes, polls + 1);
+        assert_eq!(state(cx), UiState::Running, "inside the grace period");
+        assert_eq!(agents.read_with(cx, |p, cx| p.visible_ids(cx).len()), rows);
+        fake.advance(21.0);
+        tick(cx, 2);
+        assert_eq!(fake.calls().changes, polls + 2);
+        assert_eq!(state(cx), UiState::Disconnected);
+        assert_eq!(agents.read_with(cx, |p, cx| p.visible_ids(cx).len()), rows);
+        // Backing off: the third failure waits 4 s, not 2.
+        tick(cx, 2);
+        assert_eq!(fake.calls().changes, polls + 2, "backing off");
+        fake.fail(None);
+        tick(cx, 2);
+        assert_eq!(fake.calls().changes, polls + 3);
+        assert_eq!(state(cx), UiState::Running, "recovered");
+        assert_eq!(agents.read_with(cx, |p, _| p.store().error.clone()), None);
+
+        // `reset: true`: the list is read again.
+        let lists = fake.calls().sessions;
+        fake.reset_next();
+        tick(cx, 2);
+        assert!(fake.calls().sessions > lists, "reloaded on reset");
+        assert_eq!(state(cx), UiState::Running);
+
+        // Away and straight back (inside one pause): still one loop.
+        shell.update(cx, |shell, cx| shell.navigate(Page::Home, None, cx));
+        shell.update(cx, |shell, cx| shell.navigate(Page::Agents, None, cx));
+        cx.run_until_parked();
+        let polls = fake.calls().changes;
+        for _ in 0..4 {
+            tick(cx, 2);
+        }
+        assert_eq!(fake.calls().changes, polls + 4, "one read per pause");
+
+        // Hidden: the loop stops.
+        shell.update(cx, |shell, cx| shell.navigate(Page::Home, None, cx));
+        tick(cx, 2);
+        assert!(!agents.read_with(cx, |p, _| p.polling()));
+        let polls = fake.calls().changes;
+        for _ in 0..4 {
+            tick(cx, 2);
+        }
+        assert_eq!(fake.calls().changes, polls, "no reads while hidden");
+        // Back: exactly one loop again.
+        shell.update(cx, |shell, cx| shell.navigate(Page::Agents, None, cx));
+        cx.run_until_parked();
+        tick(cx, 2);
+        let polls = fake.calls().changes;
+        for _ in 0..3 {
+            tick(cx, 2);
+        }
+        assert_eq!(fake.calls().changes, polls + 3);
+    }
+
+    /// Review L3: a 404 from `/changes` (no agents API) ends the loop.
+    #[gpui::test]
+    fn the_poll_loop_stops_when_the_api_is_absent(cx: &mut TestAppContext) {
+        use crate::controllers::agents::AgentsError;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        fake.fail(Some(AgentsError::Absent));
+        tick(cx, 2);
+        assert!(!agents.read_with(cx, |p, _| p.polling()));
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.store().error.clone()),
+            Some(AgentsError::Absent)
+        );
+        let polls = fake.calls().changes;
+        tick(cx, 10);
+        assert_eq!(fake.calls().changes, polls);
+    }
+
+    /// Review M4: the service down on the first read shows only its
+    /// banner, never "Connect an agent to get started".
+    #[gpui::test]
+    fn a_service_down_first_read_shows_only_the_banner(cx: &mut TestAppContext) {
+        use crate::controllers::agents::AgentsError;
+        let (shell, cx, _dir) = open(Page::Home, cx);
+        set_agents(&shell, true, cx);
+        agents_fake(&shell, cx).fail(Some(AgentsError::Offline));
+        shell.update(cx, |shell, cx| shell.navigate(Page::Agents, None, cx));
+        cx.run_until_parked();
+        let agents = agents_view(&shell, cx).unwrap();
+        assert_eq!(agents.read_with(cx, |p, _| p.empty_heading()), None);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("agents-unread").is_some());
+        assert!(cx.debug_bounds("button:Try again").is_some(), "the banner");
+        // (Debug bounds outlive a frame, so the empty state's absence is
+        // read from the page: `empty_heading` above.)
+    }
+
+    /// Review L6: the Task section tells reading, failed and absent apart.
+    #[gpui::test]
+    fn the_task_text_says_whether_it_is_loading_failed_or_absent(cx: &mut TestAppContext) {
+        use crate::controllers::agents::AgentsError;
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        let fake = agents_fake(&shell, cx);
+        agents.update(cx, |p, cx| {
+            p.select_for_test("b41b7e000002", cx);
+            assert_eq!(p.task_text(), "Reading this task…");
+        });
+        cx.run_until_parked();
+        assert!(agents
+            .read_with(cx, |p, _| p.task_text())
+            .starts_with("Fix the flaky retry test"));
+        fake.fail(Some(AgentsError::Refused("session not found".into())));
+        agents.update(cx, |p, cx| p.select_for_test("c77ad1900003", cx));
+        cx.run_until_parked();
+        assert_eq!(
+            agents.read_with(cx, |p, _| p.task_text()),
+            "LocalFlow couldn't read this task: session not found"
+        );
+        fake.fail(Some(AgentsError::Offline));
+        agents.update(cx, |p, cx| p.select_for_test("d2c90de00004", cx));
+        cx.run_until_parked();
+        assert!(agents
+            .read_with(cx, |p, _| p.task_text())
+            .contains("isn't answering"));
+    }
+
+    /// Review M7: arrow keys keep the selected row in view.
+    #[gpui::test]
+    fn keyboard_selection_scrolls_into_view(cx: &mut TestAppContext) {
+        let (shell, agents, cx, _dir) = open_agents(cx);
+        agents_fake(&shell, cx).add_history(30);
+        agents.update(cx, |p, cx| p.refresh(cx));
+        cx.simulate_resize(size(px(960.), px(640.)));
+        cx.run_until_parked();
+        let list = agents.read_with(cx, |p, _| p.list_focus());
+        cx.update(|window, _| window.focus(&list));
+        let scroll = agents.read_with(cx, |p, _| p.list_scroll());
+        let frame = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+        frame(cx);
+        assert_eq!(scroll.offset().y, px(0.));
+        cx.simulate_keystrokes("end");
+        frame(cx);
+        let last = agents.read_with(cx, |p, cx| p.visible_ids(cx).last().cloned());
+        assert_eq!(agents.read_with(cx, |p, _| p.selected()), last);
+        assert!(scroll.offset().y < px(0.), "scrolled to the last row");
+        let viewport = scroll.bounds();
+        // The 30th older session (`add_history` ids are 12-hex too).
+        let row = bounds(cx, "agents-row-f0000000001d");
+        assert_inside(row, viewport, "the selected row");
+        cx.simulate_keystrokes("home");
+        frame(cx);
+        assert_eq!(scroll.offset().y, px(0.), "back to the top");
+    }
+
+    /// Review M5: the speaker fixture doesn't turn Agents on.
+    #[gpui::test]
+    fn the_speaker_fixture_leaves_agents_off(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_with(
+            Page::Home,
+            |root| crate::sandbox::add_fixture(root).unwrap(),
+            cx,
+        );
+        assert!(!shell.read_with(cx, |shell, _| shell.agents_enabled()));
     }
 
     const NOTICE: &str = "There's no page called “NoSuchPage”, so Home is shown.";

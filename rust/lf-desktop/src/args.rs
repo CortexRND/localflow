@@ -29,10 +29,20 @@ OPTIONS:
                        exit without a window (only with --sandbox; refused while
                        that sandbox is open in another window)
     --sandbox-fixture <SCENE>
-                       Screenshot scene over example speaker-label data:
-                       speakers-saved, speakers-recent, speakers-settings or
-                       speakers-people (only with --sandbox and --data-dir;
-                       seeds a new or reset directory only)
+                       Screenshot scene over example data: speakers-saved,
+                       speakers-recent, speakers-settings, speakers-people,
+                       agents-page, agents-states, agents-detail,
+                       agents-launcher, agents-launcher-typed,
+                       agents-launcher-secret or agents-launcher-empty (only
+                       with --sandbox and --data-dir; seeds a new or reset
+                       directory only; agents-launcher* open the launcher)
+    --agents-launcher  Open the agent launcher (its own small window; pressed
+                       again while open, it closes). Works with the main
+                       window closed; never with --page, --setup or --engine.
+    --agent-task <TEXT>, --agent-provider <ID>, --agent-workspace <ALIAS>
+                       Prefill the launcher (only with --agents-launcher)
+    --agent-session <ID>
+                       With --page agents: select this session
     -h, --help         Print this help
     -V, --version      Print the version
 
@@ -64,6 +74,15 @@ pub struct Args {
     pub sandbox_exercise: bool,
     pub data_dir: Option<PathBuf>,
     pub sandbox_fixture: Option<crate::sandbox::Fixture>,
+    /// `--agents-launcher` (also set by a launcher scene).
+    pub agents_launcher: bool,
+    /// Internal (Run again): show the draft file's prefill, and if a
+    /// launcher is open ask it to show it rather than close.
+    pub agent_prefill: bool,
+    pub agent_task: Option<String>,
+    pub agent_provider: Option<String>,
+    pub agent_workspace: Option<String>,
+    pub agent_session: Option<String>,
     pub help: bool,
     pub version: bool,
 }
@@ -124,9 +143,16 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
                         ArgError(format!("unknown --sandbox-fixture scene: {name}"))
                     })?);
             }
+            "--agents-launcher" => out.agents_launcher = true,
+            "--agent-prefill" => out.agent_prefill = true,
+            "--agent-task" => out.agent_task = Some(value("--agent-task")?),
+            "--agent-provider" => out.agent_provider = Some(value("--agent-provider")?),
+            "--agent-workspace" => out.agent_workspace = Some(value("--agent-workspace")?),
+            "--agent-session" => out.agent_session = Some(value("--agent-session")?),
             other => return Err(ArgError(format!("unknown argument: {other}"))),
         }
     }
+    check_agents(&mut out)?;
     // Never the default sandbox directory: the fixture seeds only where asked.
     if out.sandbox_fixture.is_some()
         && (!out.sandbox || out.data_dir.is_none() || out.sandbox_exercise)
@@ -141,6 +167,60 @@ pub fn parse(args: impl IntoIterator<Item = String>, env_sandbox: bool) -> Resul
         ));
     }
     Ok(out)
+}
+
+/// The launcher's combinations: a launcher scene implies the launcher;
+/// prefill flags need it; it opens no Hub page, setup, engine, reset or
+/// exercise; `--agent-session` needs `--page agents` and a v1 id.
+fn check_agents(out: &mut Args) -> Result<(), ArgError> {
+    if let Some(f) = out.sandbox_fixture {
+        if f.is_launcher() {
+            out.agents_launcher = true;
+        } else if out.agents_launcher {
+            return Err(ArgError(format!(
+                "--agents-launcher can't open the {} scene",
+                f.name()
+            )));
+        }
+    }
+    let prefill = out.agent_task.is_some()
+        || out.agent_provider.is_some()
+        || out.agent_workspace.is_some()
+        || out.agent_prefill;
+    if prefill && !out.agents_launcher {
+        return Err(ArgError(
+            "--agent-task, --agent-provider, --agent-workspace and --agent-prefill \
+             only apply with --agents-launcher"
+                .into(),
+        ));
+    }
+    if out.agents_launcher
+        && (out.page.is_some()
+            || out.unknown_page.is_some()
+            || out.setup
+            || out.engine
+            || out.sandbox_reset
+            || out.sandbox_exercise
+            || out.agent_session.is_some())
+    {
+        return Err(ArgError(
+            "--agents-launcher opens only the launcher: drop --page, --setup, --engine, \
+             --agent-session, --sandbox-reset and --sandbox-exercise"
+                .into(),
+        ));
+    }
+    if let Some(id) = &out.agent_session {
+        let agents = out
+            .unknown_page
+            .as_deref()
+            .is_some_and(crate::page::Page::is_agents_name);
+        if !agents || !crate::controllers::agents::is_session_id(id) {
+            return Err(ArgError(
+                "--agent-session needs --page agents and a 12-character session id".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Refuse `--engine` where it can't be honoured, instead of pretending.
@@ -253,6 +333,62 @@ mod tests {
         ])
         .is_err());
         assert_eq!(p(&["--sandbox"]).unwrap().sandbox_fixture, None);
+    }
+
+    #[test]
+    fn the_launcher_flags_combine_only_as_designed() {
+        use crate::sandbox::Fixture;
+        let a = p(&[
+            "--agents-launcher",
+            "--agent-task",
+            "Fix it",
+            "--agent-provider",
+            "devin",
+        ])
+        .unwrap();
+        assert!(a.agents_launcher);
+        assert_eq!(a.agent_task.as_deref(), Some("Fix it"));
+        assert_eq!(a.agent_provider.as_deref(), Some("devin"));
+        assert!(
+            p(&["--agents-launcher", "--agent-prefill"])
+                .unwrap()
+                .agent_prefill
+        );
+        for bad in [
+            &["--agent-task", "x"][..],
+            &["--agent-prefill"],
+            &["--agents-launcher", "--page", "history"],
+            &["--agents-launcher", "--page", "agents"],
+            &["--agents-launcher", "--setup"],
+            &["--agents-launcher", "--engine"],
+            &["--agents-launcher", "--agent-task", ""],
+            &["--sandbox", "--agents-launcher", "--sandbox-reset"],
+            &["--sandbox", "--agents-launcher", "--sandbox-exercise"],
+            &["--agent-session", "0123456789ab"],
+            &["--page", "agents", "--agent-session", "nope"],
+            &[
+                "--sandbox",
+                "--data-dir",
+                "/tmp/x",
+                "--sandbox-fixture",
+                "agents-page",
+                "--agents-launcher",
+            ],
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
+        let a = p(&["--page", "agents", "--agent-session", "0123456789ab"]).unwrap();
+        assert_eq!(a.agent_session.as_deref(), Some("0123456789ab"));
+        let scene = p(&[
+            "--sandbox",
+            "--data-dir",
+            "/tmp/x",
+            "--sandbox-fixture",
+            "agents-launcher-typed",
+        ])
+        .unwrap();
+        assert!(scene.agents_launcher, "a launcher scene opens the launcher");
+        assert_eq!(scene.sandbox_fixture, Some(Fixture::AgentsLauncherTyped));
     }
 
     #[test]

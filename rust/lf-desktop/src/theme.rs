@@ -654,6 +654,20 @@ mod tests {
             );
             text(p.text_primary, p.bg_muted, "keycap / selected tab");
             text(p.text_primary, p.bg_sidebar_selected, "selected nav label");
+            // A selected list row (Agents): primary text over the
+            // `selected` overlay, composited on the page backgrounds a
+            // list pane sits on.
+            let over = |base: u32, top: u32, alpha: f32| -> u32 {
+                let ch = |c: u32, s: u32| {
+                    let (b, t) = (((c >> s) & 0xFF) as f32, ((top >> s) & 0xFF) as f32);
+                    ((b + (t - b) * alpha).round() as u32) << s
+                };
+                ch(base, 16) | ch(base, 8) | ch(base, 0)
+            };
+            for bg in [p.bg_body, p.bg_surface, p.bg_card] {
+                let row = over(bg, p.overlay_base, p.selected_alpha);
+                text(p.text_primary, row, "selected list row");
+            }
             mark(p.icon_accent, p.bg_sidebar_selected, "selected nav icon");
             text(p.text_accent, p.accent_muted, "accent token / badge");
             // Banner messages are primary text on the tinted fill.

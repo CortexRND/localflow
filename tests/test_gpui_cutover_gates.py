@@ -94,6 +94,20 @@ def test_capture_requires_unit_gpui_scale(gates):
         screenshots.require_unit_scale({})
 
 
+def test_captures_run_on_x11_at_unit_scale_in_utc(gates, tmp_path):
+    _, screenshots = gates
+    sandbox = tmp_path / "sandbox"
+    env = screenshots.capture_environment(
+        {"WAYLAND_DISPLAY": "wayland-0", "TZ": "America/New_York", "KEEP": "1"}, sandbox
+    )
+    assert "WAYLAND_DISPLAY" not in env
+    assert env["GPUI_X11_SCALE_FACTOR"] == "1"
+    assert env["TZ"] == "UTC", "fixture times draw the same in every zone"
+    assert env["KEEP"] == "1"
+    assert env["XDG_RUNTIME_DIR"] == str(tmp_path / "runtime")
+    assert screenshots.capture_environment({"XDG_RUNTIME_DIR": "/run/x"}, sandbox)["XDG_RUNTIME_DIR"] == "/run/x"
+
+
 def test_unknown_page_notice_is_detected_in_stderr(gates):
     _, screenshots = gates
     log = (
@@ -143,11 +157,47 @@ def test_speaker_scenes_add_distinct_opt_in_captures(gates):
     assert len(pages) == 44 and len(speakers) == 16
     assert not set(pages) & set(speakers), "old capture names are unchanged"
     assert all(name.startswith("speakers-") for name in speakers)
-    assert screenshots.expected_captures() == 60
     assert screenshots.duplicate_captures({**pages, **speakers}) == []
     for name, route in screenshots.speaker_scenes():
         assert route == ["--sandbox-fixture", name]
         assert name not in screenshots.PAGES
+
+
+def test_agent_scenes_add_distinct_opt_in_captures(gates):
+    _, screenshots = gates
+    pages = capture_digests(screenshots)
+    speakers = speaker_digests(screenshots)
+    agents = {
+        f"{name}-{theme}-{width}x{height}.png": f"{name}/{theme}/{width}"
+        for name, _ in screenshots.agent_scenes()
+        for theme in ("light", "dark")
+        for width, height in screenshots.SIZES
+    }
+    assert [name for name, _ in screenshots.agent_scenes()] == [
+        "agents-page", "agents-states", "agents-detail",
+    ]
+    assert len(agents) == 12
+    launcher = {
+        f"{name}-{theme}-{width}x{height}.png": f"{name}/{theme}/{width}"
+        for name, _ in screenshots.launcher_scenes()
+        for theme in ("light", "dark")
+        for width, height in screenshots.LAUNCHER_SIZES
+    }
+    assert [name for name, _ in screenshots.launcher_scenes()] == [
+        "agents-launcher", "agents-launcher-typed", "agents-launcher-secret",
+        "agents-launcher-empty",
+    ]
+    assert screenshots.LAUNCHER_SIZES == ((640, 540),), "the popup's own fixed size"
+    assert len(launcher) == 8
+    earlier = set(pages) | set(speakers)
+    assert not earlier & set(agents), "old capture names are unchanged"
+    assert not (earlier | set(agents)) & set(launcher)
+    assert screenshots.expected_captures() == 80
+    assert screenshots.duplicate_captures({**pages, **speakers, **agents, **launcher}) == []
+    for name, route in screenshots.agent_scenes() + screenshots.launcher_scenes():
+        assert route == ["--sandbox-fixture", name]
+        assert name not in screenshots.PAGES and name not in screenshots.SPEAKER_SURFACES
+    assert screenshots.HUB_TITLE != screenshots.LAUNCHER_TITLE
     entry = screenshots.manifest({"speakers-people-dark-960x640.png": "s"})["captures"][0]
     assert (entry["page"], entry["theme"], entry["width"]) == ("speakers-people", "dark", 960)
 

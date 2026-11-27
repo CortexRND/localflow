@@ -39,13 +39,23 @@ fn main() -> ExitCode {
         eprintln!("lf-desktop: {}", err.0);
         return ExitCode::from(2);
     }
+    if args.agents_launcher {
+        return agents_launcher(&args);
+    }
     let fixture = args.sandbox_fixture;
     // A fixture scene opens its own page; `people` resolves once the config
     // is known (it has no Hub route, so a hand-off carries the unknown name).
     let (page, unknown_page) = match fixture {
         Some(f) if f.page() == Page::People => (None, Some("people".to_string())),
+        // Agents has no Hub route either: start on Home; the scene's action
+        // opens Agents once the window knows the (fake) service has it on.
+        Some(f) if f.page() == Page::Agents => (Some(Page::Home), None),
         Some(f) => (Some(f.page()), None),
-        None => (args.page, args.unknown_page.clone()),
+        // `--page agents --agent-session <id>` hands off as `agents/<id>`.
+        None => match &args.agent_session {
+            Some(id) => (None, Some(format!("agents/{id}"))),
+            None => (args.page, args.unknown_page.clone()),
+        },
     };
     let request = Request {
         route: if args.setup && fixture.is_none() {
@@ -60,13 +70,20 @@ fn main() -> ExitCode {
             .unknown_page
             .as_deref()
             .is_some_and(Page::is_people_name);
+    // `--page agents` resolves once the window has asked the service
+    // whether Agents is on, so no notice is decided here.
+    let agents_request = request.is_unknown_home()
+        && request
+            .unknown_page
+            .as_deref()
+            .is_some_and(Page::is_agents_name);
     let mut notice = request.notice();
     let launched = if args.sandbox {
         let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
         launch::sandbox_with(
             &dir,
             args.sandbox_reset,
-            fixture.is_some(),
+            fixture,
             (!args.sandbox_exercise).then(|| request.clone()),
         )
     } else {
@@ -86,6 +103,13 @@ fn main() -> ExitCode {
                 eprintln!(
                     "lf-desktop: LocalFlow is already open; sent it to People \
                      (Home if speaker recognition is off)."
+                );
+                return ExitCode::SUCCESS;
+            }
+            if agents_request {
+                eprintln!(
+                    "lf-desktop: LocalFlow is already open; sent it to Agents \
+                     (Home if its agent service doesn't have Agents on)."
                 );
                 return ExitCode::SUCCESS;
             }
@@ -134,6 +158,10 @@ fn main() -> ExitCode {
         } else {
             page.unwrap_or(Page::Home)
         };
+    if agents_request {
+        // The window shows the notice itself if Agents turns out to be off.
+        notice = None;
+    }
     if let Some(n) = &notice {
         eprintln!("lf-desktop: {n}");
     }
@@ -145,10 +173,87 @@ fn main() -> ExitCode {
         notice,
         instance,
         fixture,
+        agents_request,
+        agent_session: args.agent_session.clone(),
     });
     // Non-zero when no window opened, so `lf --gpui` falls back instead of
     // mistaking it for a hand-off (see USAGE's EXIT STATUS).
     ExitCode::from(status.exit_code())
+}
+
+/// `--agents-launcher`: the launcher's own process. It takes the
+/// launcher's lock (never the Hub's); a second launch hands the open one a
+/// toggle (close) or, for Run again, a "show the prefill", and exits 0.
+fn agents_launcher(args: &args::Args) -> ExitCode {
+    use lf_desktop::controllers::agents_launcher::{self as model, LauncherClaim, Signal};
+    use lf_desktop::launcher;
+    let root = if args.sandbox {
+        let dir = args.data_dir.clone().unwrap_or_else(default_sandbox_dir);
+        // An existing sandbox is used as is (never reset from here).
+        match lf_desktop::sandbox::check_dir(&dir)
+            .and_then(|_| lf_desktop::sandbox::prepare_with(&dir, false, args.sandbox_fixture))
+        {
+            Ok(root) => root,
+            Err(err) => {
+                eprintln!("lf-desktop: sandbox: {err:#}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        match DataRoot::real() {
+            Ok(root) => root,
+            Err(err) => {
+                eprintln!("lf-desktop: couldn't resolve LocalFlow's data locations: {err:#}");
+                return ExitCode::from(1);
+            }
+        }
+    };
+    let signal = if args.agent_prefill {
+        Signal::Show
+    } else {
+        Signal::Toggle
+    };
+    let instance = match model::claim(&model::launcher_dir(&root), signal) {
+        Ok(LauncherClaim::Owner(instance)) => instance,
+        Ok(LauncherClaim::HandedOff) => {
+            eprintln!("lf-desktop: the agent launcher is already open; sent it the request.");
+            return ExitCode::SUCCESS;
+        }
+        Err(err) => {
+            eprintln!("lf-desktop: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let fixture = args.sandbox_fixture;
+    let backend = match fixture {
+        Some(f) => {
+            lf_desktop::sandbox::set_scene(f);
+            launcher::scene_backend(&root, f)
+        }
+        None => launcher::backend_for(&root),
+    };
+    let prefill = match fixture {
+        Some(f) => launcher::scene_prefill(f),
+        None => args.agent_task.clone().map(|text| model::Draft {
+            text,
+            provider: args.agent_provider.clone().map(|p| (p, String::new())),
+            workspace: args.agent_workspace.clone(),
+            saved_at: lf_desktop::controllers::agents::now(),
+        }),
+    };
+    match launcher::run(launcher::LauncherLaunch {
+        root,
+        backend,
+        instance: Some(instance),
+        prefill,
+        fixture,
+    }) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("lf-desktop: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// The window starts in setup by the same policy as the Hub

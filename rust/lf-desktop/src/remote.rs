@@ -22,10 +22,13 @@ use lf_ui::backends::meeting::{FakeMeetingClient, MeetingClient, MeetingClientEr
 use lf_ui::backends::prompts::{FakePromptQueue, PromptQueue, QueueError, UnavailablePromptQueue};
 use serde_json::Value;
 
+use crate::controllers::agents::AgentsBackend;
+use crate::controllers::agents_client::HttpAgents;
 use crate::controllers::ask_agent::{AgentBackend, RECALL_NUM_CTX};
 use crate::controllers::mcp_client::{self, McpError, ToolTransport};
 use crate::controllers::people::People;
 use crate::data::{open_history, DataRoot};
+use crate::sandbox::agents::FakeAgents;
 
 /// Whether the local service answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +58,7 @@ pub enum Remote {
         root: DataRoot,
         prompts: Arc<FakePromptQueue>,
         meetings: Arc<FakeMeetingClient>,
+        agents: Arc<FakeAgents>,
     },
 }
 
@@ -65,6 +69,17 @@ impl Remote {
                 root: root.clone(),
                 prompts: Arc::new(crate::sandbox::seed_prompt_queue()),
                 meetings: Arc::new(crate::sandbox::meeting_client(root)),
+                // On only in a sandbox seeded for the `agents-*` scenes,
+                // shared between its launcher and Hub windows through one
+                // file there (a scene switches to the pinned in-memory
+                // seed: `FakeAgents::use_fixture`); off in a plain one so
+                // its pages and captures stay as they are.
+                agents: Arc::new(match &root.sandbox_dir {
+                    Some(dir) if crate::sandbox::has_agents_fixture(root) => {
+                        FakeAgents::shared(dir.join(crate::sandbox::agents::STATE_FILE))
+                    }
+                    _ => FakeAgents::seeded(false),
+                }),
             }
         } else {
             Remote::Http {
@@ -176,6 +191,23 @@ impl Remote {
                     }
                 }
             }
+        }
+    }
+
+    /// The agents service (`agents-api v1`): loopback HTTP, or the
+    /// sandbox's in-process fake.
+    pub fn agents(&self, config: &Config) -> Arc<dyn AgentsBackend> {
+        match self {
+            Remote::Sandbox { agents, .. } => agents.clone(),
+            Remote::Http { token_path } => Arc::new(HttpAgents::new(config, token_path.clone())),
+        }
+    }
+
+    /// The sandbox's fake agents service (fixtures and tests drive it).
+    pub fn sandbox_agents(&self) -> Option<Arc<FakeAgents>> {
+        match self {
+            Remote::Sandbox { agents, .. } => Some(agents.clone()),
+            Remote::Http { .. } => None,
         }
     }
 

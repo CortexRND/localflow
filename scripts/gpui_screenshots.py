@@ -21,6 +21,19 @@ SIZES = ((1280, 850), (960, 640))
 # sandbox directory so the default sandbox and its captures stay as they are. Each opens
 # a real page and performs one real action there (rust/lf-desktop/src/sandbox.rs).
 SPEAKER_SURFACES = ("speakers-saved", "speakers-recent", "speakers-settings", "speakers-people")
+# Opt-in Agents scenes (`--sandbox-fixture agents-*`): the in-process fake agents service
+# with its clock pinned, in their own sandbox directory (the agents fixture has its own
+# marker, so the speaker scenes and the default sandbox don't gain the Agents page).
+AGENT_SURFACES = ("agents-page", "agents-states", "agents-detail")
+# Opt-in agent launcher scenes (mockups M1, M2, M3, M5): `--sandbox-fixture agents-launcher*`
+# opens the launcher's own fixed-size popup window (not the Hub), in the same agents sandbox.
+LAUNCHER_SURFACES = (
+    "agents-launcher", "agents-launcher-typed", "agents-launcher-secret", "agents-launcher-empty",
+)
+# The launcher popup is not resizable: one capture per theme at its own size.
+LAUNCHER_SIZES = ((640, 540),)
+HUB_TITLE = r"^LocalFlow \(Sandbox\)$"
+LAUNCHER_TITLE = r"^Agent launcher \(Sandbox\)$"
 # lf-desktop prints this once a scene's real end state is rendered (fixture runs only).
 SCENE_READY = "lf-desktop: scene ready: {}"
 SCENE_TIMEOUT_SECONDS = 20
@@ -84,16 +97,26 @@ def window_manager():
         stop(manager)
 
 
-@contextmanager
-def sandbox_window(binary, sandbox, *route, scene=None):
-    """Open a sandbox window; with ``scene``, also wait until it reports that scene ready."""
-    env = os.environ.copy()
+def capture_environment(base, sandbox):
+    """The environment a capture runs lf-desktop in: X11 at scale 1, in UTC."""
+    env = dict(base)
     env.pop("WAYLAND_DISPLAY", None)
     env[SCALE_ENV] = "1"
+    # Fixture clocks are pinned, but times are drawn in local time: one zone for every
+    # capture, so they don't change with the machine that takes them.
+    env["TZ"] = "UTC"
     if not env.get("XDG_RUNTIME_DIR"):
         runtime = sandbox.parent / "runtime"
         runtime.mkdir(mode=0o700, exist_ok=True)
         env["XDG_RUNTIME_DIR"] = str(runtime)
+    return env
+
+
+@contextmanager
+def sandbox_window(binary, sandbox, *route, scene=None, title=HUB_TITLE):
+    """Open a sandbox window titled ``title``; with ``scene``, also wait until it reports that
+    scene ready."""
+    env = capture_environment(os.environ, sandbox)
     # A file, not a pipe: the app logs a lot and nothing drains a pipe while we wait.
     log = sandbox.parent / "lf-desktop.stderr"
     with open(log, "wb") as stderr:
@@ -122,7 +145,7 @@ def sandbox_window(binary, sandbox, *route, scene=None):
         try:
             windows = xdotool(
                 "search", "--all", "--onlyvisible", "--pid", str(process.pid),
-                "--name", r"^LocalFlow \(Sandbox\)$",
+                "--name", title,
             )
         except subprocess.CalledProcessError:
             return None
@@ -229,6 +252,9 @@ def appearance(theme):
 
 
 def capture(window, path, theme, width, height, previous):
+    # Keep the pointer outside the resized window: GPUI 0.2.2 can re-enter its
+    # X11 cursor-style RefCell and panic when a resize/capture happens under it.
+    xdotool("mousemove", "1599", "999")
     xdotool("windowsize", window, str(width), str(height))
     stale_frame = None
     if previous is not None:
@@ -288,10 +314,10 @@ def record(output, paths):
         raise RuntimeError(f"Captures share identical pixels: {groups}")
 
 
-def capture_sizes(window, output, name, theme):
+def capture_sizes(window, output, name, theme, sizes=SIZES):
     paths = []
     previous = None
-    for width, height in SIZES:
+    for width, height in sizes:
         path = output / f"{name}-{theme}-{width}x{height}.png"
         capture(window, path, theme, width, height, previous)
         paths.append(path)
@@ -304,8 +330,19 @@ def speaker_scenes():
     return [(scene, ["--sandbox-fixture", scene]) for scene in SPEAKER_SURFACES]
 
 
+def agent_scenes():
+    """(capture name, extra lf-desktop arguments) of each Agents scene."""
+    return [(scene, ["--sandbox-fixture", scene]) for scene in AGENT_SURFACES]
+
+
+def launcher_scenes():
+    """(capture name, extra lf-desktop arguments) of each agent launcher scene."""
+    return [(scene, ["--sandbox-fixture", scene]) for scene in LAUNCHER_SURFACES]
+
+
 def expected_captures():
-    return (len(PAGES) + len(SPEAKER_SURFACES)) * len(SIZES) * 2
+    hub = (len(PAGES) + len(SPEAKER_SURFACES) + len(AGENT_SURFACES)) * len(SIZES) * 2
+    return hub + len(LAUNCHER_SURFACES) * len(LAUNCHER_SIZES) * 2
 
 
 def main():
@@ -324,6 +361,16 @@ def main():
                     sandbox = Path(scratch) / "sandbox-speakers"
                     with sandbox_window(args.binary, sandbox, *route, scene=name) as window:
                         paths += capture_sizes(window, output, name, theme)
+                for name, route in agent_scenes():
+                    sandbox = Path(scratch) / "sandbox-agents"
+                    with sandbox_window(args.binary, sandbox, *route, scene=name) as window:
+                        paths += capture_sizes(window, output, name, theme)
+                for name, route in launcher_scenes():
+                    sandbox = Path(scratch) / "sandbox-agents"
+                    with sandbox_window(
+                        args.binary, sandbox, *route, scene=name, title=LAUNCHER_TITLE
+                    ) as window:
+                        paths += capture_sizes(window, output, name, theme, LAUNCHER_SIZES)
     record(output, paths)
     if len(paths) != expected_captures():
         raise RuntimeError(f"Gate 8 expected {expected_captures()} captures, made {len(paths)}")

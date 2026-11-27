@@ -1,5 +1,9 @@
 //! Portable page logic. No GPUI types here, so all of it is unit-tested.
 
+pub mod agents;
+pub mod agents_client;
+pub mod agents_launcher;
+pub mod agents_secrets;
 pub mod ask;
 pub mod ask_agent;
 pub mod assistant;
