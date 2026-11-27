@@ -18,15 +18,15 @@ pub enum Launched {
 /// `--sandbox` (with `--data-dir` / `--sandbox-reset`). `request` is
 /// `None` for `--sandbox-exercise`, which opens no window.
 pub fn sandbox(dir: &Path, reset: bool, request: Option<Request>) -> Result<Launched, String> {
-    sandbox_with(dir, reset, false, request)
+    sandbox_with(dir, reset, None, request)
 }
 
-/// [`sandbox`], seeding the speaker-label fixture into a new (or reset)
-/// directory when `fixture` (`--sandbox-fixture`).
+/// [`sandbox`], seeding the scene's fixture (speaker labels or agents) into
+/// a new (or reset) directory for `--sandbox-fixture`.
 pub fn sandbox_with(
     dir: &Path,
     reset: bool,
-    fixture: bool,
+    fixture: Option<crate::sandbox::Fixture>,
     request: Option<Request>,
 ) -> Result<Launched, String> {
     crate::sandbox::check_dir(dir).map_err(|e| format!("sandbox: {e:#}"))?;

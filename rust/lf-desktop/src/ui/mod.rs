@@ -115,6 +115,57 @@ pub fn glyph_tile(name: &str, fg: Hsla, bg: Hsla) -> Div {
         .child(icon_lg(name, fg))
 }
 
+/// A provider's tile: its initial on a muted square (no brand art or
+/// colour; providers are data). `side` is the tile's edge.
+pub fn monogram_tile(t: &Theme, letter: impl Into<SharedString>, side: Pixels) -> Div {
+    let (sz, lh) = if side >= px(36.) {
+        text::heading()
+    } else {
+        text::body()
+    };
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(side)
+        .rounded(if side >= px(36.) {
+            size::radius_group()
+        } else {
+            size::radius_inner()
+        })
+        .bg(t.bg_muted)
+        .text_size(sz)
+        .line_height(lh)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(t.tone(Tone::Neutral).0)
+        .child(letter.into())
+}
+
+/// A status as a 14 px glyph and a 12 px medium word in the tone's text
+/// colour (never colour alone).
+pub fn status_glyph(
+    t: &Theme,
+    tone: Tone,
+    icon_name: &'static str,
+    word: impl Into<SharedString>,
+) -> Div {
+    let (fg, _) = t.tone(tone);
+    let (sz, lh) = text::supporting();
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(space::s2())
+        .text_size(sz)
+        .line_height(lh)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg)
+        .whitespace_nowrap()
+        .child(icon(icon_name, fg).size(px(14.)))
+        .child(word.into())
+}
+
 // ------------------------------------------------------------------ text ---
 
 pub fn title(t: &Theme, s: impl Into<SharedString>) -> Div {
@@ -937,18 +988,25 @@ pub fn section(
     support: Option<SharedString>,
     action: Option<AnyElement>,
 ) -> Div {
+    let heading_text: SharedString = heading_text.into();
+    let name = heading_text.clone();
     div().flex().flex_col().gap(space::s4()).w_full().child(
         div()
+            .debug_selector(move || format!("section-heading:{name}"))
             .flex()
             .items_end()
             .justify_between()
             .gap(space::s6())
             .min_h(size::control_sm())
             .child(
+                // `flex_1`: the text takes the row's width, never its
+                // min-content (inside a scrolled column that measured to
+                // nothing, and the heading wrapped one letter a line).
                 div()
                     .flex()
                     .flex_col()
                     .gap(space::s1())
+                    .flex_1()
                     .min_w_0()
                     .child(heading(t, heading_text))
                     .when_some(support, |d, s| d.child(supporting(t, s))),

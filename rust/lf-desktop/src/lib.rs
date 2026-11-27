@@ -13,6 +13,7 @@ pub mod console;
 pub mod controllers;
 pub mod data;
 pub mod launch;
+pub mod launcher;
 mod native_appearance;
 pub mod page;
 pub mod pages;

@@ -32,23 +32,23 @@ use serde_json::{json, Value};
 /// credential-like names, `Bearer <token>`, provider-style prefixes
 /// (`sk-…`, `gsk_…`, `ghp_…`, …) and long mixed letter/digit tokens.
 pub fn mask_secrets(text: &str) -> String {
-    use std::sync::OnceLock;
-    static PATTERNS: OnceLock<[regex::Regex; 4]> = OnceLock::new();
-    let [assignment, bearer, prefixed, long] = PATTERNS.get_or_init(|| {
-        [
-            regex::Regex::new(
-                r#"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|secret|client[_-]?secret|password|passwd|apikey|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*["']?)([^\s"'&,;}\]]+)"#,
-            )
-            .expect("static regex"),
-            regex::Regex::new(r"(?i)(bearer\s+)([A-Za-z0-9._~+/=\-]{8,})").expect("static regex"),
-            regex::Regex::new(r"\b(?:sk|gsk|xai|fw|pk|rk|ghp|gho|hf|sk_live|sk_test)[-_][A-Za-z0-9_\-]{8,}")
-                .expect("static regex"),
-            regex::Regex::new(r"[A-Za-z0-9_\-]{24,}").expect("static regex"),
-        ]
-    });
+    let [assignment, bearer, prefixed, long] = secret_patterns();
     let mask = |value: &str| lf_providers::keys::mask_key(value);
-    let text = assignment.replace_all(text, |c: &regex::Captures| {
-        format!("{}{}", &c[1], mask(&c[2]))
+    let source = text;
+    let text = assignment.replace_all(source, |c: &regex::Captures| {
+        // Only the value is replaced; the name and any quotes stay.
+        if prose_quoted_value(source, c) {
+            return c.get(0).expect("match").as_str().to_string();
+        }
+        let (whole, value) = (c.get(0).expect("match"), assignment_value(c));
+        let at = |i: usize| i - whole.start();
+        let s = whole.as_str();
+        format!(
+            "{}{}{}",
+            &s[..at(value.start())],
+            mask(value.as_str()),
+            &s[at(value.end())..]
+        )
     });
     let text = bearer.replace_all(&text, |c: &regex::Captures| {
         format!("{}{}", &c[1], mask(&c[2]))
@@ -56,15 +56,86 @@ pub fn mask_secrets(text: &str) -> String {
     let text = prefixed.replace_all(&text, |c: &regex::Captures| mask(&c[0]));
     long.replace_all(&text, |c: &regex::Captures| {
         let token = &c[0];
-        let mixed = token.chars().any(|ch| ch.is_ascii_digit())
-            && token.chars().any(|ch| ch.is_ascii_alphabetic());
-        if mixed {
+        if mixed_token(token) {
             mask(token)
         } else {
             token.to_string()
         }
     })
     .into_owned()
+}
+
+/// The value of an `assignment` match (quoted or not; never the quotes).
+pub(crate) fn assignment_value<'t>(c: &regex::Captures<'t>) -> regex::Match<'t> {
+    c.name("dq")
+        .or_else(|| c.name("sq"))
+        .or_else(|| c.name("bare"))
+        .expect("an assignment match has a value")
+}
+
+/// A quoted "value" that is really prose between two quoted terms:
+/// `'password=' exactly as 'password equals'`. The first closing quote is
+/// not opening a value when the key itself was not properly quoted before
+/// its `:`/`=`; JSON/YAML-style `"password": value` still counts.
+pub(crate) fn prose_quoted_value(text: &str, c: &regex::Captures) -> bool {
+    if c.name("dq").is_none() && c.name("sq").is_none() {
+        return false;
+    }
+    let Some(whole) = c.get(0) else {
+        return false;
+    };
+    let Some(open) = whole
+        .start()
+        .checked_sub(1)
+        .and_then(|i| text.as_bytes().get(i))
+        .copied()
+    else {
+        return false;
+    };
+    if open != b'\'' && open != b'"' {
+        return false;
+    }
+    let value_quote = if c.name("dq").is_some() { b'"' } else { b'\'' };
+    if value_quote != open {
+        return false;
+    }
+    let prefix = c.get(1).expect("assignment name").as_str();
+    let mut rest = prefix.chars().rev().skip_while(|ch| ch.is_whitespace());
+    if !matches!(rest.next(), Some(':' | '=')) {
+        return false;
+    }
+    let mut rest = rest.skip_while(|ch| ch.is_whitespace());
+    !matches!(rest.next(), Some(ch) if ch == open as char)
+}
+
+/// A long token is credential-like only when it mixes letters and digits.
+pub(crate) fn mixed_token(token: &str) -> bool {
+    token.chars().any(|ch| ch.is_ascii_digit()) && token.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+/// The credential-like spans [`mask_secrets`] masks, shared with the agent
+/// launcher's pre-launch check (`controllers::agents_secrets`):
+/// `[assignment, bearer, prefixed, long]`. In `assignment` the name is
+/// capture group 1 and the value is [`assignment_value`]; in `bearer` the
+/// value is capture group 2.
+pub(crate) fn secret_patterns() -> &'static [regex::Regex; 4] {
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<[regex::Regex; 4]> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            // A quoted value is one value up to its closing quote, spaces
+            // included (`password="correct horse battery staple"`); an
+            // unquoted (or unclosed) one ends at whitespace or punctuation.
+            regex::Regex::new(
+                r#"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|secret|client[_-]?secret|password|passwd|apikey|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*)(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|["']?(?P<bare>[^\s"'&,;}\]]+))"#,
+            )
+            .expect("static regex"),
+            regex::Regex::new(r"(?i)(bearer\s+)([A-Za-z0-9._~+/=\-]{8,})").expect("static regex"),
+            regex::Regex::new(r"\b(?:sk|gsk|xai|fw|pk|rk|ghp|gho|hf|sk_live|sk_test)[-_][A-Za-z0-9_\-]{8,}")
+                .expect("static regex"),
+            regex::Regex::new(r"[A-Za-z0-9_\-]{24,}").expect("static regex"),
+        ]
+    })
 }
 
 pub struct Assistant {

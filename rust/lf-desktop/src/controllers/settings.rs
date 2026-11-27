@@ -16,17 +16,21 @@ pub enum Tab {
     Dictation,
     Cleanup,
     Meetings,
+    /// Settings → Agents: service-backed rows (`pages/settings_agents.rs`),
+    /// no `SPECS` entries. Shown only while the service speaks agents v1.
+    Agents,
     Privacy,
     Advanced,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 8] = [
         Tab::General,
         Tab::Shortcuts,
         Tab::Dictation,
         Tab::Cleanup,
         Tab::Meetings,
+        Tab::Agents,
         Tab::Privacy,
         Tab::Advanced,
     ];
@@ -37,9 +41,19 @@ impl Tab {
             Tab::Dictation => "Input & language",
             Tab::Cleanup => "Cleanup",
             Tab::Meetings => "Meetings",
+            Tab::Agents => crate::controllers::agents_settings::TAB_LABEL,
             Tab::Privacy => "Privacy & data",
             Tab::Advanced => "Advanced",
         }
+    }
+
+    /// The tab strip: every tab, Agents only while the agents service is
+    /// supported (it answers v1, on or off: the tab is where it's turned on).
+    pub fn visible(agents_supported: bool) -> Vec<Tab> {
+        Tab::ALL
+            .into_iter()
+            .filter(|t| *t != Tab::Agents || agents_supported)
+            .collect()
     }
 }
 
@@ -615,6 +629,23 @@ mod tests {
     use super::*;
     use crate::data::DataRoot;
     use lf_core::config::PASTE_METHODS;
+
+    #[test]
+    fn the_agents_tab_follows_meetings_and_only_while_supported() {
+        let shown = Tab::visible(true);
+        assert_eq!(shown, Tab::ALL.to_vec());
+        let meetings = shown.iter().position(|t| *t == Tab::Meetings).unwrap();
+        assert_eq!(shown[meetings + 1], Tab::Agents);
+        assert_eq!(Tab::Agents.label(), "Agents");
+        let hidden = Tab::visible(false);
+        assert_eq!(hidden.len(), 7);
+        assert!(!hidden.contains(&Tab::Agents));
+        assert_eq!(
+            specs_for(Tab::Agents).count(),
+            0,
+            "service-backed rows only"
+        );
+    }
 
     fn file() -> (tempfile::TempDir, ConfigFile) {
         let dir = tempfile::tempdir().unwrap();

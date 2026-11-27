@@ -143,6 +143,21 @@ pub struct TextInput {
 
 impl EventEmitter<InputEvent> for TextInput {}
 
+/// A masked field's reserved buffer (bytes): longer than any API key, so
+/// edits stay in one allocation.
+const MASKED_CAPACITY: usize = 1024;
+
+/// A masked field's text is overwritten when the field goes away. This is
+/// best effort: what the platform's text input or clipboard held, and any
+/// copy a paste longer than [`MASKED_CAPACITY`] caused, are beyond reach.
+impl Drop for TextInput {
+    fn drop(&mut self) {
+        if self.masked {
+            self.buf.wipe();
+        }
+    }
+}
+
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -200,6 +215,9 @@ impl TextInput {
         self.masked = true;
         // No undo snapshots: a secret is never copied around in memory.
         self.buf.keep_undo = false;
+        // Room up front, so typing or pasting a key edits in place rather
+        // than reallocating (which would leave an unwiped copy behind).
+        self.buf.text.reserve(MASKED_CAPACITY);
         self
     }
 
@@ -228,7 +246,12 @@ impl TextInput {
 
     /// Replace the text without emitting `Changed` (programmatic loads).
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        if self.buf.set_text(text.into()) {
+        let text = text.into();
+        if self.masked && self.buf.text != text {
+            // The old value's bytes are overwritten, not just dropped.
+            self.buf.wipe();
+        }
+        if self.buf.set_text(text) {
             self.marked = None;
             self.autoscroll = true;
             cx.notify();
@@ -236,9 +259,28 @@ impl TextInput {
     }
 
     /// Clear the text and its undo history (used after a secret is saved).
+    /// A masked field overwrites its bytes first.
     pub fn clear(&mut self, cx: &mut Context<Self>) {
+        if self.masked {
+            self.buf.wipe();
+            self.marked = None;
+            cx.notify();
+            return;
+        }
         self.set_text(String::new(), cx);
         self.buf.clear_undo();
+    }
+
+    /// Move the text out and leave the field empty: the caller owns the
+    /// only copy (a key on its way to the service).
+    pub fn take_text(&mut self, cx: &mut Context<Self>) -> String {
+        self.marked = None;
+        let text = self.buf.take();
+        if self.masked {
+            self.buf.text.reserve(MASKED_CAPACITY);
+        }
+        cx.notify();
+        text
     }
 
     pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {

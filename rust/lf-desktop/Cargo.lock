@@ -4219,6 +4219,7 @@ dependencies = [
  "tray-icon",
  "unicode-segmentation",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

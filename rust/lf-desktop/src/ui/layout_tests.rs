@@ -281,13 +281,18 @@ fn setting_rows_fit_at_960(cx: &mut TestAppContext) {
 /// column frame, with the longest label selected.
 struct TabsHarness {
     density: TabDensity,
+    /// The Agents tab is shown (the service supports agents).
+    agents: bool,
 }
 
 impl Render for TabsHarness {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         use crate::controllers::settings::Tab;
         let t = Theme::light();
-        let items: Vec<(Tab, &'static str)> = Tab::ALL.iter().map(|t| (*t, t.label())).collect();
+        let items: Vec<(Tab, &'static str)> = Tab::visible(self.agents)
+            .into_iter()
+            .map(|t| (t, t.label()))
+            .collect();
         let strip = div().debug_selector(|| "strip".into()).child(tabs(
             &t,
             "settings-tab",
@@ -314,7 +319,10 @@ impl Render for TabsHarness {
 fn settings_tabs_are_compact_and_stay_inside_at_960(cx: &mut TestAppContext) {
     let settings = crate::pages::settings::TAB_DENSITY;
     let tabs = [TabDensity::Regular, settings].map(|density| {
-        let (_view, cx) = cx.add_window_view(|_, _| TabsHarness { density });
+        let (_view, cx) = cx.add_window_view(|_, _| TabsHarness {
+            density,
+            agents: false,
+        });
         cx.simulate_resize(size(px(960.), px(640.)));
         cx.run_until_parked();
         let strip = cx.debug_bounds("strip").expect("strip laid out");
@@ -363,6 +371,52 @@ fn settings_tabs_are_compact_and_stay_inside_at_960(cx: &mut TestAppContext) {
             compact[0].top(),
             "{settings:?}: tab {i} at {tab:?} left the first line"
         );
+    }
+}
+
+/// With the Agents tab shown (eight tabs) at the 960 px minimum: every tab
+/// stays inside the 656 px strip, at its compact height, in order (the strip
+/// wraps, never overflows). In this test font (wider than the UI font) the
+/// eighth tab takes a second line; whether it does with the real font is
+/// checked on the 960 × 640 `agents-settings` captures, not hidden here.
+#[gpui::test]
+fn settings_tabs_with_agents_wrap_inside_at_960(cx: &mut TestAppContext) {
+    let density = crate::pages::settings::TAB_DENSITY;
+    let (_view, cx) = cx.add_window_view(|_, _| TabsHarness {
+        density,
+        agents: true,
+    });
+    cx.simulate_resize(size(px(960.), px(640.)));
+    cx.run_until_parked();
+    let strip = cx.debug_bounds("strip").expect("strip laid out");
+    assert_eq!(strip.size.width, px(656.));
+    let selectors = [
+        "settings-tab-0",
+        "settings-tab-1",
+        "settings-tab-2",
+        "settings-tab-3",
+        "settings-tab-4",
+        "settings-tab-5",
+        "settings-tab-6",
+        "settings-tab-7",
+    ];
+    let mut previous: Option<gpui::Bounds<gpui::Pixels>> = None;
+    for (i, selector) in selectors.into_iter().enumerate() {
+        let tab = cx.debug_bounds(selector).expect("tab laid out");
+        assert_eq!(tab.size.height, size::control_sm(), "tab {i}");
+        assert!(
+            strip.left() <= tab.left()
+                && tab.right() <= strip.right()
+                && tab.bottom() <= strip.bottom(),
+            "tab {i} at {tab:?} overflows the strip {strip:?}"
+        );
+        if let Some(p) = previous {
+            assert!(
+                tab.top() > p.top() || (tab.top() == p.top() && tab.left() > p.left()),
+                "tab {i} keeps reading order"
+            );
+        }
+        previous = Some(tab);
     }
 }
 

@@ -122,6 +122,11 @@ impl Select {
         self.selected
     }
 
+    #[cfg(test)]
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
     pub fn set_options(
         &mut self,
         options: Vec<SharedString>,

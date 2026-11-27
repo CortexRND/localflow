@@ -16,6 +16,10 @@ pub enum Page {
     /// `controllers::people::enabled`: never in [`Page::ALL`], the sidebar
     /// order for Ctrl+1..0, or a hand-off request (it has no Hub route).
     People,
+    /// Agents (sessions handed to cloud or local agents). GPUI-only like
+    /// People, and shown only while the service reports the feature on
+    /// (`controllers::agents::available`).
+    Agents,
 }
 
 /// Sidebar groups: `(group label, pages)`; `None` = ungrouped.
@@ -61,6 +65,7 @@ impl Page {
             Page::Models => "Models",
             Page::Settings => "Settings",
             Page::People => "People",
+            Page::Agents => "Agents",
         }
     }
 
@@ -85,6 +90,7 @@ impl Page {
             Page::Models => "cpu",
             Page::Settings => "settings",
             Page::People => "user-round",
+            Page::Agents => "bot",
         }
     }
 
@@ -111,13 +117,18 @@ impl Page {
         pages
     }
 
-    /// The sidebar as drawn (arrow-key order): People follows Meetings only
-    /// while it is turned on.
-    pub fn visible_order(people: bool) -> Vec<Page> {
+    /// The sidebar as drawn (arrow-key order): People follows Meetings and
+    /// Agents follows Prompts, each only while it is turned on.
+    pub fn visible_order(people: bool, agents: bool) -> Vec<Page> {
         let mut pages = Page::sidebar_order();
-        if people {
-            if let Some(i) = pages.iter().position(|p| *p == Page::Meetings) {
-                pages.insert(i + 1, Page::People);
+        for (on, after, page) in [
+            (people, Page::Meetings, Page::People),
+            (agents, Page::Prompts, Page::Agents),
+        ] {
+            if on {
+                if let Some(i) = pages.iter().position(|p| *p == after) {
+                    pages.insert(i + 1, page);
+                }
             }
         }
         pages
@@ -127,6 +138,32 @@ impl Page {
     /// and resolved once the config is known.
     pub fn is_people_name(name: &str) -> bool {
         name.trim().eq_ignore_ascii_case("people")
+    }
+
+    /// A hand-off for `agents`: an unknown name (no Hub route), resolved by
+    /// the open window once it knows whether Agents is on.
+    pub fn is_agents_name(name: &str) -> bool {
+        let name = name.trim();
+        name.eq_ignore_ascii_case("agents") || Page::agents_session(name).is_some()
+    }
+
+    /// `--page agents/settings`: the hand-off for Settings → Agents.
+    pub const AGENTS_SETTINGS: &'static str = "agents/settings";
+
+    /// `agents/settings` (the launcher's and the empty states' "Open Agent
+    /// settings"): an unknown name like `agents`, resolved by the open
+    /// window once the service has answered. It needs only a service that
+    /// supports agents, not one with Agents on.
+    pub fn is_agents_settings_name(name: &str) -> bool {
+        name.trim().eq_ignore_ascii_case(Page::AGENTS_SETTINGS)
+    }
+
+    /// `agents/<session id>`: the launcher's request to open Agents on one
+    /// session (`--page agents --agent-session <id>`).
+    pub fn agents_session(name: &str) -> Option<String> {
+        let (page, id) = name.trim().split_once('/')?;
+        (page.eq_ignore_ascii_case("agents") && crate::controllers::agents::is_session_id(id))
+            .then(|| id.to_string())
     }
 }
 
@@ -145,11 +182,31 @@ mod tests {
         assert!(!Page::sidebar_order().contains(&Page::People));
         assert_eq!(Page::parse("people"), None, "no Hub route");
         assert!(Page::is_people_name(" People "));
-        assert_eq!(Page::visible_order(false), Page::sidebar_order());
-        let shown = Page::visible_order(true);
+        assert_eq!(Page::visible_order(false, false), Page::sidebar_order());
+        let shown = Page::visible_order(true, false);
         let meetings = shown.iter().position(|p| *p == Page::Meetings).unwrap();
         assert_eq!(shown[meetings + 1], Page::People);
         assert_eq!(shown.len(), 11);
+        // Agents: after Prompts, never in Ctrl+1..0 or the Hub routes.
+        assert!(!Page::ALL.contains(&Page::Agents));
+        assert!(!Page::sidebar_order().contains(&Page::Agents));
+        assert_eq!(Page::parse("agents"), None, "no Hub route");
+        assert!(Page::is_agents_name(" Agents "));
+        assert!(Page::is_agents_settings_name(" Agents/Settings "));
+        assert!(!Page::is_agents_name("agents/settings"), "not a session");
+        assert!(!Page::is_agents_settings_name("agents"));
+        assert_eq!(Page::parse("agents/settings"), None, "no Hub route");
+        let shown = Page::visible_order(false, true);
+        let prompts = shown.iter().position(|p| *p == Page::Prompts).unwrap();
+        assert_eq!(shown[prompts + 1], Page::Agents);
+        assert_eq!(shown.len(), 11);
+        let both = Page::visible_order(true, true);
+        assert_eq!(both.len(), 12);
+        let without: Vec<Page> = both
+            .into_iter()
+            .filter(|p| !matches!(p, Page::People | Page::Agents))
+            .collect();
+        assert_eq!(without, Page::sidebar_order(), "the ten keep their order");
         assert_eq!(
             Page::Models.label(),
             lf_ui::hub_model::sidebar_label("Models")
