@@ -105,7 +105,12 @@ def gate_suite(gate: str) -> str:
 def active_suites(manifest: dict) -> list[str]:
     """Suites a run declared in manifest.json (all suites when it declares none or "all")."""
     declared = manifest.get("suites")
-    if not declared or "all" in declared:
+    if not declared:
+        return list(SUITE_ORDER)
+    unknown = [suite for suite in declared if suite != "all" and suite not in SUITE_ORDER]
+    if unknown:
+        raise ValueError(f"unknown suite(s) in manifest: {', '.join(unknown)}")
+    if "all" in declared:
         return list(SUITE_ORDER)
     return [suite for suite in SUITE_ORDER if suite in declared]
 

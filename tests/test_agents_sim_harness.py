@@ -136,6 +136,8 @@ def test_suites_all_expands_to_suite_order_in_gates_and_run_matrix(sim, tmp_path
     assert sim.gates.active_suites({"suites": ["all"]}) == order
     assert sim.gates.active_suites({"suites": ["agents", "all"]}) == order
     assert sim.gates.active_suites({"suites": ["agents"]}) == ["agents"]
+    with pytest.raises(ValueError, match="setting_api"):
+        sim.gates.active_suites({"suites": ["mcp", "setting_api"]})
     script = (SIM / "run_matrix.sh").read_text(encoding="utf-8")
     assert f'ALL_SUITES="{" ".join(order)}"' in script  # kept in sync with gates.SUITE_ORDER
     if sys.platform == "win32":

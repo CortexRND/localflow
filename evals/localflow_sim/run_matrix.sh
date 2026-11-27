@@ -23,6 +23,10 @@ for suite in $SUITES; do
 done
 SUITES=""
 for suite in $expanded; do
+  case " $ALL_SUITES " in
+    *" $suite "*) ;;
+    *) echo "unknown suite: $suite (expected one of: $ALL_SUITES)" >&2; exit 2 ;;
+  esac
   case " $SUITES " in *" $suite "*) ;; *) SUITES="${SUITES:+$SUITES }$suite" ;; esac
 done
 
