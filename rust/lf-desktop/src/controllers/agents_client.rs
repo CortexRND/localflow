@@ -327,7 +327,11 @@ impl AgentsBackend for HttpAgents {
             TIMEOUT + Duration::from_secs(u64::from(wait)),
         )
         .map(|reply| agents::parse_events(&reply))
-        .map_err(|(_, e)| e)
+        // The session is gone: say so, so its reader stops (no retry).
+        .map_err(|e| match e {
+            (Some(StatusCode::NOT_FOUND), _) => AgentsError::Absent,
+            (_, e) => e,
+        })
     }
 
     fn changes(&self, since: u64, wait: u32) -> Result<Changes, AgentsError> {
@@ -897,6 +901,29 @@ mod tests {
         let (port, handle) = serve(
             "200 OK",
             json!({"sessions": [{"id": "a1f3a2c80001", "state": "waiting_input"}],
+    #[test]
+    fn a_gone_sessions_events_read_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (port, handle) = serve(
+            "404 Not Found",
+            json!({"detail": "no session", "code": "not_found"}).to_string(),
+        );
+        let error = client(port, &dir)
+            .events("0123456789ab", 3, 200, 0)
+            .unwrap_err();
+        handle.join().unwrap();
+        assert_eq!(error, AgentsError::Absent);
+        let (port, handle) = serve("502 Bad Gateway", json!({"detail": "x"}).to_string());
+        let error = client(port, &dir)
+            .events("0123456789ab", 3, 200, 0)
+            .unwrap_err();
+        handle.join().unwrap();
+        assert!(
+            matches!(error, AgentsError::Refused(_)),
+            "other failures retry"
+        );
+    }
+
                    "next_cursor": null, "revision": 7, "counts": {}})
             .to_string(),
         );

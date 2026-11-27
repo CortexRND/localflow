@@ -2064,7 +2064,8 @@ impl AgentsBackend for FakeAgents {
                     .sessions
                     .iter()
                     .find(|s| s["id"] == id)
-                    .ok_or_else(|| AgentsError::Refused("session not found".into()))?;
+                    // The route's 404, as the HTTP client reports it.
+                    .ok_or(AgentsError::Absent)?;
                 let state = session["state"].clone();
                 let log = inner.events.get(id).cloned().unwrap_or_default();
                 let newer: Vec<Value> = log

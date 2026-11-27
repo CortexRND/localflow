@@ -115,6 +115,8 @@ pub struct AgentsPage {
     events_reading: bool,
     /// Failed events reads in a row (the backoff).
     events_failures: u32,
+    /// An events read stopped (failed or due) while the page was hidden.
+    events_stalled: bool,
     reply: Entity<TextInput>,
     reply_error: Option<String>,
     sending: bool,
@@ -187,6 +189,7 @@ impl AgentsPage {
             events_generation: 0,
             events_reading: false,
             events_failures: 0,
+            events_stalled: false,
             reply,
             reply_error: None,
             sending: false,
@@ -232,6 +235,11 @@ impl AgentsPage {
         }
         self.load(cx);
         self.watch(cx);
+        // An events read that stopped while hidden resumes now, even if
+        // the session's `last_seq` didn't move meanwhile.
+        if std::mem::take(&mut self.events_stalled) {
+            self.read_events(cx);
+        }
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
@@ -612,8 +620,14 @@ impl AgentsPage {
             if let Some(pause) = again {
                 cx.background_executor().timer(pause).await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.events_generation == generation {
+                    if this.events_generation != generation {
+                        return;
+                    }
+                    if this.shown() {
                         this.read_events(cx);
+                    } else {
+                        // Hidden: stop; `refresh` picks it up again.
+                        this.events_stalled = true;
                     }
                 });
             }
@@ -637,9 +651,13 @@ impl AgentsPage {
                 self.events_failures = 0;
                 page
             }
-            // Try again, backing off like `/changes` (a 404: the session
-            // went away; the list's next read says so).
+            // Try again, backing off like `/changes`, while shown (a 404:
+            // the session went away; the list's next read says so).
             Err(AgentsError::Absent) => return None,
+            Err(_) if !self.shown() => {
+                self.events_stalled = true;
+                return None;
+            }
             Err(_) => {
                 self.events_failures = self.events_failures.saturating_add(1);
                 return Some(backoff(self.events_failures));
@@ -1114,6 +1132,11 @@ impl AgentsPage {
     #[cfg(test)]
     pub(crate) fn read_events_for_test(&mut self, cx: &mut Context<Self>) {
         self.read_events(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn events_stalled_for_test(&self) -> bool {
+        self.events_stalled
     }
 
     #[cfg(test)]

@@ -148,3 +148,45 @@ fn status_is_asked_on_transitions_and_not_after_absent(cx: &mut TestAppContext) 
     );
     assert!(!shell.read_with(cx, |s, _| s.cx.agents_supported()));
 }
+
+/// Failed events reads retry only while Agents is shown; hidden, they
+/// stop, and resume (once) when the page is shown again.
+#[gpui::test]
+fn events_retries_stop_while_hidden_and_resume(cx: &mut TestAppContext) {
+    let (shell, page, cx, _dir, fake) = on_running(cx);
+    fake.fail(Some(AgentsError::Offline));
+    let reads = fake.calls().events;
+    page.update(cx, |p, cx| p.read_events_for_test(cx));
+    cx.run_until_parked();
+    assert_eq!(fake.calls().events, reads + 1);
+    shell.update(cx, |s, cx| s.navigate(Page::Home, None, cx));
+    cx.run_until_parked();
+    for secs in [2, 4, 8, 10] {
+        tick(cx, secs);
+    }
+    assert_eq!(fake.calls().events, reads + 1, "no retries while hidden");
+    fake.fail(None);
+    fake.emit(CLAUDE_RUNNING, "Read once back on Agents");
+    shell.update(cx, |s, cx| s.navigate(Page::Agents, None, cx));
+    cx.run_until_parked();
+    assert!(texts(&page, cx)
+        .iter()
+        .any(|t| t == "Read once back on Agents"));
+    assert!(!page.read_with(cx, |p, _| p.events_stalled_for_test()));
+}
+
+/// A session's events 404 (it went away): no retry.
+#[gpui::test]
+fn a_gone_session_stops_its_events_reader(cx: &mut TestAppContext) {
+    let (_shell, page, cx, _dir, fake) = on_running(cx);
+    fake.fail(Some(AgentsError::Absent));
+    let reads = fake.calls().events;
+    page.update(cx, |p, cx| p.read_events_for_test(cx));
+    cx.run_until_parked();
+    for secs in [2, 4, 8] {
+        tick(cx, secs);
+    }
+    fake.fail(None);
+    assert_eq!(fake.calls().events, reads + 1, "no retry after a 404");
+}
+
