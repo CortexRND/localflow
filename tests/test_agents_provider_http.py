@@ -397,3 +397,65 @@ def test_moved_or_deleted_profile_keeps_the_pinned_token_redacted(tmp_path, stub
 def test_invalid_ports_are_rejected(base):
     with pytest.raises(ProfileError, match="invalid port"):
         validate_profile(_profile(base))
+
+
+# -- regressions (PR #185 review, round 4) -------------------------------------------
+
+
+def _move(manager, profile_id, base_url):
+    with manager.profiles.mutate() as profiles:
+        entry = next(p for p in profiles if p["id"] == profile_id)
+        entry["base_url"] = base_url
+
+
+def test_a_move_racing_a_rotation_read_keeps_the_pinned_token(tmp_path, stub, monkeypatch):
+    other = StubAgentServer()
+    try:
+        manager, _clock = _manager(tmp_path)
+        profile = _install(manager, _profile(stub.url))
+        _set_token(manager, profile["id"], TOKEN)
+        provider = manager.provider_for("http", profile["id"]).pinned()
+        replacement = "replacement-token-for-new-origin-0123"
+        original = provider._resolve_secret
+
+        def racing_resolve(live=None):
+            # Between the same-origin check and the token read, the profile moves and
+            # a replacement token is bound to the new origin.
+            _move(manager, profile["id"], other.url)
+            _set_token(manager, profile["id"], replacement)
+            return original(live)
+
+        monkeypatch.setattr(provider, "_resolve_secret", racing_resolve)
+        assert provider._secret() == TOKEN
+    finally:
+        other.close()
+
+
+def test_a_move_after_a_rotation_keeps_the_rotated_token(tmp_path, stub):
+    other = StubAgentServer()
+    try:
+        manager, clock = _manager(tmp_path)
+        profile = _install(manager, _profile(stub.url))
+        _set_token(manager, profile["id"], TOKEN)
+        stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+        stub.script("GET", "/v1/runs/r1", (200, {"status": "running"}),
+                    (200, {"status": "done", "output": {"text": "ok"}}))
+        session, _ = manager.launch({"prompt": "go", "provider": "http",
+                                     "profile": profile["id"]})
+        rotated = "rotated-token-same-origin-0123456"
+        _set_token(manager, profile["id"], rotated)  # the launch token is revoked
+        for _ in range(20):  # one poll with the rotated token
+            if len(stub.requests) >= 2:
+                break
+            clock.advance(5)
+            manager.tick()
+        assert stub.requests[-1]["headers"]["Authorization"] == f"Bearer {rotated}"
+        _move(manager, profile["id"], other.url)
+        _set_token(manager, profile["id"], "replacement-token-for-new-origin-0123")
+        done = drive(manager, clock, session.id, step=5)
+        assert done.state == "completed"
+        assert [r["headers"]["Authorization"] for r in stub.requests] == [
+            f"Bearer {TOKEN}", f"Bearer {rotated}", f"Bearer {rotated}"]
+        assert other.requests == []
+    finally:
+        other.close()

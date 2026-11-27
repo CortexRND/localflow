@@ -290,7 +290,12 @@ class HttpProvider(AgentProvider):
             # Same origin and the token is still bound to it: a rotated token applies
             # to the active run. Reading it also registers it with the redactor.
             fresh = self._resolve_secret(live)
-            if fresh:
+            # Re-check after reading: a concurrent move plus replacement between the
+            # two reads would otherwise send the new origin's token to the old endpoint.
+            if fresh and self._live_profile_for_pinned_origin() is not None:
+                # Remember the rotation so a later move falls back to the latest
+                # same-origin token rather than the revoked launch token.
+                self._pinned_secret = fresh
                 return fresh
         # Deleted, moved to another origin or token removed: the live token (if any)
         # belongs elsewhere. The snapshot stays redacted (the redactor never forgets).
