@@ -1,7 +1,7 @@
 #!/bin/bash
 # Full matrix: REPEATS x every cell of every suite, one fresh process per cell, each under `timeout`.
 # Results: ~/sim-runs/$RUN_ID/rK/results/<cell>.json   (see PROTOCOL.md; SIM_RUNS overrides ~/sim-runs)
-#   RUN_ID=<id> REPEATS=3 SUITES="dictation meetings recall_ask mcp settings_api agents" evals/localflow_sim/run_matrix.sh
+#   RUN_ID=<id> REPEATS=3 SUITES=all evals/localflow_sim/run_matrix.sh   (or a space-separated subset, e.g. SUITES="mcp agents")
 #   SUITES=agents needs no FIREWORKS_API_KEY (no live LLM); AGENTS_LIVE=claude,devin is recorded, never gated.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -9,12 +9,22 @@ REPO="$(cd "$HERE/../.." && pwd)"
 PY="${SIM_PYTHON:-$REPO/.venv-tk/bin/python}"
 export SIM_SUT="${SIM_SUT:-$HOME/work/sim-sut}"
 REPEATS="${REPEATS:-3}"
-SUITES="${SUITES:-dictation meetings recall_ask mcp settings_api agents}"
+SUITES="${SUITES:-all}"
 CELL_TIMEOUT="${CELL_TIMEOUT:-900}"
 MEETING_TIMEOUT="${MEETING_TIMEOUT:-1800}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-localflow-sim}"
 RUN="${SIM_RUNS:-$HOME/sim-runs}/$RUN_ID"
 LOG="$RUN/matrix.log"
+ALL_SUITES="dictation meetings recall_ask mcp settings_api agents"  # keep in sync with gates.SUITE_ORDER
+# SUITES=all (alone or mixed with names) expands to every suite in SUITE_ORDER.
+expanded=""
+for suite in $SUITES; do
+  if [ "$suite" = all ]; then expanded="$expanded $ALL_SUITES"; else expanded="$expanded $suite"; fi
+done
+SUITES=""
+for suite in $expanded; do
+  case " $SUITES " in *" $suite "*) ;; *) SUITES="${SUITES:+$SUITES }$suite" ;; esac
+done
 
 needs_llm=0
 for suite in $SUITES; do

@@ -60,6 +60,8 @@ def _write_manifest(run: Path, commit: str, suites=("agents",), repeats: int = 1
 @pytest.fixture(scope="module")
 def agents_run(tmp_path_factory):
     """One repeat of the two fastest-to-check real cells (A1 lifecycle, A2 hot commands)."""
+    if sys.platform == "win32":
+        pytest.skip("evals/localflow_sim driver requires POSIX isolation")
     pytest.importorskip("fastapi")
     pytest.importorskip("sounddevice")
     if shutil.which("git") is None:
@@ -116,6 +118,7 @@ def test_driver_scrubs_planted_secrets_to_a_countable_marker(sim):
     assert sim.driver.PLANTED_MARK == sim.gates.PLANTED_MARK
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="run_matrix.sh requires POSIX bash")
 def test_run_matrix_only_needs_the_llm_key_for_llm_suites(tmp_path):
     env = {k: v for k, v in _env().items() if k != "FIREWORKS_API_KEY"}
     env.update(SIM_SUT=str(tmp_path / "missing"), SUITES="dictation agents", SIM_RUNS=str(tmp_path))
@@ -126,6 +129,30 @@ def test_run_matrix_only_needs_the_llm_key_for_llm_suites(tmp_path):
     proc = subprocess.run(["bash", str(SIM / "run_matrix.sh")], env=env, capture_output=True, text=True,
                           timeout=60, check=False)
     assert proc.returncode == 2 and "FIREWORKS_API_KEY" not in proc.stderr  # fails later, on the missing SUT
+
+
+def test_suites_all_expands_to_suite_order_in_gates_and_run_matrix(sim, tmp_path):
+    order = list(sim.gates.SUITE_ORDER)
+    assert sim.gates.active_suites({"suites": ["all"]}) == order
+    assert sim.gates.active_suites({"suites": ["agents", "all"]}) == order
+    assert sim.gates.active_suites({"suites": ["agents"]}) == ["agents"]
+    script = (SIM / "run_matrix.sh").read_text(encoding="utf-8")
+    assert f'ALL_SUITES="{" ".join(order)}"' in script  # kept in sync with gates.SUITE_ORDER
+    if sys.platform == "win32":
+        return
+    env = {k: v for k, v in _env().items() if k != "FIREWORKS_API_KEY"}
+    env.update(SIM_SUT=str(tmp_path / "missing"), SIM_RUNS=str(tmp_path), SUITES="all")
+    proc = subprocess.run(["bash", str(SIM / "run_matrix.sh")], env=env, capture_output=True, text=True,
+                          timeout=60, check=False)
+    assert proc.returncode == 2 and "FIREWORKS_API_KEY" in proc.stderr  # "all" includes the LLM suites
+    # REPEATS=0 writes the manifest without running a cell: "all" is recorded expanded.
+    env.update(SIM_SUT=str(ROOT), SIM_ALLOW_COMMIT_OVERRIDE="1", SIM_PYTHON=sys.executable, REPEATS="0",
+               FIREWORKS_API_KEY="fw-not-used", RUN_ID="all-suites", SUITES="all agents")
+    proc = subprocess.run(["bash", str(SIM / "run_matrix.sh")], env=env, capture_output=True, text=True,
+                          timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr
+    manifest = json.loads((tmp_path / "all-suites" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["suites"] == order
 
 
 # -- gates -------------------------------------------------------------------------------
@@ -277,3 +304,58 @@ def test_an_advisory_jev_disagreement_queues_but_never_turns_red(sim, tmp_path, 
     assert card["verdict"] == "GREEN"
     queued = [q for q in card["disagreement_queue"] if q["source"] == "gate-vs-jev"]
     assert [(q["type"], q["trust"]) for q in queued] == [("agent_launch_intent", "advisory")]
+
+
+# -- focused gate & report checks ---------------------------------------------------------
+
+
+def _tally():
+    seen: dict[str, bool] = {}
+
+    def tally(gate, ok, item, detail=""):
+        seen[item] = bool(ok)
+    return seen, tally
+
+
+def _xproc(alternations: int, barrier: bool = True) -> dict:
+    return {"writers": [{"exit": 0, "unreadable": 0}] * 2, "barrier": barrier, "entries": 200, "unique": 200,
+            "expected": 200, "missing": [], "per_writer_in_order": True, "alternations": alternations}
+
+
+def test_xproc_interleaving_needs_a_barrier_and_two_alternations(sim):
+    cell = {"id": "c", "xproc": {"writes_per_process": 100}}
+    for alternations, barrier, want in ((1, True, False), (2, True, True), (50, False, False)):
+        seen, tally = _tally()
+        sim.gates._agents_xproc(_xproc(alternations, barrier), cell, tally)
+        assert seen["c:xproc:interleaved"] is want, (alternations, barrier)
+        assert seen["c:xproc:none-lost"] and seen["c:xproc:never-unreadable"]
+
+
+def _filters(devin_ids) -> dict:
+    ids = ["s1", "s2", "s3"]
+    row = lambda got: {"status": 200, "ids": got, "states": [], "origins": []}
+    f = {"state_failed": {**row(["s1"]), "states": ["failed"]}, "state_terminal": row(ids), "state_active": row([]),
+         "provider_mock": row(ids), "origin_cli": row(["s3"]), "q": row(["s2"]), "root_id": row(["s1"])}
+    if devin_ids is not None:
+        f["provider_devin"] = row(devin_ids)
+    f["_expect"] = {"failed": ["s1"], "terminal": ids, "q": ["s2"], "cli": ["s3"], "root": ["s1"], "devin": []}
+    return f
+
+
+def test_provider_filter_must_also_exclude(sim):
+    for devin_ids, want in (([], True), (["s1", "s2", "s3"], False), (None, False)):
+        seen, tally = _tally()
+        sim.gates._agents_api_filters(_filters(devin_ids), "c", tally)
+        assert seen["c:filter:provider-exclusion"] is want, devin_ids
+        assert seen["c:filter:provider"]
+
+
+def test_jev_pass_is_complete_for_deterministic_only_runs(sim):
+    done = {"calls": 0, "errors": 0, "rows": []}
+    assert sim.report.jev_complete(done, []) is True  # mcp / settings_api: nothing to grade
+    assert sim.report.jev_complete({**done, "errors": 1}, []) is False
+    assert sim.report.jev_complete(done, [{"id": "x"}]) is False  # items to grade, none graded
+    assert sim.report.jev_complete(done, None) is False  # jev_inputs.json missing
+    assert sim.report.jev_complete(None, []) is False  # jev never ran
+    graded = {"calls": 1, "errors": 0, "rows": [{"verdict": "pass"}]}
+    assert sim.report.jev_complete(graded, [{"id": "x"}]) is True

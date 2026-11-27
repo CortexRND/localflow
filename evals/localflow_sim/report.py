@@ -322,6 +322,26 @@ def gate_table(gate_data: dict) -> str:
                   "Wilson 95%", "low power"], rows)
 
 
+def jev_complete(jev: dict | None, jev_items: list | None) -> bool:
+    """Whether the Jev pass ran to completion.
+
+    Either it graded at least one row, or the run had nothing to grade (deterministic-only
+    suites such as mcp / settings_api: jev_inputs.json holds 0 items) and jev ran with 0 errors."""
+    if not jev:
+        return False
+    graded_rows = [
+        r for r in jev.get("rows", [])
+        if not r.get("error") and (
+            r.get("sourcesSuffice") is not None
+            or r.get("verdict") is not None
+            or bool(r.get("advisory"))
+        )
+    ]
+    if jev.get("calls", 0) > 0 and graded_rows:
+        return True
+    return isinstance(jev_items, list) and len(jev_items) == 0 and jev.get("errors", 0) == 0
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print(__doc__)
@@ -335,16 +355,7 @@ def main() -> int:
         (run / "gates.json").write_text(json.dumps(gate_data, indent=1), encoding="utf-8")
     jev = load(run / "jev_out.json")
     tables = jev_tables(jev or {}, gate_data)
-    jev_rows = (jev or {}).get("rows", [])
-    graded_rows = [
-        r for r in jev_rows
-        if not r.get("error") and (
-            r.get("sourcesSuffice") is not None
-            or r.get("verdict") is not None
-            or bool(r.get("advisory"))
-        )
-    ]
-    has_jev = bool(jev and jev.get("calls", 0) > 0 and graded_rows)
+    has_jev = jev_complete(jev, load(run / "jev_inputs.json"))
     verdict, reasons = classify(gate_data, has_jev)
     counts = defaultdict(int)
     for row in gate_data["summary"].values():

@@ -731,13 +731,15 @@ def cell_hotcommands(cell: dict) -> dict:
             normal = None if item["expect"] else baseline(item["text"], kind)
         launcher.join()
         payloads = post.payloads[before_posts:]
-        route = None
+        route, route_status = None, None
+        flags_on = bool(cfg.agents_enabled and cfg.agent_hot_commands)
         comparable = kind == "dictate" and not context.get("cooldown") and not context.get("retry")
         if comparable:
             api.server._config = cfg
             status, data = api.post("/api/agents/hot-commands/test", "/api/agents/hot-commands/test",
                                     json={"text": item["text"]})
             api.server._config = base_cfg
+            route_status = status
             route = data if status == 200 else {"status": status, **(data if isinstance(data, dict) else {})}
         out["utterances"].append({
             "id": item["id"], "case": item.get("case", "positive"), "text": item["text"], "expect": item["expect"],
@@ -746,7 +748,7 @@ def cell_hotcommands(cell: dict) -> dict:
                           "prompt": p.get("prompt"), "origin": p.get("origin"), "id": p.get("id")} for p in payloads],
             "history": None if row is None else {k: row.get(k) for k in ("kind", "raw_text", "final_text", "status")},
             "history_audio": None if row is None else bool(row.get("audio_path")),
-            "route": route, "route_comparable": comparable,
+            "route": route, "route_status": route_status, "route_comparable": comparable, "flags_on": flags_on,
         })
     out["pasted"] = pasted  # the worker pastes; _process_job itself never does
     out["rule_ids"] = rule_ids
@@ -986,6 +988,7 @@ def cell_api(cell: dict) -> dict:
         filters = {}
         for name, params in (("state_failed", {"state": "failed"}), ("state_terminal", {"state": "terminal"}),
                              ("state_active", {"state": "active"}), ("provider_mock", {"provider": "mock"}),
+                             ("provider_devin", {"provider": "devin"}),
                              ("origin_cli", {"origin": "cli"}), ("q", {"q": "PAGE ITEM 3"}),
                              ("root_id", {"root_id": target})):
             status, body = hit("get", S, S, params={**params, "limit": 200})
@@ -994,7 +997,9 @@ def cell_api(cell: dict) -> dict:
                              "origins": sorted({s["origin"] for s in body.get("sessions", [])})}
         filters["_expect"] = {"failed": sorted(s["id"] for s in everything if s["state"] == "failed"),
                               "terminal": sorted(s["id"] for s in everything),
-                              "q": [page_ids[2]], "cli": [cli_id], "root": [target]}
+                              "q": [page_ids[2]], "cli": [cli_id], "root": [target],
+                              # Exclusion: every session here is mock, so a filter that is ignored returns them all.
+                              "devin": sorted(s["id"] for s in everything if s.get("provider") == "devin")}
         bad = {}
         for name, params in (("state", {"state": "sleeping"}), ("limit", {"limit": 0}), ("origin", {"origin": "radio"}),
                              ("unknown", {"colour": "red"}), ("cursor", {"before": "!!"})):
@@ -1208,6 +1213,11 @@ def cell_secrets(cell: dict) -> dict:
 
     # CLI with the server down (read commands fall back to the store).
     env = {**os.environ, "PYTHONPATH": str(SUT)}
+    # Operator proxies must never intercept the CLI's loopback probes.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        env.pop(name, None)
+        env.pop(name.lower(), None)
+    env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
     cli_runs = []
     cli_out = b""
     for args in (["agents", "list", "--json"], ["agents", "show", echo, "--json"], ["agents", "logs", echo, "--json"],
@@ -1281,7 +1291,9 @@ class _ProviderBench:
                 "outputs": [e["text"] for e in events if e["type"] == "output"],
                 "seqs_contiguous": [e["seq"] for e in events] == list(range(1, s.last_seq + 1)),
                 "prompt": s.prompt, "title": s.title, "raw_status": s.internal.get("raw_status"),
-                "event_log": event_log_text(events)}
+                "event_log": event_log_text(events),
+                # The product's own list-summary preview (AgentSession.to_summary), never re-derived here.
+                "result_preview": s.to_summary()["result_preview"]}
 
 
 def cell_providers(cell: dict) -> dict:
@@ -1328,9 +1340,16 @@ def cell_providers(cell: dict) -> dict:
     bench.configure(agent_claude_bin=str(TMP / "nowhere" / "claude"))
     out["claude"]["missing_binary"] = bench.launch({"prompt": "Fix the tests", "provider": "claude"})
     bench.configure(agent_claude_bin="claude", agent_claude_wrapper="headroom")
+    # PATH is ONLY the private shim dir here, so no real headroom on the host can satisfy the probe.
+    saved_path = os.environ["PATH"]
     (BIN / "headroom").rename(HARNESS / "headroom.off")
-    out["claude"]["missing_wrapper"] = bench.launch({"prompt": "Fix the tests", "provider": "claude"})
-    (HARNESS / "headroom.off").rename(BIN / "headroom")
+    try:
+        os.environ["PATH"] = str(BIN)
+        out["claude"]["missing_wrapper_which"] = shutil.which("headroom")
+        out["claude"]["missing_wrapper"] = bench.launch({"prompt": "Fix the tests", "provider": "claude"})
+    finally:
+        os.environ["PATH"] = saved_path
+        (HARNESS / "headroom.off").rename(BIN / "headroom")
     bench.configure(agent_claude_wrapper="none")
     out["claude"]["repo_path"] = str(REPO.resolve())
     os.environ.pop("FAKE_CLAUDE_MODE", None)
@@ -1444,7 +1463,7 @@ def cell_providers(cell: dict) -> dict:
     for key, row in (("claude:base", out["claude"]["base"]), ("devin:lifecycle", out["devin"]["lifecycle"]),
                      ("http:lifecycle", out["http"]["lifecycle"])):
         out["jev_result_items"].append({"id": key, "prompt": row["prompt"], "event_log": row["event_log"],
-                                        "result_text": row["result_text"], "result_preview": row["result_text"][:200]})
+                                        "result_text": row["result_text"], "result_preview": row["result_preview"]})
     return out
 
 
@@ -1592,8 +1611,9 @@ from pathlib import Path
 from localflow.agents.store import HotCommandStore
 path, me, count, go = sys.argv[1], sys.argv[2], int(sys.argv[3]), Path(sys.argv[4])
 store = HotCommandStore(Path(path))
-while not go.exists():
-    time.sleep(0.001)
+(go.parent / (go.name + "." + me + ".ready")).write_text("ready", encoding="utf-8")  # start barrier, part 1
+while not go.exists():  # start barrier, part 2: the parent releases both writers at once
+    time.sleep(0.0005)
 bad = 0
 for i in range(count):
     with store.mutate() as rules:
@@ -1627,6 +1647,23 @@ def cell_recovery(cell: dict) -> dict:
     env = {**os.environ, "PYTHONPATH": str(SUT), "LOCALFLOW_DEVIN_BASE_URL": stub.url, "FAKE_CLAUDE_MODE": "hang"}
     stub.script("POST", "/v1/sessions", (200, {"session_id": "devin-r1", "url": "https://app.devin.ai/sessions/devin-r1"}))
     stub.script("GET", "/v1/sessions/devin-r1", (200, {"status_enum": "working", "messages": []}))
+    seen = len(records())
+
+    def spawned() -> list[dict]:
+        return [r for r in records()[seen:] if r.get("pid")]
+
+    def reap(recs: list[dict]) -> None:
+        """SIGKILL each fake claude's own process group and wait until it is gone (never orphaned)."""
+        for rec in recs:
+            pgid = rec.get("pgid") or rec["pid"]
+            with contextlib.suppress(OSError):
+                if pgid == os.getpgrp():  # never our own group: fall back to the single process
+                    os.kill(rec["pid"], signal.SIGKILL)
+                else:
+                    os.killpg(pgid, signal.SIGKILL)
+        for rec in recs:
+            wait_for(lambda rec=rec: not _pid_alive(rec["pid"]), 10, 0.02)
+
     try:
         # 1. A real server process is SIGKILLed mid-run, then a new manager recovers.
         child = subprocess.Popen([sys.executable, "-c", _SERVER_CHILD], env=env, cwd=str(TMP),
@@ -1635,17 +1672,20 @@ def cell_recovery(cell: dict) -> dict:
         try:  # the child prints one JSON line once its three sessions are in place
             wait_for(lambda: child.poll() is not None or select_line(child), 60, 0.05)
             line = _LINES.get(child.pid, "")
+            if line:  # the claude session is "running": kill only once fake claude has recorded its PID
+                wait_for(lambda: spawned() or child.poll() is not None, 15, 0.02)
         finally:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait(timeout=10)
+            # A spawn already in flight at SIGKILL time still records itself: poll briefly for it.
+            wait_for(spawned, 0 if spawned() else 2, 0.05)
+            orphans = spawned()
+            reap(orphans)  # fake claude ran in its own group; the dead server cannot reap it
         before = json.loads(line) if line else {"ids": {}, "states": {}}
         out["before_kill"] = before["states"]
         out["killed_exit"] = child.returncode
-        orphans = [r for r in records() if r.get("pid")]
-        for rec in orphans:  # the fake claude ran in its own group; the dead server cannot reap it
-            with contextlib.suppress(OSError):
-                os.killpg(rec["pid"], signal.SIGKILL)
         out["claude_spawned"] = len(orphans)
+        out["claude_orphans_alive"] = sum(1 for r in orphans if _pid_alive(r["pid"]))
         stub.script("GET", "/v1/sessions/devin-r1", (200, {"status_enum": "finished", "messages": [
             {"type": "devin_message", "message": "Recovered after the restart and finished."}]}))
         stub.take()
@@ -1668,11 +1708,16 @@ def cell_recovery(cell: dict) -> dict:
     # 2. Two processes, 200 interleaved rule writes through the store's locks.
     rules_path = TMP / "home" / ".localflow" / "agents" / "hot_commands-xproc.json"
     go = TMP / "xproc.go"
+    ready = [go.parent / f"{go.name}.{name}.ready" for name in ("w1", "w2")]
+    for path in (go, *ready):
+        path.unlink(missing_ok=True)
     count = cell["xproc"]["writes_per_process"]
     writers = [subprocess.Popen([sys.executable, "-c", _RULE_WRITER, str(rules_path), name, str(count), str(go)],
                                 env={**os.environ, "PYTHONPATH": str(SUT)}, cwd=str(TMP),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for name in ("w1", "w2")]
-    time.sleep(0.5)
+    # Start barrier: release only once BOTH writers are imported and parked, so they genuinely contend.
+    barrier = bool(wait_for(lambda: all(p.exists() for p in ready) or any(w.poll() is not None for w in writers),
+                            60, 0.005)) and all(p.exists() for p in ready)
     go.write_text("go", encoding="utf-8")
     reports = []
     for proc in writers:
@@ -1685,7 +1730,7 @@ def cell_recovery(cell: dict) -> dict:
     entries = json.loads(raw)
     ids_written = [e["id"] for e in entries]
     owners = [i.split("-")[0] for i in ids_written]
-    out["xproc"] = {"writers": reports, "entries": len(entries), "unique": len(set(ids_written)),
+    out["xproc"] = {"writers": reports, "barrier": barrier, "entries": len(entries), "unique": len(set(ids_written)),
                     "expected": 2 * count,
                     "missing": sorted({f"{w}-{i:03d}" for w in ("w1", "w2") for i in range(count)} - set(ids_written)),
                     "alternations": sum(1 for a, b in itertools.pairwise(owners) if a != b),
@@ -1741,6 +1786,19 @@ def cell_recovery(cell: dict) -> dict:
 
 
 _LINES: dict[int, str] = {}
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while `pid` exists and is not a zombie."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    with contextlib.suppress(OSError):
+        return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][:1] != "Z"
+    return True
 
 
 def select_line(proc) -> bool:

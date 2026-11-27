@@ -103,9 +103,9 @@ def gate_suite(gate: str) -> str:
 
 
 def active_suites(manifest: dict) -> list[str]:
-    """Suites a run declared in manifest.json (all suites when it declares none)."""
+    """Suites a run declared in manifest.json (all suites when it declares none or "all")."""
     declared = manifest.get("suites")
-    if not declared:
+    if not declared or "all" in declared:
         return list(SUITE_ORDER)
     return [suite for suite in SUITE_ORDER if suite in declared]
 
@@ -784,7 +784,12 @@ def _agents_hotcommands(res: dict, cell: dict, tally) -> None:
         if u.get("history") is not None:
             tally("A2", u["history"]["kind"] == kind, f"{cid}:{n['id']}:history-kind")
         if u.get("route_comparable"):
-            tally("A2", (u.get("route") or {}).get("matched") is not True, f"{cid}:{n['id']}:route-agrees")
+            route = u.get("route") or {}
+            if u.get("flags_on", True):  # agents + hot commands on: the route must answer, and say no match
+                ok = u.get("route_status") == 200 and route.get("matched") is False
+            else:
+                ok = route.get("matched") is not True
+            tally("A2", ok, f"{cid}:{n['id']}:route-agrees", f"status={u.get('route_status')} {json.dumps(route)[:120]}")
     cases = {n["case"] for n in spec["negatives"]}
     tally("A2", len(spec["positives"]) >= 20 and len(spec["negatives"]) >= 20 and len(got) ==
           len(spec["positives"]) + len(spec["negatives"]), f"{cid}:corpus-size")
@@ -839,15 +844,7 @@ def _agents_api(res: dict, cell: dict, tally) -> None:
     page = res["pagination"]
     tally("A4", page["walked"] == page["sorted"] and len(set(page["walked"])) == len(page["walked"])
           and sorted(page["walked"]) == sorted(page["all"]) and page["pages"] >= 3, f"{cid}:pagination")
-    f, want = res["filters"], res["filters"]["_expect"]
-    tally("A4", sorted(f["state_failed"]["ids"]) == want["failed"] and f["state_failed"]["states"] == ["failed"],
-          f"{cid}:filter:state")
-    tally("A4", sorted(f["state_terminal"]["ids"]) == want["terminal"] and f["state_active"]["ids"] == [],
-          f"{cid}:filter:alias")
-    tally("A4", sorted(f["provider_mock"]["ids"]) == want["terminal"], f"{cid}:filter:provider")
-    tally("A4", f["origin_cli"]["ids"] == want["cli"], f"{cid}:filter:origin")
-    tally("A4", f["q"]["ids"] == want["q"], f"{cid}:filter:q")
-    tally("A4", f["root_id"]["ids"] == want["root"], f"{cid}:filter:root_id")
+    _agents_api_filters(res["filters"], cid, tally)
     tally("A4", all(v == 400 for v in res["bad_filters"].values()) and len(res["bad_filters"]) == 5, f"{cid}:filter:bad-400")
     idem = res["idempotent"]
     tally("A4", idem["first"] == 202 and idem["replay"] == 200 and idem["same_session"] and idem["created"] == 1,
@@ -864,6 +861,22 @@ def _agents_api(res: dict, cell: dict, tally) -> None:
     tally("A4", ch["waited"] is True and ch["launched"] in ch["changed_ids"] and ch["woke_secs"] < 1.3, f"{cid}:changes:update")
     tally("A4", ch["deleted"] == [ch["launched"]] and ch["deleted_reset"] is False, f"{cid}:changes:deleted")
     tally("A4", ch["future_reset"] is True, f"{cid}:changes:reset")
+
+
+def _agents_api_filters(f: dict, cid: str, tally) -> None:
+    """A4 list filters, each checked against the full listing (and an exclusion the mock-only run must not match)."""
+    want = f["_expect"]
+    tally("A4", sorted(f["state_failed"]["ids"]) == want["failed"] and f["state_failed"]["states"] == ["failed"],
+          f"{cid}:filter:state")
+    tally("A4", sorted(f["state_terminal"]["ids"]) == want["terminal"] and f["state_active"]["ids"] == [],
+          f"{cid}:filter:alias")
+    tally("A4", sorted(f["provider_mock"]["ids"]) == want["terminal"], f"{cid}:filter:provider")
+    tally("A4", "provider_devin" in f and f["provider_devin"]["status"] == 200
+          and "devin" in want and sorted(f["provider_devin"]["ids"]) == want["devin"] != want["terminal"],
+          f"{cid}:filter:provider-exclusion")
+    tally("A4", f["origin_cli"]["ids"] == want["cli"], f"{cid}:filter:origin")
+    tally("A4", f["q"]["ids"] == want["q"], f"{cid}:filter:q")
+    tally("A4", f["root_id"]["ids"] == want["root"], f"{cid}:filter:root_id")
 
 
 def _agents_secrets(res: dict, cell: dict, tally) -> None:
@@ -992,22 +1005,30 @@ def _agents_idle(res: dict, cell: dict, tally) -> None:
           str(submit["max_ms"]))
 
 
+def _agents_xproc(x: dict, cell: dict, tally) -> None:
+    """A8 cross-process rule writes: two barrier-released writers, nothing lost, genuinely interleaved."""
+    cid = cell["id"]
+    tally("A8", all(w.get("exit") == 0 and w.get("unreadable") == 0 for w in x["writers"]) and len(x["writers"]) == 2,
+          f"{cid}:xproc:never-unreadable", json.dumps(x["writers"]))
+    tally("A8", x["entries"] == x["unique"] == x["expected"] == 2 * cell["xproc"]["writes_per_process"]
+          and x["missing"] == [] and x["per_writer_in_order"], f"{cid}:xproc:none-lost", str(x["entries"]))
+    tally("A8", x.get("barrier") is True and x["alternations"] >= 2, f"{cid}:xproc:interleaved",
+          f"barrier={x.get('barrier')} alternations={x['alternations']}")
+
+
 def _agents_recovery(res: dict, cell: dict, tally) -> None:
     cid = cell["id"]
     tally("A8", res["before_kill"] == {"claude": "running", "devin": "running", "queued": "queued"}
           and res["killed_exit"] == -9, f"{cid}:killed-mid-run", json.dumps(res["before_kill"]))
+    tally("A8", res.get("claude_spawned", 0) >= 1 and res.get("claude_orphans_alive") == 0, f"{cid}:claude:no-orphan",
+          f"spawned={res.get('claude_spawned')} alive={res.get('claude_orphans_alive')}")
     after = res["after_restart"]
     tally("A8", after.get("claude") == {"state": "failed", "error": "interrupted"}, f"{cid}:restart:local-interrupted")
     tally("A8", after.get("queued") == {"state": "failed", "error": "interrupted"}, f"{cid}:restart:queued-interrupted")
     tally("A8", after.get("devin") == {"state": "completed", "error": None} and bool(res["devin_requests"])
           and {r[2] for r in res["devin_requests"]} == {"planted"}
           and res["devin_result"] == "Recovered after the restart and finished.", f"{cid}:restart:devin-reattached")
-    x = res["xproc"]
-    tally("A8", all(w.get("exit") == 0 and w.get("unreadable") == 0 for w in x["writers"]) and len(x["writers"]) == 2,
-          f"{cid}:xproc:never-unreadable", json.dumps(x["writers"]))
-    tally("A8", x["entries"] == x["unique"] == x["expected"] == 2 * cell["xproc"]["writes_per_process"]
-          and x["missing"] == [] and x["per_writer_in_order"], f"{cid}:xproc:none-lost", str(x["entries"]))
-    tally("A8", x["alternations"] > 0, f"{cid}:xproc:interleaved")
+    _agents_xproc(res["xproc"], cell, tally)
     down = res["server_down"]
     tally("A8", down["returned"] == [None, False] and down["pasted"] == [] and down["raised"] == "", f"{cid}:down:no-paste")
     tally("A8", down["history"] == {"kind": "command", "raw_text": "Launch Claude to fix the flaky hot phrase test",
