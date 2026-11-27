@@ -85,6 +85,12 @@ def config_holder(monkeypatch):
     return holder
 
 
+@pytest.fixture(autouse=True)
+def _collect_tk_vars_on_main_thread():
+    yield
+    gc.collect()
+
+
 def _window(tmp_path, backend, config_holder):
     try:
         root = tk.Tk()
