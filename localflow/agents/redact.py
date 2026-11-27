@@ -32,7 +32,9 @@ class Redactor:
     """Exact-value replacement of every resolvable agent secret plus patterns.
 
     `names()` returns the secret names to resolve; `get_secret` resolves one.
-    `refresh()` rebuilds the value table (after a secret changes).
+    `refresh()` re-resolves the names (after a secret changes) and merges the values
+    into the table. A value is never dropped once registered: an active run may still
+    hold a rotated or deleted token, and an endpoint that echoes it must not leak it.
     """
 
     def __init__(self, names: Callable[[], Iterable[str]] | None = None,
@@ -40,6 +42,7 @@ class Redactor:
         self._names = names or (lambda: ())
         self._get_secret = get_secret or (lambda _name: "")
         self._lock = threading.Lock()
+        self._seen: dict[str, str] = {}  # value -> secret name, for the process lifetime
         self._values: list[tuple[str, str]] = []
         self.refresh()
 
@@ -52,19 +55,21 @@ class Redactor:
                 value = ""
             if len(value) >= MIN_SECRET_CHARS:
                 values[value] = name
-        ordered = sorted(values.items(), key=lambda item: -len(item[0]))
         with self._lock:
-            self._values = ordered
+            self._seen.update(values)
+            self._reorder()
 
     def add(self, name: str, value: str) -> None:
         if value and len(value) >= MIN_SECRET_CHARS:
             with self._lock:
-                if any(v == value for v, _name in self._values):
+                if value in self._seen:
                     return
-                self._values = sorted(
-                    [*(v for v in self._values if v[0] != value), (value, name)],
-                    key=lambda item: -len(item[0]),
-                )
+                self._seen[value] = name
+                self._reorder()
+
+    def _reorder(self) -> None:
+        # Longest first, so a secret containing another is replaced whole. Caller holds the lock.
+        self._values = sorted(self._seen.items(), key=lambda item: -len(item[0]))
 
     def __call__(self, text: str) -> str:
         return self.redact(text)

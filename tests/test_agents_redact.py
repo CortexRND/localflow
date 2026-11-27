@@ -36,6 +36,19 @@ def test_patterns_and_exact_values():
     assert redactor.redact_obj({"a": [DEVIN]}) == {"a": ["[redacted:agent_devin_api_key]"]}
 
 
+def test_refresh_never_forgets_a_secret_seen_in_this_process():
+    current = {"agent_http_x_token": "first-token-value-0123"}
+    redactor = Redactor(names=lambda: list(current), get_secret=lambda name: current.get(name, ""))
+    redactor.add("agent_http_y_token", "added-token-value-4567")
+    current["agent_http_x_token"] = "second-token-value-89ab"  # rotated
+    redactor.refresh()
+    del current["agent_http_x_token"]  # deleted
+    redactor.refresh()
+    out = redactor("a first-token-value-0123 b second-token-value-89ab c added-token-value-4567")
+    assert out == ("a [redacted:agent_http_x_token] b [redacted:agent_http_x_token] "
+                   "c [redacted:agent_http_y_token]")
+
+
 def test_scrub_env_drops_localflow_secrets():
     env = scrub_env({"PATH": "/bin", "LOCALFLOW_AGENT_DEVIN_API_KEY": "x", "localflow_x": "y",
                      "FIREWORKS_API_KEY": "z", "DEVIN_API_KEY": "w", "HOME": "/h"})

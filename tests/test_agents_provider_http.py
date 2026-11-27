@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fixtures.agents.stub_agent_server import StubAgentServer
 from fixtures.agents.support import (
@@ -12,7 +14,7 @@ from localflow.agents.models import Unsupported, new_short_id
 from localflow.agents.providers import http as http_provider
 from localflow.agents.providers.base import is_loopback_url
 from localflow.agents.providers.http import ProfileError, validate_profile
-from localflow.secrets import set_secret
+from localflow.secrets import delete_secret, set_secret
 
 TOKEN = "http-agent-token-0123456789"
 
@@ -323,6 +325,71 @@ def test_cancel_and_message_use_the_pinned_profile_capabilities(tmp_path, stub):
     cancelled = manager.cancel(session.id)
     assert cancelled.state == "cancelled" and cancelled.error is None
     assert [r["path"] for r in stub.requests] == ["/v1/runs"]
+
+
+# -- regressions (PR #185 review, round 3) -------------------------------------------
+
+
+def _leaks(manager, session_id, secret):
+    session = manager.store.get(session_id)
+    events = json.dumps([e.to_api() if hasattr(e, "to_api") else repr(e)
+                         for e in manager.store.events(session_id)])
+    on_disk = "".join(f.read_text(errors="replace")
+                      for f in manager.store.root.rglob("*") if f.is_file())
+    return any(secret in text for text in (json.dumps(session.to_api()), events, on_disk))
+
+
+def test_same_origin_token_rotation_reaches_an_active_run(tmp_path, stub):
+    manager, clock = _manager(tmp_path)
+    profile = _install(manager, _profile(stub.url))
+    _set_token(manager, profile["id"], TOKEN)
+    stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+    stub.script("GET", "/v1/runs/r1", (200, {"status": "running"}),
+                (200, {"status": "done", "output": {"text": f"old was {TOKEN}"}}))
+    session, _ = manager.launch({"prompt": "go", "provider": "http", "profile": profile["id"]})
+    rotated = "rotated-token-same-origin-0123456"
+    _set_token(manager, profile["id"], rotated)  # the old token is revoked upstream
+    manager.redactor.refresh()
+    done = drive(manager, clock, session.id, step=5)
+    assert done.state == "completed"
+    assert [r["headers"]["Authorization"] for r in stub.requests] == [
+        f"Bearer {TOKEN}", f"Bearer {rotated}", f"Bearer {rotated}"]
+    # The replaced token is still redacted after the rotation dropped it from the keyring.
+    assert TOKEN not in done.result_text and not _leaks(manager, session.id, TOKEN)
+
+
+@pytest.mark.parametrize("change", ["move", "delete_and_replace"])
+def test_moved_or_deleted_profile_keeps_the_pinned_token_redacted(tmp_path, stub, change):
+    other = StubAgentServer()
+    try:
+        manager, clock = _manager(tmp_path)
+        profile = _install(manager, _profile(stub.url))
+        _set_token(manager, profile["id"], TOKEN)
+        stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+        stub.script("GET", "/v1/runs/r1",
+                    (200, {"status": "done", "output": {"text": f"echo {TOKEN}"}}))
+        session, _ = manager.launch({"prompt": "go", "provider": "http",
+                                     "profile": profile["id"]})
+        with manager.profiles.mutate() as profiles:
+            if change == "move":
+                entry = next(p for p in profiles if p["id"] == profile["id"])
+                entry["base_url"] = other.url
+            else:  # deleted, then recreated under the same id for another origin
+                profiles[:] = [p for p in profiles if p["id"] != profile["id"]]
+                profiles.append({"id": profile["id"], **validate_profile(_profile(other.url))})
+        delete_secret(http_provider.secret_name(profile["id"]))
+        manager.redactor.refresh()  # what the API does; the old token is no longer resolvable
+        replacement = "replacement-token-for-new-origin-0123"
+        _set_token(manager, profile["id"], replacement)
+        manager.redactor.refresh()
+        done = drive(manager, clock, session.id, step=5)
+        assert done.state == "completed"
+        assert [r["headers"]["Authorization"] for r in stub.requests] == [f"Bearer {TOKEN}"] * 2
+        assert other.requests == []
+        assert done.result_text == f"echo [redacted:{http_provider.secret_name(profile['id'])}]"
+        assert not _leaks(manager, session.id, TOKEN)
+    finally:
+        other.close()
 
 
 @pytest.mark.parametrize("base", ["https://agents.example.com:99999",

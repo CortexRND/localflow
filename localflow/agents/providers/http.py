@@ -274,20 +274,45 @@ class HttpProvider(AgentProvider):
     def pinned(self) -> HttpProvider:
         """A copy bound to this profile snapshot and the token resolved right now.
 
-        An active run keeps using that token: a replacement set after the profile
-        moved to a new origin is never sent to the run's (old) endpoint.
+        An active run follows a same-origin token rotation (see `_secret`), but a
+        replacement set after the profile moved to a new origin, or was deleted and
+        recreated, is never sent to the run's (old) endpoint.
         """
         copy = type(self)(self.config, self.ctx, dict(self.profile) if self.profile else None)
         copy._pinned_secret = self._resolve_secret()
         return copy
 
     def _secret(self) -> str:
-        if self._pinned_secret is not self._UNPINNED:
-            return self._pinned_secret
-        return self._resolve_secret()
+        if self._pinned_secret is self._UNPINNED:
+            return self._resolve_secret()
+        live = self._live_profile_for_pinned_origin()
+        if live is not None:
+            # Same origin and the token is still bound to it: a rotated token applies
+            # to the active run. Reading it also registers it with the redactor.
+            fresh = self._resolve_secret(live)
+            if fresh:
+                return fresh
+        # Deleted, moved to another origin or token removed: the live token (if any)
+        # belongs elsewhere. The snapshot stays redacted (the redactor never forgets).
+        return self._pinned_secret
 
-    def _resolve_secret(self) -> str:
-        profile = self.profile or {}
+    def _live_profile_for_pinned_origin(self) -> dict | None:
+        pinned = self.profile or {}
+        store = self.ctx.profiles
+        if store is None or not pinned.get("id"):
+            return None
+        try:
+            live = store.get(pinned["id"])
+            if not live or not secret_bound(live):
+                return None
+            if origin(str(live.get("base_url") or "")) != origin(str(pinned.get("base_url"))):
+                return None
+        except Exception:  # noqa: BLE001 - an unreadable store keeps the pinned token
+            return None
+        return live
+
+    def _resolve_secret(self, profile: dict | None = None) -> str:
+        profile = profile if profile is not None else (self.profile or {})
         if not profile.get("id") or not secret_bound(profile):
             return ""
         name = secret_name(profile["id"])
