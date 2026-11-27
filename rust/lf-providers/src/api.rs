@@ -14,6 +14,10 @@ use std::fmt;
 pub fn secret_names() -> Vec<String> {
     let mut names = vec!["llm_api_key".to_string(), "fireworks_api_key".to_string()];
     names.extend(provider_secret_names());
+    names.extend([
+        "agent_devin_api_key".to_string(),
+        "agent_claude_api_key".to_string(),
+    ]);
     names
 }
 
@@ -308,7 +312,11 @@ mod tests {
             secret_names()[..3],
             ["llm_api_key", "fireworks_api_key", "provider_key_fireworks"]
         );
-        assert_eq!(secret_names().len(), 8);
+        assert_eq!(secret_names().len(), 10);
+        assert_eq!(
+            secret_names()[8..],
+            ["agent_devin_api_key", "agent_claude_api_key"]
+        );
         assert_eq!(
             serde_json::to_string(&llm_providers()).unwrap(),
             r#"[{"id":"ollama","offline":true},{"id":"openai-compatible","offline":false}]"#

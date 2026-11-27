@@ -494,9 +494,13 @@ def _process_clip(
     paste: bool = True,
     raw_text_callback: Callable[[str], None] | None = None,
     timings: dict | None = None,
+    intercept: Callable[[str], bool] | None = None,
 ) -> str:
     """`timings`, when given, receives stt_ms, llm_ms, render_ms (render
-    excluding the LLM) and llm_used for the perf ledger."""
+    excluding the LLM) and llm_used for the perf ledger.
+
+    `intercept`, when given, sees the raw transcript once; True means it was
+    consumed (a hot command): nothing is rendered, cleaned, pasted or printed."""
     start = time.monotonic()
     if rms_dbfs(audio) < config.silence_threshold_dbfs:
         log.info("silence gate: audio below %.1f dBFS", config.silence_threshold_dbfs)
@@ -511,6 +515,11 @@ def _process_clip(
             timings["stt_ms"] = (time.monotonic() - stt_started) * 1000
     if raw_text_callback is not None:
         raw_text_callback(text)
+    if intercept is not None and text and intercept(text):
+        if timings is not None:
+            timings.update(llm_used=False, llm_ms=0.0, render_ms=0.0)
+        log.info("hot command: %d chars handed to the agent launcher", len(text))
+        return ""
     render_started = time.monotonic()
     llm_seconds: list[float] = []
     if text:
@@ -612,6 +621,44 @@ def _record_job_perf(
         log.debug("could not record job timings", exc_info=True)
 
 
+_hot_command_seam = None
+_hot_command_seam_lock = threading.Lock()
+
+
+def _agents_seam(config):
+    """The hot-command seam, built on the first clip with both agent flags on.
+    With either flag off this returns None and never imports localflow.agents."""
+    global _hot_command_seam
+    if not (getattr(config, "agents_enabled", False)
+            and getattr(config, "agent_hot_commands", False)):
+        return None
+    if _hot_command_seam is None:
+        with _hot_command_seam_lock:
+            if _hot_command_seam is None:
+                try:
+                    from localflow.agents.handoff import HotCommandSeam
+
+                    _hot_command_seam = HotCommandSeam()
+                except Exception:
+                    log.exception("hot commands unavailable")
+                    return None
+    return _hot_command_seam
+
+
+def _hot_command_intercept(seam, config, dictionary_store, hits: list):
+    def intercept(text: str) -> bool:
+        try:
+            hit = seam.intercept(text, config, dictionary_store)
+        except Exception:
+            log.exception("hot command check failed; dictating normally")
+            return False
+        if hit:
+            hits.append(True)
+        return hit
+
+    return intercept
+
+
 def _process_job(
     item: Job,
     config,
@@ -622,6 +669,7 @@ def _process_job(
     hot_phrases: HotPhraseStore,
     dictionary_store: DictionaryStore,
     history_store: HistoryStore,
+    hot_command_seam=None,
 ) -> tuple[str | None, bool]:
     started = time.monotonic()
     queued_at = getattr(item, "queued_at", None)
@@ -647,9 +695,17 @@ def _process_job(
         except Exception:
             log.warning("could not store dictation clip", exc_info=True)
 
+    hot_command = False
     try:
         if item.kind == "dictate":
             captured = []
+            hits: list = []
+            intercept = None
+            if getattr(config, "agents_enabled", False) and getattr(
+                    config, "agent_hot_commands", False):
+                seam = hot_command_seam if hot_command_seam is not None else _agents_seam(config)
+                if seam is not None:
+                    intercept = _hot_command_intercept(seam, config, dictionary_store, hits)
             text = _process_clip(
                 item.audio,
                 config,
@@ -662,9 +718,14 @@ def _process_job(
                 paste=False,
                 raw_text_callback=captured.append,
                 timings=timings,
+                intercept=intercept,
             )
             raw_text = captured[0] if captured else ""
-            status = "ok" if text else "silent"
+            if hits:
+                hot_command, text = True, None
+                status = "ok"
+            else:
+                status = "ok" if text else "silent"
         elif (
             item.kind == "command"
             and config.llm_provider == "ollama"
@@ -716,14 +777,14 @@ def _process_job(
     )
 
     if history_store.enabled:
-        if status == "silent":
+        if status == "silent" or hot_command:
             history_store.delete_clip(audio_path)
             audio_path = None
         info = item.app_info
         entry_id = None
         try:
             entry_id = history_store.add(
-                kind=item.kind,
+                kind="command" if hot_command else item.kind,
                 app_name=info.name if info else None,
                 bundle_id=info.bundle_id if info else None,
                 category=category_for(info, config.app_category_overrides),
@@ -735,7 +796,8 @@ def _process_job(
             )
         except Exception:
             log.exception("could not save dictation history")
-        if item.kind == "dictate" and status == "ok" and entry_id is not None:
+        if item.kind == "dictate" and status == "ok" and entry_id is not None \
+                and not hot_command:
             try:
                 history_store.prune_audio_clips(
                     getattr(config, "keep_audio_clips", 5)

@@ -472,6 +472,15 @@ def _all_fields_update() -> dict:
         ("meetings", "vault_path"): "~/Vault 🗂/notes\ttab\nline",
         ("meetings", "orca_repo"): "id:'quoted'",
         ("meetings", "diarization_backend"): "mock",
+        # [agents] values are validated; pick valid non-defaults.
+        ("agents", "default_provider"): "devin",
+        ("agents", "default_repo"): "beta two",
+        ("agents", "repos"): [f"alpha={os.path.abspath('/tmp/alpha')}", "beta two=~/beta repo"],
+        ("agents", "max_concurrent"): 4,
+        ("agents", "claude_bin"): os.path.abspath("/usr/local/bin/claude"),
+        ("agents", "claude_wrapper"): "headroom",
+        ("agents", "claude_permission_mode"): "plan",
+        ("agents", "claude_model"): "claude-opus-5-5[1m]",
     }
     update: dict = {}
     for section, values in config_to_dict(Config()).items():

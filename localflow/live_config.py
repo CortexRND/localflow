@@ -30,7 +30,18 @@ from localflow.settings_agent import ALLOWLIST
 
 log = logging.getLogger("localflow.live_config")
 
-LIVE_FIELDS = frozenset(ALLOWLIST)
+# The agent launcher settings the dictation app reads per clip. Not in the
+# Settings agent's ALLOWLIST (the model never sees or edits them), but just as
+# safe to adopt without a restart; lists are compared and copied whole.
+AGENT_LIVE_FIELDS = frozenset({
+    "agents_enabled", "agent_hot_commands", "agent_repos", "agent_default_repo",
+    "agent_default_provider",
+})
+LIVE_FIELDS = frozenset(ALLOWLIST) | AGENT_LIVE_FIELDS
+# Every [agents] field: the server re-reads them all at each launch/admission.
+AGENT_FIELDS = frozenset(
+    spec.name for spec in fields(Config) if spec.name.startswith(("agents_", "agent_"))
+)
 HOTKEY_FIELDS = frozenset(
     {
         "dictation_toggle_hotkey",

@@ -43,6 +43,12 @@ pub const LIVE_FIELDS: &[&str] = &[
     "work_prompts",
     DICTATION_ENABLED,
     DICTATION_TOGGLE_HOTKEY,
+    // Python `AGENT_LIVE_FIELDS`.
+    "agents_enabled",
+    "agent_hot_commands",
+    "agent_repos",
+    "agent_default_repo",
+    "agent_default_provider",
 ];
 
 pub const HOTKEY_FIELDS: &[&str] = &[

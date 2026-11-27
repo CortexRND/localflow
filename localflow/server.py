@@ -5,6 +5,7 @@ import logging
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -52,6 +53,7 @@ from localflow.formatting import apply_spoken_formatting, apply_style
 from localflow.history import HistoryStore
 from localflow.hotphrases import HotPhraseStore, render_dictation
 from localflow.live_config import (
+    AGENT_FIELDS,
     RUNTIME_FIELDS,
     ConfigWatcher,
     adopt_groups,
@@ -93,6 +95,50 @@ from localflow.system_audio import open_system_audio
 from localflow.workprompts import WorkPromptGenerator
 
 app = FastAPI()
+
+
+class _LazyAgentsApi:
+    """Serves /api/agents/* from localflow.agents, imported on the first such
+    request only: no other route loads the launcher or builds its manager.
+    Added before the auth middleware, so it runs inside it (token and Host
+    checks apply unchanged)."""
+
+    PREFIX = "/api/agents"
+
+    def __init__(self, inner):
+        self.inner = inner
+        self._agents = None
+        self._lock = threading.Lock()
+
+    def _build(self):
+        from localflow.agents import api as agents_api
+
+        agents_api.configure(_agents_config, _request_is_local)
+        sub = FastAPI()
+        sub.include_router(agents_api.router)
+        sub.add_exception_handler(agents_api.AgentApiError, agents_api.agent_error_handler)
+        return sub
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope.get("type") == "http" else ""
+        if path == self.PREFIX or path.startswith(self.PREFIX + "/"):
+            if self._agents is None:
+                with self._lock:
+                    if self._agents is None:
+                        self._agents = self._build()
+            await self._agents(scope, receive, send)
+            return
+        await self.inner(scope, receive, send)
+
+
+app.add_middleware(_LazyAgentsApi)
+
+
+def _agents_config() -> Config:
+    """The live config for the agents routes: read at every call, so an
+    `[agents]` change (PUT /api/config, or a file edit the watcher adopts)
+    applies to the next launch without a restart."""
+    return _config
 
 setup_logging(SERVER_LOG_PATH)  # not localflow.log: dictation rotates that one
 log = logging.getLogger("localflow.server")
@@ -202,6 +248,18 @@ def _cancel_diarization_download() -> None:
         worker = _diar_thread
     if worker is not None:
         worker.join(timeout=_DIAR_SHUTDOWN_JOIN_SECONDS)  # not under _diar_lock
+
+
+@app.on_event("shutdown")
+def _shutdown_agents() -> None:
+    # Only if an agents route ever ran; never imports the launcher itself.
+    agents_api = sys.modules.get("localflow.agents.api")
+    if agents_api is not None:
+        try:
+            agents_api.shutdown()
+        except Exception:
+            log.warning("stopping agent sessions failed", exc_info=True)
+
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -571,10 +629,31 @@ def api_config() -> dict:
     return config_to_dict(_config)
 
 
+# These decide what binary an agent runs, where it runs, and who may launch one.
+_LOCAL_ONLY_AGENT_KEYS = ("claude_bin", "repos", "allow_remote")
+
+
+def _changes_local_only_agent_keys(body: dict) -> bool:
+    values = body.get("agents") if isinstance(body, dict) else None
+    if not isinstance(values, dict):
+        return False
+    return any(
+        key in values and values[key] != getattr(_config, f"agent_{key}")
+        for key in _LOCAL_ONLY_AGENT_KEYS
+    )
+
+
 @app.put("/api/config")
-def api_config_update(body: dict) -> dict:
+def api_config_update(body: dict, request: Request = None) -> dict:
     global _config, _transcriber, _cleaner, _ollama, _commands, _history, _summarizer
     with _config_lock:
+        if (request is not None and _changes_local_only_agent_keys(body)
+                and not _request_is_local(request)):
+            raise HTTPException(
+                status_code=403,
+                detail="agents.claude_bin, agents.repos and agents.allow_remote can only be "
+                       "changed on this computer",
+            )
         try:
             updated = apply_config_update(_config, body)
             new_llm = api_logic.validate_runtime(updated)
@@ -700,10 +779,16 @@ def api_secrets() -> dict[str, bool]:
 
 
 @app.put("/api/secrets/{name}")
-def api_secret_update(name: str, body: dict) -> dict[str, bool]:
+def api_secret_update(name: str, body: dict, request: Request = None) -> dict[str, bool]:
     global _ollama, _cleaner, _prompt_gen, _summarizer
     if name not in api_logic.SECRET_NAMES:
         raise HTTPException(status_code=404, detail="unknown secret")
+    # Agent keys follow the same rule as /api/agents/providers/{id}/secret.
+    if (request is not None and name.startswith("agent_")
+            and not getattr(_config, "agent_allow_remote", False)
+            and not _request_is_local(request)):
+        raise HTTPException(status_code=403,
+                            detail="agent keys can only be changed on this computer")
     value = body.get("value", "")
     if not isinstance(value, str):
         raise HTTPException(status_code=400, detail="value must be a string")
@@ -722,6 +807,11 @@ def api_secret_update(name: str, body: dict) -> dict[str, bool]:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except SecretsUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+    agents_api = sys.modules.get("localflow.agents.api")
+    manager = agents_api.manager_if_built() if agents_api is not None else None
+    if manager is not None and name.startswith("agent_"):
+        manager.redactor.add(name, value)
+        manager.redactor.refresh()
     return api_logic.secrets_status(_config)
 
 
@@ -1932,7 +2022,13 @@ def _apply_live_config(fresh: Config) -> None:
         # track the file's current value even when nothing live changed.
         _config = replace(_config, _file_meetings_enabled=fresh._file_meetings_enabled)
         merged, changed = merge_live(_config, fresh,
-                                     reloaded=RUNTIME_FIELDS | _LIVE_SPEAKER_FLAGS)
+                                     reloaded=RUNTIME_FIELDS | _LIVE_SPEAKER_FLAGS | AGENT_FIELDS)
+        # Every [agents] key is read per launch/admission, so all of them apply live.
+        agents = {name: getattr(fresh, name) for name in sorted(AGENT_FIELDS)
+                  if getattr(merged, name) != getattr(fresh, name)}
+        if agents:
+            merged = replace(merged, **agents)
+            changed = changed | frozenset(agents)
         # The speaker flags gate voiceprint I/O, so turning one off on disk must stop it
         # now: adopt both here (not via live_config). A running meeting keeps the collector
         # it started with; finalize detaches the registry and the sidecar write rechecks.

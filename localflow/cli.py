@@ -2272,6 +2272,19 @@ def autostart_status() -> None:
     _autostart_status()
 
 
+def _add_agents_group() -> None:
+    # `lf agents` (plural): the headless agent launcher. Unrelated to the
+    # hidden `lf agent` autostart alias; the two share no subcommand names.
+    # Hidden until the launcher has a UI; it works the same either way.
+    from localflow.agents.cli import agents as agents_group
+
+    agents_group.hidden = True
+    cli.add_command(agents_group)
+
+
+_add_agents_group()
+
+
 def main() -> None:
     cli()
 
