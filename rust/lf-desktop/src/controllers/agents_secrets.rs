@@ -17,7 +17,9 @@
 
 use std::ops::Range;
 
-use crate::controllers::assistant::{assignment_value, mixed_token, secret_patterns};
+use crate::controllers::assistant::{
+    assignment_value, mixed_token, prose_quoted_value, secret_patterns,
+};
 
 pub const REDACTED: &str = "[redacted]";
 
@@ -72,6 +74,9 @@ pub fn scan(text: &str) -> Vec<Finding> {
     let mut found: Vec<(Range<usize>, &'static str)> = Vec::new();
     for c in assignment.captures_iter(text) {
         if let Some(name) = c.get(1) {
+            if prose_quoted_value(text, &c) {
+                continue;
+            }
             // A quoted value is one finding, spaces and all.
             let value = assignment_value(&c);
             found.push((value.range(), kind_for_name(name.as_str())));
@@ -243,11 +248,6 @@ mod tests {
         assert!(scan("Rename the password field to passphrase").is_empty());
     }
 
-    #[test]
-    fn findings_give_kind_and_line_but_never_the_value() {
-        let task = format!("Rotate the webhook key.\nUse api_key={KEY}\nthen redeploy.");
-        let found = scan(&task);
-        assert_eq!(found.len(), 1, "{found:?}");
     /// The marker only suppresses a value that is exactly the marker, not
     /// a longer quoted value that happens to start with it.
     #[test]
@@ -271,6 +271,27 @@ mod tests {
         );
     }
 
+    /// Quoted prose such as `'password=' exactly as 'password equals'` is
+    /// not a credential value, so keeping a draft does not cut the words
+    /// between the quotes. Properly quoted JSON/YAML keys still scan.
+    #[test]
+    fn quoted_prose_is_not_a_quoted_value() {
+        let prose = "Write 'password=' exactly as 'password equals' in the docs";
+        assert!(scan(prose).is_empty(), "quoted prose is not a finding");
+        assert!(redact(prose) == prose, "the draft text is unchanged");
+        assert!(
+            crate::controllers::assistant::mask_secrets(prose) == prose,
+            "display masking is unchanged"
+        );
+        let jsonish = "{\"password\": \"correct horse battery staple\"}";
+        assert_eq!(scan(jsonish).len(), 1, "a properly quoted key still scans");
+    }
+
+    #[test]
+    fn findings_give_kind_and_line_but_never_the_value() {
+        let task = format!("Rotate the webhook key.\nUse api_key={KEY}\nthen redeploy.");
+        let found = scan(&task);
+        assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!((found[0].kind, found[0].line), ("an API key", 2));
         let shown = format!("{found:?}");
         assert!(!shown.contains("4f9QxZ2m"), "the shown finding is redacted");

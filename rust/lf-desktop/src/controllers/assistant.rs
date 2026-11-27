@@ -34,8 +34,12 @@ use serde_json::{json, Value};
 pub fn mask_secrets(text: &str) -> String {
     let [assignment, bearer, prefixed, long] = secret_patterns();
     let mask = |value: &str| lf_providers::keys::mask_key(value);
-    let text = assignment.replace_all(text, |c: &regex::Captures| {
+    let source = text;
+    let text = assignment.replace_all(source, |c: &regex::Captures| {
         // Only the value is replaced; the name and any quotes stay.
+        if prose_quoted_value(source, c) {
+            return c.get(0).expect("match").as_str().to_string();
+        }
         let (whole, value) = (c.get(0).expect("match"), assignment_value(c));
         let at = |i: usize| i - whole.start();
         let s = whole.as_str();
@@ -67,6 +71,37 @@ pub(crate) fn assignment_value<'t>(c: &regex::Captures<'t>) -> regex::Match<'t> 
         .or_else(|| c.name("sq"))
         .or_else(|| c.name("bare"))
         .expect("an assignment match has a value")
+}
+
+/// A quoted "value" that is really prose between two quoted terms:
+/// `'password=' exactly as 'password equals'`. The first closing quote is
+/// not opening a value when the key itself was not properly quoted before
+/// its `:`/`=`; JSON/YAML-style `"password": value` still counts.
+pub(crate) fn prose_quoted_value(text: &str, c: &regex::Captures) -> bool {
+    if c.name("dq").is_none() && c.name("sq").is_none() {
+        return false;
+    }
+    let Some(whole) = c.get(0) else {
+        return false;
+    };
+    let Some(open) = whole
+        .start()
+        .checked_sub(1)
+        .and_then(|i| text.as_bytes().get(i))
+        .copied()
+    else {
+        return false;
+    };
+    if open != b'\'' && open != b'"' {
+        return false;
+    }
+    let prefix = c.get(1).expect("assignment name").as_str();
+    let mut rest = prefix.chars().rev().skip_while(|ch| ch.is_whitespace());
+    if !matches!(rest.next(), Some(':' | '=')) {
+        return false;
+    }
+    let mut rest = rest.skip_while(|ch| ch.is_whitespace());
+    !matches!(rest.next(), Some(ch) if ch == open as char)
 }
 
 /// A long token is credential-like only when it mixes letters and digits.
