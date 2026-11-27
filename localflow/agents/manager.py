@@ -127,7 +127,7 @@ class Sink:
         session = self._m.store.get(self.session_id)
         if session is None:
             return
-        external_id = self._m.redactor(str(external_id))[:200]
+        external_id = self._m.redactor.redact_literals(str(external_id))[:200]
         url = self._m.redactor(str(url))[:500] if url else session.external_url
         if session.external_id == external_id and session.external_url == url:
             return
@@ -194,9 +194,9 @@ class AgentManager:
         self.profiles = profiles if profiles is not None else HttpProfileStore(
             self.store.root / "http_providers.json")
         if ctx is None:
-            from localflow.secrets import get_secret
+            from localflow.secrets import get_keyring_secret, get_secret
 
-            ctx = ProviderContext(get_secret=get_secret)
+            ctx = ProviderContext(get_secret=get_secret, get_stored_secret=get_keyring_secret)
         self.ctx = ctx
         self.ctx.profiles = self.profiles
         resolve = getattr(ctx.get_secret, "_lf_resolve", ctx.get_secret)
@@ -292,6 +292,22 @@ class AgentManager:
                 provider.config = self.config
                 return provider
         return self.provider_for(session.effective_provider, session.profile)
+
+    def _pin_provider(self, session_id: str, provider: AgentProvider) -> AgentProvider:
+        """Pin the provider (profile snapshot and, for HTTP, its token) for a tracked run."""
+        pinned = provider.pinned()
+        with self._lock:
+            if session_id in self._tracked:
+                self._session_providers[session_id] = pinned
+        return pinned
+
+    def _session_capabilities(self, session: AgentSession) -> ProviderCapabilities:
+        """Capabilities of the provider the session is pinned to, not the live profile."""
+        try:
+            provider = self._session_provider(session)
+            return type(provider).capabilities_for(self.config, provider.profile)
+        except Exception:  # noqa: BLE001 - a broken entry point never raises into a route
+            return _BROKEN_CAPS
 
     def _forget(self, session_id: str) -> None:
         with self._lock:
@@ -576,10 +592,8 @@ class AgentManager:
         sink = Sink(self, session_id)
         provider = None
         try:
-            provider = self.provider_for(session.effective_provider, session.profile)
-            with self._lock:
-                if session_id in self._tracked:
-                    self._session_providers[session_id] = provider
+            provider = self._pin_provider(
+                session_id, self.provider_for(session.effective_provider, session.profile))
             provider.start(session, sink)
         except ProviderError as exc:
             code = "spawn_failed" if exc.code == "internal" else exc.code
@@ -701,7 +715,7 @@ class AgentManager:
             self._notify()
             current = self.store.require(session_id)
             sink = Sink(self, session_id)
-            if not self.capabilities(current.effective_provider, current.profile).cancel:
+            if not self._session_capabilities(current).cancel:
                 sink.output("system", "the remote run was not stopped: the provider has no "
                                       "cancel operation")
                 self._finish(session_id, "cancelled")
@@ -727,7 +741,7 @@ class AgentManager:
         if len(text) > MAX_PROMPT_CHARS:
             raise PromptTooLong(f"message is too long (max {MAX_PROMPT_CHARS} characters)")
         session = self.store.require(session_id)
-        if not self.capabilities(session.effective_provider, session.profile).live_message:
+        if not self._session_capabilities(session).live_message:
             raise Unsupported("this provider does not accept follow-up messages")
         if session.state not in ("running", "waiting_input"):
             raise SessionConflict(session_id, session.state, ("running", "waiting_input"))
@@ -925,6 +939,11 @@ class AgentManager:
             self._tracked[session.id] = {"deadline": self._clock() + remaining,
                                          "next_poll": self._clock(), "base": base,
                                          "interval": base, "failures": 0}
+            try:
+                self._pin_provider(session.id, self.provider_for(session.effective_provider,
+                                                                 session.profile))
+            except Exception:  # noqa: BLE001 - polling falls back to the live profile
+                log.warning("agent session %s: could not pin its provider", session.id)
             reattached += 1
         if reattached:
             log.info("re-attached %d agent session(s)", reattached)

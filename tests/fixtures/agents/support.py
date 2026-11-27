@@ -150,11 +150,12 @@ def make_manager(tmp_path: Path, config_ref, **kwargs):
     from localflow.agents.manager import AgentManager
     from localflow.agents.providers.base import ProviderContext
     from localflow.agents.store import AgentSessionStore
-    from localflow.secrets import get_secret
+    from localflow.secrets import get_keyring_secret, get_secret
 
     getter = config_ref if callable(config_ref) else (lambda: config_ref)
     root = tmp_path / "home" / ".localflow" / "agents"
     ctx = kwargs.pop("ctx", None) or ProviderContext(get_secret=get_secret,
+                                                     get_stored_secret=get_keyring_secret,
                                                      mock_poll_seconds=0.01,
                                                      kill_grace_seconds=0.5)
     return AgentManager(getter, store=kwargs.pop("store", None) or AgentSessionStore(root),

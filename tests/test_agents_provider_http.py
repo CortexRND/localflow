@@ -8,10 +8,11 @@ from fixtures.agents.support import (
     make_manager,
 )
 
-from localflow.agents.models import new_short_id
+from localflow.agents.models import Unsupported, new_short_id
 from localflow.agents.providers import http as http_provider
 from localflow.agents.providers.base import is_loopback_url
 from localflow.agents.providers.http import ProfileError, validate_profile
+from localflow.secrets import set_secret
 
 TOKEN = "http-agent-token-0123456789"
 
@@ -233,7 +234,8 @@ def test_token_is_withheld_after_an_origin_change(tmp_path, stub, monkeypatch):
         assert not http_provider.secret_bound(manager.profiles.get(profile["id"]))
         provider = manager.provider_for("http", profile["id"])
         assert provider._secret() == ""
-        # Setting the token again binds it to the new origin.
+        # Setting the token again (keyring) binds it to the new origin.
+        set_secret(http_provider.secret_name(profile["id"]), TOKEN)
         http_provider.bind_secret(manager.profiles, profile["id"])
         assert manager.readiness("http", profile["id"]).ready
         other.script("POST", "/v1/runs", (200, {"id": "r9"}))
@@ -255,3 +257,76 @@ def test_profiles_without_a_secret_origin_keep_their_token():
                                            "secret_origin": "https://x.example.com:443"})
     assert not http_provider.secret_bound({"id": "a", "base_url": "https://y.example.com",
                                            "secret_origin": ""})
+
+
+# -- regressions (PR #185 review, round 2) -------------------------------------------
+
+
+def _set_token(manager, profile_id, value):
+    set_secret(http_provider.secret_name(profile_id), value)
+    http_provider.bind_secret(manager.profiles, profile_id)
+
+
+def test_an_active_run_never_receives_a_replacement_token(tmp_path, stub):
+    other = StubAgentServer()
+    try:
+        manager, clock = _manager(tmp_path)
+        profile = _install(manager, _profile(stub.url))
+        _set_token(manager, profile["id"], TOKEN)
+        stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+        stub.script("GET", "/v1/runs/r1", (200, {"status": "done", "output": {"text": "ok"}}))
+        session, _ = manager.launch({"prompt": "go", "provider": "http",
+                                     "profile": profile["id"]})
+        # The profile moves and gets a replacement token for the new origin.
+        with manager.profiles.mutate() as profiles:
+            entry = next(p for p in profiles if p["id"] == profile["id"])
+            entry["base_url"] = other.url
+        replacement = "replacement-token-for-new-origin-0123"
+        _set_token(manager, profile["id"], replacement)
+        done = drive(manager, clock, session.id, step=5)
+        assert done.state == "completed"
+        assert [r["headers"]["Authorization"] for r in stub.requests] == [f"Bearer {TOKEN}"] * 2
+        assert other.requests == []
+    finally:
+        other.close()
+
+
+def test_keyring_token_wins_over_a_stale_environment_token(tmp_path, stub, monkeypatch):
+    manager, clock = _manager(tmp_path)
+    profile = _install(manager, _profile(stub.url))
+    monkeypatch.setenv(f"LOCALFLOW_AGENT_HTTP_{profile['id'].upper()}_TOKEN",
+                       "stale-env-token-for-old-origin")
+    _set_token(manager, profile["id"], TOKEN)
+    assert manager.profiles.get(profile["id"])["secret_source"] == "keyring"
+    assert manager.provider_for("http", profile["id"])._secret() == TOKEN
+    stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+    stub.script("GET", "/v1/runs/r1", (200, {"status": "done"}))
+    session, _ = manager.launch({"prompt": "go", "provider": "http", "profile": profile["id"]})
+    drive(manager, clock, session.id, step=5)
+    assert {r["headers"]["Authorization"] for r in stub.requests} == {f"Bearer {TOKEN}"}
+
+
+def test_cancel_and_message_use_the_pinned_profile_capabilities(tmp_path, stub):
+    manager, _clock = _manager(tmp_path)
+    base = _profile(stub.url, headers={})
+    del base["cancel"], base["message"]
+    profile = _install(manager, base)
+    stub.script("POST", "/v1/runs", (200, {"id": "r1"}))
+    session, _ = manager.launch({"prompt": "go", "provider": "http", "profile": profile["id"]})
+    with manager.profiles.mutate() as profiles:  # added after the run started
+        entry = next(p for p in profiles if p["id"] == profile["id"])
+        entry["message"] = _profile(stub.url)["message"]
+        entry["cancel"] = _profile(stub.url)["cancel"]
+    assert manager.capabilities("http", profile["id"]).cancel  # the live profile
+    with pytest.raises(Unsupported):
+        manager.send_message(session.id, "hello")
+    cancelled = manager.cancel(session.id)
+    assert cancelled.state == "cancelled" and cancelled.error is None
+    assert [r["path"] for r in stub.requests] == ["/v1/runs"]
+
+
+@pytest.mark.parametrize("base", ["https://agents.example.com:99999",
+                                  "https://agents.example.com:abc"])
+def test_invalid_ports_are_rejected(base):
+    with pytest.raises(ProfileError, match="invalid port"):
+        validate_profile(_profile(base))

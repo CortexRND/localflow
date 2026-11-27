@@ -281,3 +281,55 @@ def test_descendants_die_when_the_leader_exits_on_sigterm(tmp_path):
         except (ProcessLookupError, PermissionError):
             pass
         proc.wait(timeout=5)
+
+
+class _FinishedProc:
+    pid = 515151
+
+    def __init__(self):
+        import io
+
+        self.stdin = io.BytesIO()
+        self.stdout = iter(())
+        self.stderr = iter(())
+
+    def wait(self):
+        return -15
+
+
+class _Sink:
+    def __init__(self):
+        self.finished = []
+
+    def finish(self, state, result_text="", error=None):
+        self.finished.append(state)
+        return True
+
+    def __getattr__(self, _name):
+        return lambda *a, **k: None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+@pytest.mark.parametrize("stopped", [True, False])
+def test_group_is_killed_after_pipes_close_on_cancel(tmp_path, monkeypatch, stopped):
+    import threading
+
+    from localflow.agents.models import AgentSession
+    from localflow.agents.providers import claude as claude_module
+
+    sent = []
+    monkeypatch.setattr(claude_module.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    provider = ClaudeProvider(agents_config(tmp_path), ProviderContext())
+    session = AgentSession(id="abcdef012345", provider="claude", prompt="p", title="p")
+    timer = threading.Timer(60, lambda: None)
+    if stopped:  # stop() ran (cancel/timeout): its SIGKILL timer is pending
+        provider._timers[session.id] = timer
+    provider._read(session, _FinishedProc(), _Sink(), False)
+    assert sent == ([(515151, signal.SIGKILL)] if stopped else [])
+
+    def gone(_pid, _sig):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(claude_module.os, "killpg", gone)
+    provider._timers[session.id] = timer
+    provider._read(session, _FinishedProc(), _Sink(), False)  # group gone: quiet

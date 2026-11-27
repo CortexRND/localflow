@@ -329,7 +329,7 @@ async def agents_provider_secret(request: Request, provider_id: str):
 def _profile_out(manager, profile: dict) -> dict:
     from localflow.agents.providers.http import secret_bound, secret_name
 
-    out = {k: v for k, v in profile.items() if k != "secret_origin"}
+    out = {k: v for k, v in profile.items() if k not in ("secret_origin", "secret_source")}
     out["secret_set"] = secret_bound(profile) and bool(
         manager.ctx.get_secret(secret_name(profile["id"])))
     return out

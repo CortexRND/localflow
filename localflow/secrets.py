@@ -31,6 +31,11 @@ def get_secret(name: str) -> str:
     legacy_name = _LEGACY_ENV.get(name)
     if legacy_name and legacy_name in os.environ:
         return os.environ[legacy_name]
+    return get_keyring_secret(name)
+
+
+def get_keyring_secret(name: str) -> str:
+    """The keyring value only, ignoring any environment override."""
     try:
         return keyring.get_password(SERVICE, name) or ""
     except Exception as exc:

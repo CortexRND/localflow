@@ -80,11 +80,16 @@ def secret_bound(profile: dict | None) -> bool:
 
 
 def bind_secret(profiles, profile_id: str) -> None:
-    """Record that the profile's token was just set for its current origin."""
+    """Record that the profile's token was just saved to the keyring for its current origin.
+
+    `secret_source: "keyring"` makes the provider read the keyring only, so a stale
+    LOCALFLOW_AGENT_HTTP_<ID>_TOKEN left over for an old origin is never sent.
+    """
     with profiles.mutate() as entries:
         for entry in entries:
             if entry.get("id") == profile_id and isinstance(entry.get("base_url"), str):
                 entry["secret_origin"] = origin(entry["base_url"])
+                entry["secret_source"] = "keyring"
 
 
 def _walk_strings(value):
@@ -170,6 +175,10 @@ def validate_profile(body, *, current: dict | None = None) -> dict:
     parsed = urlparse(base)
     if parsed.scheme not in ("https", "http") or not parsed.hostname:
         raise ProfileError("base_url must be an https:// URL")
+    try:
+        parsed.port  # noqa: B018 - raises ValueError on a malformed or out-of-range port
+    except ValueError:
+        raise ProfileError("invalid port in base_url") from None
     if parsed.scheme == "http" and not is_loopback_url(base):
         raise ProfileError("base_url must be https:// (http:// only on a loopback host)")
     if parsed.query or parsed.fragment or parsed.username or parsed.password:
@@ -259,11 +268,35 @@ class HttpProvider(AgentProvider):
             return Readiness(False, "missing_secret", "Add the token for this HTTP agent.")
         return OK
 
+    _UNPINNED = object()
+    _pinned_secret = _UNPINNED
+
+    def pinned(self) -> HttpProvider:
+        """A copy bound to this profile snapshot and the token resolved right now.
+
+        An active run keeps using that token: a replacement set after the profile
+        moved to a new origin is never sent to the run's (old) endpoint.
+        """
+        copy = type(self)(self.config, self.ctx, dict(self.profile) if self.profile else None)
+        copy._pinned_secret = self._resolve_secret()
+        return copy
+
     def _secret(self) -> str:
+        if self._pinned_secret is not self._UNPINNED:
+            return self._pinned_secret
+        return self._resolve_secret()
+
+    def _resolve_secret(self) -> str:
         profile = self.profile or {}
         if not profile.get("id") or not secret_bound(profile):
             return ""
-        return self.ctx.get_secret(secret_name(profile["id"]))
+        name = secret_name(profile["id"])
+        stored = self.ctx.get_stored_secret
+        if profile.get("secret_source") == "keyring" and stored is not None:
+            value = stored(name) or ""
+            self.ctx.redactor.add(name, value)
+            return value
+        return self.ctx.get_secret(name)
 
     def _values(self, session: AgentSession, message: str = "") -> dict[str, str]:
         return {"prompt": session.prompt, "title": session.title, "session_id": session.id,

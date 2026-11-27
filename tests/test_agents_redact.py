@@ -118,3 +118,13 @@ def test_error_details_are_redacted(env):
     response = client.post("/api/agents/sessions",
                            json={"prompt": "x", "provider": "mock", "rule_id": DEVIN})
     assert DEVIN not in response.text
+
+
+def test_redact_literals_replaces_only_known_values():
+    redactor = Redactor()
+    redactor.add("agent_devin_api_key", "known-secret-0123456789")
+    assert redactor.redact_literals("apk_run_0123456789") == "apk_run_0123456789"
+    assert redactor.redact_literals("Bearer abcdefgh12345") == "Bearer abcdefgh12345"
+    assert redactor.redact_literals("run-known-secret-0123456789") == \
+        "run-[redacted:agent_devin_api_key]"
+    assert redactor.redact("apk_run_0123456789") != "apk_run_0123456789"

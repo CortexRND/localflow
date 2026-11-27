@@ -410,3 +410,24 @@ def test_a_key_set_elsewhere_is_redacted_once_a_provider_reads_it(tmp_path):
     assert done.state == "completed" and secret not in done.result_text
     assert not any(secret in t for t in texts)
     assert any("[redacted:agent_devin_api_key]" in t for t in texts)
+
+
+def test_provider_run_ids_matching_token_patterns_are_kept(tmp_path):
+    from localflow.agents.manager import Sink
+
+    manager, _clock = _manager(tmp_path)
+    session = _launch(manager, "hang")
+    run_id = "apk_run_0123456789abcdef"  # looks like a Devin key to the generic patterns
+    Sink(manager, session.id).external(run_id, "https://x.example/?q=Bearer abcdefgh12345")
+    stored = manager.store.get(session.id)
+    assert stored.external_id == run_id
+    assert "abcdefgh12345" not in stored.external_url  # URLs keep full redaction
+
+
+def test_recovered_sessions_are_pinned_to_their_provider(tmp_path):
+    config = agents_config(tmp_path)
+    manager, _clock = _manager(tmp_path, config)
+    running = _launch(manager, "hang")
+    restarted, _ = _manager(tmp_path, config, store=None)
+    assert running.id in restarted._tracked
+    assert running.id in restarted._session_providers

@@ -45,6 +45,8 @@ def _default_http():
 @dataclass
 class ProviderContext:
     get_secret: Callable[[str], str] = lambda _name: ""
+    # Keyring-only lookup (no environment override); used for secrets saved via API/CLI.
+    get_stored_secret: Callable[[str], str] | None = None
     redactor: Redactor = field(default_factory=Redactor)
     clock: Callable[[], float] = time.time
     popen: Callable[..., Any] = subprocess.Popen
@@ -66,6 +68,10 @@ class AgentProvider(ABC):
         self.config = config
         self.ctx = ctx
         self.profile = profile
+
+    def pinned(self) -> AgentProvider:
+        """The instance an active session keeps for its whole run (see AgentManager)."""
+        return self
 
     @classmethod
     def capabilities_for(cls, config, profile: dict | None = None) -> ProviderCapabilities:

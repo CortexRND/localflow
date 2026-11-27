@@ -220,6 +220,13 @@ class ClaudeProvider(AgentProvider):
             timer = self._timers.pop(session.id, None)
         if timer is not None:
             timer.cancel()
+            if sys.platform != "win32":
+                # Cancelled or timed out: a descendant may have closed its pipes and
+                # survived SIGTERM, so kill the whole group now that the leader is gone.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:  # ProcessLookupError / PermissionError: the group is gone
+                    pass
         self._finish(lines, "".join(stderr_lines), returncode, sink, streaming)
 
     def _stream_line(self, line: str, sink: EventSink) -> None:

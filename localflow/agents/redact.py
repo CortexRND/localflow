@@ -69,7 +69,12 @@ class Redactor:
     def __call__(self, text: str) -> str:
         return self.redact(text)
 
-    def redact(self, text: str) -> str:
+    def redact_literals(self, text: str) -> str:
+        """Replace only exact registered secret values, never generic patterns.
+
+        For identifiers (provider run ids) that must round-trip intact unless they
+        literally contain a known secret.
+        """
         if not text:
             return text or ""
         with self._lock:
@@ -77,6 +82,12 @@ class Redactor:
         for value, name in values:
             if value in text:
                 text = text.replace(value, f"[redacted:{name}]")
+        return text
+
+    def redact(self, text: str) -> str:
+        if not text:
+            return text or ""
+        text = self.redact_literals(text)
         for pattern, replacement in _PATTERNS:
             text = pattern.sub(replacement, text)
         return text

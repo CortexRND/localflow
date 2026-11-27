@@ -495,3 +495,26 @@ def test_removing_a_missing_secret_does_not_log_its_name(env, caplog):
     agents_api._delete_secret_quietly("agent_http_deadbeef_token")
     assert caplog.records and not any("agent_http_deadbeef_token" in r.getMessage()
                                       for r in caplog.records)
+
+
+def test_invalid_ports_are_a_validation_error_not_a_500(env):
+    route = "/api/agents/http-profiles"
+    for base in ("https://agents.example.com:99999", "https://agents.example.com:abc"):
+        body = {"label": "Agent", "base_url": base, "start": {"method": "POST", "path": "/r"}}
+        response = env.client.post(route, json=body)
+        assert response.status_code == 400, response.text
+        assert "invalid port" in response.text
+        validate_response(response, "POST", route)
+
+
+def test_secret_source_is_not_exposed(env):
+    route = "/api/agents/http-profiles"
+    body = {"label": "Agent", "base_url": "https://agents.example.com",
+            "headers": {"Authorization": "Bearer {secret}"},
+            "start": {"method": "POST", "path": "/runs"}}
+    pid = validate_response(env.client.post(route, json=body), "POST", route)["id"]
+    env.client.put("/api/agents/providers/http/secret",
+                   json={"profile": pid, "value": "new-token-0123456789"})
+    assert env.manager.profiles.get(pid)["secret_source"] == "keyring"
+    listed = validate_response(env.client.get(route), "GET", route)["profiles"]
+    assert "secret_source" not in listed[0] and "secret_origin" not in listed[0]
