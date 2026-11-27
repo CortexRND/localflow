@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -36,7 +37,7 @@ BASE_CONFIG = {
     "hot_phrases": True, "sample_rate": 16000, "keep_audio_clips": 5, "history_enabled": True,
     "sounds_enabled": True, "command_names": (), "skills_dirs": (), "llm_provider": "ollama",
     "llm_model": "x", "agents_enabled": True, "agent_hot_commands": True,
-    "agent_repos": ["localflow=/r/localflow"], "agent_default_repo": "",
+    "agent_repos": [f"localflow={os.path.abspath('/r/localflow')}"], "agent_default_repo": "",
     "agent_default_provider": "claude", "perf_metrics": False,
 }
 
@@ -56,7 +57,7 @@ def env(tmp_path, monkeypatch):
     rules = HotCommandStore(tmp_path / "hot_commands.json")
     from localflow.config import Config
 
-    cfg = Config(agent_repos=["localflow=/r/localflow"])
+    cfg = Config(agent_repos=[f"localflow={os.path.abspath('/r/localflow')}"])
     rule = rule_ops.add_rule(rules, {"trigger": "launch claude", "provider": "claude"}, cfg,
                              known_provider=KNOWN, phrases=[])
     clock = {"now": 100.0}

@@ -475,9 +475,9 @@ def _all_fields_update() -> dict:
         # [agents] values are validated; pick valid non-defaults.
         ("agents", "default_provider"): "devin",
         ("agents", "default_repo"): "beta two",
-        ("agents", "repos"): ["alpha=/tmp/alpha", "beta two=~/beta repo"],
+        ("agents", "repos"): [f"alpha={os.path.abspath('/tmp/alpha')}", "beta two=~/beta repo"],
         ("agents", "max_concurrent"): 4,
-        ("agents", "claude_bin"): "/usr/local/bin/claude",
+        ("agents", "claude_bin"): os.path.abspath("/usr/local/bin/claude"),
         ("agents", "claude_wrapper"): "headroom",
         ("agents", "claude_permission_mode"): "plan",
         ("agents", "claude_model"): "claude-opus-5-5[1m]",

@@ -2,7 +2,7 @@
 
 Same storage pattern as `HotPhraseStore` / `PromptQueue`: a threading lock plus
 an flock on a sidecar `.lock` file around each read-modify-write, atomic writes
-through a per-pid temp file and `os.replace`, and an unreadable or missing file
+through a per-pid/per-thread temp file and `os.replace`, and an unreadable or missing file
 reads as empty. Without `fcntl` (Windows) or when the lock cannot be taken the
 stores degrade to in-process locking.
 
@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import itertools
 import json
 import logging
 import os
+import sys
 import threading
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -60,13 +63,52 @@ def _ensure_dir(path: Path) -> None:
         pass
 
 
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+_TMP_COUNTER = itertools.count()
+_REPLACE_RETRIES = 10
+_REPLACE_BACKOFF = 0.005
+
+
+def _path_lock(path: Path) -> threading.RLock:
+    """One in-process lock per resolved path, shared by every store instance.
+
+    OS file locks (and `msvcrt` on Windows) do not serialize threads of the
+    same process, so instances opened on the same file must share this lock.
+    """
+    try:
+        key = str(path.resolve())
+    except OSError:
+        key = os.path.abspath(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = _PATH_LOCKS[key] = threading.RLock()
+        return lock
+
+
+def _replace(src: Path, dst: Path) -> None:
+    """`os.replace`, retried briefly on Windows where a reader may hold `dst` open."""
+    if sys.platform != "win32":
+        os.replace(src, dst)
+        return
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRIES - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF * (attempt + 1))
+
+
 class LockedJsonFile:
-    """One JSON document guarded by a thread lock and a sidecar flock."""
+    """One JSON document guarded by a per-path thread lock and a sidecar flock."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
-        self._lock = threading.RLock()
         self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self._lock = _path_lock(self._lock_path)
 
     @contextmanager
     def exclusive(self):
@@ -105,11 +147,19 @@ class LockedJsonFile:
 
     def write(self, data) -> None:
         _ensure_dir(self.path.parent)
-        tmp = self.path.with_suffix(f"{self.path.suffix}.{os.getpid()}.tmp")
+        suffix = f"{os.getpid()}.{threading.get_ident()}.{next(_TMP_COUNTER)}"
+        tmp = self.path.with_suffix(f"{self.path.suffix}.{suffix}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(data, indent=1, ensure_ascii=False))
-        os.replace(tmp, self.path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(data, indent=1, ensure_ascii=False))
+            _replace(tmp, self.path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
         try:
             self.path.chmod(0o600)
         except OSError:

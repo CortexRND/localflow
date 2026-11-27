@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -7,7 +8,8 @@ from localflow.agents import rules as rule_ops
 from localflow.agents.models import HotCommandConflict, ValidationError
 from localflow.agents.store import HotCommandStore
 
-REPOS = ["localflow=/r/localflow", "web app=/r/web", "infra=/r/infra"]
+REPOS = [f"{alias}={os.path.abspath(path)}" for alias, path in
+         [("localflow", "/r/localflow"), ("web app", "/r/web"), ("infra", "/r/infra")]]
 RULES = [
     {"id": "r1", "trigger": "launch claude", "provider": "claude", "repo": "",
      "prompt_template": "{prompt}", "min_prompt_words": 3, "enabled": True},
@@ -129,7 +131,7 @@ def test_conflicts_with_rules_and_hot_phrases():
 def test_rule_crud_through_the_store(tmp_path):
     from localflow.config import Config
 
-    config = Config(agent_repos=["proj=/tmp/proj"])
+    config = Config(agent_repos=[f"proj={os.path.abspath('/tmp/proj')}"])
     store = HotCommandStore(tmp_path / "hot_commands.json")
     rule = rule_ops.add_rule(store, {"trigger": "launch claude", "provider": "claude",
                                      "repo": "proj"}, config, known_provider=KNOWN, phrases=[])

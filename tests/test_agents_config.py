@@ -1,4 +1,6 @@
 import dataclasses
+import json
+import os
 
 import pytest
 from click.testing import CliRunner
@@ -15,12 +17,20 @@ from localflow.config import (
     save_config,
 )
 
+# Platform-native absolute paths: on Windows `/p` is not absolute.
+P = os.path.abspath("/p")
+
+
+def _abs(path: str) -> str:
+    return os.path.abspath(path)
+
+
 AGENT_KEYS = {
     "enabled": ("agents_enabled", True),
     "hot_commands": ("agent_hot_commands", True),
     "default_provider": ("agent_default_provider", "devin"),
     "default_repo": ("agent_default_repo", "proj"),
-    "repos": ("agent_repos", ["proj=/home/u/proj", "web app=/home/u/web"]),
+    "repos": ("agent_repos", [f"proj={_abs('/home/u/proj')}", f"web app={_abs('/home/u/web')}"]),
     "max_concurrent": ("agent_max_concurrent", 4),
     "max_queued": ("agent_max_queued", 0),
     "timeout_seconds": ("agent_timeout_seconds", 600),
@@ -29,7 +39,7 @@ AGENT_KEYS = {
     "poll_seconds": ("agent_poll_seconds", 30),
     "allow_remote": ("agent_allow_remote", True),
     "sandbox": ("agent_sandbox", True),
-    "claude_bin": ("agent_claude_bin", "/opt/claude/bin/claude"),
+    "claude_bin": ("agent_claude_bin", _abs("/opt/claude/bin/claude")),
     "claude_wrapper": ("agent_claude_wrapper", "headroom"),
     "claude_permission_mode": ("agent_claude_permission_mode", "plan"),
     "claude_model": ("agent_claude_model", "claude-opus-5-5[1m]"),
@@ -70,9 +80,10 @@ def test_every_key_round_trips(tmp_path):
     ("timeout_seconds", 9), ("timeout_seconds", 86401), ("max_output_kb", 15),
     ("max_sessions", 2001), ("poll_seconds", 1), ("max_concurrent", True),
     ("claude_wrapper", "sudo"), ("claude_permission_mode", "bypassPermissions"),
-    ("repos", ["no-equals-sign"]), ("repos", ["Upper=/x"]), ("repos", ["rel=relative/path"]),
-    ("repos", ["a=/x", "a=/y"]), ("repos", ["a b=/x", "a_b=/y"]),
-    ("repos", [f"r{i}=/x{i}" for i in range(33)]),
+    ("repos", ["no-equals-sign"]), ("repos", [f"Upper={_abs('/x')}"]), ("repos", ["rel=relative/path"]),
+    ("repos", [f"a={_abs('/x')}", f"a={_abs('/y')}"]),
+    ("repos", [f"a b={_abs('/x')}", f"a_b={_abs('/y')}"]),
+    ("repos", [f"r{i}={_abs(f'/x{i}')}" for i in range(33)]),
     ("claude_bin", "claude --dangerously-skip-permissions"), ("claude_bin", "bin/claude"),
     ("claude_bin", ""), ("claude_bin", "-claude"), ("claude_model", "model; rm -rf"),
     ("default_provider", ""), ("default_provider", "Bad Provider"),
@@ -87,12 +98,12 @@ def test_invalid_values_in_the_file_fall_back_to_defaults(tmp_path, caplog):
     path = tmp_path / "config.toml"
     path.write_text(
         "config_version = 2\n[agents]\nmax_concurrent = 99\nclaude_wrapper = \"sudo\"\n"
-        "repos = [\"proj=/p\"]\ndefault_repo = \"other\"\nenabled = true\n",
+        f"repos = [{json.dumps('proj=' + P)}]\ndefault_repo = \"other\"\nenabled = true\n",
         encoding="utf-8",
     )
     loaded = load_config()
     assert loaded.agent_max_concurrent == 2 and loaded.agent_claude_wrapper == "none"
-    assert loaded.agent_repos == ["proj=/p"] and loaded.agent_default_repo == ""
+    assert loaded.agent_repos == [f"proj={P}"] and loaded.agent_default_repo == ""
     assert loaded.agents_enabled is True
     assert "agents.max_concurrent" in caplog.text
 
@@ -105,12 +116,12 @@ def test_agent_keys_never_need_a_restart():
 def test_the_dictation_app_adopts_the_agent_fields_live():
     running = Config()
     fresh = dataclasses.replace(running, agents_enabled=True, agent_hot_commands=True,
-                                agent_repos=["proj=/p"], agent_default_repo="proj",
+                                agent_repos=[f"proj={P}"], agent_default_repo="proj",
                                 agent_default_provider="devin")
     merged, changed = live_config.merge_live(running, fresh)
     assert changed == {"agents_enabled", "agent_hot_commands", "agent_repos",
                        "agent_default_repo", "agent_default_provider"}
-    assert merged.agent_repos == ["proj=/p"]
+    assert merged.agent_repos == [f"proj={P}"]
     assert live_config.AGENT_FIELDS == {f for f, _v in AGENT_KEYS.values()}
 
 
