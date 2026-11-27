@@ -809,19 +809,34 @@ impl Launcher {
         if self.closed {
             return;
         }
+        if self.begin_close(cx) {
+            window.remove_window();
+        }
+    }
+
+    /// The close semantics both paths share (a key, a click outside, or the
+    /// window manager's close via `on_window_should_close`): `true` when
+    /// the window may go now (an unsent draft is kept); `false` while a
+    /// launch is in flight, which then finishes and closes the window
+    /// itself (the signal loop removes it once `closed`). Never removes the
+    /// window, so it is safe inside the should-close callback.
+    pub(crate) fn begin_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.closed {
+            return true;
+        }
         if self.in_flight {
             self.close_requested = true;
             self.menu = None;
             self.confirming = false;
             cx.notify();
-            return;
+            return false;
         }
         if !self.launched {
             self.keep_draft(cx);
         }
         self.closed = true;
-        window.remove_window();
         cx.notify();
+        true
     }
 
     /// Tab / Shift+Tab: inside "Send without redacting?" between its two
@@ -1790,6 +1805,13 @@ pub fn run(launch: LauncherLaunch) -> Result<(), String> {
                     let _ = window.update(cx, |_, window, cx| {
                         cx.activate(true);
                         window.activate_window();
+                        // The window manager's close keeps the draft, and
+                        // waits for a launch in flight, like Esc does.
+                        let weak = cx.weak_entity();
+                        window.on_window_should_close(cx, move |_, cx| {
+                            weak.update(cx, |l: &mut Launcher, cx| l.begin_close(cx))
+                                .unwrap_or(true)
+                        });
                         // Signals from a second launch, and close once a
                         // launch has landed.
                         cx.spawn_in(window, async move |this, cx| loop {
@@ -2165,6 +2187,45 @@ mod tests {
             Some("Do something"),
             "the draft stays"
         );
+    }
+
+    /// The window manager's close (`on_window_should_close` →
+    /// `begin_close`) keeps an unsent task as the draft, like Esc.
+    #[gpui::test]
+    fn a_window_manager_close_keeps_the_draft(cx: &mut TestAppContext) {
+        let mut o = open(cx);
+        o.cx.simulate_input("Write the release notes");
+        let allowed = o.launcher.update(o.cx, |l, cx| l.begin_close(cx));
+        assert!(allowed, "nothing in flight: the window may go now");
+        assert!(read(&mut o, |l, _| l.is_closed()));
+        assert_eq!(
+            drafts(&o).load(ctl::now()).map(|d| d.text).as_deref(),
+            Some("Write the release notes")
+        );
+        assert_eq!(o.fake.calls().launch, 0);
+    }
+
+    /// While a launch is in flight the window manager's close waits: the
+    /// request finishes, then the launcher closes itself (no draft: it was
+    /// sent).
+    #[gpui::test]
+    fn a_window_manager_close_waits_for_a_launch_in_flight(cx: &mut TestAppContext) {
+        let mut o = open(cx);
+        o.cx.simulate_input("Fix the flaky test");
+        let allowed = o.cx.update(|window, cx| {
+            o.launcher.update(cx, |l, cx| {
+                l.enter(false, window, cx);
+                l.begin_close(cx)
+            })
+        });
+        assert!(!allowed, "kept open while the launch is in flight");
+        assert!(!read(&mut o, |l, _| l.is_closed()));
+        o.cx.run_until_parked();
+        assert_eq!(o.fake.calls().launch, 1, "the request finished");
+        assert!(read(&mut o, |l, _| l.is_closed()), "then it closes");
+        assert_eq!(drafts(&o).load(ctl::now()), None, "sent: no draft");
+        // Asked again once closed: allowed.
+        assert!(o.launcher.update(o.cx, |l, cx| l.begin_close(cx)));
     }
 
     /// A provider that needs sign-in is listed disabled; Enter on it opens
